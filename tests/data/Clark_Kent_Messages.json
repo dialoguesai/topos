@@ -1,0 +1,198 @@
+{
+  "user_id": "user_clark_kent",
+  "channels": [
+    "iMessage",
+    "Slack",
+    "SMS",
+    "WhatsApp"
+  ],
+  "messages": [
+    // --- IMESSAGE (Family) ---
+    {
+      "id": "msg_1001",
+      "platform": "iMessage",
+      "timestamp": "2026-02-04T18:10:00",
+      "from": "Clark Kent",
+      "to": "Maya Kent",
+      "content": "Hey, I’ll be home in about 20. Want to cook together or grab something?",
+      "sentiment": "warm"
+    },
+    {
+      "id": "msg_1002",
+      "platform": "iMessage",
+      "timestamp": "2026-02-04T18:12:00",
+      "from": "Maya Kent",
+      "to": "Clark Kent",
+      "content": "Let’s cook! I found that pasta recipe you like.",
+      "sentiment": "positive"
+    },
+    {
+      "id": "msg_1003",
+      "platform": "iMessage",
+      "timestamp": "2026-03-07T17:25:00",
+      "from": "Clark Kent",
+      "to": "Maya Kent",
+      "content": "You played really well today. Proud of how much effort you’re putting in.",
+      "sentiment": "supportive"
+    },
+
+    // --- SMS (Friends / Ride Group) ---
+    {
+      "id": "msg_1101",
+      "platform": "SMS",
+      "timestamp": "2026-02-05T17:42:00",
+      "from": "Clark Kent",
+      "to": "Ride Group",
+      "content": "I’m going to miss tonight’s ride. Work ran longer than expected.",
+      "sentiment": "neutral"
+    },
+    {
+      "id": "msg_1102",
+      "platform": "SMS",
+      "timestamp": "2026-02-05T17:45:00",
+      "from": "Leo Morgan",
+      "to": "Clark Kent",
+      "content": "All good, we’ll catch you this weekend. Don’t work too hard.",
+      "sentiment": "supportive"
+    },
+    {
+      "id": "msg_1103",
+      "platform": "SMS",
+      "timestamp": "2026-03-14T07:30:00",
+      "from": "Clark Kent",
+      "to": "Ride Group",
+      "content": "Heading out early today. Weather looks perfect.",
+      "sentiment": "positive"
+    },
+
+    // --- SLACK (Work / Coworkers) ---
+    {
+      "id": "msg_1201",
+      "platform": "Slack",
+      "timestamp": "2026-02-10T11:15:00",
+      "channel": "#clinical-innovation",
+      "from": "Clark Kent",
+      "content": "I’ve been experimenting with a simple reflection model using short voice notes + tagging. Seeing better engagement so far.",
+      "sentiment": "informational"
+    },
+    {
+      "id": "msg_1202",
+      "platform": "Slack",
+      "timestamp": "2026-02-10T11:18:00",
+      "channel": "#clinical-innovation",
+      "from": "Dr. Nina Flores",
+      "content": "That sounds promising. Are patients sticking with it between sessions?",
+      "sentiment": "curious"
+    },
+    {
+      "id": "msg_1203",
+      "platform": "Slack",
+      "timestamp": "2026-02-10T11:20:00",
+      "channel": "#clinical-innovation",
+      "from": "Clark Kent",
+      "content": "More than expected. I think the low friction is key. It feels less like 'homework'.",
+      "sentiment": "analytical"
+    },
+    {
+      "id": "msg_1204",
+      "platform": "Slack",
+      "timestamp": "2026-03-05T13:40:00",
+      "channel": "#team-general",
+      "from": "Clinic Director",
+      "content": "Clark’s approach is a great example of balancing innovation with patient care. Appreciate the work here.",
+      "sentiment": "positive_feedback"
+    },
+
+    // --- WHATSAPP (Friends / Support Network) ---
+    {
+      "id": "msg_1301",
+      "platform": "WhatsApp",
+      "timestamp": "2026-02-20T16:20:00",
+      "from": "Clark Kent",
+      "to": "Sam Rivera",
+      "content": "Hey, I need to reschedule tonight. Maya’s got a school thing she needs help with.",
+      "sentiment": "apologetic"
+    },
+    {
+      "id": "msg_1302",
+      "platform": "WhatsApp",
+      "timestamp": "2026-02-20T16:25:00",
+      "from": "Sam Rivera",
+      "to": "Clark Kent",
+      "content": "No worries at all. Family comes first. Let’s do tomorrow morning.",
+      "sentiment": "supportive"
+    },
+    {
+      "id": "msg_1303",
+      "platform": "WhatsApp",
+      "timestamp": "2026-03-12T08:30:00",
+      "from": "Leo Morgan",
+      "to": "Clark Kent",
+      "content": "Good catching up today. You seem like you're in a good place lately.",
+      "sentiment": "observational"
+    },
+
+    // --- PATIENT COMMUNICATION (CONTROLLED / PROFESSIONAL) ---
+    {
+      "id": "msg_1401",
+      "platform": "iMessage",
+      "timestamp": "2026-02-03T18:10:00",
+      "from": "Clark Kent",
+      "to": "Jane Patterson",
+      "content": "After today’s session, try noting any moments where you felt tension around decisions. No need to overthink it.",
+      "sentiment": "supportive",
+      "context": "post_session"
+    },
+    {
+      "id": "msg_1402",
+      "platform": "iMessage",
+      "timestamp": "2026-02-11T09:15:00",
+      "from": "Jane Patterson",
+      "to": "Clark Kent",
+      "content": "I noticed I canceled plans again last night. It felt automatic.",
+      "sentiment": "reflective",
+      "context": "self_report"
+    },
+    {
+      "id": "msg_1403",
+      "platform": "iMessage",
+      "timestamp": "2026-02-11T09:20:00",
+      "from": "Clark Kent",
+      "to": "Jane Patterson",
+      "content": "That’s a really important observation. Let’s look at what happened just before that decision next session.",
+      "sentiment": "guiding",
+      "context": "therapeutic_response"
+    },
+    {
+      "id": "msg_1404",
+      "platform": "iMessage",
+      "timestamp": "2026-03-04T18:25:00",
+      "from": "Jane Patterson",
+      "to": "Clark Kent",
+      "content": "Canceled dinner again tonight. I’m starting to see the pattern we talked about.",
+      "sentiment": "self_awareness",
+      "context": "pattern_recognition"
+    },
+    {
+      "id": "msg_1405",
+      "platform": "iMessage",
+      "timestamp": "2026-03-04T18:32:00",
+      "from": "Clark Kent",
+      "to": "Jane Patterson",
+      "content": "Seeing the pattern is the first big step. We’ll work on ways to interrupt it.",
+      "sentiment": "encouraging",
+      "context": "therapeutic_response"
+    }
+  ],
+  "communication_patterns": {
+    "family_tone": "consistently warm and supportive",
+    "coworker_tone": "analytical and collaborative",
+    "friend_tone": "relaxed and appreciative",
+    "patient_tone": "measured, guiding, and reflective",
+    "response_latency": {
+      "family": "fast",
+      "coworkers": "moderate",
+      "patients": "intentional and paced"
+    }
+  }
+}

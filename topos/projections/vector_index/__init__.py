@@ -1,0 +1,1 @@
+"""Vector index projection abstractions."""

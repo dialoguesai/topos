@@ -1,0 +1,186 @@
+{
+  "user_id": "user_jane_patterson",
+  "browsing_history": [
+    {
+      "id": "bh_001",
+      "timestamp": "2026-02-02T07:45:00",
+      "url": "https://hbr.org/2026/01/managing-high-stakes-decisions",
+      "title": "Managing High-Stakes Decisions Without Burnout",
+      "category": "work",
+      "tags": ["leadership", "decision-making", "stress"],
+      "time_spent_seconds": 420
+    },
+    {
+      "id": "bh_002",
+      "timestamp": "2026-02-02T23:18:00",
+      "url": "https://www.mckinsey.com/business-functions/operations/our-insights/scaling-operations-teams",
+      "title": "Scaling Operations Teams Effectively",
+      "category": "work",
+      "tags": ["operations", "team_growth"],
+      "time_spent_seconds": 610
+    },
+    {
+      "id": "bh_003",
+      "timestamp": "2026-02-04T18:25:00",
+      "url": "https://www.google.com/search?q=quick+healthy+dinner+recipes+30+minutes",
+      "title": "quick healthy dinner recipes 30 minutes",
+      "category": "personal",
+      "tags": ["family", "food", "time_constraint"],
+      "time_spent_seconds": 180
+    },
+    {
+      "id": "bh_004",
+      "timestamp": "2026-02-05T22:40:00",
+      "url": "https://www.psychologytoday.com/us/blog/stress-management/2026/01/why-we-cancel-plans-when-overwhelmed",
+      "title": "Why We Cancel Plans When We’re Overwhelmed",
+      "category": "mental_health",
+      "tags": ["self-awareness", "stress_patterns"],
+      "time_spent_seconds": 520
+    },
+    {
+      "id": "bh_005",
+      "timestamp": "2026-02-08T09:10:00",
+      "url": "https://www.rottentomatoes.com/browse/movies_at_home",
+      "title": "Browse Movies at Home",
+      "category": "leisure",
+      "tags": ["movies", "family_time"],
+      "time_spent_seconds": 300
+    },
+    {
+      "id": "bh_006",
+      "timestamp": "2026-02-10T23:05:00",
+      "url": "https://www.youtube.com/watch?v=leadership-under-pressure",
+      "title": "Leadership Under Pressure - Talk",
+      "category": "work",
+      "tags": ["leadership", "pressure"],
+      "time_spent_seconds": 900
+    },
+    {
+      "id": "bh_007",
+      "timestamp": "2026-02-11T17:35:00",
+      "url": "https://www.alltrails.com/trail/us/texas/greenbelt-trail",
+      "title": "Greenbelt Trail Info",
+      "category": "health",
+      "tags": ["exercise", "running"],
+      "time_spent_seconds": 240
+    },
+    {
+      "id": "bh_008",
+      "timestamp": "2026-02-11T17:50:00",
+      "url": "https://www.google.com/search?q=how+to+recover+from+mental+fatigue",
+      "title": "how to recover from mental fatigue",
+      "category": "mental_health",
+      "tags": ["fatigue", "recovery"],
+      "time_spent_seconds": 210
+    },
+    {
+      "id": "bh_009",
+      "timestamp": "2026-02-17T06:50:00",
+      "url": "https://hbr.org/2026/02/how-to-say-no-at-work",
+      "title": "How to Say No at Work Without Damaging Relationships",
+      "category": "work",
+      "tags": ["boundaries", "communication"],
+      "time_spent_seconds": 480
+    },
+    {
+      "id": "bh_010",
+      "timestamp": "2026-02-18T18:10:00",
+      "url": "https://www.google.com/search?q=movies+playing+near+me",
+      "title": "movies playing near me",
+      "category": "leisure",
+      "tags": ["movies", "planning"],
+      "time_spent_seconds": 120
+    },
+    {
+      "id": "bh_011",
+      "timestamp": "2026-02-20T22:55:00",
+      "url": "https://www.psychologytoday.com/us/blog/work-life/2026/02/work-life-balance-strategies",
+      "title": "Work-Life Balance Strategies That Actually Work",
+      "category": "mental_health",
+      "tags": ["balance", "self_improvement"],
+      "time_spent_seconds": 650
+    },
+    {
+      "id": "bh_012",
+      "timestamp": "2026-02-24T23:30:00",
+      "url": "https://www.google.com/search?q=how+to+prepare+for+board+meeting+presentation",
+      "title": "how to prepare for board meeting presentation",
+      "category": "work",
+      "tags": ["presentation", "pressure"],
+      "time_spent_seconds": 300
+    },
+    {
+      "id": "bh_013",
+      "timestamp": "2026-03-02T21:50:00",
+      "url": "https://www.youtube.com/watch?v=public-speaking-confidence",
+      "title": "Building Confidence in High-Stakes Presentations",
+      "category": "work",
+      "tags": ["confidence", "presentation"],
+      "time_spent_seconds": 840
+    },
+    {
+      "id": "bh_014",
+      "timestamp": "2026-03-03T18:40:00",
+      "url": "https://www.google.com/search?q=why+do+i+prioritize+work+over+family",
+      "title": "why do i prioritize work over family",
+      "category": "mental_health",
+      "tags": ["self_reflection", "family"],
+      "time_spent_seconds": 260
+    },
+    {
+      "id": "bh_015",
+      "timestamp": "2026-03-04T18:35:00",
+      "url": "https://www.psychologytoday.com/us/blog/burnout/2026/02/signs-of-high-functioning-burnout",
+      "title": "Signs of High-Functioning Burnout",
+      "category": "mental_health",
+      "tags": ["burnout", "self_awareness"],
+      "time_spent_seconds": 540
+    },
+    {
+      "id": "bh_016",
+      "timestamp": "2026-03-07T10:30:00",
+      "url": "https://www.alltrails.com/trail/us/texas/lady-bird-lake-trail",
+      "title": "Lady Bird Lake Trail",
+      "category": "health",
+      "tags": ["exercise", "outdoors"],
+      "time_spent_seconds": 300
+    },
+    {
+      "id": "bh_017",
+      "timestamp": "2026-03-08T08:10:00",
+      "url": "https://www.google.com/search?q=benefits+of+morning+exercise+mental+health",
+      "title": "benefits of morning exercise mental health",
+      "category": "health",
+      "tags": ["exercise", "mental_health"],
+      "time_spent_seconds": 200
+    },
+    {
+      "id": "bh_018",
+      "timestamp": "2026-03-09T06:55:00",
+      "url": "https://www.google.com/search?q=how+to+stay+calm+before+big+presentation",
+      "title": "how to stay calm before big presentation",
+      "category": "work",
+      "tags": ["stress", "performance"],
+      "time_spent_seconds": 180
+    }
+  ],
+  "browsing_patterns": {
+    "work_related_percentage": 0.44,
+    "mental_health_related_percentage": 0.28,
+    "leisure_and_health_percentage": 0.28,
+    "late_night_activity_frequency": "high",
+    "common_search_themes": [
+      "managing stress and pressure",
+      "improving leadership and decision-making",
+      "work-life balance",
+      "self-awareness and burnout",
+      "finding time for family and exercise"
+    ],
+    "behavioral_signals": [
+      "frequent late-night work-related browsing before major events",
+      "increased mental health searches following missed personal commitments",
+      "attempts to plan leisure activities often precede cancellations",
+      "growing trend toward self-reflection and behavior change over time"
+    ]
+  }
+}

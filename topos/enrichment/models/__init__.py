@@ -1,0 +1,1 @@
+"""Enrichment model registry scaffolding."""

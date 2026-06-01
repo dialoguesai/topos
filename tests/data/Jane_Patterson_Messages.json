@@ -1,0 +1,470 @@
+{
+  "user_id": "user_jane_patterson",
+  "channels": [
+    "iMessage",
+    "Slack",
+    "SMS",
+    "WhatsApp"
+  ],
+  "messages": [
+    {
+      "id": "msg_j_1001",
+      "platform": "iMessage",
+      "timestamp": "2026-02-04T17:58:00",
+      "from": "Jane Patterson",
+      "to": "Emily Patterson",
+      "content": "Running behind again. I’m really sorry. I’m still at the office.",
+      "sentiment": "apologetic",
+      "context": "family_schedule_conflict"
+    },
+    {
+      "id": "msg_j_1002",
+      "platform": "iMessage",
+      "timestamp": "2026-02-04T18:01:00",
+      "from": "Emily Patterson",
+      "to": "Jane Patterson",
+      "content": "Okay. We can push dinner a little, but the kids were excited to eat together tonight.",
+      "sentiment": "disappointed",
+      "context": "family_schedule_conflict"
+    },
+    {
+      "id": "msg_j_1003",
+      "platform": "iMessage",
+      "timestamp": "2026-02-04T18:06:00",
+      "from": "Jane Patterson",
+      "to": "Emily Patterson",
+      "content": "I know. I hate that this keeps happening. I’ll make it up to everyone this weekend.",
+      "sentiment": "guilty",
+      "context": "family_schedule_conflict"
+    },
+    {
+      "id": "msg_j_1004",
+      "platform": "iMessage",
+      "timestamp": "2026-02-08T10:14:00",
+      "from": "Jane Patterson",
+      "to": "Emily Patterson",
+      "content": "Thinking movie night tonight if everyone’s up for it. No laptop, no work.",
+      "sentiment": "hopeful",
+      "context": "family_reconnection"
+    },
+    {
+      "id": "msg_j_1005",
+      "platform": "iMessage",
+      "timestamp": "2026-02-08T10:18:00",
+      "from": "Emily Patterson",
+      "to": "Jane Patterson",
+      "content": "That sounds perfect. The kids will love that.",
+      "sentiment": "positive",
+      "context": "family_reconnection"
+    },
+    {
+      "id": "msg_j_1006",
+      "platform": "iMessage",
+      "timestamp": "2026-03-04T18:19:00",
+      "from": "Jane Patterson",
+      "to": "Emily Patterson",
+      "content": "Something urgent came up with the client review. I’m not going to make dinner again.",
+      "sentiment": "stressed",
+      "context": "family_schedule_conflict"
+    },
+    {
+      "id": "msg_j_1007",
+      "platform": "iMessage",
+      "timestamp": "2026-03-04T18:22:00",
+      "from": "Emily Patterson",
+      "to": "Jane Patterson",
+      "content": "I understand, but this is becoming a pattern.",
+      "sentiment": "frustrated",
+      "context": "family_schedule_conflict"
+    },
+    {
+      "id": "msg_j_1008",
+      "platform": "iMessage",
+      "timestamp": "2026-03-04T18:27:00",
+      "from": "Jane Patterson",
+      "to": "Emily Patterson",
+      "content": "You’re right. I’ve been noticing it too.",
+      "sentiment": "reflective",
+      "context": "pattern_recognition"
+    },
+    {
+      "id": "msg_j_1101",
+      "platform": "Slack",
+      "timestamp": "2026-02-02T08:47:00",
+      "channel": "#ops-team",
+      "from": "Jane Patterson",
+      "content": "Morning all — today’s strategy meeting is focused on the rollout timeline, open risks, and staffing gaps. Please come prepared with blockers.",
+      "sentiment": "directive",
+      "context": "team_management"
+    },
+    {
+      "id": "msg_j_1102",
+      "platform": "Slack",
+      "timestamp": "2026-02-02T10:42:00",
+      "channel": "#ops-team",
+      "from": "Ava Chen",
+      "content": "Biggest blocker on my side is vendor turnaround. I’ll bring updated estimates.",
+      "sentiment": "informational",
+      "context": "team_management"
+    },
+    {
+      "id": "msg_j_1103",
+      "platform": "Slack",
+      "timestamp": "2026-02-10T16:48:00",
+      "channel": "#leadership",
+      "from": "Jane Patterson",
+      "content": "Client presentation went well overall, but they want a tighter delivery window than we can comfortably support right now.",
+      "sentiment": "measured",
+      "context": "high_stakes_work"
+    },
+    {
+      "id": "msg_j_1104",
+      "platform": "Slack",
+      "timestamp": "2026-02-10T16:51:00",
+      "channel": "#leadership",
+      "from": "Mark Rivera",
+      "content": "Do you think they’ll accept a phased approach if we frame it around risk reduction?",
+      "sentiment": "problem_solving",
+      "context": "high_stakes_work"
+    },
+    {
+      "id": "msg_j_1105",
+      "platform": "Slack",
+      "timestamp": "2026-02-10T16:54:00",
+      "channel": "#leadership",
+      "from": "Jane Patterson",
+      "content": "Possibly. I need to think through how to position that without sounding defensive.",
+      "sentiment": "pressured",
+      "context": "high_stakes_work"
+    },
+    {
+      "id": "msg_j_1106",
+      "platform": "Slack",
+      "timestamp": "2026-02-24T20:38:00",
+      "channel": "#ops-team",
+      "from": "Jane Patterson",
+      "content": "I know it’s late — thank you all for pushing today. Let’s regroup tomorrow and avoid reacting tonight unless it’s truly urgent.",
+      "sentiment": "supportive",
+      "context": "after_hours_work"
+    },
+    {
+      "id": "msg_j_1107",
+      "platform": "Slack",
+      "timestamp": "2026-03-02T21:11:00",
+      "channel": "#leadership",
+      "from": "Jane Patterson",
+      "content": "Still polishing the board review materials. I’ll send the latest deck within the hour.",
+      "sentiment": "stressed",
+      "context": "after_hours_work"
+    },
+    {
+      "id": "msg_j_1108",
+      "platform": "Slack",
+      "timestamp": "2026-03-02T21:13:00",
+      "channel": "#leadership",
+      "from": "Mark Rivera",
+      "content": "You’ve got this. The story is strong — don’t overwork the last 5 percent.",
+      "sentiment": "supportive",
+      "context": "after_hours_work"
+    },
+    {
+      "id": "msg_j_1109",
+      "platform": "Slack",
+      "timestamp": "2026-03-05T09:07:00",
+      "channel": "#ops-team",
+      "from": "Jane Patterson",
+      "content": "I want us to protect focus time better next week. Too many last-minute changes are burning people out.",
+      "sentiment": "concerned",
+      "context": "management_reflection"
+    },
+    {
+      "id": "msg_j_1110",
+      "platform": "Slack",
+      "timestamp": "2026-03-05T09:10:00",
+      "channel": "#ops-team",
+      "from": "Ava Chen",
+      "content": "Appreciate you saying that. This week has been rough on everyone.",
+      "sentiment": "appreciative",
+      "context": "management_reflection"
+    },
+    {
+      "id": "msg_j_1201",
+      "platform": "SMS",
+      "timestamp": "2026-02-11T17:43:00",
+      "from": "Jane Patterson",
+      "to": "Laura Gomez",
+      "content": "I was going to hit the trail tonight, but I’m wiped out.",
+      "sentiment": "low_energy",
+      "context": "exercise_cancellation"
+    },
+    {
+      "id": "msg_j_1202",
+      "platform": "SMS",
+      "timestamp": "2026-02-11T17:46:00",
+      "from": "Laura Gomez",
+      "to": "Jane Patterson",
+      "content": "Then rest. The trail will still be there tomorrow.",
+      "sentiment": "supportive",
+      "context": "exercise_cancellation"
+    },
+    {
+      "id": "msg_j_1203",
+      "platform": "SMS",
+      "timestamp": "2026-02-18T18:22:00",
+      "from": "Jane Patterson",
+      "to": "Laura Gomez",
+      "content": "Movie tonight still on? I need something that does not involve decision-making.",
+      "sentiment": "drained",
+      "context": "self_care"
+    },
+    {
+      "id": "msg_j_1204",
+      "platform": "SMS",
+      "timestamp": "2026-02-18T18:25:00",
+      "from": "Laura Gomez",
+      "to": "Jane Patterson",
+      "content": "Absolutely. I’ll pick the movie so your brain can take the night off.",
+      "sentiment": "playful",
+      "context": "self_care"
+    },
+    {
+      "id": "msg_j_1205",
+      "platform": "SMS",
+      "timestamp": "2026-03-09T07:18:00",
+      "from": "Jane Patterson",
+      "to": "Laura Gomez",
+      "content": "Big executive review this morning. Already feel my shoulders up around my ears.",
+      "sentiment": "anxious",
+      "context": "work_stress"
+    },
+    {
+      "id": "msg_j_1206",
+      "platform": "SMS",
+      "timestamp": "2026-03-09T07:22:00",
+      "from": "Laura Gomez",
+      "to": "Jane Patterson",
+      "content": "Breathe, pace yourself, and remember you know this material better than anyone.",
+      "sentiment": "encouraging",
+      "context": "work_stress"
+    },
+    {
+      "id": "msg_j_1301",
+      "platform": "WhatsApp",
+      "timestamp": "2026-02-20T19:12:00",
+      "from": "Jane Patterson",
+      "to": "Family Group",
+      "content": "Running late but I should be home before 8. Please save me leftovers.",
+      "sentiment": "lighthearted",
+      "context": "family_group"
+    },
+    {
+      "id": "msg_j_1302",
+      "platform": "WhatsApp",
+      "timestamp": "2026-02-20T19:13:00",
+      "from": "Emily Patterson",
+      "to": "Family Group",
+      "content": "Only if you promise to actually stop checking email when you get here.",
+      "sentiment": "teasing",
+      "context": "family_group"
+    },
+    {
+      "id": "msg_j_1303",
+      "platform": "WhatsApp",
+      "timestamp": "2026-02-20T19:14:00",
+      "from": "Jane Patterson",
+      "to": "Family Group",
+      "content": "That is an aggressive but fair request.",
+      "sentiment": "playful",
+      "context": "family_group"
+    },
+    {
+      "id": "msg_j_1304",
+      "platform": "WhatsApp",
+      "timestamp": "2026-03-07T11:08:00",
+      "from": "Jane Patterson",
+      "to": "Family Group",
+      "content": "Movie matinee or trail walk this afternoon? I am officially off-duty.",
+      "sentiment": "positive",
+      "context": "family_quality_time"
+    },
+    {
+      "id": "msg_j_1305",
+      "platform": "WhatsApp",
+      "timestamp": "2026-03-07T11:11:00",
+      "from": "Emily Patterson",
+      "to": "Family Group",
+      "content": "Trail first, movie later. Best of both worlds.",
+      "sentiment": "positive",
+      "context": "family_quality_time"
+    },
+    {
+      "id": "msg_j_1401",
+      "platform": "iMessage",
+      "timestamp": "2026-02-03T18:09:00",
+      "from": "Clark Kent",
+      "to": "Jane Patterson",
+      "content": "After today’s session, try noting any moments where you felt tension around decisions. No need to overthink it.",
+      "sentiment": "supportive",
+      "context": "post_session"
+    },
+    {
+      "id": "msg_j_1402",
+      "platform": "iMessage",
+      "timestamp": "2026-02-11T09:15:00",
+      "from": "Jane Patterson",
+      "to": "Clark Kent",
+      "content": "I noticed I canceled plans again last night. It felt automatic.",
+      "sentiment": "reflective",
+      "context": "self_report"
+    },
+    {
+      "id": "msg_j_1403",
+      "platform": "iMessage",
+      "timestamp": "2026-02-11T09:20:00",
+      "from": "Clark Kent",
+      "to": "Jane Patterson",
+      "content": "That’s a really important observation. Let’s look at what happened just before that decision next session.",
+      "sentiment": "guiding",
+      "context": "therapeutic_response"
+    },
+    {
+      "id": "msg_j_1404",
+      "platform": "iMessage",
+      "timestamp": "2026-03-04T18:25:00",
+      "from": "Jane Patterson",
+      "to": "Clark Kent",
+      "content": "Canceled dinner again tonight. I’m starting to see the pattern we talked about.",
+      "sentiment": "self_awareness",
+      "context": "pattern_recognition"
+    },
+    {
+      "id": "msg_j_1405",
+      "platform": "iMessage",
+      "timestamp": "2026-03-04T18:32:00",
+      "from": "Clark Kent",
+      "to": "Jane Patterson",
+      "content": "Seeing the pattern is the first big step. We’ll work on ways to interrupt it.",
+      "sentiment": "encouraging",
+      "context": "therapeutic_response"
+    },
+    {
+      "id": "msg_j_1406",
+      "platform": "iMessage",
+      "timestamp": "2026-03-10T18:11:00",
+      "from": "Jane Patterson",
+      "to": "Clark Kent",
+      "content": "Today’s session helped. I think I treat every work issue like it’s a fire.",
+      "sentiment": "insightful",
+      "context": "post_session_reflection"
+    },
+    {
+      "id": "msg_j_1407",
+      "platform": "iMessage",
+      "timestamp": "2026-03-10T18:18:00",
+      "from": "Clark Kent",
+      "to": "Jane Patterson",
+      "content": "That sounds like an important shift in perspective. Try noticing which issues are urgent and which only feel urgent.",
+      "sentiment": "guiding",
+      "context": "post_session_reflection"
+    },
+    {
+      "id": "msg_j_1501",
+      "platform": "Slack",
+      "timestamp": "2026-02-17T12:04:00",
+      "channel": "#ops-team",
+      "from": "Evan Brooks",
+      "content": "Do you want us to escalate the vendor delay now or wait until tomorrow’s review?",
+      "sentiment": "question",
+      "context": "team_coordination"
+    },
+    {
+      "id": "msg_j_1502",
+      "platform": "Slack",
+      "timestamp": "2026-02-17T12:06:00",
+      "channel": "#ops-team",
+      "from": "Jane Patterson",
+      "content": "Escalate now, but keep the message factual. I don’t want us sounding reactive.",
+      "sentiment": "controlled",
+      "context": "team_coordination"
+    },
+    {
+      "id": "msg_j_1503",
+      "platform": "Slack",
+      "timestamp": "2026-02-24T18:48:00",
+      "channel": "#leadership",
+      "from": "Mark Rivera",
+      "content": "You still online? Happy to review the deck if you want another set of eyes.",
+      "sentiment": "supportive",
+      "context": "after_hours_work"
+    },
+    {
+      "id": "msg_j_1504",
+      "platform": "Slack",
+      "timestamp": "2026-02-24T18:52:00",
+      "channel": "#leadership",
+      "from": "Jane Patterson",
+      "content": "Yes please. I’m too close to it right now and can’t tell what’s clear anymore.",
+      "sentiment": "overwhelmed",
+      "context": "after_hours_work"
+    },
+    {
+      "id": "msg_j_1601",
+      "platform": "WhatsApp",
+      "timestamp": "2026-03-01T09:42:00",
+      "from": "Jane Patterson",
+      "to": "Laura Gomez",
+      "content": "Trying to protect this Sunday from work creep. Hold me accountable.",
+      "sentiment": "determined",
+      "context": "boundary_setting"
+    },
+    {
+      "id": "msg_j_1602",
+      "platform": "WhatsApp",
+      "timestamp": "2026-03-01T09:46:00",
+      "from": "Laura Gomez",
+      "to": "Jane Patterson",
+      "content": "Gladly. If I see you answering emails, I’m confiscating your phone.",
+      "sentiment": "playful",
+      "context": "boundary_setting"
+    },
+    {
+      "id": "msg_j_1603",
+      "platform": "WhatsApp",
+      "timestamp": "2026-03-08T08:31:00",
+      "from": "Jane Patterson",
+      "to": "Laura Gomez",
+      "content": "Actually made it to the trail this morning. Feels like I finally exhaled.",
+      "sentiment": "relieved",
+      "context": "self_care_success"
+    },
+    {
+      "id": "msg_j_1604",
+      "platform": "WhatsApp",
+      "timestamp": "2026-03-08T08:35:00",
+      "from": "Laura Gomez",
+      "to": "Jane Patterson",
+      "content": "There she is. More of that, please.",
+      "sentiment": "affirming",
+      "context": "self_care_success"
+    }
+  ],
+  "communication_patterns": {
+    "family_tone": "apologetic but loving, with recurring tension around missed plans",
+    "coworker_tone": "direct, composed, and responsibility-heavy",
+    "friend_tone": "honest, fatigued at times, but increasingly open to support",
+    "therapist_tone": "reflective, vulnerable, and insight-oriented",
+    "response_latency": {
+      "family": "fast but inconsistent during work crises",
+      "coworkers": "very fast during business hours and after-hours",
+      "friends": "moderate",
+      "therapist": "thoughtful and intentional"
+    },
+    "behavioral_signals": [
+      "recurring apologies for late work conflicts",
+      "after-hours work messaging increases before major reviews",
+      "family frustration rises after repeated cancellations",
+      "therapeutic messaging shows growing self-awareness",
+      "friend conversations often reveal fatigue and stress before self-care attempts"
+    ]
+  }
+}

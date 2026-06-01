@@ -1,0 +1,564 @@
+{
+  "user": {
+    "id": "user_clark_kent",
+    "name": "Clark Kent",
+    "age": 47,
+    "occupation": "Licensed Therapist",
+    "personality_traits": [
+      "patient",
+      "calm",
+      "observant",
+      "compassionate",
+      "innovative"
+    ],
+    "background": {
+      "marital_status": "widower",
+      "spouse_status": "wife died 8 years ago",
+      "children": [
+        {
+          "name": "Maya Kent",
+          "age": 16,
+          "relationship": "daughter"
+        }
+      ]
+    },
+    "interests": [
+      "motorcycle riding",
+      "clinical research",
+      "community support",
+      "mentorship"
+    ],
+    "professional_style": {
+      "therapy_approach": [
+        "blends traditional talk therapy with newer interactive techniques",
+        "uses reflective voice notes and structured self-observation prompts",
+        "experiments with digital journaling, mood mapping, and behavioral pattern review"
+      ],
+      "strengths": [
+        "excellent listener",
+        "steady under pressure",
+        "creative treatment planning",
+        "strong rapport with patients"
+      ]
+    }
+  },
+  "calendar": {
+    "events": [
+      {
+        "id": "evt_c_001",
+        "title": "Morning Clinical Review",
+        "type": "work",
+        "start_time": "2026-02-02T08:00:00",
+        "end_time": "2026-02-02T08:45:00",
+        "location": "Office",
+        "tags": [
+          "planning",
+          "clinical"
+        ],
+        "priority": "medium"
+      },
+      {
+        "id": "evt_c_002",
+        "title": "Patient Session - Jane Patterson",
+        "type": "work",
+        "start_time": "2026-02-03T17:00:00",
+        "end_time": "2026-02-03T18:00:00",
+        "location": "Virtual",
+        "tags": [
+          "patient_session",
+          "recurring"
+        ],
+        "priority": "high"
+      },
+      {
+        "id": "evt_c_003",
+        "title": "Dinner with Maya",
+        "type": "personal",
+        "start_time": "2026-02-04T19:00:00",
+        "end_time": "2026-02-04T20:15:00",
+        "location": "Home",
+        "tags": [
+          "family",
+          "routine"
+        ],
+        "priority": "high"
+      },
+      {
+        "id": "evt_c_004",
+        "title": "Evening Motorcycle Ride",
+        "type": "personal",
+        "start_time": "2026-02-05T18:30:00",
+        "end_time": "2026-02-05T20:00:00",
+        "location": "Hill Country Loop",
+        "tags": [
+          "motorcycle",
+          "stress_relief"
+        ],
+        "priority": "medium"
+      },
+      {
+        "id": "evt_c_005",
+        "title": "Peer Consultation Group",
+        "type": "work",
+        "start_time": "2026-02-06T12:00:00",
+        "end_time": "2026-02-06T13:00:00",
+        "location": "Clinic Conference Room",
+        "tags": [
+          "coworkers",
+          "support_group",
+          "professional_development"
+        ],
+        "priority": "medium"
+      },
+      {
+        "id": "evt_c_006",
+        "title": "Interactive Methods Workshop",
+        "type": "work",
+        "start_time": "2026-02-10T09:00:00",
+        "end_time": "2026-02-10T10:30:00",
+        "location": "Community Mental Health Center",
+        "tags": [
+          "innovation",
+          "training"
+        ],
+        "priority": "medium"
+      },
+      {
+        "id": "evt_c_007",
+        "title": "Patient Session - Jane Patterson",
+        "type": "work",
+        "start_time": "2026-02-10T17:00:00",
+        "end_time": "2026-02-10T18:00:00",
+        "location": "Virtual",
+        "tags": [
+          "patient_session",
+          "recurring"
+        ],
+        "priority": "high"
+      },
+      {
+        "id": "evt_c_008",
+        "title": "Maya Parent-Teacher Conference",
+        "type": "personal",
+        "start_time": "2026-02-12T16:30:00",
+        "end_time": "2026-02-12T17:15:00",
+        "location": "Roosevelt High School",
+        "tags": [
+          "daughter",
+          "school"
+        ],
+        "priority": "high"
+      },
+      {
+        "id": "evt_c_009",
+        "title": "Saturday Ride with Friends",
+        "type": "personal",
+        "start_time": "2026-02-14T09:00:00",
+        "end_time": "2026-02-14T12:00:00",
+        "location": "County Road Meetup Point",
+        "tags": [
+          "motorcycle",
+          "friends",
+          "support_group"
+        ],
+        "priority": "medium"
+      },
+      {
+        "id": "evt_c_010",
+        "title": "Patient Session - Jane Patterson",
+        "type": "work",
+        "start_time": "2026-02-17T17:00:00",
+        "end_time": "2026-02-17T18:00:00",
+        "location": "Virtual",
+        "tags": [
+          "patient_session",
+          "recurring"
+        ],
+        "priority": "high"
+      },
+      {
+        "id": "evt_c_011",
+        "title": "Experimental Therapy Design Review",
+        "type": "work",
+        "start_time": "2026-02-18T08:30:00",
+        "end_time": "2026-02-18T09:30:00",
+        "location": "Office",
+        "tags": [
+          "innovation",
+          "treatment_design"
+        ],
+        "priority": "medium"
+      },
+      {
+        "id": "evt_c_012",
+        "title": "Dinner with Friends",
+        "type": "personal",
+        "start_time": "2026-02-20T19:00:00",
+        "end_time": "2026-02-20T21:00:00",
+        "location": "Local Bistro",
+        "tags": [
+          "friends",
+          "support_group"
+        ],
+        "priority": "medium"
+      },
+      {
+        "id": "evt_c_013",
+        "title": "Patient Session - Jane Patterson",
+        "type": "work",
+        "start_time": "2026-02-24T17:00:00",
+        "end_time": "2026-02-24T18:00:00",
+        "location": "Virtual",
+        "tags": [
+          "patient_session",
+          "recurring"
+        ],
+        "priority": "high"
+      },
+      {
+        "id": "evt_c_014",
+        "title": "Motorcycle Maintenance",
+        "type": "personal",
+        "start_time": "2026-02-28T10:00:00",
+        "end_time": "2026-02-28T11:30:00",
+        "location": "Garage",
+        "tags": [
+          "motorcycle",
+          "routine"
+        ],
+        "priority": "low"
+      },
+      {
+        "id": "evt_c_015",
+        "title": "Patient Session - Jane Patterson",
+        "type": "work",
+        "start_time": "2026-03-03T17:00:00",
+        "end_time": "2026-03-03T18:00:00",
+        "location": "Virtual",
+        "tags": [
+          "patient_session",
+          "recurring"
+        ],
+        "priority": "high"
+      },
+      {
+        "id": "evt_c_016",
+        "title": "New Methods Roundtable",
+        "type": "work",
+        "start_time": "2026-03-05T12:30:00",
+        "end_time": "2026-03-05T13:30:00",
+        "location": "Virtual",
+        "tags": [
+          "innovation",
+          "coworkers"
+        ],
+        "priority": "medium"
+      },
+      {
+        "id": "evt_c_017",
+        "title": "Maya Soccer Match",
+        "type": "personal",
+        "start_time": "2026-03-07T15:00:00",
+        "end_time": "2026-03-07T17:00:00",
+        "location": "West Field",
+        "tags": [
+          "daughter",
+          "family"
+        ],
+        "priority": "high"
+      },
+      {
+        "id": "evt_c_018",
+        "title": "Patient Session - Jane Patterson",
+        "type": "work",
+        "start_time": "2026-03-10T17:00:00",
+        "end_time": "2026-03-10T18:00:00",
+        "location": "Virtual",
+        "tags": [
+          "patient_session",
+          "recurring"
+        ],
+        "priority": "high"
+      },
+      {
+        "id": "evt_c_019",
+        "title": "Support Group Coffee",
+        "type": "personal",
+        "start_time": "2026-03-12T07:30:00",
+        "end_time": "2026-03-12T08:15:00",
+        "location": "Neighborhood Cafe",
+        "tags": [
+          "friends",
+          "support_group"
+        ],
+        "priority": "medium"
+      },
+      {
+        "id": "evt_c_020",
+        "title": "Weekend Ride",
+        "type": "personal",
+        "start_time": "2026-03-14T08:00:00",
+        "end_time": "2026-03-14T11:00:00",
+        "location": "Lake Route",
+        "tags": [
+          "motorcycle",
+          "friends"
+        ],
+        "priority": "medium"
+      }
+    ],
+    "cancellations": [
+      {
+        "id": "cnl_c_001",
+        "event_id": "evt_c_004",
+        "title": "Evening Motorcycle Ride",
+        "original_time": "2026-02-05T18:30:00",
+        "cancellation_time": "2026-02-05T17:40:00",
+        "reason": "Stayed late to support a patient in crisis planning",
+        "category": "professional_obligation"
+      },
+      {
+        "id": "cnl_c_002",
+        "event_id": "evt_c_012",
+        "title": "Dinner with Friends",
+        "original_time": "2026-02-20T19:00:00",
+        "cancellation_time": "2026-02-20T16:10:00",
+        "reason": "Maya needed help preparing for a school presentation",
+        "category": "family_priority"
+      }
+    ],
+    "reschedules": [
+      {
+        "id": "res_c_001",
+        "event_id": "evt_c_012",
+        "original_time": "2026-02-20T19:00:00",
+        "new_time": "2026-02-21T10:00:00",
+        "reason": "Moved to breakfast after family scheduling conflict"
+      },
+      {
+        "id": "res_c_002",
+        "event_id": "evt_c_004",
+        "original_time": "2026-02-05T18:30:00",
+        "new_time": "2026-02-07T09:30:00",
+        "reason": "Used weekend ride as decompression time"
+      }
+    ]
+  },
+  "messages": [
+    {
+      "id": "msg_c_001",
+      "timestamp": "2026-02-05T17:43:00",
+      "from": "Clark Kent",
+      "to": "Ride Group",
+      "content": "I’m going to miss tonight’s ride. Got pulled into something important at work. Catch you all this weekend.",
+      "linked_event_id": "evt_c_004",
+      "sentiment": "regretful"
+    },
+    {
+      "id": "msg_c_002",
+      "timestamp": "2026-02-12T17:35:00",
+      "from": "Clark Kent",
+      "to": "Maya Kent",
+      "content": "You handled that conference really well. Proud of you. Let’s grab dinner wherever you want.",
+      "linked_event_id": "evt_c_008",
+      "sentiment": "supportive"
+    },
+    {
+      "id": "msg_c_003",
+      "timestamp": "2026-02-20T16:15:00",
+      "from": "Clark Kent",
+      "to": "Sam Rivera",
+      "content": "Need to rain check tonight. Maya needs an extra hand with school stuff. Can we do breakfast tomorrow?",
+      "linked_event_id": "evt_c_012",
+      "sentiment": "warm"
+    },
+    {
+      "id": "msg_c_004",
+      "timestamp": "2026-03-05T14:05:00",
+      "from": "Colleague - Dr. Nina Flores",
+      "to": "Clark Kent",
+      "content": "Your mood-mapping prompt idea was excellent. Patients seem more engaged with it than a standard worksheet.",
+      "linked_event_id": "evt_c_016",
+      "sentiment": "positive_feedback"
+    },
+    {
+      "id": "msg_c_005",
+      "timestamp": "2026-03-07T17:20:00",
+      "from": "Clark Kent",
+      "to": "Maya Kent",
+      "content": "Great game today. You looked stronger and more confident out there than last month.",
+      "linked_event_id": "evt_c_017",
+      "sentiment": "encouraging"
+    },
+    {
+      "id": "msg_c_006",
+      "timestamp": "2026-03-12T08:22:00",
+      "from": "Friend - Leo Morgan",
+      "to": "Clark Kent",
+      "content": "Coffee was good. Glad you’re making time for yourself too. Let’s get a ride in next week.",
+      "linked_event_id": "evt_c_019",
+      "sentiment": "supportive"
+    }
+  ],
+  "emails": [
+    {
+      "id": "email_c_001",
+      "timestamp": "2026-02-09T20:10:00",
+      "from": "Clark Kent",
+      "to": "Clinic Team",
+      "subject": "Pilot Proposal: Interactive Reflection Check-Ins",
+      "content": "I’d like to test a lightweight between-session reflection model using short voice notes, emotional tagging, and behavior snapshots. The goal is to improve patient self-awareness without increasing reporting burden.",
+      "tags": [
+        "innovation",
+        "proposal",
+        "clinical_work"
+      ]
+    },
+    {
+      "id": "email_c_002",
+      "timestamp": "2026-02-18T10:05:00",
+      "from": "Clinic Director",
+      "to": "Clark Kent",
+      "subject": "Re: Experimental Therapy Design Review",
+      "content": "Your approach is thoughtful and measured. I appreciate that you’re pairing experimental methods with clear clinical boundaries and documentation.",
+      "tags": [
+        "recognition",
+        "leadership",
+        "innovation"
+      ]
+    },
+    {
+      "id": "email_c_003",
+      "timestamp": "2026-03-03T19:20:00",
+      "from": "Clark Kent",
+      "to": "Peer Consultation Group",
+      "subject": "Observations on Pattern-Based Patient Reflection",
+      "content": "I’m seeing stronger engagement when patients review their own recurring patterns across calendar, message tone, and self-notes. Interested in discussing ethical guardrails and practical workflows at next week’s consult.",
+      "tags": [
+        "clinical_insight",
+        "data_patterns",
+        "peer_group"
+      ]
+    }
+  ],
+  "notes": [
+    {
+      "id": "note_c_001",
+      "timestamp": "2026-02-03T18:20:00",
+      "context": "post_session_reflection",
+      "content": "Patient responded well to structured emotional labeling tied to recent work decisions. Pattern awareness seems to reduce defensiveness and increase insight.",
+      "linked_event_id": "evt_c_002",
+      "privacy_level": "clinical_private"
+    },
+    {
+      "id": "note_c_002",
+      "timestamp": "2026-02-10T10:50:00",
+      "context": "professional_development",
+      "content": "The workshop confirmed that patients engage more deeply when reflection feels conversational rather than diagnostic. Need to keep the methods human and not overly technical.",
+      "linked_event_id": "evt_c_006",
+      "privacy_level": "personal_professional"
+    },
+    {
+      "id": "note_c_003",
+      "timestamp": "2026-02-18T09:45:00",
+      "context": "treatment_design",
+      "content": "New method idea: ask patients to compare what they planned, what they canceled, and what they felt immediately before the change. This could surface stress loops more clearly.",
+      "linked_event_id": "evt_c_011",
+      "privacy_level": "personal_professional"
+    },
+    {
+      "id": "note_c_004",
+      "timestamp": "2026-02-20T22:15:00",
+      "context": "personal_reflection",
+      "content": "Still feel the old grief sometimes when the house gets quiet, but I’m grateful Maya talks to me openly. Support from friends keeps life moving forward.",
+      "privacy_level": "personal_private"
+    },
+    {
+      "id": "note_c_005",
+      "timestamp": "2026-03-05T14:40:00",
+      "context": "post_roundtable",
+      "content": "Coworkers are receptive to the unconventional methods because the intent is clear: more emotional precision, less judgment, better continuity between sessions.",
+      "linked_event_id": "evt_c_016",
+      "privacy_level": "personal_professional"
+    },
+    {
+      "id": "note_c_006",
+      "timestamp": "2026-03-12T08:40:00",
+      "context": "social_support",
+      "content": "It matters that I keep saying yes to friends. Stability is not something that happens automatically; it has to be maintained.",
+      "linked_event_id": "evt_c_019",
+      "privacy_level": "personal_private"
+    }
+  ],
+  "relationships": {
+    "frequent_contacts": [
+      {
+        "name": "Maya Kent",
+        "relationship": "daughter",
+        "interaction_frequency": "daily"
+      },
+      {
+        "name": "Dr. Nina Flores",
+        "relationship": "coworker",
+        "interaction_frequency": "weekly"
+      },
+      {
+        "name": "Sam Rivera",
+        "relationship": "friend",
+        "interaction_frequency": "weekly"
+      },
+      {
+        "name": "Leo Morgan",
+        "relationship": "friend",
+        "interaction_frequency": "weekly"
+      }
+    ]
+  },
+  "behavioral_patterns": {
+    "patient_session_consistency": "high",
+    "family_engagement_frequency": "high",
+    "social_support_engagement": "consistent",
+    "personal_hobby_frequency": "moderate",
+    "work_innovation_activity": "high",
+    "cancellation_pattern": {
+      "rate": "low",
+      "common_causes": [
+        "professional obligation",
+        "family priority"
+      ]
+    },
+    "stability_indicators": [
+      "maintains close contact with daughter",
+      "regular peer consultation",
+      "sustains friendships",
+      "protects time for motorcycle riding",
+      "documents reflective notes consistently"
+    ]
+  },
+  "insight_candidates": [
+    {
+      "id": "ins_c_001",
+      "type": "support_network_strength",
+      "description": "Clark maintains a stable support system across family, coworkers, and close friends.",
+      "confidence": 0.94
+    },
+    {
+      "id": "ins_c_002",
+      "type": "professional_innovation",
+      "description": "Frequent workshops, proposal emails, and treatment design notes suggest Clark actively develops new therapeutic methods.",
+      "confidence": 0.96
+    },
+    {
+      "id": "ins_c_003",
+      "type": "resilience_pattern",
+      "description": "Widower grief remains present in private reflection, but his routines and relationships indicate strong long-term emotional stability.",
+      "confidence": 0.89
+    },
+    {
+      "id": "ins_c_004",
+      "type": "family_priority",
+      "description": "Clark reliably prioritizes his daughter when scheduling conflicts arise, with low overall cancellation behavior.",
+      "confidence": 0.91
+    }
+  ]
+}

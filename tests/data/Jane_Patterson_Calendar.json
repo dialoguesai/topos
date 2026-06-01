@@ -1,0 +1,239 @@
+{
+  "user": {
+    "name": "Jane Patterson",
+    "age": 38,
+    "occupation": "Operations Manager"
+  },
+  "calendar": {
+    "events": [
+      // --- WEEK 1 ---
+      {
+        "id": "evt_001",
+        "title": "Team Strategy Meeting",
+        "type": "work",
+        "start_time": "2026-02-02T09:00:00",
+        "end_time": "2026-02-02T10:30:00",
+        "tags": ["decision-making"]
+      },
+      {
+        "id": "evt_002",
+        "title": "Therapy Session",
+        "type": "health",
+        "start_time": "2026-02-03T17:00:00",
+        "end_time": "2026-02-03T18:00:00",
+        "recurring": "weekly"
+      },
+      {
+        "id": "evt_003",
+        "title": "Family Dinner",
+        "type": "personal",
+        "start_time": "2026-02-04T19:00:00",
+        "end_time": "2026-02-04T20:30:00"
+      },
+
+      // --- WEEK 2 ---
+      {
+        "id": "evt_010",
+        "title": "Client Presentation",
+        "type": "work",
+        "start_time": "2026-02-10T11:00:00",
+        "end_time": "2026-02-10T12:00:00",
+        "tags": ["high-stakes"]
+      },
+      {
+        "id": "evt_011",
+        "title": "Therapy Session",
+        "type": "health",
+        "start_time": "2026-02-10T17:00:00",
+        "end_time": "2026-02-10T18:00:00"
+      },
+      {
+        "id": "evt_012",
+        "title": "Trail Run",
+        "type": "health",
+        "start_time": "2026-02-11T18:30:00",
+        "end_time": "2026-02-11T19:30:00"
+      },
+
+      // --- WEEK 3 ---
+      {
+        "id": "evt_020",
+        "title": "Quarterly Planning",
+        "type": "work",
+        "start_time": "2026-02-17T09:00:00",
+        "end_time": "2026-02-17T12:00:00"
+      },
+      {
+        "id": "evt_021",
+        "title": "Therapy Session",
+        "type": "health",
+        "start_time": "2026-02-17T17:00:00",
+        "end_time": "2026-02-17T18:00:00"
+      },
+      {
+        "id": "evt_022",
+        "title": "Movie Night",
+        "type": "personal",
+        "start_time": "2026-02-18T20:00:00",
+        "end_time": "2026-02-18T22:00:00"
+      },
+
+      // --- WEEK 4 ---
+      {
+        "id": "evt_030",
+        "title": "Hiring Interviews",
+        "type": "work",
+        "start_time": "2026-02-24T10:00:00",
+        "end_time": "2026-02-24T15:00:00"
+      },
+      {
+        "id": "evt_031",
+        "title": "Therapy Session",
+        "type": "health",
+        "start_time": "2026-02-24T17:00:00",
+        "end_time": "2026-02-24T18:00:00"
+      },
+
+      // --- WEEK 5 ---
+      {
+        "id": "evt_040",
+        "title": "Board Review Prep",
+        "type": "work",
+        "start_time": "2026-03-02T20:00:00",
+        "end_time": "2026-03-02T22:30:00",
+        "tags": ["after-hours"]
+      },
+      {
+        "id": "evt_041",
+        "title": "Therapy Session",
+        "type": "health",
+        "start_time": "2026-03-03T17:00:00",
+        "end_time": "2026-03-03T18:00:00"
+      },
+      {
+        "id": "evt_042",
+        "title": "Family Dinner",
+        "type": "personal",
+        "start_time": "2026-03-04T19:00:00",
+        "end_time": "2026-03-04T20:30:00"
+      },
+
+      // --- WEEK 6 ---
+      {
+        "id": "evt_050",
+        "title": "Executive Review",
+        "type": "work",
+        "start_time": "2026-03-09T09:00:00",
+        "end_time": "2026-03-09T11:00:00"
+      },
+      {
+        "id": "evt_051",
+        "title": "Therapy Session",
+        "type": "health",
+        "start_time": "2026-03-10T17:00:00",
+        "end_time": "2026-03-10T18:00:00"
+      }
+    ],
+    "cancellations": [
+      {
+        "event_id": "evt_003",
+        "reason": "Late work escalation",
+        "category": "work_conflict"
+      },
+      {
+        "event_id": "evt_012",
+        "reason": "Exhaustion after long workday",
+        "category": "fatigue"
+      },
+      {
+        "event_id": "evt_042",
+        "reason": "Client emergency meeting",
+        "category": "work_conflict"
+      }
+    ]
+  },
+
+  "messages": [
+    {
+      "id": "msg_001",
+      "timestamp": "2026-02-04T18:15:00",
+      "from": "Jane Patterson",
+      "to": "Emily Patterson",
+      "content": "I’m so sorry, I’m still stuck at work. Can we reschedule dinner?",
+      "linked_event_id": "evt_003",
+      "sentiment": "negative"
+    },
+    {
+      "id": "msg_002",
+      "timestamp": "2026-02-11T17:45:00",
+      "from": "Jane Patterson",
+      "to": "Friend - Laura",
+      "content": "I was planning to run but I’m completely drained today.",
+      "linked_event_id": "evt_012",
+      "sentiment": "low_energy"
+    },
+    {
+      "id": "msg_003",
+      "timestamp": "2026-03-04T18:20:00",
+      "from": "Jane Patterson",
+      "to": "Emily Patterson",
+      "content": "Something urgent came up again... I hate this pattern.",
+      "linked_event_id": "evt_042",
+      "sentiment": "frustration"
+    }
+  ],
+
+  "emails": [
+    {
+      "id": "email_001",
+      "timestamp": "2026-02-09T21:30:00",
+      "from": "Jane Patterson",
+      "to": "Executive Team",
+      "subject": "Updated Client Strategy Deck",
+      "content": "Attached is the revised version for tomorrow’s presentation. Please review before 9am.",
+      "tags": ["after_hours", "urgency"]
+    },
+    {
+      "id": "email_002",
+      "timestamp": "2026-03-02T22:45:00",
+      "from": "Jane Patterson",
+      "to": "Board Members",
+      "subject": "Pre-Read: Board Review",
+      "content": "Sharing materials ahead of tomorrow’s session. Feedback welcome tonight or early morning.",
+      "tags": ["late_night", "pressure"]
+    }
+  ],
+
+  "notes": [
+    {
+      "id": "note_001",
+      "timestamp": "2026-02-03T18:30:00",
+      "context": "post_therapy",
+      "content": "Noticed I default to prioritizing work even when I don’t need to. Need to set boundaries."
+    },
+    {
+      "id": "note_002",
+      "timestamp": "2026-02-17T18:30:00",
+      "context": "post_therapy",
+      "content": "Therapy helped me reframe the client pressure. I don’t have to carry everything alone."
+    },
+    {
+      "id": "note_003",
+      "timestamp": "2026-03-03T18:30:00",
+      "context": "post_therapy",
+      "content": "Pattern is clear: I cancel personal plans when stressed. Need a system to protect that time."
+    }
+  ],
+
+  "behavioral_patterns": {
+    "therapy_attendance_rate": 1.0,
+    "family_event_cancellation_rate": 0.66,
+    "after_hours_work_frequency_per_week": 2,
+    "exercise_cancellation_rate": 0.5,
+    "stress_indicators": [
+      "late night emails",
+      "missed personal events",
+      "fatigue messages"
+    ]
+  }
+}

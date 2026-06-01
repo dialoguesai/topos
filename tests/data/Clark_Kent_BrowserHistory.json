@@ -1,0 +1,242 @@
+{
+  "user_id": "user_clark_kent",
+  "browsing_history": [
+    {
+      "id": "bh_c_001",
+      "timestamp": "2026-02-02T06:45:00",
+      "url": "https://www.apa.org/monitor/2026/01/innovative-therapy-techniques",
+      "title": "Innovative Therapy Techniques for Modern Practice",
+      "category": "professional",
+      "tags": [
+        "therapy_methods",
+        "innovation"
+      ],
+      "time_spent_seconds": 540
+    },
+    {
+      "id": "bh_c_002",
+      "timestamp": "2026-02-03T19:10:00",
+      "url": "https://www.psychologytoday.com/us/blog/reflective-practice/2026/01/pattern-recognition-in-patient-behavior",
+      "title": "Pattern Recognition in Patient Behavior",
+      "category": "professional",
+      "tags": [
+        "behavior_analysis",
+        "patterns"
+      ],
+      "time_spent_seconds": 620
+    },
+    {
+      "id": "bh_c_003",
+      "timestamp": "2026-02-05T17:20:00",
+      "url": "https://www.revzilla.com/common-tread/best-motorcycle-routes-texas",
+      "title": "Best Motorcycle Routes in Texas",
+      "category": "personal",
+      "tags": [
+        "motorcycle",
+        "routes",
+        "leisure"
+      ],
+      "time_spent_seconds": 300
+    },
+    {
+      "id": "bh_c_004",
+      "timestamp": "2026-02-06T13:30:00",
+      "url": "https://www.ncbi.nlm.nih.gov/pmc/articles/CBT-digital-tools",
+      "title": "Digital Tools Supporting Cognitive Behavioral Therapy",
+      "category": "professional",
+      "tags": [
+        "cbt",
+        "digital_health"
+      ],
+      "time_spent_seconds": 780
+    },
+    {
+      "id": "bh_c_005",
+      "timestamp": "2026-02-08T20:45:00",
+      "url": "https://www.google.com/search?q=teenage+motivation+strategies+parenting",
+      "title": "teenage motivation strategies parenting",
+      "category": "family",
+      "tags": [
+        "parenting",
+        "teenager"
+      ],
+      "time_spent_seconds": 260
+    },
+    {
+      "id": "bh_c_006",
+      "timestamp": "2026-02-10T22:10:00",
+      "url": "https://www.youtube.com/watch?v=emotional-regulation-therapy",
+      "title": "Emotional Regulation Techniques in Therapy",
+      "category": "professional",
+      "tags": [
+        "therapy",
+        "emotions"
+      ],
+      "time_spent_seconds": 900
+    },
+    {
+      "id": "bh_c_007",
+      "timestamp": "2026-02-12T15:50:00",
+      "url": "https://www.google.com/search?q=how+to+support+teen+confidence",
+      "title": "how to support teen confidence",
+      "category": "family",
+      "tags": [
+        "parenting",
+        "confidence"
+      ],
+      "time_spent_seconds": 240
+    },
+    {
+      "id": "bh_c_008",
+      "timestamp": "2026-02-14T07:40:00",
+      "url": "https://www.revzilla.com/common-tread/motorcycle-maintenance-basics",
+      "title": "Motorcycle Maintenance Basics",
+      "category": "personal",
+      "tags": [
+        "motorcycle",
+        "maintenance"
+      ],
+      "time_spent_seconds": 420
+    },
+    {
+      "id": "bh_c_009",
+      "timestamp": "2026-02-17T19:05:00",
+      "url": "https://www.psychologytoday.com/us/blog/grief-and-healing/2026/02/living-with-loss-years-later",
+      "title": "Living with Loss Years Later",
+      "category": "personal",
+      "tags": [
+        "grief",
+        "reflection"
+      ],
+      "time_spent_seconds": 510
+    },
+    {
+      "id": "bh_c_010",
+      "timestamp": "2026-02-18T10:15:00",
+      "url": "https://www.google.com/search?q=patient+engagement+between+therapy+sessions",
+      "title": "patient engagement between therapy sessions",
+      "category": "professional",
+      "tags": [
+        "engagement",
+        "therapy_design"
+      ],
+      "time_spent_seconds": 300
+    },
+    {
+      "id": "bh_c_011",
+      "timestamp": "2026-02-20T08:05:00",
+      "url": "https://hbr.org/2026/02/building-trust-in-teams",
+      "title": "Building Trust in Teams",
+      "category": "professional",
+      "tags": [
+        "trust",
+        "teamwork"
+      ],
+      "time_spent_seconds": 460
+    },
+    {
+      "id": "bh_c_012",
+      "timestamp": "2026-02-24T21:30:00",
+      "url": "https://www.youtube.com/watch?v=guided-mindfulness-10min",
+      "title": "10-Minute Guided Mindfulness Exercise",
+      "category": "personal",
+      "tags": [
+        "mindfulness",
+        "self_care"
+      ],
+      "time_spent_seconds": 600
+    },
+    {
+      "id": "bh_c_013",
+      "timestamp": "2026-03-01T09:20:00",
+      "url": "https://www.google.com/search?q=best+coffee+shops+austin+quiet",
+      "title": "best coffee shops austin quiet",
+      "category": "personal",
+      "tags": [
+        "coffee",
+        "quiet_space"
+      ],
+      "time_spent_seconds": 180
+    },
+    {
+      "id": "bh_c_014",
+      "timestamp": "2026-03-03T18:50:00",
+      "url": "https://www.ncbi.nlm.nih.gov/pmc/articles/behavioral-pattern-tracking",
+      "title": "Behavioral Pattern Tracking in Clinical Practice",
+      "category": "professional",
+      "tags": [
+        "data_patterns",
+        "clinical_methods"
+      ],
+      "time_spent_seconds": 720
+    },
+    {
+      "id": "bh_c_015",
+      "timestamp": "2026-03-05T14:10:00",
+      "url": "https://www.psychologytoday.com/us/blog/innovation-in-therapy/2026/03/non-traditional-therapy-tools",
+      "title": "Non-Traditional Therapy Tools That Work",
+      "category": "professional",
+      "tags": [
+        "innovation",
+        "therapy_tools"
+      ],
+      "time_spent_seconds": 560
+    },
+    {
+      "id": "bh_c_016",
+      "timestamp": "2026-03-07T18:30:00",
+      "url": "https://www.google.com/search?q=teen+athlete+support+parenting",
+      "title": "teen athlete support parenting",
+      "category": "family",
+      "tags": [
+        "parenting",
+        "sports"
+      ],
+      "time_spent_seconds": 220
+    },
+    {
+      "id": "bh_c_017",
+      "timestamp": "2026-03-10T20:25:00",
+      "url": "https://www.youtube.com/watch?v=active-listening-skills",
+      "title": "Improving Active Listening Skills",
+      "category": "professional",
+      "tags": [
+        "communication",
+        "therapy"
+      ],
+      "time_spent_seconds": 840
+    },
+    {
+      "id": "bh_c_018",
+      "timestamp": "2026-03-12T07:10:00",
+      "url": "https://www.google.com/search?q=morning+routines+for+mental+clarity",
+      "title": "morning routines for mental clarity",
+      "category": "personal",
+      "tags": [
+        "routine",
+        "mental_health"
+      ],
+      "time_spent_seconds": 200
+    }
+  ],
+  "browsing_patterns": {
+    "professional_percentage": 0.56,
+    "family_percentage": 0.17,
+    "personal_leisure_percentage": 0.27,
+    "late_night_activity_frequency": "moderate",
+    "common_search_themes": [
+      "innovative therapy techniques",
+      "patient engagement and behavioral patterns",
+      "parenting a teenager",
+      "motorcycle riding and maintenance",
+      "mindfulness and emotional regulation"
+    ],
+    "behavioral_signals": [
+      "consistent professional development and research activity",
+      "active interest in improving patient engagement techniques",
+      "ongoing effort to support daughter's growth and confidence",
+      "balanced use of personal hobbies for stress management",
+      "periodic reflection on grief and emotional well-being"
+    ]
+  }
+}

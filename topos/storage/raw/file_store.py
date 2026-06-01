@@ -1,0 +1,100 @@
+from __future__ import annotations
+
+import logging
+import shutil
+import json
+import os
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Optional
+
+from .raw_store import RawFile, RawFileRef
+
+logger = logging.getLogger("topos.storage.raw.file_store")
+
+
+@dataclass(frozen=True)
+class RawFileStore:
+    base_path: Path
+
+    def __init__(self, base_path: Optional[Path] = None):
+        env_override = os.getenv("TOPOS_INGESTION_BASE_PATH")
+        resolved_base = base_path or (Path(env_override) if env_override else Path.home() / ".topos" / "ingestion")
+        object.__setattr__(self, "base_path", resolved_base)
+        self.base_path.mkdir(parents=True, exist_ok=True)
+
+    def get_file_path(self, dataset_id: str, schema_id: str) -> Path:
+        safe_dataset_id = dataset_id.replace(":", "_").replace("/", "_")
+        safe_schema_id = schema_id.replace(".", "_").replace("/", "_")
+        dataset_dir = self.base_path / safe_dataset_id
+        dataset_dir.mkdir(parents=True, exist_ok=True)
+        return dataset_dir / f"{safe_schema_id}.jsonl"
+
+    def write_file(self, raw_file: RawFile) -> RawFileRef:
+        destination = self.get_file_path(
+            raw_file.metadata.get("dataset_id", "unknown"),
+            raw_file.metadata.get("schema_id", "unknown"),
+        )
+        source_path = Path(raw_file.file_path)
+        if source_path.resolve() == destination.resolve():
+            return RawFileRef(file_id=destination.stem, file_path=str(destination))
+        if destination.exists():
+            backup = destination.with_suffix(".jsonl.backup")
+            shutil.copy2(destination, backup)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(raw_file.file_path, destination)
+        logger.info("Saved raw file: %s", destination)
+        return RawFileRef(file_id=destination.stem, file_path=str(destination))
+
+    def write_bytes(self, dataset_id: str, schema_id: str, payload: bytes) -> RawFileRef:
+        destination = self.get_file_path(dataset_id, schema_id)
+        if destination.exists():
+            backup = destination.with_suffix(".jsonl.backup")
+            shutil.copy2(destination, backup)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(payload)
+        logger.info("Saved raw file bytes: %s", destination)
+        return RawFileRef(file_id=destination.stem, file_path=str(destination))
+
+    def append_record(self, dataset_id: str, schema_id: str, record: dict) -> RawFileRef:
+        destination = self.get_file_path(dataset_id, schema_id)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with destination.open("a", encoding="utf-8") as handle:
+            handle.write(json.dumps(record))
+            handle.write("\n")
+        return RawFileRef(file_id=destination.stem, file_path=str(destination))
+
+    def list_datasets(self) -> list[dict]:
+        """List all datasets with their file stats."""
+        datasets = []
+        if not self.base_path.exists():
+            return datasets
+        for dataset_dir in self.base_path.iterdir():
+            if not dataset_dir.is_dir():
+                continue
+            dataset_id = dataset_dir.name.replace("_", ":")
+            total_size = 0
+            message_count = 0
+            schemas = []
+            for file_path in dataset_dir.glob("*.jsonl"):
+                if file_path.name.endswith(".backup"):
+                    continue
+                file_size = file_path.stat().st_size
+                total_size += file_size
+                schema_id = file_path.stem.replace("_", ".")
+                # Count messages in file
+                try:
+                    with file_path.open("r", encoding="utf-8") as f:
+                        for _ in f:
+                            message_count += 1
+                except Exception:
+                    pass
+                schemas.append({"schema_id": schema_id, "file_size": file_size})
+            if total_size > 0 or message_count > 0:
+                datasets.append({
+                    "dataset_id": dataset_id,
+                    "total_size": total_size,
+                    "message_count": message_count,
+                    "schemas": schemas,
+                })
+        return datasets

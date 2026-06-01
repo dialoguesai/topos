@@ -1,0 +1,1 @@
+"""Oplog storage abstractions."""
