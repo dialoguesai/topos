@@ -95,6 +95,7 @@ class DeviceInfoResponse(BaseModel):
     engine_mode: str
     llm_enabled: bool
     database_mode: str
+    database_version: Optional[str] = None
     engine_name: Optional[str]
     engine_version: Optional[str] = None
     system: Dict[str, Any]

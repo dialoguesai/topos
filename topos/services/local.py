@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import sqlite3
 from typing import Any, Dict, Optional
 
+from ..__version__ import __version__
 from ..core.api_models import (
     DeviceInfoResponse,
     DeviceNameResponse,
@@ -92,8 +94,9 @@ class LocalDeviceService:
             engine_mode=state.get_engine_mode(),
             llm_enabled=settings.enable_llm and state.get_engine_mode() == "full",
             database_mode=settings.topos_database_mode,
+            database_version=sqlite3.sqlite_version if settings.topos_database_mode in {"local", "sqlite"} else None,
             engine_name=device_name,
-            engine_version=None,
+            engine_version=__version__,
             system=state.get_system_info(),
             last_sync_at=last_sync_at,
             last_received_hlc_ts=last_received_hlc_ts,
