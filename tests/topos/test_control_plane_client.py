@@ -114,6 +114,35 @@ async def test_control_plane_client_queues_presence_until_connected(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_send_message_restarts_background_task_if_stopped(monkeypatch):
+    ws = FakeWebSocket([])
+    connect = FakeConnect(ws)
+    monkeypatch.setattr(control_plane_client, "connect", connect)
+
+    async def handler(_message):
+        return None
+
+    client = ControlPlaneClient(
+        control_plane_url="ws://example/ws/engine",
+        api_key="test-key",
+        handler=handler,
+        verify_ssl=False,
+    )
+
+    # Simulate an unexpected task exit while the app is still running.
+    client._task = asyncio.create_task(asyncio.sleep(0))
+    await client._task
+    assert client._task.done()
+
+    await client.send_message({"type": "engine_register", "id": "queued"})
+
+    assert client._task is not None
+    assert not client._task.done()
+    client._stop.set()
+    await asyncio.wait_for(client._task, timeout=1)
+
+
+@pytest.mark.asyncio
 async def test_control_plane_client_sends_busy_error_when_saturated(monkeypatch):
     request_a = {"id": "req-a", "type": "alpha", "payload": {}}
     request_b = {"id": "req-b", "type": "beta", "payload": {}}

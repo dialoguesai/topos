@@ -103,6 +103,24 @@ class ControlPlaneClient:
         self._task = asyncio.create_task(self._run())
         logger.info("Control plane client starting: %s", self.control_plane_url)
 
+    def _restart_if_task_stopped(self) -> None:
+        # Self-heal if the reconnect loop exited unexpectedly while the app is still running.
+        if self._stop.is_set() or not self._task or not self._task.done():
+            return
+        reason = "unknown"
+        try:
+            exc = self._task.exception()
+            if exc is not None:
+                reason = repr(exc)
+        except asyncio.CancelledError:
+            reason = "cancelled"
+        logger.warning(
+            "Control plane background task stopped unexpectedly; restarting endpoint=%s reason=%s",
+            self.control_plane_url,
+            reason,
+        )
+        self.start()
+
     async def wait_until_connected(self, timeout_s: float | None = None) -> bool:
         timeout = float(timeout_s) if timeout_s is not None else float(settings.connection_readiness_timeout_seconds)
         try:
@@ -292,6 +310,7 @@ class ControlPlaneClient:
     async def send_message(self, message: Dict[str, Any]) -> None:
         """Send an unsolicited message to the control plane (e.g., progress updates)."""
         if not self._ws:
+            self._restart_if_task_stopped()
             await self._enqueue_presence_message(message)
             logger.warning("Queued presence message; control plane currently disconnected")
             return
