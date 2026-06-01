@@ -2358,7 +2358,7 @@ wheels = [
 
 [[package]]
 name = "topos-node"
-version = "0.1.5"
+version = "0.1.6"
 source = { editable = "." }
 dependencies = [
     { name = "asgi-lifespan" },
@@ -2377,6 +2377,7 @@ dependencies = [
     { name = "pydantic-settings" },
     { name = "python-louvain" },
     { name = "python-multipart" },
+    { name = "torch" },
     { name = "transformers" },
     { name = "uvicorn", extra = ["standard"] },
     { name = "websockets" },
@@ -2391,7 +2392,6 @@ dev = [
 engine = [
     { name = "duckdb" },
     { name = "psycopg", extra = ["binary"] },
-    { name = "torch" },
 ]
 signal = [
     { name = "pysqlcipher3" },
@@ -2420,7 +2420,7 @@ requires-dist = [
     { name = "pytest-asyncio", marker = "extra == 'dev'", specifier = ">=0.23" },
     { name = "python-louvain", specifier = ">=0.16" },
     { name = "python-multipart", specifier = ">=0.0.6" },
-    { name = "torch", marker = "extra == 'engine'", specifier = ">=2.8.0" },
+    { name = "torch", specifier = ">=2.8.0" },
     { name = "transformers", specifier = ">=4.57.6" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.29" },
     { name = "websockets", specifier = ">=12.0" },
