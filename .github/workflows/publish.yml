@@ -1,0 +1,58 @@
+name: Publish to PyPI
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Ensure tag matches package version
+        run: |
+          python - <<'PY'
+          import tomllib
+          from pathlib import Path
+
+          tag = "${{ github.ref_name }}"
+          if not tag.startswith("v"):
+              raise SystemExit(f"Expected a v-prefixed tag, got: {tag}")
+          tag_version = tag[1:]
+
+          data = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+          package_version = data["project"]["version"]
+
+          if tag_version != package_version:
+              raise SystemExit(
+                  f"Tag/version mismatch: tag={tag_version}, pyproject={package_version}"
+              )
+          print(f"Version check passed: {package_version}")
+          PY
+
+      - name: Build package artifacts
+        run: uv build
+
+      - name: Validate package metadata
+        run: uvx --from twine twine check dist/*
+
+      - name: Publish to PyPI with Trusted Publishing
+        uses: pypa/gh-action-pypi-publish@release/v1
