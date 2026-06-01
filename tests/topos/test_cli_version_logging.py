@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 from topos.cli import commands
 
 
@@ -25,6 +27,7 @@ def test_get_runtime_version_returns_unknown_without_any_source(monkeypatch):
 
 
 def test_emit_startup_banner_includes_software_and_version(monkeypatch):
+    monkeypatch.delenv("TOPOS_STARTUP_BANNER_EMITTED", raising=False)
     monkeypatch.setattr(commands, "_get_runtime_version", lambda *_args, **_kwargs: "2.4.6")
 
     messages: list[str] = []
@@ -38,3 +41,4 @@ def test_emit_startup_banner_includes_software_and_version(monkeypatch):
     assert any("Version : v2.4.6" in line for line in messages)
     assert any("Mode    : cli" in line for line in messages)
     assert any("Bind    : 127.0.0.1:9000" in line for line in messages)
+    assert os.environ["TOPOS_STARTUP_BANNER_EMITTED"] == "1"

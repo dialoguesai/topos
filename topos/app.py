@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import logging
+import os
 import sys
 
 from fastapi import FastAPI
@@ -60,6 +61,8 @@ app = FastAPI(
 
 
 def _log_runtime_banner() -> None:
+    if os.environ.get("TOPOS_STARTUP_BANNER_EMITTED", "").strip().lower() in {"1", "true", "yes"}:
+        return
     emit_startup_banner(
         lambda line: print(line, flush=True),
         version=__version__,

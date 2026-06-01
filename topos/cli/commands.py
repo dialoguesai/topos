@@ -134,6 +134,8 @@ def _emit_startup_banner(host: str, port: int, package_name: str = "topos-node")
         mode="cli",
         bind=f"{host}:{port}",
     )
+    # Prevent duplicate banner when app startup runs in same process.
+    os.environ["TOPOS_STARTUP_BANNER_EMITTED"] = "1"
 
 
 def _get_latest_pypi_version(package_name: str, timeout_seconds: float = 2.0) -> str | None:
