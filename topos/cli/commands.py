@@ -2,12 +2,18 @@
 
 from __future__ import annotations
 
+import json
 import os
+import subprocess
 import sys
+from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
+from urllib.error import URLError
+from urllib.request import urlopen
 
 import click
 import uvicorn
+from packaging.version import InvalidVersion, Version
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
@@ -62,6 +68,107 @@ def _save_topos_key(topos_key: str, env_path: Path = USER_ENV_PATH) -> Path:
     return env_path
 
 
+def _can_prompt_for_input() -> bool:
+    return sys.stdin.isatty() and sys.stdout.isatty()
+
+
+def _prompt_for_topos_key() -> str:
+    click.echo("TOPOS_KEY is required to connect Topos Node.")
+    click.echo("Enter your TOPOS_KEY to save it locally and continue.")
+    while True:
+        key = click.prompt("TOPOS_KEY", hide_input=True).strip()
+        if key:
+            return key
+        click.echo("TOPOS_KEY cannot be empty. Please try again.")
+
+
+def _resolve_topos_key(cli_topos_key: str | None, env_path: Path = USER_ENV_PATH) -> str:
+    if cli_topos_key:
+        os.environ["TOPOS_KEY"] = cli_topos_key
+        return cli_topos_key
+
+    existing_key = (os.getenv("TOPOS_KEY") or "").strip()
+    if existing_key:
+        os.environ["TOPOS_KEY"] = existing_key
+        return existing_key
+
+    if _can_prompt_for_input():
+        prompted_key = _prompt_for_topos_key()
+        saved_path = _save_topos_key(prompted_key, env_path=env_path)
+        os.environ["TOPOS_KEY"] = prompted_key
+        click.echo(f"Saved TOPOS_KEY to {saved_path}")
+        click.echo("Connecting with saved TOPOS_KEY...")
+        return prompted_key
+
+    raise click.ClickException(
+        "TOPOS_KEY is not configured. Run `topos-node --set-topos-key <YOUR_TOPOS_KEY>` "
+        "or provide `--topos-key` for this run."
+    )
+
+
+def _get_installed_package_version(package_name: str) -> str | None:
+    try:
+        return package_version(package_name)
+    except PackageNotFoundError:
+        return None
+
+
+def _get_latest_pypi_version(package_name: str, timeout_seconds: float = 2.0) -> str | None:
+    url = f"https://pypi.org/pypi/{package_name}/json"
+    try:
+        with urlopen(url, timeout=timeout_seconds) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, URLError, ValueError):
+        return None
+    return str(payload.get("info", {}).get("version") or "").strip() or None
+
+
+def _should_skip_update_check(skip_update_check: bool) -> bool:
+    if skip_update_check:
+        return True
+    env_value = (os.getenv("TOPOS_SKIP_UPDATE_CHECK") or "").strip().lower()
+    return env_value in {"1", "true", "yes", "on"}
+
+
+def _maybe_offer_self_update(
+    skip_update_check: bool,
+    package_name: str = "topos-node",
+) -> bool:
+    if _should_skip_update_check(skip_update_check):
+        return False
+
+    installed = _get_installed_package_version(package_name)
+    if not installed:
+        return False
+
+    latest = _get_latest_pypi_version(package_name)
+    if not latest:
+        return False
+
+    try:
+        if Version(latest) <= Version(installed):
+            return False
+    except InvalidVersion:
+        return False
+
+    click.echo(f"Update available for {package_name}: {installed} -> {latest}")
+    if not _can_prompt_for_input():
+        click.echo(f"Run `uv tool upgrade {package_name}` to update.")
+        return False
+
+    if not click.confirm("Install the latest version now?", default=True):
+        return False
+
+    click.echo(f"Updating {package_name}...")
+    result = subprocess.run(["uv", "tool", "upgrade", package_name], check=False)
+    if result.returncode != 0:
+        click.echo("Update failed. Continuing with current version.")
+        return False
+
+    click.echo("Update installed. Please re-run `topos-node` to use the latest version.")
+    return True
+
+
 @click.command()
 @click.option(
     "--db-path",
@@ -91,7 +198,12 @@ def _save_topos_key(topos_key: str, env_path: Path = USER_ENV_PATH) -> Path:
     default="0.0.0.0",
     help="Host to bind to (default: 0.0.0.0)",
 )
-def main(db_path, topos_key, set_topos_key, discover, port, host) -> None:
+@click.option(
+    "--skip-update-check",
+    is_flag=True,
+    help="Skip checking PyPI for a newer topos-node version.",
+)
+def main(db_path, topos_key, set_topos_key, discover, port, host, skip_update_check) -> None:
     """Topos Control Plane API entry point."""
     if set_topos_key:
         env_path = _save_topos_key(set_topos_key)
@@ -109,14 +221,13 @@ def main(db_path, topos_key, set_topos_key, discover, port, host) -> None:
             click.echo("No existing databases found")
         return
 
+    if _maybe_offer_self_update(skip_update_check=skip_update_check):
+        return
+
     _load_env_file(USER_ENV_PATH)
     _load_env_file(LEGACY_ENV_PATH)
 
-    if topos_key:
-        os.environ["TOPOS_KEY"] = topos_key
-    elif not os.getenv("TOPOS_KEY"):
-        os.environ["TOPOS_KEY"] = "dev-key"
-        click.echo("TOPOS_KEY not set; using local dev key")
+    _resolve_topos_key(topos_key)
 
     from topos.app import app
 
