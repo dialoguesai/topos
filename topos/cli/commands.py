@@ -19,6 +19,7 @@ from packaging.version import InvalidVersion, Version
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
 from topos.storage.db.paths import discover_databases
+from topos.startup_banner import emit_startup_banner
 
 USER_ENV_PATH = Path.home() / ".topos" / ".env"
 LEGACY_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
@@ -111,6 +112,28 @@ def _get_installed_package_version(package_name: str) -> str | None:
         return package_version(package_name)
     except PackageNotFoundError:
         return None
+
+
+def _get_module_version() -> str | None:
+    try:
+        from topos.__version__ import __version__
+    except Exception:
+        return None
+    return __version__ or None
+
+
+def _get_runtime_version(package_name: str = "topos-node") -> str:
+    return _get_module_version() or _get_installed_package_version(package_name) or "unknown"
+
+
+def _emit_startup_banner(host: str, port: int, package_name: str = "topos-node") -> None:
+    runtime_version = _get_runtime_version(package_name=package_name)
+    emit_startup_banner(
+        click.echo,
+        version=runtime_version,
+        mode="cli",
+        bind=f"{host}:{port}",
+    )
 
 
 def _get_latest_pypi_version(package_name: str, timeout_seconds: float = 2.0) -> str | None:
@@ -235,7 +258,7 @@ def main(db_path, topos_key, set_topos_key, discover, port, host, skip_update_ch
         os.environ["TOPOS_DATABASE_PATH"] = db_path
         click.echo(f"Database path: {db_path}")
 
-    click.echo(f"Starting topos API on {host}:{port}")
+    _emit_startup_banner(host=host, port=port)
     uvicorn.run(app, host=host, port=port)
 
 

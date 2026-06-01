@@ -45,6 +45,7 @@ from .control_plane_client import ControlPlaneClient
 from .engine.registration import build_engine_heartbeat_message, build_engine_register_message
 from .hosted_pool_lease import HostedPoolLeaseClient
 from .services.container import get_services
+from .startup_banner import emit_startup_banner
 from .sync import SyncClient
 from .sync_handlers import handle_sync_op
 
@@ -57,9 +58,14 @@ app = FastAPI(
     version=__version__,
 )
 
-logger.info("CORS allowed origins: %s", settings.allowed_origins)
-if settings.allowed_origin_regex:
-    logger.info("CORS allowed origin regex: %s", settings.allowed_origin_regex)
+
+def _log_runtime_banner() -> None:
+    emit_startup_banner(
+        lambda line: print(line, flush=True),
+        version=__version__,
+        mode="uvicorn",
+    )
+
 
 app.add_middleware(
     CORSMiddleware,
@@ -100,6 +106,10 @@ app.include_router(data_commit_routes.router)
 
 @app.on_event("startup")
 async def startup_event() -> None:
+    _log_runtime_banner()
+    logger.info("CORS allowed origins: %s", settings.allowed_origins)
+    if settings.allowed_origin_regex:
+        logger.info("CORS allowed origin regex: %s", settings.allowed_origin_regex)
     logger.info("Runtime Python executable: %s", sys.executable)
     logger.info(
         "Runtime deps available: transformers=%s torch=%s",
