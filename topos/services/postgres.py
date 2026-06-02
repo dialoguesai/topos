@@ -24,6 +24,7 @@ from ..storage.db.postgres import (
     connect_postgres,
     execute_query,
     fetch_all,
+    fetch_one,
 )
 
 
@@ -366,6 +367,17 @@ class PostgresDbService:
         }
 
 
+def _hosted_postgres_version() -> Optional[str]:
+    try:
+        with connect_postgres() as conn:
+            row = fetch_one(conn, "SELECT version() AS version", ())
+            if row and row[0]:
+                return str(row[0]).strip() or None
+    except Exception:
+        return None
+    return None
+
+
 def _hosted_dataset_id(context: Optional[Dict[str, Any]], user_id: Optional[str]) -> Optional[str]:
     ctx = context if isinstance(context, dict) else {}
     explicit = str(ctx.get("dataset_id") or "").strip()
@@ -410,7 +422,7 @@ class HostedDeviceService:
             engine_mode=engine_mode,
             llm_enabled=bool(settings.enable_llm and engine_mode == "full"),
             database_mode=settings.topos_database_mode or "postgres",
-            database_version=None,
+            database_version=_hosted_postgres_version(),
             engine_name=device_name,
             engine_version=__version__,
             system={},

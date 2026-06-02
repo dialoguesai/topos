@@ -45,3 +45,26 @@ async def test_hosted_device_info_prefers_context_owner_over_settings(monkeypatc
     assert info.dataset_id == "pooled-user:default"
     assert info.engine_mode == "sync"
     assert info.llm_enabled is False
+
+
+@pytest.mark.asyncio
+async def test_hosted_device_info_reports_postgres_version(monkeypatch: pytest.MonkeyPatch):
+    from contextlib import contextmanager
+
+    monkeypatch.setattr(settings, "topos_database_mode", "postgres", raising=False)
+    monkeypatch.setattr(state, "get_engine_mode", lambda: "full", raising=True)
+    monkeypatch.setattr(state, "get_engine_class", lambda: "full_engine", raising=True)
+    monkeypatch.setattr(
+        "topos.services.postgres.fetch_one",
+        lambda conn, query, params=(): ("PostgreSQL 16.2 on x86_64-pc-linux-gnu",),
+    )
+
+    @contextmanager
+    def _fake_connect_postgres():
+        yield object()
+
+    monkeypatch.setattr("topos.services.postgres.connect_postgres", _fake_connect_postgres)
+
+    info = await HostedDeviceService().get_device_info()
+
+    assert info.database_version == "PostgreSQL 16.2 on x86_64-pc-linux-gnu"
