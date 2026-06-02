@@ -12,12 +12,12 @@ router = APIRouter()
 
 @router.get("/device/info", response_model=DeviceInfoResponse, dependencies=[Depends(require_api_key)])
 async def get_device_info(services: Services = Depends(get_services)):
-    return await services.device.get_device_info()
+    return await services.device.get_device_info(context=None)
 
 
 @router.get("/device_info", response_model=DeviceInfoResponse, dependencies=[Depends(require_api_key)])
 async def get_device_info_alias(services: Services = Depends(get_services)):
-    return await services.device.get_device_info()
+    return await services.device.get_device_info(context=None)
 
 
 @router.post("/device_name", response_model=DeviceNameResponse, dependencies=[Depends(require_api_key)])

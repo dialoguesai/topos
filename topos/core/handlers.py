@@ -1759,8 +1759,10 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
         except Exception as exc:  # noqa: BLE001
             return {"id": req_id, "status": "error", "error": str(exc)}
     if msg_type == "get_device_info":
+        payload = message.get("payload") or {}
+        context = payload if isinstance(payload, dict) else {}
         try:
-            result = await get_services().device.get_device_info()
+            result = await get_services().device.get_device_info(context=context)
             return {"id": req_id, "status": "ok", "payload": result.model_dump()}
         except Exception as exc:  # noqa: BLE001
             return {"id": req_id, "status": "error", "error": str(exc)}

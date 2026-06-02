@@ -7,7 +7,9 @@ from uuid import uuid4
 
 from fastapi import HTTPException, status
 
+from ..__version__ import __version__
 from ..config.settings import settings
+from ..core import state
 from ..core.api_models import (
     DeviceInfoResponse,
     DeviceNameResponse,
@@ -364,20 +366,69 @@ class PostgresDbService:
         }
 
 
+def _hosted_dataset_id(context: Optional[Dict[str, Any]], user_id: Optional[str]) -> Optional[str]:
+    ctx = context if isinstance(context, dict) else {}
+    explicit = str(ctx.get("dataset_id") or "").strip()
+    if explicit:
+        return explicit
+    if not user_id:
+        return None
+    tenant_id = str(ctx.get("tenant_id") or "").strip()
+    if tenant_id:
+        return f"{user_id}:default:{tenant_id}"
+    default_dataset = (settings.topos_default_dataset_id or "default").strip() or "default"
+    return f"{user_id}:{default_dataset}"
+
+
 class HostedDeviceService:
     async def get_pairing_code(self) -> PairingCodeResponse:
-        raise NotImplementedError("HostedDeviceService not implemented yet")
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Pairing is not available for hosted runtimes",
+        )
 
     async def pair_device(self, pairing_code: str, keep_existing_data: bool) -> PairDeviceResponse:
         _ = (pairing_code, keep_existing_data)
-        raise NotImplementedError("HostedDeviceService not implemented yet")
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Pairing is not available for hosted runtimes",
+        )
 
-    async def get_device_info(self) -> DeviceInfoResponse:
-        raise NotImplementedError("HostedDeviceService not implemented yet")
+    async def get_device_info(self, context: Optional[Dict[str, Any]] = None) -> DeviceInfoResponse:
+        ctx = context if isinstance(context, dict) else {}
+        user_id = str(ctx.get("owner_user_id") or settings.topos_user_id or "").strip() or None
+        dataset_id = _hosted_dataset_id(ctx, user_id)
+        engine_mode = state.get_engine_mode()
+        device_name = (settings.engine_name or "").strip() or None
+
+        return DeviceInfoResponse(
+            user_id=user_id,
+            dataset_id=dataset_id,
+            sync_connected=False,
+            sync_enabled=False,
+            engine_class=state.get_engine_class(),
+            engine_mode=engine_mode,
+            llm_enabled=bool(settings.enable_llm and engine_mode == "full"),
+            database_mode=settings.topos_database_mode or "postgres",
+            database_version=None,
+            engine_name=device_name,
+            engine_version=__version__,
+            system={},
+            last_sync_at=None,
+            last_received_hlc_ts=None,
+            last_received_op_id=None,
+            oplog_count=None,
+            oplog_bytes=None,
+            ops_since_last_sync=None,
+            oplog_bytes_since_last_sync=None,
+        )
 
     async def set_device_name(self, device_name: str) -> DeviceNameResponse:
         _ = device_name
-        raise NotImplementedError("HostedDeviceService not implemented yet")
+        raise HTTPException(
+            status_code=status.HTTP_501_NOT_IMPLEMENTED,
+            detail="Device rename is not available for hosted runtimes",
+        )
 
 
 class HostedSyncService:

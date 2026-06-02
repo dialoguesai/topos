@@ -63,7 +63,8 @@ class LocalDeviceService:
         _ = (pairing_code, keep_existing_data)
         raise HTTPException(status_code=status.HTTP_501_NOT_IMPLEMENTED, detail="Pairing not implemented")
 
-    async def get_device_info(self) -> DeviceInfoResponse:
+    async def get_device_info(self, context: Optional[Dict[str, Any]] = None) -> DeviceInfoResponse:
+        _ = context
         # Get user_id from database (set by connection_info handler) or fall back to settings
         user_id = None
         if state.db_conn:
