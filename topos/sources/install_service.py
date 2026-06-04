@@ -782,6 +782,101 @@ def uninstall_source(
     }
 
 
+_PATCHABLE_DEFINITION_KEYS = frozenset(
+    {
+        "default_scope_id",
+        "ingestion_trigger",
+        "enrichment_trigger",
+        "raw_enrichment_jobs",
+        "canonical_enrichment_jobs",
+    }
+)
+_IMMUTABLE_DEFINITION_KEYS = frozenset(
+    {
+        "source_id",
+        "display_name",
+        "source_type",
+        "schema_id",
+        "parser_id",
+        "canonical_mapper_id",
+        "canonical_group_id",
+    }
+)
+
+
+def patch_source_install(
+    *,
+    source_id: str,
+    scope: Optional[Dict[str, Any]] = None,
+    source_definition_json: Optional[Dict[str, Any]] = None,
+) -> InstallRecord:
+    """Update an active install's definition in place (user configuration changes)."""
+    ensure_install_schema()
+    sid = str(source_id or "").strip()
+    if not sid:
+        raise ValueError("source_id is required")
+    partial = source_definition_json if isinstance(source_definition_json, dict) else {}
+    if not partial:
+        raise ValueError("source_definition_json is required")
+
+    _validate_concrete_install_scope(scope)
+    scope_key = _scope_key(scope)
+    now = _utc_now_iso()
+
+    with _db_conn() as conn:
+        with _LOCK:
+            active = _get_active_record(conn, scope_key, sid)
+            if not active or not active.is_active:
+                raise ValueError(f"No active install found for source_id={sid}")
+
+            merged = dict(active.source_definition_json if isinstance(active.source_definition_json, dict) else {})
+            for key, value in partial.items():
+                if key in _IMMUTABLE_DEFINITION_KEYS and value != merged.get(key):
+                    raise ValueError(f"Cannot change immutable field {key!r} via PATCH")
+                if key in _PATCHABLE_DEFINITION_KEYS:
+                    merged[key] = value
+
+            merged = _normalize_enrichment_bindings(merged)
+            _validate_source_contract(merged)
+            if str(merged.get("source_id") or "").strip() != sid:
+                raise ValueError("source_id in definition must match install source_id")
+
+            try:
+                handle = install_source_definition(merged)
+            except Exception as exc:
+                raise RuntimeError(str(exc)) from exc
+
+            execute_query(
+                conn,
+                f"""
+                UPDATE {INSTALL_TABLE}
+                SET source_definition_json = %s, updated_at = %s
+                WHERE install_id = %s
+                """,
+                (
+                    json.dumps(merged, separators=(",", ":"), ensure_ascii=True),
+                    now,
+                    active.install_id,
+                ),
+            )
+            if settings.topos_database_mode != "postgres":
+                conn.commit()
+            _ACTIVE_HANDLES[(scope_key, sid)] = handle
+            return InstallRecord(
+                install_id=active.install_id,
+                scope=_scope_dict(scope_key),
+                source_id=sid,
+                version_id=active.version_id,
+                status="active",
+                is_active=True,
+                source_definition_json=merged,
+                source_version_row_json=active.source_version_row_json,
+                failure_reason=None,
+                created_at=active.created_at,
+                updated_at=now,
+            )
+
+
 def get_active_source_definition(*, source_id: str, scope: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     try:
         with _db_conn() as conn:

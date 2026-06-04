@@ -148,6 +148,9 @@ class SyncClient:
                     self._consecutive_failures = 0
                     self._last_connected_at = utc_now_iso()
                     logger.info("Sync client connected to relay")
+                    # Let concurrent readiness waiters observe the connection before
+                    # processing messages; short-lived test sockets can close immediately.
+                    await asyncio.sleep(0)
 
                     await self._send_connect()
 

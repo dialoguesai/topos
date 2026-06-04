@@ -1314,6 +1314,20 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
         except Exception as exc:  # noqa: BLE001
             return {"id": req_id, "status": "error", "error": str(exc)}
 
+    if msg_type == "patch_source_install":
+        from ..api.source_install import _patch_source_install_core
+
+        payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
+        try:
+            result = await _patch_source_install_core(payload)
+            return {"id": req_id, "status": "ok", "payload": result}
+        except ValueError as exc:
+            return {"id": req_id, "status": "error", "error": str(exc)}
+        except RuntimeError as exc:
+            return {"id": req_id, "status": "error", "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            return {"id": req_id, "status": "error", "error": str(exc)}
+
     if msg_type == "post_source_test_ingestion":
         from ..api.source_install import _test_ingestion_core
 

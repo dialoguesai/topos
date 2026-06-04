@@ -145,6 +145,21 @@ async def _list_sources_core(payload: Dict[str, Any]) -> Dict[str, Any]:
     return {"status": "ok", "sources": sources}
 
 
+async def _patch_source_install_core(payload: Dict[str, Any]) -> Dict[str, Any]:
+    source_id = str(payload.get("source_id") or "").strip()
+    if not source_id:
+        raise ValueError("source_id is required")
+    partial = payload.get("source_definition_json")
+    if not isinstance(partial, dict):
+        raise ValueError("source_definition_json object is required")
+    record = install_service.patch_source_install(
+        source_id=source_id,
+        scope=_scope_from_payload(payload),
+        source_definition_json=partial,
+    )
+    return {"status": "ok", "install": record.to_dict()}
+
+
 async def _uninstall_source_core(payload: Dict[str, Any]) -> Dict[str, Any]:
     source_id = str(payload.get("source_id") or "").strip()
     if not source_id:
@@ -264,6 +279,21 @@ async def source_install_status(
     _log_request("source_install_status", request_id, payload)
     result = await _list_install_status_core(payload)
     return _ok_envelope(request_id, result)
+
+
+@router.patch("/source-install", dependencies=[Depends(require_api_key)])
+async def patch_source_install(payload: Dict[str, Any] = Body(default_factory=dict)) -> Dict[str, Any]:
+    request_id = str(uuid.uuid4())
+    _log_request("patch_source_install", request_id, payload)
+    try:
+        result = await _patch_source_install_core(payload)
+        return _ok_envelope(request_id, result)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc))
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=500, detail=str(exc))
 
 
 @router.delete("/source-install", dependencies=[Depends(require_api_key)])

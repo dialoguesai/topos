@@ -2,27 +2,41 @@
 
 from __future__ import annotations
 
-import json
 import os
-import subprocess
 import sys
-from importlib.metadata import PackageNotFoundError, version as package_version
 from pathlib import Path
-from urllib.error import URLError
-from urllib.request import urlopen
 
 import click
 import uvicorn
-from packaging.version import InvalidVersion, Version
 
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+from topos.runtime_update import (
+    DEFAULT_PACKAGE_NAME,
+    apply_package_update,
+    can_prompt_for_input,
+    check_for_update,
+    get_installed_package_version,
+    get_latest_pypi_version,
+    get_module_version,
+    should_skip_update_check,
+)
 from topos.storage.db.paths import discover_databases
 from topos.startup_banner import emit_startup_banner
 
 USER_ENV_PATH = Path.home() / ".topos" / ".env"
 LEGACY_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"
+
+# Re-exported for tests that monkeypatch commands.*
+_get_installed_package_version = get_installed_package_version
+_get_latest_pypi_version = get_latest_pypi_version
+_get_module_version = get_module_version
+_can_prompt_for_input = can_prompt_for_input
+
+
+def _get_runtime_version(package_name: str = DEFAULT_PACKAGE_NAME) -> str:
+    return _get_module_version() or _get_installed_package_version(package_name) or "unknown"
 
 
 def _load_env_file(env_path: Path) -> None:
@@ -69,10 +83,6 @@ def _save_topos_key(topos_key: str, env_path: Path = USER_ENV_PATH) -> Path:
     return env_path
 
 
-def _can_prompt_for_input() -> bool:
-    return sys.stdin.isatty() and sys.stdout.isatty()
-
-
 def _prompt_for_topos_key() -> str:
     click.echo("TOPOS_KEY is required to connect Topos Node.")
     click.echo("Enter your TOPOS_KEY to save it locally and continue.")
@@ -107,26 +117,7 @@ def _resolve_topos_key(cli_topos_key: str | None, env_path: Path = USER_ENV_PATH
     )
 
 
-def _get_installed_package_version(package_name: str) -> str | None:
-    try:
-        return package_version(package_name)
-    except PackageNotFoundError:
-        return None
-
-
-def _get_module_version() -> str | None:
-    try:
-        from topos.__version__ import __version__
-    except Exception:
-        return None
-    return __version__ or None
-
-
-def _get_runtime_version(package_name: str = "topos-node") -> str:
-    return _get_module_version() or _get_installed_package_version(package_name) or "unknown"
-
-
-def _emit_startup_banner(host: str, port: int, package_name: str = "topos-node") -> None:
+def _emit_startup_banner(host: str, port: int, package_name: str = DEFAULT_PACKAGE_NAME) -> None:
     runtime_version = _get_runtime_version(package_name=package_name)
     emit_startup_banner(
         click.echo,
@@ -138,45 +129,18 @@ def _emit_startup_banner(host: str, port: int, package_name: str = "topos-node")
     os.environ["TOPOS_STARTUP_BANNER_EMITTED"] = "1"
 
 
-def _get_latest_pypi_version(package_name: str, timeout_seconds: float = 2.0) -> str | None:
-    url = f"https://pypi.org/pypi/{package_name}/json"
-    try:
-        with urlopen(url, timeout=timeout_seconds) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except (OSError, URLError, ValueError):
-        return None
-    return str(payload.get("info", {}).get("version") or "").strip() or None
-
-
-def _should_skip_update_check(skip_update_check: bool) -> bool:
-    if skip_update_check:
-        return True
-    env_value = (os.getenv("TOPOS_SKIP_UPDATE_CHECK") or "").strip().lower()
-    return env_value in {"1", "true", "yes", "on"}
-
-
 def _maybe_offer_self_update(
     skip_update_check: bool,
-    package_name: str = "topos-node",
+    package_name: str = DEFAULT_PACKAGE_NAME,
 ) -> bool:
-    if _should_skip_update_check(skip_update_check):
+    if should_skip_update_check(cli_skip=skip_update_check):
         return False
 
-    installed = _get_installed_package_version(package_name)
-    if not installed:
+    info = check_for_update(package_name)
+    if not info:
         return False
 
-    latest = _get_latest_pypi_version(package_name)
-    if not latest:
-        return False
-
-    try:
-        if Version(latest) <= Version(installed):
-            return False
-    except InvalidVersion:
-        return False
-
-    click.echo(f"Update available for {package_name}: {installed} -> {latest}")
+    click.echo(f"Update available for {package_name}: {info.installed} -> {info.latest}")
     if not _can_prompt_for_input():
         click.echo(f"Run `uv tool upgrade {package_name}` to update.")
         return False
@@ -185,8 +149,7 @@ def _maybe_offer_self_update(
         return False
 
     click.echo(f"Updating {package_name}...")
-    result = subprocess.run(["uv", "tool", "upgrade", package_name], check=False)
-    if result.returncode != 0:
+    if not apply_package_update(package_name):
         click.echo("Update failed. Continuing with current version.")
         return False
 
@@ -245,6 +208,9 @@ def main(db_path, topos_key, set_topos_key, discover, port, host, skip_update_ch
         else:
             click.echo("No existing databases found")
         return
+
+    if skip_update_check:
+        os.environ["TOPOS_SKIP_UPDATE_CHECK"] = "1"
 
     if _maybe_offer_self_update(skip_update_check=skip_update_check):
         return

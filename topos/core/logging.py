@@ -5,6 +5,7 @@ from datetime import datetime
 from time import time
 
 from ..config.settings import settings
+from ..runtime_update import is_update_available
 
 _LOG_FORMAT: str | None = None
 
@@ -96,8 +97,9 @@ class ColorFormatter(logging.Formatter):
         logging.CRITICAL: "\x1b[38;5;196m", # Red
     }
     
-    # Timestamp color: Forest green
+    # Timestamp color: Forest green (amber when a newer Topos release is on PyPI)
     _TIMESTAMP_COLOR = "\x1b[38;5;28m"  # Forest green
+    _TIMESTAMP_UPDATE_COLOR = "\x1b[38;5;214m"  # Amber
     
     # Separator color: Light gray
     _SEPARATOR_COLOR = "\x1b[38;5;244m"  # Light gray
@@ -119,7 +121,10 @@ class ColorFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:  # noqa: D401
         # Format timestamp: YYYY-MM-DD HH:MM:SS.ms (green)
         timestamp_str = datetime.fromtimestamp(record.created).strftime("%Y-%m-%d %H:%M:%S.%f")[:-3]
-        timestamp = f"{self._TIMESTAMP_COLOR}{timestamp_str}{self._RESET}"
+        timestamp_color = (
+            self._TIMESTAMP_UPDATE_COLOR if is_update_available() else self._TIMESTAMP_COLOR
+        )
+        timestamp = f"{timestamp_color}{timestamp_str}{self._RESET}"
         
         # Get text color for log level (no background)
         level_color = self._LEVEL_COLORS.get(record.levelno, "")

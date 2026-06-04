@@ -46,6 +46,11 @@ from .control_plane_client import ControlPlaneClient
 from .engine.registration import build_engine_heartbeat_message, build_engine_register_message
 from .hosted_pool_lease import HostedPoolLeaseClient
 from .services.container import get_services
+from .runtime_update import (
+    start_runtime_update_monitor,
+    start_update_hotkey_listener,
+    stop_runtime_update_monitor,
+)
 from .startup_banner import emit_startup_banner
 from .sync import SyncClient
 from .sync_handlers import handle_sync_op
@@ -206,6 +211,9 @@ async def startup_event() -> None:
                     await state.control_plane_client.send_message(build_engine_heartbeat_message())
 
         state.engine_presence_task = asyncio.create_task(_presence_loop())
+    start_runtime_update_monitor()
+    start_update_hotkey_listener()
+
     if settings.enable_sync and settings.topos_user_id:
         state.sync_client = SyncClient(
             sync_url=settings.get_sync_url(),
@@ -229,6 +237,7 @@ async def startup_event() -> None:
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
+    await stop_runtime_update_monitor()
     if state.engine_presence_task:
         state.engine_presence_task.cancel()
         try:
