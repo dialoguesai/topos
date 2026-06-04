@@ -1139,6 +1139,15 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
     _payload = message.get("payload") or {}
     _mcp_source = _payload.get("mcp_source")
     _mcp_requester_id = _payload.get("mcp_requester_id")
+    if msg_type == "migrate_browser_plugin_app_id":
+        from .state import _migrate_legacy_browser_plugin_app_ids
+
+        conn = get_db_connection()
+        if not conn:
+            return {"id": req_id, "status": "error", "error": "Database not available"}
+        updated = _migrate_legacy_browser_plugin_app_ids(conn)
+        return {"id": req_id, "status": "ok", "payload": {"updated_rows": updated}}
+
     if msg_type == "get_request_counts":
         """Return UMA + MCP request counts from engine DB (for CP proxy or direct frontend)."""
         payload = message.get("payload") or {}

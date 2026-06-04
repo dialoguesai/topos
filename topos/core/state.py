@@ -14,6 +14,8 @@ from typing import Any, Dict, Optional
 
 MCP_REQUEST_LOG_TABLE = "mcp_request_log"
 UMA_ACCESS_REQUESTS_TABLE = "uma_access_requests"
+LEGACY_BROWSER_PLUGIN_APP_ID = "browser-plugin"
+BROWSER_HISTORY_PLUGIN_APP_ID = "browser-history-plugin"
 
 
 def derive_uma_access_context(owner_user_id: str, requesting_user_id: Optional[str]) -> str:
@@ -401,6 +403,29 @@ def _ensure_uma_access_requests_table(conn: sqlite3.Connection) -> None:
                 conn.commit()
     except Exception as exc:
         logger.warning("Failed to ensure uma_access_requests table exists: %s", exc)
+    else:
+        _migrate_legacy_browser_plugin_app_ids(conn)
+
+
+def _migrate_legacy_browser_plugin_app_ids(conn: sqlite3.Connection) -> int:
+    """Rewrite engine Activity counts from browser-plugin → browser-history-plugin (idempotent)."""
+    try:
+        cursor = conn.execute(
+            f"UPDATE {UMA_ACCESS_REQUESTS_TABLE} SET app_id = ? WHERE app_id = ?",
+            (BROWSER_HISTORY_PLUGIN_APP_ID, LEGACY_BROWSER_PLUGIN_APP_ID),
+        )
+        if cursor.rowcount:
+            conn.commit()
+            logger.info(
+                "Migrated %s uma_access_requests rows: %s → %s",
+                cursor.rowcount,
+                LEGACY_BROWSER_PLUGIN_APP_ID,
+                BROWSER_HISTORY_PLUGIN_APP_ID,
+            )
+        return int(cursor.rowcount or 0)
+    except Exception as exc:
+        logger.warning("browser-plugin app_id migration on engine failed: %s", exc)
+        return 0
 
 
 def record_uma_request(
@@ -463,6 +488,7 @@ def get_uma_request_counts(
         "total_read_requests": 0,
         "total_write_requests": 0,
         "by_app": [],
+        "by_app_requester": [],
         "by_requesting_user": [],
         "access_attribution": {
             "window_days": since_days or 0,
@@ -509,6 +535,38 @@ def get_uma_request_counts(
                 {"app_id": aid, "app_name": None, "read_requests": d["read_requests"], "write_requests": d["write_requests"]}
                 for aid, d in sorted(by_app.items())
             ]
+
+            cursor = conn.execute(
+                f"""SELECT app_id, requesting_user_id, requesting_user_email, request_type
+                    FROM {UMA_ACCESS_REQUESTS_TABLE}
+                    WHERE owner_user_id = ? AND created_at >= ?""",
+                (owner_user_id, since_ts),
+            )
+            by_app_req: Dict[str, Dict[str, Any]] = {}
+            for row in cursor.fetchall():
+                app_id_val = (row[0] or "").strip() if len(row) > 0 else ""
+                rid = (row[1] or "").strip() if len(row) > 1 else ""
+                remail = (row[2] or "").strip() if len(row) > 2 else ""
+                rt = (row[3] or "").strip().lower() if len(row) > 3 else ""
+                key = f"{app_id_val}\0{rid}\0{remail}"
+                if key not in by_app_req:
+                    by_app_req[key] = {
+                        "app_id": app_id_val or None,
+                        "requesting_user_id": rid or None,
+                        "requesting_user_email": remail or None,
+                        "read_requests": 0,
+                        "write_requests": 0,
+                    }
+                if rt == "read":
+                    by_app_req[key]["read_requests"] += 1
+                elif rt == "write":
+                    by_app_req[key]["write_requests"] += 1
+            app_req_ranked = []
+            for d in by_app_req.values():
+                tr = int(d["read_requests"]) + int(d["write_requests"])
+                app_req_ranked.append({**d, "total_requests": tr})
+            app_req_ranked.sort(key=lambda x: -x["total_requests"])
+            out["by_app_requester"] = app_req_ranked[:50]
 
             cursor = conn.execute(
                 f"""SELECT requesting_user_id, requesting_user_email, request_type, access_context
