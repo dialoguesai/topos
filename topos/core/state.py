@@ -8,9 +8,9 @@ import shutil
 import sqlite3
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 MCP_REQUEST_LOG_TABLE = "mcp_request_log"
 UMA_ACCESS_REQUESTS_TABLE = "uma_access_requests"
@@ -27,6 +27,95 @@ def derive_uma_access_context(owner_user_id: str, requesting_user_id: Optional[s
     if oid and oid == rid:
         return "owner_self"
     return "grantee"
+
+
+def _empty_access_attribution(window_days: int = 0) -> Dict[str, int]:
+    return {
+        "window_days": window_days,
+        "owner_self_reads": 0,
+        "owner_self_writes": 0,
+        "grantee_reads": 0,
+        "grantee_writes": 0,
+        "unknown_reads": 0,
+        "unknown_writes": 0,
+    }
+
+
+def _uma_actx_case_sql() -> str:
+    """SQL CASE matching derive_uma_access_context for GROUP BY aggregates."""
+    return """CASE
+        WHEN LOWER(COALESCE(access_context, '')) IN ('owner_self', 'grantee', 'unknown')
+            THEN LOWER(access_context)
+        WHEN requesting_user_id IS NOT NULL AND TRIM(requesting_user_id) = ?
+            THEN 'owner_self'
+        WHEN requesting_user_id IS NOT NULL AND TRIM(requesting_user_id) != ''
+            THEN 'grantee'
+        ELSE 'unknown'
+    END"""
+
+
+def _aggregate_uma_access_attribution(
+    conn: sqlite3.Connection,
+    owner_user_id: str,
+    *,
+    since_ts: Optional[str] = None,
+    window_days: int = 0,
+) -> Dict[str, Any]:
+    attr = _empty_access_attribution(window_days)
+    where = f"owner_user_id = ?"
+    params: List[Any] = [owner_user_id, owner_user_id]
+    if since_ts:
+        where += " AND created_at >= ?"
+        params.append(since_ts)
+    actx_sql = _uma_actx_case_sql()
+    cursor = conn.execute(
+        f"""SELECT LOWER(request_type) AS rt, ({actx_sql}) AS actx, COUNT(*) AS cnt
+            FROM {UMA_ACCESS_REQUESTS_TABLE}
+            WHERE {where}
+            GROUP BY rt, actx""",
+        tuple(params),
+    )
+    for row in cursor.fetchall():
+        rt = (row[0] or "").strip().lower() if len(row) > 0 else ""
+        actx = (row[1] or "").strip().lower() if len(row) > 1 else "unknown"
+        count = int(row[2] or 0) if len(row) > 2 else 0
+        if rt == "read":
+            if actx == "owner_self":
+                attr["owner_self_reads"] += count
+            elif actx == "grantee":
+                attr["grantee_reads"] += count
+            else:
+                attr["unknown_reads"] += count
+        elif rt == "write":
+            if actx == "owner_self":
+                attr["owner_self_writes"] += count
+            elif actx == "grantee":
+                attr["grantee_writes"] += count
+            else:
+                attr["unknown_writes"] += count
+    return attr
+
+
+def _ensure_uma_access_requests_indexes(conn: sqlite3.Connection) -> None:
+    try:
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_uma_access_requests_owner_created "
+            f"ON {UMA_ACCESS_REQUESTS_TABLE}(owner_user_id, created_at)"
+        )
+        conn.commit()
+    except Exception as exc:
+        logger.debug("Failed to ensure uma_access_requests indexes: %s", exc)
+
+
+def _ensure_mcp_request_log_indexes(conn: sqlite3.Connection) -> None:
+    try:
+        conn.execute(
+            f"CREATE INDEX IF NOT EXISTS idx_mcp_request_log_requested_at "
+            f"ON {MCP_REQUEST_LOG_TABLE}(requested_at)"
+        )
+        conn.commit()
+    except Exception as exc:
+        logger.debug("Failed to ensure mcp_request_log indexes: %s", exc)
 
 
 def derive_mcp_access_context(resource_owner_user_id: Optional[str], requester_id: Optional[str]) -> str:
@@ -321,6 +410,7 @@ def _ensure_mcp_request_log_table(conn: sqlite3.Connection) -> None:
             """)
             conn.commit()
             logger.debug("mcp_request_log table created successfully")
+            _ensure_mcp_request_log_indexes(conn)
             return
         # Add source/requester_id columns if missing (migration for existing DBs)
         cursor = conn.execute(f"PRAGMA table_info({MCP_REQUEST_LOG_TABLE})")
@@ -334,6 +424,7 @@ def _ensure_mcp_request_log_table(conn: sqlite3.Connection) -> None:
         if "access_context" not in columns:
             conn.execute(f"ALTER TABLE {MCP_REQUEST_LOG_TABLE} ADD COLUMN access_context TEXT")
             conn.commit()
+        _ensure_mcp_request_log_indexes(conn)
     except Exception as exc:
         logger.warning("Failed to ensure mcp_request_log table exists: %s", exc)
 
@@ -390,6 +481,7 @@ def _ensure_uma_access_requests_table(conn: sqlite3.Connection) -> None:
             """)
             conn.commit()
             logger.debug("uma_access_requests table created successfully")
+            _ensure_uma_access_requests_indexes(conn)
             return
         cursor = conn.execute(f"PRAGMA table_info({UMA_ACCESS_REQUESTS_TABLE})")
         columns = [row[1] for row in cursor.fetchall()]
@@ -404,6 +496,7 @@ def _ensure_uma_access_requests_table(conn: sqlite3.Connection) -> None:
     except Exception as exc:
         logger.warning("Failed to ensure uma_access_requests table exists: %s", exc)
     else:
+        _ensure_uma_access_requests_indexes(conn)
         _migrate_legacy_browser_plugin_app_ids(conn)
 
 
@@ -483,22 +576,15 @@ def get_uma_request_counts(
     since_days: Optional[int] = 90,
 ) -> Dict[str, Any]:
     """Return UMA request counts from engine DB. Extends CP shape with attribution + top requesters."""
-    from datetime import timedelta
     out: Dict[str, Any] = {
         "total_read_requests": 0,
         "total_write_requests": 0,
         "by_app": [],
         "by_app_requester": [],
         "by_requesting_user": [],
-        "access_attribution": {
-            "window_days": since_days or 0,
-            "owner_self_reads": 0,
-            "owner_self_writes": 0,
-            "grantee_reads": 0,
-            "grantee_writes": 0,
-            "unknown_reads": 0,
-            "unknown_writes": 0,
-        },
+        "access_attribution": _empty_access_attribution(since_days or 0),
+        "access_attribution_all_time": _empty_access_attribution(0),
+        "access_attribution_24h": _empty_access_attribution(0),
     }
     if not conn or not owner_user_id:
         return out
@@ -515,6 +601,13 @@ def get_uma_request_counts(
                 out["total_read_requests"] = count
             else:
                 out["total_write_requests"] = count
+        out["access_attribution_all_time"] = _aggregate_uma_access_attribution(
+            conn, owner_user_id, window_days=0
+        )
+        since_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        out["access_attribution_24h"] = _aggregate_uma_access_attribution(
+            conn, owner_user_id, since_ts=since_24h, window_days=0
+        )
         if since_days and since_days > 0:
             since_ts = (datetime.now(timezone.utc) - timedelta(days=since_days)).isoformat()
             cursor = conn.execute(
@@ -629,12 +722,18 @@ def get_mcp_request_counts(
     since_days: Optional[int] = 90,
 ) -> Dict[str, Any]:
     """Return MCP request counts from engine DB: by_source (identity + count), by_tool, by_access_context, total."""
-    from datetime import timedelta
     out: Dict[str, Any] = {
         "by_source": [],
         "by_tool": [],
         "by_access_context": [],
         "total": 0,
+        "total_all_time": 0,
+        "total_24h": 0,
+        "by_source_all_time": [],
+        "owner_self_all_time": 0,
+        "other_all_time": 0,
+        "owner_self_24h": 0,
+        "other_24h": 0,
     }
     if not conn:
         return out
@@ -681,6 +780,61 @@ def get_mcp_request_counts(
             by_tool[t] = by_tool.get(t, 0) + 1
         out["by_tool"] = [{"tool_name": t, "count": c} for t, c in sorted(by_tool.items(), key=lambda x: -x[1])]
         out["total"] = sum(by_tool.values())
+
+        cursor = conn.execute(f"SELECT COUNT(*) FROM {MCP_REQUEST_LOG_TABLE}")
+        row = cursor.fetchone()
+        out["total_all_time"] = int(row[0] or 0) if row else 0
+
+        since_24h = (datetime.now(timezone.utc) - timedelta(hours=24)).isoformat()
+        cursor = conn.execute(
+            f"SELECT COUNT(*) FROM {MCP_REQUEST_LOG_TABLE} WHERE requested_at >= ?",
+            (since_24h,),
+        )
+        row = cursor.fetchone()
+        out["total_24h"] = int(row[0] or 0) if row else 0
+
+        cursor = conn.execute(
+            f"""SELECT
+                    COALESCE(NULLIF(TRIM(source), ''), NULLIF(TRIM(requester_id), ''), 'other') AS src,
+                    COUNT(*) AS cnt
+                FROM {MCP_REQUEST_LOG_TABLE}
+                GROUP BY src
+                ORDER BY cnt DESC
+                LIMIT 6"""
+        )
+        out["by_source_all_time"] = [
+            {"source": (r[0] or "other") if len(r) > 0 else "other", "requester_id": None, "count": int(r[1] or 0) if len(r) > 1 else 0}
+            for r in cursor.fetchall()
+        ]
+
+        def _mcp_owner_other_counts(since: Optional[str]) -> tuple[int, int]:
+            owner_self = 0
+            other = 0
+            bucket_sql = (
+                "CASE WHEN LOWER(COALESCE(access_context, '')) = 'owner_self' "
+                "THEN 'owner_self' ELSE 'other' END"
+            )
+            if since:
+                cursor = conn.execute(
+                    f"SELECT {bucket_sql} AS bucket, COUNT(*) FROM {MCP_REQUEST_LOG_TABLE} "
+                    f"WHERE requested_at >= ? GROUP BY bucket",
+                    (since,),
+                )
+            else:
+                cursor = conn.execute(
+                    f"SELECT {bucket_sql} AS bucket, COUNT(*) FROM {MCP_REQUEST_LOG_TABLE} GROUP BY bucket"
+                )
+            for mrow in cursor.fetchall():
+                bucket = (mrow[0] or "").strip().lower() if len(mrow) > 0 else "other"
+                count = int(mrow[1] or 0) if len(mrow) > 1 else 0
+                if bucket == "owner_self":
+                    owner_self = count
+                else:
+                    other += count
+            return owner_self, other
+
+        out["owner_self_all_time"], out["other_all_time"] = _mcp_owner_other_counts(None)
+        out["owner_self_24h"], out["other_24h"] = _mcp_owner_other_counts(since_24h)
     except Exception as exc:
         logger.debug("get_mcp_request_counts failed: %s", exc)
     return out
