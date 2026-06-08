@@ -195,6 +195,7 @@ from ..analytics.messenger_labels import (
 )
 from ..config.settings import settings
 from ..storage.db.postgres import connect_postgres
+from ..core import state as engine_state
 from ..core.state import (
     get_db_connection,
     get_engine_config_value,
@@ -250,6 +251,27 @@ def _safe_sql_identifier(name: str) -> bool:
 
 def _is_sqlite_conn(conn: Any) -> bool:
     return "sqlite" in conn.__class__.__module__.lower()
+
+
+def _device_id_for_topos_key(topos_key: Optional[str]) -> Optional[str]:
+    import hashlib
+
+    key = (topos_key or "").strip()
+    if not key:
+        return None
+    return hashlib.sha256(key.encode()).hexdigest()[:16].lower()
+
+
+def _primary_dataset_id_for_engine_context(user_id: Optional[str]) -> Optional[str]:
+    """Match control-plane default dataset id shape when TOPOS_KEY is configured."""
+    uid = (user_id or "").strip()
+    if not uid:
+        return None
+    default_name = (getattr(settings, "topos_default_dataset_id", None) or "default").strip() or "default"
+    device_id = _device_id_for_topos_key(getattr(settings, "topos_key", None))
+    if device_id:
+        return f"{uid}:{default_name}:{device_id}"
+    return f"{uid}:{default_name}"
 
 
 def _resolve_uma_scope(payload: Dict[str, Any], resource_id: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
@@ -1237,6 +1259,23 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
             return {"id": req_id, "status": "error", "error": str(exc)}
         return {"id": req_id, "status": "ok", "payload": {"deleted": deleted}}
 
+    if msg_type == "llm_integrations_storage":
+        from ..llm_integrations_storage import handle_storage_op
+
+        conn = get_db_connection()
+        if not conn:
+            return {"id": req_id, "status": "error", "error": "Database not available"}
+        payload = message.get("payload") or {}
+        op = str(payload.get("op") or "").strip()
+        args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
+        if not op:
+            return {"id": req_id, "status": "error", "error": "op is required"}
+        try:
+            result = handle_storage_op(conn, op=op, args=args)
+        except ValueError as exc:
+            return {"id": req_id, "status": "error", "error": str(exc)}
+        return {"id": req_id, "status": "ok", "payload": {"result": result}}
+
     if msg_type == "get_user_identity":
         from ..storage.user_identity import get_user_identity as load_user_identity
 
@@ -1756,13 +1795,25 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
     if msg_type == "llm_generation":
         payload = message.get("payload") or {}
         logger.info(
-            "llm_generation request: provider=%r model=%r prompt_chars=%d",
+            "llm_generation request: provider=%r model=%r prompt_chars=%d stream=%s",
             payload.get("provider"),
             payload.get("model"),
             len(str(payload.get("prompt") or "")),
+            bool(payload.get("stream")),
         )
         try:
-            result = await get_services().llm.generate(payload)
+            on_delta = None
+            if payload.get("stream"):
+                cp_client = getattr(engine_state, "control_plane_client", None)
+
+                async def _emit_chunk(delta: str) -> None:
+                    if cp_client is not None:
+                        await cp_client.send_message(
+                            {"id": req_id, "status": "chunk", "payload": {"delta": delta}}
+                        )
+
+                on_delta = _emit_chunk
+            result = await get_services().llm.generate(payload, on_delta=on_delta)
             return {"id": req_id, "status": "ok", "payload": result}
         except Exception as exc:  # noqa: BLE001
             return {"id": req_id, "status": "error", "error": str(exc)}
@@ -2162,8 +2213,14 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                     }
                 filters_dict = payload.get("filters")
                 if not isinstance(filters_dict, dict):
-                    filters_dict = None
-                filter_manifest = extract_filter_manifest(filters_dict)
+                    filters_dict = {}
+                # Owner self-read: do not apply grant-oriented contact sharing exclusions.
+                filters_for_pipeline = dict(filters_dict)
+                cgp = dict(filters_for_pipeline.get("contact_grant_policy") or {})
+                if "inherit_contact_defaults" not in cgp:
+                    cgp["inherit_contact_defaults"] = False
+                filters_for_pipeline["contact_grant_policy"] = cgp
+                filter_manifest = extract_filter_manifest(filters_for_pipeline)
                 field_transforms = extract_field_transforms(filters_dict)
                 req_limit = min(max(0, int(payload.get("limit") or 100)), 1000)
                 offset_clamped = max(0, int(payload.get("offset") or 0))
@@ -2244,7 +2301,7 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                         dataset_id=ds,
                         allowed_scopes=owner_allowed_scopes,
                         manifest=filter_manifest,
-                        filters=filters_dict,
+                        filters=filters_for_pipeline,
                     )
                     manifest_for_generic = strip_contact_runtime_filters(filter_manifest)
                     transform_diag: Dict[str, Any] = {}
@@ -2717,6 +2774,38 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
         except Exception as exc:  # noqa: BLE001
             logger.debug("[PIPELINE:QUERY] get_sources error: %s", exc)
             return {"id": req_id, "status": "error", "error": str(exc)}
+    if msg_type == "get_sources_overview":
+        try:
+            from ..api.sources_overview import _get_sources_overview_core
+
+            payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
+            result = await _get_sources_overview_core(payload)
+            return {"id": req_id, "status": "ok", "payload": result}
+        except ValueError as exc:
+            return {"id": req_id, "status": "error", "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[PIPELINE:QUERY] get_sources_overview error: %s", exc)
+            return {"id": req_id, "status": "error", "error": str(exc)}
+    if msg_type == "get_runtime_bootstrap":
+        try:
+            from ..api.runtime_bootstrap import _get_runtime_bootstrap_core
+
+            payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
+            result = await _get_runtime_bootstrap_core(payload)
+            return {"id": req_id, "status": "ok", "payload": result}
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[PIPELINE:QUERY] get_runtime_bootstrap error: %s", exc)
+            return {"id": req_id, "status": "error", "error": str(exc)}
+    if msg_type == "get_database_explorer_summary":
+        try:
+            from ..api.database_explorer import _get_database_explorer_summary_core
+
+            payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
+            result = await _get_database_explorer_summary_core(payload)
+            return {"id": req_id, "status": "ok", "payload": result}
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[PIPELINE:QUERY] get_database_explorer_summary error: %s", exc)
+            return {"id": req_id, "status": "error", "error": str(exc)}
     if msg_type == "enrichment_process_source":
         import sys
         import uuid
@@ -3139,6 +3228,8 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
     if msg_type == "list_database_tables":
         """List all tables in the database, grouped by architecture layer."""
         try:
+            from ..llm_integrations_storage import DATA_EXPLORER_HIDDEN_TABLES, maybe_migrate_legacy_llm_config
+
             payload = message.get("payload") or {}
             pooled_mode = _pooled_read_enforcement_enabled()
             pooled_dataset_id = (payload.get("dataset_id") or "").strip() or None
@@ -3161,6 +3252,7 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                 conn = get_db_connection()
                 if not conn:
                     return {"id": req_id, "status": "error", "error": "Database connection not available"}
+                maybe_migrate_legacy_llm_config(conn)
             
             # Define table categories based on architecture
             # Raw Retention Tables (original payloads before parsing)
@@ -3271,6 +3363,8 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                 table_type = row["type"] if isinstance(row, dict) else row[1]
                 
                 if not _safe_sql_identifier(table_name):
+                    continue
+                if table_name in DATA_EXPLORER_HIDDEN_TABLES:
                     continue
 
                 # Get table schema info
@@ -3418,7 +3512,7 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
             )
             if uid:
                 engine_context["user_id"] = uid
-                engine_context["primary_dataset_id"] = f"{uid}:{settings.topos_default_dataset_id}"
+                engine_context["primary_dataset_id"] = _primary_dataset_id_for_engine_context(uid)
 
             return {
                 "id": req_id,
@@ -3621,6 +3715,8 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
     if msg_type == "get_table_rows":
         """Return rows from a table for the simple table viewer. Limit to avoid huge payloads."""
         try:
+            from ..llm_integrations_storage import DATA_EXPLORER_HIDDEN_TABLES
+
             payload = message.get("payload") or {}
             table_name = (payload.get("table_name") or "").strip()
             requested_limit = max(1, int(payload.get("limit") or 500))
@@ -3648,6 +3744,12 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                 return {"id": req_id, "status": "error", "error": "table_name required"}
             if not _safe_sql_identifier(table_name):
                 return {"id": req_id, "status": "error", "error": "Invalid table_name"}
+            if table_name in DATA_EXPLORER_HIDDEN_TABLES:
+                return {
+                    "id": req_id,
+                    "status": "error",
+                    "error": "This table is managed in Settings and is not available in Data explorer",
+                }
             if settings.topos_database_mode == "postgres":
                 with connect_postgres() as conn:
                     if _is_sqlite_conn(conn):
@@ -3903,6 +4005,8 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
 
     if msg_type == "delete_database_table":
         """Drop a user table or view from the engine SQLite database (validated name)."""
+        from ..llm_integrations_storage import DATA_EXPLORER_HIDDEN_TABLES
+
         _NON_DROPPABLE_TABLES = frozenset(
             {
                 "engine_config",
@@ -3913,6 +4017,7 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                 "ingestion_checkpoints",
                 "ingestion_jobs",
                 "ingestion_errors",
+                *DATA_EXPLORER_HIDDEN_TABLES,
             }
         )
         try:

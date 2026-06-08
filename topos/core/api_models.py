@@ -17,7 +17,7 @@ class GenerationRequest(BaseModel):
     prompt: str = Field(..., min_length=1)
     max_tokens: Optional[int] = Field(None, ge=1, le=4096)
     temperature: Optional[float] = Field(None, ge=0.0, le=2.0)
-    provider: Optional[Literal["openai", "ollama"]] = None
+    provider: Optional[Literal["openai", "ollama", "anthropic", "grok", "platform"]] = None
     model: Optional[str] = Field(None, max_length=256)
 
     @field_validator("prompt")

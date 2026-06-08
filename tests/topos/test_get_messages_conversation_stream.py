@@ -121,3 +121,50 @@ async def test_get_messages_conversation_filters_source_and_self(monkeypatch):
     msgs = out["payload"]["messages"]
     assert len(msgs) == 1
     assert msgs[0]["message_id"] == "m1"
+
+
+@pytest.mark.asyncio
+async def test_get_messages_conversation_owner_self_read_keeps_grant_excluded_contacts(monkeypatch):
+    """Owner MCP lane must not inherit grant-oriented contact sharing exclusions."""
+    conn = sqlite3.connect(":memory:")
+    ensure_all_tables(conn)
+    conn.execute(
+        """
+        INSERT INTO contacts (contact_id, dataset_id, source_id, display_name, is_self, sharing_policy_json)
+        VALUES ('c1', 'ds1', 'imessage', 'Alice', 0, '{"name_visibility":"normal","row_visibility":"exclude_from_grants"}')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO contact_identifiers (dataset_id, source_id, identifier, identifier_type, contact_id)
+        VALUES ('ds1', 'imessage', '+15551212', 'phone', 'c1')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO conversation_messages (
+            message_id, conversation_id, dataset_id, sender_type, sender_id,
+            event_at, source_id, content, is_from_self, metadata_json
+        ) VALUES (
+            'm1', 'c1', 'ds1', 'user', '+15551212',
+            '2025-06-01T12:00:00+00:00', 'imessage', 'hello from imessage', 0, NULL
+        )
+        """
+    )
+    conn.commit()
+
+    monkeypatch.setattr("topos.core.handlers.get_db_connection", lambda: conn)
+    out = await handle_control_plane_request(
+        {
+            "id": "r4",
+            "type": "get_messages",
+            "payload": {
+                "dataset_id": "ds1",
+                "message_stream": "conversation",
+                "limit": 10,
+            },
+        }
+    )
+    assert out["status"] == "ok"
+    assert len(out["payload"]["messages"]) == 1
+    assert out["payload"]["messages"][0]["message_id"] == "m1"

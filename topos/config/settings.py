@@ -94,6 +94,7 @@ class Settings(BaseSettings):
     sanitization_ollama_host: Optional[str] = Field(None, env="SANITIZATION_OLLAMA_HOST")
     sanitization_ollama_default_model: str = Field("llama3.2", env="SANITIZATION_OLLAMA_DEFAULT_MODEL")
     sanitization_ollama_timeout_sec: float = Field(120.0, env="SANITIZATION_OLLAMA_TIMEOUT_SEC")
+    ollama_list_timeout_sec: float = Field(10.0, env="OLLAMA_LIST_TIMEOUT_SEC")
     sanitization_ollama_auto_pull: bool = Field(True, env="SANITIZATION_OLLAMA_AUTO_PULL")
     sanitization_ollama_max_input_chars: int = Field(8000, env="SANITIZATION_OLLAMA_MAX_INPUT_CHARS")
     sanitization_ollama_model_pii_redaction: Optional[str] = Field(None, env="SANITIZATION_OLLAMA_MODEL_PII_REDACTION")

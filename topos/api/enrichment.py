@@ -798,24 +798,19 @@ async def get_processing_status(
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.get(
-    "/sources/{source_id}/enrichments",
-    dependencies=[Depends(require_api_key)],
-)
-async def list_source_enrichments(source_id: str) -> Dict[str, Any]:
-    """List enrichment capabilities for a specific source."""
+def _list_source_enrichments_core(source_id: str) -> Dict[str, Any]:
+    """List enrichment capabilities for a specific source (shared by HTTP and batch handlers)."""
     source_def = REGISTRY.get(source_id)
     if not source_def:
-        raise HTTPException(status_code=404, detail=f"Source {source_id} not found")
+        raise ValueError(f"Source {source_id} not found")
 
     raw_jobs = list(getattr(source_def, "raw_enrichment_jobs", []) or [])
     canonical_jobs = list(getattr(source_def, "canonical_enrichment_jobs", []) or [])
-    implemented_backfills = [
+    implemented_backfills = sorted(
         enrichment_name
-        for (sid, enrichment_name) in _RAW_SOURCE_BACKFILL_HANDLERS.keys()
+        for sid, enrichment_name in _RAW_SOURCE_BACKFILL_HANDLERS
         if sid == source_id
-    ]
-    implemented_backfills.sort()
+    )
     capabilities: List[Dict[str, Any]] = []
     for name in raw_jobs:
         key = (source_id, name)
@@ -838,6 +833,18 @@ async def list_source_enrichments(source_id: str) -> Dict[str, Any]:
         "canonical_enrichments": canonical_jobs,
         "raw_backfill_supported": implemented_backfills,
     }
+
+
+@router.get(
+    "/sources/{source_id}/enrichments",
+    dependencies=[Depends(require_api_key)],
+)
+async def list_source_enrichments(source_id: str) -> Dict[str, Any]:
+    """List enrichment capabilities for a specific source."""
+    try:
+        return _list_source_enrichments_core(source_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @router.post(
