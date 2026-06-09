@@ -37,6 +37,7 @@ from .api import (
     data_explorer_table_prefs as data_explorer_table_prefs_routes,
     sanitization_ollama_config as sanitization_ollama_config_routes,
     filter_lab as filter_lab_routes,
+    home_chat as home_chat_routes,
 )
 from .config.settings import settings
 from .core.logging import configure_logging
@@ -108,6 +109,7 @@ app.include_router(data_explorer_table_prefs_routes.router)
 app.include_router(user_identity_routes.router)
 app.include_router(sanitization_ollama_config_routes.router)
 app.include_router(filter_lab_routes.router)
+app.include_router(home_chat_routes.router)
 app.include_router(compute_remote_routes.router)
 app.include_router(data_commit_routes.router)
 
