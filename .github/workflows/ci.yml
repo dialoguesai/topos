@@ -27,6 +27,9 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev --extra engine
 
+      - name: Verify dependency pins match lockfile
+        run: python scripts/sync-dep-pins.py --check
+
       - name: Run public test lane
         run: uv run pytest tests -m "public and not e2e" -q
 
