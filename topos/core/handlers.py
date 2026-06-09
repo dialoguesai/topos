@@ -1886,6 +1886,15 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                 on_delta = _emit_chunk
             result = await get_services().llm.generate(payload, on_delta=on_delta)
             return {"id": req_id, "status": "ok", "payload": result}
+        except HTTPException as exc:
+            detail = exc.detail
+            err_msg = detail if isinstance(detail, str) else str(detail)
+            return {
+                "id": req_id,
+                "status": "error",
+                "error": err_msg,
+                "error_code": exc.status_code,
+            }
         except Exception as exc:  # noqa: BLE001
             return {"id": req_id, "status": "error", "error": str(exc)}
     if msg_type == "ollama_list_models":

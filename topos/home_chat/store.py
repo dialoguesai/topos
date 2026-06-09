@@ -34,6 +34,46 @@ def _row_data(row: sqlite3.Row) -> Dict[str, Any]:
     return dict(row)
 
 
+def _validate_participants_json(participants: Any) -> list[dict[str, Any]]:
+    if participants is None:
+        return []
+    if not isinstance(participants, list):
+        raise ValueError("INVALID_PARTICIPANTS")
+    out: list[dict[str, Any]] = []
+    for row in participants:
+        if not isinstance(row, dict):
+            continue
+        key = str(row.get("key") or "").strip()
+        mode = str(row.get("mode") or "").strip()
+        label = str(row.get("label") or "").strip()
+        if not key or mode not in {"self", "shared"} or not label:
+            continue
+        item: dict[str, Any] = {"key": key, "mode": mode, "label": label}
+        email = str(row.get("email") or "").strip()
+        if email:
+            item["email"] = email
+        permission_id = str(row.get("permissionId") or row.get("permission_id") or "").strip()
+        if permission_id:
+            item["permissionId"] = permission_id
+        resource_id = str(row.get("resourceId") or row.get("resource_id") or "").strip()
+        if resource_id:
+            item["resourceId"] = resource_id
+        out.append(item)
+    return out
+
+
+def _parse_participants_row(raw: Any) -> list[dict[str, Any]]:
+    if raw is None:
+        return []
+    if isinstance(raw, str):
+        try:
+            parsed = json.loads(raw)
+        except json.JSONDecodeError:
+            return []
+        return _validate_participants_json(parsed)
+    return _validate_participants_json(raw)
+
+
 def _row_to_meta(row: sqlite3.Row) -> Dict[str, Any]:
     data = _row_data(row)
     return {
@@ -45,6 +85,7 @@ def _row_to_meta(row: sqlite3.Row) -> Dict[str, Any]:
         "createdAt": int(data.get("created_at_ms") or 0),
         "updatedAt": int(data.get("updated_at_ms") or 0),
         "revision": int(data.get("revision") or 0),
+        "participants": _parse_participants_row(data.get("participants_json")),
     }
 
 
@@ -65,7 +106,7 @@ def list_sessions(conn: sqlite3.Connection, *, user_id: str, engine_id: str) -> 
     eid = str(engine_id).strip()
     cur = conn.execute(
         """
-        SELECT id, user_id, engine_id, title, trace_session_id, revision, created_at_ms, updated_at_ms
+        SELECT id, user_id, engine_id, title, trace_session_id, participants_json, revision, created_at_ms, updated_at_ms
         FROM home_chat_sessions
         WHERE user_id = ? AND engine_id = ?
         ORDER BY updated_at_ms DESC
@@ -100,6 +141,7 @@ def upsert_session(conn: sqlite3.Connection, *, user_id: str, payload: Dict[str,
     if not engine_id:
         raise ValueError("INVALID_ENGINE_ID")
     history = _validate_history_json(payload.get("history"))
+    participants = _validate_participants_json(payload.get("participants"))
     uid = str(user_id).strip()
     revision = int(payload.get("revision") or 0)
     now = _now_iso()
@@ -123,17 +165,19 @@ def upsert_session(conn: sqlite3.Connection, *, user_id: str, payload: Dict[str,
         next_revision = max(revision, 1)
 
     history_json = json.dumps(history, separators=(",", ":"), default=str)
+    participants_json = json.dumps(participants, separators=(",", ":"), default=str)
     conn.execute(
         """
         INSERT INTO home_chat_sessions (
-            id, user_id, engine_id, title, trace_session_id, history_json, revision,
+            id, user_id, engine_id, title, trace_session_id, history_json, participants_json, revision,
             created_at_ms, updated_at_ms, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
             engine_id = excluded.engine_id,
             title = excluded.title,
             trace_session_id = excluded.trace_session_id,
             history_json = excluded.history_json,
+            participants_json = excluded.participants_json,
             revision = excluded.revision,
             updated_at_ms = excluded.updated_at_ms,
             updated_at = excluded.updated_at
@@ -145,6 +189,7 @@ def upsert_session(conn: sqlite3.Connection, *, user_id: str, payload: Dict[str,
             str(payload.get("title") or "New chat").strip() or "New chat",
             str(payload.get("traceSessionId") or payload.get("trace_session_id") or ""),
             history_json,
+            participants_json,
             next_revision,
             created_at_ms,
             updated_at_ms,

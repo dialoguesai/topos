@@ -50,14 +50,17 @@ def test_store_crud(memory_conn: sqlite3.Connection) -> None:
             "revision": 1,
             "createdAt": 1000,
             "updatedAt": 2000,
+            "participants": [{"key": "self", "mode": "self", "label": "My Topos"}],
         },
     )
     listed = store.list_sessions(memory_conn, user_id="user-1", engine_id="engine-a")
     assert len(listed) == 1
     assert listed[0]["sessionId"] == sid
+    assert listed[0]["participants"][0]["label"] == "My Topos"
     blob = store.get_session(memory_conn, user_id="user-1", session_id=sid)
     assert blob is not None
     assert blob["title"] == "Test"
+    assert blob["participants"][0]["key"] == "self"
     assert store.delete_session(memory_conn, user_id="user-1", session_id=sid)
     assert store.get_session(memory_conn, user_id="user-1", session_id=sid) is None
 
