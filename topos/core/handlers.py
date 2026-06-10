@@ -4313,9 +4313,8 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                 debug_metadata: Optional[Dict[str, Any]] = None,
             ) -> Dict[str, Any]:
                 logger.debug("[PIPELINE:UMA] uma_get_messages returned %d messages", len(messages_out))
-                owner_uid = (dataset_id or "").split(":")[0] or (
-                    resource_id.split(":")[1] if len(resource_id.split(":")) >= 2 else ""
-                )
+                _, owner_uid_resolved, _ = _resolve_uma_scope(payload, resource_id)
+                owner_uid = (owner_uid_resolved or "").strip()
                 req_uid = (payload.get("requesting_user_id") or "").strip() or None
                 acc_ch = (payload.get("access_channel") or "").strip() or "http"
                 if owner_uid:
