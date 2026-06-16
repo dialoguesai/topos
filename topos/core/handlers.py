@@ -404,6 +404,43 @@ def _operation_to_msg_type(operation: str) -> str:
 
 _POOLED_SCOPE_COLUMNS = ("dataset_id", "owner_user_id", "tenant_id")
 
+# Newest-first row reads for MCP/Data explorer (matches uma_get_rows and get_messages).
+_TABLE_ROW_TIME_ORDER_COLUMNS = (
+    "event_at",
+    "timestamp",
+    "visited_at",
+    "start_time",
+    "end_time",
+    "created_at",
+    "updated_at",
+    "ts",
+)
+_TABLE_ROW_CANONICAL_TIME_ORDER: Dict[str, tuple[str, ...]] = {
+    "events": ("event_at", "timestamp", "created_at"),
+    "activity": ("event_at", "timestamp", "created_at"),
+    "journal": ("event_at", "created_at", "id"),
+    "conversation_messages": ("event_at", "created_at", "message_id"),
+    "ai_chat_messages": ("event_at", "created_at", "message_id"),
+}
+
+
+def _table_row_order_clause(
+    col_names: set[str],
+    *,
+    table_name: str = "",
+    is_sqlite: bool = True,
+) -> str:
+    """Resolve ORDER BY for tabular reads: prefer temporal columns, newest first."""
+    for c in _TABLE_ROW_CANONICAL_TIME_ORDER.get(table_name, ()):
+        if c in col_names:
+            return f'"{c}" DESC'
+    for c in _TABLE_ROW_TIME_ORDER_COLUMNS:
+        if c in col_names:
+            return f'"{c}" DESC'
+    if is_sqlite:
+        return "rowid DESC"
+    return "1 DESC"
+
 
 def _pooled_scope_tables(conn: Any, requested_tables: Optional[List[str]] = None) -> List[str]:
     if requested_tables:
@@ -3882,9 +3919,17 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                                 "table_name": table_name,
                             },
                         }
+                    order_clause = _table_row_order_clause(
+                        col_names,
+                        table_name=table_name,
+                        is_sqlite=_is_sqlite_conn(conn),
+                    )
                     if _is_sqlite_conn(conn):
                         if scope_field and scope_value:
-                            sql = f'SELECT * FROM "{table_name}" WHERE "{scope_field}" = ? LIMIT ? OFFSET ?'
+                            sql = (
+                                f'SELECT * FROM "{table_name}" WHERE "{scope_field}" = ? '
+                                f"ORDER BY {order_clause} LIMIT ? OFFSET ?"
+                            )
                             sql_params = (scope_value, limit + 1, offset)
                             query_plan = _sqlite_query_plan(conn, sql, sql_params)
                             cursor = conn.execute(
@@ -3892,7 +3937,7 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                                 sql_params,
                             )
                         else:
-                            sql = f'SELECT * FROM "{table_name}" LIMIT ? OFFSET ?'
+                            sql = f'SELECT * FROM "{table_name}" ORDER BY {order_clause} LIMIT ? OFFSET ?'
                             sql_params = (limit + 1, offset)
                             query_plan = _sqlite_query_plan(conn, sql, sql_params)
                             cursor = conn.execute(sql, sql_params)
@@ -3900,16 +3945,17 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                     else:
                         if scope_field and scope_value:
                             cursor = conn.execute(
-                                f'SELECT * FROM "{table_name}" WHERE "{scope_field}" = %s LIMIT %s OFFSET %s',
+                                f'SELECT * FROM "{table_name}" WHERE "{scope_field}" = %s '
+                                f"ORDER BY {order_clause} LIMIT %s OFFSET %s",
                                 (scope_value, limit + 1, offset),
                             )
                         else:
                             cursor = conn.execute(
-                                f'SELECT * FROM "{table_name}" LIMIT %s OFFSET %s',
+                                f'SELECT * FROM "{table_name}" ORDER BY {order_clause} LIMIT %s OFFSET %s',
                                 (limit + 1, offset),
                             )
-                        col_names = [desc[0] for desc in (cursor.description or [])]
-                        rows = [dict(zip(col_names, r)) for r in cursor.fetchall()]
+                        result_col_names = [desc[0] for desc in (cursor.description or [])]
+                        rows = [dict(zip(result_col_names, r)) for r in cursor.fetchall()]
             else:
                 conn = get_db_connection()
                 if not conn:
@@ -3939,8 +3985,16 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                             "table_name": table_name,
                         },
                     }
+                order_clause = _table_row_order_clause(
+                    col_names,
+                    table_name=table_name,
+                    is_sqlite=True,
+                )
                 if scope_field and scope_value:
-                    sql = f'SELECT * FROM "{table_name}" WHERE "{scope_field}" = ? LIMIT ? OFFSET ?'
+                    sql = (
+                        f'SELECT * FROM "{table_name}" WHERE "{scope_field}" = ? '
+                        f"ORDER BY {order_clause} LIMIT ? OFFSET ?"
+                    )
                     sql_params = (scope_value, limit + 1, offset)
                     query_plan = _sqlite_query_plan(conn, sql, sql_params)
                     cursor = conn.execute(
@@ -3948,7 +4002,7 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                         sql_params,
                     )
                 else:
-                    sql = f'SELECT * FROM "{table_name}" LIMIT ? OFFSET ?'
+                    sql = f'SELECT * FROM "{table_name}" ORDER BY {order_clause} LIMIT ? OFFSET ?'
                     sql_params = (limit + 1, offset)
                     query_plan = _sqlite_query_plan(conn, sql, sql_params)
                     cursor = conn.execute(sql, sql_params)
@@ -4724,13 +4778,6 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
             return {"id": req_id, "status": "error", "error": f"table not allowed: {table_name}"}
         try:
             use_postgres = settings.topos_database_mode == "postgres"
-            preferred_order_by = {
-                "events": ["event_at", "timestamp", "created_at"],
-                "activity": ["event_at", "timestamp", "created_at"],
-                "journal": ["event_at", "created_at", "id"],
-                "conversation_messages": ["event_at", "created_at", "message_id"],
-                "ai_chat_messages": ["event_at", "created_at", "message_id"],
-            }
             if use_postgres:
                 with connect_postgres() as conn:
                     if _is_sqlite_conn(conn):
@@ -4780,17 +4827,11 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                             "status": "error",
                             "error": f"table not tenant scoped for UMA reads: {table_name}",
                         }
-                    order_col = None
-                    for c in preferred_order_by.get(table_name, []):
-                        if c in col_names:
-                            order_col = c
-                            break
-                    if order_col:
-                        order_clause = f'"{order_col}" DESC'
-                    elif _is_sqlite_conn(conn):
-                        order_clause = "rowid DESC"
-                    else:
-                        order_clause = "1 DESC"
+                    order_clause = _table_row_order_clause(
+                        col_names,
+                        table_name=table_name,
+                        is_sqlite=_is_sqlite_conn(conn),
+                    )
 
                     # Pull one extra row to derive has_more without a separate COUNT.
                     if _is_sqlite_conn(conn):
@@ -4834,12 +4875,11 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                         "status": "error",
                         "error": f"table not tenant scoped for UMA reads: {table_name}",
                     }
-                order_col = None
-                for c in preferred_order_by.get(table_name, []):
-                    if c in col_names:
-                        order_col = c
-                        break
-                order_clause = f'"{order_col}" DESC' if order_col else "rowid DESC"
+                order_clause = _table_row_order_clause(
+                    col_names,
+                    table_name=table_name,
+                    is_sqlite=True,
+                )
                 cursor = conn.execute(
                     f'SELECT * FROM "{table_name}"{scope_where} ORDER BY {order_clause} LIMIT ? OFFSET ?',
                     scope_params + (limit + 1, offset),
