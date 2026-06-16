@@ -442,6 +442,24 @@ def _table_row_order_clause(
     return "1 DESC"
 
 
+def _resolve_table_row_order_clause(
+    col_names: set[str],
+    *,
+    table_name: str = "",
+    is_sqlite: bool = True,
+    order_by: Optional[str] = None,
+    order_dir: Optional[str] = None,
+) -> str:
+    """Apply explicit client sort when valid; otherwise use default table ordering."""
+    column = (order_by or "").strip()
+    direction = (order_dir or "asc").strip().lower()
+    if direction not in ("asc", "desc"):
+        direction = "asc"
+    if column and column in col_names and _safe_sql_identifier(column):
+        return f'"{column}" {direction.upper()}'
+    return _table_row_order_clause(col_names, table_name=table_name, is_sqlite=is_sqlite)
+
+
 def _pooled_scope_tables(conn: Any, requested_tables: Optional[List[str]] = None) -> List[str]:
     if requested_tables:
         return [t for t in requested_tables if _safe_sql_identifier(t)]
@@ -3840,6 +3858,8 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
             limit = min(requested_limit, 2000)
             cap_reason = "max_rows_limit" if limit < requested_limit else None
             offset = max(0, int(payload.get("offset") or 0))
+            order_by = (payload.get("order_by") or payload.get("sort_column") or "").strip() or None
+            order_dir = (payload.get("order_dir") or payload.get("sort_direction") or "").strip() or None
             scope_strategy: Optional[str] = None
             query_plan: List[str] = []
             started_at = time_module.perf_counter()
@@ -3919,10 +3939,12 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                                 "table_name": table_name,
                             },
                         }
-                    order_clause = _table_row_order_clause(
+                    order_clause = _resolve_table_row_order_clause(
                         col_names,
                         table_name=table_name,
                         is_sqlite=_is_sqlite_conn(conn),
+                        order_by=order_by,
+                        order_dir=order_dir,
                     )
                     if _is_sqlite_conn(conn):
                         if scope_field and scope_value:
@@ -3985,10 +4007,12 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                             "table_name": table_name,
                         },
                     }
-                order_clause = _table_row_order_clause(
+                order_clause = _resolve_table_row_order_clause(
                     col_names,
                     table_name=table_name,
                     is_sqlite=True,
+                    order_by=order_by,
+                    order_dir=order_dir,
                 )
                 if scope_field and scope_value:
                     sql = (
