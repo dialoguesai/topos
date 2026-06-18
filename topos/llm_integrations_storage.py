@@ -29,7 +29,7 @@ LEGACY_USAGE_EVENTS_CONFIG_KEY = "llm_integrations:v1:usage_events"
 MAX_USAGE_EVENTS = 5000
 
 SUPPORTED_BYOK_PROVIDERS = ("openai", "anthropic", "grok")
-ACTIVE_PROVIDERS = ("platform", "ollama", "openai", "anthropic", "grok")
+ACTIVE_PROVIDERS = ("platform", "redpill", "ollama", "openai", "anthropic", "grok")
 
 DEFAULT_MODELS: Dict[str, str] = {
     "openai": "gpt-4o-mini",
