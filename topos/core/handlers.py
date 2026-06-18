@@ -74,6 +74,16 @@ def _resource_owner_for_mcp_log(conn: Any) -> Optional[str]:
     return (uid or "").strip() or None
 
 
+def _uma_attribution_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
+    tags = routine_uma_attribution(mcp_source=payload.get("mcp_source"))
+    acc_ch = tags.get("access_channel") or (payload.get("access_channel") or "http").strip() or "http"
+    app_id = tags.get("app_id") or (payload.get("requesting_app_id") or "").strip() or None
+    out: Dict[str, Any] = {"access_channel": acc_ch, "app_id": app_id}
+    if tags.get("access_context"):
+        out["access_context"] = tags["access_context"]
+    return out
+
+
 def _default_ui_config() -> Dict[str, Any]:
     return {"version": 1, "topbar": {"pinnedAnalytics": []}}
 
@@ -208,6 +218,7 @@ from ..core.state import (
     set_engine_config_value,
     store_user_id,
 )
+from ..core.routine_access import routine_uma_attribution
 from fastapi import HTTPException
 
 from ..ingestion.ingest_helpers import ingest_file_payload, ingest_ui_payload
@@ -421,6 +432,8 @@ _TABLE_ROW_CANONICAL_TIME_ORDER: Dict[str, tuple[str, ...]] = {
     "journal": ("event_at", "created_at", "id"),
     "conversation_messages": ("event_at", "created_at", "message_id"),
     "ai_chat_messages": ("event_at", "created_at", "message_id"),
+    "browser_visits": ("visited_at", "created_at", "record_id"),
+    "browser_events": ("visited_at", "created_at", "record_id"),
 }
 
 
@@ -1763,6 +1776,246 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
             return {"id": req_id, "status": "error", "error": "Session not found"}
         return {"id": req_id, "status": "ok", "payload": {"deleted": True}}
 
+    if msg_type == "list_routines":
+        from ..routines import store as routines_store
+
+        conn = get_db_connection()
+        if not conn:
+            return {"id": req_id, "status": "error", "error": "Database not available"}
+        pl = message.get("payload") or {}
+        user_id = str(pl.get("user_id") or "").strip()
+        engine_id = str(pl.get("engine_id") or "").strip()
+        if not user_id or not engine_id:
+            return {"id": req_id, "status": "error", "error": "user_id and engine_id required"}
+        rows = routines_store.list_routines(conn, owner_user_id=user_id, engine_id=engine_id)
+        return {"id": req_id, "status": "ok", "payload": {"routines": rows}}
+
+    if msg_type == "get_routine":
+        from ..routines import store as routines_store
+
+        conn = get_db_connection()
+        if not conn:
+            return {"id": req_id, "status": "error", "error": "Database not available"}
+        pl = message.get("payload") or {}
+        user_id = str(pl.get("user_id") or "").strip()
+        routine_id = str(pl.get("routine_id") or "").strip()
+        if not user_id or not routine_id:
+            return {"id": req_id, "status": "error", "error": "user_id and routine_id required"}
+        row = routines_store.get_routine(conn, owner_user_id=user_id, routine_id=routine_id)
+        if not row:
+            return {"id": req_id, "status": "error", "error": "Routine not found"}
+        return {"id": req_id, "status": "ok", "payload": {"routine": row}}
+
+    if msg_type == "get_routine_by_id":
+        from ..routines import store as routines_store
+
+        conn = get_db_connection()
+        if not conn:
+            return {"id": req_id, "status": "error", "error": "Database not available"}
+        pl = message.get("payload") or {}
+        routine_id = str(pl.get("routine_id") or "").strip()
+        if not routine_id:
+            return {"id": req_id, "status": "error", "error": "routine_id required"}
+        row = routines_store.get_routine_for_execution(conn, routine_id)
+        if not row:
+            return {"id": req_id, "status": "error", "error": "Routine not found"}
+        return {"id": req_id, "status": "ok", "payload": {"routine": row}}
+
+    if msg_type == "create_routine":
+        from ..routines import store as routines_store
+
+        conn = get_db_connection()
+        if not conn:
+            return {"id": req_id, "status": "error", "error": "Database not available"}
+        pl = message.get("payload") or {}
+        user_id = str(pl.get("user_id") or "").strip()
+        engine_id = str(pl.get("engine_id") or "").strip()
+        body = pl.get("body") if isinstance(pl.get("body"), dict) else {}
+        if not user_id or not engine_id:
+            return {"id": req_id, "status": "error", "error": "user_id and engine_id required"}
+        try:
+            row = routines_store.create_routine(
+                conn,
+                owner_user_id=user_id,
+                engine_id=engine_id,
+                payload=body,
+            )
+            return {"id": req_id, "status": "ok", "payload": {"routine": row}}
+        except ValueError as exc:
+            return {"id": req_id, "status": "error", "error": str(exc), "error_code": str(exc)}
+
+    if msg_type == "patch_routine":
+        from ..routines import store as routines_store
+
+        conn = get_db_connection()
+        if not conn:
+            return {"id": req_id, "status": "error", "error": "Database not available"}
+        pl = message.get("payload") or {}
+        user_id = str(pl.get("user_id") or "").strip()
+        routine_id = str(pl.get("routine_id") or "").strip()
+        body = pl.get("body") if isinstance(pl.get("body"), dict) else {}
+        if not user_id or not routine_id:
+            return {"id": req_id, "status": "error", "error": "user_id and routine_id required"}
+        row = routines_store.patch_routine(
+            conn,
+            owner_user_id=user_id,
+            routine_id=routine_id,
+            payload=body,
+        )
+        if not row:
+            return {"id": req_id, "status": "error", "error": "Routine not found"}
+        return {"id": req_id, "status": "ok", "payload": {"routine": row}}
+
+    if msg_type == "delete_routine":
+        from ..routines import store as routines_store
+
+        conn = get_db_connection()
+        if not conn:
+            return {"id": req_id, "status": "error", "error": "Database not available"}
+        pl = message.get("payload") or {}
+        user_id = str(pl.get("user_id") or "").strip()
+        routine_id = str(pl.get("routine_id") or "").strip()
+        if not user_id or not routine_id:
+            return {"id": req_id, "status": "error", "error": "user_id and routine_id required"}
+        deleted = routines_store.soft_delete_routine(
+            conn,
+            owner_user_id=user_id,
+            routine_id=routine_id,
+        )
+        if not deleted:
+            return {"id": req_id, "status": "error", "error": "Routine not found"}
+        return {"id": req_id, "status": "ok", "payload": {"deleted": True}}
+
+    if msg_type == "list_routine_runs":
+        from ..routines import store as routines_store
+
+        conn = get_db_connection()
+        if not conn:
+            return {"id": req_id, "status": "error", "error": "Database not available"}
+        pl = message.get("payload") or {}
+        user_id = str(pl.get("user_id") or "").strip()
+        routine_id = str(pl.get("routine_id") or "").strip()
+        if not user_id or not routine_id:
+            return {"id": req_id, "status": "error", "error": "user_id and routine_id required"}
+        rows = routines_store.list_runs(conn, owner_user_id=user_id, routine_id=routine_id)
+        return {"id": req_id, "status": "ok", "payload": {"runs": rows}}
+
+    if msg_type == "get_routine_run":
+        from ..routines import store as routines_store
+
+        conn = get_db_connection()
+        if not conn:
+            return {"id": req_id, "status": "error", "error": "Database not available"}
+        pl = message.get("payload") or {}
+        user_id = str(pl.get("user_id") or "").strip()
+        routine_id = str(pl.get("routine_id") or "").strip()
+        run_id = str(pl.get("run_id") or "").strip()
+        if not user_id or not routine_id or not run_id:
+            return {"id": req_id, "status": "error", "error": "user_id, routine_id, and run_id required"}
+        row = routines_store.get_run(conn, owner_user_id=user_id, routine_id=routine_id, run_id=run_id)
+        if not row:
+            return {"id": req_id, "status": "error", "error": "Run not found"}
+        return {"id": req_id, "status": "ok", "payload": {"run": row}}
+
+    if msg_type == "get_routine_run_by_id":
+        from ..routines import store as routines_store
+
+        conn = get_db_connection()
+        if not conn:
+            return {"id": req_id, "status": "error", "error": "Database not available"}
+        pl = message.get("payload") or {}
+        run_id = str(pl.get("run_id") or "").strip()
+        if not run_id:
+            return {"id": req_id, "status": "error", "error": "run_id required"}
+        row = routines_store.get_run_for_execution(conn, run_id)
+        if not row:
+            return {"id": req_id, "status": "error", "error": "Run not found"}
+        return {"id": req_id, "status": "ok", "payload": {"run": row}}
+
+    if msg_type == "create_routine_run":
+        from ..routines import store as routines_store
+
+        conn = get_db_connection()
+        if not conn:
+            return {"id": req_id, "status": "error", "error": "Database not available"}
+        pl = message.get("payload") or {}
+        user_id = str(pl.get("user_id") or "").strip()
+        engine_id = str(pl.get("engine_id") or "").strip()
+        routine_id = str(pl.get("routine_id") or "").strip()
+        body = pl.get("body") if isinstance(pl.get("body"), dict) else {}
+        if not user_id or not engine_id or not routine_id:
+            return {"id": req_id, "status": "error", "error": "user_id, engine_id, and routine_id required"}
+        try:
+            row = routines_store.create_run(
+                conn,
+                owner_user_id=user_id,
+                engine_id=engine_id,
+                routine_id=routine_id,
+                run_payload=body,
+            )
+            return {"id": req_id, "status": "ok", "payload": {"run": row}}
+        except ValueError as exc:
+            return {"id": req_id, "status": "error", "error": str(exc), "error_code": str(exc)}
+
+    if msg_type == "update_routine_run":
+        from ..routines import store as routines_store
+
+        conn = get_db_connection()
+        if not conn:
+            return {"id": req_id, "status": "error", "error": "Database not available"}
+        pl = message.get("payload") or {}
+        run_id = str(pl.get("run_id") or "").strip()
+        patch = pl.get("patch") if isinstance(pl.get("patch"), dict) else {}
+        if not run_id:
+            return {"id": req_id, "status": "error", "error": "run_id required"}
+        row = routines_store.update_run(conn, run_id, patch)
+        if not row:
+            return {"id": req_id, "status": "error", "error": "Run not found"}
+        return {"id": req_id, "status": "ok", "payload": {"run": row}}
+
+    if msg_type == "list_due_routines":
+        from ..routines import store as routines_store
+
+        conn = get_db_connection()
+        if not conn:
+            return {"id": req_id, "status": "error", "error": "Database not available"}
+        pl = message.get("payload") or {}
+        engine_id = str(pl.get("engine_id") or "").strip()
+        if not engine_id:
+            return {"id": req_id, "status": "error", "error": "engine_id required"}
+        rows = routines_store.list_due_scheduled_routines(conn, engine_id=engine_id)
+        return {"id": req_id, "status": "ok", "payload": {"routines": rows}}
+
+    if msg_type == "routine_has_active_run":
+        from ..routines import store as routines_store
+
+        conn = get_db_connection()
+        if not conn:
+            return {"id": req_id, "status": "error", "error": "Database not available"}
+        pl = message.get("payload") or {}
+        routine_id = str(pl.get("routine_id") or "").strip()
+        if not routine_id:
+            return {"id": req_id, "status": "error", "error": "routine_id required"}
+        return {
+            "id": req_id,
+            "status": "ok",
+            "payload": {"active": routines_store.has_active_run(conn, routine_id)},
+        }
+
+    if msg_type == "advance_routine_next_run_at":
+        from ..routines import store as routines_store
+
+        conn = get_db_connection()
+        if not conn:
+            return {"id": req_id, "status": "error", "error": "Database not available"}
+        pl = message.get("payload") or {}
+        routine_id = str(pl.get("routine_id") or "").strip()
+        next_run_at = pl.get("next_run_at")
+        if not routine_id:
+            return {"id": req_id, "status": "error", "error": "routine_id required"}
+        routines_store.advance_next_run_at(conn, routine_id, next_run_at=next_run_at)
+        return {"id": req_id, "status": "ok", "payload": {"advanced": True}}
+
     if msg_type == "connection_info":
         """
         Handle connection_info message from control plane with user_id from auth.
@@ -2473,7 +2726,9 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                 
                 if has_conversations_table and dataset_id:
                     # Join with conversations to filter by owner_user_id
-                    user_id = dataset_id.split(":")[0] if ":" in dataset_id else dataset_id
+                    engine_uid = (get_user_id(db_conn) or "").strip()
+                    owner_uid = engine_uid or (dataset_id.split(":")[0] if ":" in str(dataset_id) else str(dataset_id).strip())
+                    legacy_local_owners = ("user", "manual-user")
                     if has_emotions_table:
                         # Include emotion data via LEFT JOIN
                         # Get the emotion with highest confidence per message (in case multiple models exist)
@@ -2492,7 +2747,7 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                                     GROUP BY message_id
                                 ) e2 ON e1.message_id = e2.message_id AND e1.confidence = e2.max_confidence
                             ) e ON m.message_id = e.message_id
-                            WHERE c.owner_user_id = ?
+                            WHERE (c.owner_user_id = ? OR c.owner_user_id IN (?, ?))
                             ORDER BY m.event_at DESC
                             LIMIT ? OFFSET ?
                         """
@@ -2503,11 +2758,14 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                                    NULL as emotion_label, NULL as confidence
                             FROM ai_chat_messages m
                             LEFT JOIN ai_chat_conversations c ON m.conversation_id = c.conversation_id
-                            WHERE c.owner_user_id = ?
+                            WHERE (c.owner_user_id = ? OR c.owner_user_id IN (?, ?))
                             ORDER BY m.event_at DESC
                             LIMIT ? OFFSET ?
                         """
-                    cursor = db_conn.execute(query, (user_id, limit, offset))
+                    cursor = db_conn.execute(
+                        query,
+                        (owner_uid, legacy_local_owners[0], legacy_local_owners[1], limit, offset),
+                    )
                 else:
                     # Query without user filtering
                     if has_emotions_table:
@@ -4393,8 +4651,10 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                 logger.debug("[PIPELINE:UMA] uma_get_messages returned %d messages", len(messages_out))
                 _, owner_uid_resolved, _ = _resolve_uma_scope(payload, resource_id)
                 owner_uid = (owner_uid_resolved or "").strip()
-                req_uid = (payload.get("requesting_user_id") or "").strip() or None
-                acc_ch = (payload.get("access_channel") or "").strip() or "http"
+                req_uid = (
+                    (payload.get("requesting_user_id") or payload.get("mcp_requester_id") or "").strip() or None
+                )
+                uma_attr = _uma_attribution_from_payload(payload)
                 if owner_uid:
                     record_uma_request(
                         db_conn,
@@ -4403,9 +4663,10 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                         request_type="read",
                         endpoint="messages",
                         requesting_user_id=req_uid,
-                        app_id=requesting_app_id,
+                        app_id=uma_attr.get("app_id"),
                         requesting_user_email=requesting_user_email,
-                        access_channel=acc_ch,
+                        access_channel=uma_attr.get("access_channel"),
+                        access_context=uma_attr.get("access_context"),
                     )
                 payload_out: Dict[str, Any] = {"messages": messages_out}
                 if isinstance(debug_metadata, dict) and debug_metadata:
@@ -4768,15 +5029,17 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
         requesting_app_id = (payload.get("requesting_app_id") or "").strip() or None
         db_conn = get_db_connection()
         if db_conn and owner_uid and resource_id:
+            uma_attr = _uma_attribution_from_payload(payload)
             record_uma_request(
                 db_conn,
                 owner_user_id=owner_uid,
                 resource_id=resource_id,
                 request_type="read",
                 endpoint="oplog",
-                requesting_user_id=payload.get("requesting_user_id"),
-                app_id=requesting_app_id,
-                access_channel=(payload.get("access_channel") or "http").strip() or "http",
+                requesting_user_id=payload.get("requesting_user_id") or payload.get("mcp_requester_id"),
+                app_id=uma_attr.get("app_id") or requesting_app_id,
+                access_channel=uma_attr.get("access_channel"),
+                access_context=uma_attr.get("access_context"),
             )
         return {"id": req_id, "status": "ok", "payload": {"ops": []}}
 
@@ -4938,15 +5201,17 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
             except UMAFilterError as exc:
                 return {"id": req_id, "status": "error", "error": str(exc)}
             if owner_uid:
+                uma_attr = _uma_attribution_from_payload(payload)
                 record_uma_request(
                     conn,
                     owner_user_id=owner_uid,
                     resource_id=resource_id,
                     request_type="read",
                     endpoint=f"rows:{table_name}",
-                    requesting_user_id=payload.get("requesting_user_id"),
-                    app_id=payload.get("requesting_app_id"),
-                    access_channel=(payload.get("access_channel") or "http").strip() or "http",
+                    requesting_user_id=payload.get("requesting_user_id") or payload.get("mcp_requester_id"),
+                    app_id=uma_attr.get("app_id") or payload.get("requesting_app_id"),
+                    access_channel=uma_attr.get("access_channel"),
+                    access_context=uma_attr.get("access_context"),
                 )
             return {
                 "id": req_id,

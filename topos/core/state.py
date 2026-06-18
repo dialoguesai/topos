@@ -17,6 +17,13 @@ UMA_ACCESS_REQUESTS_TABLE = "uma_access_requests"
 LEGACY_BROWSER_PLUGIN_APP_ID = "browser-plugin"
 BROWSER_HISTORY_PLUGIN_APP_ID = "browser-history-plugin"
 
+from .routine_access import (
+    ROUTINE_ACCESS_CHANNEL,
+    ROUTINE_ACCESS_CONTEXT,
+    ROUTINE_APP_ID,
+    is_routine_mcp_source,
+)
+
 
 def derive_uma_access_context(owner_user_id: str, requesting_user_id: Optional[str]) -> str:
     """Classify whether the caller is the resource owner or a grantee (or unknown)."""
@@ -38,13 +45,15 @@ def _empty_access_attribution(window_days: int = 0) -> Dict[str, int]:
         "grantee_writes": 0,
         "unknown_reads": 0,
         "unknown_writes": 0,
+        "routine_reads": 0,
+        "routine_writes": 0,
     }
 
 
 def _uma_actx_case_sql() -> str:
     """SQL CASE matching derive_uma_access_context for GROUP BY aggregates."""
     return """CASE
-        WHEN LOWER(COALESCE(access_context, '')) IN ('owner_self', 'grantee', 'unknown')
+        WHEN LOWER(COALESCE(access_context, '')) IN ('owner_self', 'grantee', 'unknown', 'routine')
             THEN LOWER(access_context)
         WHEN requesting_user_id IS NOT NULL AND TRIM(requesting_user_id) = ?
             THEN 'owner_self'
@@ -84,6 +93,8 @@ def _aggregate_uma_access_attribution(
                 attr["owner_self_reads"] += count
             elif actx == "grantee":
                 attr["grantee_reads"] += count
+            elif actx == "routine":
+                attr["routine_reads"] += count
             else:
                 attr["unknown_reads"] += count
         elif rt == "write":
@@ -91,6 +102,8 @@ def _aggregate_uma_access_attribution(
                 attr["owner_self_writes"] += count
             elif actx == "grantee":
                 attr["grantee_writes"] += count
+            elif actx == "routine":
+                attr["routine_writes"] += count
             else:
                 attr["unknown_writes"] += count
     return attr
@@ -435,11 +448,14 @@ def record_mcp_request(
     source: Optional[str] = None,
     requester_id: Optional[str] = None,
     resource_owner_user_id: Optional[str] = None,
+    *,
+    uma_resource_id: Optional[str] = None,
 ) -> None:
     """
     Record one MCP tool invocation in the engine's DB.
-    source: e.g. "claude_desktop", "chatgpt", "local". requester_id: identity of requester (e.g. user sub or engine key prefix).
+    source: e.g. "claude_desktop", "chatgpt", "routine_executor". requester_id: identity of requester.
     resource_owner_user_id: engine-linked owner; used to set access_context (owner_self vs other).
+    When source is routine_executor, also writes a UMA access row tagged as Topos Routine.
     """
     if not conn or not tool_name:
         return
@@ -447,11 +463,25 @@ def record_mcp_request(
         _ensure_mcp_request_log_table(conn)
         requested_at = datetime.now(timezone.utc).isoformat()
         access_ctx = derive_mcp_access_context(resource_owner_user_id, requester_id)
+        if is_routine_mcp_source(source):
+            access_ctx = ROUTINE_ACCESS_CONTEXT
         conn.execute(
             f"INSERT INTO {MCP_REQUEST_LOG_TABLE} (tool_name, requested_at, source, requester_id, access_context) VALUES (?, ?, ?, ?, ?)",
             (tool_name, requested_at, source or None, requester_id or None, access_ctx),
         )
         conn.commit()
+        if is_routine_mcp_source(source) and resource_owner_user_id:
+            record_uma_request(
+                conn,
+                owner_user_id=resource_owner_user_id,
+                resource_id=(uma_resource_id or "").strip() or f"routine:{tool_name}",
+                request_type="read",
+                endpoint=tool_name,
+                requesting_user_id=(requester_id or "").strip() or resource_owner_user_id,
+                app_id=ROUTINE_APP_ID,
+                access_channel=ROUTINE_ACCESS_CHANNEL,
+                access_context=ROUTINE_ACCESS_CONTEXT,
+            )
     except Exception as exc:
         logger.debug("Failed to record MCP request (non-critical): %s", exc)
 
@@ -689,6 +719,11 @@ def get_uma_request_counts(
                         attr["grantee_reads"] += 1
                     elif is_write:
                         attr["grantee_writes"] += 1
+                elif actx == "routine":
+                    if is_read:
+                        attr["routine_reads"] += 1
+                    elif is_write:
+                        attr["routine_writes"] += 1
                 else:
                     if is_read:
                         attr["unknown_reads"] += 1
