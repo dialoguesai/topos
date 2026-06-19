@@ -6,13 +6,13 @@ set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 default:
     @just --list
 
-# Install default local runtime (database + engine colocated).
+# Install colocated local runtime (database + engine, includes sentence-transformers).
 setup:
-    uv sync --extra engine
+    uv sync --extra local
 
 # Install development toolchain + colocated runtime.
 setup-dev:
-    uv sync --extra dev --extra engine
+    uv sync --extra dev --extra local
 
 # Run API directly.
 run host="0.0.0.0" port="9000":

@@ -28,9 +28,10 @@ CHATGPT_FILE = DataSourceDefinition(
         "dimension_summary",
         "goal_extraction",
         "relationship_edges",
+        "topic_clusters",
     ],
     analytics_profile_id="chatgpt_dev",
-    enrichment_trigger="manual",  # Enrichment skipped during ingestion, trigger via POST /v1/enrichment/process
+    enrichment_trigger="automatic",
     ingestion_trigger="manual",  # Ingestion processing waits for manual trigger after upload
     default_scope_id="ai_conversations",
     allowed_scope_ids=["ai_conversations:read"],
@@ -71,6 +72,7 @@ CHATGPT_UI = DataSourceDefinition(
         "dimension_summary",
         "goal_extraction",
         "relationship_edges",
+        "topic_clusters",
     ],
     analytics_profile_id="chatgpt_dev",
     enrichment_trigger="automatic",  # Enrichment runs automatically during ingestion
@@ -104,11 +106,11 @@ BROWSER_VISITS = DataSourceDefinition(
     parser_id="browser.visits.v1",
     canonical_mapper_id="browser_activity",
     canonical_group_id="activity",
-    raw_enrichment_jobs=["url_classification"],  # Classify URL category during browser ingestion
-    canonical_enrichment_jobs=[],
-    signal_derivation_jobs=["url_classification"],
+    raw_enrichment_jobs=[],
+    canonical_enrichment_jobs=["url_classification", "embeddings"],
+    signal_derivation_jobs=["url_classification", "embeddings", "topic_clusters"],
     analytics_profile_id=None,
-    enrichment_trigger="manual",  # No automatic enrichment
+    enrichment_trigger="automatic",
     ingestion_trigger="automatic",
     default_scope_id="activity",
     allowed_scope_ids=["activity:read", "activity:write"],

@@ -20,6 +20,8 @@ class ScopeResolutionManifest:
     summary_objects: List[str] = field(default_factory=list)
     inference_objects: List[str] = field(default_factory=list)
     access_mode_ceiling: str = "summary"
+    default_source_id: Optional[str] = None
+    default_source_ids: List[str] = field(default_factory=list)
     filter_manifest: Optional[Dict[str, Any]] = None
     must_not_retrieve: List[str] = field(default_factory=list)
 
@@ -36,6 +38,8 @@ class ScopeResolutionManifest:
             summary_objects=list(data.get("summary_objects") or []),
             inference_objects=list(data.get("inference_objects") or []),
             access_mode_ceiling=str(data.get("access_mode_ceiling") or data.get("default_mode_ceiling") or "summary"),
+            default_source_id=data.get("default_source_id"),
+            default_source_ids=list(data.get("default_source_ids") or []),
             filter_manifest=data.get("filter_manifest"),
             must_not_retrieve=list(data.get("must_not_retrieve") or []),
         )

@@ -7,7 +7,7 @@ This repository is intentionally consumer-facing. Keep changes focused on local 
 ## Local setup
 
 ```bash
-uv sync --extra dev --extra engine
+uv sync --extra dev --extra local
 ```
 
 ## Test lanes

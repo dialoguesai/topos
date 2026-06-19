@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
 from ..base import BaseEnrichmentJob
+from ._batch_limits import MAX_JOB_MESSAGES, TOPIC_BATCH_CONCURRENCY
+from ....config.settings import settings
 from ._engine_runner import run_engine_task
 from ....engine import Engine
 
 logger = logging.getLogger("topos.enrichment.jobs.goal_extraction")
+
+GOAL_BATCH_CONCURRENCY = 2
 
 
 class GoalExtractionJob(BaseEnrichmentJob):
@@ -26,44 +31,85 @@ class GoalExtractionJob(BaseEnrichmentJob):
         canonical_messages: List[Dict[str, Any]],
         progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> List[Dict[str, Any]]:
-        results: List[Dict[str, Any]] = []
-        total = len(canonical_messages)
-        for idx, msg in enumerate(canonical_messages):
+        messages = canonical_messages[:MAX_JOB_MESSAGES]
+        if len(canonical_messages) > MAX_JOB_MESSAGES:
+            logger.warning(
+                "GoalExtractionJob capped input from %d to %d messages",
+                len(canonical_messages),
+                MAX_JOB_MESSAGES,
+            )
+
+        work: List[Dict[str, Any]] = []
+        for msg in messages:
             message_id = msg.get("message_id") or msg.get("id")
             content = msg.get("content", "")
-            source_id = msg.get("source_id")
-            if not message_id or not content:
-                if progress_callback:
-                    progress_callback(idx + 1, total)
-                continue
-            result = await run_engine_task(
-                self._engine,
-                task_id=f"goals_{message_id}",
-                subtype="goal_extraction",
-                source_id=source_id,
-                record_ids=[str(message_id)],
-                input_payload={"text": content},
-                provider="ollama",
-                model="llama3.2:3b",
-            )
-            if result.status == "deferred":
-                return [{"_deferred": True, "error": "ollama_unreachable"}]
-            if result.status != "completed":
-                if progress_callback:
-                    progress_callback(idx + 1, total)
-                continue
-            for goal in result.output.get("goals") or []:
-                results.append(
+            if message_id and content:
+                work.append(
                     {
                         "message_id": message_id,
-                        "source_id": source_id,
-                        "goal_text": goal.get("text"),
-                        "confidence": goal.get("confidence"),
-                        "horizon": goal.get("horizon"),
-                        "provider": "ollama",
-                        "model": result.output.get("model"),
+                        "content": str(content),
+                        "source_id": msg.get("source_id"),
                     }
                 )
+
+        total = len(work)
+        results: List[Dict[str, Any]] = []
+        deferrals = 0
+        sem = asyncio.Semaphore(GOAL_BATCH_CONCURRENCY)
+        processed = 0
+
+        async def _one(item: Dict[str, Any]) -> List[Dict[str, Any]]:
+            nonlocal deferrals
+            async with sem:
+                result = await run_engine_task(
+                    self._engine,
+                    task_id=f"goals_{item['message_id']}",
+                    subtype="goal_extraction",
+                    source_id=item.get("source_id"),
+                    record_ids=[str(item["message_id"])],
+                    input_payload={"text": item["content"]},
+                    provider="ollama",
+                    model=settings.ollama_query_model,
+                )
+                if result.status == "deferred":
+                    deferrals += 1
+                    return []
+                if result.status != "completed":
+                    return []
+                rows: List[Dict[str, Any]] = []
+                for goal in result.output.get("goals") or []:
+                    goal_text = goal.get("text")
+                    if not goal_text:
+                        continue
+                    rows.append(
+                        {
+                            "message_id": item["message_id"],
+                            "source_id": item.get("source_id"),
+                            "goal_text": goal_text,
+                            "confidence": goal.get("confidence"),
+                            "horizon": goal.get("horizon"),
+                            "provider": "ollama",
+                            "model": result.output.get("model"),
+                        }
+                    )
+                return rows
+
+        for start in range(0, total, GOAL_BATCH_CONCURRENCY):
+            chunk = work[start : start + GOAL_BATCH_CONCURRENCY]
+            batch_out = await asyncio.gather(*[_one(item) for item in chunk])
+            for rows in batch_out:
+                if rows:
+                    results.extend(rows)
+            processed += len(chunk)
             if progress_callback:
-                progress_callback(idx + 1, total)
+                progress_callback(min(processed, total), total)
+
+        if deferrals == total and total > 0 and not results:
+            return [{"_deferred": True, "error": "ollama_unreachable"}]
+        if deferrals:
+            logger.warning(
+                "GoalExtractionJob skipped %d/%d messages (Ollama deferred)",
+                deferrals,
+                total,
+            )
         return results

@@ -52,6 +52,96 @@ class SignalService:
         total = len(items) if (created_after or created_before) else page.total
         return {"items": items, "total": total, "offset": offset, "limit": limit}
 
+    def search_vectors(
+        self,
+        *,
+        query: str,
+        limit: int = 20,
+        source_id: Optional[str] = None,
+        dimension: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        from ...engine.backends.huggingface import DEFAULT_EMBEDDING_MODEL, HuggingFaceAdapter
+
+        q = str(query or "").strip()
+        limit = max(1, min(int(limit), 100))
+        embed_model = model or DEFAULT_EMBEDDING_MODEL
+        if not q:
+            return {"items": [], "total": 0, "query": "", "model": embed_model, "limit": limit}
+
+        hf = HuggingFaceAdapter()
+        emb = hf.run_inference({"text": q}, {"subtype": "embedding", "model": embed_model})
+        vectors = emb.get("vectors") or []
+        if not vectors:
+            return {
+                "items": [],
+                "total": 0,
+                "query": q,
+                "model": embed_model,
+                "limit": limit,
+                "error": "embedding_failed",
+            }
+
+        query_vector = [float(x) for x in vectors[0]]
+        vector_index = self._adapters.vector
+        search = getattr(vector_index, "search_similar", None)
+        if search is None:
+            return {
+                "items": [],
+                "total": 0,
+                "query": q,
+                "model": embed_model,
+                "limit": limit,
+                "error": "vector_search_unsupported",
+            }
+
+        page = search(
+            query_vector,
+            source_id=source_id,
+            dimension=dimension,
+            model=embed_model,
+            limit=limit,
+        )
+        items = [strip_vector_fields(item) for item in page.items]
+        return {"items": items, "total": page.total, "query": q, "model": embed_model, "limit": limit}
+
+    def get_vector_source_text(self, *, record_id: str) -> Dict[str, Any]:
+        from ...core.state import get_db_connection
+
+        rid = str(record_id or "").strip()
+        if not rid:
+            return {"record_id": "", "content": "", "found": False}
+
+        conn = get_db_connection()
+        if conn is None:
+            return {"record_id": rid, "content": "", "found": False, "error": "database_unavailable"}
+
+        try:
+            row = conn.execute(
+                """
+                SELECT message_id, content, content_rendered, source_id, conversation_id, sender_type
+                FROM ai_chat_messages
+                WHERE message_id = ?
+                LIMIT 1
+                """,
+                (rid,),
+            ).fetchone()
+        except Exception as exc:
+            return {"record_id": rid, "content": "", "found": False, "error": str(exc)}
+
+        if not row:
+            return {"record_id": rid, "content": "", "found": False}
+
+        content = str(row[1] or row[2] or "").strip()
+        return {
+            "record_id": str(row[0]),
+            "content": content,
+            "source_id": row[3],
+            "conversation_id": row[4],
+            "sender_type": row[5],
+            "found": True,
+        }
+
     def list_graph(
         self,
         *,
@@ -78,6 +168,9 @@ class SignalService:
             edges = [e for e in edges if e.get("edge_type") == edge_type]
         if min_weight is not None:
             edges = [e for e in edges if float(e.get("weight") or 0) >= min_weight]
+        from .graph_sanitize import ensure_graph_endpoints
+
+        nodes, edges = ensure_graph_endpoints(nodes, edges)
         return {"nodes": nodes, "edges": edges}
 
     def _cached_profiles(self, deferred_jobs: Optional[List[str]] = None) -> Dict[str, Dict[str, Any]]:
@@ -117,6 +210,36 @@ class SignalService:
             "provider_status": {"ollama": "up" if ollama_up else "down", "huggingface": "up"},
             "updated_at": profiles.get("memory", {}).get("updated_at"),
         }
+
+    def list_topic_clusters(
+        self,
+        *,
+        limit: int = 50,
+        dimension: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        from ...core.state import get_db_connection
+        from .topic_clustering import load_topic_clusters_for_query
+
+        limit = max(1, min(int(limit), 200))
+        conn = get_db_connection()
+        items = load_topic_clusters_for_query(conn, limit=limit, dimension=dimension) if conn else []
+        return {"items": items, "total": len(items), "limit": limit}
+
+    def list_topic_cluster_members(
+        self,
+        cluster_id: str,
+        *,
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        from ...core.state import get_db_connection
+        from .topic_clustering import load_topic_cluster_members
+
+        limit = max(1, min(int(limit), 500))
+        conn = get_db_connection()
+        items = (
+            load_topic_cluster_members(conn, cluster_id, limit=limit) if conn else []
+        )
+        return {"items": items, "total": len(items), "cluster_id": cluster_id, "limit": limit}
 
 
 def get_signal_service(conn=None) -> SignalService:

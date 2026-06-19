@@ -4,6 +4,7 @@ import asyncio
 import json
 import logging
 import re
+import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -45,6 +46,76 @@ def _control_plane_base_url(raw_url: Optional[str]) -> str:
     if value.startswith("ws://"):
         return value.replace("ws://", "http://").split("/ws/")[0]
     return value.rstrip("/")
+
+
+def _enriched_id_column(table_name: str, conn: sqlite3.Connection) -> str:
+    cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table_name})").fetchall()}
+    if "message_id" in cols:
+        return "message_id"
+    if "record_id" in cols:
+        return "record_id"
+    return "message_id"
+
+
+def _sqlite_table_exists(conn: sqlite3.Connection, table_name: str) -> bool:
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (table_name,),
+    ).fetchone()
+    return row is not None
+
+
+def _persist_raw_retention(
+    db_conn: Any,
+    source_def: Any,
+    normalized_records: List[Any],
+    *,
+    sync_batch_id: str,
+    records_in: int,
+) -> int:
+    from ..pipeline.audit import SQLiteIngestAuditStore, StageAuditRow
+    from ..pipeline.stages import PipelineStage
+    from ..storage.raw.raw_tables_manager import RawTablesManager
+
+    raw_source_type = (
+        "events"
+        if getattr(source_def, "canonical_group_id", None) == "activity"
+        else "chat_messages"
+    )
+    raw_manager = RawTablesManager(db_conn)
+    raw_written = 0
+    for normalized in normalized_records:
+        payload = normalized.payload if hasattr(normalized, "payload") else normalized
+        if not isinstance(payload, dict):
+            continue
+        record_id = str(
+            getattr(normalized, "record_id", None)
+            or payload.get("message_id")
+            or payload.get("event_id")
+            or payload.get("id")
+            or ""
+        ).strip()
+        if not record_id:
+            continue
+        raw_manager.write_raw_record(
+            source_id=source_def.source_id,
+            source_record_id=record_id,
+            payload=payload,
+            source_type=raw_source_type,
+        )
+        raw_written += 1
+    if raw_written:
+        SQLiteIngestAuditStore(db_conn).append_stage(
+            StageAuditRow(
+                sync_batch_id=sync_batch_id,
+                source_id=source_def.source_id,
+                stage=PipelineStage.RAW_RETENTION,
+                status="completed",
+                records_in=records_in,
+                records_out=raw_written,
+            )
+        )
+    return raw_written
 
 
 def _filter_unenriched_messages(
@@ -106,41 +177,21 @@ def _filter_unenriched_messages(
                 continue
             
             placeholders = ",".join("?" for _ in candidate_ids)
+            id_col = _enriched_id_column(table_name, tables_manager.conn)
 
-            # Prefer scoped join against canonical tables when present.
-            params: list[Any] = []
-            if source_id:
-                if owner_user_id:
+            if source_id and id_col == "message_id":
+                if owner_user_id and _sqlite_table_exists(tables_manager.conn, "ai_chat_conversations"):
+                    params = [source_id, owner_user_id, *candidate_ids]
                     cursor = tables_manager.conn.execute(
-                        """
-                        SELECT name FROM sqlite_master
-                        WHERE type='table' AND name='ai_chat_conversations'
-                        """
+                        f"""
+                        SELECT DISTINCT d.message_id
+                        FROM {table_name} d
+                        INNER JOIN ai_chat_messages m ON m.message_id = d.message_id
+                        INNER JOIN ai_chat_conversations c ON c.conversation_id = m.conversation_id
+                        WHERE m.source_id = ? AND c.owner_user_id = ? AND d.message_id IN ({placeholders})
+                        """,
+                        tuple(params),
                     )
-                    has_conversations = cursor.fetchone() is not None
-                    if has_conversations:
-                        params = [source_id, owner_user_id, *candidate_ids]
-                        cursor = tables_manager.conn.execute(
-                            f"""
-                            SELECT DISTINCT d.message_id
-                            FROM {table_name} d
-                            INNER JOIN ai_chat_messages m ON m.message_id = d.message_id
-                            INNER JOIN ai_chat_conversations c ON c.conversation_id = m.conversation_id
-                            WHERE m.source_id = ? AND c.owner_user_id = ? AND d.message_id IN ({placeholders})
-                            """,
-                            tuple(params),
-                        )
-                    else:
-                        params = [source_id, *candidate_ids]
-                        cursor = tables_manager.conn.execute(
-                            f"""
-                            SELECT DISTINCT d.message_id
-                            FROM {table_name} d
-                            INNER JOIN ai_chat_messages m ON m.message_id = d.message_id
-                            WHERE m.source_id = ? AND d.message_id IN ({placeholders})
-                            """,
-                            tuple(params),
-                        )
                 else:
                     params = [source_id, *candidate_ids]
                     cursor = tables_manager.conn.execute(
@@ -152,9 +203,20 @@ def _filter_unenriched_messages(
                         """,
                         tuple(params),
                     )
+            elif source_id and id_col == "record_id":
+                params = [source_id, *candidate_ids]
+                cursor = tables_manager.conn.execute(
+                    f"""
+                    SELECT DISTINCT d.record_id
+                    FROM {table_name} d
+                    INNER JOIN ai_chat_messages m ON m.message_id = d.record_id
+                    WHERE m.source_id = ? AND d.record_id IN ({placeholders})
+                    """,
+                    tuple(params),
+                )
             else:
                 cursor = tables_manager.conn.execute(
-                    f"SELECT DISTINCT message_id FROM {table_name} WHERE message_id IN ({placeholders})",
+                    f"SELECT DISTINCT {id_col} FROM {table_name} WHERE {id_col} IN ({placeholders})",
                     tuple(candidate_ids),
                 )
             enriched_message_ids.update(str(row[0]) for row in cursor.fetchall() if row and row[0])
@@ -819,115 +881,63 @@ class IngestionManager(BaseObject):
                 )
                 errors.append({"step": "source_data_table", "errors": [str(exc)]})
         
-        # Canonicalize normalized records: conversations group -> conversation_messages; else engine ai_chat_*
+        # Canonicalize normalized records via shared pipeline (activity / conversations / ai_messages).
         canonical_messages: List[Dict[str, Any]] = []
         sync_batch_id = str(getattr(job, "job_id", "unknown"))
         if source_def and normalized_records:
-            # Build staging records once (same shape for both paths)
-            staging_records = []
-            for normalized in normalized_records:
-                staging_record = {
-                    "message_id": normalized.payload.get("message_id"),
-                    "dataset_id": job.dataset_id,
-                    "thread_id": normalized.payload.get("thread_id") or normalized.payload.get("conversation_id") or job.dataset_id,
-                    "ts": normalized.payload.get("ts") or normalized.payload.get("created_at") or str(datetime.now(timezone.utc).timestamp()),
-                    "sender_type": normalized.payload.get("sender_type"),
-                    "content": normalized.payload.get("content"),
-                    "source_id": source_def.source_id,
-                }
-                if "_metadata" in normalized.payload:
-                    staging_record["_metadata"] = normalized.payload["_metadata"]
-                staging_records.append(staging_record)
+            from ..ingestion.canonical_pipeline import canonicalize_normalized_batch
 
-            canonical_group_id = getattr(source_def, "canonical_group_id", None)
-            if canonical_group_id == "conversations":
-                # Conversations canonical: write only to conversation_messages / conversations (never ai_chat_*)
-                from ..core.state import get_db_connection
-                from ..storage.canonical import ConversationsTablesManager
-                db_conn = get_db_connection()
-                if db_conn:
-                    conv_manager = ConversationsTablesManager(db_conn)
-                    canonical_result = conv_manager.upsert_message_batch(
-                        staging_records, job.dataset_id, source_def.source_id, sync_batch_id=sync_batch_id
-                    )
-                    logger.debug(
-                        "[PIPELINE:CANONICAL] %s: Conversations canonical: messages_created=%s, conversations_created=%s",
-                        self,
-                        canonical_result.get("messages_created", 0),
-                        canonical_result.get("conversations_created", 0),
-                    )
-                for staging_record in staging_records:
-                    import json as _json
-                    metadata_json = None
-                    if "_metadata" in staging_record:
-                        metadata_json = _json.dumps(staging_record["_metadata"])
-                    canonical_messages.append({
-                        "message_id": staging_record.get("message_id"),
-                        "conversation_id": staging_record.get("thread_id") or staging_record.get("conversation_id") or job.dataset_id,
-                        "sender_type": staging_record.get("sender_type"),
-                        "sender_id": None,
-                        "ts": staging_record.get("ts"),
-                        "content": staging_record.get("content"),
-                        "content_rendered": None,
-                        "metadata_json": metadata_json,
-                        "seq": 0,
-                        "source_id": source_def.source_id,
-                    })
-            elif source_def.canonical_mapper_id:
-                # Engine path: ai_chat_messages / ai_chat_conversations
+            db_conn = get_db_connection()
+            if db_conn:
                 try:
-                    from ..storage.canonical.ai_chat import CanonicalTablesManager, Canonicalizer
-                    from ..core.state import get_db_connection
-
-                    db_conn = get_db_connection()
-                    canonical_tables_manager = CanonicalTablesManager(db_conn) if db_conn else None
-                    if canonical_tables_manager:
-                        canonicalizer = Canonicalizer(canonical_tables_manager)
-                        mapper_source = source_def.canonical_mapper_id
-                        logger.debug(
-                            "[PIPELINE:CANONICAL] %s: Canonicalizing %d records with mapper=%s (source_id=%s)",
-                            self,
-                            len(staging_records),
-                            mapper_source,
-                            source_def.source_id,
-                        )
-                        canonical_result = canonicalizer.canonicalize_staging_batch(
-                            staging_records,
-                            source=mapper_source,
-                            batch_size=1000,
-                            sync_batch_id=sync_batch_id,
-                            mapping_source_id=source_def.source_id,
-                        )
-                        # Enrichment should consume canonicalized rows (not pre-mapper staging rows).
-                        mapped_messages = canonical_result.get("canonical_messages")
-                        if isinstance(mapped_messages, list):
-                            canonical_messages.extend(
-                                [msg for msg in mapped_messages if isinstance(msg, dict)]
-                            )
-                        logger.debug(
-                            "[PIPELINE:CANONICAL] %s: Canonicalization complete: messages_created=%s, conversations_created=%s, canonical_messages_count=%s",
-                            self,
-                            canonical_result.get("messages_created", 0),
-                            canonical_result.get("conversations_created", 0),
-                            len(canonical_messages),
-                        )
-                    else:
-                        logger.warning("[PIPELINE:CANONICAL] %s: No database connection, skipping canonicalization", self)
-                except ImportError as e:
-                    logger.warning("[PIPELINE:CANONICAL] %s: Canonicalization modules not available: %s. Using fallback mapper.", self, e)
-                    if canonical_mapper:
-                        for normalized in normalized_records:
-                            try:
-                                canonical = canonical_mapper.map(normalized)
-                                if source_def:
-                                    canonical.payload["source_id"] = source_def.source_id
-                                canonical_messages.append(canonical.payload)
-                            except Exception as exc:
-                                logger.error("[PIPELINE:CANONICAL] %s: Failed to canonicalize record %s: %s", self, normalized.record_id, exc)
-                                errors.append({"record_id": normalized.record_id, "errors": [str(exc)]})
+                    _persist_raw_retention(
+                        db_conn,
+                        source_def,
+                        normalized_records,
+                        sync_batch_id=sync_batch_id,
+                        records_in=len(normalized_records),
+                    )
                 except Exception as exc:
-                    logger.error("[PIPELINE:CANONICAL] %s: Failed to canonicalize records: %s", self, exc, exc_info=True)
-                    errors.append({"step": "canonicalization", "errors": [str(exc)]})
+                    logger.warning(
+                        "[PIPELINE:RAW] %s: Failed raw retention (non-fatal): %s",
+                        self,
+                        exc,
+                    )
+
+                canon_result = canonicalize_normalized_batch(
+                    db_conn,
+                    source_def,
+                    normalized_records,
+                    dataset_id=job.dataset_id,
+                    sync_batch_id=sync_batch_id,
+                )
+                canonical_messages.extend(canon_result.canonical_records)
+                if canon_result.errors:
+                    errors.extend(canon_result.errors)
+                logger.debug(
+                    "[PIPELINE:CANONICAL] %s: canonical_records=%d messages_created=%d events_created=%d",
+                    self,
+                    len(canonical_messages),
+                    canon_result.messages_created,
+                    canon_result.events_created,
+                )
+            else:
+                logger.warning("[PIPELINE:CANONICAL] %s: No database connection, skipping canonicalization", self)
+                if canonical_mapper:
+                    for normalized in normalized_records:
+                        try:
+                            canonical = canonical_mapper.map(normalized)
+                            if source_def:
+                                canonical.payload["source_id"] = source_def.source_id
+                            canonical_messages.append(canonical.payload)
+                        except Exception as exc:
+                            logger.error(
+                                "[PIPELINE:CANONICAL] %s: Failed to canonicalize record %s: %s",
+                                self,
+                                normalized.record_id,
+                                exc,
+                            )
+                            errors.append({"record_id": normalized.record_id, "errors": [str(exc)]})
 
             if source_def and normalized_records:
                 try:

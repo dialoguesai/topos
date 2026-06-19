@@ -46,7 +46,12 @@
       "signal_objects": ["message_topics", "user_goals"],
       "summary_objects": ["memory_dimension_summary"],
       "inference_objects": ["goal_inference"],
-      "default_mode_ceiling": "summary"
+      "default_mode_ceiling": "inference",
+      "default_source_ids": [
+        "chatgpt_file_ingestion",
+        "chatgpt_ingestion",
+        "chatgpt_ui_conversation"
+      ]
     },
     {
       "scope_id": "schedule:read",
@@ -74,7 +79,8 @@
       "signal_objects": ["user_goals"],
       "summary_objects": ["work_stub_summary"],
       "inference_objects": [],
-      "default_mode_ceiling": "summary"
+      "default_mode_ceiling": "summary",
+      "default_source_ids": ["chatgpt_ingestion", "chatgpt_file_ingestion", "chatgpt_ui_conversation"]
     },
     {
       "scope_id": "public_bio:read",

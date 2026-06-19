@@ -18,6 +18,10 @@ class ManifestValidationError(Exception):
 
 
 def manifest_from_scope_entry(entry: Dict[str, Any]) -> ScopeResolutionManifest:
+    source_ids = list(entry.get("default_source_ids") or [])
+    single = entry.get("default_source_id")
+    if single and single not in source_ids:
+        source_ids.insert(0, str(single))
     return ScopeResolutionManifest(
         scope_id=str(entry["scope_id"]),
         primary_dimensions=list(entry.get("primary_dimensions") or []),
@@ -28,6 +32,8 @@ def manifest_from_scope_entry(entry: Dict[str, Any]) -> ScopeResolutionManifest:
         access_mode_ceiling=str(
             entry.get("default_mode_ceiling") or entry.get("access_mode_ceiling") or "summary"
         ),
+        default_source_id=str(single) if single else (source_ids[0] if source_ids else None),
+        default_source_ids=source_ids,
         must_not_retrieve=list(entry.get("must_not_retrieve") or []),
     )
 

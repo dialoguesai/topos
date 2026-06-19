@@ -8,7 +8,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 AccessMode = Literal["raw", "summary", "inference"]
 
-MODE_RANK = {"raw": 0, "summary": 1, "inference": 2}
+MODE_RANK = {"summary": 0, "inference": 1, "raw": 2}
 
 
 class RetrievalError(Exception):
@@ -22,6 +22,7 @@ class RetrievalError(Exception):
 class RetrievalRequest:
     manifest: Any
     access_mode: AccessMode
+    query_text: Optional[str] = None
     filter_manifest: Optional[Dict[str, Any]] = None
     field_transforms: Optional[List[Any]] = None
     skip_retrieval: bool = False
@@ -32,6 +33,7 @@ class RetrievalBundle:
     context_packet: Dict[str, Any] = field(default_factory=dict)
     stores_touched: List[str] = field(default_factory=list)
     record_counts: Dict[str, int] = field(default_factory=dict)
+    retrieval_metadata: Dict[str, Any] = field(default_factory=dict)
     error: Optional[str] = None
 
 

@@ -6,6 +6,7 @@ import json
 from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 from typing import Any, Dict, Optional
 
+from ..config.settings import settings
 from ..engine import Engine
 from ..engine.tasks import ModelRequest, ProcessingTask
 
@@ -40,7 +41,7 @@ def run_query_inference(
         source_id=scope_id,
         record_ids=[],
         input={"query": query_text, "context": bounded["context"]},
-        model_request=ModelRequest(provider="ollama", model="llama3.2:3b"),
+        model_request=ModelRequest(provider="ollama", model=settings.ollama_query_model),
     )
 
     def _run() -> Any:
@@ -55,7 +56,11 @@ def run_query_inference(
         return {"answer": "unknown", "confidence": 0.0, "error": str(exc)}
 
     if result.status == "deferred":
-        return {"answer": "unknown", "confidence": 0.0, "deferred": True}
+        err = getattr(result, "error", None) or (result.output or {}).get("error")
+        out = {"answer": "unknown", "confidence": 0.0, "deferred": True}
+        if err:
+            out["error"] = err
+        return out
     if result.status != "completed":
         return {"answer": "unknown", "confidence": 0.0, "error": result.error}
     out = result.output or {}
