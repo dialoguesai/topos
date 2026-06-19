@@ -7,7 +7,7 @@ from uuid import uuid4
 from ..config.settings import settings
 
 
-CAPABILITIES_SCHEMA_VERSION = "v1"
+CAPABILITIES_SCHEMA_VERSION = "v2"
 
 RUNTIME_PROFILE_OPERATIONS: dict[str, list[str]] = {
     "basic_hosted": ["healthcheck", "sanitization.run", "filter_lab.list_job_groups"],
@@ -58,6 +58,20 @@ def build_engine_capabilities() -> Dict[str, Any]:
 
     if settings.engine_ollama_base_url:
         providers.append("ollama")
+    providers.append("huggingface")
+
+    capability_tiers = ["tier.core", "tier.summary"]
+    signal_jobs_available: list[str] = []
+    try:
+        from ..storage.adapters.factory import AdapterFactory
+
+        bundle = AdapterFactory.from_runtime({"database_hosting_mode": "memory"})
+        capability_tiers.extend(["tier.vector", "tier.graph"])
+        from ..enrichment.jobs import SIGNAL_JOB_REGISTRY
+
+        signal_jobs_available = sorted(SIGNAL_JOB_REGISTRY.keys())
+    except Exception:
+        pass
 
     return {
         "schema_version": CAPABILITIES_SCHEMA_VERSION,
@@ -66,6 +80,9 @@ def build_engine_capabilities() -> Dict[str, Any]:
         "supports_filtering": True,
         "supports_sanitization": True,
         "supports_enrichment": True,
+        "capability_tiers": capability_tiers,
+        "signal_providers": [p for p in ("huggingface", "ollama") if p in providers],
+        "signal_jobs_available": signal_jobs_available,
         "operations": list(RUNTIME_PROFILE_OPERATIONS.get(runtime_profile, [])),
         "runtime_profile": {
             "id": runtime_profile,

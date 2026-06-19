@@ -175,3 +175,178 @@ class EnrichmentOrchestrator(BaseObject):
             sum(results["records_created"].values()),
         )
         return results
+
+    def enqueue_signal_derive_stub(
+        self,
+        *,
+        source_id: str,
+        sync_batch_id: str,
+        dataset_id: Optional[str] = None,
+        signal_derivation_jobs: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        """Accept signal_derive work without running ML (Phase 1 stub)."""
+        _ = dataset_id
+        logger.info(
+            "signal_derive stub — deferred Phase 2 (source_id=%s sync_batch_id=%s jobs=%s)",
+            source_id,
+            sync_batch_id,
+            list(signal_derivation_jobs or []),
+        )
+        return {
+            "status": "accepted",
+            "job_name": "signal_derive",
+            "sync_batch_id": sync_batch_id,
+            "source_id": source_id,
+            "signal_derivation_jobs": list(signal_derivation_jobs or []),
+        }
+
+
+class SignalDerivationOrchestrator(EnrichmentOrchestrator):
+    """Phase 2 orchestrator: source-driven signal jobs writing via adapter bundle."""
+
+    def __init__(
+        self,
+        tables_manager: Optional[DerivedTablesManager] = None,
+        *,
+        adapters: Optional[Any] = None,
+        name: Optional[str] = None,
+    ):
+        super().__init__(tables_manager, name=name)
+        self._adapters = adapters
+        from .jobs import SIGNAL_JOB_REGISTRY
+
+        self._signal_jobs = dict(SIGNAL_JOB_REGISTRY)
+
+    def _get_adapters(self) -> Any:
+        if self._adapters is not None:
+            return self._adapters
+        from ..storage.adapters.factory import AdapterFactory
+
+        bundle = AdapterFactory.from_runtime()
+        self._adapters = bundle
+        return bundle
+
+    def _resolve_job_names(self, source_id: str, job_names: Optional[List[str]]) -> List[str]:
+        if job_names:
+            return list(job_names)
+        from ..sources.registry import REGISTRY
+
+        source_def = REGISTRY.get(source_id)
+        if source_def and getattr(source_def, "signal_derivation_jobs", None):
+            return list(source_def.signal_derivation_jobs)
+        return []
+
+    async def run_signal_derivation(
+        self,
+        canonical_messages: List[Dict[str, Any]],
+        source_id: str,
+        job_names: Optional[List[str]] = None,
+        sync_batch_id: Optional[str] = None,
+        progress_callback: Optional[Callable[[int, int, str, float, float], None]] = None,
+    ) -> Dict[str, Any]:
+        from ..core.state import get_db_connection
+        from ..enrichment.job_writer import write_signal_records
+        from ..pipeline.envelope import JobEnvelope
+        from ..pipeline.stages import PipelineStage
+
+        resolved = self._resolve_job_names(source_id, job_names)
+        adapters = self._get_adapters()
+        conn = get_db_connection()
+        results: Dict[str, Any] = {
+            "jobs_run": 0,
+            "records_created": {},
+            "errors": [],
+            "deferred_jobs": [],
+            "envelopes": [],
+        }
+        jobs_to_run = [self._signal_jobs[name] for name in resolved if name in self._signal_jobs]
+        total_jobs = len(jobs_to_run)
+        logger.info(
+            "[PIPELINE:SIGNAL_DERIVE] source_id=%s batch_id=%s jobs=%s messages=%d",
+            source_id,
+            sync_batch_id,
+            resolved,
+            len(canonical_messages),
+        )
+        for job_idx, job in enumerate(jobs_to_run, 1):
+            if not job.should_run(canonical_messages):
+                continue
+            job_name = job.get_job_name()
+            try:
+                records = await job.enrich(canonical_messages)
+                if records and records[0].get("_deferred"):
+                    results["deferred_jobs"].append(job_name)
+                    env = JobEnvelope(
+                        stage=PipelineStage.SIGNAL_DERIVE,
+                        source_id=source_id,
+                        batch_id=sync_batch_id or "unknown",
+                        record_ids=[],
+                        status="failed",
+                        provenance={"job_name": job_name, "status": "deferred"},
+                        error=str(records[0].get("error")),
+                        idempotency_key=f"{sync_batch_id or source_id}:{job_name}:signal_derive",
+                    )
+                    results["envelopes"].append(env.to_dict())
+                    continue
+                records = [r for r in records if not r.get("_deferred")]
+                provenance = {"provider": records[0].get("provider") if records else "unknown", "job_id": job_name}
+                if records:
+                    model = records[0].get("model")
+                    if model:
+                        provenance["model"] = model
+                    count = write_signal_records(
+                        job_name,
+                        records,
+                        adapters=adapters,
+                        tables_manager=self.tables_manager,
+                        provenance={**provenance, "sync_batch_id": sync_batch_id, "source_id": source_id},
+                        conn=conn,
+                    )
+                    results["records_created"][job_name] = count
+                else:
+                    results["records_created"][job_name] = 0
+                env = JobEnvelope(
+                    stage=PipelineStage.SIGNAL_DERIVE,
+                    source_id=source_id,
+                    batch_id=sync_batch_id or "unknown",
+                    record_ids=[str(r.get("message_id") or r.get("record_id")) for r in records[:50]],
+                    status="completed",
+                    provenance={**provenance, "records_out": results["records_created"].get(job_name, 0)},
+                    idempotency_key=f"{sync_batch_id or source_id}:{job_name}:signal_derive",
+                )
+                results["envelopes"].append(env.to_dict())
+                results["jobs_run"] += 1
+                if progress_callback:
+                    progress_callback(0, len(canonical_messages), job_name, (job_idx / total_jobs) * 100, 100.0)
+            except Exception as exc:
+                logger.error("[PIPELINE:SIGNAL_DERIVE] job %s failed: %s", job_name, exc)
+                results["errors"].append({"job": job_name, "error": str(exc)})
+
+        try:
+            from ..features.signal.dimension_profiles import DimensionProfileUpdater
+
+            DimensionProfileUpdater(adapters, conn).upsert_all(deferred_jobs=results["deferred_jobs"])
+        except Exception as exc:
+            logger.debug("[PIPELINE:SIGNAL_DERIVE] dimension profile update skipped: %s", exc)
+
+        logger.info(
+            "[PIPELINE:SIGNAL_DERIVE] complete source_id=%s batch_id=%s jobs_run=%d deferred=%s",
+            source_id,
+            sync_batch_id,
+            results["jobs_run"],
+            results["deferred_jobs"],
+        )
+        return results
+
+    async def run_canonical(
+        self,
+        canonical_messages: List[Dict[str, Any]],
+        job_names: Optional[List[str]] = None,
+        progress_callback: Optional[Callable[[int, int, str, float, float], None]] = None,
+    ) -> Dict[str, Any]:
+        logger.debug("run_canonical delegates to legacy EnrichmentOrchestrator path")
+        return await super().run_canonical(canonical_messages, job_names, progress_callback)
+
+
+# Backward-compatible alias: signal orchestrator is the Phase 2 default export.
+EnrichmentOrchestratorSignal = SignalDerivationOrchestrator

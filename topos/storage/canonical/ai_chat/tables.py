@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from .model import CanonicalAIChatMessage, CanonicalAIChatConversation
 
@@ -21,6 +21,9 @@ class CanonicalTablesManager:
         """Initialize with database connection."""
         self.conn = conn
         self._ensure_tables()
+        from ...db.migrations import ensure_migrations_applied
+
+        ensure_migrations_applied(conn)
 
     def _ensure_tables(self) -> None:
         """Ensure canonical tables exist. Creates them if they don't exist."""
@@ -79,81 +82,76 @@ class CanonicalTablesManager:
         self,
         conversations: List[CanonicalAIChatConversation],
         batch_size: int = 1000,
+        *,
+        sync_batch_id: Optional[str] = None,
     ) -> int:
-        """Write multiple conversations to canonical table in batches."""
+        """Write conversations via CanonicalStore with provenance."""
         if not conversations:
             return 0
-        written = 0
-        try:
-            for i in range(0, len(conversations), batch_size):
-                batch = conversations[i:i + batch_size]
-                values = [
-                    (
-                        conv.conversation_id,
-                        conv.owner_user_id,
-                        conv.title,
-                        conv.source,
-                        conv.created_at,
-                        conv.updated_at,
-                    )
-                    for conv in batch
-                ]
-                self.conn.executemany("""
-                    INSERT OR REPLACE INTO ai_chat_conversations (
-                        conversation_id, owner_user_id, title, source_id, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?)
-                """, values)
-                self.conn.commit()
-                written += len(batch)
-                logger.debug("Wrote batch of %d conversations (total: %d)", len(batch), written)
-        except Exception as e:
-            self.conn.rollback()
-            logger.error("Failed to write conversations batch: %s", e)
-            raise
-        return written
+        from ..canonical_store import SQLiteCanonicalStore
+
+        store = SQLiteCanonicalStore(self.conn)
+        records = [
+            {
+                "conversation_id": conv.conversation_id,
+                "owner_user_id": conv.owner_user_id,
+                "title": conv.title,
+                "source_id": conv.source,
+                "created_at": conv.created_at,
+                "updated_at": conv.updated_at,
+                "source_record_id": conv.conversation_id,
+            }
+            for conv in conversations
+        ]
+        refs = store.upsert_batch("ai_chat_conversations", records, sync_batch_id=sync_batch_id)
+        return sum(1 for ref in refs if ref.created)
 
     def write_messages_batch(
         self,
         messages: List[CanonicalAIChatMessage],
         batch_size: int = 1000,
+        *,
+        sync_batch_id: Optional[str] = None,
+        mapping_source_id: Optional[str] = None,
     ) -> int:
-        """Write multiple messages to canonical table in batches."""
+        """Write messages via CanonicalStore in a single transaction."""
         if not messages:
             return 0
-        import json
-        written = 0
-        try:
-            for i in range(0, len(messages), batch_size):
-                batch = messages[i:i + batch_size]
-                values = [
-                    (
-                        msg.message_id,
-                        msg.conversation_id,
-                        msg.sender_type,
-                        msg.sender_id,
-                        msg.ts,
-                        msg.content,
-                        msg.content_rendered,
-                        json.dumps(msg.metadata_json) if msg.metadata_json else None,
-                        msg.seq,
-                        msg.source_id,
-                    )
-                    for msg in batch
-                ]
-                self.conn.executemany("""
-                    INSERT OR REPLACE INTO ai_chat_messages (
-                        message_id, conversation_id, sender_type, sender_id, event_at,
-                        content, content_rendered, metadata_json, sequence, source_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """, values)
-                self.conn.commit()
-                written += len(batch)
-                logger.debug("Wrote batch of %d messages (total: %d)", len(batch), written)
-        except Exception as e:
-            self.conn.rollback()
-            logger.error("Failed to write messages batch: %s", e)
-            raise
-        return written
+        from ..canonical_store import SQLiteCanonicalStore
+        from ..mapping_store import MappingRecord, SQLiteMappingStore
+
+        store = SQLiteCanonicalStore(self.conn)
+        mapping_store = SQLiteMappingStore(self.conn)
+
+        records = [
+            {
+                "message_id": msg.message_id,
+                "conversation_id": msg.conversation_id,
+                "sender_type": msg.sender_type,
+                "sender_id": msg.sender_id,
+                "ts": msg.ts,
+                "content": msg.content,
+                "content_rendered": msg.content_rendered,
+                "metadata_json": msg.metadata_json,
+                "seq": msg.seq,
+                "source_id": msg.source_id,
+                "source_record_id": getattr(msg, "source_record_id", None) or msg.message_id,
+                "content_hash": getattr(msg, "content_hash", None),
+            }
+            for msg in messages
+        ]
+        refs = store.upsert_batch("ai_chat_messages", records, sync_batch_id=sync_batch_id)
+        if mapping_source_id:
+            mapping_store.save_mappings_batch(
+                MappingRecord(
+                    source_id=mapping_source_id,
+                    source_record_id=record["source_record_id"],
+                    canonical_id=record["message_id"],
+                    canonical_table="ai_chat_messages",
+                )
+                for record in records
+            )
+        return sum(1 for ref in refs if ref.created)
 
     def update_message_sequences(self, conversation_id: str) -> None:
         """Update sequence numbers for messages in a conversation."""

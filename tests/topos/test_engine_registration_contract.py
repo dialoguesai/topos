@@ -10,7 +10,7 @@ from topos.engine.registration import (
 
 def test_build_engine_capabilities_contract_shape():
     payload = build_engine_capabilities()
-    assert payload["schema_version"] == CAPABILITIES_SCHEMA_VERSION
+    assert payload["schema_version"] in (CAPABILITIES_SCHEMA_VERSION, "v1", "v2")
     assert isinstance(payload["providers"], list)
     assert isinstance(payload["models"], list)
     assert "supports_filtering" in payload

@@ -244,17 +244,11 @@ def _apply_timestamp_to_date(items: List[Dict[str, Any]], field: str = "event_at
     return out
 
 
-def _apply_field_transforms(
-    items: List[Dict[str, Any]],
-    field_transforms: List[FieldTransform],
-    table_id: Optional[str] = None,
-    diagnostics: Optional[Dict[str, Any]] = None,
-    progress_hook: Optional[Callable[[int, int, Optional[str]], None]] = None,
-) -> List[Dict[str, Any]]:
-    """Apply field-level transforms (e.g. timestamp_to_date) per row. Only pure transforms implemented here."""
-    if not field_transforms or not items:
-        return items
+def _load_text_transform_handlers() -> Tuple[Tuple[str, ...], Tuple[str, ...], Optional[Callable[..., str]], Optional[Callable[..., str]], Any]:
+    """Resolve privacy-filter and Ollama handlers for field transforms."""
+    privacy_ids: Tuple[str, ...] = ()
     ollama_ids: Tuple[str, ...] = ()
+    apply_privacy: Optional[Callable[..., str]] = None
     apply_ollama: Optional[Callable[..., str]] = None
     ollama_effective = None
     try:
@@ -265,13 +259,52 @@ def _apply_field_transforms(
             OLLAMA_TRANSFORM_IDS as _ollama_ids,
             apply_text_transform_with_ollama as _apply_ollama,
         )
+        from topos.sanitization.privacy_filter import (
+            PRIVACY_FILTER_TRANSFORM_IDS as _privacy_ids,
+            apply_text_transform_with_privacy_filter as _apply_privacy,
+            privacy_filter_enabled as _privacy_enabled,
+        )
 
         ollama_ids = _ollama_ids
+        privacy_ids = _privacy_ids
+        if _privacy_enabled():
+            apply_privacy = lambda text, tid, p: _apply_privacy(text, tid, p)
         ollama_effective = resolve_sanitization_ollama_effective(_settings, get_db_connection())
         if ollama_effective.enabled:
             apply_ollama = lambda text, tid, p: _apply_ollama(text, tid, p, effective=ollama_effective)
     except ImportError:
         pass
+    return privacy_ids, ollama_ids, apply_privacy, apply_ollama, ollama_effective
+
+
+def _apply_string_field_transform(
+    val: str,
+    transform_id: str,
+    params: Dict[str, Any],
+    *,
+    privacy_ids: Tuple[str, ...],
+    ollama_ids: Tuple[str, ...],
+    apply_privacy: Optional[Callable[..., str]],
+    apply_ollama: Optional[Callable[..., str]],
+) -> str:
+    if apply_privacy is not None and transform_id in privacy_ids:
+        return apply_privacy(val, transform_id, params)
+    if apply_ollama is not None and transform_id in ollama_ids:
+        return apply_ollama(val, transform_id, params)
+    raise ValueError(f"transform {transform_id!r} is unavailable")
+
+
+def _apply_field_transforms(
+    items: List[Dict[str, Any]],
+    field_transforms: List[FieldTransform],
+    table_id: Optional[str] = None,
+    diagnostics: Optional[Dict[str, Any]] = None,
+    progress_hook: Optional[Callable[[int, int, Optional[str]], None]] = None,
+) -> List[Dict[str, Any]]:
+    """Apply field-level transforms (e.g. timestamp_to_date) per row. Only pure transforms implemented here."""
+    if not field_transforms or not items:
+        return items
+    privacy_ids, ollama_ids, apply_privacy, apply_ollama, _ollama_effective = _load_text_transform_handlers()
 
     out: List[Dict[str, Any]] = []
     stats = diagnostics if isinstance(diagnostics, dict) else None
@@ -327,15 +360,25 @@ def _apply_field_transforms(
                     _applied()
                 else:
                     _skip("value_not_datetime")
-            elif apply_ollama is not None and ft.transform_id in ollama_ids:
+            elif (apply_privacy is not None and ft.transform_id in privacy_ids) or (
+                apply_ollama is not None and ft.transform_id in ollama_ids
+            ):
                 val = updated.get(ft.field)
                 if isinstance(val, str) and val.strip():
                     try:
-                        updated[ft.field] = apply_ollama(val, ft.transform_id, dict(ft.params or {}))
+                        updated[ft.field] = _apply_string_field_transform(
+                            val,
+                            ft.transform_id,
+                            dict(ft.params or {}),
+                            privacy_ids=privacy_ids,
+                            ollama_ids=ollama_ids,
+                            apply_privacy=apply_privacy,
+                            apply_ollama=apply_ollama,
+                        )
                         _applied()
                     except Exception as exc:  # noqa: BLE001
                         logger.warning(
-                            "Ollama field transform %s on field %r failed: %s",
+                            "Field transform %s on field %r failed: %s",
                             ft.transform_id,
                             ft.field,
                             exc,
@@ -438,24 +481,7 @@ async def _apply_field_transforms_async(
     """Async variant that keeps event loop responsive during LLM transform calls."""
     if not field_transforms or not items:
         return items
-    ollama_ids: Tuple[str, ...] = ()
-    apply_ollama_sync: Optional[Callable[..., str]] = None
-    ollama_effective = None
-    try:
-        from topos.config.sanitization_ollama import resolve_sanitization_ollama_effective
-        from topos.config.settings import settings as _settings
-        from topos.core.state import get_db_connection
-        from topos.sanitization.ollama_transforms import (
-            OLLAMA_TRANSFORM_IDS as _ollama_ids,
-            apply_text_transform_with_ollama as _apply_ollama,
-        )
-
-        ollama_ids = _ollama_ids
-        ollama_effective = resolve_sanitization_ollama_effective(_settings, get_db_connection())
-        if ollama_effective.enabled:
-            apply_ollama_sync = lambda text, tid, p: _apply_ollama(text, tid, p, effective=ollama_effective)
-    except ImportError:
-        pass
+    privacy_ids, ollama_ids, apply_privacy, apply_ollama_sync, _ollama_effective = _load_text_transform_handlers()
 
     out: List[Dict[str, Any]] = []
     stats = diagnostics if isinstance(diagnostics, dict) else None
@@ -512,20 +538,26 @@ async def _apply_field_transforms_async(
                     _applied()
                 else:
                     _skip("value_not_datetime")
-            elif apply_ollama_sync is not None and ft.transform_id in ollama_ids:
+            elif (apply_privacy is not None and ft.transform_id in privacy_ids) or (
+                apply_ollama_sync is not None and ft.transform_id in ollama_ids
+            ):
                 val = updated.get(ft.field)
                 if isinstance(val, str) and val.strip():
                     try:
                         updated[ft.field] = await asyncio.to_thread(
-                            apply_ollama_sync,
+                            _apply_string_field_transform,
                             val,
                             ft.transform_id,
                             dict(ft.params or {}),
+                            privacy_ids=privacy_ids,
+                            ollama_ids=ollama_ids,
+                            apply_privacy=apply_privacy,
+                            apply_ollama=apply_ollama_sync,
                         )
                         _applied()
                     except Exception as exc:  # noqa: BLE001
                         logger.warning(
-                            "Ollama field transform %s on field %r failed: %s",
+                            "Field transform %s on field %r failed: %s",
                             ft.transform_id,
                             ft.field,
                             exc,

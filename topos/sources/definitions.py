@@ -38,6 +38,7 @@ class DataSourceDefinition:
     canonical_group_id: Optional[str] = None
     raw_enrichment_jobs: List[str] = field(default_factory=list)
     canonical_enrichment_jobs: List[str] = field(default_factory=list)
+    signal_derivation_jobs: List[str] = field(default_factory=list)
     analytics_profile_id: Optional[str] = None
     enrichment_trigger: Literal["automatic", "manual"] = "automatic"
     ingestion_trigger: Literal["automatic", "manual"] = "automatic"  # When to start processing after upload
@@ -80,6 +81,7 @@ class DataSourceDefinition:
             "canonical_group_id": self.canonical_group_id,
             "raw_enrichment_jobs": list(self.raw_enrichment_jobs),
             "canonical_enrichment_jobs": list(self.canonical_enrichment_jobs),
+            "signal_derivation_jobs": list(self.signal_derivation_jobs),
             "analytics_profile_id": self.analytics_profile_id,
             "enrichment_trigger": self.enrichment_trigger,
             "ingestion_trigger": self.ingestion_trigger,

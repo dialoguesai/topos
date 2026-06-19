@@ -20,11 +20,20 @@ CHATGPT_FILE = DataSourceDefinition(
     canonical_group_id="ai_messages",
     raw_enrichment_jobs=["attachments", "tool_calls", "language", "time_normalization"],
     canonical_enrichment_jobs=["entities", "topics", "sentiment", "embeddings", "emo_27"],
+    signal_derivation_jobs=[
+        "emo_27",
+        "entities",
+        "embeddings",
+        "topics",
+        "dimension_summary",
+        "goal_extraction",
+        "relationship_edges",
+    ],
     analytics_profile_id="chatgpt_dev",
     enrichment_trigger="manual",  # Enrichment skipped during ingestion, trigger via POST /v1/enrichment/process
     ingestion_trigger="manual",  # Ingestion processing waits for manual trigger after upload
-    default_scope_id="aiMessages",
-    allowed_scope_ids=["aiMessages:read", "aiChat:read"],
+    default_scope_id="ai_conversations",
+    allowed_scope_ids=["ai_conversations:read"],
     default_filter_hints=["rolling_window_days", "max_rows"],
     filter_tier_kind="sensitivity",
     default_filter_tiers={
@@ -54,10 +63,19 @@ CHATGPT_UI = DataSourceDefinition(
     canonical_group_id="ai_messages",
     raw_enrichment_jobs=["attachments", "tool_calls", "language", "time_normalization"],
     canonical_enrichment_jobs=["entities", "topics", "sentiment", "embeddings", "emo_27"],
+    signal_derivation_jobs=[
+        "emo_27",
+        "entities",
+        "embeddings",
+        "topics",
+        "dimension_summary",
+        "goal_extraction",
+        "relationship_edges",
+    ],
     analytics_profile_id="chatgpt_dev",
     enrichment_trigger="automatic",  # Enrichment runs automatically during ingestion
-    default_scope_id="aiMessages",
-    allowed_scope_ids=["aiMessages:read", "aiChat:read"],
+    default_scope_id="ai_conversations",
+    allowed_scope_ids=["ai_conversations:read"],
     default_filter_hints=["rolling_window_days", "max_rows"],
     filter_tier_kind="sensitivity",
     default_filter_tiers={
@@ -84,10 +102,11 @@ BROWSER_VISITS = DataSourceDefinition(
     source_type="ui_stream",
     schema_id="browser.visits.v1",
     parser_id="browser.visits.v1",
-    canonical_mapper_id=None,  # No canonical mapping for MVP
-    canonical_group_id=None,
+    canonical_mapper_id="browser_activity",
+    canonical_group_id="activity",
     raw_enrichment_jobs=["url_classification"],  # Classify URL category during browser ingestion
     canonical_enrichment_jobs=[],
+    signal_derivation_jobs=["url_classification"],
     analytics_profile_id=None,
     enrichment_trigger="manual",  # No automatic enrichment
     ingestion_trigger="automatic",
@@ -121,8 +140,8 @@ BROWSER_EVENTS = DataSourceDefinition(
     source_type="ui_stream",
     schema_id="browser.events.v1",
     parser_id="browser.events.v1",
-    canonical_mapper_id=None,
-    canonical_group_id=None,
+    canonical_mapper_id="browser_activity",
+    canonical_group_id="activity",
     raw_enrichment_jobs=[],
     canonical_enrichment_jobs=[],
     analytics_profile_id=None,
@@ -163,6 +182,7 @@ IMESSAGE = DataSourceDefinition(
     canonical_group_id="conversations",
     raw_enrichment_jobs=[],
     canonical_enrichment_jobs=["emo_27"],
+    signal_derivation_jobs=["entities", "relationship_edges", "emo_27"],
     analytics_profile_id=None,
     enrichment_trigger="automatic",
     ingestion_trigger="automatic",  # Sync runs on schedule or "Sync now"
@@ -199,6 +219,7 @@ SIGNAL = DataSourceDefinition(
     canonical_group_id="conversations",
     raw_enrichment_jobs=[],
     canonical_enrichment_jobs=["emo_27"],
+    signal_derivation_jobs=["entities", "relationship_edges", "emo_27"],
     analytics_profile_id=None,
     enrichment_trigger="automatic",
     ingestion_trigger="automatic",
@@ -225,6 +246,34 @@ SIGNAL = DataSourceDefinition(
     ],
 )
 
+CALENDAR_STUB = DataSourceDefinition(
+    source_id="calendar_stub",
+    display_name="Calendar (stub)",
+    source_type="stub",
+    schema_id="calendar.stub.v1",
+    parser_id="calendar.stub.v1",
+    canonical_mapper_id=None,
+    canonical_group_id="schedule",
+    ingestion_trigger="manual",
+    enrichment_trigger="manual",
+    default_scope_id="schedule",
+    allowed_scope_ids=["schedule:read"],
+)
+
+CONTACTS_ENRICHMENT_STUB = DataSourceDefinition(
+    source_id="contacts_enrichment_stub",
+    display_name="Contacts enrichment (stub)",
+    source_type="stub",
+    schema_id="contacts.stub.v1",
+    parser_id="contacts.stub.v1",
+    canonical_mapper_id=None,
+    canonical_group_id="contacts",
+    ingestion_trigger="manual",
+    enrichment_trigger="manual",
+    default_scope_id="contacts",
+    allowed_scope_ids=["contacts:resolve"],
+)
+
 REGISTRY = {
     CHATGPT_FILE.source_id: CHATGPT_FILE,
     CHATGPT_UI.source_id: CHATGPT_UI,
@@ -232,6 +281,8 @@ REGISTRY = {
     BROWSER_EVENTS.source_id: BROWSER_EVENTS,
     IMESSAGE.source_id: IMESSAGE,
     SIGNAL.source_id: SIGNAL,
+    CALENDAR_STUB.source_id: CALENDAR_STUB,
+    CONTACTS_ENRICHMENT_STUB.source_id: CONTACTS_ENRICHMENT_STUB,
 }
 
 

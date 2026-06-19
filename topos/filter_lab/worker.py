@@ -13,6 +13,11 @@ from topos.config.settings import settings
 from topos.core.state import get_db_connection
 from topos.engine.backends.ollama import OllamaAdapter
 from topos.sanitization.ollama_transforms import apply_text_transform_with_ollama
+from topos.sanitization.privacy_filter import (
+    PRIVACY_FILTER_TRANSFORM_IDS,
+    apply_text_transform_with_privacy_filter,
+    privacy_filter_enabled,
+)
 
 from . import bundles as bundles_mod
 from . import store
@@ -190,16 +195,20 @@ def process_job_group_sync(group_id: str) -> None:
             )
 
             try:
-                assert adapter is not None
-                _ensure_model_pulled(adapter, model_tag, baseline_set, pulled, conn, group_id)
                 t0 = time.perf_counter()
-                out = apply_text_transform_with_ollama(
-                    text,
-                    group["filter_id"],
-                    None,
-                    effective=eff_merged,
-                    model_override=model_tag,
-                )
+                filter_id = str(group["filter_id"])
+                if privacy_filter_enabled() and filter_id in PRIVACY_FILTER_TRANSFORM_IDS:
+                    out = apply_text_transform_with_privacy_filter(text, filter_id, None)
+                else:
+                    assert adapter is not None
+                    _ensure_model_pulled(adapter, model_tag, baseline_set, pulled, conn, group_id)
+                    out = apply_text_transform_with_ollama(
+                        text,
+                        filter_id,
+                        None,
+                        effective=eff_merged,
+                        model_override=model_tag,
+                    )
                 ms = int((time.perf_counter() - t0) * 1000)
                 store.update_run(
                     conn,

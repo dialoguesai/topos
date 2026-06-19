@@ -4,11 +4,26 @@ from __future__ import annotations
 
 import json
 import logging
-import urllib.request
 import urllib.error
+import urllib.request
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger("topos.engine.ollama")
+
+_PROMPT_CONFIG: Optional[Dict[str, Any]] = None
+
+
+def _load_prompt_config() -> Dict[str, Any]:
+    global _PROMPT_CONFIG
+    if _PROMPT_CONFIG is not None:
+        return _PROMPT_CONFIG
+    config_path = Path(__file__).resolve().parents[2] / "enrichment" / "signal_derivation_config.json"
+    try:
+        _PROMPT_CONFIG = json.loads(config_path.read_text(encoding="utf-8"))
+    except Exception:
+        _PROMPT_CONFIG = {}
+    return _PROMPT_CONFIG
 
 
 class OllamaAdapter:
@@ -120,12 +135,48 @@ class OllamaAdapter:
                     f'Classify the emotion of this text in one word or short phrase. '
                     f'Reply with JSON only: {{"emotion_label": "...", "confidence": 0.9}}\n\nText: {text}'
                 )
+            elif subtype == "topic_extraction":
+                prompt = (
+                    "Extract up to 5 topics from the text. Reply with JSON only: "
+                    '{"topics": [{"label": "...", "confidence": 0.9}]}\n\nText: '
+                    f"{text}"
+                )
+            elif subtype == "raw_to_summary":
+                dimension = payload.get("dimension") or "memory"
+                records = payload.get("records") or []
+                context = "\n".join(str(r.get("content", r))[:500] for r in records[:20] if r)
+                templates = _load_prompt_config().get("dimension_summary_templates") or {}
+                template = templates.get(dimension) or f"Summarize the following {dimension} dimension records."
+                prompt = f"{template}\n\nRecords:\n{context}\n\nReply JSON: {{\"summary_text\": \"...\", \"dimension\": \"{dimension}\"}}"
+            elif subtype == "goal_extraction":
+                prompt = (
+                    "Extract user goals from the AI chat content. Reply JSON only: "
+                    '{"goals": [{"text": "...", "confidence": 0.8, "horizon": "short"}]}\n\nText: '
+                    f"{text}"
+                )
+            elif subtype == "query_inference":
+                ctx = payload.get("context") or ""
+                q = payload.get("query") or text
+                prompt = (
+                    f"Answer yes or no with confidence 0-1. Reply JSON only: "
+                    f'{{"answer": "yes|no|unknown", "confidence": 0.5}}\n\nQuery: {q}\n\nContext: {ctx[:3500]}'
+                )
             else:
                 prompt = str(payload) if payload else ""
             response_text = self._generate(model, prompt, num_predict=None, keep_alive=None)
             out = self._parse_response(response_text, subtype, model)
             out["model"] = model
             return out
+        except urllib.error.URLError:
+            return {
+                "status": "deferred",
+                "error": "ollama_unreachable",
+                "model": model,
+            }
+        except RuntimeError as exc:
+            if "Ollama request failed" in str(exc):
+                return {"status": "deferred", "error": "ollama_unreachable", "model": model}
+            return {"error": str(exc), "model": model}
         except Exception as e:
             return {"error": str(e), "model": model, "emotion_label": None, "confidence": None, "all_emotions": []}
 
@@ -174,7 +225,47 @@ class OllamaAdapter:
             except (json.JSONDecodeError, KeyError):
                 pass
             return {"emotion_label": response_text[:100] if response_text else None, "confidence": None, "all_emotions": []}
+        if subtype == "topic_extraction":
+            parsed = self._parse_json_object(response_text)
+            topics = parsed.get("topics") if isinstance(parsed, dict) else []
+            if not isinstance(topics, list):
+                topics = []
+            return {"topics": topics[:5], "model": model}
+        if subtype == "raw_to_summary":
+            parsed = self._parse_json_object(response_text)
+            if isinstance(parsed, dict) and parsed.get("summary_text"):
+                return {"summary_text": parsed.get("summary_text"), "dimension": parsed.get("dimension"), "model": model}
+            return {"summary_text": response_text[:2000], "dimension": "memory", "model": model}
+        if subtype == "goal_extraction":
+            parsed = self._parse_json_object(response_text)
+            goals = parsed.get("goals") if isinstance(parsed, dict) else []
+            if not isinstance(goals, list):
+                goals = []
+            return {"goals": goals, "model": model}
+        if subtype == "query_inference":
+            parsed = self._parse_json_object(response_text)
+            if isinstance(parsed, dict):
+                return {
+                    "answer": parsed.get("answer"),
+                    "confidence": parsed.get("confidence"),
+                    "model": model,
+                }
+            return {"answer": "unknown", "confidence": 0.0, "model": model}
         return {"output": response_text}
+
+    def _parse_json_object(self, response_text: str) -> Dict[str, Any]:
+        response_text = (response_text or "").strip()
+        start = response_text.find("{")
+        if start < 0:
+            return {}
+        end = response_text.rfind("}") + 1
+        if end <= start:
+            return {}
+        try:
+            obj = json.loads(response_text[start:end])
+            return obj if isinstance(obj, dict) else {}
+        except json.JSONDecodeError:
+            return {}
 
     def unload_model(self, model_name: str) -> None:
         """Unload model from memory by sending a minimal generate with keep_alive=0."""

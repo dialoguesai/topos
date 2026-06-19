@@ -28,6 +28,9 @@ class Canonicalizer:
         staging_records: List[Dict[str, Any]],
         source: str,
         batch_size: int = 1000,
+        *,
+        sync_batch_id: Optional[str] = None,
+        mapping_source_id: Optional[str] = None,
     ) -> Dict[str, Any]:
         """Canonicalize a batch of staging records.
 
@@ -116,7 +119,9 @@ class Canonicalizer:
         conversations_created = 0
         try:
             conversations_created = self.tables_manager.write_conversations_batch(
-                conversations, batch_size=batch_size
+                conversations,
+                batch_size=batch_size,
+                sync_batch_id=sync_batch_id,
             )
         except Exception as exc:
             logger.error("Failed to write conversations: %s", exc)
@@ -125,7 +130,10 @@ class Canonicalizer:
         messages_created = 0
         try:
             messages_created = self.tables_manager.write_messages_batch(
-                canonical_messages, batch_size=batch_size
+                canonical_messages,
+                batch_size=batch_size,
+                sync_batch_id=sync_batch_id,
+                mapping_source_id=mapping_source_id or source,
             )
         except Exception as exc:
             logger.error("Failed to write messages: %s", exc)
