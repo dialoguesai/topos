@@ -1973,6 +1973,22 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
             return {"id": req_id, "status": "error", "error": "Run not found"}
         return {"id": req_id, "status": "ok", "payload": {"run": row}}
 
+    if msg_type == "list_waiting_routine_runs":
+        from ..routines import store as routines_store
+
+        conn = get_db_connection()
+        if not conn:
+            return {"id": req_id, "status": "error", "error": "Database not available"}
+        pl = message.get("payload") or {}
+        user_id = str(pl.get("user_id") or "").strip()
+        engine_id = str(pl.get("engine_id") or "").strip()
+        if not user_id or not engine_id:
+            return {"id": req_id, "status": "error", "error": "user_id and engine_id required"}
+        rows = routines_store.list_waiting_runs_for_owner(
+            conn, owner_user_id=user_id, engine_id=engine_id
+        )
+        return {"id": req_id, "status": "ok", "payload": {"runs": rows}}
+
     if msg_type == "list_due_routines":
         from ..routines import store as routines_store
 
