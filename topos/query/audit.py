@@ -18,6 +18,7 @@ def build_query_audit_event(
     filters_applied: Optional[List[str]] = None,
     cache_keys: Optional[List[str]] = None,
     deny_reason: Optional[str] = None,
+    retrieval_metadata: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     outcome = turn_outcome.value if isinstance(turn_outcome, TurnOutcome) else str(turn_outcome)
     event = {
@@ -32,6 +33,10 @@ def build_query_audit_event(
     }
     if deny_reason:
         event["deny_reason"] = deny_reason
+    if retrieval_metadata:
+        for key in ("retrieval_strategy", "vector_hits", "clusters_returned", "canonical_source"):
+            if key in retrieval_metadata:
+                event[key] = retrieval_metadata[key]
     if outcome == TurnOutcome.MEMORY_HIT.value:
         event["stores_touched"] = []
     return event

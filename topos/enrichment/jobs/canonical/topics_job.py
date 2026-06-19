@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ..base import BaseEnrichmentJob
 from ._batch_limits import MAX_JOB_MESSAGES, TOPIC_BATCH_CONCURRENCY
+from ....config.settings import settings
 from ._engine_runner import run_engine_task
 from ....engine import Engine
 
@@ -68,7 +69,7 @@ class TopicsJob(BaseEnrichmentJob):
                     record_ids=[str(item["message_id"])],
                     input_payload={"text": item["content"]},
                     provider="ollama",
-                    model="llama3.2:3b",
+                    model=settings.ollama_query_model,
                 )
                 if result.status == "deferred":
                     deferred = True

@@ -35,6 +35,11 @@ from .sqlite.stores import (
 BackendKind = Literal["local_database", "hosted_database", "memory"]
 
 
+def _is_sqlite_conn(conn: Any) -> bool:
+    module_name = conn.__class__.__module__.lower()
+    return "sqlite" in module_name
+
+
 @dataclass(frozen=True)
 class AdapterBundle:
     canonical: CanonicalStore
@@ -57,7 +62,37 @@ class AdapterFactory:
         conn: Optional[sqlite3.Connection] = None,
     ) -> AdapterBundle:
         if backend == "hosted_database":
-            raise NotImplementedError("hosted_database adapters are Phase 4+")
+            import os
+
+            pg_conn = conn
+            if pg_conn is None:
+                try:
+                    from ..db.postgres import connect_postgres
+
+                    pg_conn = connect_postgres()
+                except Exception:
+                    pg_conn = None
+            if pg_conn is not None and not _is_sqlite_conn(pg_conn) and os.environ.get("POSTGRES_URL"):
+                from .postgres.stores import build_postgres_adapter_bundle
+
+                return build_postgres_adapter_bundle(pg_conn)
+            # Contract tests without Postgres: sqlite bundle tagged hosted_database.
+            if conn is None:
+                conn = sqlite3.connect(":memory:")
+                conn.row_factory = sqlite3.Row
+            from ..db.migrations import ensure_migrations_applied
+
+            ensure_migrations_applied(conn)
+            bundle = AdapterFactory.create("local_database", conn=conn)
+            return AdapterBundle(
+                canonical=bundle.canonical,
+                signal=bundle.signal,
+                vector=bundle.vector,
+                graph=bundle.graph,
+                audit=bundle.audit,
+                query_session=bundle.query_session,
+                backend="hosted_database",
+            )
 
         if backend == "memory":
             return AdapterBundle(

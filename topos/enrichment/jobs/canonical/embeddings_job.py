@@ -42,18 +42,23 @@ class EmbeddingsJob(BaseEnrichmentJob):
         processed = 0
         for msg in canonical_messages:
             message_id = msg.get("message_id") or msg.get("id")
+            record_id = msg.get("event_id") or msg.get("record_id") or message_id
             content = msg.get("content", "")
-            if not message_id or not content:
+            if not content:
+                title = msg.get("title") or ""
+                url = msg.get("url") or ""
+                content = f"{title} {url}".strip()
+            if not record_id or not content:
                 processed += 1
                 continue
             batch_texts.append(str(content))
             batch_meta.append(
                 {
-                    "message_id": message_id,
-                    "record_id": message_id,
+                    "message_id": record_id,
+                    "record_id": record_id,
                     "source_id": msg.get("source_id"),
                     "text_preview": str(content)[:200],
-                    "signal_dimension": "memory",
+                    "signal_dimension": msg.get("signal_dimension") or "memory",
                 }
             )
             if len(batch_texts) >= batch_size:

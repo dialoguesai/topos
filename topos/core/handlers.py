@@ -2600,6 +2600,34 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
             return {"id": req_id, "status": "ok", "payload": result}
         except Exception as exc:  # noqa: BLE001
             return {"id": req_id, "status": "error", "error": str(exc), "code": 503}
+    if msg_type == "signal_search_vectors":
+        payload = message.get("payload") or {}
+        try:
+            from ..features.signal.service import get_signal_service
+
+            conn = get_db_connection()
+            service = get_signal_service(conn=conn)
+            result = service.search_vectors(
+                query=str(payload.get("q") or payload.get("query") or ""),
+                limit=min(int(payload.get("limit") or 20), 100),
+                source_id=payload.get("source_id"),
+                dimension=payload.get("dimension"),
+                model=payload.get("model"),
+            )
+            return {"id": req_id, "status": "ok", "payload": result}
+        except Exception as exc:  # noqa: BLE001
+            return {"id": req_id, "status": "error", "error": str(exc), "code": 503}
+    if msg_type == "signal_vector_source_text":
+        payload = message.get("payload") or {}
+        try:
+            from ..features.signal.service import get_signal_service
+
+            conn = get_db_connection()
+            service = get_signal_service(conn=conn)
+            result = service.get_vector_source_text(record_id=str(payload.get("record_id") or ""))
+            return {"id": req_id, "status": "ok", "payload": result}
+        except Exception as exc:  # noqa: BLE001
+            return {"id": req_id, "status": "error", "error": str(exc), "code": 503}
     if msg_type == "signal_list_graph":
         payload = message.get("payload") or {}
         try:
@@ -2618,6 +2646,37 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
             return {"id": req_id, "status": "ok", "payload": result}
         except Exception as exc:  # noqa: BLE001
             return {"id": req_id, "status": "error", "error": str(exc), "code": 503}
+    if msg_type == "signal_list_topic_clusters":
+        payload = message.get("payload") or {}
+        try:
+            from ..features.signal.service import get_signal_service
+
+            conn = get_db_connection()
+            service = get_signal_service(conn=conn)
+            result = service.list_topic_clusters(
+                limit=min(int(payload.get("limit") or 50), 200),
+                dimension=payload.get("dimension"),
+            )
+            return {"id": req_id, "status": "ok", "payload": result}
+        except Exception as exc:  # noqa: BLE001
+            return {"id": req_id, "status": "error", "error": str(exc)}
+    if msg_type == "signal_list_topic_cluster_members":
+        payload = message.get("payload") or {}
+        cluster_id = str(payload.get("cluster_id") or "").strip()
+        if not cluster_id:
+            return {"id": req_id, "status": "error", "error": "cluster_id required", "code": 400}
+        try:
+            from ..features.signal.service import get_signal_service
+
+            conn = get_db_connection()
+            service = get_signal_service(conn=conn)
+            result = service.list_topic_cluster_members(
+                cluster_id,
+                limit=min(int(payload.get("limit") or 100), 500),
+            )
+            return {"id": req_id, "status": "ok", "payload": result}
+        except Exception as exc:  # noqa: BLE001
+            return {"id": req_id, "status": "error", "error": str(exc)}
     if msg_type == "signal_list_dimensions":
         try:
             from ..features.signal.service import get_signal_service

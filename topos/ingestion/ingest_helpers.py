@@ -1,92 +1,17 @@
 from __future__ import annotations
 
-import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Any, Dict, Optional
 
+from .canonical_pipeline import canonicalize_normalized_batch, run_post_canonical_pipeline
 from .log_preview import field_preview
 from .manager import IngestionManager
 from .triggers.file_trigger import FileTrigger
 from ..storage.raw.file_store import RawFileStore
 
 logger = logging.getLogger("topos.ingestion.ingest_helpers")
-
-
-async def _run_browser_url_classification_enrichment(
-    *,
-    db_conn,
-    source_id: str,
-    source,
-    normalized_payload: dict,
-) -> None:
-    """Run URL classification enrichment for browser plugin sources."""
-    configured_jobs = list(getattr(source, "raw_enrichment_jobs", []) or [])
-    if "url_classification" not in configured_jobs:
-        logger.debug(
-            "[PIPELINE:ENRICHMENT] Browser URL classification skipped: source=%s configured_raw_jobs=%s",
-            source_id,
-            configured_jobs,
-        )
-        return
-
-    url = normalized_payload.get("url")
-    if not isinstance(url, str) or not url.strip():
-        logger.debug(
-            "[PIPELINE:ENRICHMENT] Browser URL classification skipped: source=%s missing url",
-            source_id,
-        )
-        return
-
-    title = normalized_payload.get("title")
-    record_id = normalized_payload.get("record_id") or ""
-    dataset_id = normalized_payload.get("dataset_id")
-
-    try:
-        from ..engine import Engine, build_url_classification_task
-        from ..storage.raw.browser_flat_tables import write_browser_url_classification
-
-        task_id = f"url_cls_{source_id}_{record_id}" if record_id else f"url_cls_{source_id}_{uuid.uuid4().hex[:12]}"
-        task = build_url_classification_task(
-            task_id=task_id,
-            url=url,
-            title=title if isinstance(title, str) else None,
-            source_id=source_id,
-            record_ids=[record_id] if record_id else [],
-        )
-        engine = Engine()
-        result = await asyncio.to_thread(engine.run, task)
-        if result.status != "completed" or result.error:
-            logger.warning(
-                "[PIPELINE:ENRICHMENT] Browser URL classification Engine result failed: %s",
-                result.error or result.status,
-            )
-            return
-        out = result.output
-        write_browser_url_classification(
-            db_conn,
-            source_table=source_id,
-            record_id=record_id,
-            dataset_id=dataset_id,
-            url=url,
-            title=title if isinstance(title, str) else None,
-            category=out.get("category"),
-            confidence=out.get("confidence"),
-            model_name=out.get("model"),
-        )
-        logger.debug(
-            "[PIPELINE:ENRICHMENT] Browser URL classification stored: source=%s record_id=%s category=%s confidence=%.4f",
-            source_id,
-            (record_id or "")[:24],
-            out.get("category"),
-            float(out.get("confidence", 0.0) or 0.0),
-        )
-    except Exception as e:  # noqa: BLE001
-        logger.warning(
-            "[PIPELINE:DIRECT] Browser URL classification failed (non-fatal): %s",
-            e,
-        )
 
 
 async def ingest_file_payload(
@@ -256,7 +181,6 @@ async def _ingest_ui_payload_direct(
     """Process UI payload directly to database without creating JSONL files."""
     from .parsers import PARSER_REGISTRY
     from .sources.base import RawRecord
-    from ..enrichment.orchestrator import EnrichmentOrchestrator
     from ..enrichment.derived_tables import DerivedTablesManager
     from ..core.state import get_db_connection
     
@@ -368,168 +292,39 @@ async def _ingest_ui_payload_direct(
         except Exception as e:  # noqa: BLE001
             logger.warning("[PIPELINE:DIRECT] Failed to write browser_events flat row (non-fatal): %s", e)
 
-    if source_id.startswith("browser_") and getattr(source, "canonical_mapper_id", None) == "browser_activity":
-        try:
-            from ..canonicalization.mappers import MAPPER_REGISTRY
-            from ..ingestion.parsers.base import NormalizedRecord
-            from ..storage.canonical.activity_tables import ActivityEventsManager
-
-            mapper = MAPPER_REGISTRY.get("browser_activity")
-            if mapper:
-                norm = NormalizedRecord(
-                    record_id=str(normalized.payload.get("id") or record_id),
-                    payload=normalized.payload,
-                )
-                mapped = mapper.map(norm)
-                activity_manager = ActivityEventsManager(db_conn)
-                sync_batch_id = str(job_id)
-                activity_manager.upsert_batch(
-                    [mapped.payload],
-                    source_id=source_id,
-                    sync_batch_id=sync_batch_id,
-                )
-                logger.debug(
-                    "[PIPELINE:DIRECT] Browser activity canonical: event_id=%s",
-                    mapped.payload.get("event_id"),
-                )
-        except Exception as e:  # noqa: BLE001
-            logger.warning("[PIPELINE:DIRECT] Failed to write activity_events (non-fatal): %s", e)
-
-    if source_id.startswith("browser_"):
-        await _run_browser_url_classification_enrichment(
-            db_conn=db_conn,
-            source_id=source_id,
-            source=source,
-            normalized_payload=normalized.payload,
-        )
-    
     tables_manager = DerivedTablesManager(conn=db_conn)
-    
-    # Note: Raw record storage happens before parsing (see above)
-    # This ensures raw retention per architecture requirements
-    
-    # Canonicalize: conversations group -> conversation_messages; else engine ai_chat_*
-    canonical_messages_dicts = []
-    staging_record = {
-        "message_id": normalized.payload.get("message_id"),
-        "dataset_id": dataset_id,
-        "thread_id": normalized.payload.get("thread_id") or normalized.payload.get("conversation_id") or dataset_id,
-        "ts": normalized.payload.get("ts") or normalized.payload.get("created_at") or str(datetime.now(timezone.utc).timestamp()),
-        "sender_type": normalized.payload.get("sender_type"),
-        "content": normalized.payload.get("content"),
-        "source_id": source_id,
-    }
-    if "_metadata" in normalized.payload:
-        staging_record["_metadata"] = normalized.payload["_metadata"]
+    sync_batch_id = str(job_id)
 
-    if getattr(source, "canonical_group_id", None) == "conversations":
-        # Conversations canonical: write only to conversation_messages / conversations (never ai_chat_*)
-        try:
-            from ..storage.canonical import ConversationsTablesManager
-            conv_manager = ConversationsTablesManager(db_conn)
-            conv_manager.upsert_message_batch(
-                [staging_record], dataset_id, source_id, sync_batch_id=str(job_id)
-            )
-            canonical_messages_dicts = [{
-                "message_id": staging_record.get("message_id"),
-                "conversation_id": staging_record.get("thread_id") or staging_record.get("conversation_id") or dataset_id,
-                "sender_type": staging_record.get("sender_type"),
-                "sender_id": None,
-                "ts": staging_record.get("ts"),
-                "content": staging_record.get("content"),
-                "source_id": source_id,
-            }]
-            logger.debug(
-                "[PIPELINE:DIRECT] Conversations canonical: message_id=%s",
-                staging_record.get("message_id"),
-            )
-        except Exception as e:
-            logger.error(
-                "[PIPELINE:DIRECT] Failed to write to conversation_messages: %s",
-                e,
-                exc_info=True,
-            )
-    elif source.canonical_mapper_id:
-        try:
-            from ..storage.canonical.ai_chat import CanonicalTablesManager, Canonicalizer
-
-            canonical_tables_manager = CanonicalTablesManager(db_conn)
-            canonicalizer = Canonicalizer(canonical_tables_manager)
-            mapper_source = source.canonical_mapper_id
-            canonical_result = canonicalizer.canonicalize_staging_batch(
-                [staging_record],
-                source=mapper_source,
-                batch_size=1,
-                sync_batch_id=str(job_id),
-                mapping_source_id=source_id,
-            )
-            canonical_messages_dicts = canonical_result.get("canonical_messages", [])
-            logger.debug(
-                "[PIPELINE:DIRECT] Canonicalized record: message_id=%s, conversations=%d, messages=%d",
-                staging_record.get("message_id"),
-                canonical_result.get("conversations_created", 0),
-                canonical_result.get("messages_created", 0),
-            )
-            if canonical_result.get("errors"):
-                logger.warning(
-                    "[PIPELINE:DIRECT] Canonicalization had errors: %s",
-                    canonical_result.get("errors"),
-                )
-        except ImportError as e:
-            logger.warning(
-                "[PIPELINE:DIRECT] Canonicalization modules not available: %s. Skipping canonicalization.",
-                e,
-            )
-        except Exception as e:
-            logger.error(
-                "[PIPELINE:DIRECT] Failed to canonicalize record: %s",
-                e,
-                exc_info=True,
-            )
-    
-    # Run canonical enrichment only for sources that declare canonical jobs.
-    enrichment_trigger = getattr(source, "enrichment_trigger", "manual")
-    canonical_jobs = list(getattr(source, "canonical_enrichment_jobs", []) or [])
-    canonical_message_count = len(canonical_messages_dicts) if canonical_messages_dicts else 0
-
-    if canonical_jobs:
-        logger.info(
-            "[PIPELINE:DIRECT:ENRICHMENT] source_id=%s, enrichment_trigger=%s, canonical_messages=%d, jobs=%s",
+    canonical_result = canonicalize_normalized_batch(
+        db_conn,
+        source,
+        [normalized],
+        dataset_id=dataset_id,
+        sync_batch_id=sync_batch_id,
+    )
+    if canonical_result.errors:
+        logger.warning(
+            "[PIPELINE:DIRECT] Canonicalization errors: source_id=%s errors=%s",
             source_id,
-            enrichment_trigger,
-            canonical_message_count,
-            canonical_jobs,
+            canonical_result.errors,
         )
-        if enrichment_trigger == "manual":
-            logger.info(
-                "[PIPELINE:DIRECT:ENRICHMENT] ✅ SKIPPING enrichment (manual trigger): %d canonical messages will be enriched later via POST /v1/enrichment/process",
-                canonical_message_count,
-            )
-        elif enrichment_trigger == "automatic" and canonical_messages_dicts:
-            enrichment_orchestrator = EnrichmentOrchestrator(tables_manager=tables_manager)
-            logger.info(
-                "[PIPELINE:DIRECT:ENRICHMENT] Running enrichment (automatic trigger): %d messages, jobs=%s",
-                canonical_message_count,
-                canonical_jobs,
-            )
-            enrichment_result = await enrichment_orchestrator.run_canonical(
-                canonical_messages_dicts,
-                job_names=canonical_jobs,
-            )
-            logger.debug(
-                "[PIPELINE:DIRECT] Enrichment complete: jobs_run=%s, records_created=%s",
-                enrichment_result.get("jobs_run"),
-                enrichment_result.get("records_created"),
-            )
-    else:
-        logger.debug(
-            "[PIPELINE:DIRECT:ENRICHMENT] No canonical enrichment jobs configured for source_id=%s; skipping canonical enrichment stage",
-            source_id,
-        )
-    
+
+    pipeline_outcome = await run_post_canonical_pipeline(
+        source_def=source,
+        canonical_records=canonical_result.canonical_records,
+        sync_batch_id=sync_batch_id,
+        tables_manager=tables_manager,
+    )
+    signal_out = pipeline_outcome.get("signal_derivation") or {}
+    enrich_out = pipeline_outcome.get("canonical_enrichment") or {}
+
     return {
         "status": "ok",
         "job_id": job_id,
         "records_processed": 1,
-        "errors_count": 0,
+        "errors_count": len(canonical_result.errors),
+        "canonical_events_created": canonical_result.events_created,
+        "canonical_messages_created": canonical_result.messages_created,
+        "signal_jobs_run": (signal_out.get("jobs_run") if isinstance(signal_out, dict) else 0) or 0,
+        "enrichment_jobs_run": (enrich_out.get("jobs_run") if isinstance(enrich_out, dict) else 0) or 0,
     }

@@ -123,6 +123,40 @@ class InMemoryVectorIndex:
         page = [{k: v for k, v in r.items() if k != "vector"} for r in rows[offset : offset + limit]]
         return ListPage(items=page, total=total, offset=offset, limit=limit)
 
+    def search_similar(
+        self,
+        query_vector: List[float],
+        *,
+        source_id: Optional[str] = None,
+        dimension: Optional[str] = None,
+        model: Optional[str] = None,
+        limit: int = 20,
+    ) -> ListPage:
+        from ...features.signal.vector_math import cosine_similarity
+
+        limit = max(1, min(int(limit), 100))
+        rows = list(self._items.values())
+        if source_id is not None:
+            rows = [r for r in rows if r.get("source_id") == source_id]
+        if dimension is not None:
+            rows = [r for r in rows if r.get("signal_dimension") == dimension]
+        if model is not None:
+            rows = [r for r in rows if r.get("model") == model]
+        query_dims = len(query_vector)
+        scored: List[tuple[float, Dict[str, Any]]] = []
+        for row in rows:
+            vector = row.get("vector")
+            if not isinstance(vector, list) or len(vector) != query_dims:
+                continue
+            sim = cosine_similarity(query_vector, [float(x) for x in vector])
+            meta = {k: v for k, v in row.items() if k != "vector"}
+            meta["similarity"] = round(sim, 6)
+            scored.append((sim, meta))
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        top = scored[:limit]
+        items = [meta for _, meta in top]
+        return ListPage(items=items, total=len(scored), offset=0, limit=limit)
+
     def delete_by_record(self, record_id: str) -> int:
         to_delete = [k for k, v in self._items.items() if v.get("record_id") == record_id]
         for key in to_delete:

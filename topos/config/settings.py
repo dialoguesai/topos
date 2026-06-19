@@ -87,6 +87,7 @@ class Settings(BaseSettings):
     topos_compute_profile: str = Field("basic_hosted", env="TOPOS_COMPUTE_PROFILE")
 
     engine_ollama_base_url: str = Field("http://localhost:11434", env="ENGINE_OLLAMA_BASE_URL")
+    ollama_query_model: str = Field("llama3.2:latest", env="TOPOS_OLLAMA_QUERY_MODEL")
     engine_default_provider: str = Field("huggingface", env="ENGINE_DEFAULT_PROVIDER")
 
     # Sanitization field-transforms via Ollama (see topos.config.sanitization_ollama + engine_config overrides)

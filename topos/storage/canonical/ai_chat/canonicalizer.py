@@ -106,11 +106,12 @@ class Canonicalizer:
             timestamps = [msg.ts for msg in messages if msg.ts]
             created_at = min(timestamps) if timestamps else ""
             updated_at = max(timestamps) if timestamps else ""
+            conv_source = mapping_source_id or (messages[0].source_id if messages else source)
             conversation = CanonicalAIChatConversation(
                 conversation_id=conversation_id,
                 owner_user_id=owner_user_id,
                 title=None,
-                source=source,
+                source=conv_source,
                 created_at=created_at,
                 updated_at=updated_at,
             )

@@ -179,6 +179,7 @@ class QueryPipelineOrchestrator:
                 RetrievalRequest(
                     manifest=manifest,
                     access_mode=access_mode,
+                    query_text=query_text,
                     filter_manifest=filter_manifest,
                     field_transforms=field_transforms,
                     skip_retrieval=False,
@@ -207,7 +208,10 @@ class QueryPipelineOrchestrator:
             access_mode=access_mode,
         )
         public = self._game_layer.apply(
-            context_packet=filtered.context_packet, access_mode=access_mode, scope_id=scope_id
+            context_packet=filtered.context_packet,
+            access_mode=access_mode,
+            scope_id=scope_id,
+            query_text=query_text,
         )
         if access_mode == "inference":
             inf = await asyncio.to_thread(
@@ -255,6 +259,7 @@ class QueryPipelineOrchestrator:
             game_layer_strategy=public.strategy,
             stores_touched=bundle.stores_touched,
             filters_applied=filtered.filters_applied,
+            retrieval_metadata=bundle.retrieval_metadata,
         )
         return {
             "turn_outcome": TurnOutcome.LIVE_QUERY.value,

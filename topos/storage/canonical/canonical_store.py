@@ -96,6 +96,7 @@ class SQLiteCanonicalStore(CanonicalStore):
             ON CONFLICT(message_id) DO UPDATE SET
                 content=excluded.content,
                 metadata_json=excluded.metadata_json,
+                source_id=excluded.source_id,
                 sync_batch_id=excluded.sync_batch_id,
                 ingested_at=excluded.ingested_at
             """,

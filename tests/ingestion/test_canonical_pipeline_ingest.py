@@ -1,0 +1,121 @@
+"""Tests for canonical-first ingestion and signal derivation."""
+
+from __future__ import annotations
+
+import sqlite3
+from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
+
+from topos.ingestion.canonical_pipeline import (
+    activity_payload_to_signal_record,
+    canonicalize_normalized_batch,
+)
+from topos.ingestion.ingest_helpers import ingest_ui_payload
+from topos.ingestion.parsers.base import NormalizedRecord
+from topos.sources.registry import BROWSER_VISITS, CHATGPT_FILE, CHATGPT_UI
+from topos.storage.db.migrations import apply_all_migrations
+
+
+@pytest.fixture
+def migrated_conn(tmp_path, monkeypatch):
+    db_path = tmp_path / "canonical_pipeline.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    apply_all_migrations(conn)
+    monkeypatch.setattr("topos.core.state.get_db_connection", lambda: conn)
+    yield conn
+    conn.close()
+
+
+def test_browser_visit_canonicalize_writes_activity_events(migrated_conn) -> None:
+    normalized = NormalizedRecord(
+        record_id="visit-1",
+        payload={
+            "id": "visit-1",
+            "url": "https://example.com/docs",
+            "title": "Example Docs",
+            "visited_at": "2026-01-03T08:00:00Z",
+            "event_type": "visit",
+        },
+    )
+    result = canonicalize_normalized_batch(
+        migrated_conn,
+        BROWSER_VISITS,
+        [normalized],
+        dataset_id="user-1:default:device1",
+        sync_batch_id="batch-1",
+    )
+    assert result.events_created == 1
+    assert len(result.canonical_records) == 1
+    signal_row = result.canonical_records[0]
+    assert signal_row["url"] == "https://example.com/docs"
+    assert signal_row["event_id"].startswith("browser:")
+
+    row = migrated_conn.execute(
+        "SELECT event_id, url, source_id FROM activity_events WHERE event_id=?",
+        (signal_row["event_id"],),
+    ).fetchone()
+    assert row is not None
+    assert row["source_id"] == "browser_visits"
+
+
+def test_activity_payload_to_signal_record_shape() -> None:
+    record = activity_payload_to_signal_record(
+        {"event_id": "browser:abc", "url": "https://a.test", "title": "A"},
+        source_id="browser_visits",
+    )
+    assert record["record_id"] == "browser:abc"
+    assert record["source_id"] == "browser_visits"
+
+
+@pytest.mark.asyncio
+async def test_browser_direct_ingest_runs_signal_derive_from_canonical(migrated_conn) -> None:
+    mock_engine_result = MagicMock()
+    mock_engine_result.status = "completed"
+    mock_engine_result.error = None
+    mock_engine_result.output = {
+        "category": "technology",
+        "confidence": 0.91,
+        "model": "test-model",
+        "items": [{"category": "technology", "confidence": 0.91, "model": "test-model"}],
+    }
+
+    with patch(
+        "topos.enrichment.jobs.canonical.url_classification_core.run_engine_task",
+        new=AsyncMock(return_value=mock_engine_result),
+    ):
+        result = await ingest_ui_payload(
+                dataset_id="user-1:default:device1",
+                schema_id="browser.visits.v1",
+                payload={
+                    "url": "https://example.com/docs",
+                    "visited_at": "2026-05-31T20:38:56.765Z",
+                    "title": "Example Docs",
+                },
+            source_id="browser_visits",
+        )
+
+    assert result["status"] == "ok"
+    assert migrated_conn.execute("SELECT COUNT(*) FROM activity_events").fetchone()[0] == 1
+    enrichment = migrated_conn.execute(
+        "SELECT url_category, record_id FROM browser_url_classification WHERE enriched_from_table='activity_events'"
+    ).fetchone()
+    assert enrichment is not None
+    assert enrichment["url_category"] == "technology"
+    fact = migrated_conn.execute(
+        "SELECT dimension, payload_json FROM signal_facts WHERE source_id='browser_visits'"
+    ).fetchone()
+    assert fact is not None
+    assert fact["dimension"] == "interests"
+    assert "technology" in (fact["payload_json"] or "")
+
+
+def test_chatgpt_sources_declare_automatic_enrichment_for_ui_and_file() -> None:
+    assert CHATGPT_UI.enrichment_trigger == "automatic"
+    assert CHATGPT_FILE.enrichment_trigger == "automatic"
+    assert BROWSER_VISITS.raw_enrichment_jobs == []
+    assert "url_classification" in BROWSER_VISITS.canonical_enrichment_jobs
+    assert "embeddings" in BROWSER_VISITS.canonical_enrichment_jobs
+    assert "topic_clusters" in BROWSER_VISITS.signal_derivation_jobs
+    assert "topic_clusters" in CHATGPT_FILE.signal_derivation_jobs

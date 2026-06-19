@@ -25,13 +25,47 @@ PYPROJECT = ROOT / "pyproject.toml"
 LOCKFILE = ROOT / "uv.lock"
 
 # Transitive deps pinned explicitly so they do not float on `uv tool upgrade`.
-TRANSITIVE_PINS = ("huggingface-hub", "tqdm", "hf-xet")
+TRANSITIVE_PINS = ("huggingface-hub", "tqdm", "hf-xet", "sentence-transformers")
 
 # lock package name when it differs from the pyproject dependency string
 LOCK_ALIASES: dict[str, str] = {
     "uvicorn[standard]": "uvicorn",
     "psycopg[binary]": "psycopg",
 }
+
+CORE_DEPS = (
+    "fastapi",
+    "uvicorn[standard]",
+    "httpx",
+    "pydantic",
+    "pydantic-settings",
+    "websockets",
+    "certifi",
+    "cryptography",
+    "python-multipart",
+    "click",
+    "packaging",
+    "mcp",
+    "google-cloud-storage",
+    "google-cloud-run",
+    "asgi-lifespan",
+)
+
+DATABASE_DEPS = ("psycopg[binary]",)
+
+ENGINE_DEPS = (
+    "duckdb",
+    "torch",
+    "transformers",
+    "huggingface-hub",
+    "tqdm",
+    "hf-xet",
+    "sentence-transformers",
+    "networkx",
+    "python-louvain",
+)
+
+LOCAL_DEPS = DATABASE_DEPS + ENGINE_DEPS
 
 
 @dataclass(frozen=True)
@@ -41,45 +75,12 @@ class DepSection:
 
 
 SECTIONS = (
-    DepSection(
-        "dependencies",
-        (
-            "fastapi",
-            "uvicorn[standard]",
-            "httpx",
-            "pydantic",
-            "pydantic-settings",
-            "websockets",
-            "certifi",
-            "cryptography",
-            "python-multipart",
-            "click",
-            "packaging",
-            "mcp",
-            "google-cloud-storage",
-            "google-cloud-run",
-            "networkx",
-            "transformers",
-            "huggingface-hub",
-            "tqdm",
-            "hf-xet",
-            "torch",
-            "python-louvain",
-            "asgi-lifespan",
-        ),
-    ),
-    DepSection(
-        "engine",
-        ("duckdb", "psycopg[binary]"),
-    ),
-    DepSection(
-        "signal",
-        ("pysqlcipher3",),
-    ),
-    DepSection(
-        "dev",
-        ("pytest", "pytest-asyncio", "httpx"),
-    ),
+    DepSection("dependencies", CORE_DEPS),
+    DepSection("database", DATABASE_DEPS),
+    DepSection("engine", ENGINE_DEPS),
+    DepSection("local", LOCAL_DEPS),
+    DepSection("signal", ("pysqlcipher3",)),
+    DepSection("dev", ("pytest", "pytest-asyncio", "httpx")),
 )
 
 # Packages where ~= from lock is too loose or lock version is not portable.

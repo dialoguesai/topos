@@ -17,11 +17,13 @@ _LEGACY_TABLE_BY_JOB: Dict[str, str] = {
     "topics": "message_topics",
     "sentiment": "message_sentiment",
     "goal_extraction": "user_goals",
-    "relationship_edges": "relationship_edges",
     "dimension_summary": "signal_summaries",
     "url_classification": "signal_tags",
     "availability_scores": "signal_scores",
 }
+
+# Jobs that persist via signal/graph adapters or dedicated tables — not DerivedTablesManager batches.
+_SIGNAL_ONLY_JOBS = frozenset({"relationship_edges", "topic_clusters", "embeddings"})
 
 
 def _merge_provenance(record: Dict[str, Any], provenance: Dict[str, Any]) -> Dict[str, Any]:
@@ -81,21 +83,19 @@ def write_signal_records(
     written = 0
 
     legacy_table = _LEGACY_TABLE_BY_JOB.get(job_name)
-    if tables_manager and legacy_table:
+    if tables_manager and legacy_table and job_name not in _SIGNAL_ONLY_JOBS:
         written = tables_manager.write_enrichment_batch(records, legacy_table)
 
     if conn is not None and job_name in (
         "entities",
         "topics",
         "sentiment",
-        "emo_27",
         "goal_extraction",
     ):
         wiki_table = {
             "entities": ("message_entities", "entity_id"),
             "topics": ("message_topics", "topic_id"),
             "sentiment": ("message_sentiment", "sentiment_id"),
-            "emo_27": ("message_emotions", "emotion_id"),
             "goal_extraction": ("user_goals", "goal_id"),
         }.get(job_name)
         if wiki_table:
@@ -218,7 +218,7 @@ def write_signal_records(
             adapters.signal.put_fact(
                 _merge_provenance(
                     {
-                        "dimension": "profile",
+                        "dimension": "work",
                         "source_id": rec.get("source_id"),
                         "record_id": rec.get("message_id"),
                         "goal_text": rec.get("goal_text") or rec.get("text"),
@@ -234,6 +234,32 @@ def write_signal_records(
             dst = rec.get("dst_node_id") or rec.get("dst")
             if not src or not dst:
                 continue
+            prov_rec = _merge_provenance(
+                {
+                    "source_id": rec.get("source_id"),
+                    "dimension": "relationships",
+                },
+                prov,
+            )
+            for node_id in (src, dst):
+                adapters.graph.upsert_node(
+                    {
+                        **prov_rec,
+                        "node_id": str(node_id),
+                        "node_type": (
+                            "contact"
+                            if str(node_id).startswith("contact:")
+                            else "conversation"
+                            if str(node_id).startswith("conversation:")
+                            else "entity"
+                        ),
+                        "label": (
+                            "Unknown sender"
+                            if str(node_id) == "contact:unknown"
+                            else str(node_id).split(":", 1)[-1][:48]
+                        ),
+                    }
+                )
             adapters.graph.upsert_edge(
                 _merge_provenance(
                     {
@@ -278,5 +304,8 @@ def write_signal_records(
                 )
             )
             written += 1
+    elif job_name == "topic_clusters":
+        # Persisted inside TopicClusterJob.enrich(); records are summary rows only.
+        written = len(records)
 
     return written or len(records)

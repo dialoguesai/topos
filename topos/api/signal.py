@@ -38,6 +38,45 @@ def _check_tier_graph() -> None:
         raise HTTPException(status_code=503, detail={"error": "tier.graph_unavailable"}) from exc
 
 
+@router.get("/vectors/search")
+async def search_signal_vectors(
+    _api_key: str = Depends(require_api_key),
+    q: str = Query(..., min_length=1, max_length=2000),
+    limit: int = Query(20, ge=1, le=100),
+    source_id: Optional[str] = None,
+    dimension: Optional[str] = None,
+    model: Optional[str] = None,
+):
+    """
+    Semantic search over stored embeddings (metadata + similarity score; no raw vectors).
+
+    Example: {"query": "project planning", "items": [{"embedding_id": "...", "similarity": 0.82}]}
+    """
+    import asyncio
+
+    _check_tier_vector()
+    service = get_signal_service()
+    return await asyncio.to_thread(
+        service.search_vectors,
+        query=q,
+        limit=limit,
+        source_id=source_id,
+        dimension=dimension,
+        model=model,
+    )
+
+
+@router.get("/vectors/source-text")
+async def get_vector_source_text(
+    _api_key: str = Depends(require_api_key),
+    record_id: str = Query(..., min_length=1),
+):
+    """Full canonical message text for a vector record_id (message_id)."""
+    _check_tier_vector()
+    service = get_signal_service()
+    return service.get_vector_source_text(record_id=record_id)
+
+
 @router.get("/vectors")
 async def list_signal_vectors(
     _api_key: str = Depends(require_api_key),
@@ -100,3 +139,23 @@ async def list_signal_dimensions(_api_key: str = Depends(require_api_key)):
 async def get_signal_data_health(_api_key: str = Depends(require_api_key)):
     service = get_signal_service()
     return service.get_data_health()
+
+
+@router.get("/topic-clusters")
+async def list_topic_clusters(
+    limit: int = Query(default=50, ge=1, le=200),
+    dimension: Optional[str] = Query(default=None),
+    _api_key: str = Depends(require_api_key),
+):
+    service = get_signal_service()
+    return service.list_topic_clusters(limit=limit, dimension=dimension)
+
+
+@router.get("/topic-clusters/{cluster_id}/members")
+async def list_topic_cluster_members(
+    cluster_id: str,
+    limit: int = Query(default=100, ge=1, le=500),
+    _api_key: str = Depends(require_api_key),
+):
+    service = get_signal_service()
+    return service.list_topic_cluster_members(cluster_id, limit=limit)

@@ -10,8 +10,8 @@ from typing import Any, Dict, List, Literal, Optional
 from ..core.state import get_db_connection
 from ..pipeline.audit import SQLiteIngestAuditStore, StageAuditRow, stage_context
 from ..pipeline.stages import PipelineStage
-from ..pipeline.stub_enqueue import enqueue_signal_derive_stub
 from ..sources.registry import REGISTRY
+from .canonical_pipeline import canonicalize_normalized_batch, load_canonical_records_for_signal, run_post_canonical_pipeline
 from .parsers import PARSER_REGISTRY
 from .sources.base import RawRecord
 
@@ -77,88 +77,49 @@ async def _remap_records(
     sync_batch_id: str,
 ) -> Dict[str, int]:
     if not records:
-        return {"records_created": 0, "records_updated": 0, "records_unchanged": 0}
+        return {
+            "records_created": 0,
+            "records_updated": 0,
+            "records_unchanged": 0,
+            "canonical_records": [],
+        }
 
     parser_cls = PARSER_REGISTRY.get(source_def.parser_id or source_def.schema_id)
     if parser_cls is None:
-        return {"records_created": 0, "records_updated": 0, "records_unchanged": len(records)}
+        return {
+            "records_created": 0,
+            "records_updated": 0,
+            "records_unchanged": len(records),
+            "canonical_records": [],
+        }
 
     parser = parser_cls(dataset_id=dataset_id, _schema_id=source_def.schema_id)
-    staging_records: List[Dict[str, Any]] = []
+    normalized_records = []
     for payload in records:
         record_id = str(payload.get("id") or payload.get("record_id") or uuid.uuid4())
         raw = RawRecord(record_id=record_id, payload=payload)
         validation = parser.validate(raw)
         if not validation.is_valid:
             continue
-        normalized = parser.parse(raw)
-        staging_records.append(
-            {
-                "message_id": normalized.payload.get("message_id") or record_id,
-                "dataset_id": dataset_id,
-                "thread_id": normalized.payload.get("thread_id")
-                or normalized.payload.get("conversation_id")
-                or dataset_id,
-                "ts": normalized.payload.get("ts")
-                or normalized.payload.get("created_at")
-                or normalized.payload.get("visited_at"),
-                "sender_type": normalized.payload.get("sender_type"),
-                "content": normalized.payload.get("content"),
-                "source_id": source_def.source_id,
-                **({"_metadata": normalized.payload["_metadata"]} if "_metadata" in normalized.payload else {}),
-                **normalized.payload,
-            }
-        )
+        normalized_records.append(parser.parse(raw))
 
     conn = get_db_connection()
     if not conn:
         raise RuntimeError("Database connection not available for reprocess")
 
     before = _count_canonical_rows(conn, source_def)
-    group = getattr(source_def, "canonical_group_id", None)
-    created = 0
-
-    if group == "conversations":
-        from ..storage.canonical import ConversationsTablesManager
-
-        result = ConversationsTablesManager(conn).upsert_message_batch(
-            staging_records,
-            dataset_id,
-            source_def.source_id,
-            sync_batch_id=sync_batch_id,
-        )
-        created = int(result.get("messages_created", 0))
-    elif group == "activity":
-        from ..canonicalization.mappers import MAPPER_REGISTRY
-        from ..ingestion.parsers.base import NormalizedRecord
-        from ..storage.canonical.activity_tables import ActivityEventsManager
-
-        mapper = MAPPER_REGISTRY.get(source_def.canonical_mapper_id or "browser_activity")
-        activity_manager = ActivityEventsManager(conn)
-        mapped_payloads: List[Dict[str, Any]] = []
-        for staging in staging_records:
-            norm = NormalizedRecord(
-                record_id=str(staging.get("message_id") or staging.get("id")),
-                payload=staging,
-            )
-            if mapper:
-                mapped_payloads.append(mapper.map(norm).payload)
-        batch_result = activity_manager.upsert_batch(
-            mapped_payloads,
-            source_id=source_def.source_id,
-            sync_batch_id=sync_batch_id,
-        )
-        created = int(batch_result.get("events_created", 0))
-    elif source_def.canonical_mapper_id:
-        from ..storage.canonical.ai_chat import CanonicalTablesManager, Canonicalizer
-
-        result = Canonicalizer(CanonicalTablesManager(conn)).canonicalize_staging_batch(
-            staging_records,
-            source=source_def.canonical_mapper_id,
-            sync_batch_id=sync_batch_id,
-            mapping_source_id=source_def.source_id,
-        )
-        created = int(result.get("messages_created", 0))
+    canon_result = canonicalize_normalized_batch(
+        conn,
+        source_def,
+        normalized_records,
+        dataset_id=dataset_id,
+        sync_batch_id=sync_batch_id,
+    )
+    created = max(
+        canon_result.events_created,
+        canon_result.messages_created,
+        len(canon_result.canonical_records),
+    )
 
     after = _count_canonical_rows(conn, source_def)
     net_new = max(after - before, created)
@@ -167,6 +128,7 @@ async def _remap_records(
         "records_created": net_new if net_new > 0 else created,
         "records_updated": 0,
         "records_unchanged": unchanged,
+        "canonical_records": canon_result.canonical_records,
     }
 
 
@@ -190,6 +152,7 @@ async def reprocess_source(
     audit = SQLiteIngestAuditStore(conn)
     stages: List[str] = []
     counts = {"records_created": 0, "records_updated": 0, "records_unchanged": 0}
+    canonical_records: List[Dict[str, Any]] = []
 
     _ = force  # reserved for future forced remap
 
@@ -221,6 +184,7 @@ async def reprocess_source(
                 sync_batch_id=batch_id,
             )
             map_outcome["records_out"] = counts["records_created"]
+            canonical_records = list(counts.get("canonical_records") or [])
     else:
         with stage_context(
             audit,
@@ -237,29 +201,52 @@ async def reprocess_source(
                 sync_batch_id=batch_id,
             )
             map_outcome["records_out"] = counts["records_created"]
+            canonical_records = list(counts.get("canonical_records") or [])
 
-    enqueue_signal_derive_stub(
-        logger,
-        source_id=source_id,
-        batch_id=batch_id,
-        record_ids=[],
-        signal_derivation_jobs=list(getattr(source_def, "signal_derivation_jobs", []) or []),
-    )
-    audit.append_stage(
-        StageAuditRow(
+    if not canonical_records:
+        canonical_records = load_canonical_records_for_signal(conn, source_def)
+
+    signal_status = "skipped"
+    signal_records_out = 0
+    if canonical_records and getattr(source_def, "signal_derivation_jobs", None):
+        with stage_context(
+            audit,
+            stage=PipelineStage.SIGNAL_DERIVE,
             sync_batch_id=batch_id,
             source_id=source_id,
-            stage=PipelineStage.SIGNAL_DERIVE,
-            status="accepted_stub",
-            records_out=0,
+            records_in=len(canonical_records),
+        ) as signal_outcome:
+            stages.append(PipelineStage.SIGNAL_DERIVE.value)
+            pipeline_outcome = await run_post_canonical_pipeline(
+                source_def=source_def,
+                canonical_records=canonical_records,
+                sync_batch_id=batch_id,
+                run_enrichment=True,
+            )
+            derive_result = pipeline_outcome.get("signal_derivation") or {}
+            signal_status = "completed" if derive_result.get("jobs_run") else "deferred"
+            if derive_result.get("deferred_jobs"):
+                signal_status = "deferred"
+            signal_records_out = sum((derive_result.get("records_created") or {}).values())
+            signal_outcome["records_out"] = signal_records_out
+    else:
+        audit.append_stage(
+            StageAuditRow(
+                sync_batch_id=batch_id,
+                source_id=source_id,
+                stage=PipelineStage.SIGNAL_DERIVE,
+                status="skipped",
+                records_out=0,
+            )
         )
-    )
-    stages.append(PipelineStage.SIGNAL_DERIVE.value)
+        stages.append(PipelineStage.SIGNAL_DERIVE.value)
 
     return {
         "status": "accepted",
         "sync_batch_id": batch_id,
         "from_stage": from_stage,
         "stages": stages,
-        **counts,
+        "signal_derive_status": signal_status,
+        "signal_records_out": signal_records_out,
+        **{k: counts[k] for k in ("records_created", "records_updated", "records_unchanged")},
     }

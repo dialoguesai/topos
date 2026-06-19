@@ -85,36 +85,25 @@ async def _backfill_browser_visits_url_classification(
     only_missing: bool = True,
     limit: Optional[int] = None,
 ) -> Dict[str, Any]:
-    """Backfill URL classification for normalized browser visits raw table rows."""
-    from ..engine import Engine, build_url_classification_task
-    from ..storage.raw.browser_flat_tables import (
-        ensure_browser_url_classification_table,
-        write_browser_url_classification,
-    )
-    from ..enrichment.progress_bar import ProgressBar
-    from ..storage.raw.raw_tables_manager import RawTablesManager
+    """Backfill Interests signal facts from canonical activity_events (not raw tables)."""
+    import uuid
 
-    source_table = "raw_chat_messages_browservisits"
+    from ..ingestion.canonical_pipeline import (
+        activity_payload_to_signal_record,
+        run_post_canonical_pipeline,
+    )
+    from ..sources.registry import BROWSER_VISITS
 
     logger.info(
-        "[PIPELINE:ENRICHMENT] Source backfill start: source=browser_visits enrichment=url_classification only_missing=%s limit=%s",
+        "[PIPELINE:SIGNAL_DERIVE] Browser visits backfill from activity_events only_missing=%s limit=%s",
         only_missing,
         limit,
     )
 
-    # Ensure/migrate the raw browser visits table to normalized-column schema first.
-    RawTablesManager(db_conn).ensure_raw_table(source_table)
-
-    # If source table does not exist yet, return an empty success result.
-    source_exists = db_conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
-        (source_table,),
+    table_exists = db_conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name='activity_events'"
     ).fetchone()
-    if not source_exists:
-        logger.info(
-            "[PIPELINE:ENRICHMENT] Source backfill complete: source table missing (%s)",
-            source_table,
-        )
+    if not table_exists:
         return {
             "rows_scanned": 0,
             "rows_processed": 0,
@@ -123,100 +112,71 @@ async def _backfill_browser_visits_url_classification(
             "errors": [],
         }
 
-    ensure_browser_url_classification_table(db_conn)
-
-    params: List[Any] = []
+    params: List[Any] = ["browser_visits"]
+    query = """
+        SELECT event_id, activity_type, url, title, occurred_at, source_id
+        FROM activity_events
+        WHERE source_id=?
+    """
     if only_missing:
-        query = """
-            SELECT
-                (COALESCE(v.url, '') || '_' || COALESCE(v.visited_at, '')) AS derived_record_id,
-                v.dataset_id,
-                v.url,
-                v.title
-            FROM raw_chat_messages_browservisits v
-            LEFT JOIN browser_url_classification c
-              ON c.source_table = 'browser_visits'
-             AND c.record_id = (COALESCE(v.url, '') || '_' || COALESCE(v.visited_at, ''))
-            WHERE c.record_id IS NULL
-            ORDER BY v.visited_at ASC
+        query += """
+          AND event_id NOT IN (
+            SELECT record_id FROM signal_facts
+            WHERE source_id='browser_visits' AND dimension='interests'
+          )
         """
-    else:
-        query = """
-            SELECT
-                (COALESCE(v.url, '') || '_' || COALESCE(v.visited_at, '')) AS derived_record_id,
-                v.dataset_id,
-                v.url,
-                v.title
-            FROM raw_chat_messages_browservisits v
-            ORDER BY v.visited_at ASC
-        """
+    query += " ORDER BY occurred_at ASC"
     if isinstance(limit, int) and limit > 0:
         query += " LIMIT ?"
         params.append(limit)
 
     rows = db_conn.execute(query, tuple(params)).fetchall()
+    canonical_records = [
+        activity_payload_to_signal_record(
+            {
+                "event_id": row[0],
+                "activity_type": row[1],
+                "url": row[2],
+                "title": row[3],
+                "occurred_at": row[4],
+                "source_id": row[5],
+            },
+            source_id="browser_visits",
+        )
+        for row in rows
+        if isinstance(row[2], str) and row[2].strip()
+    ]
 
-    processed = 0
-    skipped = 0
-    failed = 0
-    errors: List[Dict[str, Any]] = []
+    skipped = max(len(rows) - len(canonical_records), 0)
+    if not canonical_records:
+        return {
+            "rows_scanned": len(rows),
+            "rows_processed": 0,
+            "rows_skipped": skipped + len(rows),
+            "rows_failed": 0,
+            "errors": [],
+        }
 
-    if rows:
-        with ProgressBar(total=len(rows), desc="url_classification backfill") as pbar:
-            for row in rows:
-                record_id = row[0]
-                dataset_id = row[1]
-                url = row[2]
-                title = row[3]
-                if not isinstance(url, str) or not url.strip():
-                    skipped += 1
-                    pbar.update(1)
-                    continue
-
-                try:
-                    task = build_url_classification_task(
-                        task_id=f"backfill_url_{record_id}",
-                        url=url,
-                        title=title,
-                        source_id="browser_visits",
-                        record_ids=[record_id],
-                    )
-                    engine = Engine()
-                    result = await asyncio.to_thread(engine.run, task)
-                    if result.status != "completed":
-                        failed += 1
-                        errors.append({"record_id": record_id, "error": result.error or result.status})
-                        continue
-                    out = result.output
-                    write_browser_url_classification(
-                        db_conn,
-                        source_table="browser_visits",
-                        record_id=record_id,
-                        dataset_id=dataset_id,
-                        url=url,
-                        title=title,
-                        category=out.get("category"),
-                        confidence=out.get("confidence"),
-                        model_name=out.get("model"),
-                        ensure_table=False,
-                        log_write=False,  # Avoid per-row log spam during bulk backfill
-                    )
-                    processed += 1
-                except Exception as exc:  # noqa: BLE001
-                    failed += 1
-                    errors.append({"record_id": record_id, "error": str(exc)})
-                finally:
-                    pbar.update(1)
+    pipeline_outcome = await run_post_canonical_pipeline(
+        source_def=BROWSER_VISITS,
+        canonical_records=canonical_records,
+        sync_batch_id=f"backfill_browser_visits_{uuid.uuid4().hex[:12]}",
+        run_enrichment=False,
+        job_names=["url_classification"],
+    )
+    derive_result = pipeline_outcome.get("signal_derivation") or {}
+    processed = sum((derive_result.get("records_created") or {}).values())
+    failed = len(derive_result.get("errors") or [])
 
     summary = {
         "rows_scanned": len(rows),
-        "rows_processed": processed,
+        "rows_processed": int(processed),
         "rows_skipped": skipped,
         "rows_failed": failed,
-        "errors": errors[:100],
+        "errors": (derive_result.get("errors") or [])[:100],
     }
     logger.info(
-        "[PIPELINE:ENRICHMENT] Source backfill complete: source=browser_visits enrichment=url_classification scanned=%d processed=%d skipped=%d failed=%d",
+        "[PIPELINE:SIGNAL_DERIVE] Browser visits backfill complete: scanned=%d processed=%d skipped=%d failed=%d",
         summary["rows_scanned"],
         summary["rows_processed"],
         summary["rows_skipped"],

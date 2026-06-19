@@ -8,13 +8,113 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from ..protocols import ListPage
+from ...canonical.canonical_store import SQLiteCanonicalStore as TypedSQLiteCanonicalStore
+
+_NATIVE_TABLES = frozenset({"ai_chat_messages", "conversation_messages", "activity_events"})
+_NATIVE_ID_COL = {
+    "ai_chat_messages": "message_id",
+    "conversation_messages": "message_id",
+    "activity_events": "event_id",
+}
+_NATIVE_LIST_SPECS: Dict[str, tuple[str, List[str]]] = {
+    "ai_chat_messages": (
+        """
+        SELECT message_id AS record_id, conversation_id, sender_type, source_id,
+               substr(coalesce(content_rendered, content), 1, 500) AS content_preview,
+               content, event_at
+        FROM ai_chat_messages
+        """,
+        [
+            "record_id",
+            "conversation_id",
+            "sender_type",
+            "source_id",
+            "content_preview",
+            "content",
+            "event_at",
+        ],
+    ),
+    "conversation_messages": (
+        """
+        SELECT message_id AS record_id, conversation_id, sender_id, source_id,
+               substr(coalesce(content, ''), 1, 500) AS content_preview,
+               content, created_at AS event_at
+        FROM conversation_messages
+        """,
+        [
+            "record_id",
+            "conversation_id",
+            "sender_id",
+            "source_id",
+            "content_preview",
+            "content",
+            "event_at",
+        ],
+    ),
+    "activity_events": (
+        """
+        SELECT event_id AS record_id, source_id,
+               substr(coalesce(title, description, ''), 1, 500) AS content_preview,
+               coalesce(title, description, '') AS content, event_at
+        FROM activity_events
+        """,
+        ["record_id", "source_id", "content_preview", "content", "event_at"],
+    ),
+}
 
 
 class SQLiteCanonicalStore:
+    """Adapter-facing canonical store — delegates MVP tables to typed canonical_store."""
+
+    _NATIVE_TABLES = _NATIVE_TABLES
+
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
+        self._typed = TypedSQLiteCanonicalStore(conn)
+
+    def _fetch_native_row(self, table: str, record_id: str) -> Optional[Dict[str, Any]]:
+        id_col = _NATIVE_ID_COL.get(table)
+        if not id_col:
+            return None
+        row = self._conn.execute(f"SELECT * FROM {table} WHERE {id_col}=?", (record_id,)).fetchone()
+        if row is None:
+            return None
+        cols = [d[0] for d in self._conn.execute(f"PRAGMA table_info({table})").fetchall()]
+        return dict(zip(cols, row))
+
+    def _list_native(
+        self,
+        table: str,
+        *,
+        source_id: Optional[str] = None,
+        limit: int = 100,
+        offset: int = 0,
+    ) -> ListPage:
+        if table not in self._NATIVE_TABLES:
+            return ListPage(items=[], total=0, offset=offset, limit=limit)
+
+        base, col_names = _NATIVE_LIST_SPECS[table]
+        params: List[Any] = []
+        query = base
+        if source_id is not None:
+            query += " WHERE source_id=?"
+            params.append(source_id)
+        count_row = self._conn.execute(f"SELECT COUNT(*) FROM ({query})", params).fetchone()
+        total = int(count_row[0]) if count_row else 0
+        query += " ORDER BY record_id LIMIT ? OFFSET ?"
+        params.extend([limit, offset])
+        rows = self._conn.execute(query, params).fetchall()
+        items = [dict(zip(col_names, row)) for row in rows]
+        return ListPage(items=items, total=total, offset=offset, limit=limit)
 
     def upsert(self, table: str, record: Dict[str, Any], *, idempotency_key: Optional[str] = None) -> str:
+        if table in self._NATIVE_TABLES:
+            ref = self._typed.upsert(
+                table,
+                record,
+                sync_batch_id=idempotency_key or record.get("sync_batch_id"),
+            )
+            return ref.record_id
         record_id = str(record.get("record_id") or record.get("id") or idempotency_key or uuid.uuid4())
         payload = json.dumps({**record, "record_id": record_id})
         self._conn.execute(
@@ -32,6 +132,8 @@ class SQLiteCanonicalStore:
         return record_id
 
     def get(self, table: str, record_id: str) -> Optional[Dict[str, Any]]:
+        if table in self._NATIVE_TABLES:
+            return self._fetch_native_row(table, record_id)
         row = self._conn.execute(
             "SELECT payload_json FROM wiki_canonical_records WHERE record_id=? AND table_name=?",
             (record_id, table),
@@ -48,6 +150,9 @@ class SQLiteCanonicalStore:
         limit: int = 100,
         offset: int = 0,
     ) -> ListPage:
+        if table in self._NATIVE_TABLES:
+            return self._list_native(table, source_id=source_id, limit=limit, offset=offset)
+
         query = "SELECT payload_json FROM wiki_canonical_records WHERE table_name=?"
         params: List[Any] = [table]
         if source_id is not None:
@@ -65,10 +170,14 @@ class SQLiteCanonicalStore:
         return ListPage(items=items, total=total, offset=offset, limit=limit)
 
     def delete(self, table: str, record_id: str) -> bool:
-        cur = self._conn.execute(
-            "DELETE FROM wiki_canonical_records WHERE record_id=? AND table_name=?",
-            (record_id, table),
-        )
+        id_col = _NATIVE_ID_COL.get(table)
+        if id_col:
+            cur = self._conn.execute(f"DELETE FROM {table} WHERE {id_col}=?", (record_id,))
+        else:
+            cur = self._conn.execute(
+                "DELETE FROM wiki_canonical_records WHERE record_id=? AND table_name=?",
+                (record_id, table),
+            )
         self._conn.commit()
         return cur.rowcount > 0
 
@@ -229,6 +338,50 @@ class SQLiteVectorIndex:
         params.extend([limit, offset])
         items = [json.loads(r[0]) for r in self._conn.execute(query, params).fetchall()]
         return ListPage(items=items, total=total, offset=offset, limit=limit)
+
+    def search_similar(
+        self,
+        query_vector: List[float],
+        *,
+        source_id: Optional[str] = None,
+        dimension: Optional[str] = None,
+        model: Optional[str] = None,
+        limit: int = 20,
+    ) -> ListPage:
+        from ....features.signal.vector_math import cosine_similarity
+
+        limit = max(1, min(int(limit), 100))
+        query_sql = "SELECT provenance_json, vector_blob FROM signal_embeddings WHERE vector_blob IS NOT NULL"
+        params: List[Any] = []
+        if source_id is not None:
+            query_sql += " AND source_id=?"
+            params.append(source_id)
+        if dimension is not None:
+            query_sql += " AND signal_dimension=?"
+            params.append(dimension)
+        if model is not None:
+            query_sql += " AND model=?"
+            params.append(model)
+        rows = self._conn.execute(query_sql, params).fetchall()
+        scored: List[tuple[float, Dict[str, Any]]] = []
+        query_dims = len(query_vector)
+        for prov_raw, blob in rows:
+            if not blob:
+                continue
+            try:
+                stored = json.loads(blob.decode("utf-8"))
+            except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
+                continue
+            if not isinstance(stored, list) or len(stored) != query_dims:
+                continue
+            meta = json.loads(prov_raw)
+            sim = cosine_similarity(query_vector, [float(x) for x in stored])
+            meta["similarity"] = round(sim, 6)
+            scored.append((sim, meta))
+        scored.sort(key=lambda pair: pair[0], reverse=True)
+        top = scored[:limit]
+        items = [meta for _, meta in top]
+        return ListPage(items=items, total=len(scored), offset=0, limit=limit)
 
     def delete_by_record(self, record_id: str) -> int:
         cur = self._conn.execute("DELETE FROM signal_embeddings WHERE record_id=?", (record_id,))
