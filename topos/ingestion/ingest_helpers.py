@@ -368,6 +368,33 @@ async def _ingest_ui_payload_direct(
         except Exception as e:  # noqa: BLE001
             logger.warning("[PIPELINE:DIRECT] Failed to write browser_events flat row (non-fatal): %s", e)
 
+    if source_id.startswith("browser_") and getattr(source, "canonical_mapper_id", None) == "browser_activity":
+        try:
+            from ..canonicalization.mappers import MAPPER_REGISTRY
+            from ..ingestion.parsers.base import NormalizedRecord
+            from ..storage.canonical.activity_tables import ActivityEventsManager
+
+            mapper = MAPPER_REGISTRY.get("browser_activity")
+            if mapper:
+                norm = NormalizedRecord(
+                    record_id=str(normalized.payload.get("id") or record_id),
+                    payload=normalized.payload,
+                )
+                mapped = mapper.map(norm)
+                activity_manager = ActivityEventsManager(db_conn)
+                sync_batch_id = str(job_id)
+                activity_manager.upsert_batch(
+                    [mapped.payload],
+                    source_id=source_id,
+                    sync_batch_id=sync_batch_id,
+                )
+                logger.debug(
+                    "[PIPELINE:DIRECT] Browser activity canonical: event_id=%s",
+                    mapped.payload.get("event_id"),
+                )
+        except Exception as e:  # noqa: BLE001
+            logger.warning("[PIPELINE:DIRECT] Failed to write activity_events (non-fatal): %s", e)
+
     if source_id.startswith("browser_"):
         await _run_browser_url_classification_enrichment(
             db_conn=db_conn,
@@ -400,7 +427,9 @@ async def _ingest_ui_payload_direct(
         try:
             from ..storage.canonical import ConversationsTablesManager
             conv_manager = ConversationsTablesManager(db_conn)
-            conv_manager.upsert_message_batch([staging_record], dataset_id, source_id)
+            conv_manager.upsert_message_batch(
+                [staging_record], dataset_id, source_id, sync_batch_id=str(job_id)
+            )
             canonical_messages_dicts = [{
                 "message_id": staging_record.get("message_id"),
                 "conversation_id": staging_record.get("thread_id") or staging_record.get("conversation_id") or dataset_id,
@@ -431,6 +460,8 @@ async def _ingest_ui_payload_direct(
                 [staging_record],
                 source=mapper_source,
                 batch_size=1,
+                sync_batch_id=str(job_id),
+                mapping_source_id=source_id,
             )
             canonical_messages_dicts = canonical_result.get("canonical_messages", [])
             logger.debug(

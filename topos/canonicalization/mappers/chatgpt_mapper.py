@@ -34,7 +34,9 @@ class ChatGPTCanonicalMapper(CanonicalMapper):
             content_hash=content_hash,
             metadata=metadata,
         )
-        return CanonicalRecord(record_id=canonical.message_id, payload=canonical.__dict__)
+        out = canonical.__dict__
+        out["source_record_id"] = normalized.record_id
+        return CanonicalRecord(record_id=canonical.message_id, payload=out)
 
     def mapping_metadata(self, normalized: NormalizedRecord) -> MappingMetadata:
         return MappingMetadata(source_id="chatgpt", mapping_version=self.version)

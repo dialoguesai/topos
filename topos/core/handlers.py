@@ -2581,6 +2581,137 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
             import traceback
             print(f"\033[91m[CRITICAL TOPOS HANDLER] Traceback:\n{traceback.format_exc()}\033[0m", file=sys.stderr, flush=True)
             return {"id": req_id, "status": "error", "error": str(exc)}
+    if msg_type == "signal_list_vectors":
+        payload = message.get("payload") or {}
+        try:
+            from ..features.signal.service import get_signal_service
+
+            conn = get_db_connection()
+            service = get_signal_service(conn=conn)
+            result = service.list_vectors(
+                limit=min(int(payload.get("limit") or 50), 500),
+                offset=int(payload.get("offset") or 0),
+                source_id=payload.get("source_id"),
+                dimension=payload.get("dimension"),
+                model=payload.get("model"),
+                created_after=payload.get("created_after"),
+                created_before=payload.get("created_before"),
+            )
+            return {"id": req_id, "status": "ok", "payload": result}
+        except Exception as exc:  # noqa: BLE001
+            return {"id": req_id, "status": "error", "error": str(exc), "code": 503}
+    if msg_type == "signal_list_graph":
+        payload = message.get("payload") or {}
+        try:
+            from ..features.signal.service import get_signal_service
+
+            conn = get_db_connection()
+            service = get_signal_service(conn=conn)
+            result = service.list_graph(
+                dimension=payload.get("dimension"),
+                limit_nodes=min(int(payload.get("limit_nodes") or 200), 1000),
+                limit_edges=min(int(payload.get("limit_edges") or 500), 2000),
+                edge_type=payload.get("edge_type"),
+                min_weight=payload.get("min_weight"),
+                source_id=payload.get("source_id"),
+            )
+            return {"id": req_id, "status": "ok", "payload": result}
+        except Exception as exc:  # noqa: BLE001
+            return {"id": req_id, "status": "error", "error": str(exc), "code": 503}
+    if msg_type == "signal_list_dimensions":
+        try:
+            from ..features.signal.service import get_signal_service
+
+            return {"id": req_id, "status": "ok", "payload": get_signal_service(conn=get_db_connection()).list_dimensions()}
+        except Exception as exc:  # noqa: BLE001
+            return {"id": req_id, "status": "error", "error": str(exc)}
+    if msg_type == "signal_data_health":
+        try:
+            from ..features.signal.service import get_signal_service
+
+            return {"id": req_id, "status": "ok", "payload": get_signal_service(conn=get_db_connection()).get_data_health()}
+        except Exception as exc:  # noqa: BLE001
+            return {"id": req_id, "status": "error", "error": str(exc)}
+    if msg_type in ("query", "query_live"):
+        payload = message.get("payload") or {}
+        try:
+            from ..query.manifest_validation import ManifestValidationError, resolve_scope_manifest
+            from ..query.runtime import get_query_orchestrator
+
+            raw_manifest = payload.get("manifest") or {}
+            scope_id = str(payload.get("scope_id") or raw_manifest.get("scope_id") or "")
+            filter_manifest = payload.get("filter_manifest") if isinstance(payload.get("filter_manifest"), dict) else None
+            try:
+                manifest = resolve_scope_manifest(
+                    scope_id,
+                    client_manifest=raw_manifest if raw_manifest else None,
+                    filter_manifest=filter_manifest,
+                )
+            except ManifestValidationError as exc:
+                return {
+                    "id": req_id,
+                    "status": "ok",
+                    "payload": {
+                        "turn_outcome": "denied",
+                        "deny_reason": exc.code,
+                        "public_result": None,
+                        "session_id": payload.get("query_session_id") or payload.get("session_id"),
+                    },
+                }
+            result = await get_query_orchestrator(conn=get_db_connection()).execute(
+                query_text=str(payload.get("intent") or payload.get("query") or ""),
+                scope_id=scope_id,
+                access_mode=str(payload.get("access_mode") or "summary"),
+                manifest=manifest,
+                query_session_id=payload.get("query_session_id") or payload.get("session_id"),
+                filter_manifest=filter_manifest,
+                field_transforms=payload.get("field_transforms"),
+                requester_id=str(payload.get("requester_id") or "mcp"),
+            )
+            return {"id": req_id, "status": "ok", "payload": result}
+        except KeyError as exc:
+            return {"id": req_id, "status": "error", "error": f"Missing field: {exc}"}
+        except Exception as exc:  # noqa: BLE001
+            return {"id": req_id, "status": "error", "error": str(exc)}
+    if msg_type == "ingestion_reprocess":
+        payload = message.get("payload") or {}
+        try:
+            from ..ingestion.reprocess import reprocess_source
+
+            result = await reprocess_source(
+                source_id=str(payload["source_id"]),
+                dataset_id=str(payload["dataset_id"]),
+                from_stage=payload.get("from_stage") or "raw",
+                sync_batch_id=payload.get("sync_batch_id"),
+                force=bool(payload.get("force", False)),
+            )
+            return {"id": req_id, "status": "ok", "payload": result}
+        except KeyError as exc:
+            return {"id": req_id, "status": "error", "error": f"Missing field: {exc}"}
+        except ValueError as exc:
+            return {"id": req_id, "status": "error", "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            return {"id": req_id, "status": "error", "error": str(exc)}
+    if msg_type == "get_ingestion_audit":
+        payload = message.get("payload") or {}
+        sync_batch_id = str(payload.get("sync_batch_id") or "").strip()
+        if not sync_batch_id:
+            return {"id": req_id, "status": "error", "error": "sync_batch_id required"}
+        try:
+            from ..pipeline.audit import SQLiteIngestAuditStore
+
+            conn = get_db_connection()
+            if not conn:
+                return {"id": req_id, "status": "error", "error": "Database connection not available"}
+            store = SQLiteIngestAuditStore(conn)
+            stages = store.query_by_batch(sync_batch_id)
+            return {
+                "id": req_id,
+                "status": "ok",
+                "payload": {"sync_batch_id": sync_batch_id, "stages": stages},
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"id": req_id, "status": "error", "error": str(exc)}
     if msg_type == "get_messages":
         payload = message.get("payload") or {}
         dataset_id = payload.get("dataset_id")
@@ -3693,7 +3824,9 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
             
             # Canonical Tables (shared canonical layer)
             canonical_tables = {
-                "ai_chat_messages", "ai_chat_conversations", "ai_chat_participants"
+                "ai_chat_messages", "ai_chat_conversations", "ai_chat_participants",
+                "conversation_messages", "conversations",
+                "activity_events", "calendar_events", "contacts", "contact_identifiers",
             }
             
             # Enrichment System Tables

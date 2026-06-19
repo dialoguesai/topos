@@ -65,8 +65,12 @@ filterwarnings = [
   "ignore:on_event is deprecated.*:DeprecationWarning:fastapi.*",
 ]
 markers = [
+  "gap: gap verification test (sprint pack); must pass after sprint lands",
+  "acceptance: Wiki MVP acceptance test (AT-1 through AT-8)",
+  "hosted_parity: hosted vs local parity (staging/nightly)",
   "public: public-safe test lane for OSS CI",
   "private: internal architecture or fixtures; excluded from public CI",
   "e2e: end-to-end tests (live Keycloak + Control Plane; require config and running CP)",
 ]
+pythonpath = ["tests/gap/p3/engine", "tests/gap/p4/engine", "tests/acceptance/wiki_mvp"]
 testpaths = ["tests"]

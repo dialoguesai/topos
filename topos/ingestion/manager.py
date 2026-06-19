@@ -821,6 +821,7 @@ class IngestionManager(BaseObject):
         
         # Canonicalize normalized records: conversations group -> conversation_messages; else engine ai_chat_*
         canonical_messages: List[Dict[str, Any]] = []
+        sync_batch_id = str(getattr(job, "job_id", "unknown"))
         if source_def and normalized_records:
             # Build staging records once (same shape for both paths)
             staging_records = []
@@ -847,7 +848,7 @@ class IngestionManager(BaseObject):
                 if db_conn:
                     conv_manager = ConversationsTablesManager(db_conn)
                     canonical_result = conv_manager.upsert_message_batch(
-                        staging_records, job.dataset_id, source_def.source_id
+                        staging_records, job.dataset_id, source_def.source_id, sync_batch_id=sync_batch_id
                     )
                     logger.debug(
                         "[PIPELINE:CANONICAL] %s: Conversations canonical: messages_created=%s, conversations_created=%s",
@@ -891,7 +892,11 @@ class IngestionManager(BaseObject):
                             source_def.source_id,
                         )
                         canonical_result = canonicalizer.canonicalize_staging_batch(
-                            staging_records, source=mapper_source, batch_size=1000
+                            staging_records,
+                            source=mapper_source,
+                            batch_size=1000,
+                            sync_batch_id=sync_batch_id,
+                            mapping_source_id=source_def.source_id,
                         )
                         # Enrichment should consume canonicalized rows (not pre-mapper staging rows).
                         mapped_messages = canonical_result.get("canonical_messages")
@@ -923,6 +928,64 @@ class IngestionManager(BaseObject):
                 except Exception as exc:
                     logger.error("[PIPELINE:CANONICAL] %s: Failed to canonicalize records: %s", self, exc, exc_info=True)
                     errors.append({"step": "canonicalization", "errors": [str(exc)]})
+
+            if source_def and normalized_records:
+                try:
+                    from ..core.state import get_db_connection
+                    from ..pipeline.audit import SQLiteIngestAuditStore, StageAuditRow
+                    from ..pipeline.stages import PipelineStage
+
+                    db_conn = get_db_connection()
+                    if db_conn:
+                        audit = SQLiteIngestAuditStore(db_conn)
+                        audit.append_stage(
+                            StageAuditRow(
+                                sync_batch_id=sync_batch_id,
+                                source_id=source_def.source_id,
+                                stage=PipelineStage.CANONICAL_MAP,
+                                status="completed",
+                                records_in=len(normalized_records),
+                                records_out=len(canonical_messages),
+                            )
+                        )
+                except Exception as exc:
+                    logger.debug("[PIPELINE:AUDIT] %s: canonical audit skipped: %s", self, exc)
+
+        if canonical_messages and source_def:
+            try:
+                import asyncio
+
+                from ..enrichment.orchestrator import SignalDerivationOrchestrator
+                from ..pipeline.audit import SQLiteIngestAuditStore, StageAuditRow
+                from ..pipeline.stages import PipelineStage
+
+                orchestrator = SignalDerivationOrchestrator()
+                derive_result = await orchestrator.run_signal_derivation(
+                    canonical_messages,
+                    source_id=source_def.source_id,
+                    sync_batch_id=sync_batch_id,
+                )
+                try:
+                    from ..core.state import get_db_connection
+
+                    db_conn = get_db_connection()
+                    if db_conn:
+                        status = "completed" if derive_result.get("jobs_run") else "deferred"
+                        if derive_result.get("deferred_jobs"):
+                            status = "deferred"
+                        SQLiteIngestAuditStore(db_conn).append_stage(
+                            StageAuditRow(
+                                sync_batch_id=sync_batch_id,
+                                source_id=source_def.source_id,
+                                stage=PipelineStage.SIGNAL_DERIVE,
+                                status=status,
+                                records_out=sum(derive_result.get("records_created", {}).values()),
+                            )
+                        )
+                except Exception:
+                    pass
+            except Exception as exc:
+                logger.debug("[PIPELINE:SIGNAL_DERIVE] %s: wave A skipped: %s", self, exc)
 
         # Run enrichment on canonical messages (only if automatic trigger)
         if canonical_messages and source_def and source_def.canonical_enrichment_jobs:

@@ -83,6 +83,21 @@ class Engine:
         start = time.perf_counter()
         raw_output = adapter.run_inference(normalized.input, config=config)
         duration_ms = int((time.perf_counter() - start) * 1000)
+        if raw_output.get("status") == "deferred":
+            return format_result(
+                task_id=normalized.id,
+                status="deferred",
+                raw_output=raw_output,
+                provenance_source_id=normalized.source_id,
+                provenance_record_ids=normalized.record_ids if normalized.record_ids else None,
+                execution_meta=ExecutionMeta(
+                    provider=normalized.model_request.provider,
+                    model=config.get("model"),
+                    duration_ms=duration_ms,
+                    cache_hit=False,
+                ),
+                error=str(raw_output.get("error") or "deferred"),
+            )
         # Adapter may return error in output
         if raw_output.get("error"):
             try:

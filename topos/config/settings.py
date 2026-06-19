@@ -107,6 +107,12 @@ class Settings(BaseSettings):
     sanitization_ollama_model_name_removal: Optional[str] = Field(None, env="SANITIZATION_OLLAMA_MODEL_NAME_REMOVAL")
     sanitization_ollama_model_contact_removal: Optional[str] = Field(None, env="SANITIZATION_OLLAMA_MODEL_CONTACT_REMOVAL")
 
+    # Local PII redaction via Hugging Face openai/privacy-filter (see topos.sanitization.privacy_filter)
+    privacy_filter_enabled: bool = Field(True, env="PRIVACY_FILTER_ENABLED")
+    privacy_filter_model: str = Field("openai/privacy-filter", env="PRIVACY_FILTER_MODEL")
+    privacy_filter_device: Optional[str] = Field(None, env="PRIVACY_FILTER_DEVICE")
+    privacy_filter_max_input_chars: Optional[int] = Field(None, env="PRIVACY_FILTER_MAX_INPUT_CHARS")
+
     topos_database_path: Optional[str] = Field(None, env="TOPOS_DATABASE_PATH")
     topos_database_mode: str = Field("local", env="TOPOS_DATABASE_MODE")
     topos_database_service_url: Optional[str] = Field(None, env="TOPOS_DATABASE_SERVICE_URL")

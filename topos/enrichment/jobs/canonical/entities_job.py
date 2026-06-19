@@ -1,27 +1,69 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
 from ..base import BaseEnrichmentJob
+from ._engine_runner import run_engine_task
+from ....engine import Engine
 
 logger = logging.getLogger("topos.enrichment.jobs.entities")
 
 
 class EntitiesJob(BaseEnrichmentJob):
+    def __init__(self, *, name: Optional[str] = None, engine: Optional[Engine] = None):
+        super().__init__(name=name)
+        self._engine = engine or Engine()
+
     def get_derived_table(self) -> str:
         return "message_entities"
 
+    def get_job_name(self) -> str:
+        return "entities"
+
     async def enrich(
-        self, 
+        self,
         canonical_messages: List[Dict[str, Any]],
         progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> List[Dict[str, Any]]:
-        logger.debug("%s: Entities enrichment stub: %d messages", self, len(canonical_messages))
-        # Call progress callback to indicate completion (stub jobs complete instantly)
-        if progress_callback:
-            progress_callback(len(canonical_messages), len(canonical_messages))
-        return []
-
-    def get_job_name(self) -> str:
-        return "entities"
+        results: List[Dict[str, Any]] = []
+        total = len(canonical_messages)
+        for idx, msg in enumerate(canonical_messages):
+            if idx % 10 == 0:
+                await asyncio.sleep(0)
+            message_id = msg.get("message_id") or msg.get("id")
+            content = msg.get("content", "")
+            source_id = msg.get("source_id")
+            if not message_id or not content:
+                if progress_callback:
+                    progress_callback(idx + 1, total)
+                continue
+            result = await run_engine_task(
+                self._engine,
+                task_id=f"entities_{message_id}",
+                subtype="entity_extraction",
+                source_id=source_id,
+                record_ids=[str(message_id)],
+                input_payload={"text": content},
+            )
+            if result.status != "completed":
+                if progress_callback:
+                    progress_callback(idx + 1, total)
+                continue
+            for ent in result.output.get("entities") or []:
+                results.append(
+                    {
+                        "message_id": message_id,
+                        "record_id": message_id,
+                        "source_id": source_id,
+                        "entity_text": ent.get("entity_text"),
+                        "entity_type": ent.get("entity_type"),
+                        "confidence": ent.get("confidence"),
+                        "provider": result.output.get("provider", "huggingface"),
+                        "model": result.output.get("model"),
+                    }
+                )
+            if progress_callback:
+                progress_callback(idx + 1, total)
+        return results

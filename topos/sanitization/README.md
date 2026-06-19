@@ -6,14 +6,19 @@
 `topos/uma_filters.py` applies `field_transforms` on UMA reads (e.g. `uma_get_messages`).
 
 - **`timestamp_to_date`** — local, no LLM.
-- **Sanitization IDs** — optional **Ollama** when `sanitization_ollama_enabled` is true (see below).
+- **PII transforms** (`pii_redaction`, `name_removal`, `contact_removal`) — local **openai/privacy-filter** when `PRIVACY_FILTER_ENABLED=true` (default).
+- **Other sanitization IDs** — optional **Ollama** when `sanitization_ollama_enabled` is true (see below).
 
 ## Configuration layers (precedence)
 
 1. **Device DB** — JSON in SQLite `engine_config` under key `sanitization_ollama_device` (highest precedence).
-2. **`topos.config.settings`** — loaded from `topos/.env` and environment (`SANITIZATION_OLLAMA_*`).
+2. **`topos.config.settings`** — loaded from `topos/.env` and environment (`SANITIZATION_OLLAMA_*`, `PRIVACY_FILTER_*`).
 
-Per **transform** (`pii_redaction`, `nsfw_sanitization`, …), the model used is:
+### PII redaction (`pii_redaction`, `name_removal`, `contact_removal`)
+
+Uses the local Hugging Face model **[openai/privacy-filter](https://huggingface.co/openai/privacy-filter)** via `transformers` token-classification pipeline when `PRIVACY_FILTER_ENABLED=true` (default). No Ollama required for these transforms.
+
+Per **other transform** (`nsfw_sanitization`, …), the model used is:
 
 `device.models[transform_id]` → else `settings.sanitization_ollama_model_<transform_id>` → else `sanitization_ollama_default_model` (default **`llama3.2`**).
 
@@ -28,9 +33,13 @@ Host resolution: `device.host` → `sanitization_ollama_host` → `engine_ollama
 | `SANITIZATION_OLLAMA_DEFAULT_MODEL` | `llama3.2` | Model when no per-transform override |
 | `SANITIZATION_OLLAMA_TIMEOUT_SEC` | `120` | HTTP timeout |
 | `SANITIZATION_OLLAMA_MAX_INPUT_CHARS` | `8000` | Truncate long fields |
-| `SANITIZATION_OLLAMA_MODEL_PII_REDACTION` | _(unset)_ | Override model for PII only |
+| `SANITIZATION_OLLAMA_MODEL_PII_REDACTION` | _(unset)_ | Override model for PII only (legacy Ollama fallback when privacy filter disabled) |
 | `SANITIZATION_OLLAMA_MODEL_NSFW_SANITIZATION` | _(unset)_ | Override model for NSFW only |
 | … | | Same pattern for each transform id (see `settings.py`) |
+| `PRIVACY_FILTER_ENABLED` | `true` | Use openai/privacy-filter for PII transforms |
+| `PRIVACY_FILTER_MODEL` | `openai/privacy-filter` | Hugging Face model id |
+| `PRIVACY_FILTER_DEVICE` | _(auto)_ | `cpu`, `cuda`, or `mps`; auto-selects when unset |
+| `PRIVACY_FILTER_MAX_INPUT_CHARS` | _(unset)_ | Falls back to `SANITIZATION_OLLAMA_MAX_INPUT_CHARS` |
 
 ## Device overrides (frontend / local UI)
 
@@ -70,19 +79,20 @@ ollama pull llama3.2
 
 Enable in `.env` on the engine host, then tune per-transform via env or PUT overrides.
 
-## Implemented transform_ids (Ollama)
+## Implemented transform_ids
 
-| `transform_id` | Params (optional) |
-|----------------|-------------------|
-| `pii_redaction` | — |
-| `nsfw_sanitization` | — |
-| `raw_to_summary` | `style`, `max_length` |
-| `raw_to_sentiment` | `scale` |
-| `third_party_anonymization` | `mode` |
-| `name_removal` | — |
-| `contact_removal` | — |
+| `transform_id` | Backend | Params (optional) |
+|----------------|---------|-------------------|
+| `pii_redaction` | privacy-filter | — |
+| `name_removal` | privacy-filter | — |
+| `contact_removal` | privacy-filter | — |
+| `nsfw_sanitization` | Ollama | — |
+| `raw_to_summary` | Ollama | `style`, `max_length` |
+| `raw_to_sentiment` | Ollama | `scale` |
+| `third_party_anonymization` | Ollama | `mode` |
 
-Prompts: `topos/sanitization/ollama_transforms.py`.
+Prompts (Ollama only): `topos/sanitization/ollama_transforms.py`.  
+PII detection: `topos/sanitization/privacy_filter.py`.
 
 ## Production notes
 

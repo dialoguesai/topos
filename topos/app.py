@@ -38,6 +38,7 @@ from .api import (
     sanitization_ollama_config as sanitization_ollama_config_routes,
     filter_lab as filter_lab_routes,
     home_chat as home_chat_routes,
+    signal as signal_routes,
 )
 from .config.settings import settings
 from .core.logging import configure_logging
@@ -98,6 +99,7 @@ app.include_router(source_install_routes.router, prefix="/v1")
 app.include_router(app_registry_routes.router)
 app.include_router(ingestion_compat_routes.router)
 app.include_router(enrichment_routes.router, prefix="/v1")
+app.include_router(signal_routes.router, prefix="/v1")
 app.include_router(ingestion_routes.router, prefix="/v1")
 app.include_router(ingestion_sources_routes.router)
 app.include_router(query_routes.router, prefix="/v1")

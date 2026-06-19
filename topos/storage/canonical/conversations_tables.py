@@ -299,6 +299,8 @@ class ConversationsTablesManager:
         records: List[Dict[str, Any]],
         dataset_id: str,
         source_id: str,
+        *,
+        sync_batch_id: Optional[str] = None,
     ) -> Dict[str, int]:
         """
         Upsert messages into conversation_messages and ensure parent rows in conversations.
@@ -438,6 +440,7 @@ class ConversationsTablesManager:
             return contact_id
 
         conversations_created = 0
+        messages_created = 0
         seen_conversation_ids: set[tuple[str, str]] = set()
         participants_seen: set[tuple[str, str]] = set()
         for rec in records:
@@ -471,53 +474,47 @@ class ConversationsTablesManager:
                         ),
                     )
                     participants_seen.add(part_key)
+        from .canonical_store import SQLiteCanonicalStore
+
+        store = SQLiteCanonicalStore(self.conn)
+        message_records: List[Dict[str, Any]] = []
         for rec in records:
             message_id = str(rec.get("message_id") or "")
             if not message_id:
                 continue
-            conversation_id = (
-                str(rec.get("conversation_id") or rec.get("thread_id") or dataset_id)
-            )
-            event_at = rec.get("event_at") or rec.get("ts") or ""
-            sender_type = rec.get("sender_type")
-            sender_id = rec.get("sender_id")
-            reply_to_message_id = rec.get("reply_to_message_id")
-            message_type = rec.get("message_type")
-            event_type = rec.get("event_type")
-            content = rec.get("content")
+            conversation_id = str(rec.get("conversation_id") or rec.get("thread_id") or dataset_id)
             metadata_json = None
             if "_metadata" in rec:
                 metadata_json = json.dumps(rec["_metadata"], ensure_ascii=False)
-            is_from_self = 1 if (rec.get("is_from_self") is True or rec.get("from_self") is True) else 0
-            owner_user_id = rec.get("owner_user_id")
-            self.conn.execute(f"""
-                INSERT OR REPLACE INTO {CONVERSATION_MESSAGES_TABLE}
-                (message_id, conversation_id, dataset_id, sender_type, sender_id, reply_to_message_id, message_type, event_type, content, event_at, source_id, metadata_json, is_from_self, owner_user_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-            """, (
-                message_id,
-                conversation_id,
-                dataset_id,
-                sender_type,
-                sender_id,
-                reply_to_message_id,
-                message_type,
-                event_type,
-                content,
-                event_at,
-                source_id,
-                metadata_json,
-                is_from_self,
-                owner_user_id,
-            ))
-        self.conn.commit()
+            message_records.append(
+                {
+                    "message_id": message_id,
+                    "conversation_id": conversation_id,
+                    "dataset_id": dataset_id,
+                    "sender_type": rec.get("sender_type"),
+                    "sender_id": rec.get("sender_id"),
+                    "reply_to_message_id": rec.get("reply_to_message_id"),
+                    "message_type": rec.get("message_type"),
+                    "event_type": rec.get("event_type"),
+                    "content": rec.get("content"),
+                    "event_at": rec.get("event_at") or rec.get("ts") or "",
+                    "source_id": source_id,
+                    "metadata_json": metadata_json,
+                    "is_from_self": rec.get("is_from_self") is True or rec.get("from_self") is True,
+                    "owner_user_id": rec.get("owner_user_id"),
+                    "source_record_id": message_id,
+                }
+            )
+        refs = store.upsert_batch("conversation_messages", message_records, sync_batch_id=sync_batch_id)
+        messages_created = sum(1 for ref in refs if ref.created)
         logger.debug(
-            "[PIPELINE:CONVERSATIONS] Wrote %d messages to %s, %d conversation rows",
+            "[PIPELINE:CONVERSATIONS] Wrote %d messages to %s (%d new), %d conversation rows",
             len(records),
             CONVERSATION_MESSAGES_TABLE,
+            messages_created,
             len(seen_conversation_ids),
         )
-        return {"messages_created": len(records), "conversations_created": conversations_created}
+        return {"messages_created": messages_created, "conversations_created": conversations_created}
 
     def list_contacts(
         self,

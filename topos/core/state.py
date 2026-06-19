@@ -269,6 +269,12 @@ def get_db_connection() -> Optional[sqlite3.Connection]:
         _db_conn_path = resolved
         logger.debug("Created database connection: %s", db_path)
         try:
+            from ..storage.db.migrations import ensure_migrations_applied
+
+            ensure_migrations_applied(db_conn)
+        except Exception as migration_exc:  # noqa: BLE001
+            logger.warning("Wiki MVP migrations skipped on startup: %s", migration_exc)
+        try:
             from ..storage.raw.browser_flat_tables import backfill_browser_visits_from_raw_retention
 
             backfill_browser_visits_from_raw_retention(db_conn)
