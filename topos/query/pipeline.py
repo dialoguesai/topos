@@ -15,9 +15,10 @@ from .game_layer import DefaultGameLayer
 from .inference import run_query_inference
 from .intent import compute_intent_hash
 from .manifest import ScopeResolutionManifest
-from .retrieval import DefaultSignalRetrievalAdapter
+from .retrieval import DefaultSignalRetrievalAdapter, resolve_retrieval_source_ids
 from .session import QueryArtifact, QuerySession, TurnOutcome
 from .session_utils import build_cache_key, validate_public_result
+from .source_generation import get_data_health_version, list_installed_source_ids
 from .turn_classifier import TurnClassifierLite
 from .types import AccessMode, QueryTurn, RetrievalError, RetrievalRequest
 
@@ -50,6 +51,19 @@ def _merge_envelope(existing: Optional[Dict[str, Any]], *, scope_id: str, access
     return {**base, "scopes": scopes, "access_modes": modes, "last_scope_id": scope_id}
 
 
+def _db_conn_from_adapters(adapters) -> Optional[Any]:
+    for store in (
+        getattr(adapters, "canonical", None),
+        getattr(adapters, "query_session", None),
+        getattr(adapters, "signal", None),
+        getattr(adapters, "graph", None),
+    ):
+        conn = getattr(store, "_conn", None)
+        if conn is not None:
+            return conn
+    return None
+
+
 class QueryPipelineOrchestrator:
     def __init__(self, adapters=None) -> None:
         self._adapters = adapters or AdapterFactory.from_runtime({"database_hosting_mode": "memory"})
@@ -72,6 +86,10 @@ class QueryPipelineOrchestrator:
         filter_manifest: Optional[Dict[str, Any]] = None,
         field_transforms: Optional[list] = None,
         requester_id: str = "owner",
+        owner_id: str = "owner",
+        is_grantee_request: bool = False,
+        disclosure_ceiling: Optional[str] = None,
+        explicit_disclosure_tier: Optional[str] = None,
     ) -> Dict[str, Any]:
         session_id = query_session_id or f"qs_{uuid.uuid4()}"
         store = self._session_store()
@@ -103,7 +121,31 @@ class QueryPipelineOrchestrator:
 
         intent_hash = compute_intent_hash(scope_id=scope_id, access_mode=access_mode, query_text=query_text)
         turn = QueryTurn(query_text=query_text, scope_id=scope_id, access_mode=access_mode, intent_hash=intent_hash)
-        classification = self._classifier.classify(turn, session, filter_manifest=filter_manifest)
+
+        from ..disclosure.tier import resolve_disclosure_tier
+
+        disclosure_tier = resolve_disclosure_tier(
+            requester_id=requester_id,
+            owner_id=owner_id,
+            is_grantee_request=is_grantee_request,
+            explicit_tier=explicit_disclosure_tier,  # type: ignore[arg-type]
+            disclosure_ceiling=disclosure_ceiling,
+        )
+
+        from ..core.state import get_db_connection
+
+        db_conn = _db_conn_from_adapters(self._adapters) or get_db_connection()
+        installed_source_ids = list_installed_source_ids(db_conn)
+        resolved_source_ids = resolve_retrieval_source_ids(manifest, installed_source_ids or None)
+        data_health_version = get_data_health_version(scope_id, resolved_source_ids, db_conn)
+
+        classification = self._classifier.classify(
+            turn,
+            session,
+            filter_manifest=filter_manifest,
+            source_ids=resolved_source_ids,
+            data_health_version=data_health_version,
+        )
 
         if classification.outcome == TurnOutcome.DENIED:
             audit = build_query_audit_event(
@@ -183,6 +225,9 @@ class QueryPipelineOrchestrator:
                     filter_manifest=filter_manifest,
                     field_transforms=field_transforms,
                     skip_retrieval=False,
+                    installed_source_ids=installed_source_ids or None,
+                    disclosure_tier=disclosure_tier,
+                    requester_id=requester_id,
                 )
             )
         except RetrievalError as exc:
@@ -206,6 +251,7 @@ class QueryPipelineOrchestrator:
             filter_manifest=filter_manifest,
             field_transforms=field_transforms,
             access_mode=access_mode,
+            disclosure_tier=disclosure_tier,
         )
         public = self._game_layer.apply(
             context_packet=filtered.context_packet,
@@ -226,7 +272,11 @@ class QueryPipelineOrchestrator:
         validate_public_result(public_dict)
 
         fingerprint = compute_retrieval_fingerprint(
-            scope_id=scope_id, access_mode=access_mode, filter_manifest=filter_manifest
+            scope_id=scope_id,
+            access_mode=access_mode,
+            filter_manifest=filter_manifest,
+            source_ids=resolved_source_ids,
+            data_health_version=data_health_version,
         )
         cache_key = build_cache_key(scope_id=scope_id, access_mode=access_mode, intent_hash=intent_hash)
         ttl = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
@@ -261,6 +311,7 @@ class QueryPipelineOrchestrator:
             filters_applied=filtered.filters_applied,
             retrieval_metadata=bundle.retrieval_metadata,
         )
+        audit["disclosure_tier"] = disclosure_tier
         return {
             "turn_outcome": TurnOutcome.LIVE_QUERY.value,
             "public_result": public_dict,
@@ -268,6 +319,7 @@ class QueryPipelineOrchestrator:
             "session_id": session_id,
             "query_session_id": session_id,
             "audit": audit,
+            "disclosure_tier": disclosure_tier,
         }
 
 

@@ -45,6 +45,9 @@ class DataSourceDefinition:
     # MVP roles/scopes (Sprint 02 Stage 1): scope this source's canonical output maps to
     default_scope_id: str = "unknown"
     allowed_scope_ids: Optional[List[str]] = None
+    # Signal dimensions whose briefs/summaries should update when this source ingests.
+    # When unset, falls back to canonical_group_id lane defaults.
+    brief_update_dimensions: Optional[List[str]] = None
     default_filter_hints: Optional[List[str]] = None
     filter_tier_kind: Optional[Literal["sensitivity", "inferability"]] = None
     default_filter_tiers: Optional[Dict[str, Dict[str, object]]] = None
@@ -89,6 +92,8 @@ class DataSourceDefinition:
         }
         if self.allowed_scope_ids is not None:
             out["allowed_scope_ids"] = list(self.allowed_scope_ids)
+        if self.brief_update_dimensions is not None:
+            out["brief_update_dimensions"] = list(self.brief_update_dimensions)
         if self.default_filter_hints is not None:
             out["default_filter_hints"] = list(self.default_filter_hints)
         if self.filter_tier_kind is not None:

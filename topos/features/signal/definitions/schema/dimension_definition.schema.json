@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://topos.dev/schemas/signal/dimension_definition.schema.json",
+  "title": "SignalDimensionDefinition",
+  "type": "object",
+  "required": [
+    "definition_version",
+    "dimension_id",
+    "status",
+    "core_question",
+    "primary_entity_types",
+    "signal_objects",
+    "gate_objects",
+    "canonical_contributions",
+    "view_types",
+    "extraction_hints"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "definition_version": {
+      "type": "string",
+      "pattern": "^\\d+\\.\\d+\\.\\d+$"
+    },
+    "dimension_id": {
+      "type": "string",
+      "pattern": "^[a-z_]+$"
+    },
+    "status": {
+      "type": "string",
+      "enum": ["typed", "legacy_brief_only"]
+    },
+    "core_question": {
+      "type": "string",
+      "minLength": 1
+    },
+    "primary_entity_types": {
+      "type": "array",
+      "minItems": 0,
+      "items": {
+        "type": "object",
+        "required": ["id", "description"],
+        "additionalProperties": false,
+        "properties": {
+          "id": { "type": "string", "minLength": 1 },
+          "description": { "type": "string", "minLength": 1 },
+          "fields": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      }
+    },
+    "signal_objects": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "gate_objects": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "canonical_contributions": {
+      "type": "object",
+      "additionalProperties": {
+        "type": "object",
+        "required": ["primary_weight"],
+        "additionalProperties": false,
+        "properties": {
+          "primary_weight": { "type": "number", "minimum": 0, "maximum": 1 },
+          "secondary_dimensions": {
+            "type": "array",
+            "items": { "type": "string" }
+          },
+          "weight_fields": {
+            "type": "array",
+            "items": { "type": "string" }
+          }
+        }
+      }
+    },
+    "view_types": {
+      "type": "array",
+      "items": { "type": "string", "minLength": 1 }
+    },
+    "extraction_hints": {
+      "type": "string"
+    }
+  }
+}

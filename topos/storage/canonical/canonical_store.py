@@ -53,6 +53,16 @@ class SQLiteCanonicalStore(CanonicalStore):
             ref = self._upsert_conversation_message(record, sync_batch_id=sync_batch_id)
         elif table == "activity_events":
             ref = self._upsert_activity_event(record, sync_batch_id=sync_batch_id)
+        elif table == "calendar_events":
+            ref = self._upsert_calendar_event(record, sync_batch_id=sync_batch_id)
+        elif table == "journal_entries":
+            ref = self._upsert_journal_entry(record, sync_batch_id=sync_batch_id)
+        elif table == "profile_records":
+            ref = self._upsert_profile_record(record, sync_batch_id=sync_batch_id)
+        elif table == "financial_transactions":
+            ref = self._upsert_financial_transaction(record, sync_batch_id=sync_batch_id)
+        elif table == "location_events":
+            ref = self._upsert_location_event(record, sync_batch_id=sync_batch_id)
         else:
             raise ValueError(f"Unsupported canonical table: {table}")
         self._maybe_commit()
@@ -228,6 +238,193 @@ class SQLiteCanonicalStore(CanonicalStore):
                 record.get("url"),
                 record.get("title"),
                 record.get("occurred_at"),
+                record.get("source_id"),
+                record.get("source_record_id") or event_id,
+                record.get("ingested_at") or _utc_now(),
+                sync_batch_id or record.get("sync_batch_id"),
+                _json_metadata(record.get("metadata_json")),
+            ),
+        )
+        return CanonicalRef(record_id=event_id, created=existing is None)
+
+    def _upsert_calendar_event(self, record: Dict[str, Any], *, sync_batch_id: Optional[str]) -> CanonicalRef:
+        event_id = str(record.get("event_id") or record.get("source_record_id") or "")
+        if not event_id:
+            raise ValueError("calendar_events upsert requires event_id")
+        existing = self._conn.execute(
+            "SELECT event_id FROM calendar_events WHERE event_id=?",
+            (event_id,),
+        ).fetchone()
+        self._conn.execute(
+            """
+            INSERT INTO calendar_events (
+                event_id, title, starts_at, ends_at, source_id,
+                source_record_id, ingested_at, sync_batch_id, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(event_id) DO UPDATE SET
+                title=excluded.title,
+                starts_at=excluded.starts_at,
+                ends_at=excluded.ends_at,
+                sync_batch_id=excluded.sync_batch_id,
+                ingested_at=excluded.ingested_at,
+                metadata_json=excluded.metadata_json
+            """,
+            (
+                event_id,
+                record.get("title"),
+                record.get("starts_at"),
+                record.get("ends_at"),
+                record.get("source_id"),
+                record.get("source_record_id") or event_id,
+                record.get("ingested_at") or _utc_now(),
+                sync_batch_id or record.get("sync_batch_id"),
+                _json_metadata(record.get("metadata_json")),
+            ),
+        )
+        return CanonicalRef(record_id=event_id, created=existing is None)
+
+    def _upsert_journal_entry(self, record: Dict[str, Any], *, sync_batch_id: Optional[str]) -> CanonicalRef:
+        entry_id = str(record.get("entry_id") or record.get("source_record_id") or "")
+        if not entry_id:
+            raise ValueError("journal_entries upsert requires entry_id")
+        existing = self._conn.execute(
+            "SELECT entry_id FROM journal_entries WHERE entry_id=?",
+            (entry_id,),
+        ).fetchone()
+        self._conn.execute(
+            """
+            INSERT INTO journal_entries (
+                entry_id, entry_at, mood_tag, category, content, people, place_name, source_id,
+                source_record_id, ingested_at, sync_batch_id, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(entry_id) DO UPDATE SET
+                content=excluded.content,
+                mood_tag=excluded.mood_tag,
+                category=excluded.category,
+                people=excluded.people,
+                place_name=excluded.place_name,
+                entry_at=excluded.entry_at,
+                sync_batch_id=excluded.sync_batch_id,
+                ingested_at=excluded.ingested_at,
+                metadata_json=excluded.metadata_json
+            """,
+            (
+                entry_id,
+                record.get("entry_at"),
+                record.get("mood_tag"),
+                record.get("category"),
+                record.get("content"),
+                record.get("people"),
+                record.get("place_name"),
+                record.get("source_id"),
+                record.get("source_record_id") or entry_id,
+                record.get("ingested_at") or _utc_now(),
+                sync_batch_id or record.get("sync_batch_id"),
+                _json_metadata(record.get("metadata_json")),
+            ),
+        )
+        return CanonicalRef(record_id=entry_id, created=existing is None)
+
+    def _upsert_profile_record(self, record: Dict[str, Any], *, sync_batch_id: Optional[str]) -> CanonicalRef:
+        record_id = str(record.get("record_id") or record.get("source_record_id") or "")
+        if not record_id:
+            raise ValueError("profile_records upsert requires record_id")
+        existing = self._conn.execute(
+            "SELECT record_id FROM profile_records WHERE record_id=?",
+            (record_id,),
+        ).fetchone()
+        self._conn.execute(
+            """
+            INSERT INTO profile_records (
+                record_id, record_type, title, organization, start_date, end_date,
+                description, source_id, source_record_id, ingested_at, sync_batch_id, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(record_id) DO UPDATE SET
+                description=excluded.description,
+                sync_batch_id=excluded.sync_batch_id,
+                ingested_at=excluded.ingested_at
+            """,
+            (
+                record_id,
+                record.get("record_type"),
+                record.get("title"),
+                record.get("organization"),
+                record.get("start_date"),
+                record.get("end_date"),
+                record.get("description"),
+                record.get("source_id"),
+                record.get("source_record_id") or record_id,
+                record.get("ingested_at") or _utc_now(),
+                sync_batch_id or record.get("sync_batch_id"),
+                _json_metadata(record.get("metadata_json")),
+            ),
+        )
+        return CanonicalRef(record_id=record_id, created=existing is None)
+
+    def _upsert_financial_transaction(self, record: Dict[str, Any], *, sync_batch_id: Optional[str]) -> CanonicalRef:
+        transaction_id = str(record.get("transaction_id") or record.get("source_record_id") or "")
+        if not transaction_id:
+            raise ValueError("financial_transactions upsert requires transaction_id")
+        existing = self._conn.execute(
+            "SELECT transaction_id FROM financial_transactions WHERE transaction_id=?",
+            (transaction_id,),
+        ).fetchone()
+        self._conn.execute(
+            """
+            INSERT INTO financial_transactions (
+                transaction_id, account_type, account_name, posted_at, amount, currency,
+                category, description, source_id, source_record_id, ingested_at, sync_batch_id, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(transaction_id) DO UPDATE SET
+                amount=excluded.amount,
+                sync_batch_id=excluded.sync_batch_id,
+                ingested_at=excluded.ingested_at
+            """,
+            (
+                transaction_id,
+                record.get("account_type"),
+                record.get("account_name"),
+                record.get("posted_at"),
+                record.get("amount"),
+                record.get("currency") or "USD",
+                record.get("category"),
+                record.get("description"),
+                record.get("source_id"),
+                record.get("source_record_id") or transaction_id,
+                record.get("ingested_at") or _utc_now(),
+                sync_batch_id or record.get("sync_batch_id"),
+                _json_metadata(record.get("metadata_json")),
+            ),
+        )
+        return CanonicalRef(record_id=transaction_id, created=existing is None)
+
+    def _upsert_location_event(self, record: Dict[str, Any], *, sync_batch_id: Optional[str]) -> CanonicalRef:
+        event_id = str(record.get("event_id") or record.get("source_record_id") or "")
+        if not event_id:
+            raise ValueError("location_events upsert requires event_id")
+        existing = self._conn.execute(
+            "SELECT event_id FROM location_events WHERE event_id=?",
+            (event_id,),
+        ).fetchone()
+        self._conn.execute(
+            """
+            INSERT INTO location_events (
+                event_id, place_name, city, region, country, event_at, event_type,
+                source_id, source_record_id, ingested_at, sync_batch_id, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(event_id) DO UPDATE SET
+                place_name=excluded.place_name,
+                sync_batch_id=excluded.sync_batch_id,
+                ingested_at=excluded.ingested_at
+            """,
+            (
+                event_id,
+                record.get("place_name"),
+                record.get("city"),
+                record.get("region"),
+                record.get("country"),
+                record.get("event_at"),
+                record.get("event_type"),
                 record.get("source_id"),
                 record.get("source_record_id") or event_id,
                 record.get("ingested_at") or _utc_now(),

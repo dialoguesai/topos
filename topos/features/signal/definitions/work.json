@@ -1,0 +1,57 @@
+{
+  "definition_version": "1.0.0",
+  "dimension_id": "work",
+  "status": "typed",
+  "core_question": "What are they building and how much capacity do they have?",
+  "primary_entity_types": [
+    {
+      "id": "ProjectLoad",
+      "description": "Active project or bet with load weight.",
+      "fields": ["project_label", "domain_tags", "load_band", "status"]
+    },
+    {
+      "id": "DomainFocus",
+      "description": "Primary professional domain concentration.",
+      "fields": ["domain_tags", "focus_strength"]
+    },
+    {
+      "id": "CapacityBand",
+      "description": "Coarse available capacity for new work.",
+      "fields": ["capacity_band", "confidence", "computed_at"]
+    }
+  ],
+  "signal_objects": [
+    "capacity_score",
+    "domain_overlap",
+    "active_project_load",
+    "work_context_summary",
+    "user_goals"
+  ],
+  "gate_objects": [
+    "capacity_score",
+    "domain_overlap",
+    "active_project_load"
+  ],
+  "canonical_contributions": {
+    "ai_chat_messages": {
+      "primary_weight": 0.8,
+      "secondary_dimensions": ["memory", "intentions"]
+    },
+    "profile_records": {
+      "primary_weight": 0.7,
+      "secondary_dimensions": ["profile"]
+    },
+    "project": {
+      "primary_weight": 1.0
+    },
+    "task": {
+      "primary_weight": 0.8
+    },
+    "user_goals": {
+      "primary_weight": 0.6,
+      "secondary_dimensions": ["intentions"]
+    }
+  },
+  "view_types": ["project_summary", "domain_tags", "narrative_brief_optional"],
+  "extraction_hints": "Active project themes, domain focus, and capacity bands; no repo names or ticket text."
+}

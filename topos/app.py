@@ -36,12 +36,14 @@ from .api import (
     ui_config as ui_config_routes,
     data_explorer_table_prefs as data_explorer_table_prefs_routes,
     sanitization_ollama_config as sanitization_ollama_config_routes,
+    signal_extraction_config as signal_extraction_config_routes,
     filter_lab as filter_lab_routes,
     home_chat as home_chat_routes,
+    privacy_disclose as privacy_disclose_routes,
     signal as signal_routes,
 )
 from .config.settings import settings
-from .core.logging import configure_logging
+from .core.logging import align_uvicorn_loggers, configure_logging
 from .core import state
 from .core.handlers import handle_control_plane_request
 from .control_plane_client import ControlPlaneClient
@@ -110,14 +112,17 @@ app.include_router(ui_config_routes.router)
 app.include_router(data_explorer_table_prefs_routes.router)
 app.include_router(user_identity_routes.router)
 app.include_router(sanitization_ollama_config_routes.router)
+app.include_router(signal_extraction_config_routes.router)
 app.include_router(filter_lab_routes.router)
 app.include_router(home_chat_routes.router)
+app.include_router(privacy_disclose_routes.router)
 app.include_router(compute_remote_routes.router)
 app.include_router(data_commit_routes.router)
 
 
 @app.on_event("startup")
 async def startup_event() -> None:
+    align_uvicorn_loggers()
     _log_runtime_banner()
     logger.info("CORS allowed origins: %s", settings.allowed_origins)
     if settings.allowed_origin_regex:

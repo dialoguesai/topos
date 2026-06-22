@@ -10,7 +10,7 @@ from fastapi import APIRouter, Body, Depends, Query, Request  # noqa: F401 Body 
 
 from ..auth import require_api_key
 from ..core.state import get_db_connection
-from ..ingestion.ingest_helpers import ingest_file_payload, ingest_ui_payload
+from ..ingestion.ingest_helpers import ingest_file_payload, ingest_ui_payload, resolve_file_format
 from ..ingestion.local_sync import run_imessage_sync, run_signal_sync, run_signal_upload
 from ..sources.registry import REGISTRY
 from ..storage.signal_identity import get_signal_identity, put_signal_identity
@@ -86,6 +86,8 @@ async def ingest_source(
                 dataset_id=dataset_id,
                 schema_id=source.schema_id,
                 file_path=file_path,
+                source_id=source_id,
+                file_format=resolve_file_format(source_definition=source, file_path=file_path),
             )
         payload_bytes = await file.read()
         guard = await submit_usage_guard_check(
@@ -102,6 +104,8 @@ async def ingest_source(
             dataset_id=dataset_id,
             schema_id=source.schema_id,
             file_bytes=payload_bytes,
+            source_id=source_id,
+            file_format=resolve_file_format(source_definition=source),
         )
 
     if source.source_type == "ui_stream":

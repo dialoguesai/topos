@@ -1508,6 +1508,55 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
         except Exception as exc:  # noqa: BLE001
             return {"id": req_id, "status": "error", "error": str(exc)}
 
+    if msg_type == "get_signal_extraction_config":
+        from ..config.signal_extraction import effective_config_for_api
+
+        conn = get_db_connection()
+        if not conn:
+            return {"id": req_id, "status": "error", "error": "Database not available"}
+        try:
+            data = effective_config_for_api(settings, conn)
+            return {"id": req_id, "status": "ok", "payload": {"status": "ok", **data}}
+        except Exception as exc:  # noqa: BLE001
+            return {"id": req_id, "status": "error", "error": str(exc)}
+
+    if msg_type == "put_signal_extraction_config":
+        from ..config.signal_extraction import (
+            ENGINE_CONFIG_KEY_SIGNAL_EXTRACTION_DEVICE,
+            effective_config_for_api,
+            normalize_put_device_overrides,
+        )
+
+        conn = get_db_connection()
+        if not conn:
+            return {"id": req_id, "status": "error", "error": "Database not available"}
+        payload = message.get("payload") or {}
+        try:
+            json_str = normalize_put_device_overrides(payload)
+            set_engine_config_value(conn, ENGINE_CONFIG_KEY_SIGNAL_EXTRACTION_DEVICE, json_str)
+            data = effective_config_for_api(settings, conn)
+            return {"id": req_id, "status": "ok", "payload": {"status": "ok", **data}}
+        except ValueError as exc:
+            return {"id": req_id, "status": "error", "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            return {"id": req_id, "status": "error", "error": str(exc)}
+
+    if msg_type == "delete_signal_extraction_config":
+        from ..config.signal_extraction import (
+            ENGINE_CONFIG_KEY_SIGNAL_EXTRACTION_DEVICE,
+            effective_config_for_api,
+        )
+
+        conn = get_db_connection()
+        if not conn:
+            return {"id": req_id, "status": "error", "error": "Database not available"}
+        try:
+            set_engine_config_value(conn, ENGINE_CONFIG_KEY_SIGNAL_EXTRACTION_DEVICE, "{}")
+            data = effective_config_for_api(settings, conn)
+            return {"id": req_id, "status": "ok", "payload": {"status": "ok", **data}}
+        except Exception as exc:  # noqa: BLE001
+            return {"id": req_id, "status": "error", "error": str(exc)}
+
     if msg_type == "get_filter_lab_bundles":
         from ..filter_lab import bundles as fl_bundles
 
@@ -2691,6 +2740,203 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
             return {"id": req_id, "status": "ok", "payload": get_signal_service(conn=get_db_connection()).get_data_health()}
         except Exception as exc:  # noqa: BLE001
             return {"id": req_id, "status": "error", "error": str(exc)}
+    if msg_type == "signal_list_briefs":
+        try:
+            from ..features.signal.service import get_signal_service
+
+            conn = get_db_connection()
+            return {
+                "id": req_id,
+                "status": "ok",
+                "payload": get_signal_service(conn=conn).list_briefs(),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"id": req_id, "status": "error", "error": str(exc)}
+    if msg_type == "signal_get_brief":
+        payload = message.get("payload") or {}
+        dimension = str(payload.get("dimension") or "").strip()
+        if not dimension:
+            return {"id": req_id, "status": "error", "error": "dimension required", "code": 400}
+        try:
+            from ..features.signal.service import get_signal_service
+
+            conn = get_db_connection()
+            return {
+                "id": req_id,
+                "status": "ok",
+                "payload": get_signal_service(conn=conn).get_brief(dimension),
+            }
+        except ValueError as exc:
+            return {"id": req_id, "status": "error", "error": str(exc), "code": 400}
+        except Exception as exc:  # noqa: BLE001
+            return {"id": req_id, "status": "error", "error": str(exc)}
+    if msg_type == "signal_list_brief_revisions":
+        payload = message.get("payload") or {}
+        dimension = str(payload.get("dimension") or "").strip()
+        if not dimension:
+            return {"id": req_id, "status": "error", "error": "dimension required", "code": 400}
+        try:
+            from ..features.signal.service import get_signal_service
+
+            conn = get_db_connection()
+            limit = min(int(payload.get("limit") or 20), 100)
+            return {
+                "id": req_id,
+                "status": "ok",
+                "payload": get_signal_service(conn=conn).list_brief_revisions(dimension, limit=limit),
+            }
+        except ValueError as exc:
+            return {"id": req_id, "status": "error", "error": str(exc), "code": 400}
+        except Exception as exc:  # noqa: BLE001
+            return {"id": req_id, "status": "error", "error": str(exc)}
+    if msg_type == "signal_update_brief":
+        payload = message.get("payload") or {}
+        dimension = str(payload.get("dimension") or "").strip()
+        markdown_body = payload.get("markdown_body")
+        if not dimension:
+            return {"id": req_id, "status": "error", "error": "dimension required", "code": 400}
+        if markdown_body is None:
+            return {"id": req_id, "status": "error", "error": "markdown_body required", "code": 400}
+        try:
+            from ..features.signal.service import get_signal_service
+
+            conn = get_db_connection()
+            return {
+                "id": req_id,
+                "status": "ok",
+                "payload": get_signal_service(conn=conn).update_brief(dimension, str(markdown_body)),
+            }
+        except ValueError as exc:
+            return {"id": req_id, "status": "error", "error": str(exc), "code": 400}
+        except Exception as exc:  # noqa: BLE001
+            return {"id": req_id, "status": "error", "error": str(exc)}
+    if msg_type == "signal_refresh_brief":
+        payload = message.get("payload") or {}
+        dimension = str(payload.get("dimension") or "").strip()
+        if not dimension:
+            return {"id": req_id, "status": "error", "error": "dimension required", "code": 400}
+        try:
+            from ..features.signal.service import get_signal_service
+
+            conn = get_db_connection()
+            limit = min(int(payload.get("limit") or 40), 100)
+            service = get_signal_service(conn=conn)
+            result = await service.refresh_brief(dimension, limit=limit)
+            return {"id": req_id, "status": "ok", "payload": result}
+        except ValueError as exc:
+            return {"id": req_id, "status": "error", "error": str(exc), "code": 400}
+        except Exception as exc:  # noqa: BLE001
+            return {"id": req_id, "status": "error", "error": str(exc)}
+    if msg_type == "signal_list_definitions":
+        try:
+            from ..features.signal.service import get_signal_service
+
+            conn = get_db_connection()
+            return {
+                "id": req_id,
+                "status": "ok",
+                "payload": get_signal_service(conn=conn).list_definitions(),
+            }
+        except Exception as exc:  # noqa: BLE001
+            return {"id": req_id, "status": "error", "error": str(exc)}
+    if msg_type == "signal_get_definition":
+        payload = message.get("payload") or {}
+        dimension = str(payload.get("dimension") or "").strip()
+        if not dimension:
+            return {"id": req_id, "status": "error", "error": "dimension required", "code": 400}
+        try:
+            from ..features.signal.service import get_signal_service
+
+            conn = get_db_connection()
+            return {
+                "id": req_id,
+                "status": "ok",
+                "payload": get_signal_service(conn=conn).get_definition(dimension),
+            }
+        except ValueError as exc:
+            return {"id": req_id, "status": "error", "error": str(exc), "code": 404}
+        except Exception as exc:  # noqa: BLE001
+            return {"id": req_id, "status": "error", "error": str(exc)}
+    if msg_type == "signal_list_objects":
+        payload = message.get("payload") or {}
+        dimension = str(payload.get("dimension") or "").strip()
+        if not dimension:
+            return {"id": req_id, "status": "error", "error": "dimension required", "code": 400}
+        try:
+            from ..features.signal.service import get_signal_service
+
+            conn = get_db_connection()
+            limit = min(int(payload.get("limit") or 50), 200)
+            object_type = payload.get("object_type")
+            return {
+                "id": req_id,
+                "status": "ok",
+                "payload": get_signal_service(conn=conn).list_signal_objects(
+                    dimension,
+                    object_type=str(object_type).strip() if object_type else None,
+                    limit=limit,
+                ),
+            }
+        except ValueError as exc:
+            return {"id": req_id, "status": "error", "error": str(exc), "code": 400}
+        except Exception as exc:  # noqa: BLE001
+            return {"id": req_id, "status": "error", "error": str(exc)}
+    if msg_type == "signal_get_object":
+        payload = message.get("payload") or {}
+        object_id = str(payload.get("object_id") or "").strip()
+        if not object_id:
+            return {"id": req_id, "status": "error", "error": "object_id required", "code": 400}
+        try:
+            from ..features.signal.service import get_signal_service
+
+            conn = get_db_connection()
+            return {
+                "id": req_id,
+                "status": "ok",
+                "payload": get_signal_service(conn=conn).get_signal_object(object_id),
+            }
+        except ValueError as exc:
+            return {"id": req_id, "status": "error", "error": str(exc), "code": 404}
+        except Exception as exc:  # noqa: BLE001
+            return {"id": req_id, "status": "error", "error": str(exc)}
+    if msg_type == "signal_owner_override_object":
+        payload = message.get("payload") or {}
+        object_id = str(payload.get("object_id") or "").strip()
+        patch = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+        if not object_id:
+            return {"id": req_id, "status": "error", "error": "object_id required", "code": 400}
+        try:
+            from ..features.signal.service import get_signal_service
+
+            conn = get_db_connection()
+            return {
+                "id": req_id,
+                "status": "ok",
+                "payload": get_signal_service(conn=conn).owner_override_signal_object(object_id, patch),
+            }
+        except ValueError as exc:
+            return {"id": req_id, "status": "error", "error": str(exc), "code": 404}
+        except Exception as exc:  # noqa: BLE001
+            return {"id": req_id, "status": "error", "error": str(exc)}
+    if msg_type == "signal_evaluate_fit":
+        payload = message.get("payload") or {}
+        opportunity_type = str(payload.get("opportunity_type") or "").strip()
+        if not opportunity_type:
+            return {"id": req_id, "status": "error", "error": "opportunity_type required", "code": 400}
+        context = payload.get("context") if isinstance(payload.get("context"), dict) else {}
+        try:
+            from ..features.signal.service import get_signal_service
+
+            conn = get_db_connection()
+            return {
+                "id": req_id,
+                "status": "ok",
+                "payload": get_signal_service(conn=conn).evaluate_fit(opportunity_type, context=context),
+            }
+        except ValueError as exc:
+            return {"id": req_id, "status": "error", "error": str(exc), "code": 400}
+        except Exception as exc:  # noqa: BLE001
+            return {"id": req_id, "status": "error", "error": str(exc)}
     if msg_type in ("query", "query_live"):
         payload = message.get("payload") or {}
         try:
@@ -2726,6 +2972,12 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                 filter_manifest=filter_manifest,
                 field_transforms=payload.get("field_transforms"),
                 requester_id=str(payload.get("requester_id") or "mcp"),
+                owner_id=str(payload.get("owner_user_id") or payload.get("owner_id") or "owner"),
+                is_grantee_request=bool(payload.get("is_grantee_request")),
+                disclosure_ceiling=str(payload.get("disclosure_ceiling") or "default"),
+                explicit_disclosure_tier=str(payload.get("disclosure_tier")).strip()
+                if payload.get("disclosure_tier")
+                else None,
             )
             return {"id": req_id, "status": "ok", "payload": result}
         except KeyError as exc:
@@ -3886,6 +4138,7 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                 "ai_chat_messages", "ai_chat_conversations", "ai_chat_participants",
                 "conversation_messages", "conversations",
                 "activity_events", "calendar_events", "contacts", "contact_identifiers",
+                "journal_entries", "profile_records", "financial_transactions", "location_events",
             }
             
             # Enrichment System Tables
@@ -4002,7 +4255,9 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                         pooled_owner_user_id,
                         pooled_tenant_id,
                     )
-                    if not (scope_field and scope_value and scope_strategy):
+                    # Pooled tenants must not see tables we cannot scope. Local/off-pool
+                    # engines still list source_id-only canonical tables (harness lanes).
+                    if pooled_mode and not (scope_field and scope_value and scope_strategy):
                         pooled_hidden_unscoped_tables += 1
                         continue
 
@@ -4039,7 +4294,7 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                 except Exception:
                     row_count = None
 
-                if (pooled_mode or scope_requested) and scope_field and isinstance(row_count, int) and row_count <= 0:
+                if pooled_mode and scope_field and isinstance(row_count, int) and row_count <= 0:
                     pooled_filtered_tables += 1
                     continue
                 
@@ -4852,6 +5107,19 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
             if not db_conn:
                 return {"id": req_id, "status": "error", "error": "Database connection not available"}
 
+            from ..disclosure.tier import apply_disclosure_tier_to_rows, resolve_disclosure_tier
+
+            _, owner_uid_for_tier, _ = _resolve_uma_scope(payload, resource_id)
+            req_uid_for_tier = (
+                (payload.get("requesting_user_id") or payload.get("mcp_requester_id") or "").strip() or None
+            )
+            uma_disclosure_tier = resolve_disclosure_tier(
+                requester_id=req_uid_for_tier or "owner",
+                owner_id=owner_uid_for_tier or "owner",
+                is_grantee_request=bool(payload.get("is_grantee_request")),
+                disclosure_ceiling=str(payload.get("disclosure_ceiling") or "default"),
+            )
+
             def _uma_messages_record_and_return(
                 messages_out: list,
                 debug_metadata: Optional[Dict[str, Any]] = None,
@@ -4889,7 +5157,9 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                     query = (
                         """
                         SELECT m.message_id, m.conversation_id, m.sender_type, m.sender_id,
-                               m.event_at, m.content, m.metadata_json, m.source_id, m.dataset_id,
+                               m.event_at, m.content, m.content_disclosure, m.content_disclosure_hash,
+                               m.content_nsfw, m.content_nsfw_score,
+                               m.metadata_json, m.source_id, m.dataset_id,
                                m.reply_to_message_id, m.message_type, m.event_type, m.is_from_self, m.owner_user_id
                         FROM conversation_messages m
                         WHERE m.dataset_id = ?
@@ -4911,16 +5181,25 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                                 "sender_id": row[3],
                                 "event_at": row[4],
                                 "content": row[5],
-                                "metadata_json": row[6],
-                                "source_id": row[7],
-                                "dataset_id": row[8],
-                                "reply_to_message_id": row[9],
-                                "message_type": row[10],
-                                "event_type": row[11],
-                                "is_from_self": row[12],
-                                "owner_user_id": row[13],
+                                "content_disclosure": row[6],
+                                "content_disclosure_hash": row[7],
+                                "content_nsfw": row[8],
+                                "content_nsfw_score": row[9],
+                                "metadata_json": row[10],
+                                "source_id": row[11],
+                                "dataset_id": row[12],
+                                "reply_to_message_id": row[13],
+                                "message_type": row[14],
+                                "event_type": row[15],
+                                "is_from_self": row[16],
+                                "owner_user_id": row[17],
                             }
                         )
+                    messages = apply_disclosure_tier_to_rows(
+                        messages,
+                        table="conversation_messages",
+                        tier=uma_disclosure_tier,
+                    )
                     allowed_scopes: List[str] = []
                     raw_scopes = payload.get("allowed_scopes")
                     if isinstance(raw_scopes, list):
@@ -5024,7 +5303,10 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                     if has_emotions_table:
                         query = """
                             SELECT m.message_id, m.conversation_id, m.sender_type, m.sender_id,
-                                   m.event_at, m.content, m.content_rendered, m.metadata_json, m.sequence, m.source_id,
+                                   m.event_at, m.content, m.content_rendered,
+                                   m.content_disclosure, m.content_rendered_disclosure,
+                                   m.content_nsfw, m.content_nsfw_score,
+                                   m.metadata_json, m.sequence, m.source_id,
                                    e.emotion_label, e.confidence
                             FROM ai_chat_messages m
                             LEFT JOIN ai_chat_conversations c ON m.conversation_id = c.conversation_id
@@ -5045,7 +5327,10 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                     else:
                         query = """
                             SELECT m.message_id, m.conversation_id, m.sender_type, m.sender_id,
-                                   m.event_at, m.content, m.content_rendered, m.metadata_json, m.sequence, m.source_id,
+                                   m.event_at, m.content, m.content_rendered,
+                                   m.content_disclosure, m.content_rendered_disclosure,
+                                   m.content_nsfw, m.content_nsfw_score,
+                                   m.metadata_json, m.sequence, m.source_id,
                                    NULL as emotion_label, NULL as confidence
                             FROM ai_chat_messages m
                             LEFT JOIN ai_chat_conversations c ON m.conversation_id = c.conversation_id
@@ -5059,7 +5344,10 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                     if has_emotions_table:
                         query = """
                             SELECT m.message_id, m.conversation_id, m.sender_type, m.sender_id,
-                                   m.event_at, m.content, m.content_rendered, m.metadata_json, m.sequence, m.source_id,
+                                   m.event_at, m.content, m.content_rendered,
+                                   m.content_disclosure, m.content_rendered_disclosure,
+                                   m.content_nsfw, m.content_nsfw_score,
+                                   m.metadata_json, m.sequence, m.source_id,
                                    e.emotion_label, e.confidence
                             FROM ai_chat_messages m
                             LEFT JOIN (
@@ -5078,7 +5366,10 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                     else:
                         query = """
                             SELECT message_id, conversation_id, sender_type, sender_id,
-                                   event_at, content, content_rendered, metadata_json, sequence, source_id,
+                                   event_at, content, content_rendered,
+                                   content_disclosure, content_rendered_disclosure,
+                                   content_nsfw, content_nsfw_score,
+                                   metadata_json, sequence, source_id,
                                    NULL as emotion_label, NULL as confidence
                             FROM ai_chat_messages
                             """ + ("WHERE 1=1" + filter_where_plain if filter_where_plain else "") + """
@@ -5110,15 +5401,24 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                         "event_at": row[4],
                         "content": row[5],
                         "content_rendered": row[6],
-                        "metadata_json": row[7],
-                        "sequence": row[8],
-                        "source_id": row[9],
+                        "content_disclosure": row[7],
+                        "content_rendered_disclosure": row[8],
+                        "content_nsfw": row[9],
+                        "content_nsfw_score": row[10],
+                        "metadata_json": row[11],
+                        "sequence": row[12],
+                        "source_id": row[13],
                     }
-                    if len(row) > 10 and row[10] is not None:
-                        msg["emotion"] = row[10]
-                        if row[11] is not None:
-                            msg["emotion_confidence"] = float(row[11])
+                    if len(row) > 14 and row[14] is not None:
+                        msg["emotion"] = row[14]
+                        if row[15] is not None:
+                            msg["emotion_confidence"] = float(row[15])
                     messages.append(msg)
+                messages = apply_disclosure_tier_to_rows(
+                    messages,
+                    table="ai_chat_messages",
+                    tier=uma_disclosure_tier,
+                )
                 allowed_scopes: List[str] = []
                 raw_scopes = payload.get("allowed_scopes")
                 if isinstance(raw_scopes, list):

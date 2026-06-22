@@ -10,11 +10,31 @@ from typing import Any, Dict, List, Optional
 from ..protocols import ListPage
 from ...canonical.canonical_store import SQLiteCanonicalStore as TypedSQLiteCanonicalStore
 
-_NATIVE_TABLES = frozenset({"ai_chat_messages", "conversation_messages", "activity_events"})
+_NATIVE_TABLES = frozenset(
+    {
+        "ai_chat_messages",
+        "conversation_messages",
+        "activity_events",
+        "financial_transactions",
+        "location_events",
+        "profile_records",
+        "calendar_events",
+        "journal_entries",
+        "contacts",
+        "contact_identifiers",
+    }
+)
 _NATIVE_ID_COL = {
     "ai_chat_messages": "message_id",
     "conversation_messages": "message_id",
     "activity_events": "event_id",
+    "financial_transactions": "transaction_id",
+    "location_events": "event_id",
+    "profile_records": "record_id",
+    "calendar_events": "event_id",
+    "journal_entries": "entry_id",
+    "contacts": "contact_id",
+    "contact_identifiers": "contact_id",
 }
 _NATIVE_LIST_SPECS: Dict[str, tuple[str, List[str]]] = {
     "ai_chat_messages": (
@@ -22,6 +42,24 @@ _NATIVE_LIST_SPECS: Dict[str, tuple[str, List[str]]] = {
         SELECT message_id AS record_id, conversation_id, sender_type, source_id,
                substr(coalesce(content_rendered, content), 1, 500) AS content_preview,
                content, event_at
+        FROM ai_chat_messages
+        """,
+        [
+            "record_id",
+            "conversation_id",
+            "sender_type",
+            "source_id",
+            "content_preview",
+            "content",
+            "event_at",
+        ],
+    ),
+    "ai_chat_messages_disclosure": (
+        """
+        SELECT message_id AS record_id, conversation_id, sender_type, source_id,
+               substr(coalesce(content_rendered_disclosure, content_rendered, content_disclosure, content), 1, 500) AS content_preview,
+               coalesce(content_disclosure, content) AS content,
+               event_at
         FROM ai_chat_messages
         """,
         [
@@ -51,16 +89,176 @@ _NATIVE_LIST_SPECS: Dict[str, tuple[str, List[str]]] = {
             "event_at",
         ],
     ),
+    "conversation_messages_disclosure": (
+        """
+        SELECT message_id AS record_id, conversation_id, sender_id, source_id,
+               substr(coalesce(content_disclosure, content, ''), 1, 500) AS content_preview,
+               coalesce(content_disclosure, content) AS content,
+               created_at AS event_at
+        FROM conversation_messages
+        """,
+        [
+            "record_id",
+            "conversation_id",
+            "sender_id",
+            "source_id",
+            "content_preview",
+            "content",
+            "event_at",
+        ],
+    ),
     "activity_events": (
         """
         SELECT event_id AS record_id, source_id,
-               substr(coalesce(title, description, ''), 1, 500) AS content_preview,
-               coalesce(title, description, '') AS content, event_at
+               substr(coalesce(title, ''), 1, 500) AS content_preview,
+               coalesce(title, '') AS content, occurred_at AS event_at
         FROM activity_events
         """,
         ["record_id", "source_id", "content_preview", "content", "event_at"],
     ),
+    "financial_transactions": (
+        """
+        SELECT transaction_id AS record_id, source_id, account_type, amount, category, currency,
+               substr(coalesce(description, ''), 1, 500) AS content_preview,
+               coalesce(description, '') AS content, posted_at AS event_at
+        FROM financial_transactions
+        """,
+        [
+            "record_id",
+            "source_id",
+            "account_type",
+            "amount",
+            "category",
+            "currency",
+            "content_preview",
+            "content",
+            "event_at",
+        ],
+    ),
+    "location_events": (
+        """
+        SELECT event_id AS record_id, source_id, place_name, city, region, country, event_type,
+               substr(coalesce(place_name, city, ''), 1, 500) AS content_preview,
+               coalesce(place_name, city, '') AS content, event_at
+        FROM location_events
+        """,
+        [
+            "record_id",
+            "source_id",
+            "place_name",
+            "city",
+            "region",
+            "country",
+            "event_type",
+            "content_preview",
+            "content",
+            "event_at",
+        ],
+    ),
+    "profile_records": (
+        """
+        SELECT record_id, record_type, title, organization, description, source_id,
+               substr(coalesce(description, title, ''), 1, 500) AS content_preview,
+               coalesce(description, title, '') AS content
+        FROM profile_records
+        """,
+        [
+            "record_id",
+            "record_type",
+            "title",
+            "organization",
+            "description",
+            "source_id",
+            "content_preview",
+            "content",
+        ],
+    ),
+    "calendar_events": (
+        """
+        SELECT event_id AS record_id, title, starts_at, ends_at, source_id, metadata_json,
+               substr(coalesce(title, ''), 1, 500) AS content_preview,
+               coalesce(title, '') AS content
+        FROM calendar_events
+        """,
+        [
+            "record_id",
+            "title",
+            "starts_at",
+            "ends_at",
+            "source_id",
+            "metadata_json",
+            "content_preview",
+            "content",
+        ],
+    ),
+    "journal_entries": (
+        """
+        SELECT entry_id AS record_id, entry_at, mood_tag, category, content, people, place_name, source_id,
+               substr(coalesce(content, ''), 1, 500) AS content_preview,
+               entry_at AS event_at
+        FROM journal_entries
+        """,
+        [
+            "record_id",
+            "entry_at",
+            "mood_tag",
+            "category",
+            "content",
+            "people",
+            "place_name",
+            "source_id",
+            "content_preview",
+            "event_at",
+        ],
+    ),
+    "journal_entries_disclosure": (
+        """
+        SELECT entry_id AS record_id, entry_at, mood_tag, category,
+               coalesce(content_disclosure, content) AS content,
+               source_id,
+               substr(coalesce(content_disclosure, content, ''), 1, 500) AS content_preview,
+               entry_at AS event_at
+        FROM journal_entries
+        """,
+        [
+            "record_id",
+            "entry_at",
+            "mood_tag",
+            "category",
+            "content",
+            "source_id",
+            "content_preview",
+            "event_at",
+        ],
+    ),
+    "contacts": (
+        """
+        SELECT contact_id AS record_id, display_name, source_id, is_self
+        FROM contacts
+        """,
+        ["record_id", "display_name", "source_id", "is_self"],
+    ),
+    "contact_identifiers": (
+        """
+        SELECT contact_id AS record_id, identifier, identifier_type, source_id
+        FROM contact_identifiers
+        """,
+        ["record_id", "identifier", "identifier_type", "source_id"],
+    ),
 }
+
+
+_DISCLOSURE_LIST_TABLES = frozenset(
+    {"ai_chat_messages", "conversation_messages", "journal_entries"}
+)
+
+
+def _native_list_spec_key(table: str, disclosure_tier: str) -> str:
+    if disclosure_tier == "default_disclosure" and table in _DISCLOSURE_LIST_TABLES:
+        disclosure_key = f"{table}_disclosure"
+        if disclosure_key in _NATIVE_LIST_SPECS:
+            return disclosure_key
+    return table
 
 
 class SQLiteCanonicalStore:
@@ -89,11 +287,13 @@ class SQLiteCanonicalStore:
         source_id: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
+        disclosure_tier: str = "owner_raw",
     ) -> ListPage:
         if table not in self._NATIVE_TABLES:
             return ListPage(items=[], total=0, offset=offset, limit=limit)
 
-        base, col_names = _NATIVE_LIST_SPECS[table]
+        spec_key = _native_list_spec_key(table, disclosure_tier)
+        base, col_names = _NATIVE_LIST_SPECS[spec_key]
         params: List[Any] = []
         query = base
         if source_id is not None:
@@ -149,9 +349,16 @@ class SQLiteCanonicalStore:
         source_id: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
+        disclosure_tier: str = "owner_raw",
     ) -> ListPage:
         if table in self._NATIVE_TABLES:
-            return self._list_native(table, source_id=source_id, limit=limit, offset=offset)
+            return self._list_native(
+                table,
+                source_id=source_id,
+                limit=limit,
+                offset=offset,
+                disclosure_tier=disclosure_tier,
+            )
 
         query = "SELECT payload_json FROM wiki_canonical_records WHERE table_name=?"
         params: List[Any] = [table]
@@ -276,32 +483,141 @@ class SQLiteVectorIndex:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
+    def _existing_embedding_id(
+        self,
+        record_id: Optional[str],
+        model: Optional[str],
+        chunk_index: int,
+    ) -> Optional[str]:
+        if not record_id or not model:
+            return None
+        row = self._conn.execute(
+            """
+            SELECT embedding_id FROM signal_embeddings
+            WHERE record_id=? AND model=? AND chunk_index=?
+            """,
+            (record_id, model, chunk_index),
+        ).fetchone()
+        return str(row[0]) if row else None
+
+    def get_embedding_hashes(
+        self,
+        record_id: str,
+        model: str,
+    ) -> Dict[int, str]:
+        rows = self._conn.execute(
+            """
+            SELECT chunk_index, content_hash FROM signal_embeddings
+            WHERE record_id=? AND model=? AND content_hash IS NOT NULL
+            """,
+            (record_id, model),
+        ).fetchall()
+        return {int(row[0]): str(row[1]) for row in rows if row[1]}
+
+    def delete_chunks_for_record(
+        self,
+        record_id: str,
+        model: str,
+        *,
+        keep_indices: Optional[List[int]] = None,
+    ) -> int:
+        from .vector_search import delete_vec_rows
+
+        if keep_indices is not None:
+            placeholders = ",".join("?" for _ in keep_indices)
+            ids = [
+                str(row[0])
+                for row in self._conn.execute(
+                    f"""
+                    SELECT embedding_id FROM signal_embeddings
+                    WHERE record_id=? AND model=? AND chunk_index NOT IN ({placeholders})
+                    """,
+                    (record_id, model, *keep_indices),
+                ).fetchall()
+            ]
+            cur = self._conn.execute(
+                f"""
+                DELETE FROM signal_embeddings
+                WHERE record_id=? AND model=? AND chunk_index NOT IN ({placeholders})
+                """,
+                (record_id, model, *keep_indices),
+            )
+        else:
+            ids = [
+                str(row[0])
+                for row in self._conn.execute(
+                    "SELECT embedding_id FROM signal_embeddings WHERE record_id=? AND model=?",
+                    (record_id, model),
+                ).fetchall()
+            ]
+            cur = self._conn.execute(
+                "DELETE FROM signal_embeddings WHERE record_id=? AND model=?",
+                (record_id, model),
+            )
+        delete_vec_rows(self._conn, ids)
+        self._conn.commit()
+        return cur.rowcount
+
     def upsert(self, metadata: Dict[str, Any], *, vector: Optional[List[float]] = None) -> str:
-        embedding_id = str(metadata.get("embedding_id") or uuid.uuid4())
-        vector_blob = json.dumps(vector).encode("utf-8") if vector is not None else None
+        from ....features.signal.vector_codec import encode_vector
+        from ....features.signal.vector_settings import vector_format
+        from .vector_search import sync_vec_row
+
+        record_id = metadata.get("record_id")
+        model = metadata.get("model")
+        chunk_index = int(metadata.get("chunk_index") or 0)
+        existing_id = self._existing_embedding_id(record_id, model, chunk_index)
+        embedding_id = str(metadata.get("embedding_id") or existing_id or uuid.uuid4())
+        fmt = vector_format()
+        vector_blob = encode_vector(vector, fmt) if vector is not None else None
+        search_text = metadata.get("search_text") or metadata.get("text_preview")
+        provenance = {**metadata, "embedding_id": embedding_id}
+
         self._conn.execute(
             """
             INSERT INTO signal_embeddings (
                 embedding_id, record_id, source_id, signal_dimension, model, provider,
-                dims, text_preview, provenance_json, vector_blob
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(embedding_id) DO UPDATE SET
+                dims, text_preview, provenance_json, vector_blob, vector_format,
+                content_hash, chunk_index, event_at, conversation_id, record_type, search_text
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(record_id, model, chunk_index) DO UPDATE SET
+                embedding_id=excluded.embedding_id,
+                source_id=excluded.source_id,
+                signal_dimension=excluded.signal_dimension,
+                provider=excluded.provider,
+                dims=excluded.dims,
+                text_preview=excluded.text_preview,
                 provenance_json=excluded.provenance_json,
-                vector_blob=excluded.vector_blob
+                vector_blob=excluded.vector_blob,
+                vector_format=excluded.vector_format,
+                content_hash=excluded.content_hash,
+                event_at=excluded.event_at,
+                conversation_id=excluded.conversation_id,
+                record_type=excluded.record_type,
+                search_text=excluded.search_text
             """,
             (
                 embedding_id,
-                metadata.get("record_id"),
+                record_id,
                 metadata.get("source_id"),
                 metadata.get("signal_dimension"),
-                metadata.get("model"),
+                model,
                 metadata.get("provider"),
                 metadata.get("dims"),
                 metadata.get("text_preview"),
-                json.dumps({**metadata, "embedding_id": embedding_id}),
+                json.dumps(provenance),
                 vector_blob,
+                fmt if vector is not None else metadata.get("vector_format", "json"),
+                metadata.get("content_hash"),
+                chunk_index,
+                metadata.get("event_at"),
+                metadata.get("conversation_id"),
+                metadata.get("record_type"),
+                search_text,
             ),
         )
+        if vector is not None:
+            sync_vec_row(self._conn, embedding_id=embedding_id, vector=[float(x) for x in vector])
         self._conn.commit()
         return embedding_id
 
@@ -347,44 +663,38 @@ class SQLiteVectorIndex:
         dimension: Optional[str] = None,
         model: Optional[str] = None,
         limit: int = 20,
+        event_after: Optional[str] = None,
+        event_before: Optional[str] = None,
+        fetch_limit: Optional[int] = None,
     ) -> ListPage:
-        from ....features.signal.vector_math import cosine_similarity
+        from .vector_search import search_similar as run_search
 
         limit = max(1, min(int(limit), 100))
-        query_sql = "SELECT provenance_json, vector_blob FROM signal_embeddings WHERE vector_blob IS NOT NULL"
-        params: List[Any] = []
-        if source_id is not None:
-            query_sql += " AND source_id=?"
-            params.append(source_id)
-        if dimension is not None:
-            query_sql += " AND signal_dimension=?"
-            params.append(dimension)
-        if model is not None:
-            query_sql += " AND model=?"
-            params.append(model)
-        rows = self._conn.execute(query_sql, params).fetchall()
-        scored: List[tuple[float, Dict[str, Any]]] = []
-        query_dims = len(query_vector)
-        for prov_raw, blob in rows:
-            if not blob:
-                continue
-            try:
-                stored = json.loads(blob.decode("utf-8"))
-            except (json.JSONDecodeError, UnicodeDecodeError, AttributeError):
-                continue
-            if not isinstance(stored, list) or len(stored) != query_dims:
-                continue
-            meta = json.loads(prov_raw)
-            sim = cosine_similarity(query_vector, [float(x) for x in stored])
-            meta["similarity"] = round(sim, 6)
-            scored.append((sim, meta))
-        scored.sort(key=lambda pair: pair[0], reverse=True)
-        top = scored[:limit]
-        items = [meta for _, meta in top]
-        return ListPage(items=items, total=len(scored), offset=0, limit=limit)
+        items, total = run_search(
+            self._conn,
+            query_vector,
+            source_id=source_id,
+            dimension=dimension,
+            model=model,
+            event_after=event_after,
+            event_before=event_before,
+            limit=limit,
+            fetch_limit=fetch_limit,
+        )
+        return ListPage(items=items, total=total, offset=0, limit=limit)
 
     def delete_by_record(self, record_id: str) -> int:
+        from .vector_search import delete_vec_rows
+
+        ids = [
+            str(row[0])
+            for row in self._conn.execute(
+                "SELECT embedding_id FROM signal_embeddings WHERE record_id=?",
+                (record_id,),
+            ).fetchall()
+        ]
         cur = self._conn.execute("DELETE FROM signal_embeddings WHERE record_id=?", (record_id,))
+        delete_vec_rows(self._conn, ids)
         self._conn.commit()
         return cur.rowcount
 

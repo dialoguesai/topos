@@ -1,0 +1,61 @@
+{
+  "definition_version": "1.0.0",
+  "dimension_id": "profile",
+  "status": "typed",
+  "core_question": "Who is this person professionally and what can they credibly claim?",
+  "primary_entity_types": [
+    {
+      "id": "SkillNode",
+      "description": "A skill or competency with proficiency band.",
+      "fields": ["label", "proficiency_band", "evidence_count"]
+    },
+    {
+      "id": "ExperienceNode",
+      "description": "Role or employment episode.",
+      "fields": ["title_band", "organization_band", "seniority_band", "started_at", "ended_at"]
+    },
+    {
+      "id": "Credential",
+      "description": "Certification, degree, or public credential.",
+      "fields": ["credential_kind", "label", "issuer_band"]
+    }
+  ],
+  "signal_objects": [
+    "skill_vector",
+    "seniority_band",
+    "domain_tags",
+    "public_bio"
+  ],
+  "gate_objects": [
+    "skill_vector",
+    "seniority_band",
+    "skill_vector_overlap"
+  ],
+  "canonical_contributions": {
+    "profile_records": {
+      "primary_weight": 1.0,
+      "secondary_dimensions": ["work"]
+    },
+    "public_bio": {
+      "primary_weight": 1.0
+    },
+    "skill": {
+      "primary_weight": 1.0,
+      "secondary_dimensions": ["work"]
+    },
+    "experience": {
+      "primary_weight": 1.0,
+      "secondary_dimensions": ["work"]
+    },
+    "activity_events": {
+      "primary_weight": 0.3,
+      "secondary_dimensions": ["interests"]
+    },
+    "journal_entries": {
+      "primary_weight": 0.45,
+      "secondary_dimensions": ["work", "intentions", "wellbeing"]
+    }
+  },
+  "view_types": ["skill_tags", "public_bio", "narrative_brief_optional"],
+  "extraction_hints": "Focus on professional background, skills themes, and affiliations — no exact employer unless clearly public."
+}

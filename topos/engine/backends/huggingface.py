@@ -98,6 +98,10 @@ class HuggingFaceAdapter:
             return self._run_embedding(payload, model, config)
         if subtype == "sentiment_classification":
             return self._run_sentiment_classification(payload, model)
+        if subtype == "privacy_disclosure":
+            return self._run_privacy_disclosure(payload, model)
+        if subtype == "content_nsfw_classification":
+            return self._run_content_nsfw_classification(payload, model)
         return {"error": f"Unknown subtype: {subtype}", "status": "unsupported"}
 
     def _run_url_classification(self, payload: Dict[str, Any], model_name: str) -> Dict[str, Any]:
@@ -250,6 +254,8 @@ class HuggingFaceAdapter:
     def _run_embedding(
         self, payload: Dict[str, Any], model_name: str, config: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
+        from ...features.signal.vector_settings import embedding_normalize_enabled
+
         texts = payload.get("texts")
         if texts is None:
             single = payload.get("text") or payload.get("content") or ""
@@ -258,18 +264,54 @@ class HuggingFaceAdapter:
             texts = [str(texts)]
         texts = [str(t) for t in texts if t]
         if not texts:
-            return {"vectors": [], "dims": 0, "model": model_name or DEFAULT_EMBEDDING_MODEL, "provider": "huggingface"}
+            return {
+                "vectors": [],
+                "dims": 0,
+                "model": model_name or DEFAULT_EMBEDDING_MODEL,
+                "provider": "huggingface",
+                "normalized": embedding_normalize_enabled(),
+            }
         model = model_name or DEFAULT_EMBEDDING_MODEL
         batch_size = int((config or {}).get("batch_size") or payload.get("batch_size") or 32)
         embedder = self._get_embedding_model(model)
+        normalize = embedding_normalize_enabled()
         vectors: List[List[float]] = []
         for i in range(0, len(texts), batch_size):
             batch = texts[i : i + batch_size]
-            encoded = embedder.encode(batch, convert_to_numpy=True)
+            encoded = embedder.encode(batch, convert_to_numpy=True, normalize_embeddings=normalize)
             for row in encoded:
                 vectors.append([float(x) for x in row.tolist()])
         dims = len(vectors[0]) if vectors else 0
-        return {"vectors": vectors, "dims": dims, "model": model, "provider": "huggingface"}
+        return {
+            "vectors": vectors,
+            "dims": dims,
+            "model": model,
+            "provider": "huggingface",
+            "normalized": normalize,
+        }
+
+    def _run_content_nsfw_classification(self, payload: Dict[str, Any], model_name: str) -> Dict[str, Any]:
+        from ...sanitization.nsfw_classifier import classify_nsfw_batch
+
+        items = payload.get("items") or []
+        if not isinstance(items, list):
+            return {"error": "items required", "status": "invalid", "items": []}
+        result = classify_nsfw_batch(items)
+        if model_name and result.get("status") == "ok":
+            result["model"] = model_name
+        return result
+
+    def _run_privacy_disclosure(self, payload: Dict[str, Any], model_name: str) -> Dict[str, Any]:
+        from ...sanitization.privacy_filter import redact_privacy_batch
+
+        items = payload.get("items") or []
+        if not isinstance(items, list):
+            return {"error": "items required", "status": "invalid", "items": []}
+        transform_id = str(payload.get("transform_id") or "pii_redaction")
+        result = redact_privacy_batch(items, transform_id=transform_id)
+        if model_name and result.get("status") == "ok":
+            result["model"] = model_name
+        return result
 
     def _run_sentiment_classification(self, payload: Dict[str, Any], model_name: str) -> Dict[str, Any]:
         text = payload.get("text") or payload.get("content") or ""

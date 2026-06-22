@@ -2,17 +2,21 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from typing import Any, Callable, Dict, List, Optional
 
 from ..base import BaseEnrichmentJob
 from ._batch_limits import MAX_JOB_MESSAGES, TOPIC_BATCH_CONCURRENCY
-from ....config.settings import settings
+from ....config.signal_extraction import get_signal_extraction_model_request
 from ._engine_runner import run_engine_task
 from ....engine import Engine
 
 logger = logging.getLogger("topos.enrichment.jobs.goal_extraction")
 
-GOAL_BATCH_CONCURRENCY = 2
+GOAL_BATCH_CONCURRENCY = max(
+    1,
+    int(os.environ.get("TOPOS_GOAL_BATCH_CONCURRENCY", "2")),
+)
 
 
 class GoalExtractionJob(BaseEnrichmentJob):
@@ -61,6 +65,7 @@ class GoalExtractionJob(BaseEnrichmentJob):
         async def _one(item: Dict[str, Any]) -> List[Dict[str, Any]]:
             nonlocal deferrals
             async with sem:
+                engine_provider, extraction_model = get_signal_extraction_model_request()
                 result = await run_engine_task(
                     self._engine,
                     task_id=f"goals_{item['message_id']}",
@@ -68,8 +73,8 @@ class GoalExtractionJob(BaseEnrichmentJob):
                     source_id=item.get("source_id"),
                     record_ids=[str(item["message_id"])],
                     input_payload={"text": item["content"]},
-                    provider="ollama",
-                    model=settings.ollama_query_model,
+                    provider=engine_provider,
+                    model=extraction_model,
                 )
                 if result.status == "deferred":
                     deferrals += 1

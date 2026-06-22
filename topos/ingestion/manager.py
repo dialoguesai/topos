@@ -637,6 +637,7 @@ class IngestionManager(BaseObject):
         parser = parser_cls(dataset_id=job.dataset_id, _schema_id=job.schema_id)
         
         # Try to count total records for progress tracking (optional, may be None)
+        file_format = str(job.metadata.get("file_format") or "jsonl").lower()
         records_total = None
         try:
             # Count lines in file (approximation for JSONL)
@@ -1058,6 +1059,14 @@ class IngestionManager(BaseObject):
                             source_def.canonical_enrichment_jobs,
                         )
                         try:
+                            from ..disclosure.field_registry import canonical_table_for_group
+
+                            canon_table = canonical_table_for_group(
+                                getattr(source_def, "canonical_group_id", None)
+                            )
+                            if canon_table:
+                                for msg in unenriched_messages:
+                                    msg.setdefault("_table", canon_table)
                             enrichment_result = await enrichment_orchestrator.run_canonical(
                                 unenriched_messages,
                                 job_names=source_def.canonical_enrichment_jobs,

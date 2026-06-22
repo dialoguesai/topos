@@ -18,7 +18,14 @@ from .raw.language_job import LanguageJob
 from .raw.time_normalization_job import TimeNormalizationJob
 from .raw.tool_calls_job import ToolCallsJob
 
-CANONICAL_JOBS = [EntitiesJob(), TopicsJob(), SentimentJob(), EmbeddingsJob(), Emo27Job(), UrlClassificationEnrichmentJob()]
+CANONICAL_JOBS = [
+    EntitiesJob(),
+    TopicsJob(),
+    SentimentJob(),
+    EmbeddingsJob(),
+    Emo27Job(),
+    UrlClassificationEnrichmentJob(),
+]
 
 SIGNAL_DERIVATION_JOBS = [
     Emo27Job(),

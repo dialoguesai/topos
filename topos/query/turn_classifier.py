@@ -24,6 +24,8 @@ class TurnClassifierLite:
         session: Optional[QuerySession] = None,
         *,
         filter_manifest: Optional[Dict[str, Any]] = None,
+        source_ids: Optional[list[str]] = None,
+        data_health_version: str = "mvp",
     ) -> ClassificationResult:
         if not turn.scope_id:
             return ClassificationResult(outcome=TurnOutcome.DENIED, deny_reason="missing_scope")
@@ -52,6 +54,8 @@ class TurnClassifierLite:
             scope_id=turn.scope_id,
             access_mode=turn.access_mode,
             filter_manifest=filter_manifest,
+            source_ids=source_ids,
+            data_health_version=data_health_version,
         )
         for artifact in session.artifacts or []:
             if _artifact_field(artifact, "cache_key") != cache_key:

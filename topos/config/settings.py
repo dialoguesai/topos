@@ -31,6 +31,8 @@ class Settings(BaseSettings):
 
     openai_base_url: str = Field("https://api.openai.com/v1", env="OPENAI_BASE_URL")
     openai_model: str = Field("gpt-4o-mini", env="OPENAI_MODEL")
+    red_pill_api_key: Optional[str] = Field(None, env="RED_PILL_API_KEY")
+    red_pill_api_base: str = Field("https://api.redpill.ai/v1", env="RED_PILL_API_BASE")
 
     gt_cloud_api_key: Optional[str] = Field(None, env="GT_CLOUD_API_KEY")
     griptape_nodes_api_base_url: str = Field(
@@ -113,6 +115,15 @@ class Settings(BaseSettings):
     privacy_filter_model: str = Field("openai/privacy-filter", env="PRIVACY_FILTER_MODEL")
     privacy_filter_device: Optional[str] = Field(None, env="PRIVACY_FILTER_DEVICE")
     privacy_filter_max_input_chars: Optional[int] = Field(None, env="PRIVACY_FILTER_MAX_INPUT_CHARS")
+    nsfw_classifier_enabled: bool = Field(True, env="NSFW_CLASSIFIER_ENABLED")
+    nsfw_classifier_model: str = Field(
+        "michellejieli/NSFW_text_classifier",
+        env="NSFW_CLASSIFIER_MODEL",
+    )
+    nsfw_classifier_threshold: float = Field(0.5, env="NSFW_CLASSIFIER_THRESHOLD")
+    nsfw_classifier_max_input_chars: int = Field(512, env="NSFW_CLASSIFIER_MAX_INPUT_CHARS")
+    platform_privacy_via_engine: bool = Field(True, env="PLATFORM_PRIVACY_VIA_ENGINE")
+    topos_engine_service_url: Optional[str] = Field(None, env="TOPOS_ENGINE_SERVICE_URL")
 
     topos_database_path: Optional[str] = Field(None, env="TOPOS_DATABASE_PATH")
     topos_database_mode: str = Field("local", env="TOPOS_DATABASE_MODE")

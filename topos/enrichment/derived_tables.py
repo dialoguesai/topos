@@ -172,7 +172,10 @@ class DerivedTablesManager(BaseObject):
         elif table_name == "message_sentiment":
             return self._write_sentiment_batch(enrichment_records, batch_size)
         elif table_name == "message_embeddings":
-            return self._write_embeddings_batch(enrichment_records, batch_size)
+            logger.warning(
+                "message_embeddings writes are deprecated; use signal_embeddings via write_signal_records"
+            )
+            return 0
         elif table_name == "browser_url_classification":
             return self._write_url_classification_batch(enrichment_records, batch_size)
         else:

@@ -9,6 +9,31 @@ from ..runtime_update import is_update_available
 
 _LOG_FORMAT: str | None = None
 
+# Route uvicorn loggers through the root handler configured by configure_logging().
+UVICORN_LOG_CONFIG: dict[str, object] = {
+    "version": 1,
+    "disable_existing_loggers": False,
+    "loggers": {
+        "uvicorn": {"handlers": [], "level": "INFO", "propagate": True},
+        "uvicorn.error": {"level": "INFO", "propagate": True},
+        "uvicorn.access": {"handlers": [], "level": "INFO", "propagate": True},
+        "uvicorn.asgi": {"level": "INFO", "propagate": True},
+    },
+}
+
+
+def get_uvicorn_log_config() -> dict[str, object]:
+    """Return a uvicorn log_config dict that uses Topos root logging formatters."""
+    return UVICORN_LOG_CONFIG
+
+
+def align_uvicorn_loggers() -> None:
+    """Ensure uvicorn access/error logs use the root logger formatters."""
+    for name in ("uvicorn", "uvicorn.error", "uvicorn.access", "uvicorn.asgi"):
+        uvicorn_logger = logging.getLogger(name)
+        uvicorn_logger.handlers.clear()
+        uvicorn_logger.propagate = True
+
 
 def configure_logging() -> None:
     """Configure logging to stdout based on environment/log settings."""

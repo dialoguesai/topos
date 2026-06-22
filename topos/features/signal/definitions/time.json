@@ -1,0 +1,52 @@
+{
+  "definition_version": "1.0.0",
+  "dimension_id": "time",
+  "status": "typed",
+  "core_question": "When are they busy, free, and predictably available?",
+  "primary_entity_types": [
+    {
+      "id": "AvailabilityWindow",
+      "description": "A time span where the person is free or busy with confidence.",
+      "fields": ["start", "end", "availability_kind", "confidence", "hard_or_soft"]
+    },
+    {
+      "id": "Commitment",
+      "description": "A recurring or one-off obligation that consumes capacity.",
+      "fields": ["kind", "recurrence", "load_weight", "starts_at", "ends_at"]
+    },
+    {
+      "id": "RoutinePattern",
+      "description": "Coarse rhythm band (e.g. morning focus, evening social).",
+      "fields": ["day_of_week", "time_band", "frequency", "confidence"]
+    }
+  ],
+  "signal_objects": [
+    "availability_window_scores",
+    "commitment_hard_blocks",
+    "event_counts",
+    "routine_confidence",
+    "meeting_load_band"
+  ],
+  "gate_objects": [
+    "availability_window_scores",
+    "commitment_hard_blocks"
+  ],
+  "canonical_contributions": {
+    "calendar_event": {
+      "primary_weight": 1.0,
+      "secondary_dimensions": ["relationships", "places", "work"],
+      "weight_fields": ["starts_at", "ends_at", "busy_status"]
+    },
+    "journal_entries": {
+      "primary_weight": 0.85,
+      "secondary_dimensions": ["wellbeing", "memory", "work"],
+      "weight_fields": ["people", "entry_at", "metadata_json.ends_at", "metadata_json.duration_minutes"]
+    },
+    "conversation_messages": {
+      "primary_weight": 0.2,
+      "secondary_dimensions": ["relationships"]
+    }
+  },
+  "view_types": ["interval_calendar", "narrative_brief_optional"],
+  "extraction_hints": "Describe rhythm and availability patterns; never include calendar event titles or attendee names."
+}

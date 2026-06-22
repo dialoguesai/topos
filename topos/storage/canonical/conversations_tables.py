@@ -125,6 +125,34 @@ def ensure_conversation_messages_table(conn) -> None:
     conn.commit()
 
 
+def _ensure_contact_ingest_columns(conn) -> None:
+    """Add ingest provenance columns used by canonical pipeline. Idempotent."""
+    for col, typ in (
+        ("source_record_id", "TEXT"),
+        ("ingested_at", "TEXT"),
+        ("sync_batch_id", "TEXT"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE {CONTACTS_TABLE} ADD COLUMN {col} {typ}")
+            conn.commit()
+        except Exception as e:
+            if "duplicate column" not in str(e).lower():
+                logger.debug("Contact ingest column %s: %s", col, e)
+            conn.rollback()
+    for col, typ in (
+        ("source_record_id", "TEXT"),
+        ("ingested_at", "TEXT"),
+        ("sync_batch_id", "TEXT"),
+    ):
+        try:
+            conn.execute(f"ALTER TABLE {CONTACT_IDENTIFIERS_TABLE} ADD COLUMN {col} {typ}")
+            conn.commit()
+        except Exception as e:
+            if "duplicate column" not in str(e).lower():
+                logger.debug("Contact identifier ingest column %s: %s", col, e)
+            conn.rollback()
+
+
 def ensure_contacts_table(conn) -> None:
     """Create canonical contacts table if not exists."""
     conn.execute(f"""
@@ -138,6 +166,9 @@ def ensure_contacts_table(conn) -> None:
             last_import_source TEXT,
             last_import_run_id TEXT,
             last_imported_at TEXT,
+            source_record_id TEXT,
+            ingested_at TEXT,
+            sync_batch_id TEXT,
             created_at TEXT DEFAULT (datetime('now')),
             updated_at TEXT DEFAULT (datetime('now'))
         )
@@ -151,6 +182,9 @@ def ensure_contacts_table(conn) -> None:
         ON {CONTACTS_TABLE}(is_self)
     """)
     conn.commit()
+    _ensure_contact_ingest_columns(conn)
+    _ensure_contact_provenance_columns(conn)
+    _ensure_contact_sharing_policy_column(conn)
 
 
 def ensure_contact_identifiers_table(conn) -> None:
@@ -162,6 +196,9 @@ def ensure_contact_identifiers_table(conn) -> None:
             identifier TEXT NOT NULL,
             identifier_type TEXT NOT NULL,
             contact_id TEXT NOT NULL,
+            source_record_id TEXT,
+            ingested_at TEXT,
+            sync_batch_id TEXT,
             created_at TEXT DEFAULT (datetime('now')),
             updated_at TEXT DEFAULT (datetime('now')),
             PRIMARY KEY (dataset_id, source_id, identifier)
@@ -172,6 +209,7 @@ def ensure_contact_identifiers_table(conn) -> None:
         ON {CONTACT_IDENTIFIERS_TABLE}(contact_id)
     """)
     conn.commit()
+    _ensure_contact_ingest_columns(conn)
 
 
 def ensure_conversation_participants_table(conn) -> None:

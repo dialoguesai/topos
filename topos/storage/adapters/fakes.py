@@ -33,12 +33,16 @@ class InMemoryCanonicalStore:
         source_id: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
+        disclosure_tier: str = "owner_raw",
     ) -> ListPage:
         rows = list(self._tables.get(table, {}).values())
         if source_id is not None:
             rows = [r for r in rows if r.get("source_id") == source_id]
         total = len(rows)
         page = rows[offset : offset + limit]
+        from topos.disclosure.tier import apply_disclosure_tier_to_rows
+
+        page = apply_disclosure_tier_to_rows(page, table=table, tier=disclosure_tier)  # type: ignore[arg-type]
         return ListPage(items=page, total=total, offset=offset, limit=limit)
 
     def delete(self, table: str, record_id: str) -> bool:
@@ -92,10 +96,54 @@ class InMemoryVectorIndex:
     def __init__(self) -> None:
         self._items: Dict[str, Dict[str, Any]] = {}
 
+    def _key(self, metadata: Dict[str, Any]) -> Optional[tuple[str, str, int]]:
+        record_id = metadata.get("record_id")
+        model = metadata.get("model")
+        if not record_id or not model:
+            return None
+        return (str(record_id), str(model), int(metadata.get("chunk_index") or 0))
+
     def upsert(self, metadata: Dict[str, Any], *, vector: Optional[List[float]] = None) -> str:
+        key = self._key(metadata)
         embedding_id = str(metadata.get("embedding_id") or uuid.uuid4())
+        if key is not None:
+            for item in self._items.values():
+                if (
+                    str(item.get("record_id")) == key[0]
+                    and str(item.get("model")) == key[1]
+                    and int(item.get("chunk_index") or 0) == key[2]
+                ):
+                    embedding_id = str(item["embedding_id"])
+                    break
         self._items[embedding_id] = {**metadata, "embedding_id": embedding_id, "vector": vector}
         return embedding_id
+
+    def get_embedding_hashes(self, record_id: str, model: str) -> Dict[int, str]:
+        out: Dict[int, str] = {}
+        for item in self._items.values():
+            if str(item.get("record_id")) == record_id and str(item.get("model")) == model:
+                if item.get("content_hash"):
+                    out[int(item.get("chunk_index") or 0)] = str(item["content_hash"])
+        return out
+
+    def delete_chunks_for_record(
+        self,
+        record_id: str,
+        model: str,
+        *,
+        keep_indices: Optional[List[int]] = None,
+    ) -> int:
+        to_delete = []
+        for key, item in self._items.items():
+            if str(item.get("record_id")) != record_id or str(item.get("model")) != model:
+                continue
+            chunk_index = int(item.get("chunk_index") or 0)
+            if keep_indices is not None and chunk_index in keep_indices:
+                continue
+            to_delete.append(key)
+        for key in to_delete:
+            del self._items[key]
+        return len(to_delete)
 
     def get_metadata(self, embedding_id: str) -> Optional[Dict[str, Any]]:
         item = self._items.get(embedding_id)
@@ -131,9 +179,13 @@ class InMemoryVectorIndex:
         dimension: Optional[str] = None,
         model: Optional[str] = None,
         limit: int = 20,
+        event_after: Optional[str] = None,
+        event_before: Optional[str] = None,
+        fetch_limit: Optional[int] = None,
     ) -> ListPage:
-        from ...features.signal.vector_math import cosine_similarity
+        from ...features.signal.vector_codec import similarity
 
+        fetch = max(fetch_limit or limit, limit)
         limit = max(1, min(int(limit), 100))
         rows = list(self._items.values())
         if source_id is not None:
@@ -142,19 +194,31 @@ class InMemoryVectorIndex:
             rows = [r for r in rows if r.get("signal_dimension") == dimension]
         if model is not None:
             rows = [r for r in rows if r.get("model") == model]
+        if event_after is not None:
+            rows = [
+                r
+                for r in rows
+                if r.get("event_at") is None or str(r.get("event_at")) >= event_after
+            ]
+        if event_before is not None:
+            rows = [
+                r
+                for r in rows
+                if r.get("event_at") is None or str(r.get("event_at")) <= event_before
+            ]
         query_dims = len(query_vector)
         scored: List[tuple[float, Dict[str, Any]]] = []
         for row in rows:
             vector = row.get("vector")
             if not isinstance(vector, list) or len(vector) != query_dims:
                 continue
-            sim = cosine_similarity(query_vector, [float(x) for x in vector])
+            sim = similarity(query_vector, [float(x) for x in vector], normalized=True)
             meta = {k: v for k, v in row.items() if k != "vector"}
             meta["similarity"] = round(sim, 6)
             scored.append((sim, meta))
         scored.sort(key=lambda pair: pair[0], reverse=True)
-        top = scored[:limit]
-        items = [meta for _, meta in top]
+        top = scored[:fetch]
+        items = [meta for _, meta in top[:limit]]
         return ListPage(items=items, total=len(scored), offset=0, limit=limit)
 
     def delete_by_record(self, record_id: str) -> int:

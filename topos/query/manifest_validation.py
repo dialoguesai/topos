@@ -17,11 +17,18 @@ class ManifestValidationError(Exception):
         self.message = message
 
 
+from ..sources.registry import get_sources_by_scope
+
+
 def manifest_from_scope_entry(entry: Dict[str, Any]) -> ScopeResolutionManifest:
     source_ids = list(entry.get("default_source_ids") or [])
     single = entry.get("default_source_id")
     if single and single not in source_ids:
         source_ids.insert(0, str(single))
+    scope_id = str(entry["scope_id"])
+    for registry_source_id in get_sources_by_scope(scope_id):
+        if registry_source_id not in source_ids:
+            source_ids.append(registry_source_id)
     return ScopeResolutionManifest(
         scope_id=str(entry["scope_id"]),
         primary_dimensions=list(entry.get("primary_dimensions") or []),

@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 import logging
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from ..auth import require_api_key
 from ..features.signal.service import get_signal_service
@@ -46,6 +47,10 @@ async def search_signal_vectors(
     source_id: Optional[str] = None,
     dimension: Optional[str] = None,
     model: Optional[str] = None,
+    mode: str = Query("hybrid", pattern="^(vector|hybrid)$"),
+    event_after: Optional[str] = None,
+    event_before: Optional[str] = None,
+    hydrate: bool = Query(False),
 ):
     """
     Semantic search over stored embeddings (metadata + similarity score; no raw vectors).
@@ -63,6 +68,10 @@ async def search_signal_vectors(
         source_id=source_id,
         dimension=dimension,
         model=model,
+        mode=mode,
+        event_after=event_after,
+        event_before=event_before,
+        hydrate=hydrate,
     )
 
 
@@ -159,3 +168,134 @@ async def list_topic_cluster_members(
 ):
     service = get_signal_service()
     return service.list_topic_cluster_members(cluster_id, limit=limit)
+
+
+class BriefUpdateBody(BaseModel):
+    markdown_body: str = Field(..., min_length=0, max_length=50000)
+
+
+class SignalObjectOverrideBody(BaseModel):
+    payload: Dict[str, Any] = Field(default_factory=dict)
+
+
+class FitEvaluateBody(BaseModel):
+    opportunity_type: str = Field(..., min_length=1)
+    context: Dict[str, Any] = Field(default_factory=dict)
+
+
+@router.post("/fit/evaluate")
+async def evaluate_fit(body: FitEvaluateBody, _api_key: str = Depends(require_api_key)):
+    service = get_signal_service()
+    try:
+        return service.evaluate_fit(body.opportunity_type, context=body.context)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/definitions")
+async def list_signal_definitions(_api_key: str = Depends(require_api_key)):
+    service = get_signal_service()
+    return service.list_definitions()
+
+
+@router.get("/definitions/{dimension}")
+async def get_signal_definition(dimension: str, _api_key: str = Depends(require_api_key)):
+    service = get_signal_service()
+    try:
+        return service.get_definition(dimension)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/objects")
+async def list_signal_objects(
+    dimension: str = Query(..., min_length=1),
+    object_type: Optional[str] = Query(default=None),
+    limit: int = Query(default=50, ge=1, le=200),
+    _api_key: str = Depends(require_api_key),
+):
+    service = get_signal_service()
+    try:
+        return service.list_signal_objects(dimension, object_type=object_type, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/objects/{object_id}")
+async def get_signal_object(object_id: str, _api_key: str = Depends(require_api_key)):
+    service = get_signal_service()
+    try:
+        return service.get_signal_object(object_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.post("/objects/{object_id}/owner_override")
+async def owner_override_signal_object(
+    object_id: str,
+    body: SignalObjectOverrideBody,
+    _api_key: str = Depends(require_api_key),
+):
+    service = get_signal_service()
+    try:
+        return service.owner_override_signal_object(object_id, body.payload)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@router.get("/briefs")
+async def list_dimension_briefs(_api_key: str = Depends(require_api_key)):
+    service = get_signal_service()
+    return service.list_briefs()
+
+
+@router.get("/briefs/{dimension}")
+async def get_dimension_brief(dimension: str, _api_key: str = Depends(require_api_key)):
+    service = get_signal_service()
+    try:
+        return service.get_brief(dimension)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.put("/briefs/{dimension}")
+async def update_dimension_brief(
+    dimension: str,
+    body: BriefUpdateBody,
+    _api_key: str = Depends(require_api_key),
+):
+    service = get_signal_service()
+    try:
+        return service.update_brief(dimension, body.markdown_body)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/briefs/{dimension}/revisions")
+async def list_dimension_brief_revisions(
+    dimension: str,
+    limit: int = Query(default=20, ge=1, le=100),
+    _api_key: str = Depends(require_api_key),
+):
+    service = get_signal_service()
+    try:
+        return service.list_brief_revisions(dimension, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/briefs/{dimension}/refresh")
+async def refresh_dimension_brief(
+    dimension: str,
+    limit: int = Query(default=40, ge=1, le=100),
+    _api_key: str = Depends(require_api_key),
+):
+    service = get_signal_service()
+    try:
+        return await service.refresh_brief(dimension, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc

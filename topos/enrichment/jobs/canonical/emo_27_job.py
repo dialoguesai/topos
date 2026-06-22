@@ -7,6 +7,7 @@ import logging
 from typing import Any, Callable, Dict, List, Optional
 
 from ..base import BaseEnrichmentJob
+from .brief_fallback import prepare_signal_record
 from ...progress_bar import ProgressBar
 from ....engine import Engine
 from ....engine.tasks import ModelRequest, ProcessingTask
@@ -41,9 +42,10 @@ class Emo27Job(BaseEnrichmentJob):
             for msg_idx, msg in enumerate(canonical_messages):
                 if msg_idx % 10 == 0:
                     await asyncio.sleep(0)
-                message_id = msg.get("message_id") or msg.get("id")
-                content = msg.get("content", "")
-                source_id = msg.get("source_id")
+                prepared = prepare_signal_record(msg)
+                message_id = prepared.get("message_id") or prepared.get("id")
+                content = prepared.get("content", "")
+                source_id = prepared.get("source_id")
 
                 if not message_id or not content:
                     pbar.update(1)

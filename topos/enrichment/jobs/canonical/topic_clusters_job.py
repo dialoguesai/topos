@@ -6,7 +6,7 @@ from typing import Any, Callable, Dict, List, Optional
 from ..base import BaseEnrichmentJob
 from ....core.state import get_db_connection
 from ....features.signal.topic_clustering import (
-    MVP_QUERY_SOURCE_IDS,
+    _resolved_topic_cluster_source_ids,
     recompute_topic_clusters,
     write_top_topics_signal_facts,
 )
@@ -37,7 +37,15 @@ class TopicClusterJob(BaseEnrichmentJob):
             return [{"_deferred": True, "error": "database_unavailable"}]
 
         source_ids = {str(m.get("source_id") or "") for m in canonical_messages if m.get("source_id")}
-        scope_ids = [sid for sid in source_ids if sid in MVP_QUERY_SOURCE_IDS] or list(MVP_QUERY_SOURCE_IDS)
+        # Always cluster across all MVP query sources so a single-source ingest (e.g. Grow)
+        # does not wipe cross-source memory_topic_map rollups.
+        scope_ids = list(_resolved_topic_cluster_source_ids())
+        if source_ids:
+            logger.info(
+                "[PIPELINE:TOPIC_CLUSTERS] batch sources=%s; clustering scope=%s",
+                sorted(source_ids),
+                scope_ids,
+            )
         sync_batch_id = None
         if canonical_messages:
             sync_batch_id = str(canonical_messages[0].get("sync_batch_id") or "")

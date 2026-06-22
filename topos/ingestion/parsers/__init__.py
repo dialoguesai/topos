@@ -4,6 +4,17 @@ from .base import Parser
 from .browser_parser import BrowserParser, BrowserEventsParser
 from .calendar_parser import CalendarParser
 from .chatgpt_parser import ChatGPTParser
+from .demo_file_parsers import (
+    DemoBrowserFileParser,
+    DemoCalendarParser,
+    DemoContactsParser,
+    DemoFinancialParser,
+    DemoGrowFileParser,
+    DemoJournalParser,
+    DemoMessengerParser,
+    DemoPlacesParser,
+    DemoProfileParser,
+)
 from .grok_parser import GrokParser
 from .messenger_parser import ImessageParser, SignalParser
 
@@ -17,6 +28,15 @@ PARSER_REGISTRY = {
     "browser.events.v1": BrowserEventsParser,  # Clicks, highlights, star_page, VIDEO_PLAY
     "imessage.messages.v1": ImessageParser,  # Sprint 02: Messenger ingestion
     "signal.messages.v1": SignalParser,
+    "demo.messenger.v1": DemoMessengerParser,
+    "demo.calendar.v1": DemoCalendarParser,
+    "demo.journal.v1": DemoJournalParser,
+    "demo.profile.v1": DemoProfileParser,
+    "demo.financial.v1": DemoFinancialParser,
+    "demo.browser.v1": DemoBrowserFileParser,
+    "demo.places.v1": DemoPlacesParser,
+    "demo.contacts.v1": DemoContactsParser,
+    "grow.time_log.v1": DemoGrowFileParser,
 }
 
 __all__ = [
@@ -28,5 +48,14 @@ __all__ = [
     "CalendarParser",
     "ImessageParser",
     "SignalParser",
+    "DemoBrowserFileParser",
+    "DemoCalendarParser",
+    "DemoContactsParser",
+    "DemoFinancialParser",
+    "DemoGrowFileParser",
+    "DemoJournalParser",
+    "DemoMessengerParser",
+    "DemoPlacesParser",
+    "DemoProfileParser",
     "PARSER_REGISTRY",
 ]

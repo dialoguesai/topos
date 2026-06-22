@@ -34,6 +34,11 @@ class BaseEnrichmentJob(BaseObject):
     def get_derived_table(self) -> str:
         raise NotImplementedError
 
+    @property
+    def writes_canonical(self) -> bool:
+        """When True, job updates canonical tables directly (not derived tables)."""
+        return False
+
     async def enrich(
         self, 
         canonical_messages: List[Dict[str, Any]],

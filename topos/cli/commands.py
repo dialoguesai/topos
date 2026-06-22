@@ -221,13 +221,14 @@ def main(db_path, topos_key, set_topos_key, discover, port, host, skip_update_ch
     _resolve_topos_key(topos_key)
 
     from topos.app import app
+    from topos.core.logging import get_uvicorn_log_config
 
     if db_path:
         os.environ["TOPOS_DATABASE_PATH"] = db_path
         click.echo(f"Database path: {db_path}")
 
     _emit_startup_banner(host=host, port=port)
-    uvicorn.run(app, host=host, port=port)
+    uvicorn.run(app, host=host, port=port, log_config=get_uvicorn_log_config())
 
 
 if __name__ == "__main__":

@@ -15,8 +15,9 @@ _DATA_HEALTH_TTL_SEC = 30.0
 
 
 class SignalService:
-    def __init__(self, adapters: AdapterBundle) -> None:
+    def __init__(self, adapters: AdapterBundle, *, conn: Any = None) -> None:
         self._adapters = adapters
+        self._conn = conn
 
     def list_vectors(
         self,
@@ -60,86 +61,127 @@ class SignalService:
         source_id: Optional[str] = None,
         dimension: Optional[str] = None,
         model: Optional[str] = None,
+        mode: str = "hybrid",
+        event_after: Optional[str] = None,
+        event_before: Optional[str] = None,
+        hydrate: bool = False,
     ) -> Dict[str, Any]:
+        from ...core.state import get_db_connection
         from ...engine.backends.huggingface import DEFAULT_EMBEDDING_MODEL, HuggingFaceAdapter
+        from .hybrid_search import fts_search, merge_hybrid_results
+        from .query_embed_cache import get_cached_query_embedding, set_cached_query_embedding
+        from .source_hydration import hydrate_record_text
+        from .vector_settings import vector_chunking_enabled, vector_hybrid_enabled
 
         q = str(query or "").strip()
         limit = max(1, min(int(limit), 100))
         embed_model = model or DEFAULT_EMBEDDING_MODEL
+        search_mode = (mode or "hybrid").strip().lower()
         if not q:
-            return {"items": [], "total": 0, "query": "", "model": embed_model, "limit": limit}
+            return {"items": [], "total": 0, "query": "", "model": embed_model, "limit": limit, "mode": search_mode}
 
-        hf = HuggingFaceAdapter()
-        emb = hf.run_inference({"text": q}, {"subtype": "embedding", "model": embed_model})
-        vectors = emb.get("vectors") or []
-        if not vectors:
-            return {
-                "items": [],
-                "total": 0,
-                "query": q,
-                "model": embed_model,
-                "limit": limit,
-                "error": "embedding_failed",
-            }
+        query_vector = get_cached_query_embedding(q, model=embed_model)
+        if query_vector is None:
+            hf = HuggingFaceAdapter()
+            emb = hf.run_inference({"text": q}, {"subtype": "embedding", "model": embed_model})
+            vectors = emb.get("vectors") or []
+            if not vectors:
+                return {
+                    "items": [],
+                    "total": 0,
+                    "query": q,
+                    "model": embed_model,
+                    "limit": limit,
+                    "mode": search_mode,
+                    "error": "embedding_failed",
+                }
+            query_vector = [float(x) for x in vectors[0]]
+            set_cached_query_embedding(q, model=embed_model, vector=query_vector)
 
-        query_vector = [float(x) for x in vectors[0]]
-        vector_index = self._adapters.vector
-        search = getattr(vector_index, "search_similar", None)
-        if search is None:
-            return {
-                "items": [],
-                "total": 0,
-                "query": q,
-                "model": embed_model,
-                "limit": limit,
-                "error": "vector_search_unsupported",
-            }
-
-        page = search(
+        fetch_limit = limit * 3 if vector_chunking_enabled() else limit
+        page = self._adapters.vector.search_similar(
             query_vector,
             source_id=source_id,
             dimension=dimension,
             model=embed_model,
             limit=limit,
+            event_after=event_after,
+            event_before=event_before,
+            fetch_limit=fetch_limit,
         )
         items = [strip_vector_fields(item) for item in page.items]
-        return {"items": items, "total": page.total, "query": q, "model": embed_model, "limit": limit}
 
-    def get_vector_source_text(self, *, record_id: str) -> Dict[str, Any]:
+        use_hybrid = vector_hybrid_enabled() and search_mode == "hybrid"
+        conn = self._conn if self._conn is not None else get_db_connection()
+        if use_hybrid and conn is not None:
+            fts_ids = fts_search(conn, q, limit=fetch_limit)
+            items = merge_hybrid_results(conn, items, fts_ids, limit=fetch_limit)
+
+        deduped: List[Dict[str, Any]] = []
+        seen_records: set[str] = set()
+        for item in sorted(items, key=lambda row: float(row.get("similarity") or row.get("hybrid_score") or 0.0), reverse=True):
+            record_key = str(item.get("record_id") or item.get("embedding_id") or "")
+            if record_key and record_key in seen_records:
+                continue
+            if record_key:
+                seen_records.add(record_key)
+            deduped.append(item)
+            if len(deduped) >= limit:
+                break
+        items = deduped
+
+        if hydrate and conn is not None:
+            for item in items:
+                hydrated = hydrate_record_text(
+                    conn,
+                    str(item.get("record_id") or ""),
+                    source_id=item.get("source_id"),
+                    record_type=item.get("record_type"),
+                )
+                if hydrated.found:
+                    item["source_text"] = hydrated.content
+
+        return {
+            "items": items,
+            "total": page.total,
+            "query": q,
+            "model": embed_model,
+            "limit": limit,
+            "mode": search_mode,
+        }
+
+    def get_vector_source_text(self, *, record_id: str, source_id: Optional[str] = None) -> Dict[str, Any]:
         from ...core.state import get_db_connection
+        from .source_hydration import hydrate_record_text
 
         rid = str(record_id or "").strip()
         if not rid:
             return {"record_id": "", "content": "", "found": False}
 
-        conn = get_db_connection()
+        conn = self._conn if self._conn is not None else get_db_connection()
         if conn is None:
             return {"record_id": rid, "content": "", "found": False, "error": "database_unavailable"}
 
-        try:
-            row = conn.execute(
-                """
-                SELECT message_id, content, content_rendered, source_id, conversation_id, sender_type
-                FROM ai_chat_messages
-                WHERE message_id = ?
-                LIMIT 1
-                """,
-                (rid,),
-            ).fetchone()
-        except Exception as exc:
-            return {"record_id": rid, "content": "", "found": False, "error": str(exc)}
-
-        if not row:
-            return {"record_id": rid, "content": "", "found": False}
-
-        content = str(row[1] or row[2] or "").strip()
+        meta = conn.execute(
+            "SELECT source_id, record_type FROM signal_embeddings WHERE record_id=? LIMIT 1",
+            (rid,),
+        ).fetchone()
+        resolved_source = source_id or (meta[0] if meta else None)
+        resolved_type = meta[1] if meta else None
+        result = hydrate_record_text(
+            conn,
+            rid,
+            source_id=resolved_source,
+            record_type=resolved_type,
+        )
         return {
-            "record_id": str(row[0]),
-            "content": content,
-            "source_id": row[3],
-            "conversation_id": row[4],
-            "sender_type": row[5],
-            "found": True,
+            "record_id": result.record_id,
+            "content": result.content,
+            "found": result.found,
+            "source_id": result.source_id,
+            "table": result.table,
+            "truncated": result.truncated,
+            "error": result.error,
         }
 
     def list_graph(
@@ -205,8 +247,19 @@ class SignalService:
         ollama_up = "ollama_unreachable" not in {
             f for p in profiles.values() for f in p.get("provider_failures") or []
         }
+        fit_readiness: Dict[str, float] = {}
+        try:
+            from ...core.state import get_db_connection
+            from ..fit.evaluator import compute_fit_readiness
+
+            conn = self._conn if self._conn is not None else get_db_connection()
+            if conn is not None:
+                fit_readiness = compute_fit_readiness(conn)
+        except Exception:
+            fit_readiness = {}
         return {
             "dimensions": list(profiles.values()),
+            "fit_readiness": fit_readiness,
             "provider_status": {"ollama": "up" if ollama_up else "down", "huggingface": "up"},
             "updated_at": profiles.get("memory", {}).get("updated_at"),
         }
@@ -241,6 +294,159 @@ class SignalService:
         )
         return {"items": items, "total": len(items), "cluster_id": cluster_id, "limit": limit}
 
+    def list_briefs(self) -> Dict[str, Any]:
+        from ...core.state import get_db_connection
+        from .dimension_briefs import DimensionBriefStore
+
+        conn = self._conn if self._conn is not None else get_db_connection()
+        if conn is None:
+            return {"items": [], "total": 0}
+        items = DimensionBriefStore(conn).list_briefs()
+        return {"items": items, "total": len(items)}
+
+    def get_brief(self, dimension: str) -> Dict[str, Any]:
+        from ...core.state import get_db_connection
+        from .dimension_briefs import DimensionBriefStore
+
+        conn = self._conn if self._conn is not None else get_db_connection()
+        if conn is None:
+            raise RuntimeError("database_unavailable")
+        return DimensionBriefStore(conn).get_brief(dimension)
+
+    def update_brief(self, dimension: str, markdown_body: str) -> Dict[str, Any]:
+        from ...core.state import get_db_connection
+        from .dimension_briefs import DimensionBriefStore
+
+        conn = self._conn if self._conn is not None else get_db_connection()
+        if conn is None:
+            raise RuntimeError("database_unavailable")
+        return DimensionBriefStore(conn).save_user_edit(dimension, markdown_body)
+
+    def list_brief_revisions(self, dimension: str, *, limit: int = 20) -> Dict[str, Any]:
+        from ...core.state import get_db_connection
+        from .dimension_briefs import DimensionBriefStore
+
+        conn = self._conn if self._conn is not None else get_db_connection()
+        if conn is None:
+            return {"items": [], "total": 0, "signal_dimension": dimension}
+        items = DimensionBriefStore(conn).list_revisions(dimension, limit=limit)
+        return {"items": items, "total": len(items), "signal_dimension": dimension, "limit": limit}
+
+    async def refresh_brief(self, dimension: str, *, limit: int = 40) -> Dict[str, Any]:
+        """Run LLM brief update for one dimension from recent canonical rows."""
+        from ...core.state import get_db_connection
+        from ...enrichment.jobs.canonical.dimension_summary_job import DimensionSummaryJob
+        from .brief_canonical_loader import load_canonical_messages_for_dimension
+
+        conn = self._conn if self._conn is not None else get_db_connection()
+        if conn is None:
+            return {"ok": False, "error": "database_unavailable"}
+
+        messages = load_canonical_messages_for_dimension(conn, dimension, limit=limit)
+        if not messages:
+            return {"ok": False, "error": "no_canonical_messages"}
+
+        job = DimensionSummaryJob()
+        records = await job.enrich(messages, only_dimension=dimension)
+        if records and records[0].get("_deferred"):
+            return {"ok": False, "error": records[0].get("error") or "deferred"}
+        brief = self.get_brief(dimension)
+        return {"ok": True, "brief": brief, "job_result": records[0] if records else {}}
+
+    def list_definitions(self) -> Dict[str, Any]:
+        from .dimension_definition_loader import list_definition_ids, get_definition
+
+        items = [get_definition(dim_id) for dim_id in list_definition_ids()]
+        return {"items": items, "total": len(items)}
+
+    def get_definition(self, dimension: str) -> Dict[str, Any]:
+        from .dimension_definition_loader import DimensionDefinitionError, get_definition
+
+        try:
+            return get_definition(dimension)
+        except DimensionDefinitionError as exc:
+            raise ValueError(str(exc)) from exc
+
+    def list_signal_objects(
+        self,
+        dimension: str,
+        *,
+        object_type: Optional[str] = None,
+        limit: int = 50,
+    ) -> Dict[str, Any]:
+        from ...core.state import get_db_connection
+        from .signal_object_store import SignalObjectStore
+
+        conn = self._conn if self._conn is not None else get_db_connection()
+        if conn is None:
+            return {"items": [], "total": 0, "envelope": {"applied_limit": limit, "requested_limit": limit}}
+        limit = max(1, min(int(limit), 200))
+        try:
+            store = SignalObjectStore(conn)
+            items = store.list_objects(
+                dimension, object_type=object_type, limit=limit
+            )
+            count_params: List[Any] = [str(dimension).strip().lower()]
+            type_clause = ""
+            if object_type:
+                type_clause = " AND object_type=?"
+                count_params.append(str(object_type).strip())
+            total_row = conn.execute(
+                f"""
+                SELECT COUNT(*) FROM signal_objects
+                WHERE signal_dimension=? AND valid_to IS NULL{type_clause}
+                """,
+                count_params,
+            ).fetchone()
+            total = int(total_row[0] if total_row else len(items))
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+        return {
+            "items": items,
+            "total": total,
+            "envelope": {"applied_limit": limit, "requested_limit": limit},
+        }
+
+    def get_signal_object(self, object_id: str) -> Dict[str, Any]:
+        from ...core.state import get_db_connection
+        from .signal_object_store import SignalObjectStore
+
+        conn = self._conn if self._conn is not None else get_db_connection()
+        if conn is None:
+            raise RuntimeError("database_unavailable")
+        try:
+            return SignalObjectStore(conn).get_object(object_id)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+
+    def owner_override_signal_object(
+        self, object_id: str, payload_patch: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        from ...core.state import get_db_connection
+        from .signal_object_store import SignalObjectStore
+
+        conn = self._conn if self._conn is not None else get_db_connection()
+        if conn is None:
+            raise RuntimeError("database_unavailable")
+        return SignalObjectStore(conn).owner_override(object_id, payload_patch)
+
+    def evaluate_fit(
+        self,
+        opportunity_type: str,
+        *,
+        context: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        from ...core.state import get_db_connection
+        from ..fit.evaluator import evaluate_opportunity
+
+        conn = self._conn if self._conn is not None else get_db_connection()
+        if conn is None:
+            raise RuntimeError("database_unavailable")
+        try:
+            return evaluate_opportunity(conn, opportunity_type, context=context)
+        except ValueError as exc:
+            raise ValueError(str(exc)) from exc
+
 
 def get_signal_service(conn=None) -> SignalService:
     from ...storage.adapters.factory import AdapterFactory
@@ -253,4 +459,4 @@ def get_signal_service(conn=None) -> SignalService:
         bundle = AdapterFactory.create("local_database", conn=conn)
     else:
         bundle = AdapterFactory.from_runtime({"database_hosting_mode": "memory"})
-    return SignalService(bundle)
+    return SignalService(bundle, conn=conn)
