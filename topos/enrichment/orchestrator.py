@@ -109,31 +109,40 @@ class EnrichmentOrchestrator(BaseObject):
                 
                 records = await job.enrich(canonical_messages, progress_callback=job_progress_callback)
                 
-                # After job completes, calculate how many messages were effectively processed
-                # For jobs that create records, assume all messages were processed
-                # For jobs that return 0 records, they still "processed" the messages (just didn't create output)
-                messages_processed_this_job = total_messages if records else 0
-                messages_processed_so_far += messages_processed_this_job
-                
-                if records:
-                    # Write to derived table
-                    table_name = job.get_derived_table()
+                derived_table = job.get_derived_table()
+                if records and derived_table:
                     records_written = self.tables_manager.write_enrichment_batch(
-                        records, table_name
+                        records, derived_table
                     )
-                    results["records_created"][table_name] = records_written
+                    results["records_created"][derived_table] = records_written
                     logger.info(
                         "[PIPELINE:ENRICHMENT] %s → %s: %d records written to %s (job %d/%d, %.1f%% complete)",
                         self,
                         job,
                         records_written,
-                        table_name,
+                        derived_table,
                         job_idx,
                         total_jobs,
                         (job_idx / total_jobs * 100) if total_jobs > 0 else 100,
                     )
+                elif getattr(job, "writes_canonical", False):
+                    updated = 0
+                    if records and isinstance(records[0], dict):
+                        updated = int(records[0].get("records_updated") or 0)
+                    results["records_created"]["canonical_disclosure"] = (
+                        int(results["records_created"].get("canonical_disclosure") or 0) + updated
+                    )
+                    logger.info(
+                        "[PIPELINE:ENRICHMENT] %s → %s: %d canonical disclosure rows updated (job %d/%d)",
+                        self,
+                        job,
+                        updated,
+                        job_idx,
+                        total_jobs,
+                    )
                 else:
-                    results["records_created"][job.get_derived_table()] = 0
+                    table_name = derived_table or job.get_job_name()
+                    results["records_created"][table_name] = 0
                     logger.info(
                         "[PIPELINE:ENRICHMENT] %s → %s: completed with 0 records (job %d/%d, %.1f%% complete)",
                         self,
@@ -142,6 +151,10 @@ class EnrichmentOrchestrator(BaseObject):
                         total_jobs,
                         (job_idx / total_jobs * 100) if total_jobs > 0 else 100,
                     )
+                
+                # After job completes, calculate how many messages were effectively processed
+                messages_processed_this_job = total_messages if records or getattr(job, "writes_canonical", False) else 0
+                messages_processed_so_far += messages_processed_this_job
                 
                 # Call progress callback after job completes
                 if progress_callback:

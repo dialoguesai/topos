@@ -39,4 +39,7 @@ def build_query_audit_event(
                 event[key] = retrieval_metadata[key]
     if outcome == TurnOutcome.MEMORY_HIT.value:
         event["stores_touched"] = []
+        event["retrieval_skipped"] = True
+    else:
+        event["retrieval_skipped"] = False
     return event

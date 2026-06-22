@@ -16,7 +16,7 @@ setup-dev:
 
 # Run API directly.
 run host="0.0.0.0" port="9000":
-    uv run uvicorn topos.app:app --host {{host}} --port {{port}}
+    uv run uvicorn topos.app:app --host {{host}} --port {{port}} --log-config topos/config/uvicorn_logging.json
 
 # Run colocated node with Ollama runtime and auto-install missing engine deps.
 run-local host="127.0.0.1" port="9000":

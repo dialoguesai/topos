@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 
 def compute_retrieval_fingerprint(
@@ -13,7 +13,9 @@ def compute_retrieval_fingerprint(
     access_mode: str,
     filter_manifest: Optional[Dict[str, Any]] = None,
     data_health_version: str = "mvp",
+    source_ids: Optional[List[str]] = None,
 ) -> str:
     fm = json.dumps(filter_manifest or {}, sort_keys=True, default=str)
-    payload = f"{scope_id}|{access_mode}|{data_health_version}|{fm}"
+    ids = ",".join(sorted({str(s).strip() for s in (source_ids or []) if str(s).strip()}))
+    payload = f"{scope_id}|{access_mode}|{data_health_version}|{ids}|{fm}"
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]

@@ -6,6 +6,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ..base import BaseEnrichmentJob
 from ._batch_limits import MAX_JOB_MESSAGES, TOPIC_BATCH_CONCURRENCY
+from ....config.signal_extraction import get_signal_extraction_model_request, get_signal_extraction_provider
 from ....config.settings import settings
 from ._engine_runner import run_engine_task
 from ....engine import Engine
@@ -61,6 +62,8 @@ class TopicsJob(BaseEnrichmentJob):
             async with sem:
                 if deferred:
                     return None
+                engine_provider, extraction_model = get_signal_extraction_model_request()
+                configured_provider = get_signal_extraction_provider()
                 result = await run_engine_task(
                     self._engine,
                     task_id=f"topics_{item['message_id']}",
@@ -68,8 +71,8 @@ class TopicsJob(BaseEnrichmentJob):
                     source_id=item.get("source_id"),
                     record_ids=[str(item["message_id"])],
                     input_payload={"text": item["content"]},
-                    provider="ollama",
-                    model=settings.ollama_query_model,
+                    provider=engine_provider,
+                    model=extraction_model,
                 )
                 if result.status == "deferred":
                     deferred = True
@@ -84,7 +87,7 @@ class TopicsJob(BaseEnrichmentJob):
                             "source_id": item.get("source_id"),
                             "topic": topic.get("label"),
                             "confidence": topic.get("confidence"),
-                            "provider": "ollama",
+                            "provider": configured_provider,
                             "model": result.output.get("model"),
                         }
                     )
@@ -101,6 +104,7 @@ class TopicsJob(BaseEnrichmentJob):
             processed += len(chunk)
             if progress_callback:
                 progress_callback(min(processed, total), total)
+            logger.info("TopicsJob progress %d/%d", min(processed, total), total)
 
         if deferred and not results:
             return [{"_deferred": True, "error": "ollama_unreachable"}]

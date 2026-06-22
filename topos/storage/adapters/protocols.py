@@ -25,6 +25,7 @@ class CanonicalStore(Protocol):
         source_id: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
+        disclosure_tier: str = "owner_raw",
     ) -> ListPage: ...
     def delete(self, table: str, record_id: str) -> bool: ...
     def count(self, table: str, *, source_id: Optional[str] = None) -> int: ...
@@ -51,6 +52,18 @@ class VectorIndex(Protocol):
         model: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
+    ) -> ListPage: ...
+    def search_similar(
+        self,
+        query_vector: List[float],
+        *,
+        source_id: Optional[str] = None,
+        dimension: Optional[str] = None,
+        model: Optional[str] = None,
+        limit: int = 20,
+        event_after: Optional[str] = None,
+        event_before: Optional[str] = None,
+        fetch_limit: Optional[int] = None,
     ) -> ListPage: ...
     def delete_by_record(self, record_id: str) -> int: ...
 

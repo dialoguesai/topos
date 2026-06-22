@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 from shared.filtering import FieldTransform, filter_manifest_from_storage
 
+from ..disclosure.tier import strip_ingest_pii_transforms
 from ..uma_filters import apply_filter_manifest, extract_field_transforms
 from .types import FilteredContext, RetrievalBundle
 
@@ -68,6 +69,7 @@ class DisclosureFilterPipeline:
         filter_manifest: Optional[Dict[str, Any]] = None,
         field_transforms: Optional[List[Any]] = None,
         access_mode: str = "raw",
+        disclosure_tier: str = "owner_raw",
     ) -> FilteredContext:
         applied: List[str] = []
         packet = copy.deepcopy(bundle.context_packet or {})
@@ -98,6 +100,14 @@ class DisclosureFilterPipeline:
                 transforms = extract_field_transforms(
                     {"field_transforms": filter_manifest.get("field_transforms")}
                 )
+            if disclosure_tier == "default_disclosure":
+                from ..disclosure.content_policy import exclude_nsfw_rows_for_grantee
+
+                rows = exclude_nsfw_rows_for_grantee(rows, tier=disclosure_tier)  # type: ignore[arg-type]
+                applied.append("nsfw_exclusion")
+                transforms = strip_ingest_pii_transforms(transforms)
+                if transforms is not None:
+                    applied.append("ingest_disclosure_pii")
             packet["rows"] = _apply_field_transforms(rows, transforms)
             if transforms:
                 applied.append("field_transforms")

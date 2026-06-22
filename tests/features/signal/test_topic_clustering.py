@@ -106,9 +106,13 @@ def test_recompute_persists_clusters_and_top_topics(tmp_path) -> None:
 
 
 def test_mvp_query_source_ids_cover_chatgpt_and_browser() -> None:
-    assert "chatgpt_file_ingestion" in MVP_QUERY_SOURCE_IDS
-    assert "chatgpt_ui_conversation" in MVP_QUERY_SOURCE_IDS
-    assert "browser_visits" in MVP_QUERY_SOURCE_IDS
+    from topos.sources.registry import topic_cluster_source_ids
+
+    configured = topic_cluster_source_ids()
+    assert "chatgpt_file_ingestion" in configured
+    assert "chatgpt_ui_conversation" in configured
+    assert "browser_visits" in configured
+    assert "grow_data_file" in configured
 
 
 def test_persist_topic_clusters_idempotent_replace(tmp_path) -> None:

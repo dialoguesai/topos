@@ -1,0 +1,24 @@
+{
+  "version": "1.0.0",
+  "opportunity_types": {
+    "evaluate_introduction": {
+      "label": "Evaluate introduction fit",
+      "facets": [
+        {"id": "domain_overlap", "weight": 0.25, "method": "tag_overlap"},
+        {"id": "seeking_alignment", "weight": 0.30, "method": "tag_intersection"},
+        {"id": "relationship_warmth", "weight": 0.20, "method": "warmth_band"},
+        {"id": "timing_feasibility", "weight": 0.15, "method": "interval_overlap"},
+        {"id": "capacity", "weight": 0.10, "method": "capacity_band"}
+      ],
+      "pass_threshold": 0.55
+    },
+    "schedule_meeting": {
+      "label": "Schedule meeting feasibility",
+      "facets": [
+        {"id": "timing_feasibility", "weight": 0.70, "method": "interval_overlap"},
+        {"id": "commitment_conflict", "weight": 0.30, "method": "busy_overlap"}
+      ],
+      "pass_threshold": 0.5
+    }
+  }
+}

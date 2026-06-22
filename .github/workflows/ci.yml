@@ -33,6 +33,19 @@ jobs:
       - name: Run public test lane
         run: uv run pytest tests -m "public and not e2e" -q
 
+      - name: Home chat Wave A routing and retrieval gates
+        run: |
+          uv run pytest tests/query/test_retrieval_calendar_compare.py tests/query/test_retrieval_messages_multi_source.py tests/query/test_resolve_source_ids_installed_filter.py tests/query/test_fingerprint_invalidation.py tests/query/test_query_multi_turn_cache.py -q
+          uv run pytest ../topos-control-plane/tests/control_plane/test_scope_query_router.py -q
+          HARN_DB="$(mktemp /tmp/harness-ci.XXXXXX)"
+          uv run python demo/signal_dimension_harness/seed_ci_harness_db.py --db "${HARN_DB}"
+          uv run python demo/signal_dimension_harness/run_multi_turn_catalog.py --db "${HARN_DB}"
+          uv run python demo/signal_dimension_harness/run_query_catalog.py --catalog demo/signal_dimension_harness/QUERY_CATALOG.md --db "${HARN_DB}" | tee /tmp/query-catalog.out
+          grep -q "Permission: 70/70" /tmp/query-catalog.out
+          grep -q "Signal: 70/70" /tmp/query-catalog.out
+          grep -q "quality 70/70" /tmp/query-catalog.out
+          uv run python demo/signal_dimension_harness/evaluate_harness.py --db "${HARN_DB}"
+
       - name: Build package artifacts
         run: uv build
 

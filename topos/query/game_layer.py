@@ -27,6 +27,34 @@ def _is_list_query(query_text: str) -> bool:
     return bool(_LIST_QUERY_RE.search(query_text or ""))
 
 
+def _extract_inference_evidence(context_packet: Dict[str, Any], *, limit: int = 5) -> List[str]:
+    evidence: List[str] = []
+    seen: set[str] = set()
+    for score in context_packet.get("scores") or []:
+        if not isinstance(score, dict):
+            continue
+        for key in ("summary_text", "topic", "entity_text", "label"):
+            value = score.get(key)
+            if value and str(value) not in seen:
+                seen.add(str(value))
+                evidence.append(str(value))
+                break
+        if len(evidence) >= limit:
+            return evidence
+    for hit in context_packet.get("semantic_hits") or []:
+        if not isinstance(hit, dict):
+            continue
+        for key in ("content_preview", "title", "text"):
+            value = hit.get(key)
+            if value and str(value) not in seen:
+                seen.add(str(value))
+                evidence.append(str(value))
+                break
+        if len(evidence) >= limit:
+            break
+    return evidence
+
+
 def _extract_entity_labels(context_packet: Dict[str, Any]) -> List[str]:
     labels: List[str] = []
     seen: set[str] = set()
@@ -75,7 +103,33 @@ class DefaultGameLayer:
         q = str(query_text or "").strip()
 
         if access_mode == "inference":
-            if _is_list_query(q) or (
+            if "availability" in scope_id and (_is_list_query(q) or _WHO_QUERY_RE.search(q)):
+                payload.update(
+                    {
+                        "answer_type": "list",
+                        "items": [],
+                        "answer": "unknown",
+                        "confidence": 0.0,
+                    }
+                )
+            elif "availability" in scope_id:
+                windows: List[str] = []
+                for score in context_packet.get("scores") or []:
+                    if not isinstance(score, dict):
+                        continue
+                    text = str(score.get("summary_text") or score.get("topic") or "").strip()
+                    if text:
+                        windows.append(text)
+                yes_no = bool(windows or context_packet.get("scores") or context_packet.get("semantic_hits"))
+                payload.update(
+                    {
+                        "answer_type": "yes_no",
+                        "answer": "yes" if yes_no else "no",
+                        "confidence": 0.6 if windows else 0.0,
+                        "windows": windows[:6],
+                    }
+                )
+            elif _is_list_query(q) or (
                 "relationship" in scope_id and (_WHO_QUERY_RE.search(q) or _WHAT_QUERY_RE.search(q))
             ):
                 items = _extract_entity_labels(context_packet)
@@ -96,6 +150,7 @@ class DefaultGameLayer:
                     confidence = float(semantic[0].get("similarity") or 0.0)
                 elif scores and isinstance(scores[0], dict):
                     confidence = float(scores[0].get("value") or scores[0].get("confidence") or 0.0)
+                evidence = _extract_inference_evidence(context_packet)
                 payload.update(
                     {
                         "answer_type": "yes_no",
@@ -103,6 +158,8 @@ class DefaultGameLayer:
                         "confidence": confidence,
                     }
                 )
+                if scope_id == "activity:read" and evidence:
+                    payload["items"] = evidence
             for forbidden in FORBIDDEN_INFERENCE_PUBLIC_KEYS:
                 payload.pop(forbidden, None)
         elif access_mode == "summary":

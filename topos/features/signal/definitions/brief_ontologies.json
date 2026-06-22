@@ -1,0 +1,415 @@
+{
+  "version": "2.0.0",
+  "dimensions": {
+    "profile": {
+      "sections": [
+        {
+          "id": "professional_identity",
+          "title": "Professional identity",
+          "description": "Role band, seniority, and primary domain — who they are at work today.",
+          "disclosure": "inference_safe",
+          "emphasis": "primary",
+          "llm_merge": true
+        },
+        {
+          "id": "skills_and_credentials",
+          "title": "Skills & credentials",
+          "description": "Skill clusters, certifications, and education themes (not raw resume rows).",
+          "disclosure": "summary_safe",
+          "llm_merge": true
+        },
+        {
+          "id": "experience_arc",
+          "title": "Experience arc",
+          "description": "Career trajectory and organization bands over time.",
+          "disclosure": "summary_safe",
+          "llm_merge": true
+        },
+        {
+          "id": "advisory_and_affiliations",
+          "title": "Advisory & affiliations",
+          "description": "Side lanes, board/advisor roles, and public-facing affiliations.",
+          "disclosure": "summary_safe",
+          "llm_merge": true
+        },
+        {
+          "id": "grant_policy",
+          "title": "Grant policy",
+          "description": "What grantees may receive vs owner-only detail.",
+          "disclosure": "owner_only",
+          "emphasis": "muted",
+          "llm_merge": false
+        }
+      ]
+    },
+    "time": {
+      "sections": [
+        {
+          "id": "weekly_rhythm",
+          "title": "Weekly rhythm",
+          "description": "Recurring cadence — standups, focus blocks, therapy, travel bands.",
+          "disclosure": "inference_safe",
+          "emphasis": "primary",
+          "llm_merge": true
+        },
+        {
+          "id": "open_windows",
+          "title": "Open windows",
+          "description": "Availability bands grantees can use for scheduling (typed AvailabilityWindow).",
+          "disclosure": "inference_safe",
+          "llm_merge": true
+        },
+        {
+          "id": "commitment_load",
+          "title": "Commitment load",
+          "description": "Busy blocks, meeting density, hard vs soft commitments.",
+          "disclosure": "summary_safe",
+          "llm_merge": true
+        },
+        {
+          "id": "protected_time",
+          "title": "Protected time",
+          "description": "Deep work, recovery, and boundary patterns the owner is defending.",
+          "disclosure": "summary_safe",
+          "llm_merge": true
+        },
+        {
+          "id": "grant_policy",
+          "title": "Grant policy",
+          "description": "Never expose calendar titles or attendee names under inference scopes.",
+          "disclosure": "owner_only",
+          "emphasis": "muted",
+          "llm_merge": false
+        }
+      ]
+    },
+    "interests": {
+      "sections": [
+        {
+          "id": "topic_clusters",
+          "title": "Topic clusters",
+          "description": "Dominant curiosity themes from browsing, reading, and AI chats.",
+          "disclosure": "inference_safe",
+          "emphasis": "primary",
+          "llm_merge": true
+        },
+        {
+          "id": "research_depth",
+          "title": "Research depth",
+          "description": "Technical papers, repos, and infrastructure rabbit holes.",
+          "disclosure": "summary_safe",
+          "llm_merge": true
+        },
+        {
+          "id": "industry_lens",
+          "title": "Industry lens",
+          "description": "Edtech, privacy, AI agents — sector-level attention bands.",
+          "disclosure": "summary_safe",
+          "llm_merge": true
+        },
+        {
+          "id": "lifestyle_interests",
+          "title": "Lifestyle interests",
+          "description": "Outdoors, recreation, and non-work curiosity patterns.",
+          "disclosure": "summary_safe",
+          "llm_merge": true
+        },
+        {
+          "id": "grant_policy",
+          "title": "Grant policy",
+          "description": "Tags and topic bands only — no raw URLs or search queries.",
+          "disclosure": "owner_only",
+          "emphasis": "muted",
+          "llm_merge": false
+        }
+      ]
+    },
+    "relationships": {
+      "sections": [
+        {
+          "id": "network_shape",
+          "title": "Network shape",
+          "description": "Tier structure and cluster context (work, fundraising, edtech).",
+          "disclosure": "inference_safe",
+          "emphasis": "primary",
+          "llm_merge": true
+        },
+        {
+          "id": "edge_bands",
+          "title": "Relationship edges",
+          "description": "Warmth, cadence, and tier bands per RelationshipEdge (entity keys, not names).",
+          "disclosure": "inference_safe",
+          "llm_merge": true
+        },
+        {
+          "id": "intro_paths",
+          "title": "Intro & collaboration paths",
+          "description": "Who connects to whom for which opportunity themes.",
+          "disclosure": "summary_safe",
+          "llm_merge": true
+        },
+        {
+          "id": "interaction_cadence",
+          "title": "Interaction cadence",
+          "description": "Recent vs dormant threads; messenger and email activity bands.",
+          "disclosure": "summary_safe",
+          "llm_merge": true
+        },
+        {
+          "id": "grant_policy",
+          "title": "Grant policy",
+          "description": "Typed edges and warmth aggregates — no contact names or message excerpts.",
+          "disclosure": "owner_only",
+          "emphasis": "muted",
+          "llm_merge": false
+        }
+      ]
+    },
+    "work": {
+      "sections": [
+        {
+          "id": "current_bets",
+          "title": "Current bets",
+          "description": "Active projects and product theses this quarter.",
+          "disclosure": "inference_safe",
+          "emphasis": "primary",
+          "llm_merge": true
+        },
+        {
+          "id": "domain_focus",
+          "title": "Domain focus",
+          "description": "Technical domains and problem spaces (signal, ingestion, UMA).",
+          "disclosure": "summary_safe",
+          "llm_merge": true
+        },
+        {
+          "id": "capacity_band",
+          "title": "Capacity band",
+          "description": "Bandwidth for new work — senior IC load and advisory pull.",
+          "disclosure": "inference_safe",
+          "llm_merge": true
+        },
+        {
+          "id": "collaboration_surface",
+          "title": "Collaboration surface",
+          "description": "Teams, partners, and cross-functional lanes in play.",
+          "disclosure": "summary_safe",
+          "llm_merge": true
+        },
+        {
+          "id": "grant_policy",
+          "title": "Grant policy",
+          "description": "Project themes and capacity bands — no repo URLs or ticket text.",
+          "disclosure": "owner_only",
+          "emphasis": "muted",
+          "llm_merge": false
+        }
+      ]
+    },
+    "memory": {
+      "sections": [
+        {
+          "id": "active_preoccupations",
+          "title": "Active preoccupations",
+          "description": "What is top of mind across human and AI conversations.",
+          "disclosure": "inference_safe",
+          "emphasis": "primary",
+          "llm_merge": true
+        },
+        {
+          "id": "technical_threads",
+          "title": "Technical threads",
+          "description": "Recurring engineering problems and solution attempts.",
+          "disclosure": "summary_safe",
+          "llm_merge": true
+        },
+        {
+          "id": "cross_source_themes",
+          "title": "Cross-source themes",
+          "description": "Topics linking ChatGPT, messenger, email, and journal.",
+          "disclosure": "summary_safe",
+          "llm_merge": true
+        },
+        {
+          "id": "entity_and_topic_graph",
+          "title": "Entities & topics",
+          "description": "Named themes and message_topics/message_entities bands (not raw text).",
+          "disclosure": "summary_safe",
+          "llm_merge": true
+        },
+        {
+          "id": "grant_policy",
+          "title": "Grant policy",
+          "description": "Theme summaries only — raw AI or message content needs explicit raw scopes.",
+          "disclosure": "owner_only",
+          "emphasis": "muted",
+          "llm_merge": false
+        }
+      ]
+    },
+    "wellbeing": {
+      "sections": [
+        {
+          "id": "baseline_patterns",
+          "title": "Baseline patterns",
+          "description": "Stable sleep, movement, and support habits over months.",
+          "disclosure": "inference_safe",
+          "emphasis": "primary",
+          "llm_merge": true
+        },
+        {
+          "id": "mood_recent",
+          "title": "Recent mood band",
+          "description": "Emotional tone over the last 7–14 days only.",
+          "disclosure": "summary_safe",
+          "llm_merge": true
+        },
+        {
+          "id": "stress_triggers",
+          "title": "Stress triggers",
+          "description": "Work or life events that reliably spike load (investor, travel).",
+          "disclosure": "summary_safe",
+          "llm_merge": true
+        },
+        {
+          "id": "recovery_practices",
+          "title": "Recovery practices",
+          "description": "Therapy, boundaries, and protected time that restore capacity.",
+          "disclosure": "summary_safe",
+          "llm_merge": true
+        },
+        {
+          "id": "grant_policy",
+          "title": "Grant policy",
+          "description": "Do not let a bad week rewrite baseline; no journal verbatim quotes.",
+          "disclosure": "owner_only",
+          "emphasis": "muted",
+          "llm_merge": false
+        }
+      ]
+    },
+    "resources": {
+      "sections": [
+        {
+          "id": "income_band",
+          "title": "Income band",
+          "description": "Coarse earning level and stability (no dollar amounts).",
+          "disclosure": "inference_safe",
+          "emphasis": "primary",
+          "llm_merge": true
+        },
+        {
+          "id": "savings_and_investing",
+          "title": "Savings & investing",
+          "description": "Automated savings and long-term index habits.",
+          "disclosure": "summary_safe",
+          "llm_merge": true
+        },
+        {
+          "id": "spending_themes",
+          "title": "Spending themes",
+          "description": "Category bands — groceries, travel, health, dining.",
+          "disclosure": "summary_safe",
+          "llm_merge": true
+        },
+        {
+          "id": "financial_constraints",
+          "title": "Financial constraints",
+          "description": "Limits that shape opportunity choices (optional, coarse).",
+          "disclosure": "summary_safe",
+          "llm_merge": true
+        },
+        {
+          "id": "grant_policy",
+          "title": "Grant policy",
+          "description": "Category bands only — never amounts, merchants, or account IDs.",
+          "disclosure": "owner_only",
+          "emphasis": "muted",
+          "llm_merge": false
+        }
+      ]
+    },
+    "places": {
+      "sections": [
+        {
+          "id": "home_region",
+          "title": "Home region",
+          "description": "Primary metro and home-base band.",
+          "disclosure": "inference_safe",
+          "emphasis": "primary",
+          "llm_merge": true
+        },
+        {
+          "id": "travel_patterns",
+          "title": "Travel patterns",
+          "description": "Recent and recurring destination bands (airport, office, site visits).",
+          "disclosure": "summary_safe",
+          "llm_merge": true
+        },
+        {
+          "id": "place_types",
+          "title": "Place types",
+          "description": "Office, recreation, alumni, travel hub — typed location_events.",
+          "disclosure": "summary_safe",
+          "llm_merge": true
+        },
+        {
+          "id": "geographic_constraints",
+          "title": "Geographic constraints",
+          "description": "Conflicts, timezone load, and mobility limits.",
+          "disclosure": "summary_safe",
+          "llm_merge": true
+        },
+        {
+          "id": "grant_policy",
+          "title": "Grant policy",
+          "description": "Metro + place type only — no precise home address or GPS traces.",
+          "disclosure": "owner_only",
+          "emphasis": "muted",
+          "llm_merge": false
+        }
+      ]
+    },
+    "intentions": {
+      "sections": [
+        {
+          "id": "north_star",
+          "title": "North star",
+          "description": "Long-horizon aims that persist across quarters.",
+          "disclosure": "inference_safe",
+          "emphasis": "primary",
+          "llm_merge": true
+        },
+        {
+          "id": "active_seeking",
+          "title": "Active seeking",
+          "description": "Opportunities, intros, and collaborations being pursued now.",
+          "disclosure": "inference_safe",
+          "llm_merge": true
+        },
+        {
+          "id": "constraints",
+          "title": "Constraints",
+          "description": "Time, geography, and values limits on what fits.",
+          "disclosure": "summary_safe",
+          "llm_merge": true
+        },
+        {
+          "id": "near_term_momentum",
+          "title": "Near-term momentum",
+          "description": "What shifted in the last 2 weeks — urgency and optimism bands.",
+          "disclosure": "summary_safe",
+          "llm_merge": true
+        },
+        {
+          "id": "grant_policy",
+          "title": "Grant policy",
+          "description": "Separate stable aims from temporary pessimism in recent data.",
+          "disclosure": "owner_only",
+          "emphasis": "muted",
+          "llm_merge": false
+        }
+      ]
+    }
+  }
+}

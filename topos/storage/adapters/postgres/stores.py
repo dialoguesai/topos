@@ -52,7 +52,9 @@ class PostgresCanonicalAdapter:
         source_id: Optional[str] = None,
         limit: int = 100,
         offset: int = 0,
+        disclosure_tier: str = "owner_raw",
     ) -> ListPage:
+        _ = disclosure_tier
         if table not in self._NATIVE_TABLES:
             return ListPage(items=[], total=0, offset=offset, limit=limit)
         params: List[Any] = []

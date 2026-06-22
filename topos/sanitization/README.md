@@ -94,6 +94,21 @@ Enable in `.env` on the engine host, then tune per-transform via env or PUT over
 Prompts (Ollama only): `topos/sanitization/ollama_transforms.py`.  
 PII detection: `topos/sanitization/privacy_filter.py`.
 
+## Ingest-time disclosure (canonical columns)
+
+Message tables store **raw** text in `content` and pre-redacted text in `content_disclosure`
+(and related `*_disclosure` columns). The `pii_redaction` canonical enrichment job runs
+**first** in the pipeline and writes disclosure columns without overwriting raw.
+
+Non-owner reads use `disclosure_tier=default_disclosure` (query/UMA paths) and return
+`content_disclosure` when present. Owner reads use `owner_raw`.
+
+Backfill existing DBs:
+
+```bash
+python scripts/backfill_disclosure.py [--source-id SOURCE_ID]
+```
+
 ## Production notes
 
 - **Latency**: one Ollama call per row per transform; consider batching later.

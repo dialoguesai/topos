@@ -17,6 +17,30 @@ from ..ingestion.parsers.base import NormalizedRecord
 logger = logging.getLogger("topos.ingestion.canonical_pipeline")
 
 
+def _bump_generation_after_canonicalize(db_conn, source_id: str, result: "CanonicalizeResult") -> None:
+    if not db_conn or not source_id:
+        return
+    if not (
+        result.canonical_records
+        or result.messages_created
+        or result.events_created
+        or result.conversations_created
+    ):
+        return
+    try:
+        from ..query.source_generation import bump_source_generation
+
+        bump_source_generation(db_conn, source_id)
+    except Exception as exc:
+        logger.debug("source generation bump skipped: %s", exc)
+
+
+def _prepare_signal_record(record: Dict[str, Any]) -> Dict[str, Any]:
+    from ..enrichment.jobs.canonical.brief_fallback import prepare_signal_record
+
+    return prepare_signal_record(record)
+
+
 @dataclass
 class CanonicalizeResult:
     canonical_records: List[Dict[str, Any]] = field(default_factory=list)
@@ -84,6 +108,10 @@ def canonicalize_normalized_batch(
     group = getattr(source_def, "canonical_group_id", None)
     result = CanonicalizeResult()
 
+    def _finish() -> CanonicalizeResult:
+        _bump_generation_after_canonicalize(db_conn, source_id, result)
+        return result
+
     payloads: List[Dict[str, Any]] = []
     for item in normalized_records:
         if isinstance(item, NormalizedRecord):
@@ -133,7 +161,7 @@ def canonicalize_normalized_batch(
         except Exception as exc:
             logger.error("[PIPELINE:CANONICAL] conversations upsert failed: %s", exc, exc_info=True)
             result.errors.append({"step": "conversations", "error": str(exc)})
-        return result
+        return _finish()
 
     if group == "activity":
         try:
@@ -159,12 +187,14 @@ def canonicalize_normalized_batch(
                 result.events_created = int(batch_result.get("events_created", 0))
                 for canonical_payload in mapped_payloads:
                     result.canonical_records.append(
-                        activity_payload_to_signal_record(canonical_payload, source_id=source_id)
+                        _prepare_signal_record(
+                            activity_payload_to_signal_record(canonical_payload, source_id=source_id)
+                        )
                     )
         except Exception as exc:
             logger.error("[PIPELINE:CANONICAL] activity upsert failed: %s", exc, exc_info=True)
             result.errors.append({"step": "activity", "error": str(exc)})
-        return result
+        return _finish()
 
     if source_def.canonical_mapper_id and group == "ai_messages":
         try:
@@ -189,7 +219,138 @@ def canonicalize_normalized_batch(
         except Exception as exc:
             logger.error("[PIPELINE:CANONICAL] ai_chat upsert failed: %s", exc, exc_info=True)
             result.errors.append({"step": "ai_chat", "error": str(exc)})
-        return result
+        return _finish()
+
+    demo_table_by_group = {
+        "schedule": "calendar_events",
+        "journal": "journal_entries",
+        "profile": "profile_records",
+        "financial": "financial_transactions",
+        "places": "location_events",
+    }
+    if group in demo_table_by_group and source_def.canonical_mapper_id:
+        table_name = demo_table_by_group[group]
+        try:
+            from ..canonicalization.mappers import MAPPER_REGISTRY
+            from ..storage.canonical.canonical_store import SQLiteCanonicalStore
+
+            mapper_cls = MAPPER_REGISTRY.get(source_def.canonical_mapper_id)
+            mapper = mapper_cls() if mapper_cls else None
+            store = SQLiteCanonicalStore(db_conn)
+            created = 0
+            for payload in payloads:
+                norm = NormalizedRecord(record_id=str(payload.get("record_id") or payload.get("event_id") or ""), payload=payload)
+                canonical_payload = dict(mapper.map(norm).payload if mapper else payload)
+                canonical_payload["source_id"] = source_id
+                ref = store.upsert(table_name, canonical_payload, sync_batch_id=sync_batch_id)
+                if ref.created:
+                    created += 1
+                signal_record = _prepare_signal_record(dict(canonical_payload))
+                signal_record["source_id"] = source_id
+                if table_name == "calendar_events":
+                    result.events_created += 1
+                result.canonical_records.append(signal_record)
+                if source_id == "grow_data_file" and table_name == "journal_entries":
+                    from .grow_location_fanout import (
+                        grow_location_event_from_journal,
+                        grow_location_signal_record,
+                    )
+
+                    loc_row = grow_location_event_from_journal(canonical_payload, source_id=source_id)
+                    if loc_row:
+                        store.upsert("location_events", loc_row, sync_batch_id=sync_batch_id)
+                        result.events_created += 1
+                        result.canonical_records.append(
+                            _prepare_signal_record(grow_location_signal_record(loc_row))
+                        )
+            result.messages_created = created
+        except Exception as exc:
+            logger.error("[PIPELINE:CANONICAL] demo %s upsert failed: %s", group, exc, exc_info=True)
+            result.errors.append({"step": group, "error": str(exc)})
+        return _finish()
+
+    if group == "contacts" and source_def.canonical_mapper_id:
+        try:
+            from ..canonicalization.mappers import MAPPER_REGISTRY
+            from ..storage.canonical.conversations_tables import ensure_contacts_table, ensure_contact_identifiers_table
+
+            ensure_contacts_table(db_conn)
+            ensure_contact_identifiers_table(db_conn)
+            mapper_cls = MAPPER_REGISTRY.get(source_def.canonical_mapper_id)
+            mapper = mapper_cls() if mapper_cls else None
+            for payload in payloads:
+                norm = NormalizedRecord(
+                    record_id=str(payload.get("contact_id") or payload.get("record_id") or ""),
+                    payload=payload,
+                )
+                mapped = dict(mapper.map(norm).payload if mapper else payload)
+                contact_id = str(mapped.get("contact_id") or "")
+                display_name = str(mapped.get("display_name") or "")
+                identifier = str(mapped.get("identifier") or "")
+                identifier_type = str(mapped.get("identifier_type") or "email")
+                source_record_id = str(mapped.get("source_record_id") or f"{contact_id}:{identifier}")
+                if not contact_id or not identifier:
+                    continue
+                db_conn.execute(
+                    """
+                    INSERT INTO contacts (
+                        contact_id, dataset_id, source_id, display_name, is_self,
+                        source_record_id, ingested_at, sync_batch_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?)
+                    ON CONFLICT(contact_id) DO UPDATE SET
+                        display_name=excluded.display_name,
+                        sync_batch_id=excluded.sync_batch_id,
+                        ingested_at=excluded.ingested_at,
+                        source_record_id=excluded.source_record_id
+                    """,
+                    (
+                        contact_id,
+                        dataset_id,
+                        source_id,
+                        display_name,
+                        1 if contact_id == "contact-self" else 0,
+                        source_record_id,
+                        sync_batch_id,
+                    ),
+                )
+                db_conn.execute(
+                    """
+                    INSERT INTO contact_identifiers (
+                        dataset_id, source_id, identifier, identifier_type, contact_id,
+                        source_record_id, ingested_at, sync_batch_id
+                    ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?)
+                    ON CONFLICT(dataset_id, source_id, identifier) DO UPDATE SET
+                        contact_id=excluded.contact_id,
+                        sync_batch_id=excluded.sync_batch_id,
+                        source_record_id=excluded.source_record_id
+                    """,
+                    (
+                        dataset_id,
+                        source_id,
+                        identifier,
+                        identifier_type,
+                        contact_id,
+                        source_record_id,
+                        sync_batch_id,
+                    ),
+                )
+                result.canonical_records.append(
+                    _prepare_signal_record(
+                        {
+                            "contact_id": contact_id,
+                            "display_name": display_name,
+                            "identifier": identifier,
+                            "identifier_type": identifier_type,
+                            "source_id": source_id,
+                        }
+                    )
+                )
+            db_conn.commit()
+            result.messages_created = len(result.canonical_records)
+        except Exception as exc:
+            logger.error("[PIPELINE:CANONICAL] contacts upsert failed: %s", exc, exc_info=True)
+            result.errors.append({"step": "contacts", "error": str(exc)})
+        return _finish()
 
     if source_def.canonical_mapper_id:
         logger.warning(
@@ -203,7 +364,7 @@ def canonicalize_normalized_batch(
                 "source_id": source_id,
             }
         )
-    return result
+    return _finish()
 
 
 def load_canonical_records_for_signal(
@@ -266,25 +427,132 @@ def load_canonical_records_for_signal(
             for row in rows
         ]
 
+    demo_load_sql = {
+        "schedule": (
+            "SELECT event_id, title, starts_at, ends_at, source_id FROM calendar_events WHERE source_id=? ORDER BY starts_at DESC LIMIT ?",
+            lambda row: {
+                "event_id": row[0],
+                "title": row[1],
+                "starts_at": row[2],
+                "ends_at": row[3],
+                "source_id": row[4] or source_id,
+            },
+        ),
+        "journal": (
+            "SELECT entry_id, entry_at, mood_tag, category, content, people, place_name, source_id FROM journal_entries WHERE source_id=? ORDER BY entry_at DESC LIMIT ?",
+            lambda row: {
+                "entry_id": row[0],
+                "entry_at": row[1],
+                "mood_tag": row[2],
+                "category": row[3],
+                "content": row[4],
+                "people": row[5],
+                "place_name": row[6],
+                "source_id": row[7] or source_id,
+            },
+        ),
+        "profile": (
+            "SELECT record_id, record_type, title, organization, description, source_id FROM profile_records WHERE source_id=? ORDER BY record_id LIMIT ?",
+            lambda row: {
+                "record_id": row[0],
+                "record_type": row[1],
+                "title": row[2],
+                "organization": row[3],
+                "description": row[4],
+                "source_id": row[5] or source_id,
+            },
+        ),
+        "financial": (
+            "SELECT transaction_id, account_type, amount, category, description, source_id FROM financial_transactions WHERE source_id=? ORDER BY posted_at DESC LIMIT ?",
+            lambda row: {
+                "transaction_id": row[0],
+                "account_type": row[1],
+                "amount": row[2],
+                "category": row[3],
+                "description": row[4],
+                "source_id": row[5] or source_id,
+            },
+        ),
+        "places": (
+            "SELECT event_id, place_name, city, region, event_at, source_id FROM location_events WHERE source_id=? ORDER BY event_at DESC LIMIT ?",
+            lambda row: {
+                "event_id": row[0],
+                "place_name": row[1],
+                "city": row[2],
+                "region": row[3],
+                "event_at": row[4],
+                "source_id": row[5] or source_id,
+            },
+        ),
+        "contacts": (
+            """
+            SELECT c.contact_id, c.display_name, ci.identifier, ci.identifier_type, c.source_id
+            FROM contacts c
+            JOIN contact_identifiers ci ON ci.contact_id = c.contact_id AND ci.source_id = c.source_id
+            WHERE c.source_id=?
+            ORDER BY c.contact_id
+            LIMIT ?
+            """,
+            lambda row: {
+                "contact_id": row[0],
+                "display_name": row[1],
+                "identifier": row[2],
+                "identifier_type": row[3],
+                "source_id": row[4] or source_id,
+            },
+        ),
+    }
+    if group in demo_load_sql:
+        sql, mapper = demo_load_sql[group]
+        rows = db_conn.execute(sql, (source_id, limit)).fetchall()
+        return [_prepare_signal_record(mapper(row)) for row in rows]
+
+    if group == "ai_messages":
+        rows = db_conn.execute(
+            """
+            SELECT message_id, conversation_id, sender_type, content, event_at, source_id
+            FROM ai_chat_messages
+            WHERE source_id=?
+            ORDER BY event_at DESC
+            LIMIT ?
+            """,
+            (source_id, limit),
+        ).fetchall()
+        return [
+            _prepare_signal_record(
+                {
+                    "message_id": row[0],
+                    "conversation_id": row[1],
+                    "sender_type": row[2],
+                    "content": row[3],
+                    "event_at": row[4],
+                    "source_id": row[5] or source_id,
+                }
+            )
+            for row in rows
+        ]
+
     rows = db_conn.execute(
         """
-        SELECT message_id, conversation_id, sender_type, content, ts, source_id
+        SELECT message_id, conversation_id, sender_type, content, event_at, source_id
         FROM ai_chat_messages
         WHERE source_id=?
-        ORDER BY ts DESC
+        ORDER BY event_at DESC
         LIMIT ?
         """,
         (source_id, limit),
     ).fetchall()
     return [
-        {
-            "message_id": row[0],
-            "conversation_id": row[1],
-            "sender_type": row[2],
-            "content": row[3],
-            "ts": row[4],
-            "source_id": row[5] or source_id,
-        }
+        _prepare_signal_record(
+            {
+                "message_id": row[0],
+                "conversation_id": row[1],
+                "sender_type": row[2],
+                "content": row[3],
+                "event_at": row[4],
+                "source_id": row[5] or source_id,
+            }
+        )
         for row in rows
     ]
 
@@ -307,6 +575,7 @@ async def run_post_canonical_pipeline(
     outcome: Dict[str, Any] = {
         "signal_derivation": None,
         "canonical_enrichment": None,
+        "privacy_disclosure_layer": None,
     }
     if not canonical_records or not source_def:
         return outcome
@@ -319,6 +588,26 @@ async def run_post_canonical_pipeline(
 
     derived = tables_manager or DerivedTablesManager()
 
+    # Platform Privacy Layer — mandatory, not gated by enrichment_trigger
+    try:
+        from ..core.state import get_db_connection
+        from ..disclosure.field_registry import canonical_table_for_group
+        from ..disclosure.privacy_layer import run_privacy_disclosure_layer
+
+        conn = get_db_connection()
+        canon_table = canonical_table_for_group(getattr(source_def, "canonical_group_id", None))
+        if conn and canon_table and canonical_records:
+            for rec in canonical_records:
+                rec.setdefault("_table", canon_table)
+            outcome["privacy_disclosure_layer"] = await run_privacy_disclosure_layer(
+                conn,
+                canonical_records,
+                source_group=getattr(source_def, "canonical_group_id", None),
+            )
+    except Exception as exc:
+        logger.error("[PIPELINE:PRIVACY] privacy_disclosure_layer failed: %s", exc, exc_info=True)
+        outcome["privacy_disclosure_layer"] = {"errors": [str(exc)]}
+
     if (
         run_enrichment
         and canonical_jobs
@@ -326,6 +615,12 @@ async def run_post_canonical_pipeline(
         and canonical_records
     ):
         try:
+            from ..disclosure.field_registry import canonical_table_for_group
+
+            canon_table = canonical_table_for_group(getattr(source_def, "canonical_group_id", None))
+            if canon_table:
+                for rec in canonical_records:
+                    rec.setdefault("_table", canon_table)
             enrichment_orchestrator = EnrichmentOrchestrator(tables_manager=derived)
             outcome["canonical_enrichment"] = await enrichment_orchestrator.run_canonical(
                 canonical_records,

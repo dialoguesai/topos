@@ -26,6 +26,10 @@ class RetrievalRequest:
     filter_manifest: Optional[Dict[str, Any]] = None
     field_transforms: Optional[List[Any]] = None
     skip_retrieval: bool = False
+    installed_source_ids: Optional[List[str]] = None
+    disclosure_tier: str = "owner_raw"
+    requester_id: str = "owner"
+    owner_id: str = "owner"
 
 
 @dataclass

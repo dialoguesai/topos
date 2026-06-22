@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import uuid
 from typing import Any, Dict, List, Optional
 
 from ..storage.adapters.factory import AdapterBundle
 from .derived_tables import DerivedTablesManager
+
+logger = logging.getLogger(__name__)
 
 _LEGACY_TABLE_BY_JOB: Dict[str, str] = {
     "emo_27": "message_emotions",
@@ -105,7 +108,35 @@ def write_signal_records(
             conn.commit()
 
     if job_name == "embeddings":
+        vector_index = adapters.vector
+        get_hashes = getattr(vector_index, "get_embedding_hashes", None)
+        delete_chunks = getattr(vector_index, "delete_chunks_for_record", None)
+        grouped: Dict[tuple[str, str], List[Dict[str, Any]]] = {}
         for rec in records:
+            rid = str(rec.get("record_id") or rec.get("message_id") or "")
+            model = str(rec.get("model") or prov.get("model") or "")
+            if rid and model:
+                grouped.setdefault((rid, model), []).append(rec)
+
+        skipped_groups: set[tuple[str, str]] = set()
+        for (rid, model), group in grouped.items():
+            if delete_chunks is not None:
+                keep = sorted({int(r.get("chunk_index") or 0) for r in group})
+                delete_chunks(rid, model, keep_indices=keep)
+            if get_hashes is not None:
+                existing = get_hashes(rid, model)
+                parent_hash = str(group[0].get("content_hash") or "")
+                if parent_hash and existing and all(
+                    existing.get(int(r.get("chunk_index") or 0)) == parent_hash for r in group
+                ):
+                    logger.debug("Skipping re-embed write for unchanged record %s", rid)
+                    skipped_groups.add((rid, model))
+
+        for rec in records:
+            rid = str(rec.get("record_id") or rec.get("message_id") or "")
+            model = str(rec.get("model") or prov.get("model") or "")
+            if (rid, model) in skipped_groups:
+                continue
             meta = _merge_provenance(
                 {
                     "embedding_id": rec.get("embedding_id"),
@@ -116,10 +147,27 @@ def write_signal_records(
                     "provider": rec.get("provider", "huggingface"),
                     "dims": rec.get("dims"),
                     "text_preview": (rec.get("text_preview") or "")[:200],
+                    "search_text": (rec.get("search_text") or rec.get("text_preview") or "")[:2000],
                     "created_at": rec.get("created_at"),
+                    "content_hash": rec.get("content_hash"),
+                    "chunk_index": rec.get("chunk_index", 0),
+                    "event_at": rec.get("event_at"),
+                    "conversation_id": rec.get("conversation_id"),
+                    "record_type": rec.get("record_type"),
+                    "chunk_strategy": rec.get("chunk_strategy"),
+                    "chunk_count": rec.get("chunk_count"),
                 },
                 prov,
             )
+            if get_hashes is not None:
+                rid = str(meta.get("record_id") or "")
+                model = str(meta.get("model") or "")
+                parent_hash = str(meta.get("content_hash") or "")
+                chunk_index = int(meta.get("chunk_index") or 0)
+                if rid and model and parent_hash:
+                    existing = get_hashes(rid, model)
+                    if existing.get(chunk_index) == parent_hash:
+                        continue
             adapters.vector.upsert(meta, vector=rec.get("vector"))
             written += 1
     elif job_name == "entities":
@@ -201,18 +249,8 @@ def write_signal_records(
             )
             written += 1
     elif job_name == "dimension_summary":
-        for rec in records:
-            adapters.signal.put_summary(
-                _merge_provenance(
-                    {
-                        "dimension": rec.get("dimension", "memory"),
-                        "source_id": rec.get("source_id"),
-                        "summary_text": rec.get("summary_text"),
-                    },
-                    prov,
-                )
-            )
-            written += 1
+        # Briefs are written inside DimensionSummaryJob.enrich().
+        written = len([r for r in records if r.get("_brief_updated")])
     elif job_name == "goal_extraction":
         for rec in records:
             adapters.signal.put_fact(

@@ -14,6 +14,29 @@ from ..storage.raw.file_store import RawFileStore
 logger = logging.getLogger("topos.ingestion.ingest_helpers")
 
 
+def resolve_file_format(
+    *,
+    source_definition: Optional[Any] = None,
+    file_path: Optional[str] = None,
+    default: str = "jsonl",
+) -> str:
+    """Pick parser file format from source file_ingest_shape or filename extension."""
+    if source_definition is not None:
+        shape = getattr(source_definition, "file_ingest_shape", None)
+        if isinstance(shape, dict):
+            fmt = str(shape.get("format") or "").strip().lower()
+            if fmt:
+                return fmt
+    path = str(file_path or "").strip().lower()
+    if path.endswith(".csv"):
+        return "csv"
+    if path.endswith(".json"):
+        return "json"
+    if path.endswith((".jsonl", ".ndjson")):
+        return "jsonl"
+    return default
+
+
 async def ingest_file_payload(
     *,
     dataset_id: str,

@@ -217,8 +217,21 @@ def _validate_mapper_contract(source_def: Dict[str, Any]) -> None:
         raise ValueError("canonical_mapper_id is required when canonical mapping is connected")
     if requires_canonical_contract and not canonical_group_id:
         raise ValueError("canonical_group_id is required when canonical mapping is connected")
-    if canonical_group_id and canonical_group_id not in {"ai_messages", "conversations"}:
-        raise ValueError("canonical_group_id must be one of: ai_messages, conversations")
+    if canonical_group_id and canonical_group_id not in {
+        "ai_messages",
+        "conversations",
+        "activity",
+        "schedule",
+        "journal",
+        "profile",
+        "financial",
+        "places",
+        "contacts",
+    }:
+        raise ValueError(
+            "canonical_group_id must be one of: ai_messages, conversations, activity, "
+            "schedule, journal, profile, financial, places, contacts"
+        )
 
 
 def _trusted_enrichment_function_catalog() -> Dict[str, Dict[str, str]]:

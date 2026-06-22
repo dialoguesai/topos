@@ -52,4 +52,4 @@ for _ in $(seq 1 20); do
   sleep 1
 done
 
-exec uv run uvicorn topos.app:app --host "${HOST:-127.0.0.1}" --port "${PORT:-9000}"
+exec uv run uvicorn topos.app:app --host "${HOST:-127.0.0.1}" --port "${PORT:-9000}" --log-config topos/config/uvicorn_logging.json

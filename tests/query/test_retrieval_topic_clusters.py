@@ -38,15 +38,15 @@ def test_inference_retrieval_includes_topic_clusters(conn) -> None:
     manifest = ScopeResolutionManifest(
         scope_id="ai_conversations:read",
         primary_dimensions=["Memory"],
-        canonical_tables=["ai_chat_messages"],
-        access_mode_ceiling="inference",
+        canonical_tables=[],
+        access_mode_ceiling="summary",
         must_not_retrieve=[],
     )
     adapter = DefaultSignalRetrievalAdapter(adapters)
     bundle = adapter.retrieve(
         RetrievalRequest(
             manifest=manifest,
-            access_mode="inference",
+            access_mode="summary",
             skip_retrieval=False,
         )
     )

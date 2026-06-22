@@ -158,3 +158,51 @@ def apply_text_transform_with_privacy_filter(
     allowed = TRANSFORM_ENTITY_GROUPS[transform_id]
     entities = _detect_entities(text, model_id=model_id)
     return _redact_spans(text, entities, allowed_groups=allowed)
+
+
+PRIVACY_LAYER_VERSION: Final[str] = "1"
+PRIVACY_DISCLOSE_MAX_BATCH: Final[int] = 32
+
+
+def redact_privacy_batch(
+    items: List[Dict[str, Any]],
+    *,
+    transform_id: str = "pii_redaction",
+) -> Dict[str, Any]:
+    """Batch PII redaction for Engine privacy_disclosure tasks and HTTP disclose API."""
+    from topos.config.settings import settings
+
+    if not privacy_filter_available():
+        return {
+            "error": "privacy filter unavailable",
+            "status": "unavailable",
+            "items": [],
+            "model": getattr(settings, "privacy_filter_model", PRIVACY_FILTER_MODEL_ID),
+            "privacy_layer_version": PRIVACY_LAYER_VERSION,
+        }
+    if len(items) > PRIVACY_DISCLOSE_MAX_BATCH:
+        return {
+            "error": f"batch exceeds limit of {PRIVACY_DISCLOSE_MAX_BATCH}",
+            "status": "too_large",
+            "items": [],
+            "model": getattr(settings, "privacy_filter_model", PRIVACY_FILTER_MODEL_ID),
+            "privacy_layer_version": PRIVACY_LAYER_VERSION,
+        }
+    model_id = (getattr(settings, "privacy_filter_model", None) or PRIVACY_FILTER_MODEL_ID).strip()
+    out_items: List[Dict[str, Any]] = []
+    for item in items:
+        item_id = str(item.get("id") or "")
+        text = str(item.get("text") or "")
+        tid = str(item.get("transform_id") or transform_id)
+        try:
+            redacted = apply_text_transform_with_privacy_filter(text, tid, {})
+            out_items.append({"id": item_id, "text": redacted})
+        except Exception as exc:  # noqa: BLE001
+            out_items.append({"id": item_id, "text": text, "error": str(exc)})
+    return {
+        "items": out_items,
+        "model": model_id,
+        "privacy_layer_version": PRIVACY_LAYER_VERSION,
+        "provider": "huggingface",
+        "status": "ok",
+    }

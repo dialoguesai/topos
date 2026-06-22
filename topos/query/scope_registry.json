@@ -1,6 +1,6 @@
 {
-  "$schema": "topos/scope-registry-mvp-v1",
-  "version": "1.0.0",
+  "$schema": "topos/scope-registry-v2",
+  "version": "2.0.0",
   "description": "Wiki-aligned MVP scope catalog. Source of truth for PRD; migrate to control_plane/uma/scope_registry.json in Phase 0.",
   "scopes": [
     {
@@ -10,7 +10,8 @@
       "signal_objects": ["activity_tags", "top_topics"],
       "summary_objects": ["activity_summary"],
       "inference_objects": ["interest_scores"],
-      "default_mode_ceiling": "summary"
+      "default_mode_ceiling": "raw",
+      "default_source_ids": ["demo_browser_file", "browser_visits", "browser_events"]
     },
     {
       "scope_id": "health:read",
@@ -19,16 +20,19 @@
       "signal_objects": [],
       "summary_objects": ["wellness_summary"],
       "inference_objects": ["wellness_scores"],
-      "default_mode_ceiling": "summary"
+      "default_mode_ceiling": "raw",
+      "default_source_ids": ["demo_journal_file", "grow_data_file"]
     },
     {
       "scope_id": "relationship_context:read",
       "primary_dimensions": ["Relationships"],
-      "raw_tables": [],
-      "signal_objects": ["relationship_edges", "relationship_scores"],
+      "raw_tables": ["contacts", "contact_identifiers", "journal_entries"],
+      "signal_objects": ["warmth_score", "relationship_edge_summary", "relationship_edges"],
       "summary_objects": ["relationship_dimension_summary"],
       "inference_objects": ["relationship_inference"],
-      "default_mode_ceiling": "inference"
+      "fit_facets_exposed": ["relationship_warmth", "domain_overlap"],
+      "default_mode_ceiling": "raw",
+      "default_source_ids": ["demo_contacts_file", "demo_messenger_file", "grow_data_file"]
     },
     {
       "scope_id": "messages:read",
@@ -37,7 +41,8 @@
       "signal_objects": ["message_entities", "message_emotions"],
       "summary_objects": ["message_excerpts_summary"],
       "inference_objects": [],
-      "default_mode_ceiling": "raw"
+      "default_mode_ceiling": "raw",
+      "default_source_ids": ["demo_messenger_file", "imessage", "signal"]
     },
     {
       "scope_id": "ai_conversations:read",
@@ -46,7 +51,7 @@
       "signal_objects": ["message_topics", "user_goals"],
       "summary_objects": ["memory_dimension_summary"],
       "inference_objects": ["goal_inference"],
-      "default_mode_ceiling": "inference",
+      "default_mode_ceiling": "raw",
       "default_source_ids": [
         "chatgpt_file_ingestion",
         "chatgpt_ingestion",
@@ -56,40 +61,51 @@
     {
       "scope_id": "schedule:read",
       "primary_dimensions": ["Time"],
-      "raw_tables": ["calendar_events"],
+      "raw_tables": ["calendar_events", "journal_entries"],
       "signal_objects": ["event_counts"],
       "summary_objects": ["schedule_summary"],
       "inference_objects": [],
-      "default_mode_ceiling": "raw"
+      "default_mode_ceiling": "raw",
+      "default_source_ids": ["demo_calendar_file", "calendar_stub", "grow_data_file"]
     },
     {
       "scope_id": "availability:read",
       "primary_dimensions": ["Time"],
-      "raw_tables": [],
-      "signal_objects": ["availability_scores", "busy_blocks"],
+      "raw_tables": ["calendar_events", "journal_entries"],
+      "signal_objects": ["availability_window_scores", "commitment_hard_blocks"],
       "summary_objects": ["availability_summary"],
       "inference_objects": ["availability_windows"],
+      "required_health": {"time.depth_score": 0.3},
+      "fit_facets_exposed": ["timing_feasibility", "commitment_conflict"],
       "default_mode_ceiling": "inference",
-      "must_not_retrieve": ["calendar_events.title", "conversation_messages.content", "content"]
+      "default_source_ids": ["demo_calendar_file", "calendar_stub", "grow_data_file"],
+      "must_not_retrieve": ["calendar_events.title", "conversation_messages.content", "content", "title", "attendees"]
     },
     {
       "scope_id": "work_context:read",
       "primary_dimensions": ["Work"],
-      "raw_tables": [],
+      "raw_tables": ["profile_records", "journal_entries"],
       "signal_objects": ["user_goals"],
       "summary_objects": ["work_stub_summary"],
       "inference_objects": [],
-      "default_mode_ceiling": "summary",
-      "default_source_ids": ["chatgpt_ingestion", "chatgpt_file_ingestion", "chatgpt_ui_conversation"]
+      "default_mode_ceiling": "raw",
+      "default_source_ids": [
+        "demo_resume_file",
+        "grow_data_file",
+        "chatgpt_ingestion",
+        "chatgpt_file_ingestion",
+        "chatgpt_ui_conversation"
+      ]
     },
     {
       "scope_id": "public_bio:read",
       "primary_dimensions": ["Profile"],
-      "raw_tables": [],
+      "raw_tables": ["profile_records"],
       "signal_objects": [],
       "summary_objects": ["public_bio"],
       "inference_objects": [],
-      "default_mode_ceiling": "summary"
+      "default_mode_ceiling": "raw",
+      "default_source_ids": ["demo_resume_file"]
     },
     {
       "scope_id": "contacts:resolve",
@@ -100,6 +116,26 @@
       "inference_objects": [],
       "default_mode_ceiling": "raw",
       "enrichment_only": true
+    },
+    {
+      "scope_id": "resources:read",
+      "primary_dimensions": ["Resources"],
+      "raw_tables": ["financial_transactions"],
+      "signal_objects": [],
+      "summary_objects": ["financial_summary"],
+      "inference_objects": [],
+      "default_mode_ceiling": "raw",
+      "default_source_ids": ["demo_financial_file"]
+    },
+    {
+      "scope_id": "places:read",
+      "primary_dimensions": ["Places"],
+      "raw_tables": ["location_events", "journal_entries"],
+      "signal_objects": [],
+      "summary_objects": ["location_context"],
+      "inference_objects": [],
+      "default_mode_ceiling": "raw",
+      "default_source_ids": ["demo_places_file", "grow_data_file"]
     }
   ],
   "migration_from_legacy": {

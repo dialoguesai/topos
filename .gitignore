@@ -25,3 +25,4 @@ htmlcov/
 .ruff_cache/
 .DS_Store
 *.log
+demo/
