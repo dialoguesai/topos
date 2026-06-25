@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime, timezone
 
 from ...ingestion.parsers.base import NormalizedRecord
 from .base import CanonicalMapper, CanonicalRecord, MappingMetadata
@@ -128,14 +129,16 @@ class DemoPlacesMapper(CanonicalMapper):
 
 
 @dataclass
-class DemoGrowMapper(CanonicalMapper):
+class JournalTimeLogMapper(CanonicalMapper):
     version: str = "v1"
 
     def map(self, normalized: NormalizedRecord) -> CanonicalRecord:
         p = normalized.payload
         entry_id = str(p.get("entry_id") or normalized.record_id)
+        entry_at = p.get("entry_at")
+        if not entry_at:
+            entry_at = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
         metadata = {
-            "ends_at": p.get("ends_at"),
             "duration_minutes": p.get("duration_minutes"),
             "goal": p.get("goal"),
             "goal_entities": p.get("goal_entities"),
@@ -145,10 +148,13 @@ class DemoGrowMapper(CanonicalMapper):
         }
         canonical = {
             "entry_id": entry_id,
-            "entry_at": p.get("entry_at"),
+            "entry_at": entry_at,
+            "starts_at": p.get("starts_at"),
+            "ends_at": p.get("ends_at"),
             "mood_tag": p.get("mood_tag"),
             "category": p.get("category"),
             "content": p.get("content"),
+            "duration": p.get("duration") or p.get("duration_minutes"),
             "people": p.get("people"),
             "place_name": p.get("place_name"),
             "source_record_id": entry_id,
@@ -157,7 +163,7 @@ class DemoGrowMapper(CanonicalMapper):
         return CanonicalRecord(record_id=entry_id, payload=canonical)
 
     def mapping_metadata(self, normalized: NormalizedRecord) -> MappingMetadata:
-        return MappingMetadata(source_id="grow_time_log", mapping_version=self.version)
+        return MappingMetadata(source_id="journal_time_log", mapping_version=self.version)
 
 
 @dataclass

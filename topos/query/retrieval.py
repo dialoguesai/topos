@@ -265,7 +265,7 @@ def _row_summary_text(table: str, row: Dict[str, Any], *, scope_id: str = "") ->
             except _json.JSONDecodeError:
                 meta = {}
         if isinstance(meta, dict):
-            ends_at = str(meta.get("ends_at") or "").strip()
+            ends_at = str(row.get("ends_at") or meta.get("ends_at") or "").strip()
             if ends_at and row.get("entry_at"):
                 parts.insert(0, f"{row.get('entry_at')} — {ends_at}")
             duration = meta.get("duration_minutes")

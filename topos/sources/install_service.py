@@ -180,17 +180,15 @@ def _is_valid_path_token(token: str) -> bool:
 
 
 def _validate_parser_extract_map(source_def: Dict[str, Any]) -> None:
+    from .bundled_canonical_triples import requires_canonical_contract as _requires_canonical
+
     ingest_shape = source_def.get("file_ingest_shape")
     parser_extract_map = ingest_shape.get("parser_extract_map") if isinstance(ingest_shape, dict) else None
     if parser_extract_map is None:
         return
     if not isinstance(parser_extract_map, dict):
         raise ValueError("file_ingest_shape.parser_extract_map must be a JSON object")
-    canonical_mapper_id = str(source_def.get("canonical_mapper_id") or "").strip()
-    canonical_group_id = str(source_def.get("canonical_group_id") or "").strip()
-    canonical_mapping_connected = bool(source_def.get("canonical_mapping_connected"))
-    requires_canonical_contract = bool(canonical_mapping_connected or canonical_mapper_id or canonical_group_id)
-    if requires_canonical_contract:
+    if _requires_canonical(source_def):
         required_keys = {"message_id", "sender_type", "content"}
         missing = sorted([key for key in required_keys if key not in parser_extract_map])
         if missing:
@@ -206,31 +204,29 @@ def _validate_parser_extract_map(source_def: Dict[str, Any]) -> None:
 
 
 def _validate_mapper_contract(source_def: Dict[str, Any]) -> None:
+    from .bundled_canonical_triples import (
+        VALID_CANONICAL_GROUP_IDS,
+        normalize_canonical_source_payload,
+        requires_canonical_contract as _requires_canonical,
+    )
+
+    source_def = normalize_canonical_source_payload(dict(source_def))
     source_type = str(source_def.get("source_type") or "").strip()
     canonical_mapper_id = str(source_def.get("canonical_mapper_id") or "").strip()
     canonical_group_id = str(source_def.get("canonical_group_id") or "").strip()
-    canonical_mapping_connected = bool(source_def.get("canonical_mapping_connected"))
-    requires_canonical_contract = bool(canonical_mapping_connected or canonical_mapper_id or canonical_group_id)
-    if source_type in {"file", "ui_stream"} and not requires_canonical_contract:
+    if source_type in {"file", "ui_stream", "local_sync"} and not _requires_canonical(source_def):
         return
-    if requires_canonical_contract and not canonical_mapper_id:
-        raise ValueError("canonical_mapper_id is required when canonical mapping is connected")
-    if requires_canonical_contract and not canonical_group_id:
-        raise ValueError("canonical_group_id is required when canonical mapping is connected")
-    if canonical_group_id and canonical_group_id not in {
-        "ai_messages",
-        "conversations",
-        "activity",
-        "schedule",
-        "journal",
-        "profile",
-        "financial",
-        "places",
-        "contacts",
-    }:
+    if _requires_canonical(source_def) and not canonical_mapper_id:
         raise ValueError(
-            "canonical_group_id must be one of: ai_messages, conversations, activity, "
-            "schedule, journal, profile, financial, places, contacts"
+            "canonical_mapper_id is required for custom canonical mapping; "
+            "bundled schema/parser ids infer the mapper automatically"
+        )
+    if _requires_canonical(source_def) and not canonical_group_id:
+        raise ValueError("canonical_group_id is required when mapping to a canonical table")
+    if canonical_group_id and canonical_group_id not in VALID_CANONICAL_GROUP_IDS:
+        raise ValueError(
+            "canonical_group_id must be one of: "
+            + ", ".join(sorted(VALID_CANONICAL_GROUP_IDS))
         )
 
 
@@ -282,7 +278,10 @@ def _normalize_enrichment_bindings(source_def: Dict[str, Any]) -> Dict[str, Any]
     return out
 
 
-def _validate_source_contract(source_def: Dict[str, Any]) -> None:
+def _validate_source_contract(source_def: Dict[str, Any]) -> Dict[str, Any]:
+    from .bundled_canonical_triples import normalize_canonical_source_payload
+
+    source_def = normalize_canonical_source_payload(dict(source_def))
     source_id = str(source_def.get("source_id") or "").strip()
     schema_id = str(source_def.get("schema_id") or "").strip()
     parser_id = str(source_def.get("parser_id") or "").strip()
@@ -295,6 +294,7 @@ def _validate_source_contract(source_def: Dict[str, Any]) -> None:
         raise ValueError("source_definition_json.source_type must be one of: file, ui_stream, local_sync")
     _validate_parser_extract_map(source_def)
     _validate_mapper_contract(source_def)
+    return source_def
 
 
 @dataclass(frozen=True)
@@ -459,7 +459,7 @@ def install_source(
     if not isinstance(source_def, dict):
         raise ValueError("source_definition_json or source_version_row_json is required")
     source_def = _normalize_enrichment_bindings(source_def)
-    _validate_source_contract(source_def)
+    source_def = _validate_source_contract(source_def)
     source_id = str(source_def.get("source_id") or "").strip()
 
     _validate_concrete_install_scope(scope)
@@ -850,7 +850,7 @@ def patch_source_install(
                     merged[key] = value
 
             merged = _normalize_enrichment_bindings(merged)
-            _validate_source_contract(merged)
+            merged = _validate_source_contract(merged)
             if str(merged.get("source_id") or "").strip() != sid:
                 raise ValueError("source_id in definition must match install source_id")
 

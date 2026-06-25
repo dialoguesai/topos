@@ -56,3 +56,15 @@ class SignalCanonicalMapper(CanonicalMapper):
 
     def mapping_metadata(self, normalized: NormalizedRecord) -> MappingMetadata:
         return MappingMetadata(source_id="signal", mapping_version="v1")
+
+
+@dataclass
+class VoxtermTranscriptCanonicalMapper(CanonicalMapper):
+    """Maps normalized VoxTerm transcript segment to conversation_messages shape."""
+
+    def map(self, normalized: NormalizedRecord) -> CanonicalRecord:
+        payload = _normalized_to_canonical_payload(normalized, "voxterm_transcripts")
+        return CanonicalRecord(record_id=payload["message_id"], payload=payload)
+
+    def mapping_metadata(self, normalized: NormalizedRecord) -> MappingMetadata:
+        return MappingMetadata(source_id="voxterm_transcripts", mapping_version="v1")

@@ -38,6 +38,8 @@ class DataSourceDefinition:
     canonical_group_id: Optional[str] = None
     raw_enrichment_jobs: List[str] = field(default_factory=list)
     canonical_enrichment_jobs: List[str] = field(default_factory=list)
+    # Optional lane-specific extras; canonical-mapped sources always receive baseline
+    # signal jobs (embeddings, briefs, topic clusters, graph) at runtime.
     signal_derivation_jobs: List[str] = field(default_factory=list)
     analytics_profile_id: Optional[str] = None
     enrichment_trigger: Literal["automatic", "manual"] = "automatic"

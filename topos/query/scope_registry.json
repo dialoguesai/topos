@@ -21,7 +21,7 @@
       "summary_objects": ["wellness_summary"],
       "inference_objects": ["wellness_scores"],
       "default_mode_ceiling": "raw",
-      "default_source_ids": ["demo_journal_file", "grow_data_file"]
+      "default_source_ids": ["demo_journal_file"]
     },
     {
       "scope_id": "relationship_context:read",
@@ -32,7 +32,7 @@
       "inference_objects": ["relationship_inference"],
       "fit_facets_exposed": ["relationship_warmth", "domain_overlap"],
       "default_mode_ceiling": "raw",
-      "default_source_ids": ["demo_contacts_file", "demo_messenger_file", "grow_data_file"]
+      "default_source_ids": ["demo_contacts_file", "demo_messenger_file"]
     },
     {
       "scope_id": "messages:read",
@@ -66,7 +66,7 @@
       "summary_objects": ["schedule_summary"],
       "inference_objects": [],
       "default_mode_ceiling": "raw",
-      "default_source_ids": ["demo_calendar_file", "calendar_stub", "grow_data_file"]
+      "default_source_ids": ["demo_calendar_file", "calendar_stub"]
     },
     {
       "scope_id": "availability:read",
@@ -78,7 +78,7 @@
       "required_health": {"time.depth_score": 0.3},
       "fit_facets_exposed": ["timing_feasibility", "commitment_conflict"],
       "default_mode_ceiling": "inference",
-      "default_source_ids": ["demo_calendar_file", "calendar_stub", "grow_data_file"],
+      "default_source_ids": ["demo_calendar_file", "calendar_stub"],
       "must_not_retrieve": ["calendar_events.title", "conversation_messages.content", "content", "title", "attendees"]
     },
     {
@@ -91,7 +91,6 @@
       "default_mode_ceiling": "raw",
       "default_source_ids": [
         "demo_resume_file",
-        "grow_data_file",
         "chatgpt_ingestion",
         "chatgpt_file_ingestion",
         "chatgpt_ui_conversation"
@@ -135,7 +134,7 @@
       "summary_objects": ["location_context"],
       "inference_objects": [],
       "default_mode_ceiling": "raw",
-      "default_source_ids": ["demo_places_file", "grow_data_file"]
+      "default_source_ids": ["demo_places_file"]
     }
   ],
   "migration_from_legacy": {

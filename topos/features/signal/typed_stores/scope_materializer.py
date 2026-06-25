@@ -71,9 +71,9 @@ def _materialize_event_counts(store: SignalObjectStore, conn: sqlite3.Connection
 
     if _table_exists(conn, "journal_entries"):
         journal_rows = conn.execute(
-            "SELECT entry_id, entry_at, metadata_json FROM journal_entries ORDER BY entry_at"
+            "SELECT entry_id, entry_at, starts_at, ends_at, metadata_json FROM journal_entries ORDER BY entry_at"
         ).fetchall()
-        for entry_id, entry_at, metadata_json in journal_rows:
+        for entry_id, entry_at, starts_at, ends_at, metadata_json in journal_rows:
             meta: Dict[str, Any] = {}
             if metadata_json:
                 try:
@@ -82,9 +82,10 @@ def _materialize_event_counts(store: SignalObjectStore, conn: sqlite3.Connection
                         meta = parsed
                 except json.JSONDecodeError:
                     meta = {}
-            if not str(meta.get("ends_at") or "").strip():
+            end_value = str(ends_at or meta.get("ends_at") or "").strip()
+            if not end_value:
                 continue
-            day = str(entry_at or "")[:10] or "unknown"
+            day = str(starts_at or entry_at or "")[:10] or "unknown"
             by_day[day]["total"] += 1
             by_day[day]["busy"] += 1
             busy_count += 1

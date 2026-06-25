@@ -11,7 +11,7 @@ from ._batch_limits import (
     MAX_JOB_MESSAGES,
 )
 from ._engine_runner import run_engine_task
-from .brief_fallback import prepare_brief_record, rules_brief_sections, _grow_place_band
+from .brief_fallback import prepare_brief_record, rules_brief_sections, _structured_journal_place_band
 from ....engine import Engine
 from ....config.signal_extraction import get_signal_extraction_model_request, get_signal_extraction_provider
 from ....core.state import get_db_connection
@@ -61,7 +61,7 @@ def _records_for_brief_dimension(
         brief_dims = dimensions_for_brief_update(source_id=sid)
         if dim not in brief_dims:
             continue
-        if dim == "places" and not _grow_place_band(rec):
+        if dim == "places" and not _structured_journal_place_band(rec):
             continue
         matched.append(rec)
     if matched:

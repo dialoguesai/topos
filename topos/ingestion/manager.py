@@ -20,7 +20,6 @@ from ..canonicalization.mappers import MAPPER_REGISTRY
 from ..config.settings import settings
 from ..enrichment.derived_tables import DerivedTablesManager
 from ..enrichment.jobs import CANONICAL_JOBS
-from ..enrichment.orchestrator import EnrichmentOrchestrator
 from ..enrichment.progress_bar import ProgressBar
 from ..engine.usage_observation import emit_usage_observation
 from ..sources.registry import REGISTRY
@@ -478,6 +477,14 @@ def _persist_source_data_tables_on_connection(
             db_conn.execute(f'ALTER TABLE "{table_id}" ADD COLUMN "{pooled_col}" TEXT')
             persisted_columns.add(pooled_col)
 
+        for column in valid_columns:
+            col_name = str(column.get("name") or "").strip()
+            if not col_name or col_name in persisted_columns:
+                continue
+            col_type = _sql_type_for_source_column(str(column.get("type") or "text"))
+            db_conn.execute(f'ALTER TABLE "{table_id}" ADD COLUMN "{col_name}" {col_type}')
+            persisted_columns.add(col_name)
+
         column_names = [str(column.get("name")).strip() for column in valid_columns]
         quoted_columns = ", ".join([f'"{name}"' for name in column_names])
         placeholder_token = "?" if is_sqlite else "%s"
@@ -519,6 +526,8 @@ def _persist_source_data_tables_on_connection(
                     raw_value = owner_user_id
                 if raw_value is None and col_name == "tenant_id":
                     raw_value = tenant_id
+                if raw_value is None and col_name == "source_id":
+                    raw_value = str(getattr(source_def, "source_id", None) or "").strip() or None
                 if raw_value is None and col_name == "record_id":
                     raw_value = payload.get("id") or payload.get("message_id")
                 row_values.append(_coerce_table_value(raw_value, declared_type=str(column.get("type") or "")))
@@ -674,7 +683,9 @@ class IngestionManager(BaseObject):
             except Exception as exc:
                 logger.warning("Failed to send initial ingestion progress: %s", exc)
 
-        # Find source definition: use source_id if provided, otherwise find by schema_id
+        # Find source definition: use source_id if provided, otherwise find by schema_id.
+        # When source_id is explicit, do not fall back to a different source by schema_id
+        # (prevents non-chat ui_stream payloads from being routed to chatgpt_ui_conversation).
         source_def = None
         if source_id:
             source_def = REGISTRY.get(source_id)
@@ -688,13 +699,37 @@ class IngestionManager(BaseObject):
                 )
             else:
                 logger.warning(
-                    "[PIPELINE:MANAGER] %s: source_id=%s not found in registry, falling back to schema_id lookup",
+                    "[PIPELINE:MANAGER] %s: source_id=%s not found in registry; attempting control-plane install",
                     self,
                     source_id,
                 )
-        
+                source_def = await _try_install_runtime_source_definition_from_control_plane(
+                    source_id=source_id,
+                    schema_id=job.schema_id,
+                    user_id=_owner_user_id_from_dataset_id(job.dataset_id),
+                    dataset_id=job.dataset_id,
+                    progress_api_url=progress_api_url,
+                    progress_api_key=progress_api_key,
+                )
+                if not source_def:
+                    err = (
+                        f"Source '{source_id}' is not installed on this engine. "
+                        "Install the source before ingesting."
+                    )
+                    logger.error("[PIPELINE:MANAGER] %s: %s", self, err)
+                    return {
+                        "job_id": job.job_id,
+                        "records_processed": 0,
+                        "errors_count": 1,
+                        "errors": [{"error": err}],
+                        "progress_percent": 0.0,
+                        "records_total": records_total,
+                        "estimated_seconds_remaining": None,
+                        "current_step": "failed",
+                    }
+
         if not source_def:
-            # Fallback: find by schema_id (prefer file type for file ingestion)
+            # Fallback: find by schema_id when caller did not specify source_id (file ingestion).
             for source in REGISTRY.values():
                 if source.schema_id == job.schema_id:
                     # Prefer file type sources for file ingestion
@@ -739,7 +774,6 @@ class IngestionManager(BaseObject):
 
         db_conn = get_db_connection()
         tables_manager = DerivedTablesManager(conn=db_conn) if db_conn else None
-        enrichment_orchestrator = EnrichmentOrchestrator(tables_manager=tables_manager) if tables_manager else None
 
         records_processed = 0
         errors: list[dict] = []
@@ -964,23 +998,72 @@ class IngestionManager(BaseObject):
 
         if canonical_messages and source_def:
             try:
-                import asyncio
-
-                from ..enrichment.orchestrator import SignalDerivationOrchestrator
+                from ..ingestion.canonical_pipeline import run_post_canonical_pipeline
                 from ..pipeline.audit import SQLiteIngestAuditStore, StageAuditRow
                 from ..pipeline.stages import PipelineStage
 
-                orchestrator = SignalDerivationOrchestrator()
-                derive_result = await orchestrator.run_signal_derivation(
-                    canonical_messages,
-                    source_id=source_def.source_id,
-                    sync_batch_id=sync_batch_id,
-                )
-                try:
-                    from ..core.state import get_db_connection
+                enrichment_trigger = getattr(source_def, "enrichment_trigger", "automatic")
+                enrichment_records: Optional[List[Any]] = canonical_messages
+                if (
+                    source_def.canonical_enrichment_jobs
+                    and enrichment_trigger == "automatic"
+                    and tables_manager
+                ):
+                    logger.info(
+                        "[PIPELINE:ENRICHMENT] %s: Enrichment trigger check: source_id=%s, enrichment_trigger=%s, canonical_messages=%d, jobs=%s",
+                        self,
+                        source_def.source_id,
+                        enrichment_trigger,
+                        len(canonical_messages),
+                        source_def.canonical_enrichment_jobs,
+                    )
+                    enrichment_records = _filter_unenriched_messages(
+                        canonical_messages,
+                        source_def.canonical_enrichment_jobs,
+                        tables_manager,
+                        source_id=source_def.source_id,
+                        dataset_id=job.dataset_id,
+                    )
+                    if not enrichment_records:
+                        logger.debug(
+                            "[PIPELINE:ENRICHMENT] %s: All %d messages already enriched, skipping enrichment jobs",
+                            self,
+                            len(canonical_messages),
+                        )
+                elif source_def.canonical_enrichment_jobs and enrichment_trigger == "manual":
+                    logger.info(
+                        "[PIPELINE:ENRICHMENT] %s: Skipping enrichment (manual trigger): %d canonical messages will be enriched later via POST /v1/enrichment/process",
+                        self,
+                        len(canonical_messages),
+                    )
 
+                pipeline_outcome = await run_post_canonical_pipeline(
+                    source_def=source_def,
+                    canonical_records=canonical_messages,
+                    enrichment_records=enrichment_records,
+                    sync_batch_id=sync_batch_id,
+                    tables_manager=tables_manager,
+                    run_enrichment=enrichment_trigger == "automatic",
+                )
+
+                enrich_result = pipeline_outcome.get("canonical_enrichment") or {}
+                derive_result = pipeline_outcome.get("signal_derivation") or {}
+                privacy_result = pipeline_outcome.get("privacy_disclosure_layer") or {}
+
+                if enrich_result.get("errors"):
+                    errors.extend(enrich_result["errors"])
+                if derive_result.get("errors"):
+                    for err in derive_result["errors"]:
+                        if isinstance(err, dict):
+                            errors.append({"step": "signal_derivation", **err})
+                        else:
+                            errors.append({"step": "signal_derivation", "error": str(err)})
+                if privacy_result.get("errors"):
+                    errors.append({"step": "privacy", "errors": privacy_result["errors"]})
+
+                try:
                     db_conn = get_db_connection()
-                    if db_conn:
+                    if db_conn and derive_result:
                         status = "completed" if derive_result.get("jobs_run") else "deferred"
                         if derive_result.get("deferred_jobs"):
                             status = "deferred"
@@ -996,100 +1079,8 @@ class IngestionManager(BaseObject):
                 except Exception:
                     pass
             except Exception as exc:
-                logger.debug("[PIPELINE:SIGNAL_DERIVE] %s: wave A skipped: %s", self, exc)
-
-        # Run enrichment on canonical messages (only if automatic trigger)
-        if canonical_messages and source_def and source_def.canonical_enrichment_jobs:
-            # Get enrichment trigger - explicitly check attribute, default to "automatic" if not set
-            enrichment_trigger = getattr(source_def, "enrichment_trigger", "automatic")
-            
-            logger.info(
-                "[PIPELINE:ENRICHMENT] %s: Enrichment trigger check: source_id=%s, enrichment_trigger=%s, canonical_messages=%d, jobs=%s",
-                self,
-                source_def.source_id if source_def else "unknown",
-                enrichment_trigger,
-                len(canonical_messages),
-                source_def.canonical_enrichment_jobs,
-            )
-            
-            # Explicitly check for "manual" trigger - skip enrichment if manual
-            if enrichment_trigger == "manual":
-                logger.info(
-                    "[PIPELINE:ENRICHMENT] %s: ✅ SKIPPING enrichment (manual trigger): %d canonical messages will be enriched later via POST /v1/enrichment/process",
-                    self,
-                    len(canonical_messages),
-                )
-                # Do NOT run enrichment - return early from this block
-            elif enrichment_trigger == "automatic":
-                # Only run enrichment if explicitly set to "automatic"
-                logger.info(
-                    "[PIPELINE:ENRICHMENT] %s: Running enrichment (automatic trigger)",
-                    self,
-                )
-                # Automatic trigger - run enrichment now
-                # Filter out messages that are already enriched
-                unenriched_messages = _filter_unenriched_messages(
-                    canonical_messages,
-                    source_def.canonical_enrichment_jobs,
-                    tables_manager,
-                    source_id=source_def.source_id,
-                    dataset_id=job.dataset_id,
-                )
-                
-                if not unenriched_messages:
-                    logger.debug(
-                        "[PIPELINE:ENRICHMENT] %s: All %d messages already enriched, skipping",
-                        self,
-                        len(canonical_messages),
-                    )
-                else:
-                    if not enrichment_orchestrator:
-                        logger.error(
-                            "[PIPELINE:ENRICHMENT] %s: Cannot run enrichment - enrichment_orchestrator not initialized",
-                            self,
-                        )
-                        errors.append({"step": "enrichment", "errors": ["Enrichment orchestrator not initialized"]})
-                    else:
-                        logger.info(
-                            "[PIPELINE:ENRICHMENT] %s → %s: Starting enrichment (automatic): %d new messages (out of %d total), jobs=%s",
-                            self,
-                            enrichment_orchestrator,
-                            len(unenriched_messages),
-                            len(canonical_messages),
-                            source_def.canonical_enrichment_jobs,
-                        )
-                        try:
-                            from ..disclosure.field_registry import canonical_table_for_group
-
-                            canon_table = canonical_table_for_group(
-                                getattr(source_def, "canonical_group_id", None)
-                            )
-                            if canon_table:
-                                for msg in unenriched_messages:
-                                    msg.setdefault("_table", canon_table)
-                            enrichment_result = await enrichment_orchestrator.run_canonical(
-                                unenriched_messages,
-                                job_names=source_def.canonical_enrichment_jobs,
-                            )
-                            logger.info(
-                                "[PIPELINE:ENRICHMENT] %s → %s: Enrichment complete: jobs_run=%s, records_created=%s, errors=%s",
-                                self,
-                                enrichment_orchestrator,
-                                enrichment_result.get("jobs_run"),
-                                enrichment_result.get("records_created"),
-                                len(enrichment_result.get("errors", [])),
-                            )
-                            if enrichment_result.get("errors"):
-                                errors.extend(enrichment_result["errors"])
-                        except Exception as exc:
-                            logger.error(
-                                "[PIPELINE:ENRICHMENT] %s → %s: Enrichment failed: %s",
-                                self,
-                                enrichment_orchestrator,
-                                exc,
-                                exc_info=True,
-                            )
-                            errors.append({"step": "enrichment", "errors": [str(exc)]})
+                logger.error("[PIPELINE:POST_CANONICAL] %s: failed: %s", self, exc, exc_info=True)
+                errors.append({"step": "post_canonical", "errors": [str(exc)]})
 
         if self.checkpoint_store and last_record_id:
             checkpoint = IngestionCheckpoint(

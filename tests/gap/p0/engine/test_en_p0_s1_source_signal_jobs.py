@@ -13,5 +13,8 @@ pytestmark = pytest.mark.gap
 
 
 def test_chatgpt_source_lists_signal_derivation_jobs() -> None:
-    assert CHATGPT_FILE.signal_derivation_jobs
-    assert "embeddings" in CHATGPT_FILE.signal_derivation_jobs
+    from topos.sources.canonical_signal_defaults import resolved_signal_derivation_jobs
+
+    jobs = resolved_signal_derivation_jobs(CHATGPT_FILE)
+    assert jobs
+    assert "embeddings" in jobs

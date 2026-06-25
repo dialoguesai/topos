@@ -184,8 +184,8 @@ async def test_ingestion_manager_uses_canonicalizer_output_for_enrichment(tmp_pa
         file_format="jsonl",
     )
 
-    def fake_canonicalize_staging_batch(self, staging_records, source, batch_size=1000):
-        _ = (self, staging_records, source, batch_size)
+    def fake_canonicalize_staging_batch(self, staging_records, source, batch_size=1000, **kwargs):
+        _ = (self, staging_records, source, batch_size, kwargs)
         return {
             "conversations_created": 1,
             "messages_created": 1,

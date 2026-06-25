@@ -193,7 +193,7 @@ _NATIVE_LIST_SPECS: Dict[str, tuple[str, List[str]]] = {
     ),
     "journal_entries": (
         """
-        SELECT entry_id AS record_id, entry_at, mood_tag, category, content, people, place_name, source_id,
+        SELECT entry_id AS record_id, entry_at, starts_at, ends_at, mood_tag, category, content, people, place_name, source_id,
                substr(coalesce(content, ''), 1, 500) AS content_preview,
                entry_at AS event_at
         FROM journal_entries
@@ -201,6 +201,8 @@ _NATIVE_LIST_SPECS: Dict[str, tuple[str, List[str]]] = {
         [
             "record_id",
             "entry_at",
+            "starts_at",
+            "ends_at",
             "mood_tag",
             "category",
             "content",

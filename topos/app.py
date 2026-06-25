@@ -149,6 +149,19 @@ async def startup_event() -> None:
                 logger.info("Stage 9 migrations applied at startup: %d renames", len(result["applied"]))
     except Exception as e:
         logger.debug("Stage 9 migrations at startup (non-fatal): %s", e)
+    try:
+        from .sources import install_service
+
+        summary = install_service.rehydrate_active_installs_runtime()
+        if summary.get("rehydrated"):
+            logger.info(
+                "Rehydrated active source installs at startup: active=%s rehydrated=%s failed=%s",
+                summary.get("active_installs"),
+                summary.get("rehydrated"),
+                summary.get("failed"),
+            )
+    except Exception as e:
+        logger.warning("Active source install rehydration at startup failed (non-fatal): %s", e)
     if settings.topos_control_plane_url:
         if settings.hosted_pool_lease_enabled:
             try:

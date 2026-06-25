@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from topos.features.signal.brief_ontology import llm_merge_section_ids
 
-_GROW_FIELD_PREFIXES = (
+_STRUCTURED_JOURNAL_FIELD_PREFIXES = (
     "project:",
     "goal:",
     "accomplished:",
@@ -43,12 +43,12 @@ def _parse_metadata_json(record: Dict[str, Any]) -> Dict[str, Any]:
     return meta if isinstance(meta, dict) else {}
 
 
-def _looks_like_grow_journal_content(content: str) -> bool:
+def _looks_like_structured_journal_content(content: str) -> bool:
     lower = content.lower()
-    return any(prefix in lower for prefix in _GROW_FIELD_PREFIXES)
+    return any(prefix in lower for prefix in _STRUCTURED_JOURNAL_FIELD_PREFIXES)
 
 
-def _parse_grow_content_fields(content: str) -> Dict[str, str]:
+def _parse_structured_journal_content_fields(content: str) -> Dict[str, str]:
     fields: Dict[str, str] = {}
     current_key: Optional[str] = None
     buffer: List[str] = []
@@ -89,13 +89,13 @@ def _first_sentence(text: str, *, max_len: int = 100) -> str:
     return chunk
 
 
-def _grow_place_band(record: Dict[str, Any]) -> str:
+def _structured_journal_place_band(record: Dict[str, Any]) -> str:
     place = str(record.get("place_name") or "").strip()
     if place:
         return place
     content = str(record.get("content") or "")
-    if _looks_like_grow_journal_content(content):
-        fields = _parse_grow_content_fields(content)
+    if _looks_like_structured_journal_content(content):
+        fields = _parse_structured_journal_content_fields(content)
         return str(fields.get("location") or "").strip()
     return ""
 
@@ -130,12 +130,12 @@ def brief_input_text(record: Dict[str, Any]) -> str:
     category = str(record.get("category") or "").strip()
     meta = _parse_metadata_json(record)
 
-    if _looks_like_grow_journal_content(content):
-        fields = _parse_grow_content_fields(content)
+    if _looks_like_structured_journal_content(content):
+        fields = _parse_structured_journal_content_fields(content)
         project = fields.get("project") or category
         goal = fields.get("goal") or str(meta.get("goal") or record.get("goal") or "").strip()
         accomplished = _first_sentence(fields.get("accomplished") or "")
-        place = _grow_place_band(record)
+        place = _structured_journal_place_band(record)
         parts: List[str] = []
         if project:
             parts.append(f"[{project}]")
@@ -152,7 +152,7 @@ def brief_input_text(record: Dict[str, Any]) -> str:
             return " ".join(parts)
 
     parts = []
-    if category and category.lower() not in {"grow", ""}:
+    if category and category.lower() not in {"", "journal"}:
         parts.append(f"[{category}]")
     if content:
         excerpt = _first_sentence(content, max_len=140)
@@ -163,7 +163,7 @@ def brief_input_text(record: Dict[str, Any]) -> str:
     elif record.get("description"):
         parts.append(_first_sentence(str(record["description"])))
     place = str(record.get("place_name") or record.get("city") or "").strip()
-    if place and not _looks_like_grow_journal_content(content):
+    if place and not _looks_like_structured_journal_content(content):
         parts.append(f"@ {place[:40]}")
     if not parts:
         return _record_fallback_summary(record)
@@ -276,7 +276,7 @@ def _places_section_lines(section_id: str, records: List[Dict[str, Any]]) -> Lis
     places: List[str] = []
     lines: List[str] = []
     for record in records:
-        place = _grow_place_band(record)
+        place = _structured_journal_place_band(record)
         if place and place.lower() not in {p.lower() for p in places}:
             places.append(place)
         line = brief_input_text(record).strip()
@@ -296,7 +296,7 @@ def _places_section_lines(section_id: str, records: List[Dict[str, Any]]) -> Lis
         typed: List[str] = []
         for record in records:
             cat = str(record.get("category") or record.get("event_type") or "").strip()
-            place = _grow_place_band(record)
+            place = _structured_journal_place_band(record)
             if cat and place:
                 band = f"{cat} @ {place[:40]}"
                 if band not in typed:

@@ -112,7 +112,52 @@ def test_mvp_query_source_ids_cover_chatgpt_and_browser() -> None:
     assert "chatgpt_file_ingestion" in configured
     assert "chatgpt_ui_conversation" in configured
     assert "browser_visits" in configured
-    assert "grow_data_file" in configured
+    assert "demo_journal_file" in configured
+
+
+def test_time_log_embeddings_included_in_cluster_scope(tmp_path) -> None:
+    from topos.sources.registry import REGISTRY
+    from topos.sources.runtime_install import install_source_definition
+
+    handle = install_source_definition(
+        {
+            "source_id": "time_log",
+            "display_name": "Time Log",
+            "source_type": "ui_stream",
+            "schema_id": "journal.time_log.v1",
+            "parser_id": "journal.time_log.v1",
+            "canonical_mapper_id": "journal_time_log",
+            "canonical_group_id": "journal",
+            "pipeline_include_data_table": True,
+            "tables": [
+                {
+                    "table_id": "time_log_sessions",
+                    "display_name": "Sessions",
+                    "columns": [{"name": "record_id", "type": "text", "primary_key": True}],
+                }
+            ],
+        }
+    )
+    try:
+        conn = sqlite3.connect(str(tmp_path / "time-log-clusters.db"))
+        apply_all_migrations(conn)
+        conn.execute(
+            """
+            INSERT INTO signal_embeddings (
+                embedding_id, record_id, source_id, signal_dimension, model, provider,
+                dims, text_preview, provenance_json, vector_blob
+            ) VALUES (?, ?, ?, 'memory', 'test', 'test', ?, ?, '{}', ?)
+            """,
+            ("emb-tl-1", "tl-1", "time_log", 2, "Ship feature", json.dumps(_vec(1, 0)).encode("utf-8")),
+        )
+        conn.commit()
+
+        loaded = load_embedding_records(conn, source_ids=["time_log"])
+        assert len(loaded) == 1
+        assert loaded[0]["record_type"] == "journal_entry"
+    finally:
+        handle.uninstall()
+        assert "time_log" not in REGISTRY
 
 
 def test_persist_topic_clusters_idempotent_replace(tmp_path) -> None:

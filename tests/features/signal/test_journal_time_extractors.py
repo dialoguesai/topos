@@ -1,4 +1,4 @@
-"""Tests for Grow time-log journal → Time dimension artifact extraction."""
+"""Tests for time-log journal → Time dimension artifact extraction."""
 
 from __future__ import annotations
 
@@ -7,9 +7,9 @@ import json
 from topos.features.signal.extraction.rule_extractors import extract_artifacts
 
 
-def test_grow_journal_emits_busy_interval_for_time_dimension() -> None:
+def test_time_log_journal_emits_busy_interval_for_time_dimension() -> None:
     record = {
-        "entry_id": "grow-1",
+        "entry_id": "tl-1",
         "entry_at": "2026-05-01T08:00:00",
         "category": "Topos",
         "content": "Project: Topos",
@@ -46,9 +46,9 @@ def test_journal_without_end_time_skips_interval() -> None:
     assert extract_artifacts("journal_entries", record) == []
 
 
-def test_grow_journal_group_emits_relationship_edges() -> None:
+def test_time_log_journal_group_emits_relationship_edges() -> None:
     record = {
-        "entry_id": "grow-42",
+        "entry_id": "tl-42",
         "entry_at": "2026-05-01T10:00:00",
         "category": "Topos",
         "content": "Project: Topos",
@@ -69,9 +69,9 @@ def test_grow_journal_group_emits_relationship_edges() -> None:
     assert edge_keys == {"mitch", "claire"}
 
 
-def test_grow_journal_place_emits_places_artifact() -> None:
+def test_time_log_journal_place_emits_places_artifact() -> None:
     record = {
-        "entry_id": "grow-55",
+        "entry_id": "tl-55",
         "entry_at": "2026-05-01T10:00:00",
         "category": "Topos",
         "content": "Project: Topos",
@@ -84,9 +84,9 @@ def test_grow_journal_place_emits_places_artifact() -> None:
     assert places[0][1]["display_band"] == "Timbercreek Apt"
 
 
-def test_grow_journal_goal_emits_intentions_artifact() -> None:
+def test_time_log_journal_goal_emits_intentions_artifact() -> None:
     record = {
-        "entry_id": "grow-1",
+        "entry_id": "tl-1",
         "entry_at": "2026-05-01T08:00:00",
         "category": "Job Applications",
         "content": "Project: Job Applications\n\nGoal: Update resume",
@@ -105,9 +105,9 @@ def test_grow_journal_goal_emits_intentions_artifact() -> None:
     assert "intentions" in goals[0][2]
 
 
-def test_grow_journal_category_emits_profile_claim() -> None:
+def test_time_log_journal_category_emits_profile_claim() -> None:
     record = {
-        "entry_id": "grow-7",
+        "entry_id": "tl-7",
         "entry_at": "2026-05-02T12:33:00",
         "category": "Topos",
         "content": "Project: Topos",

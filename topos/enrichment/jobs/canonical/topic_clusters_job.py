@@ -37,7 +37,7 @@ class TopicClusterJob(BaseEnrichmentJob):
             return [{"_deferred": True, "error": "database_unavailable"}]
 
         source_ids = {str(m.get("source_id") or "") for m in canonical_messages if m.get("source_id")}
-        # Always cluster across all MVP query sources so a single-source ingest (e.g. Grow)
+        # Always cluster across all MVP query sources so a single-source ingest still participates.
         # does not wipe cross-source memory_topic_map rollups.
         scope_ids = list(_resolved_topic_cluster_source_ids())
         if source_ids:

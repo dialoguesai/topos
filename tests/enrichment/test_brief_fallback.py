@@ -49,7 +49,7 @@ def test_rules_brief_sections_from_records() -> None:
     assert sections[keys[-1]]
 
 
-def test_brief_input_text_compresses_grow_journal() -> None:
+def test_brief_input_text_compresses_structured_journal_content() -> None:
     digest = brief_input_text(
         {
             "category": "Job Applications",
@@ -90,7 +90,7 @@ def test_rules_brief_sections_places_travel_patterns() -> None:
 
 
 def test_rules_brief_sections_memory_uses_compressed_bullets() -> None:
-    grow_row = {
+    time_log_row = {
         "category": "Topos",
         "content": (
             "Project: Topos\n\n"
@@ -100,7 +100,7 @@ def test_rules_brief_sections_memory_uses_compressed_bullets() -> None:
             "Duration: 68 min"
         ),
     }
-    sections = rules_brief_sections("memory", [grow_row, grow_row])
+    sections = rules_brief_sections("memory", [time_log_row, time_log_row])
     assert "Project:" not in sections["active_preoccupations"]
     assert sections["active_preoccupations"].startswith("- ")
     assert "Topos" in sections["active_preoccupations"]

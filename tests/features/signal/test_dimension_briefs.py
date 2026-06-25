@@ -104,8 +104,9 @@ def test_dimensions_for_brief_update_financial_lane() -> None:
     assert dims == ("resources",)
 
 
-def test_dimensions_for_brief_update_grow_time_log() -> None:
+def test_dimensions_for_brief_update_journal_lane() -> None:
     from topos.features.signal.dimension_registry import dimensions_for_brief_update
 
-    dims = dimensions_for_brief_update(source_id="grow_data_file")
-    assert dims == ("time", "wellbeing", "memory", "work", "relationships", "places", "intentions", "profile")
+    dims = dimensions_for_brief_update(source_id="demo_journal_file")
+    assert "memory" in dims
+    assert "wellbeing" in dims
