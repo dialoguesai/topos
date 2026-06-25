@@ -7,20 +7,21 @@ from .demo_mappers import (
     DemoCalendarMapper,
     DemoContactsMapper,
     DemoFinancialMapper,
-    DemoGrowMapper,
+    JournalTimeLogMapper,
     DemoJournalMapper,
     DemoMessengerMapper,
     DemoPlacesMapper,
     DemoProfileMapper,
 )
 from .grok_mapper import GrokCanonicalMapper
-from .messenger_mapper import ImessageCanonicalMapper, SignalCanonicalMapper
+from .messenger_mapper import ImessageCanonicalMapper, SignalCanonicalMapper, VoxtermTranscriptCanonicalMapper
 
 MAPPER_REGISTRY = {
     "chatgpt": ChatGPTCanonicalMapper,
     "grok": GrokCanonicalMapper,
     "imessage": ImessageCanonicalMapper,
     "signal": SignalCanonicalMapper,
+    "voxterm_transcript": VoxtermTranscriptCanonicalMapper,
     "browser_activity": BrowserActivityCanonicalMapper,
     "demo_messenger": DemoMessengerMapper,
     "demo_calendar": DemoCalendarMapper,
@@ -29,7 +30,7 @@ MAPPER_REGISTRY = {
     "demo_financial": DemoFinancialMapper,
     "demo_places": DemoPlacesMapper,
     "demo_contacts": DemoContactsMapper,
-    "grow_time_log": DemoGrowMapper,
+    "journal_time_log": JournalTimeLogMapper,
 }
 
 __all__ = [

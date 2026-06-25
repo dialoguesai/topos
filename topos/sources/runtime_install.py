@@ -21,6 +21,11 @@ from ..storage.canonical.ai_chat.mapper import register_mapper
 from ..storage.canonical.ai_chat.model import CanonicalAIChatMessage
 from ..storage.canonical.ai_chat import mapper as storage_mapper_module
 
+# Snapshot of engine-shipped parser/mapper ids. Registry sources may reference these
+# bundled triples without replacing them with generic runtime shims on install.
+BUNDLED_PARSER_IDS = frozenset(PARSER_REGISTRY.keys())
+BUNDLED_MAPPER_IDS = frozenset(MAPPER_REGISTRY.keys())
+
 
 def _maybe_parse_json(value: Any) -> Any:
     if isinstance(value, str):
@@ -52,9 +57,9 @@ def _parse_source_definition_from_version_row(version_row: Dict[str, Any]) -> Di
 
 
 def _build_source_definition(payload: Dict[str, Any]) -> DataSourceDefinition:
-    allowed = {f.name for f in fields(DataSourceDefinition)}
-    filtered = {k: v for k, v in payload.items() if k in allowed}
-    return DataSourceDefinition(**filtered)
+    from .bundled_canonical_triples import apply_bundled_canonical_defaults
+
+    return DataSourceDefinition(**apply_bundled_canonical_defaults(payload))
 
 
 def _tokenize(path: str) -> List[str]:
@@ -373,11 +378,21 @@ def install_source_definition(source_def_payload: Dict[str, Any]) -> RuntimeInst
 
     canonical_mapper_id = str(source_def_payload.get("canonical_mapper_id") or "").strip()
     canonical_group_id = str(source_def_payload.get("canonical_group_id") or "").strip()
-    canonical_mapping_connected = bool(source_def_payload.get("canonical_mapping_connected"))
-    requires_canonical_contract = bool(canonical_mapping_connected or canonical_mapper_id or canonical_group_id)
+    from .bundled_canonical_triples import requires_canonical_contract as _requires_canonical
+
+    requires_canonical_contract = _requires_canonical(source_def_payload)
+    file_ingest_shape = source_def_payload.get("file_ingest_shape")
+    explicit_parser_extract_map: Dict[str, Any] = {}
+    if isinstance(file_ingest_shape, dict):
+        maybe_map = file_ingest_shape.get("parser_extract_map")
+        if isinstance(maybe_map, dict):
+            explicit_parser_extract_map = dict(maybe_map)
     parser_extract_map, direct_table_passthrough = _derive_parser_extract_map_for_direct_table_passthrough(
         source_def_payload
     )
+    # Table-column passthrough maps are derived automatically for pipeline_include_data_table
+    # sources. Only an explicit file_ingest_shape.parser_extract_map should override bundled parsers.
+    has_custom_extract_map = bool(explicit_parser_extract_map)
 
     parser_ids = sorted(
         {
@@ -386,34 +401,56 @@ def install_source_definition(source_def_payload: Dict[str, Any]) -> RuntimeInst
             if item
         }
     )
-    parser_cls = _build_dynamic_parser_class(
-        source_def=source_def,
-        parser_extract_map=parser_extract_map,
-        parser_id=str(source_def.schema_id or source_def.parser_id),
-        requires_canonical_contract=requires_canonical_contract,
-        direct_table_passthrough=direct_table_passthrough,
+    use_bundled_parser = (
+        bool(parser_ids)
+        and all(parser_id in BUNDLED_PARSER_IDS for parser_id in parser_ids)
+        and not has_custom_extract_map
     )
-    previous_parsers: Dict[str, Any] = {}
-    for parser_id in parser_ids:
-        previous_parsers[parser_id] = PARSER_REGISTRY.get(parser_id)
-        PARSER_REGISTRY[parser_id] = parser_cls
 
     mapper_id = str(source_def.canonical_mapper_id or "").strip() or None
+    use_bundled_mapper = bool(
+        mapper_id and mapper_id in BUNDLED_MAPPER_IDS and not has_custom_extract_map
+    )
+
+    previous_parsers: Dict[str, Any] = {}
+    installed_parser_ids: List[str] = []
+    if not use_bundled_parser:
+        parser_cls = _build_dynamic_parser_class(
+            source_def=source_def,
+            parser_extract_map=parser_extract_map,
+            parser_id=str(source_def.schema_id or source_def.parser_id),
+            requires_canonical_contract=requires_canonical_contract,
+            direct_table_passthrough=direct_table_passthrough,
+        )
+        for parser_id in parser_ids:
+            if parser_id in PARSER_REGISTRY:
+                # Reuse an existing shared parser; never clobber another source's registration.
+                continue
+            previous_parsers[parser_id] = PARSER_REGISTRY.get(parser_id)
+            PARSER_REGISTRY[parser_id] = parser_cls
+            installed_parser_ids.append(parser_id)
+
     previous_legacy_mapper = None
     previous_storage_mapper = None
-    if mapper_id:
-        previous_legacy_mapper = MAPPER_REGISTRY.get(mapper_id)
-        legacy_mapper_cls = _build_dynamic_legacy_mapper_class(source_def, mapper_id)
-        MAPPER_REGISTRY[mapper_id] = legacy_mapper_cls
+    installed_mapper_id: Optional[str] = None
+    if mapper_id and not use_bundled_mapper:
+        if mapper_id in MAPPER_REGISTRY:
+            # Reuse an existing shared mapper; never clobber another source's registration.
+            pass
+        else:
+            installed_mapper_id = mapper_id
+            previous_legacy_mapper = MAPPER_REGISTRY.get(mapper_id)
+            legacy_mapper_cls = _build_dynamic_legacy_mapper_class(source_def, mapper_id)
+            MAPPER_REGISTRY[mapper_id] = legacy_mapper_cls
 
-        previous_storage_mapper = storage_mapper_module._MAPPER_REGISTRY.get(mapper_id)
-        storage_mapper_cls = _build_dynamic_storage_mapper_class(source_def, mapper_id)
-        register_mapper(mapper_id, storage_mapper_cls)
+            previous_storage_mapper = storage_mapper_module._MAPPER_REGISTRY.get(mapper_id)
+            storage_mapper_cls = _build_dynamic_storage_mapper_class(source_def, mapper_id)
+            register_mapper(mapper_id, storage_mapper_cls)
 
     return RuntimeInstallHandle(
         source_id=source_id,
-        parser_ids=parser_ids,
-        canonical_mapper_id=mapper_id,
+        parser_ids=installed_parser_ids,
+        canonical_mapper_id=installed_mapper_id,
         _previous_source=previous_source,
         _previous_parsers=previous_parsers,
         _previous_legacy_mapper=previous_legacy_mapper,

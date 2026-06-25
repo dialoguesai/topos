@@ -95,3 +95,23 @@ async def test_app_ingest_returns_ok_with_errors_on_partial_success(monkeypatch,
     assert result["payload"]["records_total"] == 2
     assert len(result["payload"]["errors"]) == 1
     conn.close()
+
+
+@pytest.mark.asyncio
+async def test_app_ingest_fails_when_source_not_installed() -> None:
+    result = await handle_control_plane_request(
+        {
+            "id": "req-app-ingest-missing-source",
+            "type": "app_ingest",
+            "payload": {
+                "user_id": "user-1",
+                "dataset_id": "user-1:default:device1",
+                "source_id": "my_uninstalled_stream",
+                "schema_id": "journal.time_log.v1",
+                "records": [{"startDate": "2026-06-23", "goal": "Should fail"}],
+            },
+        }
+    )
+
+    assert result["status"] == "error"
+    assert "not installed" in result.get("error", "").lower()

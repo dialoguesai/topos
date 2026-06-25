@@ -26,7 +26,14 @@ _LEGACY_TABLE_BY_JOB: Dict[str, str] = {
 }
 
 # Jobs that persist via signal/graph adapters or dedicated tables — not DerivedTablesManager batches.
-_SIGNAL_ONLY_JOBS = frozenset({"relationship_edges", "topic_clusters", "embeddings"})
+_SIGNAL_ONLY_JOBS = frozenset({
+    "relationship_edges",
+    "topic_clusters",
+    "embeddings",
+    "dimension_summary",
+    "url_classification",
+    "availability_scores",
+})
 
 
 def _merge_provenance(record: Dict[str, Any], provenance: Dict[str, Any]) -> Dict[str, Any]:

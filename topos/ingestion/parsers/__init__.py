@@ -9,7 +9,7 @@ from .demo_file_parsers import (
     DemoCalendarParser,
     DemoContactsParser,
     DemoFinancialParser,
-    DemoGrowFileParser,
+    JournalTimeLogFileParser,
     DemoJournalParser,
     DemoMessengerParser,
     DemoPlacesParser,
@@ -17,6 +17,7 @@ from .demo_file_parsers import (
 )
 from .grok_parser import GrokParser
 from .messenger_parser import ImessageParser, SignalParser
+from .voxterm_parser import VoxtermTranscriptParser
 
 PARSER_REGISTRY = {
     "chatgpt.conversation.v1": ChatGPTParser,
@@ -36,7 +37,8 @@ PARSER_REGISTRY = {
     "demo.browser.v1": DemoBrowserFileParser,
     "demo.places.v1": DemoPlacesParser,
     "demo.contacts.v1": DemoContactsParser,
-    "grow.time_log.v1": DemoGrowFileParser,
+    "journal.time_log.v1": JournalTimeLogFileParser,
+    "voxterm.transcript.v1": VoxtermTranscriptParser,
 }
 
 __all__ = [
@@ -52,10 +54,11 @@ __all__ = [
     "DemoCalendarParser",
     "DemoContactsParser",
     "DemoFinancialParser",
-    "DemoGrowFileParser",
+    "JournalTimeLogFileParser",
     "DemoJournalParser",
     "DemoMessengerParser",
     "DemoPlacesParser",
     "DemoProfileParser",
+    "VoxtermTranscriptParser",
     "PARSER_REGISTRY",
 ]

@@ -242,11 +242,12 @@ class SignalDerivationOrchestrator(EnrichmentOrchestrator):
     def _resolve_job_names(self, source_id: str, job_names: Optional[List[str]]) -> List[str]:
         if job_names:
             return list(job_names)
+        from ..sources.canonical_signal_defaults import resolved_signal_derivation_jobs
         from ..sources.registry import REGISTRY
 
         source_def = REGISTRY.get(source_id)
-        if source_def and getattr(source_def, "signal_derivation_jobs", None):
-            return list(source_def.signal_derivation_jobs)
+        if source_def:
+            return resolved_signal_derivation_jobs(source_def)
         return []
 
     async def run_signal_derivation(

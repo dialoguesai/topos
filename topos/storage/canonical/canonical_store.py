@@ -294,16 +294,19 @@ class SQLiteCanonicalStore(CanonicalStore):
         self._conn.execute(
             """
             INSERT INTO journal_entries (
-                entry_id, entry_at, mood_tag, category, content, people, place_name, source_id,
+                entry_id, entry_at, starts_at, ends_at, mood_tag, category, content, duration, people, place_name, source_id,
                 source_record_id, ingested_at, sync_batch_id, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(entry_id) DO UPDATE SET
                 content=excluded.content,
                 mood_tag=excluded.mood_tag,
                 category=excluded.category,
+                duration=excluded.duration,
                 people=excluded.people,
                 place_name=excluded.place_name,
                 entry_at=excluded.entry_at,
+                starts_at=excluded.starts_at,
+                ends_at=excluded.ends_at,
                 sync_batch_id=excluded.sync_batch_id,
                 ingested_at=excluded.ingested_at,
                 metadata_json=excluded.metadata_json
@@ -311,9 +314,12 @@ class SQLiteCanonicalStore(CanonicalStore):
             (
                 entry_id,
                 record.get("entry_at"),
+                record.get("starts_at"),
+                record.get("ends_at"),
                 record.get("mood_tag"),
                 record.get("category"),
                 record.get("content"),
+                record.get("duration"),
                 record.get("people"),
                 record.get("place_name"),
                 record.get("source_id"),

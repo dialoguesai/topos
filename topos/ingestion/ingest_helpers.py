@@ -14,6 +14,21 @@ from ..storage.raw.file_store import RawFileStore
 logger = logging.getLogger("topos.ingestion.ingest_helpers")
 
 
+def _ui_stream_passes_payload_through(source: Any, source_id: str) -> bool:
+    """True when ui_stream ingest should forward the client payload to the source parser."""
+    if source_id.startswith("browser_"):
+        return True
+    if str(getattr(source, "source_type", None) or "") != "ui_stream":
+        return False
+    # Chat-style UI streams expect message-shaped payloads from the client.
+    chat_parser_ids = frozenset({"chatgpt.conversation.v1", "chatgpt.conversation.v2"})
+    parser_id = str(getattr(source, "parser_id", None) or "").strip()
+    schema_id = str(getattr(source, "schema_id", None) or "").strip()
+    if parser_id in chat_parser_ids or schema_id in chat_parser_ids:
+        return False
+    return True
+
+
 def resolve_file_format(
     *,
     source_definition: Optional[Any] = None,
@@ -131,19 +146,37 @@ async def ingest_ui_payload(
         return {"status": "error", "error": "payload required"}
 
     # If source_id is provided and it's a UI stream source, process directly without creating JSONL
+    _LEGACY_CHAT_SOURCE_ID = "chatgpt_ui_conversation"
     if source_id:
         from ..sources.registry import REGISTRY
         source = REGISTRY.get(source_id)
         if source and source.source_type == "ui_stream":
+            effective_schema = str(source.schema_id or schema_id or "").strip() or schema_id
             return await _ingest_ui_payload_direct(
                 dataset_id=dataset_id,
-                schema_id=schema_id,
+                schema_id=effective_schema,
                 payload=payload,
                 job_id=job_id,
                 source_id=source_id,
             )
+        if source_id != _LEGACY_CHAT_SOURCE_ID:
+            if not source:
+                return {
+                    "status": "error",
+                    "error": (
+                        f"Source '{source_id}' is not installed on this engine. "
+                        "Install the source before ingesting."
+                    ),
+                }
+            return {
+                "status": "error",
+                "error": (
+                    f"Source '{source_id}' has source_type={source.source_type!r}; "
+                    "app_ingest requires ui_stream sources."
+                ),
+            }
 
-    # Legacy path: create JSONL file (for backward compatibility or file-based sources)
+    # Legacy path: ChatGPT UI only (backward compatibility when source_id omitted or chatgpt default)
     file_store = RawFileStore()
     job_id = job_id or str(uuid.uuid4())
     sender_type = payload.get("sender_type", "human")
@@ -220,18 +253,41 @@ async def _ingest_ui_payload_direct(
     if not source:
         return {"status": "error", "error": f"Unknown source_id: {source_id}"}
     
-    # Get parser
-    parser_cls = PARSER_REGISTRY.get(source.parser_id or schema_id)
+    # Get parser (prefer installed source ids, then request schema_id)
+    parser_cls = None
+    for parser_key in (source.parser_id, source.schema_id, schema_id):
+        key = str(parser_key or "").strip()
+        if not key:
+            continue
+        parser_cls = PARSER_REGISTRY.get(key)
+        if parser_cls:
+            break
     if not parser_cls:
-        return {"status": "error", "error": f"No parser found for schema: {schema_id}"}
+        return {
+            "status": "error",
+            "error": (
+                f"No parser found for source_id={source_id!r} "
+                f"(parser_id={source.parser_id!r}, schema_id={schema_id!r}). "
+                "Restart the engine or reinstall the source if a bundled parser was removed."
+            ),
+        }
     
-    # Prepare raw record: for browser_* sources pass payload through; for chat use message-style fields
-    if source_id.startswith("browser_"):
+    # Prepare raw record: browser_* and journal/time-log ui_stream sources pass payload through;
+    # chat UI streams (e.g. chatgpt_ui_conversation) use message-shaped fields.
+    if _ui_stream_passes_payload_through(source, source_id):
         raw_payload = dict(payload)
-        event_or_url = raw_payload.get("event_type") or raw_payload.get("url") or "browser"
-        ts = raw_payload.get("visited_at") or raw_payload.get("starred_at") or raw_payload.get("created_at") or ""
-        record_id = f"{event_or_url}_{str(ts)[:24]}_{job_id[:8]}"[:256]
-        raw_payload.setdefault("id", record_id)
+        if source_id.startswith("browser_"):
+            event_or_url = raw_payload.get("event_type") or raw_payload.get("url") or "browser"
+            ts = raw_payload.get("visited_at") or raw_payload.get("starred_at") or raw_payload.get("created_at") or ""
+            record_id = f"{event_or_url}_{str(ts)[:24]}_{job_id[:8]}"[:256]
+            raw_payload.setdefault("id", record_id)
+        else:
+            record_id = str(
+                payload.get("id")
+                or payload.get("num")
+                or payload.get("message_id")
+                or job_id
+            )
         raw_payload.setdefault("record_id", record_id)
     else:
         sender_type = payload.get("sender_type", "human")
@@ -266,11 +322,16 @@ async def _ingest_ui_payload_direct(
     try:
         from ..storage.raw.raw_tables_manager import RawTablesManager
         raw_tables_manager = RawTablesManager(db_conn)
+        raw_source_type = (
+            "chat_messages"
+            if not _ui_stream_passes_payload_through(source, source_id)
+            else str(getattr(source, "source_type", None) or "ui_stream")
+        )
         raw_tables_manager.write_raw_record(
             source_id=source_id,
             source_record_id=record_id,
             payload=raw_payload,
-            source_type="chat_messages",
+            source_type=raw_source_type,
         )
         logger.debug(
             "[PIPELINE:RAW] Stored raw payload: source=%s, record_id=%s",
@@ -286,19 +347,39 @@ async def _ingest_ui_payload_direct(
     
     # Parse and validate
     # Instantiate parser with schema_id (for v2 support)
-    parser = parser_cls(dataset_id=dataset_id, _schema_id=schema_id)
+    effective_schema_id = str(getattr(source, "schema_id", None) or schema_id or "").strip()
+    parser = parser_cls(dataset_id=dataset_id, _schema_id=effective_schema_id)
     validation = parser.validate(raw_record)
     if not validation.is_valid:
         logger.error("[PIPELINE:DIRECT] Validation failed: %s", validation.errors)
         return {"status": "error", "error": f"Validation failed: {validation.errors}"}
     
     normalized = parser.parse(raw_record)
-    logger.debug(
-        "[PIPELINE:DIRECT] Record normalized: message_id=%s, sender_type=%s, content_preview=%s",
-        normalized.payload.get("message_id"),
-        normalized.payload.get("sender_type"),
-        field_preview(normalized.payload.get("content")),
-    )
+    if _ui_stream_passes_payload_through(source, source_id) and not source_id.startswith("browser_"):
+        logger.debug(
+            "[PIPELINE:DIRECT] Record normalized: entry_id=%s, content_preview=%s",
+            normalized.payload.get("entry_id"),
+            field_preview(normalized.payload.get("content")),
+        )
+    else:
+        logger.debug(
+            "[PIPELINE:DIRECT] Record normalized: message_id=%s, sender_type=%s, content_preview=%s",
+            normalized.payload.get("message_id"),
+            normalized.payload.get("sender_type"),
+            field_preview(normalized.payload.get("content")),
+        )
+
+    try:
+        from .manager import _persist_source_data_tables
+
+        _persist_source_data_tables(
+            db_conn=db_conn,
+            source_def=source,
+            dataset_id=dataset_id,
+            normalized_records=[normalized],
+        )
+    except Exception as e:  # noqa: BLE001
+        logger.warning("[PIPELINE:DIRECT] Failed to write source data table row (non-fatal): %s", e)
     
     # Browser plugin: raw retention (above) plus flat tables for Data Explorer / SQL.
     if source_id == "browser_visits":

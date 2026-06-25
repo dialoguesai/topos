@@ -70,6 +70,8 @@ def build_staging_record(
         "content": normalized_payload.get("content"),
         "source_id": source_id,
     }
+    if normalized_payload.get("sender_id") is not None:
+        staging["sender_id"] = normalized_payload.get("sender_id")
     if "_metadata" in normalized_payload:
         staging["_metadata"] = normalized_payload["_metadata"]
     return staging
@@ -250,18 +252,18 @@ def canonicalize_normalized_batch(
                 if table_name == "calendar_events":
                     result.events_created += 1
                 result.canonical_records.append(signal_record)
-                if source_id == "grow_data_file" and table_name == "journal_entries":
-                    from .grow_location_fanout import (
-                        grow_location_event_from_journal,
-                        grow_location_signal_record,
+                if table_name == "journal_entries" and str(canonical_payload.get("place_name") or "").strip():
+                    from .journal_location_fanout import (
+                        journal_location_event_from_entry,
+                        journal_location_signal_record,
                     )
 
-                    loc_row = grow_location_event_from_journal(canonical_payload, source_id=source_id)
+                    loc_row = journal_location_event_from_entry(canonical_payload, source_id=source_id)
                     if loc_row:
                         store.upsert("location_events", loc_row, sync_batch_id=sync_batch_id)
                         result.events_created += 1
                         result.canonical_records.append(
-                            _prepare_signal_record(grow_location_signal_record(loc_row))
+                            _prepare_signal_record(journal_location_signal_record(loc_row))
                         )
             result.messages_created = created
         except Exception as exc:
@@ -439,16 +441,19 @@ def load_canonical_records_for_signal(
             },
         ),
         "journal": (
-            "SELECT entry_id, entry_at, mood_tag, category, content, people, place_name, source_id FROM journal_entries WHERE source_id=? ORDER BY entry_at DESC LIMIT ?",
+            "SELECT entry_id, entry_at, starts_at, ends_at, mood_tag, category, content, people, place_name, duration, source_id FROM journal_entries WHERE source_id=? ORDER BY entry_at DESC LIMIT ?",
             lambda row: {
                 "entry_id": row[0],
                 "entry_at": row[1],
-                "mood_tag": row[2],
-                "category": row[3],
-                "content": row[4],
-                "people": row[5],
-                "place_name": row[6],
-                "source_id": row[7] or source_id,
+                "starts_at": row[2],
+                "ends_at": row[3],
+                "mood_tag": row[4],
+                "category": row[5],
+                "content": row[6],
+                "people": row[7],
+                "place_name": row[8],
+                "duration": row[9],
+                "source_id": row[10] or source_id,
             },
         ),
         "profile": (
@@ -566,8 +571,9 @@ async def run_post_canonical_pipeline(
     job_names: Optional[List[str]] = None,
     run_signal: bool = True,
     run_enrichment: bool = True,
+    enrichment_records: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Run canonical enrichment then signal derivation on canonical payloads."""
+    """Run privacy disclosure, canonical enrichment, then signal derivation."""
     from ..enrichment.derived_tables import DerivedTablesManager
     from ..enrichment.jobs.canonical.url_classification_core import merge_url_classification_into_records
     from ..enrichment.orchestrator import EnrichmentOrchestrator, SignalDerivationOrchestrator
@@ -581,12 +587,26 @@ async def run_post_canonical_pipeline(
         return outcome
 
     source_id = source_def.source_id
-    signal_jobs = list(getattr(source_def, "signal_derivation_jobs", []) or [])
+    from ..sources.canonical_signal_defaults import resolved_signal_derivation_jobs
+
+    signal_jobs = resolved_signal_derivation_jobs(source_def, explicit_jobs=job_names)
     canonical_jobs = list(getattr(source_def, "canonical_enrichment_jobs", []) or [])
     enrichment_trigger = getattr(source_def, "enrichment_trigger", "automatic")
     records_for_signal = list(canonical_records)
+    records_for_enrichment = (
+        list(enrichment_records) if enrichment_records is not None else list(canonical_records)
+    )
 
     derived = tables_manager or DerivedTablesManager()
+    if tables_manager is None and getattr(derived, "conn", None) is None:
+        try:
+            from ..core.state import get_db_connection
+
+            conn = get_db_connection()
+            if conn is not None:
+                derived = DerivedTablesManager(conn=conn)
+        except Exception:
+            pass
 
     # Platform Privacy Layer — mandatory, not gated by enrichment_trigger
     try:
@@ -612,18 +632,18 @@ async def run_post_canonical_pipeline(
         run_enrichment
         and canonical_jobs
         and enrichment_trigger == "automatic"
-        and canonical_records
+        and records_for_enrichment
     ):
         try:
             from ..disclosure.field_registry import canonical_table_for_group
 
             canon_table = canonical_table_for_group(getattr(source_def, "canonical_group_id", None))
             if canon_table:
-                for rec in canonical_records:
+                for rec in records_for_enrichment:
                     rec.setdefault("_table", canon_table)
             enrichment_orchestrator = EnrichmentOrchestrator(tables_manager=derived)
             outcome["canonical_enrichment"] = await enrichment_orchestrator.run_canonical(
-                canonical_records,
+                records_for_enrichment,
                 job_names=canonical_jobs,
             )
             if "url_classification" in canonical_jobs:
@@ -632,7 +652,7 @@ async def run_post_canonical_pipeline(
                 conn = get_db_connection()
                 if conn:
                     classified_rows = []
-                    for rec in canonical_records:
+                    for rec in records_for_enrichment:
                         event_id = rec.get("event_id") or rec.get("record_id")
                         if not event_id:
                             continue

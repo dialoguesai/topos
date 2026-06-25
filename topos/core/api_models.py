@@ -106,6 +106,8 @@ class DeviceInfoResponse(BaseModel):
     oplog_bytes: Optional[int] = None
     ops_since_last_sync: Optional[int] = None
     oplog_bytes_since_last_sync: Optional[int] = None
+    database_size_bytes: Optional[int] = None
+    storage_breakdown: Optional[Dict[str, Any]] = None
 
 
 class DeviceNameRequest(BaseModel):

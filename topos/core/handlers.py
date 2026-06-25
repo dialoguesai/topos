@@ -221,7 +221,7 @@ from ..core.state import (
 from ..core.routine_access import routine_uma_attribution
 from fastapi import HTTPException
 
-from ..ingestion.ingest_helpers import ingest_file_payload, ingest_ui_payload
+from ..ingestion.ingest_helpers import ingest_file_payload, ingest_ui_payload, resolve_file_format
 from ..services.container import get_services
 from ..storage.raw.file_store import RawFileStore
 from ..storage.signal_identity import get_signal_identity, put_signal_identity
@@ -2387,6 +2387,34 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
         dataset_id = payload.get("dataset_id")
         source_id = payload.get("source_id") or "chatgpt_ui_conversation"
         schema_id = payload.get("schema_id") or "chatgpt.conversation.v1"
+
+        _LEGACY_CHAT_SOURCE_ID = "chatgpt_ui_conversation"
+        if source_id != _LEGACY_CHAT_SOURCE_ID:
+            source_def = REGISTRY.get(source_id)
+            if not source_def:
+                return {
+                    "id": req_id,
+                    "status": "error",
+                    "error": (
+                        f"Source '{source_id}' is not installed on this engine. "
+                        "Install the source before ingesting."
+                    ),
+                }
+            if getattr(source_def, "source_type", None) != "ui_stream":
+                return {
+                    "id": req_id,
+                    "status": "error",
+                    "error": (
+                        f"Source '{source_id}' has source_type={source_def.source_type!r}; "
+                        "app_ingest requires ui_stream sources."
+                    ),
+                }
+            if getattr(source_def, "schema_id", None):
+                schema_id = str(source_def.schema_id)
+        else:
+            source_def = REGISTRY.get(source_id)
+            if source_def and getattr(source_def, "schema_id", None):
+                schema_id = str(source_def.schema_id)
         records = payload.get("records") or []
         if not user_id or not dataset_id:
             return {"id": req_id, "status": "error", "error": "user_id and dataset_id required"}
@@ -2485,7 +2513,11 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
         dataset_id = payload.get("dataset_id")
         owner_user_id = _owner_user_id_from_dataset_id(dataset_id)
         schema_id = payload.get("schema_id") or "chatgpt.conversation.v1"
-        file_format = payload.get("file_format") or "jsonl"
+        file_format = resolve_file_format(
+            source_definition=source_definition,
+            file_path=file_path,
+            default=str(payload.get("file_format") or "jsonl"),
+        )
         file_url = payload.get("file_url")
         file_base64 = payload.get("file_base64")
         file_path = payload.get("file_path")
@@ -4134,12 +4166,9 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
             }
             
             # Canonical Tables (shared canonical layer)
-            canonical_tables = {
-                "ai_chat_messages", "ai_chat_conversations", "ai_chat_participants",
-                "conversation_messages", "conversations",
-                "activity_events", "calendar_events", "contacts", "contact_identifiers",
-                "journal_entries", "profile_records", "financial_transactions", "location_events",
-            }
+            from ..data_explorer_tables import CANONICAL_SCHEMA_TABLES
+
+            canonical_tables = set(CANONICAL_SCHEMA_TABLES)
             
             # Enrichment System Tables
             enrichment_system_tables = {
@@ -4883,7 +4912,8 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
             return {"id": req_id, "status": "error", "error": str(exc)}
 
     if msg_type == "delete_database_table":
-        """Drop a user table or view from the engine SQLite database (validated name)."""
+        """Clear rows or drop tables/views. Canonical schema tables may only be cleared."""
+        from ..data_explorer_tables import is_canonical_schema_table
         from ..llm_integrations_storage import DATA_EXPLORER_HIDDEN_TABLES
 
         _NON_DROPPABLE_TABLES = frozenset(
@@ -4899,6 +4929,38 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                 *DATA_EXPLORER_HIDDEN_TABLES,
             }
         )
+
+        def _resolve_table_action(table_name: str, requested_action: Any) -> tuple[str | None, str | None]:
+            canonical = is_canonical_schema_table(table_name)
+            action = str(requested_action or "").strip().lower()
+            if not action:
+                return ("clear" if canonical else "drop", None)
+            if action not in ("clear", "drop"):
+                return (None, f"Invalid action: {requested_action!r} (expected 'clear' or 'drop')")
+            if canonical and action == "drop":
+                return (None, f"Canonical schema table cannot be dropped: {table_name}")
+            return (action, None)
+
+        def _clear_table_rows(conn: Any, table_name: str) -> int:
+            count_row = conn.execute(f'SELECT COUNT(*) AS count FROM "{table_name}"').fetchone()
+            if count_row is None:
+                rows_before = 0
+            elif isinstance(count_row, dict):
+                rows_before = int(count_row.get("count") or 0)
+            else:
+                rows_before = int(count_row[0] or 0)
+            conn.execute(f'DELETE FROM "{table_name}"')
+            conn.commit()
+            return rows_before
+
+        def _drop_table_or_view(conn: Any, *, table_name: str, obj_type: str, is_sqlite: bool) -> None:
+            if is_sqlite:
+                conn.execute(f'DROP {obj_type} IF EXISTS "{table_name}"')
+            else:
+                drop_type = "VIEW" if obj_type == "view" else "TABLE"
+                conn.execute(f'DROP {drop_type} IF EXISTS "{table_name}"')
+            conn.commit()
+
         try:
             payload = message.get("payload") or {}
             pooled_mode = _pooled_read_enforcement_enabled()
@@ -4929,20 +4991,17 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                 }
             if table_name in _NON_DROPPABLE_TABLES:
                 return {"id": req_id, "status": "error", "error": f"Table is protected from deletion: {table_name}"}
+            table_action, action_error = _resolve_table_action(table_name, payload.get("action"))
+            if action_error:
+                return {"id": req_id, "status": "error", "error": action_error}
             if settings.topos_database_mode == "postgres":
                 with connect_postgres() as conn:
-                    if _is_sqlite_conn(conn):
+                    is_sqlite = _is_sqlite_conn(conn)
+                    if is_sqlite:
                         meta = conn.execute(
                             "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') AND name = ?",
                             (table_name,),
                         ).fetchone()
-                        if not meta:
-                            return {"id": req_id, "status": "error", "error": f"Table or view not found: {table_name}"}
-                        obj_type = str(meta["type"])
-                        if obj_type not in ("table", "view"):
-                            return {"id": req_id, "status": "error", "error": f"Unsupported object type: {obj_type}"}
-                        conn.execute(f'DROP {obj_type} IF EXISTS "{table_name}"')
-                        conn.commit()
                     else:
                         meta = conn.execute(
                             """
@@ -4953,13 +5012,28 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                             """,
                             (table_name,),
                         ).fetchone()
-                        if not meta:
-                            return {"id": req_id, "status": "error", "error": f"Table or view not found: {table_name}"}
+                    if not meta:
+                        return {"id": req_id, "status": "error", "error": f"Table or view not found: {table_name}"}
+                    if is_sqlite:
+                        obj_type = str(meta["type"])
+                    else:
                         table_type = str(meta[1] or "").upper()
                         obj_type = "view" if table_type == "VIEW" else "table"
-                        drop_type = "VIEW" if obj_type == "view" else "TABLE"
-                        conn.execute(f'DROP {drop_type} IF EXISTS "{table_name}"')
-                        conn.commit()
+                    if obj_type not in ("table", "view"):
+                        return {"id": req_id, "status": "error", "error": f"Unsupported object type: {obj_type}"}
+                    if table_action == "clear":
+                        if obj_type != "table":
+                            return {
+                                "id": req_id,
+                                "status": "error",
+                                "error": f"Cannot clear rows from a view: {table_name}",
+                            }
+                        rows_deleted = _clear_table_rows(conn, table_name)
+                        action = "cleared"
+                    else:
+                        _drop_table_or_view(conn, table_name=table_name, obj_type=obj_type, is_sqlite=is_sqlite)
+                        rows_deleted = 0
+                        action = "dropped"
             else:
                 conn = get_db_connection()
                 if not conn:
@@ -4973,12 +5047,30 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                 obj_type = str(meta["type"])
                 if obj_type not in ("table", "view"):
                     return {"id": req_id, "status": "error", "error": f"Unsupported object type: {obj_type}"}
-                conn.execute(f'DROP {obj_type} IF EXISTS "{table_name}"')
-                conn.commit()
+                if table_action == "clear":
+                    if obj_type != "table":
+                        return {
+                            "id": req_id,
+                            "status": "error",
+                            "error": f"Cannot clear rows from a view: {table_name}",
+                        }
+                    rows_deleted = _clear_table_rows(conn, table_name)
+                    action = "cleared"
+                else:
+                    _drop_table_or_view(conn, table_name=table_name, obj_type=obj_type, is_sqlite=True)
+                    rows_deleted = 0
+                    action = "dropped"
+            payload_out: Dict[str, Any] = {
+                "table_name": table_name,
+                "action": action,
+                "rows_deleted": rows_deleted,
+            }
+            if action == "dropped":
+                payload_out["dropped_type"] = obj_type
             return {
                 "id": req_id,
                 "status": "ok",
-                "payload": {"table_name": table_name, "dropped_type": obj_type},
+                "payload": payload_out,
             }
         except Exception as exc:  # noqa: BLE001
             logger.error("Failed to delete database table: %s", exc, exc_info=True)

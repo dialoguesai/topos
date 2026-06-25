@@ -11,7 +11,7 @@ from topos.ingestion.parsers.demo_file_parsers import (
     DemoCalendarParser,
     DemoContactsParser,
     DemoFinancialParser,
-    DemoGrowFileParser,
+    JournalTimeLogFileParser,
     DemoJournalParser,
     DemoMessengerParser,
     DemoPlacesParser,
@@ -26,8 +26,8 @@ from topos.sources.registry import (
     DEMO_MESSENGER_FILE,
     DEMO_PLACES_FILE,
     DEMO_RESUME_FILE,
-    GROW_DATA_FILE,
 )
+from topos.sources.definitions import DataSourceDefinition
 from topos.storage.db.migrations import apply_all_migrations
 
 
@@ -252,8 +252,17 @@ def test_demo_journal_signal_record_has_message_id(migrated_conn) -> None:
     assert rec["content"]
 
 
-def test_grow_time_log_canonicalize(migrated_conn) -> None:
-    parser = DemoGrowFileParser(dataset_id="user:default:device")
+def test_journal_time_log_canonicalize(migrated_conn) -> None:
+    time_log_source = DataSourceDefinition(
+        source_id="time_log",
+        display_name="Time Log",
+        source_type="file",
+        schema_id="journal.time_log.v1",
+        parser_id="journal.time_log.v1",
+        canonical_mapper_id="journal_time_log",
+        canonical_group_id="journal",
+    )
+    parser = JournalTimeLogFileParser(dataset_id="user:default:device")
     raw = {
         "num": "99",
         "startDate": "2026-05-01",
@@ -262,26 +271,76 @@ def test_grow_time_log_canonicalize(migrated_conn) -> None:
         "endTime": "8:55 AM",
         "duration": "55",
         "project": "Topos",
-        "goal": "Ship Grow source",
+        "goal": "Ship time-log source",
         "accomplished": "Parser and mapper wired.",
         "completed": "TRUE",
         "location": "Home",
         "group": "Solo",
     }
-    norm = parser.parse(RawRecord(record_id="grow-99", payload=raw))
+    norm = parser.parse(RawRecord(record_id="99", payload=raw))
+    from topos.ingestion.manager import _persist_source_data_tables
+
+    _persist_source_data_tables(
+        db_conn=migrated_conn,
+        source_def=replace_time_log_source_with_table(time_log_source),
+        dataset_id="user:default:device",
+        normalized_records=[norm],
+    )
     result = canonicalize_normalized_batch(
         migrated_conn,
-        GROW_DATA_FILE,
+        time_log_source,
         [norm],
         dataset_id="user:default:device",
-        sync_batch_id="batch-grow",
+        sync_batch_id="batch-time-log",
     )
     assert result.messages_created == 1
     row = migrated_conn.execute(
-        "SELECT entry_id, category, content, people, place_name FROM journal_entries WHERE entry_id='grow-99'"
+        "SELECT entry_id, entry_at, starts_at, ends_at, category, content, duration, people, place_name FROM journal_entries WHERE entry_id='tl-99'"
     ).fetchone()
     assert row["category"] == "Topos"
+    assert row["starts_at"] == "2026-05-01T08:00:00"
+    assert row["ends_at"] == "2026-05-01T08:55:00"
+    assert row["entry_at"]
+    assert row["duration"] == "55"
     assert row["people"] == "Solo"
     assert row["place_name"] == "Home"
-    assert "Ship Grow source" in row["content"]
-    assert result.canonical_records[0]["message_id"] == "grow-99"
+    assert "Goal: Ship time-log source" in row["content"]
+    assert "Accomplished: Parser and mapper wired." in row["content"]
+    assert result.canonical_records[0]["message_id"] == "tl-99"
+
+    session = migrated_conn.execute(
+        "SELECT record_id, goal, project, source_id FROM time_log_sessions WHERE record_id='tl-99'"
+    ).fetchone()
+    assert session is not None
+    assert session["goal"] == "Ship time-log source"
+    assert session["project"] == "Topos"
+    assert session["source_id"] == "time_log"
+
+
+def replace_time_log_source_with_table(source: DataSourceDefinition) -> DataSourceDefinition:
+    from dataclasses import replace
+
+    return replace(
+        source,
+        pipeline_include_data_table=True,
+        tables=[
+            {
+                "table_id": "time_log_sessions",
+                "display_name": "Sessions",
+                "columns": [
+                    {"name": "record_id", "type": "text", "primary_key": True},
+                    {"name": "entry_at", "type": "text"},
+                    {"name": "starts_at", "type": "text"},
+                    {"name": "ends_at", "type": "text"},
+                    {"name": "duration", "type": "text"},
+                    {"name": "project", "type": "text"},
+                    {"name": "goal", "type": "text"},
+                    {"name": "accomplished", "type": "text"},
+                    {"name": "completed", "type": "integer"},
+                    {"name": "location", "type": "text"},
+                    {"name": "group", "type": "text"},
+                    {"name": "source_id", "type": "text"},
+                ],
+            }
+        ],
+    )

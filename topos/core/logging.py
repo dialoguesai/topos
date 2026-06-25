@@ -73,6 +73,14 @@ def configure_logging() -> None:
     logging.getLogger("httpx").setLevel(logging.WARNING)
     logging.getLogger("httpcore").setLevel(logging.WARNING)
 
+    # transformers logs harmless weight-load reports (e.g. UNEXPECTED pooler keys for NER models).
+    try:
+        from transformers.utils import logging as transformers_logging
+
+        transformers_logging.set_verbosity_error()
+    except ImportError:
+        pass
+
     global _LOG_FORMAT
     _LOG_FORMAT = log_format
 

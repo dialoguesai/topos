@@ -104,7 +104,10 @@ async def test_browser_direct_ingest_runs_signal_derive_from_canonical(migrated_
     assert enrichment is not None
     assert enrichment["url_category"] == "technology"
     fact = migrated_conn.execute(
-        "SELECT dimension, payload_json FROM signal_facts WHERE source_id='browser_visits'"
+        """
+        SELECT dimension, payload_json FROM signal_facts
+        WHERE source_id='browser_visits' AND payload_json LIKE '%technology%'
+        """
     ).fetchone()
     assert fact is not None
     assert fact["dimension"] == "interests"
@@ -112,10 +115,13 @@ async def test_browser_direct_ingest_runs_signal_derive_from_canonical(migrated_
 
 
 def test_chatgpt_sources_declare_automatic_enrichment_for_ui_and_file() -> None:
+    from topos.sources.canonical_signal_defaults import resolved_signal_derivation_jobs
+
     assert CHATGPT_UI.enrichment_trigger == "automatic"
     assert CHATGPT_FILE.enrichment_trigger == "automatic"
     assert BROWSER_VISITS.raw_enrichment_jobs == []
     assert "url_classification" in BROWSER_VISITS.canonical_enrichment_jobs
     assert "embeddings" in BROWSER_VISITS.canonical_enrichment_jobs
-    assert "topic_clusters" in BROWSER_VISITS.signal_derivation_jobs
-    assert "topic_clusters" in CHATGPT_FILE.signal_derivation_jobs
+    browser_jobs = resolved_signal_derivation_jobs(BROWSER_VISITS)
+    assert "topic_clusters" in browser_jobs
+    assert "topic_clusters" in resolved_signal_derivation_jobs(CHATGPT_FILE)

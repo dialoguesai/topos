@@ -6,6 +6,10 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
+from ..journal_time_log_normalize import (
+    normalize_time_log_payload as _normalize_time_log,
+    time_log_payload_has_start_time,
+)
 from ..sources.base import RawRecord
 from ..validation.base import ValidationResult
 from .base import NormalizedRecord, Parser
@@ -20,81 +24,6 @@ def _coerce_bool(value: Any) -> bool:
         return value
     text = str(value or "").strip().lower()
     return text in {"1", "true", "yes", "y"}
-
-
-def _parse_grow_timestamp(date_str: str, time_str: str) -> str:
-    date_part = str(date_str or "").strip()
-    time_part = str(time_str or "").strip()
-    if not date_part:
-        return ""
-    combined = f"{date_part} {time_part}".strip()
-    for fmt in ("%Y-%m-%d %I:%M %p", "%Y-%m-%d %I:%M:%S %p", "%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
-        try:
-            return datetime.strptime(combined, fmt).strftime("%Y-%m-%dT%H:%M:%S")
-        except ValueError:
-            continue
-    return combined.replace(" ", "T") if time_part else date_part
-
-
-def _build_grow_content(payload: Dict[str, Any]) -> str:
-    parts: List[str] = []
-    project = str(payload.get("project") or "").strip()
-    if project:
-        parts.append(f"Project: {project}")
-    goal = str(payload.get("goal") or "").strip()
-    if goal:
-        parts.append(f"Goal: {goal}")
-    accomplished = str(payload.get("accomplished") or "").strip()
-    if accomplished:
-        parts.append(f"Accomplished: {accomplished}")
-    location = str(payload.get("location") or "").strip()
-    if location:
-        parts.append(f"Location: {location}")
-    group = str(payload.get("group") or "").strip()
-    if group:
-        parts.append(f"With: {group}")
-    duration = str(payload.get("duration") or "").strip()
-    if duration:
-        parts.append(f"Duration: {duration} min")
-    completed = payload.get("completed")
-    if completed is not None and str(completed).strip():
-        parts.append(f"Completed: {str(completed).strip()}")
-    return "\n\n".join(parts)
-
-
-def _normalize_grow(payload: Dict[str, Any], record_id: str, dataset_id: str) -> Dict[str, Any]:
-    num = str(payload.get("num") or record_id).strip()
-    entry_id = f"grow-{num}" if num else f"grow-{record_id}"
-    start_at = _parse_grow_timestamp(str(payload.get("startDate") or ""), str(payload.get("startTime") or ""))
-    end_at = _parse_grow_timestamp(str(payload.get("endDate") or ""), str(payload.get("endTime") or ""))
-    emotion = str(payload.get("emotionLabel") or "").strip()
-    if emotion.lower() == "null":
-        emotion = ""
-    goal = str(payload.get("goal") or "").strip()
-    project = str(payload.get("project") or "").strip()
-    return {
-        "entry_id": entry_id,
-        "record_id": entry_id,
-        "dataset_id": dataset_id,
-        "entry_at": start_at,
-        "ends_at": end_at,
-        "mood_tag": emotion or None,
-        "category": project or "grow",
-        "goal": goal or None,
-        "content": _build_grow_content(payload),
-        "duration_minutes": str(payload.get("duration") or "").strip() or None,
-        "place_name": str(payload.get("location") or "").strip() or None,
-        "people": str(payload.get("group") or "").strip() or None,
-        "goal_entities": str(payload.get("goalEntities") or "").strip() or None,
-        "accomplished_entities": str(payload.get("accomplishedEntities") or "").strip() or None,
-        "completed": _coerce_bool(payload.get("completed")),
-        "_metadata": {
-            "grow_num": num,
-            "goal_word_count": payload.get("goalWordCount"),
-            "accomplished_word_count": payload.get("accomplishedWordCount"),
-            "has_form": payload.get("hasForm"),
-        },
-    }
 
 
 @dataclass
@@ -252,7 +181,7 @@ def demo_parser_factory(schema_id: str, dataset_id: str) -> Optional[DemoCsvPars
         "demo.browser.v1": (["event_id", "url", "visited_at"], _normalize_browser),
         "demo.places.v1": (["event_id", "place_name", "event_at"], _normalize_places),
         "demo.contacts.v1": (["contact_id", "display_name", "identifier"], _normalize_contacts),
-        "grow.time_log.v1": (["num", "startDate"], _normalize_grow),
+        "journal.time_log.v1": ([], _normalize_time_log),
     }
     spec = specs.get(schema_id)
     if not spec:
@@ -355,14 +284,22 @@ class DemoEmailParser(DemoCsvParser):
 
 
 @dataclass
-class DemoGrowFileParser(DemoCsvParser):
+class JournalTimeLogFileParser(DemoCsvParser):
     def __init__(self, dataset_id: str, **_kwargs) -> None:
         super().__init__(
             dataset_id=dataset_id,
-            _schema_id="grow.time_log.v1",
-            required_fields=["num", "startDate"],
-            normalize=_normalize_grow,
+            _schema_id="journal.time_log.v1",
+            required_fields=[],
+            normalize=_normalize_time_log,
         )
+
+    def validate(self, record: RawRecord) -> ValidationResult:
+        if not isinstance(record.payload, dict):
+            return ValidationResult(is_valid=False, errors=["Record must be a dict"], metadata={})
+        errors = _require_fields(record.payload, self.required_fields)
+        if not time_log_payload_has_start_time(record.payload):
+            errors.append("Missing required field: starts_at (or legacy startDate)")
+        return ValidationResult(is_valid=not errors, errors=errors, metadata={})
 
 
 @dataclass

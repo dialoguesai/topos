@@ -105,6 +105,59 @@ def migrate_legacy_database() -> Optional[Path]:
         return None
 
 
+def sqlite_on_disk_size_bytes(db_path: Path) -> Optional[int]:
+    """Return on-disk bytes for a SQLite file including WAL and SHM sidecars."""
+    if not db_path.is_file():
+        return None
+    total = 0
+    for suffix in ("", "-wal", "-shm"):
+        candidate = db_path if not suffix else db_path.with_name(f"{db_path.name}{suffix}")
+        if not candidate.is_file():
+            continue
+        try:
+            total += candidate.stat().st_size
+        except OSError as exc:
+            logger.debug("Failed to stat %s: %s", candidate, exc)
+    return total if total > 0 else None
+
+
+def get_local_database_size_bytes(explicit_path: Optional[str] = None) -> Optional[int]:
+    """Best-effort on-disk size of the active local SQLite database."""
+    if explicit_path:
+        return sqlite_on_disk_size_bytes(Path(explicit_path))
+
+    from ...config.settings import settings
+
+    if settings.topos_database_path:
+        size = sqlite_on_disk_size_bytes(Path(settings.topos_database_path))
+        if size is not None:
+            return size
+
+    candidates: list[Path] = []
+    config = load_config()
+    if "database_path" in config:
+        candidates.append(Path(config["database_path"]))
+    env_path = os.getenv("TOPOS_DATABASE_PATH")
+    if env_path:
+        candidates.append(Path(env_path))
+    candidates.append(get_database_path(None))
+    if platform.system() == "Darwin":
+        candidates.append(Path.home() / "Library" / "Application Support" / "ToposEngine" / "database.db")
+    candidates.append(Path.home() / ".topos_engine" / "database.db")
+    candidates.append(get_data_directory() / "database.db")
+
+    seen: set[str] = set()
+    for db_path in candidates:
+        key = str(db_path)
+        if key in seen:
+            continue
+        seen.add(key)
+        size = sqlite_on_disk_size_bytes(db_path)
+        if size is not None:
+            return size
+    return None
+
+
 def validate_database(db_path: Path) -> bool:
     if not db_path.exists() or not db_path.is_file():
         return False

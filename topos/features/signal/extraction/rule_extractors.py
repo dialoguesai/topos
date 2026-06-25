@@ -50,7 +50,7 @@ _PROFILE_SKILL_CATEGORIES = frozenset(
         "reading",
     }
 )
-_GENERIC_JOURNAL_CATEGORIES = frozenset({"grow", ""})
+_GENERIC_JOURNAL_CATEGORIES = frozenset({"", "journal"})
 
 
 def _journal_goal_text(record: Dict[str, Any], meta: Dict[str, Any]) -> str:
@@ -110,7 +110,7 @@ def _journal_place_name(record: Dict[str, Any], meta: Dict[str, Any]) -> str:
 
 
 def extract_from_journal(record: Dict[str, Any]) -> List[ArtifactDraft]:
-    """Time-log journal rows (e.g. Grow) → busy intervals and co-activity relationship edges."""
+    """Time-log journal rows → busy intervals and co-activity relationship edges."""
     entry_id = str(record.get("entry_id") or record.get("record_id") or "")
     if not entry_id:
         return []
@@ -118,8 +118,8 @@ def extract_from_journal(record: Dict[str, Any]) -> List[ArtifactDraft]:
     refs = [_source_ref("journal_entries", entry_id)]
     drafts: List[ArtifactDraft] = []
 
-    start = str(record.get("entry_at") or "")
-    end = str(meta.get("ends_at") or record.get("ends_at") or "").strip()
+    start = str(record.get("starts_at") or meta.get("starts_at") or record.get("entry_at") or "")
+    end = str(record.get("ends_at") or meta.get("ends_at") or "").strip()
     place_name = _journal_place_name(record, meta)
     if start and end:
         interval = {

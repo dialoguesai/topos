@@ -62,6 +62,18 @@ from .journal_entries_place_name_v1 import (
     MIGRATION_ID as JOURNAL_PLACE_NAME_ID,
     apply_journal_entries_place_name_v1_up,
 )
+from .journal_entries_duration_v1 import (
+    MIGRATION_ID as JOURNAL_DURATION_ID,
+    apply_journal_entries_duration_v1_up,
+)
+from .journal_entries_ends_at_v1 import (
+    MIGRATION_ID as JOURNAL_ENDS_AT_ID,
+    apply_journal_entries_ends_at_v1_up,
+)
+from .journal_entries_starts_at_v1 import (
+    MIGRATION_ID as JOURNAL_STARTS_AT_ID,
+    apply_journal_entries_starts_at_v1_up,
+)
 from .signal_objects_updated_by_v1 import (
     MIGRATION_ID as SIGNAL_OBJECTS_UPDATED_BY_ID,
     apply_signal_objects_updated_by_v1_up,
@@ -75,6 +87,17 @@ def _migration_applied(conn: sqlite3.Connection, migration_id: str) -> bool:
         row = conn.execute(
             "SELECT 1 FROM wiki_schema_migrations WHERE migration_id=?",
             (migration_id,),
+        ).fetchone()
+        return row is not None
+    except sqlite3.OperationalError:
+        return False
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+            (table,),
         ).fetchone()
         return row is not None
     except sqlite3.OperationalError:
@@ -101,6 +124,9 @@ def apply_all_migrations(conn: sqlite3.Connection) -> None:
     apply_extraction_artifacts_up(conn)
     apply_journal_entries_people_v1_up(conn)
     apply_journal_entries_place_name_v1_up(conn)
+    apply_journal_entries_duration_v1_up(conn)
+    apply_journal_entries_ends_at_v1_up(conn)
+    apply_journal_entries_starts_at_v1_up(conn)
     apply_signal_objects_updated_by_v1_up(conn)
 
 
@@ -119,7 +145,7 @@ def ensure_migrations_applied(conn: sqlite3.Connection) -> None:
     apply_wiki_mvp_query_quality_up(conn)
     if not _migration_applied(conn, PERSON_MODEL_ID):
         apply_remediation_person_model_up(conn)
-    if not _migration_applied(conn, HARNESS_ID):
+    if not _migration_applied(conn, HARNESS_ID) or not _table_exists(conn, "journal_entries"):
         apply_signal_dimension_harness_up(conn)
     apply_wiki_mvp_topic_clusters_coordination_up(conn)
     if not _migration_applied(conn, SOURCE_GENERATION_ID):
@@ -140,4 +166,7 @@ def ensure_migrations_applied(conn: sqlite3.Connection) -> None:
         apply_extraction_artifacts_up(conn)
     apply_journal_entries_people_v1_up(conn)
     apply_journal_entries_place_name_v1_up(conn)
+    apply_journal_entries_duration_v1_up(conn)
+    apply_journal_entries_ends_at_v1_up(conn)
+    apply_journal_entries_starts_at_v1_up(conn)
     apply_signal_objects_updated_by_v1_up(conn)

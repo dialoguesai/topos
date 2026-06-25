@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from pathlib import Path
 from typing import Any, Dict, Optional
 
 from ..__version__ import __version__
@@ -15,7 +16,23 @@ from ..core.api_models import (
 )
 from ..core import state
 from ..config.settings import settings
+from ..storage.db.paths import sqlite_on_disk_size_bytes
+from ..storage.db.storage_breakdown import compute_local_storage_breakdown
 from fastapi import HTTPException, status
+
+
+def _resolve_device_database_path() -> Optional[Path]:
+    """Return the SQLite file the running node is actually using."""
+    if state.db_conn:
+        try:
+            row = state.db_conn.execute("PRAGMA database_list").fetchone()
+            if row is not None:
+                db_file = str(row[2] or "").strip()
+                if db_file and db_file not in {"", ":memory:"}:
+                    return Path(db_file)
+        except Exception:
+            pass
+    return state._resolve_database_path_from_settings()
 
 
 class LocalDbService:
@@ -85,6 +102,24 @@ class LocalDeviceService:
             last_received_op_id = state.get_engine_config_value(state.db_conn, "last_received_op_id")
 
         device_name = settings.engine_name or state.get_system_info().get("hostname")
+        database_size_bytes = None
+        storage_breakdown = None
+        if settings.topos_database_mode in {"local", "sqlite"}:
+            db_path = _resolve_device_database_path()
+            if db_path is not None:
+                database_size_bytes = sqlite_on_disk_size_bytes(db_path)
+                conn = state.db_conn
+                if conn is None:
+                    try:
+                        conn = sqlite3.connect(str(db_path))
+                        storage_breakdown = compute_local_storage_breakdown(conn, db_path)
+                        conn.close()
+                    except Exception:
+                        storage_breakdown = None
+                else:
+                    storage_breakdown = compute_local_storage_breakdown(conn, db_path)
+                if storage_breakdown is not None:
+                    database_size_bytes = int(storage_breakdown.get("total_bytes") or database_size_bytes or 0)
 
         return DeviceInfoResponse(
             user_id=user_id,
@@ -106,6 +141,8 @@ class LocalDeviceService:
             oplog_bytes=None,
             ops_since_last_sync=None,
             oplog_bytes_since_last_sync=None,
+            database_size_bytes=database_size_bytes,
+            storage_breakdown=storage_breakdown,
         )
 
     async def set_device_name(self, device_name: str) -> DeviceNameResponse:

@@ -12,7 +12,7 @@ import random
 import re
 import uuid
 from collections import Counter
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 logger = logging.getLogger("topos.features.signal.topic_clustering")
 
@@ -161,7 +161,10 @@ def _record_type_for_embedding(source_id: str, metadata: Dict[str, Any]) -> str:
     sid = str(source_id or "")
     if sid in ("browser_visits", "demo_browser_file"):
         return "activity_event"
-    if sid in ("grow_data_file", "demo_journal_file"):
+    from ...sources.registry import REGISTRY
+
+    defn = REGISTRY.get(sid)
+    if defn and str(getattr(defn, "canonical_group_id", "") or "") == "journal":
         return "journal_entry"
     if sid in ("demo_messenger_file", "demo_email_file", "imessage", "signal"):
         return "conversation_message"

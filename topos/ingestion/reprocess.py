@@ -206,9 +206,11 @@ async def reprocess_source(
     if not canonical_records:
         canonical_records = load_canonical_records_for_signal(conn, source_def)
 
+    from ..sources.canonical_signal_defaults import resolved_signal_derivation_jobs
+
     signal_status = "skipped"
     signal_records_out = 0
-    if canonical_records and getattr(source_def, "signal_derivation_jobs", None):
+    if canonical_records and resolved_signal_derivation_jobs(source_def):
         with stage_context(
             audit,
             stage=PipelineStage.SIGNAL_DERIVE,
