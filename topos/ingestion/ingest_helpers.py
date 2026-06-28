@@ -139,6 +139,7 @@ async def ingest_ui_payload(
     payload: dict,
     job_id: Optional[str] = None,
     source_id: Optional[str] = None,
+    defer_enrichment: bool = False,
 ) -> dict:
     if not dataset_id:
         return {"status": "error", "error": "dataset_id required"}
@@ -158,6 +159,7 @@ async def ingest_ui_payload(
                 payload=payload,
                 job_id=job_id,
                 source_id=source_id,
+                defer_enrichment=defer_enrichment,
             )
         if source_id != _LEGACY_CHAT_SOURCE_ID:
             if not source:
@@ -226,6 +228,39 @@ async def ingest_ui_payload(
     return {"status": "ok", **result}
 
 
+async def run_ui_payload_enrichment(enrichment_ctx: dict) -> dict:
+    """Run post-canonical enrichment for a deferred inbox ingest."""
+    from ..enrichment.derived_tables import DerivedTablesManager
+    from ..sources.registry import REGISTRY
+
+    source_id = str(enrichment_ctx.get("source_id") or "").strip()
+    source = REGISTRY.get(source_id)
+    if not source:
+        return {"status": "error", "error": f"Unknown source_id: {source_id}"}
+    canonical_records = enrichment_ctx.get("canonical_records") or []
+    if not canonical_records:
+        return {"status": "ok", "enrichment_jobs_run": 0}
+
+    from ..core.state import get_db_connection
+
+    db_conn = get_db_connection()
+    tables_manager = DerivedTablesManager(conn=db_conn) if db_conn else DerivedTablesManager()
+    sync_batch_id = str(enrichment_ctx.get("sync_batch_id") or uuid.uuid4())
+    pipeline_outcome = await run_post_canonical_pipeline(
+        source_def=source,
+        canonical_records=canonical_records,
+        sync_batch_id=sync_batch_id,
+        tables_manager=tables_manager,
+    )
+    enrich_out = pipeline_outcome.get("canonical_enrichment") or {}
+    signal_out = pipeline_outcome.get("signal_derivation") or {}
+    return {
+        "status": "ok",
+        "signal_jobs_run": (signal_out.get("jobs_run") if isinstance(signal_out, dict) else 0) or 0,
+        "enrichment_jobs_run": (enrich_out.get("jobs_run") if isinstance(enrich_out, dict) else 0) or 0,
+    }
+
+
 async def _ingest_ui_payload_direct(
     *,
     dataset_id: str,
@@ -233,6 +268,7 @@ async def _ingest_ui_payload_direct(
     payload: dict,
     job_id: Optional[str] = None,
     source_id: str,
+    defer_enrichment: bool = False,
 ) -> dict:
     """Process UI payload directly to database without creating JSONL files."""
     from .parsers import PARSER_REGISTRY
@@ -412,6 +448,22 @@ async def _ingest_ui_payload_direct(
             source_id,
             canonical_result.errors,
         )
+
+    if defer_enrichment:
+        return {
+            "status": "ok",
+            "job_id": job_id,
+            "records_processed": 1,
+            "errors_count": len(canonical_result.errors),
+            "canonical_events_created": canonical_result.events_created,
+            "canonical_messages_created": canonical_result.messages_created,
+            "enrichment_pending": True,
+            "_enrichment_ctx": {
+                "source_id": source_id,
+                "sync_batch_id": sync_batch_id,
+                "canonical_records": canonical_result.canonical_records,
+            },
+        }
 
     pipeline_outcome = await run_post_canonical_pipeline(
         source_def=source,

@@ -2477,10 +2477,12 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                     "error_code": "schema_validation",
                     "error": "records required and must be non-empty",
                 }
-            from ..ingestion.ingest_helpers import ingest_ui_payload
+            from ..ingestion.ingest_helpers import ingest_ui_payload, run_ui_payload_enrichment
             processed = 0
             errors = []
             records_total = len(records)
+            enrichment_contexts: list[dict] = []
+            inbox_defer_enrichment = bool(write_id)
             for i, rec in enumerate(records):
                 if not isinstance(rec, dict):
                     err = "record must be a dict"
@@ -2498,9 +2500,13 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                         schema_id=schema_id,
                         payload=rec,
                         source_id=source_id,
+                        defer_enrichment=inbox_defer_enrichment,
                     )
                     if result.get("status") == "ok":
                         processed += 1
+                        ctx = result.get("_enrichment_ctx")
+                        if isinstance(ctx, dict):
+                            enrichment_contexts.append(ctx)
                     else:
                         err = result.get("error", "ingest failed")
                         errors.append({"index": i, "error": err})
@@ -2547,8 +2553,7 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                 "records_total": records_total,
                 "errors": errors,
             }
-            if write_id:
-                response_payload["write_id"] = write_id
+            if write_id and processed > 0:
                 from ..ingestion.usage_inbox_dedupe import record_delivery
 
                 record_delivery(
@@ -2556,6 +2561,25 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                     records_processed=processed,
                     records_total=records_total,
                 )
+                response_payload["write_id"] = write_id
+
+                def _log_enrichment_task(task: asyncio.Task) -> None:
+                    if task.cancelled():
+                        return
+                    exc = task.exception()
+                    if exc is not None:
+                        logger.warning(
+                            "[PIPELINE:APP_INGEST] Background enrichment failed write_id=%s: %s",
+                            write_id,
+                            exc,
+                            exc_info=exc,
+                        )
+
+                for ctx in enrichment_contexts:
+                    task = asyncio.create_task(run_ui_payload_enrichment(ctx))
+                    task.add_done_callback(_log_enrichment_task)
+            elif write_id:
+                response_payload["write_id"] = write_id
             if processed == 0:
                 return {
                     "id": req_id,
@@ -2575,8 +2599,30 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
         if inbox_write_id:
             from ..ingestion.inbox_drain import run_inbox_app_ingest
 
-            return await run_inbox_app_ingest(_run_app_ingest)
+            return await run_inbox_app_ingest(_run_app_ingest, write_id=inbox_write_id)
         return await _run_app_ingest()
+
+    if msg_type == "check_inbox_write":
+        payload = message.get("payload") or {}
+        write_id = str(payload.get("write_id") or "").strip()
+        if not write_id:
+            return {
+                "id": req_id,
+                "status": "error",
+                "error_code": "schema_validation",
+                "error": "write_id required",
+            }
+        from ..ingestion.usage_inbox_dedupe import get_prior_delivery
+
+        prior = get_prior_delivery(write_id)
+        response_payload = {
+            "write_id": write_id,
+            "delivered": prior is not None,
+        }
+        if prior is not None:
+            response_payload["records_processed"] = prior["records_processed"]
+            response_payload["records_total"] = prior["records_total"]
+        return {"id": req_id, "status": "ok", "payload": response_payload}
 
     if msg_type == "start_ingestion":
         import sys

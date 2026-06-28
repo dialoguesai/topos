@@ -38,5 +38,20 @@ async def test_run_inbox_app_ingest_returns_result() -> None:
     async def _body() -> dict:
         return {"status": "ok", "payload": {"records_processed": 1}}
 
-    result = await run_inbox_app_ingest(_body)
+    result = await run_inbox_app_ingest(_body, write_id="write-1")
     assert result["status"] == "ok"
+
+
+async def test_same_write_id_requests_serialize() -> None:
+    order: list[int] = []
+
+    async def _body(n: int) -> dict:
+        order.append(n)
+        await asyncio.sleep(0.02)
+        return {"n": n}
+
+    async def _run(n: int) -> dict:
+        return await run_inbox_app_ingest(lambda n=n: _body(n), write_id="same-id")
+
+    await asyncio.gather(_run(1), _run(2))
+    assert order == [1, 2]
