@@ -36,3 +36,11 @@ def vector_ann_mode() -> str:
 
 def cluster_collapse_chunks_enabled() -> bool:
     return _flag("TOPOS_CLUSTER_COLLAPSE_CHUNKS", "on")
+
+
+def min_similarity_threshold() -> float:
+    raw = os.environ.get("TOPOS_VECTOR_MIN_SIMILARITY", "0.30").strip()
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except ValueError:
+        return 0.30

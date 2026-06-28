@@ -13,3 +13,4 @@ class PipelineStage(str, Enum):
     SIGNAL_DERIVE = "signal_derive"
     DIMENSION_PROFILE = "dimension_profile"
     DATA_HEALTH = "data_health"
+    SOURCE_SCRUB = "source_scrub"

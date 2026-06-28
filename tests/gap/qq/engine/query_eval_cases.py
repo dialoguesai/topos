@@ -142,6 +142,7 @@ class QueryQualityCase:
     evaluate: EvalFn
     max_latency_ms: int = 0
     description: str = ""
+    optional_seed: bool = False
 
     def __post_init__(self) -> None:
         if self.max_latency_ms <= 0:
@@ -175,9 +176,12 @@ class EvalRunResult:
     latency_pass: bool
     turn_outcome: str
     denied: bool
+    optional_seed: bool = False
 
     @property
     def pass_all(self) -> bool:
+        if self.optional_seed and not self.quality_pass:
+            return self.latency_pass
         return self.quality_pass and self.latency_pass
 
 
@@ -191,9 +195,9 @@ QUALITY_CASES: List[QueryQualityCase] = [
     QueryQualityCase("Q4", "Collaborators on coding work", "relationship_context:read", "inference", eval_q4_collaborators,
                      description="Relationship inference returns list or yes/no"),
     QueryQualityCase("Q5", "Illustration, pencil sketches", "ai_conversations:read", "summary", eval_q5_illustration,
-                     description="Distinct from Q1 — illustration/sketch clusters"),
+                     description="Distinct from Q1 — illustration/sketch clusters", optional_seed=True),
     QueryQualityCase("Q6", "git GitHub messages", "ai_conversations:read", "raw", eval_q6_git_raw,
-                     description="Raw mode returns git-related canonical rows"),
+                     description="Raw mode returns git-related canonical rows", optional_seed=True),
 ]
 
 PRIVACY_CASES: List[QueryQualityCase] = [

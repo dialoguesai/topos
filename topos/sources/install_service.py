@@ -16,6 +16,7 @@ from ..enrichment.jobs import CANONICAL_JOBS, RAW_JOBS
 from ..ingestion.parsers import PARSER_REGISTRY
 from ..storage.db.postgres import connect_postgres, execute_query, fetch_all, fetch_one
 from .runtime_install import RuntimeInstallHandle, install_source_definition
+from .scrub_attribution import scrub_attributed_rows
 
 INSTALL_TABLE = "source_runtime_installs"
 logger = logging.getLogger("topos.sources.install_service")
@@ -711,44 +712,7 @@ def _count_all_rows(conn: Any, table_name: str) -> int:
 
 
 def _purge_source_associated_data(conn: Any, source_id: str) -> Dict[str, Any]:
-    sid = str(source_id or "").strip()
-    if not sid:
-        return {"tables_dropped": [], "rows_deleted": 0}
-
-    rows_deleted = 0
-    tables_dropped: List[str] = []
-    normalized_sid = re.sub(r"[^a-z0-9]+", "", sid.lower())
-    table_names = [name for name in _list_user_tables(conn) if name and _safe_sql_identifier(name)]
-
-    for table_name in table_names:
-        if table_name in {INSTALL_TABLE, "sqlite_sequence"}:
-            continue
-        columns = set(_list_table_columns(conn, table_name))
-        deleted_from_table = False
-        for source_column in ("source_id", "source_system"):
-            if source_column not in columns:
-                continue
-            match_count = _count_table_rows_for_source(conn, table_name, source_column, sid)
-            if match_count <= 0:
-                continue
-            execute_query(conn, f'DELETE FROM "{table_name}" WHERE "{source_column}" = %s', (sid,))
-            rows_deleted += match_count
-            deleted_from_table = True
-
-        # Per-source raw tables are safe to drop when emptied by this purge.
-        if deleted_from_table and table_name.startswith("raw_") and _count_all_rows(conn, table_name) == 0:
-            _drop_table(conn, table_name)
-            tables_dropped.append(table_name)
-            continue
-
-        # Some legacy source tables may not carry source_id/source_system columns.
-        # Drop obvious per-source raw tables by normalized source id suffix.
-        normalized_table = re.sub(r"[^a-z0-9]+", "", table_name.lower())
-        if table_name.startswith("raw_") and normalized_sid and normalized_sid in normalized_table:
-            _drop_table(conn, table_name)
-            tables_dropped.append(table_name)
-
-    return {"tables_dropped": sorted(set(tables_dropped)), "rows_deleted": rows_deleted}
+    return scrub_attributed_rows(conn, source_id).to_legacy_summary()
 
 
 def uninstall_source(
@@ -761,6 +725,16 @@ def uninstall_source(
     sid = str(source_id or "").strip()
     if not sid:
         raise ValueError("source_id is required")
+
+    if delete_source_tables:
+        import asyncio
+
+        from .scrub_service import SCRUB_LITE_OPTIONS, scrub_result_to_uninstall_dict, scrub_source_async
+
+        result = asyncio.run(
+            scrub_source_async(source_id=sid, scope=scope, options=SCRUB_LITE_OPTIONS)
+        )
+        return scrub_result_to_uninstall_dict(result, scope=scope)
 
     scope_key = _scope_key(scope)
     now = _utc_now_iso()

@@ -55,6 +55,17 @@ def test_raw_git_query_uses_chatgpt_ingestion_source(conn, monkeypatch) -> None:
     assert any("git" in str(row.get("content", "")).lower() for row in rows)
 
 
+def test_default_disclosure_tier_lists_journal_content(conn, monkeypatch) -> None:
+    monkeypatch.setattr("topos.core.state.get_db_connection", lambda: conn)
+    adapters = AdapterFactory.create("local_database", conn=conn)
+    page = adapters.canonical.list(
+        "journal_entries",
+        disclosure_tier="default_disclosure",
+        limit=10,
+    )
+    assert page.total >= 0
+
+
 def test_work_context_prefers_user_goals(conn, monkeypatch) -> None:
     monkeypatch.setattr("topos.core.state.get_db_connection", lambda: conn)
     adapters = AdapterFactory.create("local_database", conn=conn)

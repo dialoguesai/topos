@@ -167,7 +167,10 @@ async def list_topic_cluster_members(
     _api_key: str = Depends(require_api_key),
 ):
     service = get_signal_service()
-    return service.list_topic_cluster_members(cluster_id, limit=limit)
+    try:
+        return service.list_topic_cluster_members(cluster_id, limit=limit)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 class BriefUpdateBody(BaseModel):

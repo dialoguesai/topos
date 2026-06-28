@@ -51,7 +51,7 @@
       "signal_objects": ["message_topics", "user_goals"],
       "summary_objects": ["memory_dimension_summary"],
       "inference_objects": ["goal_inference"],
-      "default_mode_ceiling": "raw",
+      "default_mode_ceiling": "inference",
       "default_source_ids": [
         "chatgpt_file_ingestion",
         "chatgpt_ingestion",
@@ -88,7 +88,7 @@
       "signal_objects": ["user_goals"],
       "summary_objects": ["work_stub_summary"],
       "inference_objects": [],
-      "default_mode_ceiling": "raw",
+      "default_mode_ceiling": "summary",
       "default_source_ids": [
         "demo_resume_file",
         "chatgpt_ingestion",

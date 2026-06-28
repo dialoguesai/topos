@@ -28,6 +28,7 @@ from .api import (
     messenger_analytics as messenger_analytics_routes,
     query_api as query_routes,
     source_install as source_install_routes,
+    source_scrub as source_scrub_routes,
     sources as sources_routes,
     sync as sync_routes,
     uma_data as uma_data_routes,
@@ -98,6 +99,7 @@ app.include_router(backup_routes.router)
 app.include_router(analytics_routes.router)
 app.include_router(sources_routes.router)
 app.include_router(source_install_routes.router, prefix="/v1")
+app.include_router(source_scrub_routes.router, prefix="/v1")
 app.include_router(app_registry_routes.router)
 app.include_router(ingestion_compat_routes.router)
 app.include_router(enrichment_routes.router, prefix="/v1")

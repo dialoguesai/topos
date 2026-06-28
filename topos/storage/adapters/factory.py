@@ -114,6 +114,9 @@ class AdapterFactory:
         from ..db.migrations import ensure_migrations_applied
 
         ensure_migrations_applied(conn)
+        from ..canonical.ai_chat.tables import CanonicalTablesManager
+
+        CanonicalTablesManager(conn)
 
         return AdapterBundle(
             canonical=SQLiteCanonicalStore(conn),
