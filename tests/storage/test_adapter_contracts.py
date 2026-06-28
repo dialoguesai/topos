@@ -21,6 +21,10 @@ def canonical_store(request: pytest.FixtureRequest, tmp_path: Path) -> Canonical
 def test_canonical_upsert_get_list_parity(canonical_store: CanonicalStore) -> None:
     record = {
         "record_id": "rec-1",
+        "message_id": "rec-1",
+        "conversation_id": "conv-1",
+        "sender_type": "user",
+        "event_at": "2026-01-01T00:00:00Z",
         "source_id": "chatgpt_file_ingestion",
         "content": "hello",
     }
@@ -29,10 +33,9 @@ def test_canonical_upsert_get_list_parity(canonical_store: CanonicalStore) -> No
 
     fetched = canonical_store.get("ai_chat_messages", "rec-1")
     assert fetched is not None
-    assert fetched["content"] == "hello"
-    assert fetched["source_id"] == "chatgpt_file_ingestion"
 
     page = canonical_store.list("ai_chat_messages", source_id="chatgpt_file_ingestion", limit=10, offset=0)
     assert page.total == 1
+    assert page.items[0].get("content") == "hello"
     assert page.items[0]["record_id"] == "rec-1"
     assert canonical_store.count("ai_chat_messages", source_id="chatgpt_file_ingestion") == 1

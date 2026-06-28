@@ -233,6 +233,26 @@ _NATIVE_LIST_SPECS: Dict[str, tuple[str, List[str]]] = {
             "event_at",
         ],
     ),
+    "journal_entries_minimal": (
+        """
+        SELECT entry_id AS record_id, entry_at, content, source_id,
+               substr(coalesce(content, ''), 1, 500) AS content_preview,
+               entry_at AS event_at
+        FROM journal_entries
+        """,
+        ["record_id", "entry_at", "content", "source_id", "content_preview", "event_at"],
+    ),
+    "journal_entries_disclosure_minimal": (
+        """
+        SELECT entry_id AS record_id, entry_at,
+               coalesce(content_disclosure, content) AS content,
+               source_id,
+               substr(coalesce(content_disclosure, content, ''), 1, 500) AS content_preview,
+               entry_at AS event_at
+        FROM journal_entries
+        """,
+        ["record_id", "entry_at", "content", "source_id", "content_preview", "event_at"],
+    ),
     "contacts": (
         """
         SELECT contact_id AS record_id, display_name, source_id, is_self
@@ -255,10 +275,28 @@ _DISCLOSURE_LIST_TABLES = frozenset(
 )
 
 
-def _native_list_spec_key(table: str, disclosure_tier: str) -> str:
+def _table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
+    cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    return column in cols
+
+
+def _native_list_spec_key(
+    conn: sqlite3.Connection,
+    table: str,
+    disclosure_tier: str,
+) -> str:
+    if table == "journal_entries":
+        has_mood = _table_has_column(conn, table, "mood_tag")
+        has_disclosure = _table_has_column(conn, table, "content_disclosure")
+        if disclosure_tier == "default_disclosure" and has_disclosure:
+            return "journal_entries_disclosure" if has_mood else "journal_entries_disclosure_minimal"
+        return "journal_entries" if has_mood else "journal_entries_minimal"
     if disclosure_tier == "default_disclosure" and table in _DISCLOSURE_LIST_TABLES:
         disclosure_key = f"{table}_disclosure"
-        if disclosure_key in _NATIVE_LIST_SPECS:
+        if (
+            disclosure_key in _NATIVE_LIST_SPECS
+            and _table_has_column(conn, table, "content_disclosure")
+        ):
             return disclosure_key
     return table
 
@@ -294,7 +332,7 @@ class SQLiteCanonicalStore:
         if table not in self._NATIVE_TABLES:
             return ListPage(items=[], total=0, offset=offset, limit=limit)
 
-        spec_key = _native_list_spec_key(table, disclosure_tier)
+        spec_key = _native_list_spec_key(self._conn, table, disclosure_tier)
         base, col_names = _NATIVE_LIST_SPECS[spec_key]
         params: List[Any] = []
         query = base

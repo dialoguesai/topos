@@ -1421,6 +1421,23 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
         except Exception as exc:  # noqa: BLE001
             return {"id": req_id, "status": "error", "error": str(exc)}
 
+    if msg_type == "post_source_scrub":
+        from ..api.source_scrub import _scrub_source_core
+        from ..sources.scrub_service import ScrubInProgressError
+
+        payload = message.get("payload") if isinstance(message.get("payload"), dict) else {}
+        try:
+            result = await _scrub_source_core(payload)
+            return {"id": req_id, "status": "ok", "payload": result}
+        except ValueError as exc:
+            return {"id": req_id, "status": "error", "error": str(exc)}
+        except ScrubInProgressError as exc:
+            return {"id": req_id, "status": "error", "error": str(exc), "code": 409}
+        except RuntimeError as exc:
+            return {"id": req_id, "status": "error", "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            return {"id": req_id, "status": "error", "error": str(exc)}
+
     if msg_type == "patch_source_install":
         from ..api.source_install import _patch_source_install_core
 
@@ -2381,71 +2398,92 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
             logger.debug("[PIPELINE:ERROR] store_message exception: %s", exc)
             return {"id": req_id, "status": "error", "error": str(exc)}
     if msg_type == "app_ingest":
-        # Sprint 4 US-4.4: Ingest records using UMA write permission (Control Plane forwards here).
-        payload = message.get("payload") or {}
-        user_id = payload.get("user_id")
-        dataset_id = payload.get("dataset_id")
-        source_id = payload.get("source_id") or "chatgpt_ui_conversation"
-        schema_id = payload.get("schema_id") or "chatgpt.conversation.v1"
+        async def _run_app_ingest():
+            # Sprint 4 US-4.4: Ingest records using UMA write permission (Control Plane forwards here).
+            payload = message.get("payload") or {}
+            user_id = payload.get("user_id")
+            dataset_id = payload.get("dataset_id")
+            source_id = payload.get("source_id") or "chatgpt_ui_conversation"
+            schema_id = payload.get("schema_id") or "chatgpt.conversation.v1"
+            write_id = str(payload.get("write_id") or "").strip() or None
 
-        _LEGACY_CHAT_SOURCE_ID = "chatgpt_ui_conversation"
-        if source_id != _LEGACY_CHAT_SOURCE_ID:
-            source_def = REGISTRY.get(source_id)
-            if not source_def:
+            if write_id:
+                from ..ingestion.usage_inbox_dedupe import get_prior_delivery, record_delivery
+
+                prior = get_prior_delivery(write_id)
+                if prior is not None:
+                    response_payload = {
+                        "write_id": write_id,
+                        "records_processed": prior["records_processed"],
+                        "records_total": prior["records_total"],
+                        "errors": [],
+                        "deduplicated": True,
+                    }
+                    return {"id": req_id, "status": "ok", "payload": response_payload}
+
+            _LEGACY_CHAT_SOURCE_ID = "chatgpt_ui_conversation"
+            if source_id != _LEGACY_CHAT_SOURCE_ID:
+                source_def = REGISTRY.get(source_id)
+                if not source_def:
+                    return {
+                        "id": req_id,
+                        "status": "error",
+                        "error_code": "engine_error",
+                        "error": (
+                            f"Source '{source_id}' is not installed on this engine. "
+                            "Install the source before ingesting."
+                        ),
+                    }
+                if getattr(source_def, "source_type", None) != "ui_stream":
+                    return {
+                        "id": req_id,
+                        "status": "error",
+                        "error_code": "engine_error",
+                        "error": (
+                            f"Source '{source_id}' has source_type={source_def.source_type!r}; "
+                            "app_ingest requires ui_stream sources."
+                        ),
+                    }
+                if getattr(source_def, "schema_id", None):
+                    schema_id = str(source_def.schema_id)
+            else:
+                source_def = REGISTRY.get(source_id)
+                if source_def and getattr(source_def, "schema_id", None):
+                    schema_id = str(source_def.schema_id)
+            records = payload.get("records") or []
+            if payload.get("encrypted"):
+                try:
+                    from ..ingestion.inbox_crypto import decrypt_inbox_records_if_needed
+
+                    records = decrypt_inbox_records_if_needed(records)
+                except Exception as exc:
+                    return {
+                        "id": req_id,
+                        "status": "error",
+                        "error_code": "engine_error",
+                        "error": f"Failed to decrypt inbox payload: {exc}",
+                    }
+            if not user_id or not dataset_id:
                 return {
                     "id": req_id,
                     "status": "error",
-                    "error": (
-                        f"Source '{source_id}' is not installed on this engine. "
-                        "Install the source before ingesting."
-                    ),
+                    "error_code": "schema_validation",
+                    "error": "user_id and dataset_id required",
                 }
-            if getattr(source_def, "source_type", None) != "ui_stream":
+            if not records:
                 return {
                     "id": req_id,
                     "status": "error",
-                    "error": (
-                        f"Source '{source_id}' has source_type={source_def.source_type!r}; "
-                        "app_ingest requires ui_stream sources."
-                    ),
+                    "error_code": "schema_validation",
+                    "error": "records required and must be non-empty",
                 }
-            if getattr(source_def, "schema_id", None):
-                schema_id = str(source_def.schema_id)
-        else:
-            source_def = REGISTRY.get(source_id)
-            if source_def and getattr(source_def, "schema_id", None):
-                schema_id = str(source_def.schema_id)
-        records = payload.get("records") or []
-        if not user_id or not dataset_id:
-            return {"id": req_id, "status": "error", "error": "user_id and dataset_id required"}
-        if not records:
-            return {"id": req_id, "status": "error", "error": "records required and must be non-empty"}
-        from ..ingestion.ingest_helpers import ingest_ui_payload
-        processed = 0
-        errors = []
-        records_total = len(records)
-        for i, rec in enumerate(records):
-            if not isinstance(rec, dict):
-                err = "record must be a dict"
-                errors.append({"index": i, "error": err})
-                logger.warning(
-                    "[PIPELINE:APP_INGEST] Record failed: source_id=%s index=%s error=%s",
-                    source_id,
-                    i,
-                    err,
-                )
-                continue
-            try:
-                result = await ingest_ui_payload(
-                    dataset_id=dataset_id,
-                    schema_id=schema_id,
-                    payload=rec,
-                    source_id=source_id,
-                )
-                if result.get("status") == "ok":
-                    processed += 1
-                else:
-                    err = result.get("error", "ingest failed")
+            from ..ingestion.ingest_helpers import ingest_ui_payload
+            processed = 0
+            errors = []
+            records_total = len(records)
+            for i, rec in enumerate(records):
+                if not isinstance(rec, dict):
+                    err = "record must be a dict"
                     errors.append({"index": i, "error": err})
                     logger.warning(
                         "[PIPELINE:APP_INGEST] Record failed: source_id=%s index=%s error=%s",
@@ -2453,55 +2491,92 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                         i,
                         err,
                     )
-            except Exception as exc:
-                errors.append({"index": i, "error": str(exc)})
+                    continue
+                try:
+                    result = await ingest_ui_payload(
+                        dataset_id=dataset_id,
+                        schema_id=schema_id,
+                        payload=rec,
+                        source_id=source_id,
+                    )
+                    if result.get("status") == "ok":
+                        processed += 1
+                    else:
+                        err = result.get("error", "ingest failed")
+                        errors.append({"index": i, "error": err})
+                        logger.warning(
+                            "[PIPELINE:APP_INGEST] Record failed: source_id=%s index=%s error=%s",
+                            source_id,
+                            i,
+                            err,
+                        )
+                except Exception as exc:
+                    errors.append({"index": i, "error": str(exc)})
+                    logger.warning(
+                        "[PIPELINE:APP_INGEST] Record failed: source_id=%s index=%s error=%s",
+                        source_id,
+                        i,
+                        exc,
+                        exc_info=True,
+                    )
+            if errors:
                 logger.warning(
-                    "[PIPELINE:APP_INGEST] Record failed: source_id=%s index=%s error=%s",
+                    "[PIPELINE:APP_INGEST] Ingest completed with failures: source_id=%s processed=%d total=%d error_count=%d first_error=%s",
                     source_id,
-                    i,
-                    exc,
-                    exc_info=True,
+                    processed,
+                    records_total,
+                    len(errors),
+                    errors[0].get("error"),
                 )
-        if errors:
-            logger.warning(
-                "[PIPELINE:APP_INGEST] Ingest completed with failures: source_id=%s processed=%d total=%d error_count=%d first_error=%s",
-                source_id,
-                processed,
-                records_total,
-                len(errors),
-                errors[0].get("error"),
-            )
-        db_conn = get_db_connection()
-        if db_conn and user_id:
-            resource_id = (payload.get("resource_id") or "").strip() or f"dataset:{user_id}:{dataset_id or 'default'}"
-            record_uma_request(
-                db_conn,
-                owner_user_id=user_id,
-                resource_id=resource_id,
-                request_type="write",
-                endpoint="app_ingest",
-                requesting_user_id=(payload.get("requesting_user_id") or None),
-                app_id=payload.get("app_id"),
-                requesting_user_email=(payload.get("requesting_user_email") or "").strip() or None,
-                access_channel=(payload.get("access_channel") or "internal").strip() or "internal",
-            )
-        response_payload = {
-            "records_processed": processed,
-            "records_total": records_total,
-            "errors": errors,
-        }
-        if processed == 0:
+            db_conn = get_db_connection()
+            if db_conn and user_id:
+                resource_id = (payload.get("resource_id") or "").strip() or f"dataset:{user_id}:{dataset_id or 'default'}"
+                record_uma_request(
+                    db_conn,
+                    owner_user_id=user_id,
+                    resource_id=resource_id,
+                    request_type="write",
+                    endpoint="app_ingest",
+                    requesting_user_id=(payload.get("requesting_user_id") or None),
+                    app_id=payload.get("app_id"),
+                    requesting_user_email=(payload.get("requesting_user_email") or "").strip() or None,
+                    access_channel=(payload.get("access_channel") or "internal").strip() or "internal",
+                )
+            response_payload = {
+                "records_processed": processed,
+                "records_total": records_total,
+                "errors": errors,
+            }
+            if write_id:
+                response_payload["write_id"] = write_id
+                from ..ingestion.usage_inbox_dedupe import record_delivery
+
+                record_delivery(
+                    write_id,
+                    records_processed=processed,
+                    records_total=records_total,
+                )
+            if processed == 0:
+                return {
+                    "id": req_id,
+                    "status": "error",
+                    "error_code": "schema_validation",
+                    "error": f"All {records_total} record(s) failed ingestion for source_id={source_id}",
+                    "payload": response_payload,
+                }
             return {
                 "id": req_id,
-                "status": "error",
-                "error": f"All {records_total} record(s) failed ingestion for source_id={source_id}",
+                "status": "ok",
                 "payload": response_payload,
             }
-        return {
-            "id": req_id,
-            "status": "ok",
-            "payload": response_payload,
-        }
+
+        payload_for_drain = message.get("payload") or {}
+        inbox_write_id = str(payload_for_drain.get("write_id") or "").strip() or None
+        if inbox_write_id:
+            from ..ingestion.inbox_drain import run_inbox_app_ingest
+
+            return await run_inbox_app_ingest(_run_app_ingest)
+        return await _run_app_ingest()
 
     if msg_type == "start_ingestion":
         import sys
@@ -2756,6 +2831,8 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                 limit=min(int(payload.get("limit") or 100), 500),
             )
             return {"id": req_id, "status": "ok", "payload": result}
+        except LookupError as exc:
+            return {"id": req_id, "status": "error", "error": str(exc), "code": 404}
         except Exception as exc:  # noqa: BLE001
             return {"id": req_id, "status": "error", "error": str(exc)}
     if msg_type == "signal_list_dimensions":

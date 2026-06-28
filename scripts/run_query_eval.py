@@ -78,6 +78,7 @@ async def run_engine_eval(db_path: Path) -> List[EvalRunResult]:
                 latency_pass=elapsed <= case.max_latency_ms,
                 turn_outcome=str(out.get("turn_outcome") or ""),
                 denied=out.get("turn_outcome") == "denied",
+                optional_seed=case.optional_seed,
             )
         )
 
@@ -190,6 +191,7 @@ async def run_mcp_eval(mcp_url: str, topos_key: str) -> List[EvalRunResult]:
                         latency_pass=elapsed <= case.max_latency_ms,
                         turn_outcome=str(payload.get("turn_outcome") or ""),
                         denied=payload.get("turn_outcome") == "denied",
+                        optional_seed=case.optional_seed,
                     )
                 )
     return results
@@ -200,6 +202,7 @@ def main() -> int:
     parser.add_argument("--db", default=str(LIVE_DB_PATH), help="SQLite database path")
     parser.add_argument("--mcp", action="store_true", help="Also run MCP path eval")
     parser.add_argument("--mcp-url", default=os.environ.get("MCP_BASE_URL", "https://cp.logu3s.com"))
+    parser.add_argument("--seed", action="store_true", help="Apply minimal Q5/Q6 seed rows before eval")
     parser.add_argument("--json", action="store_true", help="Emit JSON report")
     args = parser.parse_args()
 
@@ -207,6 +210,19 @@ def main() -> int:
     if not db_path.exists():
         print(f"Database not found: {db_path}", file=sys.stderr)
         return 2
+
+    if args.seed:
+        import sqlite3
+
+        sys.path.insert(0, str(ROOT / "tests"))
+        from fixtures.query_eval_seed.apply_seed import apply_query_eval_seed
+
+        conn = sqlite3.connect(str(db_path))
+        try:
+            apply_query_eval_seed(conn)
+        finally:
+            conn.close()
+        print(f"Applied query eval seed to {db_path}")
 
     all_results: List[EvalRunResult] = []
     all_results.extend(asyncio.run(run_engine_eval(db_path)))

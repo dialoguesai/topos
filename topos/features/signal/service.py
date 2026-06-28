@@ -71,7 +71,7 @@ class SignalService:
         from .hybrid_search import fts_search, merge_hybrid_results
         from .query_embed_cache import get_cached_query_embedding, set_cached_query_embedding
         from .source_hydration import hydrate_record_text
-        from .vector_settings import vector_chunking_enabled, vector_hybrid_enabled
+        from .vector_settings import vector_chunking_enabled, vector_hybrid_enabled, min_similarity_threshold
 
         q = str(query or "").strip()
         limit = max(1, min(int(limit), 100))
@@ -129,6 +129,14 @@ class SignalService:
             if len(deduped) >= limit:
                 break
         items = deduped
+
+        min_sim = min_similarity_threshold()
+        if min_sim > 0:
+            items = [
+                item
+                for item in items
+                if float(item.get("similarity") or item.get("hybrid_score") or 0.0) >= min_sim
+            ]
 
         if hydrate and conn is not None:
             for item in items:
@@ -289,9 +297,15 @@ class SignalService:
 
         limit = max(1, min(int(limit), 500))
         conn = get_db_connection()
-        items = (
-            load_topic_cluster_members(conn, cluster_id, limit=limit) if conn else []
-        )
+        if conn is None:
+            return {"items": [], "total": 0, "cluster_id": cluster_id, "limit": limit}
+        row = conn.execute(
+            "SELECT 1 FROM topic_clusters WHERE cluster_id=? LIMIT 1",
+            (cluster_id,),
+        ).fetchone()
+        if row is None:
+            raise LookupError(f"topic cluster not found: {cluster_id}")
+        items = load_topic_cluster_members(conn, cluster_id, limit=limit)
         return {"items": items, "total": len(items), "cluster_id": cluster_id, "limit": limit}
 
     def list_briefs(self) -> Dict[str, Any]:

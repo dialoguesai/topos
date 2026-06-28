@@ -13,6 +13,20 @@ pytestmark = pytest.mark.acceptance
 
 
 @pytest.mark.asyncio
+async def test_at_05_empty_query_denied() -> None:
+    orch = QueryPipelineOrchestrator(adapters=make_adapter_bundle())
+    out = await orch.execute(
+        query_text="   ",
+        scope_id="messages:read",
+        access_mode="raw",
+        manifest=messages_manifest(),
+        query_session_id="at5-empty",
+    )
+    assert out.get("turn_outcome") == "denied"
+    assert out.get("deny_reason") == "empty_query"
+
+
+@pytest.mark.asyncio
 async def test_at_05_three_scope_mode_pairs() -> None:
     orch = QueryPipelineOrchestrator(adapters=make_adapter_bundle())
     cases = [

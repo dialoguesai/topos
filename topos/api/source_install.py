@@ -164,6 +164,7 @@ async def _uninstall_source_core(payload: Dict[str, Any]) -> Dict[str, Any]:
     source_id = str(payload.get("source_id") or "").strip()
     if not source_id:
         raise ValueError("source_id is required")
+    # delete_source_tables is deprecated; maps to scrub-lite (no brief refresh).
     result = install_service.uninstall_source(
         source_id=source_id,
         scope=_scope_from_payload(payload),

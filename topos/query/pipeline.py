@@ -99,23 +99,58 @@ class QueryPipelineOrchestrator:
             pass
 
         session_data = store.get(session_id)
+        owner = ""
         if session_data:
             owner = str(session_data.get("requester_id") or "").strip()
-            if owner and owner != str(requester_id).strip():
-                audit = build_query_audit_event(
-                    turn_outcome=TurnOutcome.DENIED,
-                    scope_id=scope_id,
-                    access_mode=access_mode,
-                    session_id=session_id,
-                    deny_reason="session_requester_mismatch",
-                )
-                return {
-                    "turn_outcome": TurnOutcome.DENIED.value,
-                    "public_result": None,
-                    "audit": audit,
-                    "session_id": session_id,
-                    "deny_reason": "session_requester_mismatch",
-                }
+        if owner and owner != str(requester_id).strip():
+            audit = build_query_audit_event(
+                turn_outcome=TurnOutcome.DENIED,
+                scope_id=scope_id,
+                access_mode=access_mode,
+                session_id=session_id,
+                deny_reason="session_requester_mismatch",
+            )
+            return {
+                "turn_outcome": TurnOutcome.DENIED.value,
+                "public_result": None,
+                "audit": audit,
+                "session_id": session_id,
+                "deny_reason": "session_requester_mismatch",
+            }
+
+        if not str(query_text or "").strip():
+            audit = build_query_audit_event(
+                turn_outcome=TurnOutcome.DENIED,
+                scope_id=scope_id,
+                access_mode=access_mode,
+                session_id=session_id,
+                deny_reason="empty_query",
+            )
+            return {
+                "turn_outcome": TurnOutcome.DENIED.value,
+                "public_result": None,
+                "audit": audit,
+                "session_id": session_id,
+                "deny_reason": "empty_query",
+            }
+
+        from .retrieval import _mode_allowed
+
+        if not _mode_allowed(access_mode, manifest.access_mode_ceiling):
+            audit = build_query_audit_event(
+                turn_outcome=TurnOutcome.DENIED,
+                scope_id=scope_id,
+                access_mode=access_mode,
+                session_id=session_id,
+                deny_reason="mode_ceiling_exceeded",
+            )
+            return {
+                "turn_outcome": TurnOutcome.DENIED.value,
+                "public_result": None,
+                "audit": audit,
+                "session_id": session_id,
+                "deny_reason": "mode_ceiling_exceeded",
+            }
 
         session = _session_from_store(session_id, session_data, requester_id) if session_data else None
 

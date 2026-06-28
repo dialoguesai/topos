@@ -143,6 +143,9 @@ class Settings(BaseSettings):
     # "off" preserves legacy behavior; set to "pooled" to require tenant-scoped reads.
     topos_pool_mode: str = Field("off", env="TOPOS_POOL_MODE")
 
+    scrub_min_embeddings_for_recluster: int = Field(3, env="SCRUB_MIN_EMBEDDINGS_FOR_RECLUSTER")
+    scrub_sync_row_limit: int = Field(50000, env="SCRUB_SYNC_ROW_LIMIT")
+
     topos_sync_url: str = Field("wss://cp.logu3s.com/ws/sync", env="TOPOS_SYNC_URL")
     enable_sync: bool = Field(True, env="ENABLE_SYNC")
 

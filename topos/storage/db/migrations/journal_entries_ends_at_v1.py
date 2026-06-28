@@ -28,6 +28,11 @@ def apply_journal_entries_ends_at_v1_up(conn: sqlite3.Connection) -> None:
     _add_column_if_missing(conn, "journal_entries", "ends_at", "TEXT")
     if not _table_exists(conn, "journal_entries"):
         return
+    rows = conn.execute("PRAGMA table_info(journal_entries)").fetchall()
+    column_names = {row[1] for row in rows}
+    if "metadata_json" not in column_names:
+        conn.commit()
+        return
     conn.execute(
         """
         UPDATE journal_entries
