@@ -65,7 +65,7 @@ ENGINE_DEPS = (
     "python-louvain",
 )
 
-LOCAL_DEPS = DATABASE_DEPS + ENGINE_DEPS
+LOCAL_RUNTIME_DEPS = DATABASE_DEPS + ENGINE_DEPS
 
 
 @dataclass(frozen=True)
@@ -75,10 +75,10 @@ class DepSection:
 
 
 SECTIONS = (
-    DepSection("dependencies", CORE_DEPS),
+    DepSection("dependencies", CORE_DEPS + LOCAL_RUNTIME_DEPS),
     DepSection("database", DATABASE_DEPS),
     DepSection("engine", ENGINE_DEPS),
-    DepSection("local", LOCAL_DEPS),
+    DepSection("local", ()),
     DepSection("signal", ("pysqlcipher3",)),
     DepSection("dev", ("pytest", "pytest-asyncio", "httpx")),
 )
@@ -158,12 +158,15 @@ def replace_section(content: str, section: DepSection, lines: list[str]) -> str:
             re.MULTILINE,
         )
         replacement = "dependencies = [\n" + "\n".join(lines) + "\n]"
-    else:
+    elif lines:
         pattern = re.compile(
             rf"({section.header} = \[)\n(?:  \"[^\"]+\",\n)+\]",
             re.MULTILINE,
         )
         replacement = f"{section.header} = [\n" + "\n".join(lines) + "\n]"
+    else:
+        pattern = re.compile(rf"{section.header} = \[[^\]]*\]", re.MULTILINE)
+        replacement = f"{section.header} = []"
     updated, count = pattern.subn(replacement, content, count=1)
     if count != 1:
         raise RuntimeError(f"Could not update [{section.header}] in {PYPROJECT}")
