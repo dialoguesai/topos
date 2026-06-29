@@ -66,7 +66,7 @@ The `shared/` package in this repo is part of the node runtime contract. It cont
 ### 1) Install
 
 ```bash
-uv tool install 'topos-node[local]'
+uv tool install topos-node
 ```
 
 ### 2) Configure
