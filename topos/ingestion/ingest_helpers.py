@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from datetime import datetime, timezone
@@ -259,6 +260,25 @@ async def run_ui_payload_enrichment(enrichment_ctx: dict) -> dict:
         "signal_jobs_run": (signal_out.get("jobs_run") if isinstance(signal_out, dict) else 0) or 0,
         "enrichment_jobs_run": (enrich_out.get("jobs_run") if isinstance(enrich_out, dict) else 0) or 0,
     }
+
+
+_inbox_enrichment_sems: dict[int, asyncio.Semaphore] = {}
+
+
+def _inbox_enrichment_semaphore() -> asyncio.Semaphore:
+    loop = asyncio.get_running_loop()
+    key = id(loop)
+    sem = _inbox_enrichment_sems.get(key)
+    if sem is None:
+        sem = asyncio.Semaphore(1)
+        _inbox_enrichment_sems[key] = sem
+    return sem
+
+
+async def run_inbox_deferred_enrichment(enrichment_ctx: dict) -> dict:
+    """Serialize heavy inbox background enrichment to avoid concurrent model loads."""
+    async with _inbox_enrichment_semaphore():
+        return await run_ui_payload_enrichment(enrichment_ctx)
 
 
 async def _ingest_ui_payload_direct(

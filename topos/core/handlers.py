@@ -2477,7 +2477,7 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                     "error_code": "schema_validation",
                     "error": "records required and must be non-empty",
                 }
-            from ..ingestion.ingest_helpers import ingest_ui_payload, run_ui_payload_enrichment
+            from ..ingestion.ingest_helpers import ingest_ui_payload, run_inbox_deferred_enrichment
             processed = 0
             errors = []
             records_total = len(records)
@@ -2576,7 +2576,7 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                         )
 
                 for ctx in enrichment_contexts:
-                    task = asyncio.create_task(run_ui_payload_enrichment(ctx))
+                    task = asyncio.create_task(run_inbox_deferred_enrichment(ctx))
                     task.add_done_callback(_log_enrichment_task)
             elif write_id:
                 response_payload["write_id"] = write_id
@@ -5197,6 +5197,58 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
             }
         except Exception as exc:  # noqa: BLE001
             logger.error("Failed to delete database table: %s", exc, exc_info=True)
+            try:
+                rb = get_db_connection()
+                if rb is not None:
+                    rb.rollback()
+            except Exception:
+                pass
+            return {"id": req_id, "status": "error", "error": str(exc)}
+
+    if msg_type == "delete_database_rows":
+        """Delete selected rows with optional upstream/downstream pipeline scope."""
+        from ..data_explorer_row_delete import delete_database_rows
+        from ..llm_integrations_storage import DATA_EXPLORER_HIDDEN_TABLES
+
+        try:
+            pooled_mode = _pooled_read_enforcement_enabled()
+            if pooled_mode:
+                return {
+                    "id": req_id,
+                    "status": "error",
+                    "error": "delete_database_rows is blocked in pooled mode until write-path hardening is complete",
+                    "error_metadata": {
+                        "policy_reason": "endpoint_not_hardened",
+                        "mode": "pooled",
+                        **_pooled_endpoint_policy_for_message(msg_type),
+                    },
+                }
+            payload = message.get("payload") or {}
+            table_name = str(payload.get("table_name") or "").strip()
+            row_ids = payload.get("row_ids") or []
+            scope = str(payload.get("scope") or "row_only").strip().lower()
+            if table_name in DATA_EXPLORER_HIDDEN_TABLES:
+                return {
+                    "id": req_id,
+                    "status": "error",
+                    "error": f"Table is hidden from Data Explorer deletes: {table_name}",
+                }
+            if not isinstance(row_ids, list):
+                return {"id": req_id, "status": "error", "error": "row_ids must be an array"}
+            conn = get_db_connection()
+            if not conn:
+                return {"id": req_id, "status": "error", "error": "Database connection not available"}
+            result = delete_database_rows(
+                conn,
+                table_name=table_name,
+                row_ids=[str(item) for item in row_ids],
+                scope=scope,
+            )
+            return {"id": req_id, "status": "ok", "payload": result.to_payload()}
+        except ValueError as exc:
+            return {"id": req_id, "status": "error", "error": str(exc)}
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Failed to delete database rows: %s", exc, exc_info=True)
             try:
                 rb = get_db_connection()
                 if rb is not None:

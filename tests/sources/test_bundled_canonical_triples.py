@@ -17,6 +17,10 @@ def test_infer_journal_time_log_triple() -> None:
         "journal_time_log",
         "journal",
     )
+    assert infer_bundled_canonical_triple(schema_id="grow.time_log.v1") == (
+        "journal_time_log",
+        "journal",
+    )
 
 
 def test_normalize_fills_mapper_from_group_and_schema() -> None:

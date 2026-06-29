@@ -204,7 +204,11 @@ async def test_run_inbox_app_ingest_passes_write_id(monkeypatch) -> None:
         seen.append(write_id)
         return await coro_factory()
 
-    monkeypatch.setattr("topos.ingestion.inbox_drain._inbox_drain.run", _fake_run)
+    class _FakeDrain:
+        async def run(self, coro_factory, *, write_id=None):
+            return await _fake_run(coro_factory, write_id=write_id)
+
+    monkeypatch.setattr("topos.ingestion.inbox_drain._inbox_drain_for_loop", lambda: _FakeDrain())
 
     async def _body() -> dict:
         return {"status": "ok"}

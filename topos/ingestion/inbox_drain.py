@@ -9,7 +9,7 @@ from typing import Any, Awaitable, Callable, Dict, Optional, TypeVar
 
 T = TypeVar("T")
 
-_DEFAULT_MAX_CONCURRENT = 10
+_DEFAULT_MAX_CONCURRENT = 1
 _MAX_WRITE_ID_LOCK_HOLD_SECONDS = 120.0
 
 logger = logging.getLogger("topos.ingestion.inbox_drain")
@@ -65,7 +65,17 @@ class InboxDrain:
         return await _guarded()
 
 
-_inbox_drain = InboxDrain(max_concurrent=_DEFAULT_MAX_CONCURRENT)
+_inbox_drains: dict[int, InboxDrain] = {}
+
+
+def _inbox_drain_for_loop() -> InboxDrain:
+    loop = asyncio.get_running_loop()
+    key = id(loop)
+    drain = _inbox_drains.get(key)
+    if drain is None:
+        drain = InboxDrain(max_concurrent=_DEFAULT_MAX_CONCURRENT)
+        _inbox_drains[key] = drain
+    return drain
 
 
 async def run_inbox_app_ingest(
@@ -73,5 +83,5 @@ async def run_inbox_app_ingest(
     *,
     write_id: Optional[str] = None,
 ) -> T:
-    """Serialize concurrent deliveries for the same write_id; cap global concurrency at 10."""
-    return await _inbox_drain.run(coro_factory, write_id=write_id)
+    """Serialize concurrent deliveries for the same write_id; cap global inbox ingest at 1."""
+    return await _inbox_drain_for_loop().run(coro_factory, write_id=write_id)
