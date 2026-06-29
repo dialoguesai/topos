@@ -25,6 +25,7 @@ BUNDLED_CANONICAL_TRIPLES: Dict[str, Tuple[str, str]] = {
     "demo.browser.v1": ("browser_activity", "activity"),
     "demo.places.v1": ("demo_places", "places"),
     "demo.contacts.v1": ("demo_contacts", "contacts"),
+    "grow.time_log.v1": ("journal_time_log", "journal"),
 }
 
 VALID_CANONICAL_GROUP_IDS = frozenset(

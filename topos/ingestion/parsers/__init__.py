@@ -38,6 +38,7 @@ PARSER_REGISTRY = {
     "demo.places.v1": DemoPlacesParser,
     "demo.contacts.v1": DemoContactsParser,
     "journal.time_log.v1": JournalTimeLogFileParser,
+    "grow.time_log.v1": JournalTimeLogFileParser,
     "voxterm.transcript.v1": VoxtermTranscriptParser,
 }
 
