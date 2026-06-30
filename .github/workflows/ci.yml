@@ -51,3 +51,6 @@ jobs:
 
       - name: Validate package metadata
         run: uvx --from twine twine check dist/*
+
+      - name: Fresh-install smoke test (wheel)
+        run: python scripts/release_smoke_test.py
