@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import logging
 import logging.config
+import os
 import re
 
 from uvicorn.config import LOGGING_CONFIG
 
-from topos.core.logging import ColorFormatter, align_uvicorn_loggers, configure_logging, get_uvicorn_log_config
+from topos.core.logging import ColorFormatter, align_uvicorn_loggers, configure_logging, get_uvicorn_log_config, suppress_ml_progress_bars
 
 
 def test_get_uvicorn_log_config_routes_access_logs_to_root():
@@ -58,3 +59,21 @@ def test_uvicorn_access_log_uses_topos_color_format(monkeypatch):
         r'127\.0\.0\.1:55390 - "GET /v1/signal/briefs/profile HTTP/1\.1" 200$',
         plain,
     )
+
+
+def test_suppress_ml_progress_bars_disables_transformers_progress():
+    suppress_ml_progress_bars()
+    assert os.environ.get("HF_HUB_DISABLE_PROGRESS_BARS") == "1"
+    from transformers.utils.logging import is_progress_bar_enabled
+
+    assert not is_progress_bar_enabled()
+
+
+def test_configure_logging_suppresses_ml_progress_bars(monkeypatch):
+    monkeypatch.delenv("HF_HUB_DISABLE_PROGRESS_BARS", raising=False)
+    monkeypatch.setattr("sys.stdout.isatty", lambda: False)
+    configure_logging()
+    assert os.environ.get("HF_HUB_DISABLE_PROGRESS_BARS") == "1"
+    from transformers.utils.logging import is_progress_bar_enabled
+
+    assert not is_progress_bar_enabled()

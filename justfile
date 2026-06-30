@@ -14,9 +14,22 @@ setup:
 setup-dev:
     uv sync --extra dev --extra local
 
-# Run API directly.
-run host="0.0.0.0" port="9000":
-    uv run uvicorn topos.app:app --host {{host}} --port {{port}} --log-config topos/config/uvicorn_logging.json
+# Run API directly. `just run` = INFO logs; `just run dev` = DEBUG; optional host/port after `dev`.
+run *args:
+    #!/usr/bin/env bash
+    set -eu
+    log_level=INFO
+    host="0.0.0.0"
+    port="9000"
+    read -r -a rest <<< "{{args}}"
+    idx=0
+    if [[ ${#rest[@]} -gt 0 && "${rest[0]}" == "dev" ]]; then
+        log_level=DEBUG
+        idx=1
+    fi
+    if [[ ${#rest[@]} -gt idx ]]; then host="${rest[idx]}"; fi
+    if [[ ${#rest[@]} -gt $((idx + 1)) ]]; then port="${rest[idx + 1]}"; fi
+    LOG_LEVEL="${log_level}" uv run uvicorn topos.app:app --host "${host}" --port "${port}" --log-config topos/config/uvicorn_logging.json
 
 # Run colocated node with Ollama runtime and auto-install missing engine deps.
 run-local host="127.0.0.1" port="9000":

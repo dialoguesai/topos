@@ -41,7 +41,7 @@ class TopicClusterJob(BaseEnrichmentJob):
         # does not wipe cross-source memory_topic_map rollups.
         scope_ids = list(_resolved_topic_cluster_source_ids())
         if source_ids:
-            logger.info(
+            logger.debug(
                 "[PIPELINE:TOPIC_CLUSTERS] batch sources=%s; clustering scope=%s",
                 sorted(source_ids),
                 scope_ids,
@@ -57,7 +57,7 @@ class TopicClusterJob(BaseEnrichmentJob):
             min_records=3,
         )
         if result.get("status") == "skipped":
-            logger.info("[PIPELINE:TOPIC_CLUSTERS] skipped: %s", result.get("reason"))
+            logger.debug("[PIPELINE:TOPIC_CLUSTERS] skipped: %s", result.get("reason"))
             if progress_callback:
                 progress_callback(1, 1)
             return []

@@ -278,7 +278,12 @@ class HuggingFaceAdapter:
         vectors: List[List[float]] = []
         for i in range(0, len(texts), batch_size):
             batch = texts[i : i + batch_size]
-            encoded = embedder.encode(batch, convert_to_numpy=True, normalize_embeddings=normalize)
+            encoded = embedder.encode(
+                batch,
+                convert_to_numpy=True,
+                normalize_embeddings=normalize,
+                show_progress_bar=False,
+            )
             for row in encoded:
                 vectors.append([float(x) for x in row.tolist()])
         dims = len(vectors[0]) if vectors else 0

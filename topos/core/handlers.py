@@ -171,7 +171,7 @@ def _uma_transform_progress_hook(req_id: str, stage_label: str):
             return
         state["bucket"] = bucket
         filter_text = f" filter={current_filter}" if current_filter else ""
-        logger.info(
+        logger.debug(
             "[PIPELINE:UMA][TRANSFORM] req=%s stage=%s%s %s %s%% (%s/%s)",
             req_id,
             stage_label,
@@ -2118,7 +2118,7 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                 if not existing_user_id:
                     # Engine started but no user_id yet - link to authenticated user
                     store_user_id(conn, auth_user_id)
-                    logger.info(
+                    logger.debug(
                         "[PIPELINE:CONNECTION] Engine had no user_id. Stored auth user_id=%s from control plane. "
                         "Engine is now linked to authenticated user.",
                         auth_user_id[:8] if auth_user_id else None,
@@ -4178,7 +4178,7 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
         if not enrichment_name:
             return {"id": req_id, "status": "error", "error": "enrichment_name required"}
         try:
-            logger.info(
+            logger.debug(
                 "[PIPELINE:ENRICHMENT] source_enrichment_backfill received: source_id=%s enrichment=%s only_missing=%s limit=%s",
                 source_id,
                 enrichment_name,
@@ -4193,7 +4193,7 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                 only_missing=bool(only_missing),
                 limit=limit,
             )
-            logger.info(
+            logger.debug(
                 "[PIPELINE:ENRICHMENT] source_enrichment_backfill complete: source_id=%s enrichment=%s rows_scanned=%s rows_processed=%s rows_failed=%s",
                 source_id,
                 enrichment_name,
@@ -4215,7 +4215,7 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
         if not enrichment_name:
             return {"id": req_id, "status": "error", "error": "enrichment_name required"}
         try:
-            logger.info(
+            logger.debug(
                 "[PIPELINE:ENRICHMENT] source_enrichment_test received: source_id=%s enrichment=%s",
                 source_id,
                 enrichment_name,
@@ -5359,7 +5359,7 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
         requesting_app_id = (payload.get("requesting_app_id") or "").strip() or None
         requesting_app_name = (payload.get("requesting_app_name") or "").strip() or None
         app_display = requesting_app_name or requesting_app_id or "(unknown app)"
-        logger.info(
+        logger.debug(
             "[PIPELINE:UMA] uma_get_messages: message_stream=%s, resource_id=%s, dataset_id=%s, limit=%s, offset=%s, requesting_user_email=%s, requesting_app=%s",
             message_stream,
             resource_id[:50] if resource_id else None,
@@ -5502,12 +5502,12 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                         pre_name_rows = sum(1 for row in after_contact if row.get("sender_display_name"))
                         manifest_for_generic = strip_contact_runtime_filters(filter_manifest)
                         transform_diag: Dict[str, Any] = {}
-                        logger.info(
+                        logger.debug(
                             "[PIPELINE:UMA][TRANSFORM] req=%s stage=conversation_messages start rows=%s",
                             req_id,
                             len(after_contact),
                         )
-                        logger.info(
+                        logger.debug(
                             "[PIPELINE:UMA] contact names: contacts_resolve=%s names_effective=%s "
                             "sender_display_name_rows_after_pipeline=%s allowed_scopes=%s",
                             contacts_resolve,
@@ -5523,7 +5523,7 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                             diagnostics=transform_diag,
                             progress_hook=_uma_transform_progress_hook(req_id, "conversation_messages"),
                         )
-                        logger.info(
+                        logger.debug(
                             "[PIPELINE:UMA][TRANSFORM] req=%s stage=conversation_messages done applied=%s skipped=%s reasons=%s",
                             req_id,
                             transform_diag.get("applied_count", 0),
@@ -5532,7 +5532,7 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                         )
                         _skip_reasons = transform_diag.get("skip_reasons") or {}
                         if _skip_reasons.get("table_mismatch"):
-                            logger.info(
+                            logger.debug(
                                 "[PIPELINE:UMA] req=%s table_mismatch skips=%s are expected when field_transforms "
                                 "include other tables (browser_visits, etc.) while processing conversation_messages.",
                                 req_id,
@@ -5707,7 +5707,7 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                         pre_contact_len,
                     )
                 transform_diag = {}
-                logger.info(
+                logger.debug(
                     "[PIPELINE:UMA][TRANSFORM] req=%s stage=ai_chat_messages start rows=%s",
                     req_id,
                     len(messages),
@@ -5720,7 +5720,7 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                     diagnostics=transform_diag,
                     progress_hook=_uma_transform_progress_hook(req_id, "ai_chat_messages"),
                 )
-                logger.info(
+                logger.debug(
                     "[PIPELINE:UMA][TRANSFORM] req=%s stage=ai_chat_messages done applied=%s skipped=%s reasons=%s",
                     req_id,
                     transform_diag.get("applied_count", 0),
@@ -5764,7 +5764,7 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                     pre_contact_len,
                 )
             transform_diag = {}
-            logger.info(
+            logger.debug(
                 "[PIPELINE:UMA][TRANSFORM] req=%s stage=ai_chat_messages_jsonl start rows=%s",
                 req_id,
                 len(messages),
@@ -5777,7 +5777,7 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                 diagnostics=transform_diag,
                 progress_hook=_uma_transform_progress_hook(req_id, "ai_chat_messages_jsonl"),
             )
-            logger.info(
+            logger.debug(
                 "[PIPELINE:UMA][TRANSFORM] req=%s stage=ai_chat_messages_jsonl done applied=%s skipped=%s reasons=%s",
                 req_id,
                 transform_diag.get("applied_count", 0),
@@ -5951,7 +5951,7 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
             rows = all_rows[:limit]
             try:
                 transform_diag = {}
-                logger.info(
+                logger.debug(
                     "[PIPELINE:UMA][TRANSFORM] req=%s stage=rows:%s start rows=%s",
                     req_id,
                     table_name,
@@ -5965,7 +5965,7 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                     diagnostics=transform_diag,
                     progress_hook=_uma_transform_progress_hook(req_id, f"rows:{table_name}"),
                 )
-                logger.info(
+                logger.debug(
                     "[PIPELINE:UMA][TRANSFORM] req=%s stage=rows:%s done applied=%s skipped=%s reasons=%s",
                     req_id,
                     table_name,
@@ -6840,7 +6840,7 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
         sync_options = payload.get("sync_options")
         if source_id == "imessage" and not sync_options:
             sync_options = {"mode": "3m"}
-        logger.info(
+        logger.debug(
             "[PIPELINE:SYNC] Engine received source_sync request: source_id=%s dataset_id=%s sync_options=%s (req_id=%s)",
             source_id,
             dataset_id[:24] + "..." if dataset_id and len(dataset_id) > 24 else dataset_id,
@@ -6870,7 +6870,7 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                     error,
                     exc_info=False,
                 )
-            logger.info("[PIPELINE:SYNC] source_sync completed: source_id=%s status=%s", source_id, status)
+            logger.debug("[PIPELINE:SYNC] source_sync completed: source_id=%s status=%s", source_id, status)
             if conn and status == "ok":
                 update_sync_result(conn, dataset_id, source_id, success=True, last_sync_at=datetime.now(timezone.utc).isoformat())
             elif conn and status == "error":

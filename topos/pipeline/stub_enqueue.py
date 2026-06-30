@@ -39,7 +39,7 @@ def enqueue_signal_derive_stub(
         batch_id=batch_id,
         source_id=source_id,
     )
-    logger.info(
+    logger.debug(
         "[PIPELINE:SIGNAL_DERIVE] stub_enqueue job_id=%s source_id=%s batch_id=%s records=%d",
         envelope.job_id,
         source_id,

@@ -86,7 +86,7 @@ async def ingest_file_payload(
         for source in REGISTRY.values():
             if source.schema_id == schema_id and source.source_type == "file":
                 source_id = source.source_id
-                logger.debug(
+                logger.info(
                     "[PIPELINE:RAW] Found source_id=%s for schema_id=%s (file type)",
                     source_id,
                     schema_id,
@@ -101,7 +101,7 @@ async def ingest_file_payload(
     file_store = RawFileStore()
     trigger = FileTrigger(file_store=file_store)
     job_id = job_id or str(uuid.uuid4())
-    logger.debug(
+    logger.info(
         "[PIPELINE:RAW] Creating file ingestion job: job_id=%s, dataset_id=%s, schema_id=%s, source_id=%s, file_path=%s, file_size=%s",
         job_id,
         dataset_id,
@@ -123,7 +123,7 @@ async def ingest_file_payload(
         progress_api_url=progress_api_url,
         progress_api_key=progress_api_key,
     )
-    logger.debug(
+    logger.info(
         "[PIPELINE:RAW] %s: File ingestion complete: job_id=%s, records_processed=%s, errors=%s",
         manager,
         job_id,
@@ -201,7 +201,7 @@ async def ingest_ui_payload(
         "content": content,
         "created_at": created_at,
     }
-    logger.debug(
+    logger.info(
         "[PIPELINE:RAW] Appending UI message to raw store: job_id=%s, dataset_id=%s, message_id=%s, content_preview=%s",
         job_id,
         dataset_id,
@@ -216,10 +216,10 @@ async def ingest_ui_payload(
         schema_id,
         file_store.get_file_path(dataset_id, schema_id).as_posix(),
     )
-    logger.debug("[PIPELINE:RAW] Starting ingestion job: job_id=%s, dataset_id=%s, schema_id=%s", job_id, dataset_id, schema_id)
+    logger.info("[PIPELINE:RAW] Starting ingestion job: job_id=%s, dataset_id=%s, schema_id=%s", job_id, dataset_id, schema_id)
     manager = IngestionManager(file_store=file_store)
     result = await manager.process_job(job)
-    logger.debug(
+    logger.info(
         "[PIPELINE:RAW] %s: UI ingestion complete: job_id=%s, records_processed=%s, errors=%s",
         manager,
         job_id,
@@ -389,7 +389,7 @@ async def _ingest_ui_payload_direct(
             payload=raw_payload,
             source_type=raw_source_type,
         )
-        logger.debug(
+        logger.info(
             "[PIPELINE:RAW] Stored raw payload: source=%s, record_id=%s",
             source_id,
             record_id[:8] if record_id else None,

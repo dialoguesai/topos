@@ -94,7 +94,7 @@ async def _backfill_browser_visits_url_classification(
     )
     from ..sources.registry import BROWSER_VISITS
 
-    logger.info(
+    logger.debug(
         "[PIPELINE:SIGNAL_DERIVE] Browser visits backfill from activity_events only_missing=%s limit=%s",
         only_missing,
         limit,
@@ -175,7 +175,7 @@ async def _backfill_browser_visits_url_classification(
         "rows_failed": failed,
         "errors": (derive_result.get("errors") or [])[:100],
     }
-    logger.info(
+    logger.debug(
         "[PIPELINE:SIGNAL_DERIVE] Browser visits backfill complete: scanned=%d processed=%d skipped=%d failed=%d",
         summary["rows_scanned"],
         summary["rows_processed"],
@@ -549,7 +549,7 @@ async def _process_enrichment_core(
     tables_manager = DerivedTablesManager(conn=db_conn)
     orchestrator = EnrichmentOrchestrator(tables_manager=tables_manager)
     
-    logger.info(
+    logger.debug(
         "[PIPELINE:ENRICHMENT] %s: Manual enrichment triggered: source_id=%s, messages=%d, jobs=%s",
         orchestrator,
         source_id,
