@@ -683,7 +683,7 @@ async def run_post_canonical_pipeline(
             logger.error("[PIPELINE:ENRICHMENT] post-canonical failed: %s", exc, exc_info=True)
             outcome["canonical_enrichment"] = {"errors": [str(exc)]}
     elif canonical_jobs and enrichment_trigger == "manual":
-        logger.info(
+        logger.debug(
             "[PIPELINE:ENRICHMENT] Skipping canonical enrichment (manual trigger): source_id=%s records=%d",
             source_id,
             len(canonical_records),

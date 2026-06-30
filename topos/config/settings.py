@@ -8,6 +8,9 @@ from typing import List, Optional
 from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Set before any huggingface_hub import during app/route loading.
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+
 
 DEFAULT_TOPOS_CONTROL_PLANE_URL = "wss://cp.logu3s.com/ws/engine"
 

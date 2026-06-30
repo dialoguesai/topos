@@ -1,5 +1,7 @@
 import json
 import logging
+import os
+import re
 import sys
 from datetime import datetime
 from time import time
@@ -8,6 +10,26 @@ from ..config.settings import settings
 from ..runtime_update import is_update_available
 
 _LOG_FORMAT: str | None = None
+
+# Before huggingface_hub/transformers import, suppress download/load tqdm bars.
+os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+
+
+def suppress_ml_progress_bars() -> None:
+    """Hide Hugging Face / transformers tqdm progress bars; keep app INFO load logs."""
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    try:
+        from huggingface_hub.utils import disable_progress_bars
+
+        disable_progress_bars()
+    except Exception:
+        pass
+    try:
+        from transformers.utils.logging import disable_progress_bar
+
+        disable_progress_bar()
+    except Exception:
+        pass
 
 # Route uvicorn loggers through the root handler configured by configure_logging().
 UVICORN_LOG_CONFIG: dict[str, object] = {
@@ -37,6 +59,7 @@ def align_uvicorn_loggers() -> None:
 
 def configure_logging() -> None:
     """Configure logging to stdout based on environment/log settings."""
+    suppress_ml_progress_bars()
     handler = logging.StreamHandler(sys.stdout)
 
     def resolve_format() -> str:
@@ -145,11 +168,41 @@ class ColorFormatter(logging.Formatter):
     
     # Message text: Same blue as DEBUG
     _MESSAGE_COLOR = "\x1b[38;5;26m"  # Light blue (same as DEBUG)
+
+    # source / source_id values: bold magenta — easy to scan in pipeline logs
+    _SOURCE_IDENTITY_VALUE_COLOR = "\x1b[1;38;5;213m"  # Bold bright magenta
     
     # Logger name (module path): Same teal/cyan as class names
     _LOGGER_NAME_COLOR = "\x1b[38;5;75m"  # Teal/cyan blue-green
     
     _ARROW_COLOR = "\x1b[38;5;244m"  # Gray for arrows
+
+    _SOURCE_KV_PATTERN = re.compile(
+        r"(?<![?&/])"  # skip URL query/path fragments like ...&source=editors
+        r"\b(?P<key>source_id|source)="
+        r"(?:"
+        r"(?P<q>['\"])(?P<qval>[^'\"]+)(?P=q)|"
+        r"(?P<uval>[^\s,;)\]&]+)"
+        r")"
+    )
+
+    _SOURCE_VALUE_SKIP = frozenset({"%s", "%d", "%i", "%f", "?"})
+
+    def _highlight_source_identities(self, message: str) -> str:
+        """Bold magenta on source / source_id values (keys stay default message color)."""
+
+        def repl(match: re.Match[str]) -> str:
+            value = match.group("qval") or match.group("uval") or ""
+            if value in self._SOURCE_VALUE_SKIP or value.startswith("excluded."):
+                return match.group(0)
+            key = match.group("key")
+            quote = match.group("q") or ""
+            colored_value = (
+                f"{self._SOURCE_IDENTITY_VALUE_COLOR}{value}{self._RESET}{self._MESSAGE_COLOR}"
+            )
+            return f"{key}={quote}{colored_value}{quote}"
+
+        return self._SOURCE_KV_PATTERN.sub(repl, message)
 
     def format(self, record: logging.LogRecord) -> str:  # noqa: D401
         # Format timestamp: YYYY-MM-DD HH:MM:SS.ms (green)
@@ -171,8 +224,7 @@ class ColorFormatter(logging.Formatter):
         
         # Get message and extract pipeline tag if present
         message = record.getMessage()
-        import re
-        
+
         # Extract pipeline stage tag from message if it exists
         pipeline_tag_pattern = r'\[PIPELINE:[A-Z_]+\]'
         pipeline_tag_match = re.search(pipeline_tag_pattern, message)
@@ -204,6 +256,8 @@ class ColorFormatter(logging.Formatter):
             f"{self._ARROW_COLOR}\\1{self._RESET}{self._MESSAGE_COLOR}",
             message_colored
         )
+
+        message_colored = self._highlight_source_identities(message_colored)
         
         # Format: TIMESTAMP | LEVEL | [PIPELINE:TAG] | LOGGER: MESSAGE
         separator = f"{self._SEPARATOR_COLOR}|{self._RESET}"

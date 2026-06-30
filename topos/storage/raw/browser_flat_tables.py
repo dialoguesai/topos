@@ -224,7 +224,7 @@ def write_browser_visit(conn, payload: Dict[str, Any]) -> None:
         _to_sql_value(payload.get("referred_by")),
     ))
     conn.commit()
-    logger.debug("[PIPELINE:RAW] Wrote flat row to %s: record_id=%s", BROWSER_VISITS_TABLE, record_id[:24] if record_id else None)
+    logger.info("[PIPELINE:RAW] Wrote flat row to %s: record_id=%s", BROWSER_VISITS_TABLE, record_id[:24] if record_id else None)
 
 
 def write_browser_event(conn, payload: Dict[str, Any]) -> None:
@@ -259,7 +259,7 @@ def write_browser_event(conn, payload: Dict[str, Any]) -> None:
         _to_sql_value(payload.get("starred_at")),
     ))
     conn.commit()
-    logger.debug("[PIPELINE:RAW] Wrote flat row to %s: record_id=%s event_type=%s", BROWSER_EVENTS_TABLE, record_id[:24] if record_id else None, event_type)
+    logger.info("[PIPELINE:RAW] Wrote flat row to %s: record_id=%s event_type=%s", BROWSER_EVENTS_TABLE, record_id[:24] if record_id else None, event_type)
 
 
 def write_browser_url_classification(
@@ -295,7 +295,7 @@ def write_browser_url_classification(
     ))
     conn.commit()
     if log_write:
-        logger.debug(
+        logger.info(
             "[PIPELINE:RAW] Wrote URL classification row: source=%s record_id=%s category=%s",
             source_table,
             record_id[:24] if record_id else None,

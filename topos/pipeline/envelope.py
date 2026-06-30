@@ -81,7 +81,7 @@ def log_stage_transition(
     batch_id: str,
     source_id: str,
 ) -> None:
-    logger.info(
+    logger.debug(
         "[PIPELINE:STAGE] %s -> %s source_id=%s batch_id=%s",
         previous.value,
         next_stage.value,

@@ -587,7 +587,7 @@ async def _try_install_runtime_source_definition_from_control_plane(
             install_source_definition(row)
             installed = REGISTRY.get(row_source_id)
             if installed:
-                logger.info(
+                logger.debug(
                     "[PIPELINE:MANAGER] Installed runtime source definition from control-plane: source_id=%s schema_id=%s",
                     row_source_id,
                     row_schema_id,
@@ -690,7 +690,7 @@ class IngestionManager(BaseObject):
         if source_id:
             source_def = REGISTRY.get(source_id)
             if source_def:
-                logger.info(
+                logger.debug(
                     "[PIPELINE:MANAGER] %s: Using source from source_id=%s: %s (enrichment_trigger=%s)",
                     self,
                     source_id,
@@ -745,7 +745,7 @@ class IngestionManager(BaseObject):
                         # Keep first match as fallback
                         source_def = source
             if source_def:
-                logger.info(
+                logger.debug(
                     "[PIPELINE:MANAGER] %s: Found source by schema_id: source_id=%s, source_type=%s, enrichment_trigger=%s",
                     self,
                     source_def.source_id,
@@ -1009,7 +1009,7 @@ class IngestionManager(BaseObject):
                     and enrichment_trigger == "automatic"
                     and tables_manager
                 ):
-                    logger.info(
+                    logger.debug(
                         "[PIPELINE:ENRICHMENT] %s: Enrichment trigger check: source_id=%s, enrichment_trigger=%s, canonical_messages=%d, jobs=%s",
                         self,
                         source_def.source_id,
@@ -1031,7 +1031,7 @@ class IngestionManager(BaseObject):
                             len(canonical_messages),
                         )
                 elif source_def.canonical_enrichment_jobs and enrichment_trigger == "manual":
-                    logger.info(
+                    logger.debug(
                         "[PIPELINE:ENRICHMENT] %s: Skipping enrichment (manual trigger): %d canonical messages will be enriched later via POST /v1/enrichment/process",
                         self,
                         len(canonical_messages),

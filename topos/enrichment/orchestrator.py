@@ -58,7 +58,7 @@ class EnrichmentOrchestrator(BaseObject):
         
         total_messages = len(canonical_messages)
         total_jobs = len(jobs_to_run)
-        logger.info(
+        logger.debug(
             "[PIPELINE:ENRICHMENT] %s: Starting enrichment: %d messages, %d jobs to run",
             self,
             total_messages,
@@ -75,7 +75,7 @@ class EnrichmentOrchestrator(BaseObject):
                 continue
             try:
                 job_name = job.get_job_name()
-                logger.info(
+                logger.debug(
                     "[PIPELINE:ENRICHMENT] %s: Running job %d/%d: %s (%d messages, %.1f%% of jobs complete)",
                     self,
                     job_idx,
@@ -115,7 +115,7 @@ class EnrichmentOrchestrator(BaseObject):
                         records, derived_table
                     )
                     results["records_created"][derived_table] = records_written
-                    logger.info(
+                    logger.debug(
                         "[PIPELINE:ENRICHMENT] %s → %s: %d records written to %s (job %d/%d, %.1f%% complete)",
                         self,
                         job,
@@ -132,7 +132,7 @@ class EnrichmentOrchestrator(BaseObject):
                     results["records_created"]["canonical_disclosure"] = (
                         int(results["records_created"].get("canonical_disclosure") or 0) + updated
                     )
-                    logger.info(
+                    logger.debug(
                         "[PIPELINE:ENRICHMENT] %s → %s: %d canonical disclosure rows updated (job %d/%d)",
                         self,
                         job,
@@ -143,7 +143,7 @@ class EnrichmentOrchestrator(BaseObject):
                 else:
                     table_name = derived_table or job.get_job_name()
                     results["records_created"][table_name] = 0
-                    logger.info(
+                    logger.debug(
                         "[PIPELINE:ENRICHMENT] %s → %s: completed with 0 records (job %d/%d, %.1f%% complete)",
                         self,
                         job,
@@ -181,7 +181,7 @@ class EnrichmentOrchestrator(BaseObject):
                     # Mark job as 100% complete (even if failed, we've moved past it)
                     progress_callback(messages_processed_so_far, total_messages, job.get_job_name(), job_progress_percent, 100.0)
         
-        logger.info(
+        logger.debug(
             "[PIPELINE:ENRICHMENT] %s: Enrichment complete: %d jobs run, %d total records created",
             self,
             results["jobs_run"],
@@ -275,7 +275,7 @@ class SignalDerivationOrchestrator(EnrichmentOrchestrator):
         }
         jobs_to_run = [self._signal_jobs[name] for name in resolved if name in self._signal_jobs]
         total_jobs = len(jobs_to_run)
-        logger.info(
+        logger.debug(
             "[PIPELINE:SIGNAL_DERIVE] source_id=%s batch_id=%s jobs=%s messages=%d",
             source_id,
             sync_batch_id,
@@ -343,7 +343,7 @@ class SignalDerivationOrchestrator(EnrichmentOrchestrator):
         except Exception as exc:
             logger.debug("[PIPELINE:SIGNAL_DERIVE] dimension profile update skipped: %s", exc)
 
-        logger.info(
+        logger.debug(
             "[PIPELINE:SIGNAL_DERIVE] complete source_id=%s batch_id=%s jobs_run=%d deferred=%s",
             source_id,
             sync_batch_id,

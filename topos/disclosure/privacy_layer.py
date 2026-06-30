@@ -184,11 +184,11 @@ async def run_privacy_disclosure_layer(
     apply_canonical_nsfw_v1_up(conn)
 
     if not getattr(settings, "platform_privacy_via_engine", True):
-        logger.info("[PIPELINE:PRIVACY] skipped: platform_privacy_via_engine=false")
+        logger.debug("[PIPELINE:PRIVACY] skipped: platform_privacy_via_engine=false")
         return {"records_updated": 0, "skipped": True}
 
     if nsfw_only and not getattr(settings, "nsfw_classifier_enabled", True):
-        logger.info("[PIPELINE:PRIVACY] nsfw-only backfill skipped: nsfw_classifier_enabled=false")
+        logger.debug("[PIPELINE:PRIVACY] nsfw-only backfill skipped: nsfw_classifier_enabled=false")
         return {"records_updated": 0, "nsfw_tagged": 0, "skipped": True}
 
     if not canonical_messages:
@@ -353,7 +353,7 @@ async def run_privacy_disclosure_layer(
         conn.commit()
 
     duration_ms = int((time.perf_counter() - started) * 1000)
-    logger.info(
+    logger.debug(
         "[PIPELINE:PRIVACY] platform_privacy_layer disclosure_updated=%d nsfw_tagged=%d "
         "failed_batches=%d nsfw_failed_batches=%d duration_ms=%d version=%s",
         updated,

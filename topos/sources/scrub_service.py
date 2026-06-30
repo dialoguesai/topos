@@ -481,7 +481,7 @@ async def scrub_source_async(
         )
         if settings.topos_database_mode != "postgres":
             conn.commit()
-        logger.info(
+        logger.debug(
             "[PIPELINE:SCRUB] source_id=%s scrub_id=%s status=%s duration_ms=%s totals=%s",
             sid,
             scrub_id,
