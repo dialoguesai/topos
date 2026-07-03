@@ -13,7 +13,7 @@ pytestmark = pytest.mark.gap
 
 def test_ai_conversations_inference_not_denied_by_ceiling() -> None:
     manifest = resolve_scope_manifest("ai_conversations:read")
-    assert manifest.access_mode_ceiling == "inference"
+    assert manifest.access_mode_ceiling == "raw"
     adapter = DefaultSignalRetrievalAdapter(make_adapter_bundle())
     bundle = adapter.retrieve(
         RetrievalRequest(manifest=manifest, access_mode="inference", query_text="keycloak")

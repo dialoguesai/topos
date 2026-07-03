@@ -5,7 +5,7 @@ import os
 from pathlib import Path
 from typing import List, Optional
 
-from pydantic import Field, model_validator
+from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # Set before any huggingface_hub import during app/route loading.
@@ -34,8 +34,14 @@ class Settings(BaseSettings):
 
     openai_base_url: str = Field("https://api.openai.com/v1", env="OPENAI_BASE_URL")
     openai_model: str = Field("gpt-4o-mini", env="OPENAI_MODEL")
-    red_pill_api_key: Optional[str] = Field(None, env="RED_PILL_API_KEY")
-    red_pill_api_base: str = Field("https://api.redpill.ai/v1", env="RED_PILL_API_BASE")
+    red_pill_api_key: Optional[str] = Field(
+        None,
+        validation_alias=AliasChoices("RED_PILL_API_KEY", "REDPILL_API_KEY"),
+    )
+    red_pill_api_base: str = Field(
+        "https://api.redpill.ai/v1",
+        validation_alias=AliasChoices("RED_PILL_API_BASE", "REDPILL_API_BASE"),
+    )
 
     gt_cloud_api_key: Optional[str] = Field(None, env="GT_CLOUD_API_KEY")
     griptape_nodes_api_base_url: str = Field(
