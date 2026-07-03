@@ -94,7 +94,7 @@ def test_dimensions_for_brief_update_journal_lane() -> None:
     from topos.features.signal.dimension_registry import dimensions_for_brief_update
 
     dims = dimensions_for_brief_update(source_id="demo_journal_file")
-    assert dims == ("wellbeing", "memory")
+    assert dims == ("wellbeing", "memory", "profile")
 
 
 def test_dimensions_for_brief_update_financial_lane() -> None:
@@ -102,11 +102,3 @@ def test_dimensions_for_brief_update_financial_lane() -> None:
 
     dims = dimensions_for_brief_update(source_id="demo_financial_file")
     assert dims == ("resources",)
-
-
-def test_dimensions_for_brief_update_journal_lane() -> None:
-    from topos.features.signal.dimension_registry import dimensions_for_brief_update
-
-    dims = dimensions_for_brief_update(source_id="demo_journal_file")
-    assert "memory" in dims
-    assert "wellbeing" in dims
