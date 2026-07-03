@@ -106,6 +106,7 @@ def _install_and_verify(python: Path, wheel: Path, *, upgrade_from: str | None) 
 
     env = os.environ.copy()
     env["TOPOS_SKIP_UPDATE_CHECK"] = "1"
+    env["TOPOS_KEY"] = "release-smoke-test-key"
     _run([str(topos_node), "--help"], env=env)
     _run([str(topos_node), "--discover"], env=env)
     _run([str(python), "-c", IMPORT_CHECK_SCRIPT], env=env)
