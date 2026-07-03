@@ -76,17 +76,34 @@ def _find_wheel(dist_dir: Path) -> Path:
     return wheels[-1]
 
 
-def _previous_pypi_version(current: str) -> str | None:
-    from packaging.version import Version
+def _parse_version(version: str) -> tuple[int, ...]:
+    parts: list[int] = []
+    for part in version.split("."):
+        num = ""
+        for ch in part:
+            if ch.isdigit():
+                num += ch
+            else:
+                break
+        parts.append(int(num) if num else 0)
+    return tuple(parts)
 
+
+def _is_prerelease(version: str) -> bool:
+    lowered = version.lower()
+    return any(marker in lowered for marker in ("a", "b", "rc", "dev"))
+
+
+def _previous_pypi_version(current: str) -> str | None:
+    current_v = _parse_version(current)
     with urllib.request.urlopen("https://pypi.org/pypi/topos-node/json", timeout=60) as resp:
         data = json.load(resp)
     versions = [
         v
         for v in data.get("releases", {})
-        if v and not Version(v).is_prerelease and data["releases"][v]
+        if v and not _is_prerelease(v) and data["releases"][v]
     ]
-    older = sorted((v for v in versions if Version(v) < Version(current)), key=Version)
+    older = sorted((v for v in versions if _parse_version(v) < current_v), key=_parse_version)
     return older[-1] if older else None
 
 
