@@ -21,16 +21,28 @@ def test_resolve_manifest_uses_registry_not_client_tables() -> None:
     assert "secret_table" not in manifest.canonical_tables
 
 
-def test_resolve_manifest_rejects_ceiling_escalation() -> None:
-    with pytest.raises(ManifestValidationError) as exc_info:
-        resolve_scope_manifest(
-            "health:read",
-            client_manifest={"access_mode_ceiling": "inference"},
-        )
-    assert exc_info.value.code == "ceiling_escalation"
+def test_resolve_manifest_ceiling_from_supported_objects() -> None:
+    manifest = resolve_scope_manifest("messages:read")
+    assert manifest.access_mode_ceiling == "raw"
+
+
+def test_resolve_manifest_applies_grant_ceiling() -> None:
+    manifest = resolve_scope_manifest(
+        "messages:read",
+        filter_manifest={"filter_manifest": {"access_mode_ceiling": "summary"}},
+    )
+    assert manifest.access_mode_ceiling == "summary"
 
 
 def test_resolve_manifest_rejects_legacy_scope() -> None:
     with pytest.raises(ManifestValidationError) as exc_info:
         resolve_scope_manifest("aiMessages:read")
     assert exc_info.value.code == "legacy_scope"
+
+
+def test_resolve_manifest_applies_scope_table_allowlist() -> None:
+    manifest = resolve_scope_manifest(
+        "contacts:resolve",
+        filter_manifest={"scope_table_allowlist": {"contacts:resolve": ["contacts"]}},
+    )
+    assert manifest.canonical_tables == ["contacts"]
