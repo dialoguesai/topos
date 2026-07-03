@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Protocol
 
-from ....engine import Engine
 from ....engine.tasks import ModelRequest, ProcessingTask
 
 
+class _EngineRunner(Protocol):
+    def run(self, task: ProcessingTask) -> Any: ...
+
+
 async def run_engine_task(
-    engine: Engine,
+    engine: _EngineRunner,
     *,
     task_id: str,
     subtype: str,

@@ -24,7 +24,16 @@ class TaskHandle:
 
     def get_result(self, timeout: Optional[float] = None) -> Optional[ProcessingResult]:
         with self._lock:
+            result = self._result
+            if result is not None and self._status in ("completed", "failed"):
+                return result
             return self._result
+
+    def consume_result(self) -> Optional[ProcessingResult]:
+        """Return result and drop handle storage to avoid unbounded growth."""
+        with self._lock:
+            result = self._result
+            return result
 
     def _set_running(self) -> None:
         with self._lock:
@@ -44,8 +53,9 @@ class TaskHandle:
 class QueueManager:
     """In-memory queue with optional max size."""
 
-    def __init__(self, max_size: int = 0) -> None:
+    def __init__(self, max_size: int = 0, *, max_handles: int = 256) -> None:
         self._max_size = max_size  # 0 = unbounded
+        self._max_handles = max(1, int(max_handles))
         self._queue: queue.Queue = queue.Queue(maxsize=max_size if max_size > 0 else 0)
         self._handles: Dict[str, TaskHandle] = {}
         self._handles_lock = threading.Lock()
@@ -107,6 +117,17 @@ class QueueManager:
     def get_handle(self, task_id: str) -> Optional[TaskHandle]:
         with self._handles_lock:
             return self._handles.get(task_id)
+
+    def prune_handle(self, completed_task_id: str) -> None:
+        with self._handles_lock:
+            self._handles.pop(completed_task_id, None)
+            if len(self._handles) <= self._max_handles:
+                return
+            for task_id, handle in list(self._handles.items()):
+                if handle.get_status() in ("completed", "failed"):
+                    self._handles.pop(task_id, None)
+                if len(self._handles) <= self._max_handles:
+                    break
 
     def qsize(self) -> int:
         return self._queue.qsize()

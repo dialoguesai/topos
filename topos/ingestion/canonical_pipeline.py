@@ -641,7 +641,9 @@ async def run_post_canonical_pipeline(
             if canon_table:
                 for rec in records_for_enrichment:
                     rec.setdefault("_table", canon_table)
-            enrichment_orchestrator = EnrichmentOrchestrator(tables_manager=derived)
+            from ..engine import Engine
+
+            enrichment_orchestrator = EnrichmentOrchestrator(tables_manager=derived, engine=Engine())
             outcome["canonical_enrichment"] = await enrichment_orchestrator.run_canonical(
                 records_for_enrichment,
                 job_names=canonical_jobs,
@@ -702,4 +704,7 @@ async def run_post_canonical_pipeline(
             logger.error("[PIPELINE:SIGNAL_DERIVE] post-canonical failed: %s", exc, exc_info=True)
             outcome["signal_derivation"] = {"errors": [str(exc)]}
 
+    from ..engine.pipeline_memory import flush_engine_model_cache_after_pipeline
+
+    flush_engine_model_cache_after_pipeline()
     return outcome

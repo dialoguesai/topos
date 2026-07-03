@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeou
 from typing import Any, Dict, Optional
 
 from ..config.settings import settings
-from ..engine import Engine
+from ..engine.client import EngineClient, get_engine_client_or_local
 from ..engine.tasks import ModelRequest, ProcessingTask
 
 DEFAULT_MAX_CONTEXT_CHARS = 4000
@@ -28,12 +28,12 @@ def run_query_inference(
     query_text: str,
     context_packet: Dict[str, Any],
     scope_id: str,
-    engine: Optional[Engine] = None,
+    engine: Optional[EngineClient] = None,
     max_chars: int = DEFAULT_MAX_CONTEXT_CHARS,
     timeout_sec: float = DEFAULT_INFERENCE_TIMEOUT_SEC,
 ) -> Dict[str, Any]:
     bounded = build_inference_context_packet(context_packet, max_chars=max_chars)
-    eng = engine or Engine()
+    client = get_engine_client_or_local(engine)
     task = ProcessingTask(
         id=f"query_inf_{scope_id}",
         type="query_inference",
@@ -45,7 +45,7 @@ def run_query_inference(
     )
 
     def _run() -> Any:
-        return eng.run(task)
+        return client.run(task)
 
     try:
         future = _INFERENCE_POOL.submit(_run)

@@ -10,7 +10,6 @@ Fail-open: callers should catch exceptions and keep the original text.
 from __future__ import annotations
 
 import logging
-import threading
 from typing import Any, Dict, Final, List, Optional
 
 logger = logging.getLogger("topos.sanitization.privacy_filter")
@@ -40,10 +39,6 @@ TRANSFORM_ENTITY_GROUPS: Final[Dict[str, frozenset[str]]] = {
     "contact_removal": frozenset({"private_email", "private_phone", "private_address", "private_url"}),
 }
 
-_pipeline: Any = None
-_pipeline_model: Optional[str] = None
-_pipeline_lock = threading.Lock()
-
 
 def privacy_filter_available() -> bool:
     try:
@@ -63,7 +58,9 @@ def privacy_filter_enabled() -> bool:
 def _resolve_device() -> int | str:
     from topos.config.settings import settings
 
-    configured = (getattr(settings, "privacy_filter_device", None) or "").strip().lower()
+    configured = (getattr(settings, "engine_ml_device", None) or "").strip().lower()
+    if not configured:
+        configured = (getattr(settings, "privacy_filter_device", None) or "").strip().lower()
     if configured in ("cpu", "cuda", "mps"):
         import torch
 
@@ -83,21 +80,21 @@ def _resolve_device() -> int | str:
 
 
 def _get_pipeline(model_id: str):
-    global _pipeline, _pipeline_model
-    with _pipeline_lock:
-        if _pipeline is not None and _pipeline_model == model_id:
-            return _pipeline
+    from topos.engine.model_cache import ModelSlot, get_model_cache
+
+    def _load():
         from transformers import pipeline
 
         device = _resolve_device()
         logger.info("Loading privacy-filter pipeline model=%r device=%s", model_id, device)
-        _pipeline = pipeline(
+        return pipeline(
             "token-classification",
             model=model_id,
             device=device,
         )
-        _pipeline_model = model_id
-        return _pipeline
+
+    handle, _ = get_model_cache().acquire(ModelSlot.PRIVACY_FILTER, model_id, _load)
+    return handle
 
 
 def _detect_entities(text: str, *, model_id: str) -> List[Dict[str, Any]]:

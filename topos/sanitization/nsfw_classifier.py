@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import logging
-import threading
 from typing import Any, Dict, Final, List, Optional, Tuple
 
 logger = logging.getLogger("topos.sanitization.nsfw_classifier")
@@ -18,10 +17,6 @@ _HEURISTIC_NSFW_TOKENS: Final[tuple[str, ...]] = (
     "porn",
     "explicit",
 )
-
-_pipeline: Any = None
-_pipeline_model: Optional[str] = None
-_pipeline_lock = threading.Lock()
 
 
 def nsfw_classifier_available() -> bool:
@@ -40,16 +35,16 @@ def nsfw_classifier_enabled() -> bool:
 
 
 def _get_pipeline(model_id: str):
-    global _pipeline, _pipeline_model
-    with _pipeline_lock:
-        if _pipeline is not None and _pipeline_model == model_id:
-            return _pipeline
+    from topos.engine.model_cache import ModelSlot, get_model_cache
+
+    def _load():
         from transformers import pipeline
 
         logger.info("Loading NSFW classifier model=%r", model_id)
-        _pipeline = pipeline("text-classification", model=model_id, top_k=None)
-        _pipeline_model = model_id
-        return _pipeline
+        return pipeline("text-classification", model=model_id, top_k=None)
+
+    handle, _ = get_model_cache().acquire(ModelSlot.NSFW, model_id, _load)
+    return handle
 
 
 def _heuristic_nsfw(text: str) -> Tuple[bool, float]:

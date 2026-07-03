@@ -15,6 +15,7 @@ from .api import (
     app_registry as app_registry_routes,
     backup as backup_routes,
     compute_remote as compute_remote_routes,
+    engine_run as engine_run_routes,
     data_commit as data_commit_routes,
     db as db_routes,
     device as device_routes,
@@ -119,6 +120,7 @@ app.include_router(filter_lab_routes.router)
 app.include_router(home_chat_routes.router)
 app.include_router(privacy_disclose_routes.router)
 app.include_router(compute_remote_routes.router)
+app.include_router(engine_run_routes.router)
 app.include_router(data_commit_routes.router)
 
 

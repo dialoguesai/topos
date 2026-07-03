@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import logging
-import threading
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
+
+from ..model_cache import ModelSlot, get_model_cache
 
 logger = logging.getLogger("topos.engine.huggingface")
 
@@ -15,23 +16,37 @@ DEFAULT_NER_MODEL = "dslim/bert-base-NER"
 DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 DEFAULT_SENTIMENT_MODEL = "cardiffnlp/twitter-roberta-base-sentiment-latest"
 
+_MODEL_NAME_TO_SLOT: Dict[str, ModelSlot] = {
+    DEFAULT_URL_CLASSIFICATION_MODEL: ModelSlot.URL_PIPELINE,
+    DEFAULT_EMOTION_MODEL: ModelSlot.EMOTION,
+    DEFAULT_NER_MODEL: ModelSlot.NER,
+    DEFAULT_EMBEDDING_MODEL: ModelSlot.EMBEDDING,
+    DEFAULT_SENTIMENT_MODEL: ModelSlot.SENTIMENT,
+}
+
+
+def _match_slot(model_name: str) -> Optional[ModelSlot]:
+    name = (model_name or "").strip().lower()
+    if not name:
+        return None
+    for key, slot in _MODEL_NAME_TO_SLOT.items():
+        if key.lower() == name or key.split("/")[-1].lower() in name:
+            return slot
+    if "website-classifier" in name:
+        return ModelSlot.URL_PIPELINE
+    if "go_emotions" in name or "emotion" in name:
+        return ModelSlot.EMOTION
+    if "ner" in name:
+        return ModelSlot.NER
+    if "minilm" in name or "embedding" in name or "sentence-transformers" in name:
+        return ModelSlot.EMBEDDING
+    if "sentiment" in name:
+        return ModelSlot.SENTIMENT
+    return None
+
 
 class HuggingFaceAdapter:
     """BackendAdapter for HuggingFace: text-classification pipeline and go_emotions model."""
-
-    def __init__(self) -> None:
-        self._url_pipeline: Any = None
-        self._url_lock = threading.Lock()
-        self._emotion_model: Any = None
-        self._emotion_tokenizer: Any = None
-        self._emotion_loaded = False
-        self._emotion_lock = threading.Lock()
-        self._ner_pipeline: Any = None
-        self._ner_lock = threading.Lock()
-        self._embedding_model: Any = None
-        self._embedding_lock = threading.Lock()
-        self._sentiment_pipeline: Any = None
-        self._sentiment_lock = threading.Lock()
 
     def load_model(self, model_name: str, config: Optional[Dict[str, Any]] = None) -> None:
         """Load model by name; we load on first run_inference per subtype instead."""
@@ -41,7 +56,6 @@ class HuggingFaceAdapter:
         """
         Ensure the model is downloaded (e.g. from HuggingFace Hub). Downloads if not present.
         Returns True if a download was triggered (caller may clean up cache later), False if already in cache.
-        Logs when download starts; Hub may show progress via tqdm if enabled.
         """
         try:
             from huggingface_hub import snapshot_download
@@ -49,8 +63,7 @@ class HuggingFaceAdapter:
             return False
         logger.info("Downloading model %s (huggingface)...", model_name)
         try:
-            # tqdm_enabled=True lets HuggingFace show a progress bar when available
-            snapshot_download(repo_id=model_name, tqdm_enabled=True)
+            snapshot_download(repo_id=model_name, tqdm_enabled=False)
         except Exception:
             logger.exception("Failed to download model %s", model_name)
             return False
@@ -58,27 +71,29 @@ class HuggingFaceAdapter:
         return True
 
     def _get_url_pipeline(self, model_name: str):
-        with self._url_lock:
-            if self._url_pipeline is not None:
-                return self._url_pipeline
-            from transformers import pipeline
-            self._url_pipeline = pipeline(
-                task="text-classification",
-                model=model_name,
-            )
-            return self._url_pipeline
+        model = model_name or DEFAULT_URL_CLASSIFICATION_MODEL
 
-    def _get_emotion_model(self, model_name: str):
-        with self._emotion_lock:
-            if self._emotion_loaded:
-                return self._emotion_model, self._emotion_tokenizer
+        def _load():
+            from transformers import pipeline
+
+            return pipeline(task="text-classification", model=model)
+
+        handle, _ = get_model_cache().acquire(ModelSlot.URL_PIPELINE, model, _load)
+        return handle
+
+    def _get_emotion_model(self, model_name: str) -> Tuple[Any, Any]:
+        model = model_name or DEFAULT_EMOTION_MODEL
+
+        def _load():
             from transformers import AutoModelForSequenceClassification, AutoTokenizer
-            import torch
-            self._emotion_tokenizer = AutoTokenizer.from_pretrained(model_name)
-            self._emotion_model = AutoModelForSequenceClassification.from_pretrained(model_name)
-            self._emotion_model.eval()
-            self._emotion_loaded = True
-            return self._emotion_model, self._emotion_tokenizer
+
+            tokenizer = AutoTokenizer.from_pretrained(model)
+            emo_model = AutoModelForSequenceClassification.from_pretrained(model)
+            emo_model.eval()
+            return emo_model, tokenizer
+
+        handle, _ = get_model_cache().acquire(ModelSlot.EMOTION, model, _load)
+        return handle
 
     def run_inference(self, payload: Dict[str, Any], config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         """Dispatch by config.subtype to url_classification or emotion_classification."""
@@ -92,6 +107,8 @@ class HuggingFaceAdapter:
             return self._run_url_classification_batch(payload, model)
         if subtype in ("emotion_classification", "emo_27"):
             return self._run_emotion_classification(payload, model)
+        if subtype == "emotion_classification_batch":
+            return self._run_emotion_classification_batch(payload, model)
         if subtype == "entity_extraction":
             return self._run_entity_extraction(payload, model)
         if subtype == "embedding":
@@ -105,17 +122,21 @@ class HuggingFaceAdapter:
         return {"error": f"Unknown subtype: {subtype}", "status": "unsupported"}
 
     def _run_url_classification(self, payload: Dict[str, Any], model_name: str) -> Dict[str, Any]:
-        """Same behavior as WebsiteUrlClassifier."""
         url = payload.get("url") or ""
         title = payload.get("title") or ""
         if not isinstance(url, str) or not url.strip():
-            return {"error": "url must be a non-empty string", "category": "unknown", "confidence": 0.0, "model": model_name or DEFAULT_URL_CLASSIFICATION_MODEL}
+            return {
+                "error": "url must be a non-empty string",
+                "category": "unknown",
+                "confidence": 0.0,
+                "model": model_name or DEFAULT_URL_CLASSIFICATION_MODEL,
+            }
         model = model_name or DEFAULT_URL_CLASSIFICATION_MODEL
-        pipeline = self._get_url_pipeline(model)
+        pipe = self._get_url_pipeline(model)
         clean_url = url.strip()
         clean_title = (title or "").strip()
         text = f"{clean_url} [SEP] {clean_title}" if clean_title else clean_url
-        result = pipeline(text, truncation=True, top_k=1)
+        result = pipe(text, truncation=True, top_k=1)
         top_result = result[0] if isinstance(result, list) and result else {}
         return {
             "category": top_result.get("label", "unknown"),
@@ -128,7 +149,7 @@ class HuggingFaceAdapter:
         if not isinstance(items, list) or not items:
             return {"error": "items required", "items": [], "model": model_name or DEFAULT_URL_CLASSIFICATION_MODEL}
         model = model_name or DEFAULT_URL_CLASSIFICATION_MODEL
-        pipeline = self._get_url_pipeline(model)
+        pipe = self._get_url_pipeline(model)
         texts: List[str] = []
         for item in items:
             url = str(item.get("url") or "").strip()
@@ -142,7 +163,7 @@ class HuggingFaceAdapter:
         classified: List[Any] = []
         if non_empty_idx:
             batch_texts = [texts[i] for i in non_empty_idx]
-            classified = pipeline(batch_texts, truncation=True, top_k=1)
+            classified = pipe(batch_texts, truncation=True, top_k=1)
             if not isinstance(classified, list):
                 classified = [classified]
 
@@ -165,13 +186,10 @@ class HuggingFaceAdapter:
             )
         return {"items": out_items, "model": model}
 
-    def _run_emotion_classification(self, payload: Dict[str, Any], model_name: str) -> Dict[str, Any]:
-        """Same behavior as Emo27Job._classify_emotion."""
-        text = payload.get("text") or payload.get("content") or ""
-        if not text or not isinstance(text, str):
-            return {"error": "text or content required", "emotion_label": None, "confidence": None, "all_emotions": [], "model": model_name or DEFAULT_EMOTION_MODEL}
-        model = model_name or DEFAULT_EMOTION_MODEL
+    def _classify_emotion_text(self, text: str, model_name: str) -> Dict[str, Any]:
         import torch
+
+        model = model_name or DEFAULT_EMOTION_MODEL
         emo_model, tokenizer = self._get_emotion_model(model)
         inputs = tokenizer(
             text,
@@ -201,35 +219,74 @@ class HuggingFaceAdapter:
             "model": model,
         }
 
+    def _run_emotion_classification(self, payload: Dict[str, Any], model_name: str) -> Dict[str, Any]:
+        text = payload.get("text") or payload.get("content") or ""
+        if not text or not isinstance(text, str):
+            return {
+                "error": "text or content required",
+                "emotion_label": None,
+                "confidence": None,
+                "all_emotions": [],
+                "model": model_name or DEFAULT_EMOTION_MODEL,
+            }
+        return self._classify_emotion_text(text, model_name)
+
+    def _run_emotion_classification_batch(self, payload: Dict[str, Any], model_name: str) -> Dict[str, Any]:
+        items = payload.get("items") or []
+        if not isinstance(items, list) or not items:
+            return {"error": "items required", "items": [], "model": model_name or DEFAULT_EMOTION_MODEL}
+        model = model_name or DEFAULT_EMOTION_MODEL
+        out_items: List[Dict[str, Any]] = []
+        for item in items:
+            text = str(item.get("text") or item.get("content") or "")
+            item_id = item.get("id") or item.get("message_id")
+            if not text:
+                out_items.append(
+                    {
+                        "id": item_id,
+                        "emotion_label": None,
+                        "confidence": None,
+                        "all_emotions": [],
+                        "model": model,
+                    }
+                )
+                continue
+            result = self._classify_emotion_text(text, model)
+            out_items.append({"id": item_id, **result})
+        return {"items": out_items, "model": model}
+
     def _get_ner_pipeline(self, model_name: str):
-        with self._ner_lock:
-            if self._ner_pipeline is not None:
-                return self._ner_pipeline
+        model = model_name or DEFAULT_NER_MODEL
+
+        def _load():
             from transformers import pipeline
 
-            model = model_name or DEFAULT_NER_MODEL
-            self._ner_pipeline = pipeline("ner", model=model, aggregation_strategy="simple")
-            return self._ner_pipeline
+            return pipeline("ner", model=model, aggregation_strategy="simple")
+
+        handle, _ = get_model_cache().acquire(ModelSlot.NER, model, _load)
+        return handle
 
     def _get_embedding_model(self, model_name: str):
-        with self._embedding_lock:
-            if self._embedding_model is not None:
-                return self._embedding_model
+        model = model_name or DEFAULT_EMBEDDING_MODEL
+
+        def _load():
             from sentence_transformers import SentenceTransformer
 
-            model = model_name or DEFAULT_EMBEDDING_MODEL
-            self._embedding_model = SentenceTransformer(model)
-            return self._embedding_model
+            return SentenceTransformer(model)
+
+        handle, _ = get_model_cache().acquire(ModelSlot.EMBEDDING, model, _load)
+        return handle
 
     def _get_sentiment_pipeline(self, model_name: str):
-        with self._sentiment_lock:
-            if self._sentiment_pipeline is not None:
-                return self._sentiment_pipeline
+        model = model_name or DEFAULT_SENTIMENT_MODEL
+
+        def _load():
             from transformers import pipeline
 
-            model = model_name or DEFAULT_SENTIMENT_MODEL
-            self._sentiment_pipeline = pipeline("sentiment-analysis", model=model)
-            return self._sentiment_pipeline
+            return pipeline("sentiment-analysis", model=model)
+
+        handle, _ = get_model_cache().acquire(ModelSlot.SENTIMENT, model, _load)
+        return handle
 
     def _run_entity_extraction(self, payload: Dict[str, Any], model_name: str) -> Dict[str, Any]:
         text = payload.get("text") or payload.get("content") or ""
@@ -342,12 +399,12 @@ class HuggingFaceAdapter:
             return self._run_emotion_classification(payload, DEFAULT_EMOTION_MODEL)
 
     def unload_model(self, model_name: str) -> None:
-        """Clear cached pipeline/model (simplified: clear if name matches)."""
-        if model_name == DEFAULT_URL_CLASSIFICATION_MODEL or "website-classifier" in (model_name or ""):
-            with self._url_lock:
-                self._url_pipeline = None
-        if model_name == DEFAULT_EMOTION_MODEL or "go_emotions" in (model_name or ""):
-            with self._emotion_lock:
-                self._emotion_model = None
-                self._emotion_tokenizer = None
-                self._emotion_loaded = False
+        """Evict cached pipeline/model for the given model name."""
+        slot = _match_slot(model_name)
+        if slot is not None:
+            get_model_cache().evict_slot(slot)
+
+    def unload_all(self) -> None:
+        for slot in ModelSlot:
+            if slot not in (ModelSlot.NSFW, ModelSlot.PRIVACY_FILTER):
+                get_model_cache().evict_slot(slot)

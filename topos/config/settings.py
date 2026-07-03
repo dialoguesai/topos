@@ -95,6 +95,12 @@ class Settings(BaseSettings):
     ollama_query_model: str = Field("llama3.2:latest", env="TOPOS_OLLAMA_QUERY_MODEL")
     engine_default_provider: str = Field("huggingface", env="ENGINE_DEFAULT_PROVIDER")
 
+    engine_max_resident_models: int = Field(3, env="ENGINE_MAX_RESIDENT_MODELS")
+    engine_model_idle_ttl_sec: int = Field(0, env="ENGINE_MODEL_IDLE_TTL_SEC")
+    engine_memory_rss_soft_limit_mb: int = Field(0, env="ENGINE_MEMORY_RSS_SOFT_LIMIT_MB")
+    engine_flush_after_task: bool = Field(False, env="ENGINE_FLUSH_AFTER_TASK")
+    engine_ml_device: Optional[str] = Field(None, env="ENGINE_ML_DEVICE")
+
     # Sanitization field-transforms via Ollama (see topos.config.sanitization_ollama + engine_config overrides)
     sanitization_ollama_enabled: bool = Field(False, env="SANITIZATION_OLLAMA_ENABLED")
     sanitization_ollama_host: Optional[str] = Field(None, env="SANITIZATION_OLLAMA_HOST")
