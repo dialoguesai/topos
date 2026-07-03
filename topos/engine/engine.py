@@ -7,6 +7,8 @@ import time
 from typing import Any, Dict, Optional
 
 from .intake import normalize_task
+from .memory_utils import get_process_rss_mb
+from .model_cache import get_model_cache
 
 logger = logging.getLogger("topos.engine")
 from .queue_manager import QueueManager, TaskHandle
@@ -57,6 +59,7 @@ class Engine:
                 handle._set_completed(result)
             else:
                 handle._set_failed(result)
+            self._queue.prune_handle(task.id)
         return True
 
     def run(self, task: ProcessingTask) -> ProcessingResult:
@@ -79,10 +82,32 @@ class Engine:
         config = self._build_inference_config(normalized)
         # Route to backend
         adapter = get_adapter_for_task(normalized)
+        cache = get_model_cache()
+        subtype = config.get("subtype") or ""
+        model_id = config.get("model") or ""
+        cache_hit = cache.touch_for_task(subtype, model_id)
+        if cache_hit is None:
+            cache_hit = False
         # Run inference
         start = time.perf_counter()
         raw_output = adapter.run_inference(normalized.input, config=config)
         duration_ms = int((time.perf_counter() - start) * 1000)
+        try:
+            from ..config.settings import settings
+
+            if getattr(settings, "engine_flush_after_task", False):
+                cache.trim_to_budget()
+        except Exception:
+            pass
+        try:
+            from ..observability.metrics import record_metric, set_metric
+
+            set_metric("engine.models_resident", float(len(cache.resident_slots())))
+            rss = get_process_rss_mb()
+            if rss is not None:
+                set_metric("engine.process_rss_mb", rss)
+        except Exception:
+            pass
         if raw_output.get("status") == "deferred":
             return format_result(
                 task_id=normalized.id,
@@ -94,7 +119,7 @@ class Engine:
                     provider=normalized.model_request.provider,
                     model=config.get("model"),
                     duration_ms=duration_ms,
-                    cache_hit=False,
+                    cache_hit=bool(cache_hit),
                 ),
                 error=str(raw_output.get("error") or "deferred"),
             )
@@ -115,7 +140,7 @@ class Engine:
                     provider=normalized.model_request.provider,
                     model=config.get("model"),
                     duration_ms=duration_ms,
-                    cache_hit=False,
+                    cache_hit=bool(cache_hit),
                 ),
                 error=str(raw_output.get("error")),
             )
@@ -123,7 +148,7 @@ class Engine:
             provider=normalized.model_request.provider,
             model=raw_output.get("model") or normalized.model_request.model or config.get("model"),
             duration_ms=duration_ms,
-            cache_hit=False,
+            cache_hit=bool(cache_hit),
         )
         try:
             from ..observability.metrics import record_metric

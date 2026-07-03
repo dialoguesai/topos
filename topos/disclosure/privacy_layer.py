@@ -69,13 +69,13 @@ class PrivacyLayerClient:
         *,
         transform_id: str,
     ) -> Dict[str, Any]:
-        from ..engine import Engine
+        from ..engine.client import get_engine_client_or_local
         from ..enrichment.jobs.canonical._engine_runner import run_engine_task
 
-        engine = self._engine or Engine()
+        client = get_engine_client_or_local(self._engine)
         record_ids = [str(i.get("id") or "") for i in items]
         result = await run_engine_task(
-            engine,
+            client,
             task_id=f"privacy_{record_ids[0] or 'batch'}",
             subtype="privacy_disclosure",
             source_id=None,
@@ -127,15 +127,15 @@ class PrivacyLayerClient:
         return await self._classify_nsfw_via_engine(items)
 
     async def _classify_nsfw_via_engine(self, items: List[Dict[str, Any]]) -> Dict[str, Any]:
-        from ..engine import Engine
-        from ..enrichment.jobs.canonical._engine_runner import run_engine_task
         from ..config.settings import settings
+        from ..engine.client import get_engine_client_or_local
+        from ..enrichment.jobs.canonical._engine_runner import run_engine_task
 
-        engine = self._engine or Engine()
+        client = get_engine_client_or_local(self._engine)
         model = getattr(settings, "nsfw_classifier_model", "michellejieli/NSFW_text_classifier")
         record_ids = [str(i.get("id") or "") for i in items]
         result = await run_engine_task(
-            engine,
+            client,
             task_id=f"nsfw_{record_ids[0] or 'batch'}",
             subtype="content_nsfw_classification",
             source_id=None,

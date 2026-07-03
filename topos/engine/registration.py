@@ -128,6 +128,20 @@ def build_engine_register_message() -> Dict[str, Any]:
 
 def build_engine_heartbeat_message() -> Dict[str, Any]:
     now = datetime.now(timezone.utc).isoformat()
+    memory_meta: Dict[str, Any] = {}
+    try:
+        from .memory_utils import get_process_rss_mb
+        from .model_cache import get_model_cache
+
+        cache = get_model_cache()
+        memory_meta = {
+            "rss_mb": get_process_rss_mb(),
+            "resident_model_slots": cache.resident_slots(),
+            "max_resident_models": cache.max_resident,
+            "model_evictions_total": cache.evictions_total,
+        }
+    except Exception:
+        pass
     return {
         "id": str(uuid4()),
         "type": "engine_heartbeat",
@@ -138,6 +152,7 @@ def build_engine_heartbeat_message() -> Dict[str, Any]:
             "metadata": {
                 "engine_mode": settings.engine_mode,
                 "enable_llm": settings.enable_llm,
+                **memory_meta,
             },
         },
     }

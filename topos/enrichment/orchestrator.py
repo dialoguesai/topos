@@ -12,11 +12,25 @@ logger = logging.getLogger("topos.enrichment.orchestrator")
 
 
 class EnrichmentOrchestrator(BaseObject):
-    def __init__(self, tables_manager: Optional[DerivedTablesManager] = None, *, name: Optional[str] = None):
+    def __init__(
+        self,
+        tables_manager: Optional[DerivedTablesManager] = None,
+        *,
+        name: Optional[str] = None,
+        engine: Optional[Any] = None,
+    ):
         super().__init__(name=name)
         self.raw_jobs = list(RAW_JOBS)
         self.canonical_jobs = list(CANONICAL_JOBS)
         self.tables_manager = tables_manager or DerivedTablesManager()
+        self._engine = engine
+
+    def _bind_shared_engine(self, jobs: List[BaseEnrichmentJob]) -> None:
+        if self._engine is None:
+            return
+        for job in jobs:
+            if hasattr(job, "_engine"):
+                job._engine = self._engine
 
     def register_raw_job(self, job) -> None:
         self.raw_jobs.append(job)
@@ -55,6 +69,7 @@ class EnrichmentOrchestrator(BaseObject):
         jobs_to_run = self.canonical_jobs
         if job_names:
             jobs_to_run = [job for job in self.canonical_jobs if job.get_job_name() in job_names]
+        self._bind_shared_engine(jobs_to_run)
         
         total_messages = len(canonical_messages)
         total_jobs = len(jobs_to_run)
@@ -187,6 +202,9 @@ class EnrichmentOrchestrator(BaseObject):
             results["jobs_run"],
             sum(results["records_created"].values()),
         )
+        from ..engine.pipeline_memory import flush_engine_model_cache_after_pipeline
+
+        flush_engine_model_cache_after_pipeline()
         return results
 
     def enqueue_signal_derive_stub(
@@ -223,8 +241,9 @@ class SignalDerivationOrchestrator(EnrichmentOrchestrator):
         *,
         adapters: Optional[Any] = None,
         name: Optional[str] = None,
+        engine: Optional[Any] = None,
     ):
-        super().__init__(tables_manager, name=name)
+        super().__init__(tables_manager, name=name, engine=engine)
         self._adapters = adapters
         from .jobs import SIGNAL_JOB_REGISTRY
 
@@ -274,6 +293,7 @@ class SignalDerivationOrchestrator(EnrichmentOrchestrator):
             "envelopes": [],
         }
         jobs_to_run = [self._signal_jobs[name] for name in resolved if name in self._signal_jobs]
+        self._bind_shared_engine(jobs_to_run)
         total_jobs = len(jobs_to_run)
         logger.debug(
             "[PIPELINE:SIGNAL_DERIVE] source_id=%s batch_id=%s jobs=%s messages=%d",
@@ -350,6 +370,9 @@ class SignalDerivationOrchestrator(EnrichmentOrchestrator):
             results["jobs_run"],
             results["deferred_jobs"],
         )
+        from ..engine.pipeline_memory import flush_engine_model_cache_after_pipeline
+
+        flush_engine_model_cache_after_pipeline()
         return results
 
     async def run_canonical(

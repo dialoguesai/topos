@@ -7,20 +7,23 @@ import logging
 from typing import Any, Callable, Dict, List, Optional
 
 from ..base import BaseEnrichmentJob
+from ._batch_limits import MAX_JOB_MESSAGES
+from ._engine_runner import run_engine_task
 from .brief_fallback import prepare_signal_record
 from ...progress_bar import ProgressBar
 from ....engine import Engine
-from ....engine.tasks import ModelRequest, ProcessingTask
 
 logger = logging.getLogger("topos.enrichment.jobs.emo_27")
+
+_EMO_BATCH_SIZE = 32
 
 
 class Emo27Job(BaseEnrichmentJob):
     """Emotion classification enrichment using the Engine (HF or Ollama)."""
 
-    def __init__(self, *, name: Optional[str] = None):
+    def __init__(self, *, name: Optional[str] = None, engine: Optional[Engine] = None):
         super().__init__(name=name)
-        self._engine = Engine()
+        self._engine = engine or Engine()
 
     def get_derived_table(self) -> str:
         return "message_emotions"
@@ -34,66 +37,75 @@ class Emo27Job(BaseEnrichmentJob):
         progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> List[Dict[str, Any]]:
         """Enrich messages with emotion classifications via Engine.run(task)."""
-        logger.debug("[PIPELINE:ENRICHMENT] %s: processing %d messages", self, len(canonical_messages))
-        results = []
-        total_messages = len(canonical_messages)
-
-        with ProgressBar(total=total_messages, desc=str(self)) as pbar:
-            for msg_idx, msg in enumerate(canonical_messages):
-                if msg_idx % 10 == 0:
-                    await asyncio.sleep(0)
-                prepared = prepare_signal_record(msg)
-                message_id = prepared.get("message_id") or prepared.get("id")
-                content = prepared.get("content", "")
-                source_id = prepared.get("source_id")
-
-                if not message_id or not content:
-                    pbar.update(1)
-                    if progress_callback:
-                        progress_callback(msg_idx + 1, total_messages)
-                    continue
-
-                try:
-                    task = ProcessingTask(
-                        id=f"emo27_{message_id}",
-                        type="enrichment",
-                        subtype="emotion_classification",
-                        source_id=source_id,
-                        record_ids=[message_id],
-                        input={"text": content},
-                        model_request=ModelRequest(provider="huggingface"),
-                    )
-                    result = await asyncio.to_thread(self._engine.run, task)
-                    if result.status != "completed":
-                        logger.warning(
-                            "[PIPELINE:ENRICHMENT] %s: Engine failed for message %s: %s",
-                            self, message_id, result.error or result.status,
-                        )
-                        pbar.update(1)
-                        if progress_callback:
-                            progress_callback(msg_idx + 1, total_messages)
-                        continue
-                    out = result.output
-                    results.append({
+        messages = canonical_messages[:MAX_JOB_MESSAGES]
+        logger.debug("[PIPELINE:ENRICHMENT] %s: processing %d messages", self, len(messages))
+        work: List[Dict[str, Any]] = []
+        for msg in messages:
+            prepared = prepare_signal_record(msg)
+            message_id = prepared.get("message_id") or prepared.get("id")
+            content = prepared.get("content", "")
+            source_id = prepared.get("source_id")
+            if message_id and content:
+                work.append(
+                    {
+                        "id": message_id,
                         "message_id": message_id,
+                        "text": content,
                         "source_id": source_id,
+                    }
+                )
+
+        results: List[Dict[str, Any]] = []
+        total = len(work)
+        processed = 0
+        with ProgressBar(total=total or 1, desc=str(self)) as pbar:
+            for i in range(0, len(work), _EMO_BATCH_SIZE):
+                batch = work[i : i + _EMO_BATCH_SIZE]
+                batch_results = await self._classify_batch(batch)
+                results.extend(batch_results)
+                processed += len(batch)
+                pbar.update(len(batch))
+                if progress_callback:
+                    progress_callback(processed, total)
+
+        logger.debug("[PIPELINE:ENRICHMENT] %s: created %d results", self, len(results))
+        return results
+
+    async def _classify_batch(self, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        if not items:
+            return []
+        record_ids = [str(i["message_id"]) for i in items]
+        source_id = items[0].get("source_id")
+        try:
+            result = await run_engine_task(
+                self._engine,
+                task_id=f"emo27_batch_{record_ids[0]}",
+                subtype="emotion_classification_batch",
+                source_id=source_id,
+                record_ids=record_ids,
+                input_payload={"items": items},
+            )
+            if result.status != "completed":
+                logger.warning(
+                    "[PIPELINE:ENRICHMENT] %s: Engine batch failed: %s",
+                    self,
+                    result.error or result.status,
+                )
+                return []
+            out_items = result.output.get("items") or []
+            rows: List[Dict[str, Any]] = []
+            for item, out in zip(items, out_items):
+                rows.append(
+                    {
+                        "message_id": item["message_id"],
+                        "source_id": item.get("source_id"),
                         "emotion_label": out.get("emotion_label"),
                         "confidence": out.get("confidence"),
                         "all_emotions": out.get("all_emotions", []),
                         "model": out.get("model", ""),
-                    })
-                except Exception as e:
-                    logger.error(
-                        "[PIPELINE:ENRICHMENT] %s: Failed to enrich message %s: %s",
-                        self, message_id, e,
-                    )
-                    pbar.update(1)
-                    if progress_callback:
-                        progress_callback(msg_idx + 1, total_messages)
-                    continue
-                pbar.update(1)
-                if progress_callback:
-                    progress_callback(msg_idx + 1, total_messages)
-
-        logger.debug("[PIPELINE:ENRICHMENT] %s: created %d results", self, len(results))
-        return results
+                    }
+                )
+            return rows
+        except Exception as exc:
+            logger.error("[PIPELINE:ENRICHMENT] %s: batch classify failed: %s", self, exc)
+            return []

@@ -139,6 +139,16 @@ uv sync --extra engine
 just run
 ```
 
+### Engine memory (local dev)
+
+ML models are cached inside the Engine with LRU eviction. For lighter local runs (especially inside Cursor's integrated terminal), see [Engine memory management](topos/docs/ml-manager-v2/MEMORY_MANAGEMENT.md).
+
+```bash
+# Default: ENGINE_MAX_RESIDENT_MODELS=3; pipeline flush is automatic
+# Override only if needed, e.g. lower RAM: export ENGINE_MAX_RESIDENT_MODELS=2
+export PRIVACY_FILTER_DEVICE=cpu
+```
+
 Run tests:
 
 ```bash
