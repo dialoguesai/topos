@@ -74,7 +74,7 @@ CANONICAL_GROUP_BRIEF_DIMENSIONS: Dict[str, Tuple[str, ...]] = {
     "activity": ("interests", "profile"),
     "schedule": ("time", "places", "relationships", "work"),
     "contacts": ("relationships", "profile"),
-    "journal": ("wellbeing", "memory"),
+    "journal": ("wellbeing", "memory", "profile"),
     "profile": ("profile", "work", "intentions"),
     "financial": ("resources",),
     "places": ("places", "interests", "relationships"),
