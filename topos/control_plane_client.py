@@ -26,6 +26,21 @@ from .core.connection_resilience import (
 
 logger = logging.getLogger("topos.control_plane_client")
 
+# Lightweight CP RPCs that must stay responsive while ingest/enrichment runs.
+_FAST_INBOUND_MESSAGE_TYPES = frozenset(
+    {
+        "healthcheck",
+        "connection_info",
+        "check_inbox_write",
+        "list_waiting_routine_runs",
+        "list_due_routines",
+        "routine_has_active_run",
+        "update_routine_run",
+        "get_routine",
+        "advance_routine_next_run_at",
+    }
+)
+
 
 class ControlPlaneClient:
     """Maintains a WS connection to the control plane and dispatches incoming requests."""
@@ -242,6 +257,12 @@ class ControlPlaneClient:
             return
 
     async def _schedule_inbound_message(self, ws, data: Dict[str, Any]) -> None:
+        msg_type = str(data.get("type") or "")
+        if msg_type in _FAST_INBOUND_MESSAGE_TYPES:
+            task = asyncio.create_task(self._handle_message(ws, data))
+            self._inbound_tasks.add(task)
+            task.add_done_callback(self._on_inbound_task_done)
+            return
         async with self._inbound_lock:
             pending_count = len(self._inbound_tasks)
             if pending_count >= self._inbound_max_pending:

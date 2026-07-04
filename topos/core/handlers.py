@@ -2482,7 +2482,8 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
             errors = []
             records_total = len(records)
             enrichment_contexts: list[dict] = []
-            inbox_defer_enrichment = bool(write_id)
+            # Ack fast: canonicalize + flat write only; enrichment/signals run in background.
+            defer_enrichment = True
             for i, rec in enumerate(records):
                 if not isinstance(rec, dict):
                     err = "record must be a dict"
@@ -2500,7 +2501,7 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                         schema_id=schema_id,
                         payload=rec,
                         source_id=source_id,
-                        defer_enrichment=inbox_defer_enrichment,
+                        defer_enrichment=defer_enrichment,
                     )
                     if result.get("status") == "ok":
                         processed += 1
@@ -2553,6 +2554,24 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                 "records_total": records_total,
                 "errors": errors,
             }
+            if processed > 0 and enrichment_contexts:
+
+                def _log_enrichment_task(task: asyncio.Task) -> None:
+                    if task.cancelled():
+                        return
+                    exc = task.exception()
+                    if exc is not None:
+                        logger.warning(
+                            "[PIPELINE:APP_INGEST] Background enrichment failed source_id=%s write_id=%s: %s",
+                            source_id,
+                            write_id or "",
+                            exc,
+                            exc_info=exc,
+                        )
+
+                for ctx in enrichment_contexts:
+                    task = asyncio.create_task(run_inbox_deferred_enrichment(ctx))
+                    task.add_done_callback(_log_enrichment_task)
             if write_id and processed > 0:
                 from ..ingestion.usage_inbox_dedupe import record_delivery
 
@@ -2562,22 +2581,6 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
                     records_total=records_total,
                 )
                 response_payload["write_id"] = write_id
-
-                def _log_enrichment_task(task: asyncio.Task) -> None:
-                    if task.cancelled():
-                        return
-                    exc = task.exception()
-                    if exc is not None:
-                        logger.warning(
-                            "[PIPELINE:APP_INGEST] Background enrichment failed write_id=%s: %s",
-                            write_id,
-                            exc,
-                            exc_info=exc,
-                        )
-
-                for ctx in enrichment_contexts:
-                    task = asyncio.create_task(run_inbox_deferred_enrichment(ctx))
-                    task.add_done_callback(_log_enrichment_task)
             elif write_id:
                 response_payload["write_id"] = write_id
             if processed == 0:
