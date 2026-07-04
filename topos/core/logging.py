@@ -179,7 +179,7 @@ class ColorFormatter(logging.Formatter):
 
     _SOURCE_KV_PATTERN = re.compile(
         r"(?<![?&/])"  # skip URL query/path fragments like ...&source=editors
-        r"\b(?P<key>source_id|source)(?P<sep>=|:)"
+        r"\b(?P<key>source_id|source)="
         r"(?:"
         r"(?P<q>['\"])(?P<qval>[^'\"]+)(?P=q)|"
         r"(?P<uval>[^\s,;)\]&]+)"
@@ -196,12 +196,11 @@ class ColorFormatter(logging.Formatter):
             if value in self._SOURCE_VALUE_SKIP or value.startswith("excluded."):
                 return match.group(0)
             key = match.group("key")
-            sep = match.group("sep")
             quote = match.group("q") or ""
             colored_value = (
                 f"{self._SOURCE_IDENTITY_VALUE_COLOR}{value}{self._RESET}{self._MESSAGE_COLOR}"
             )
-            return f"{key}{sep}{quote}{colored_value}{quote}"
+            return f"{key}={quote}{colored_value}{quote}"
 
         return self._SOURCE_KV_PATTERN.sub(repl, message)
 

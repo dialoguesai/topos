@@ -390,7 +390,7 @@ async def _ingest_ui_payload_direct(
             source_type=raw_source_type,
         )
         logger.info(
-            "[PIPELINE:RAW] source:%s record_id=%s",
+            "[PIPELINE:RAW] Stored raw payload: source=%s, record_id=%s",
             source_id,
             record_id[:8] if record_id else None,
         )

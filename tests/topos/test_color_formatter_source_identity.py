@@ -39,21 +39,10 @@ def test_highlights_source_id_values():
 def test_highlights_source_values():
     formatter = ColorFormatter()
     formatted = formatter.format(
-        _record("[PIPELINE:RAW] source:chatgpt_file_ingestion record_id=abc")
+        _record("[PIPELINE:RAW] Stored raw payload: source=chatgpt_file_ingestion, record_id=abc")
     )
     assert ColorFormatter._SOURCE_IDENTITY_VALUE_COLOR in formatted
-    assert "source:chatgpt_file_ingestion" in _plain(formatted)
-
-
-def test_highlights_source_colon_syntax():
-    formatter = ColorFormatter()
-    formatted = formatter.format(
-        _record("[PIPELINE:RAW] source:browser_visits record_id=abc12345")
-    )
-    assert ColorFormatter._SOURCE_IDENTITY_VALUE_COLOR in formatted
-    plain = _plain(formatted)
-    assert "source:browser_visits" in plain
-    assert "record_id=abc12345" in plain
+    assert "source=chatgpt_file_ingestion" in _plain(formatted)
 
 
 def test_highlights_quoted_source_values():
@@ -95,9 +84,9 @@ def test_still_highlights_source_in_pipeline_kv_context():
     formatter = ColorFormatter()
     formatted = formatter.format(
         _record(
-            "[PIPELINE:RAW] source:browser_visits record_id=https://x?source=editors"
+            "[PIPELINE:RAW] Stored raw payload: source=browser_visits, record_id=https://x?source=editors"
         )
     )
     assert ColorFormatter._SOURCE_IDENTITY_VALUE_COLOR in formatted
     plain = _plain(formatted)
-    assert "source:browser_visits" in plain
+    assert "source=browser_visits" in plain
