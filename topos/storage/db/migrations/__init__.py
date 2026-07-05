@@ -41,6 +41,12 @@ from .wiki_mvp_topic_clusters_coordination import (
 from .vector_storage_v1 import MIGRATION_ID as VECTOR_STORAGE_V1_ID, apply_vector_storage_v1_up
 from .vector_storage_v2 import MIGRATION_ID as VECTOR_STORAGE_V2_ID, apply_vector_storage_v2_up
 from .vector_storage_v3 import MIGRATION_ID as VECTOR_STORAGE_V3_ID, apply_vector_storage_v3_up
+from .vector_storage_v4 import MIGRATION_ID as VECTOR_STORAGE_V4_ID, apply_vector_storage_v4_up
+from .wiki_stats_v1 import MIGRATION_ID as WIKI_STATS_V1_ID, apply_wiki_stats_v1_up
+from .wiki_entities_v1 import MIGRATION_ID as WIKI_ENTITIES_V1_ID, apply_wiki_entities_v1_up
+from .wiki_facts_v1 import MIGRATION_ID as WIKI_FACTS_V1_ID, apply_wiki_facts_v1_up
+from .wiki_clusters_v2 import MIGRATION_ID as WIKI_CLUSTERS_V2_ID, apply_wiki_clusters_v2_up
+from .wiki_timeline_v1 import MIGRATION_ID as WIKI_TIMELINE_V1_ID, apply_wiki_timeline_v1_up
 from .canonical_disclosure_v1 import (
     MIGRATION_ID as CANONICAL_DISCLOSURE_V1_ID,
     apply_canonical_disclosure_v1_up,
@@ -118,6 +124,12 @@ def apply_all_migrations(conn: sqlite3.Connection) -> None:
     apply_vector_storage_v1_up(conn)
     apply_vector_storage_v2_up(conn)
     apply_vector_storage_v3_up(conn)
+    apply_vector_storage_v4_up(conn)
+    apply_wiki_stats_v1_up(conn)
+    apply_wiki_entities_v1_up(conn)
+    apply_wiki_facts_v1_up(conn)
+    apply_wiki_clusters_v2_up(conn)
+    apply_wiki_timeline_v1_up(conn)
     apply_canonical_disclosure_v1_up(conn)
     apply_canonical_nsfw_v1_up(conn)
     apply_signal_objects_up(conn)
@@ -156,6 +168,18 @@ def ensure_migrations_applied(conn: sqlite3.Connection) -> None:
         apply_vector_storage_v2_up(conn)
     if not _migration_applied(conn, VECTOR_STORAGE_V3_ID):
         apply_vector_storage_v3_up(conn)
+    # v4 self-checks ANN dims against the active embedding model on every run.
+    apply_vector_storage_v4_up(conn)
+    if not _migration_applied(conn, WIKI_STATS_V1_ID):
+        apply_wiki_stats_v1_up(conn)
+    if not _migration_applied(conn, WIKI_ENTITIES_V1_ID):
+        apply_wiki_entities_v1_up(conn)
+    if not _migration_applied(conn, WIKI_FACTS_V1_ID):
+        apply_wiki_facts_v1_up(conn)
+    if not _migration_applied(conn, WIKI_CLUSTERS_V2_ID):
+        apply_wiki_clusters_v2_up(conn)
+    if not _migration_applied(conn, WIKI_TIMELINE_V1_ID):
+        apply_wiki_timeline_v1_up(conn)
     # Disclosure column adds are idempotent and must run after legacy DDL creates tables.
     apply_canonical_disclosure_v1_up(conn)
     if not _migration_applied(conn, CANONICAL_NSFW_V1_ID):

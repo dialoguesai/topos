@@ -6,9 +6,12 @@ from .canonical.dimension_summary_job import DimensionSummaryJob
 from .canonical.embeddings_job import EmbeddingsJob
 from .canonical.entities_job import EntitiesJob
 from .canonical.emo_27_job import Emo27Job
+from .canonical.fact_extraction_job import FactExtractionJob
 from .canonical.goal_extraction_job import GoalExtractionJob
 from .canonical.relationship_edges_job import RelationshipEdgesJob
 from .canonical.sentiment_job import SentimentJob
+from .canonical.statistics_job import StatisticsJob
+from .canonical.timeline_job import TimelineJob
 from .canonical.topic_clusters_job import TopicClusterJob
 from .canonical.topics_job import TopicsJob
 from .canonical.url_classification_enrichment_job import UrlClassificationEnrichmentJob
@@ -25,6 +28,9 @@ CANONICAL_JOBS = [
     EmbeddingsJob(),
     Emo27Job(),
     UrlClassificationEnrichmentJob(),
+    StatisticsJob(),
+    FactExtractionJob(),
+    TimelineJob(),
 ]
 
 SIGNAL_DERIVATION_JOBS = [
@@ -39,6 +45,9 @@ SIGNAL_DERIVATION_JOBS = [
     AvailabilityScoresJob(),
     UrlClassificationSignalJob(),
     TopicClusterJob(),
+    StatisticsJob(),
+    FactExtractionJob(),
+    TimelineJob(),
 ]
 
 SIGNAL_JOB_REGISTRY = {job.get_job_name(): job for job in SIGNAL_DERIVATION_JOBS}
@@ -56,6 +65,9 @@ __all__ = [
     "GoalExtractionJob",
     "RelationshipEdgesJob",
     "AvailabilityScoresJob",
+    "StatisticsJob",
+    "FactExtractionJob",
+    "TimelineJob",
     "TopicClusterJob",
     "UrlClassificationEnrichmentJob",
     "UrlClassificationSignalJob",

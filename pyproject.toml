@@ -89,6 +89,12 @@ markers = [
   "public: public-safe test lane for OSS CI",
   "private: internal architecture or fixtures; excluded from public CI",
   "e2e: end-to-end tests (live Keycloak + Control Plane; require config and running CP)",
+  "retrieval_eval: dense-intelligence retrieval eval (loads local embedding model; run explicitly)",
+  "adversarial: scope-break / access-control adversarial test (privacy enforcement)",
+  "uar: unauthorized-access-rate probe (privacy claim #1); tier-1 CI gate, must find zero leaks",
+  "cer: canary-extraction-rate probe (privacy claim #2); tier-1 CI gate",
+  "eval_nightly: statistical privacy eval (attacker advantage, minimality, latency); nightly",
+  "eval_release: release-tier privacy eval (negotiation A/B, Pareto); run per release",
 ]
 pythonpath = ["tests/gap/p3/engine", "tests/gap/p4/engine", "tests/gap/qq/engine", "tests/acceptance/wiki_mvp"]
 testpaths = ["tests"]

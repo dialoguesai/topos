@@ -20,6 +20,15 @@ from .types import (
 logger = logging.getLogger(__name__)
 
 _INFERENCE_EXCLUDED_KEYS = frozenset({"content", "text", "body"})
+# Canonical rows carry the raw record text in topic/summary_text (see _load_canonical_summary_items).
+# Inference must expose only the existence/relevance signal — never the raw text — so canonical
+# score items are stripped of these too. Derived items (briefs, facts, clusters) keep topic/
+# summary_text because those are computed labels, not raw content.
+_INFERENCE_CANONICAL_EXCLUDED_KEYS = _INFERENCE_EXCLUDED_KEYS | frozenset({"topic", "summary_text"})
+# Semantic hits carry raw chunk previews; inference keeps only the similarity/id signal.
+_INFERENCE_SEMANTIC_EXCLUDED_KEYS = frozenset(
+    {"content", "text", "body", "content_preview", "text_preview", "title"}
+)
 _SUMMARY_ITEM_CAP = 25
 _SEMANTIC_HIT_LIMIT = 20
 _CLUSTER_LIMIT = 5
@@ -178,8 +187,11 @@ def _list_canonical_rows(
     limit: int = 100,
     disclosure_tier: str = "owner_raw",
 ) -> List[Dict[str, Any]]:
-    from ..disclosure.tier import apply_disclosure_tier_to_rows
-
+    # canonical.list() already applies the disclosure tier (SQL adapters via the
+    # per-table _disclosure spec; in-memory fake via apply_disclosure_tier_to_rows), so the
+    # rows returned here are ALREADY disclosed to `disclosure_tier`. Re-applying the swap
+    # would over-redact: SQL-disclosed rows arrive as redacted text with no disclosure
+    # column, which the swap mistakes for pending raw and overwrites with the placeholder.
     rows: List[Dict[str, Any]] = []
     seen: set[str] = set()
     candidates = source_ids or [None]
@@ -201,8 +213,8 @@ def _list_canonical_rows(
             item.setdefault("_table", table)
             rows.append(item)
             if len(rows) >= limit:
-                return apply_disclosure_tier_to_rows(rows, table=table, tier=disclosure_tier)  # type: ignore[arg-type]
-    return apply_disclosure_tier_to_rows(rows[:limit], table=table, tier=disclosure_tier)  # type: ignore[arg-type]
+                return rows
+    return rows[:limit]
 
 
 def _row_summary_text(table: str, row: Dict[str, Any], *, scope_id: str = "") -> str:
@@ -505,19 +517,8 @@ def _filter_rows_by_query(rows: List[Dict[str, Any]], query_text: str) -> List[D
         ).lower()
         if any(token in haystack for token in tokens):
             matched.append(row)
-            continue
-        if "sleep" in tokens and ("sleep" in haystack or "slept" in haystack):
-            matched.append(row)
-            continue
-        if "exercise" in tokens and ("exercise" in haystack or "run" in haystack):
-            matched.append(row)
     if matched:
         return matched
-    lowered = (query_text or "").lower()
-    if "certification" in lowered:
-        typed = [row for row in rows if str(row.get("record_type") or "").lower() == "certification"]
-        if typed:
-            return typed
     date_hints = _iso_date_hints(query_text)
     if date_hints:
         dated = [
@@ -571,19 +572,29 @@ def _iso_date_hints(query_text: str) -> List[str]:
             hints.append(iso)
     if hints:
         return hints
-    day_only = re.search(r"\b(?:the\s+)?(\d{1,2})(?:st|nd|rd|th)?\b", text, re.I)
-    if day_only and re.search(r"\b(march|mar)\b", text, re.I):
-        month = 3
-        day = int(day_only.group(1))
-        return [f"{year}-{month:02d}-{day:02d}"]
-    if day_only and not re.search(
-        r"\b(january|february|april|may|june|july|august|september|october|november|december)\b",
+    # Abbreviated month + day ("Mar 13", "jan 5"), skipping bare "may" ambiguity guard:
+    # only fires when the abbreviation is unambiguous month usage followed by a day.
+    for abbrev_match in re.finditer(
+        r"\b(jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\.?\s+(\d{1,2})\b",
         text,
         re.I,
     ):
-        day = int(day_only.group(1))
-        return [f"{year}-03-{day:02d}"]
-    return []
+        abbrev = abbrev_match.group(1).lower()[:3]
+        month = {
+            "jan": 1, "feb": 2, "mar": 3, "apr": 4, "jun": 6, "jul": 7,
+            "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+        }[abbrev]
+        day = int(abbrev_match.group(2))
+        iso = f"{year}-{month:02d}-{day:02d}"
+        if iso not in hints:
+            hints.append(iso)
+    for iso_match in re.finditer(r"\b(20\d{2})-(\d{2})-(\d{2})\b", text):
+        iso = iso_match.group(0)
+        if iso not in hints:
+            hints.append(iso)
+    # A bare day number without any month is ambiguous — return nothing rather
+    # than guessing a month (the old behavior defaulted to March).
+    return hints
 
 
 def _human_date_from_iso(iso_ts: str) -> str:
@@ -661,6 +672,7 @@ def _semantic_hits(
     *,
     source_id: Optional[str] = None,
     limit: int = _SEMANTIC_HIT_LIMIT,
+    time_range: Optional[Tuple[str, str]] = None,
 ) -> Tuple[List[Dict[str, Any]], Optional[str]]:
     q = str(query_text or "").strip()
     if not q:
@@ -668,7 +680,13 @@ def _semantic_hits(
     try:
         from ..features.signal.service import get_signal_service
 
-        result = get_signal_service().search_vectors(query=q, limit=limit, source_id=source_id)
+        result = get_signal_service().search_vectors(
+            query=q,
+            limit=limit,
+            source_id=source_id,
+            event_after=time_range[0] if time_range else None,
+            event_before=time_range[1] if time_range else None,
+        )
         hits: List[Dict[str, Any]] = []
         for item in result.get("items") or []:
             hits.append(
@@ -725,6 +743,191 @@ def _load_ranked_clusters(
         return []
 
 
+# Owner-only artifact classes and the manifest grant that unlocks each for
+# non-owner tiers. Dense rollups (stats, dossiers) are computed unconditionally
+# but packaged only where a scope explicitly asks for them.
+_OWNER_ONLY_GRANTS = {
+    "stat_insight": "stat_insights",
+    "entity_dossier": "entity_dossiers",
+    "fact": "owner_facts",
+}
+
+
+def _fact_disclosure_allowed(
+    fact: Dict[str, Any],
+    disclosure_tier: str,
+    manifest: ScopeResolutionManifest,
+) -> bool:
+    """Owner-only facts never leave the owner tier without an explicit grant."""
+    if str(fact.get("disclosure") or "") != "owner_only":
+        return True
+    if disclosure_tier == "owner_raw":
+        return True
+    grant = _OWNER_ONLY_GRANTS.get(str(fact.get("object_type") or ""), "stat_insights")
+    return grant in (manifest.signal_objects or [])
+
+
+def _load_fact_store_items(
+    conn,
+    query_text: str,
+    linked_entities: List[Dict[str, Any]],
+    *,
+    disclosure_tier: str,
+    manifest: ScopeResolutionManifest,
+) -> List[Dict[str, Any]]:
+    """Atomic facts: subject-first for linked entities, then token search."""
+    try:
+        from ..features.facts.store import FactStore
+    except Exception:
+        return []
+    store = FactStore(conn)
+    facts: List[Dict[str, Any]] = []
+    seen_ids: set = set()
+    try:
+        subject_ids = [e["entity_id"] for e in linked_entities]
+        self_row = conn.execute("SELECT entity_id FROM entities WHERE is_self=1 LIMIT 1").fetchone()
+        if self_row and self_row[0] not in subject_ids:
+            subject_ids.append(str(self_row[0]))
+        for subject_id in subject_ids:
+            for fact in store.facts_for_subject(subject_id):
+                if fact["object_id"] not in seen_ids:
+                    facts.append(fact)
+                    seen_ids.add(fact["object_id"])
+        for fact in store.search(_query_tokens(query_text)):
+            if fact["object_id"] not in seen_ids:
+                facts.append(fact)
+                seen_ids.add(fact["object_id"])
+    except Exception as exc:
+        logger.debug("fact store load skipped: %s", exc)
+        return []
+
+    tokens = set(_query_tokens(query_text))
+    items: List[Dict[str, Any]] = []
+    for fact in facts:
+        payload = fact.get("payload") or {}
+        gate_item = {"object_type": "fact", "disclosure": payload.get("disclosure")}
+        if not _fact_disclosure_allowed(gate_item, disclosure_tier, manifest):
+            continue
+        text = FactStore.render(fact)
+        blob = text.lower()
+        overlap = sum(1 for t in tokens if t in blob)
+        items.append(
+            {
+                "topic": text[:120],
+                "summary_text": text,
+                "record_id": fact["object_id"],
+                "predicate": payload.get("predicate"),
+                "retrieval_source": "fact",
+                "relevance_score": round(min(1.0, 0.6 + 0.1 * overlap), 4),
+                "_overlap": overlap,
+            }
+        )
+    items.sort(key=lambda i: i.pop("_overlap"), reverse=True)
+    return items[:10]
+
+
+def _load_stat_insight_items(
+    conn,
+    query_text: str,
+    *,
+    dimensions: Optional[List[str]] = None,
+    disclosure_tier: str = "owner_raw",
+    manifest: Optional[ScopeResolutionManifest] = None,
+    limit: int = 8,
+) -> List[Dict[str, Any]]:
+    """Aggregate-intent queries answer best from stat insights, not chunks."""
+    import json as _json
+
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT payload_json FROM signal_facts WHERE fact_id LIKE 'stat:%' ORDER BY created_at DESC LIMIT 200"
+        ).fetchall()
+    except Exception:
+        return []
+    tokens = set(_query_tokens(query_text))
+    wanted_dims = {d.lower() for d in (dimensions or [])}
+    scored: List[Tuple[float, Dict[str, Any]]] = []
+    for (payload_json,) in rows:
+        try:
+            fact = _json.loads(payload_json)
+        except _json.JSONDecodeError:
+            continue
+        if manifest is not None and not _fact_disclosure_allowed(fact, disclosure_tier, manifest):
+            continue
+        text = str(fact.get("tag") or fact.get("summary_text") or "").strip()
+        if not text:
+            continue
+        blob = f"{text} {fact.get('group_key') or ''} {fact.get('record_id') or ''}".lower()
+        overlap = sum(1 for t in tokens if t in blob)
+        dim_bonus = 1.0 if str(fact.get("dimension") or "").lower() in wanted_dims else 0.0
+        score = overlap + dim_bonus
+        if score <= 0:
+            continue
+        scored.append(
+            (
+                score,
+                {
+                    "topic": text[:120],
+                    "summary_text": text,
+                    "record_id": fact.get("fact_id"),
+                    "dimension": fact.get("dimension"),
+                    "retrieval_source": "stat_insight",
+                    "relevance_score": round(min(1.0, 0.5 + 0.15 * score), 4),
+                },
+            )
+        )
+    scored.sort(key=lambda pair: pair[0], reverse=True)
+    return [item for _, item in scored[:limit]]
+
+
+def _fusion_item_key(item: Dict[str, Any]) -> str:
+    record_id = str(item.get("record_id") or "")
+    if record_id:
+        return f"rec:{record_id}"
+    cluster_id = str(item.get("cluster_id") or "")
+    if cluster_id:
+        return f"cluster:{cluster_id}"
+    return f"txt:{str(item.get('retrieval_source') or '')}:{str(item.get('topic') or '')[:80]}"
+
+
+def _rrf_fuse_summary_lists(
+    lists: List[Tuple[str, float, List[Dict[str, Any]]]],
+    *,
+    k: int = 60,
+    cap: int = _SUMMARY_ITEM_CAP,
+) -> List[Dict[str, Any]]:
+    """Fuse ordered contributor lists with weighted reciprocal rank fusion.
+
+    Each entry is (source_name, weight, ordered_items). Scores from different
+    contributors are never compared directly — only ranks are, which is the
+    whole point: cosine similarities, keyword overlaps, and fixed brief scores
+    live on incomparable scales.
+    """
+    scores: Dict[str, float] = {}
+    best_item: Dict[str, Dict[str, Any]] = {}
+    contributors: Dict[str, List[str]] = {}
+    for source_name, weight, ordered in lists:
+        for rank, item in enumerate(ordered):
+            key = _fusion_item_key(item)
+            scores[key] = scores.get(key, 0.0) + weight / (k + rank + 1)
+            contributors.setdefault(key, []).append(source_name)
+            if key not in best_item:
+                best_item[key] = dict(item)
+
+    if not scores:
+        return []
+    max_score = max(scores.values()) or 1.0
+    fused: List[Dict[str, Any]] = []
+    for key, score in sorted(scores.items(), key=lambda pair: pair[1], reverse=True)[:cap]:
+        item = best_item[key]
+        item["relevance_score"] = round(score / max_score, 4)
+        item["fusion_sources"] = sorted(set(contributors.get(key) or []))
+        fused.append(item)
+    return fused
+
+
 def _build_summary_items(
     *,
     manifest: ScopeResolutionManifest,
@@ -734,111 +937,180 @@ def _build_summary_items(
     ranked_clusters: List[Dict[str, Any]],
     installed_source_ids: Optional[List[str]] = None,
     disclosure_tier: str = "owner_raw",
+    plan=None,
 ) -> List[Dict[str, Any]]:
-    items: List[Dict[str, Any]] = []
+    from ..features.signal.vector_settings import fusion_rrf_enabled
+
     hit_record_ids = {str(h.get("record_id")) for h in semantic_hits if h.get("record_id")}
     prefer_goals = "user_goals" in (manifest.signal_objects or [])
     work_scope = manifest.scope_id == "work_context:read"
-
-    if prefer_goals or work_scope:
-        goal_items = _load_user_goal_summaries(
-            query_text,
-            source_ids=_resolve_source_ids(manifest, installed_source_ids) or None,
-        )
-        items.extend(goal_items)
-
     source_ids = _resolve_source_ids(manifest, installed_source_ids)
-    items.extend(
-        _load_canonical_summary_items(
-            manifest=manifest,
-            adapters=adapters,
-            query_text=query_text,
-            source_ids=source_ids,
-            disclosure_tier=disclosure_tier,
-        )
+
+    goal_items: List[Dict[str, Any]] = []
+    if prefer_goals or work_scope:
+        goal_items = _load_user_goal_summaries(query_text, source_ids=source_ids or None)
+
+    canonical_items = _load_canonical_summary_items(
+        manifest=manifest,
+        adapters=adapters,
+        query_text=query_text,
+        source_ids=source_ids,
+        disclosure_tier=disclosure_tier,
     )
-    items.extend(_load_brief_summary_items(manifest.primary_dimensions))
+
+    brief_dims = list(manifest.primary_dimensions)
     if manifest.scope_id == "activity:read":
-        items.extend(_load_brief_summary_items(["Profile"]))
+        brief_dims.append("Profile")
+    brief_items = _load_brief_summary_items(brief_dims)
+
+    # Legacy work-scope employer heuristic (scheduled for deletion once the
+    # query planner covers it); contributes ordered items, not fake scores.
     if manifest.scope_id == "work_context:read" and query_text:
         lowered = query_text.lower()
         if any(token in lowered for token in ("employer", "company", "prior", "before", "previous")):
-            source_ids = _resolve_source_ids(manifest, installed_source_ids)
             for row in _list_canonical_rows(adapters, "profile_records", source_ids=source_ids, limit=50):
                 if str(row.get("record_type") or "").lower() != "experience":
                     continue
                 text = _row_summary_text("profile_records", row, scope_id=manifest.scope_id)
                 if not text:
                     continue
-                items.append(
+                canonical_items.insert(
+                    0,
                     {
                         "topic": text[:120],
                         "summary_text": text,
+                        "record_id": row.get("record_id"),
                         "relevance_score": 0.94,
                         "retrieval_source": "canonical:profile_records",
-                    }
+                    },
                 )
 
-    vector_dampen = _VECTOR_WORK_SCOPE_DAMPEN if work_scope else 1.0
+    cluster_items = [
+        {
+            "topic": cluster.get("label"),
+            "summary_text": cluster.get("label"),
+            "dimension": cluster.get("dimension"),
+            "cluster_id": cluster.get("cluster_id"),
+            "member_count": cluster.get("member_count"),
+            "relevance_score": float(cluster.get("relevance_score") or 0.0),
+            "retrieval_source": "cluster",
+        }
+        for cluster in ranked_clusters
+    ]
 
-    for cluster in ranked_clusters:
-        items.append(
-            {
-                "topic": cluster.get("label"),
-                "summary_text": cluster.get("label"),
-                "dimension": cluster.get("dimension"),
-                "cluster_id": cluster.get("cluster_id"),
-                "member_count": cluster.get("member_count"),
-                "relevance_score": float(cluster.get("relevance_score") or 0.0),
-                "retrieval_source": "cluster",
-            }
-        )
+    vector_items = [
+        {
+            "topic": hit.get("text_preview"),
+            "summary_text": hit.get("text_preview"),
+            "record_id": hit.get("record_id"),
+            "source_id": hit.get("source_id"),
+            "signal_dimension": hit.get("signal_dimension"),
+            "relevance_score": round(float(hit.get("similarity") or 0.0), 4),
+            "retrieval_source": "vector",
+        }
+        for hit in semantic_hits
+    ]
 
-    for hit in semantic_hits:
-        sim = float(hit.get("similarity") or 0.0) * vector_dampen
-        items.append(
-            {
-                "topic": hit.get("text_preview"),
-                "summary_text": hit.get("text_preview"),
-                "record_id": hit.get("record_id"),
-                "source_id": hit.get("source_id"),
-                "signal_dimension": hit.get("signal_dimension"),
-                "relevance_score": round(sim, 4),
-                "retrieval_source": "vector",
-            }
-        )
-
+    # Minimal-disclosure gate: owner-only facts (e.g. stat_insight aggregates —
+    # work rhythms, spend patterns, contact cadence) are dense fingerprints of
+    # the person. They are computed unconditionally but only *packaged* for the
+    # owner tier, unless the scope manifest explicitly grants "stat_insights".
+    fact_items: List[Dict[str, Any]] = []
     for dim in manifest.primary_dimensions:
         dim_key = dim.lower()
         page = adapters.signal.get_by_dimension(dim_key, limit=50, offset=0)
         for fact in page.items:
+            if not _fact_disclosure_allowed(fact, disclosure_tier, manifest):
+                continue
             label = fact.get("goal_text") or fact.get("summary_text") or fact.get("topic")
             if not label and not fact.get("dimension"):
                 continue
             record_id = str(fact.get("record_id") or fact.get("fact_id") or "")
             if hit_record_ids and record_id and record_id not in hit_record_ids and not fact.get("goal_text"):
                 continue
-            if fact.get("goal_text"):
-                score = _goal_relevance(str(fact.get("goal_text")), query_text)
-                retrieval_source = "signal_fact"
-            else:
-                score = 0.35 if hit_record_ids else 0.1
-                retrieval_source = "signal_fact"
-            items.append(
+            score = (
+                _goal_relevance(str(fact.get("goal_text")), query_text)
+                if fact.get("goal_text")
+                else (0.35 if hit_record_ids else 0.1)
+            )
+            fact_items.append(
                 {
                     **{k: v for k, v in fact.items() if k != "content"},
                     "topic": label,
                     "summary_text": label,
                     "relevance_score": round(score, 4),
-                    "retrieval_source": retrieval_source,
+                    "retrieval_source": "signal_fact",
                 }
             )
+    fact_items.sort(key=lambda item: float(item.get("relevance_score") or 0.0), reverse=True)
 
+    # Entity spine: link query entities, contribute dossier/mention items.
+    entity_items: List[Dict[str, Any]] = []
+    fact_store_items: List[Dict[str, Any]] = []
+    if query_text:
+        try:
+            from ..core.state import get_db_connection
+            from ..features.entities.linking import entity_context_items, link_query_entities
+
+            conn = get_db_connection()
+            if conn is not None:
+                linked = link_query_entities(conn, query_text)
+                entity_items = [
+                    item
+                    for item in entity_context_items(conn, linked)
+                    if _fact_disclosure_allowed(item, disclosure_tier, manifest)
+                ]
+                fact_store_items = _load_fact_store_items(
+                    conn, query_text, linked, disclosure_tier=disclosure_tier, manifest=manifest
+                )
+        except Exception as exc:
+            logger.debug("entity linking skipped: %s", exc)
+
+    # Aggregate-shaped queries ("how often…", "average…") answer best from
+    # the statistics layer; give those insights a heavyweight list.
+    stat_items: List[Dict[str, Any]] = []
+    if plan is not None and getattr(plan, "aggregate_intent", False):
+        try:
+            from ..core.state import get_db_connection
+
+            stat_items = _load_stat_insight_items(
+                get_db_connection(),
+                query_text,
+                dimensions=getattr(plan, "dimensions", None),
+                disclosure_tier=disclosure_tier,
+                manifest=manifest,
+            )
+        except Exception as exc:
+            logger.debug("stat insight load skipped: %s", exc)
+
+    if fusion_rrf_enabled():
+        canonical_weight = 2.0 if work_scope else 1.0
+        return _rrf_fuse_summary_lists(
+            [
+                ("stat_insights", 2.0, stat_items),
+                ("facts_store", 1.5, fact_store_items),
+                ("entities", 1.5, entity_items),
+                ("goals", 1.0, goal_items),
+                ("canonical", canonical_weight, canonical_items),
+                ("briefs", 0.8, brief_items),
+                ("clusters", 0.8, cluster_items),
+                ("vector", 0.6 if work_scope else 1.0, vector_items),
+                ("signal_facts", 1.0, fact_items),
+            ]
+        )
+
+    # Legacy path (TOPOS_FUSION_RRF=off): incomparable absolute scores.
+    for item in entity_items + fact_store_items + stat_items:
+        item.setdefault("relevance_score", 0.9)
+    items = stat_items + fact_store_items + entity_items + goal_items + canonical_items + brief_items + cluster_items + vector_items + fact_items
     if work_scope:
         for item in items:
             if str(item.get("retrieval_source") or "").startswith("canonical:profile_records"):
                 item["relevance_score"] = max(float(item.get("relevance_score") or 0.0), 0.96)
-
+            if str(item.get("retrieval_source") or "") == "vector":
+                item["relevance_score"] = round(
+                    float(item.get("relevance_score") or 0.0) * _VECTOR_WORK_SCOPE_DAMPEN, 4
+                )
     items.sort(key=lambda item: float(item.get("relevance_score") or 0.0), reverse=True)
     return items[:_SUMMARY_ITEM_CAP]
 
@@ -878,15 +1150,39 @@ class DefaultSignalRetrievalAdapter:
 
         source_filter = manifest.default_source_id
         source_ids = _resolve_source_ids(manifest, request.installed_source_ids)
+
+        # One structured parse ahead of retrieval (entities/time/aggregate).
+        plan = None
+        if query_text:
+            try:
+                from ..core.state import get_db_connection
+                from .planner import build_query_plan, query_planner_enabled
+
+                if query_planner_enabled():
+                    plan = build_query_plan(get_db_connection(), query_text)
+                    retrieval_meta["query_plan"] = plan.to_meta()
+            except Exception as exc:
+                logger.debug("query planner skipped: %s", exc)
+
+        time_range = plan.time_range if plan else None
+        semantic_query = query_text
+        if plan and plan.semantic_residual and len(plan.semantic_residual) >= 6:
+            semantic_query = plan.semantic_residual
+
         semantic_hits: List[Dict[str, Any]] = []
         vector_error: Optional[str] = None
         if query_text and request.access_mode in ("summary", "inference"):
-            semantic_hits, vector_error = _semantic_hits(query_text, source_id=source_filter)
+            semantic_hits, vector_error = _semantic_hits(
+                semantic_query, source_id=source_filter, time_range=time_range
+            )
+            if not semantic_hits and time_range:
+                # Time scope can starve results (sparse corpora); retry unscoped.
+                semantic_hits, vector_error = _semantic_hits(semantic_query, source_id=source_filter)
             if not semantic_hits and source_ids:
                 for sid in source_ids:
                     if sid == source_filter:
                         continue
-                    semantic_hits, vector_error = _semantic_hits(query_text, source_id=sid)
+                    semantic_hits, vector_error = _semantic_hits(semantic_query, source_id=sid)
                     if semantic_hits:
                         break
             if semantic_hits:
@@ -990,6 +1286,7 @@ class DefaultSignalRetrievalAdapter:
                     ranked_clusters=ranked_clusters,
                     installed_source_ids=request.installed_source_ids,
                     disclosure_tier=request.disclosure_tier,
+                    plan=plan,
                 )
                 if summaries:
                     touched.append("signal")
@@ -1000,6 +1297,8 @@ class DefaultSignalRetrievalAdapter:
                     page = self._adapters.signal.get_by_dimension(dim_key, limit=50, offset=0)
                     touched.append("signal")
                     for item in page.items:
+                        if not _fact_disclosure_allowed(item, request.disclosure_tier, manifest):
+                            continue
                         if item.get("summary_text") or item.get("topic") or item.get("dimension"):
                             summaries.append({k: v for k, v in item.items() if k != "content"})
             packet["summaries"] = summaries
@@ -1026,7 +1325,7 @@ class DefaultSignalRetrievalAdapter:
                 disclosure_tier=request.disclosure_tier,
             )
             for item in canon_items:
-                scores.append({k: v for k, v in item.items() if k not in _INFERENCE_EXCLUDED_KEYS})
+                scores.append({k: v for k, v in item.items() if k not in _INFERENCE_CANONICAL_EXCLUDED_KEYS})
             if manifest.scope_id == "activity:read":
                 for item in _load_brief_summary_items(["Profile"]):
                     scores.append({k: v for k, v in item.items() if k not in _INFERENCE_EXCLUDED_KEYS})
@@ -1040,12 +1339,19 @@ class DefaultSignalRetrievalAdapter:
                 page = self._adapters.signal.get_by_dimension(dim.lower(), limit=50, offset=0)
                 touched.append("signal")
                 for item in page.items:
+                    if not _fact_disclosure_allowed(item, request.disclosure_tier, manifest):
+                        continue
                     scores.append({k: v for k, v in item.items() if k not in _INFERENCE_EXCLUDED_KEYS})
             if ranked_clusters:
                 packet["topic_clusters"] = ranked_clusters
                 counts["topic_clusters"] = len(ranked_clusters)
             if semantic_hits:
-                packet["semantic_hits"] = semantic_hits
+                # Inference exposes only the similarity/id signal from semantic hits, never
+                # the raw chunk preview text.
+                packet["semantic_hits"] = [
+                    {k: v for k, v in hit.items() if k not in _INFERENCE_SEMANTIC_EXCLUDED_KEYS}
+                    for hit in semantic_hits
+                ]
                 counts["semantic_hits"] = len(semantic_hits)
             graph = self._adapters.graph.list_graph(limit_nodes=50, limit_edges=100)
             if graph.get("edges") or graph.get("nodes"):

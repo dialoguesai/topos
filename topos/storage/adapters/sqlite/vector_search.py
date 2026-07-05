@@ -23,13 +23,23 @@ def _sqlite_vec_ready(conn: sqlite3.Connection) -> bool:
     return row is not None
 
 
+def _vec_table_dims(conn: sqlite3.Connection) -> int:
+    """Dims declared in the vec0 DDL (0 when table missing/unparseable)."""
+    from ...db.migrations.vector_storage_v4 import declared_vec_dims
+
+    try:
+        return declared_vec_dims(conn)
+    except Exception:
+        return 0
+
+
 def sync_vec_row(
     conn: sqlite3.Connection,
     *,
     embedding_id: str,
     vector: List[float],
 ) -> None:
-    if not _sqlite_vec_ready(conn) or len(vector) != 384:
+    if not _sqlite_vec_ready(conn) or len(vector) != _vec_table_dims(conn):
         return
     try:
         conn.execute(
@@ -119,7 +129,7 @@ def search_similar_ann(
     limit: int = 20,
     fetch_limit: Optional[int] = None,
 ) -> Optional[Tuple[List[Dict[str, Any]], int]]:
-    if len(query_vector) != 384 or not _sqlite_vec_ready(conn):
+    if not _sqlite_vec_ready(conn) or len(query_vector) != _vec_table_dims(conn):
         return None
     fetch = max(fetch_limit or limit, limit)
     try:
@@ -140,37 +150,49 @@ def search_similar_ann(
     if not vec_rows:
         return None
 
+    # Batch-fetch metadata with filters pushed into SQL (avoids N+1 lookups).
+    distance_by_id = {str(eid): dist for eid, dist in vec_rows}
+    id_list = list(distance_by_id.keys())
+    placeholders = ",".join("?" for _ in id_list)
+    filter_sql = ""
+    filter_params: List[Any] = []
+    if source_id is not None:
+        filter_sql += " AND source_id = ?"
+        filter_params.append(source_id)
+    if dimension is not None:
+        filter_sql += " AND signal_dimension = ?"
+        filter_params.append(dimension)
+    if model is not None:
+        filter_sql += " AND model = ?"
+        filter_params.append(model)
+    if event_after is not None:
+        filter_sql += " AND (event_at IS NULL OR event_at >= ?)"
+        filter_params.append(event_after)
+    if event_before is not None:
+        filter_sql += " AND (event_at IS NULL OR event_at <= ?)"
+        filter_params.append(event_before)
+    meta_rows = conn.execute(
+        f"""
+        SELECT embedding_id, provenance_json
+        FROM signal_embeddings
+        WHERE embedding_id IN ({placeholders}){filter_sql}
+        """,
+        (*id_list, *filter_params),
+    ).fetchall()
+
     scored: List[tuple[float, Dict[str, Any]]] = []
-    for embedding_id, distance in vec_rows:
-        row = conn.execute(
-            """
-            SELECT provenance_json, source_id, signal_dimension, model, event_at
-            FROM signal_embeddings
-            WHERE embedding_id = ?
-            """,
-            (embedding_id,),
-        ).fetchone()
-        if not row:
-            continue
-        prov_raw, sid, dim, mdl, event_at = row
-        if source_id is not None and sid != source_id:
-            continue
-        if dimension is not None and dim != dimension:
-            continue
-        if model is not None and mdl != model:
-            continue
-        if event_after is not None and event_at is not None and event_at < event_after:
-            continue
-        if event_before is not None and event_at is not None and event_at > event_before:
-            continue
+    for embedding_id, prov_raw in meta_rows:
+        distance = distance_by_id.get(str(embedding_id))
         meta = json.loads(prov_raw)
         sim = 1.0 - float(distance) if distance is not None else 0.0
         meta["similarity"] = round(sim, 6)
         scored.append((sim, meta))
-        if len(scored) >= fetch:
-            break
 
-    if not scored:
+    # ANN fetched the global top-N; if filters trimmed it below the requested
+    # limit there may be qualifying rows outside the ANN window. Fall back to
+    # exact search rather than silently returning a starved result set.
+    has_filters = bool(filter_sql)
+    if not scored or (has_filters and len(scored) < limit):
         return None
     scored.sort(key=lambda pair: pair[0], reverse=True)
     return [meta for _, meta in scored[:fetch]], len(scored)

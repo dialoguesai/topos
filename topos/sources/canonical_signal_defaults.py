@@ -11,6 +11,9 @@ CANONICAL_BASELINE_SIGNAL_JOBS: Tuple[str, ...] = (
     "topic_clusters",
     "entities",
     "relationship_edges",
+    "statistics",
+    "facts",
+    "timeline",
 )
 
 

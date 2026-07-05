@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..model_cache import ModelSlot, get_model_cache
@@ -15,6 +16,57 @@ DEFAULT_EMOTION_MODEL = "SamLowe/roberta-base-go_emotions"
 DEFAULT_NER_MODEL = "dslim/bert-base-NER"
 DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 DEFAULT_SENTIMENT_MODEL = "cardiffnlp/twitter-roberta-base-sentiment-latest"
+DEFAULT_RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
+
+# Retrieval-tuned embedding models are asymmetric: queries and passages get
+# different prefixes. Symmetric models (MiniLM) use empty prefixes.
+EMBEDDING_MODEL_PROFILES: Dict[str, Dict[str, Any]] = {
+    "sentence-transformers/all-MiniLM-L6-v2": {
+        "dims": 384,
+        "query_prefix": "",
+        "passage_prefix": "",
+    },
+    "BAAI/bge-small-en-v1.5": {
+        "dims": 384,
+        "query_prefix": "Represent this sentence for searching relevant passages: ",
+        "passage_prefix": "",
+    },
+    "BAAI/bge-base-en-v1.5": {
+        "dims": 768,
+        "query_prefix": "Represent this sentence for searching relevant passages: ",
+        "passage_prefix": "",
+    },
+    "intfloat/e5-small-v2": {
+        "dims": 384,
+        "query_prefix": "query: ",
+        "passage_prefix": "passage: ",
+    },
+    "nomic-ai/nomic-embed-text-v1.5": {
+        "dims": 768,
+        "query_prefix": "search_query: ",
+        "passage_prefix": "search_document: ",
+        "trust_remote_code": True,
+    },
+}
+
+
+def active_embedding_model() -> str:
+    """Embedding model for new writes and query embedding (env-switchable)."""
+    return os.environ.get("TOPOS_EMBED_MODEL", "").strip() or DEFAULT_EMBEDDING_MODEL
+
+
+def embedding_model_profile(model_name: Optional[str] = None) -> Dict[str, Any]:
+    name = (model_name or active_embedding_model()).strip()
+    return EMBEDDING_MODEL_PROFILES.get(name, {"query_prefix": "", "passage_prefix": ""})
+
+
+def apply_embedding_prefix(texts: List[str], *, model_name: Optional[str], input_role: str) -> List[str]:
+    profile = embedding_model_profile(model_name)
+    prefix = str(profile.get(f"{input_role}_prefix") or "") if input_role in ("query", "passage") else ""
+    if not prefix:
+        return texts
+    return [f"{prefix}{t}" for t in texts]
+
 
 _MODEL_NAME_TO_SLOT: Dict[str, ModelSlot] = {
     DEFAULT_URL_CLASSIFICATION_MODEL: ModelSlot.URL_PIPELINE,
@@ -22,6 +74,7 @@ _MODEL_NAME_TO_SLOT: Dict[str, ModelSlot] = {
     DEFAULT_NER_MODEL: ModelSlot.NER,
     DEFAULT_EMBEDDING_MODEL: ModelSlot.EMBEDDING,
     DEFAULT_SENTIMENT_MODEL: ModelSlot.SENTIMENT,
+    DEFAULT_RERANK_MODEL: ModelSlot.RERANKER,
 }
 
 
@@ -111,8 +164,12 @@ class HuggingFaceAdapter:
             return self._run_emotion_classification_batch(payload, model)
         if subtype == "entity_extraction":
             return self._run_entity_extraction(payload, model)
+        if subtype == "entity_extraction_batch":
+            return self._run_entity_extraction_batch(payload, model)
         if subtype == "embedding":
             return self._run_embedding(payload, model, config)
+        if subtype == "rerank":
+            return self._run_rerank(payload, model)
         if subtype == "sentiment_classification":
             return self._run_sentiment_classification(payload, model)
         if subtype == "privacy_disclosure":
@@ -267,14 +324,29 @@ class HuggingFaceAdapter:
         return handle
 
     def _get_embedding_model(self, model_name: str):
-        model = model_name or DEFAULT_EMBEDDING_MODEL
+        model = model_name or active_embedding_model()
+        profile = EMBEDDING_MODEL_PROFILES.get(model, {})
 
         def _load():
             from sentence_transformers import SentenceTransformer
 
-            return SentenceTransformer(model)
+            kwargs: Dict[str, Any] = {}
+            if profile.get("trust_remote_code"):
+                kwargs["trust_remote_code"] = True
+            return SentenceTransformer(model, **kwargs)
 
         handle, _ = get_model_cache().acquire(ModelSlot.EMBEDDING, model, _load)
+        return handle
+
+    def _get_rerank_model(self, model_name: str):
+        model = model_name or DEFAULT_RERANK_MODEL
+
+        def _load():
+            from sentence_transformers import CrossEncoder
+
+            return CrossEncoder(model)
+
+        handle, _ = get_model_cache().acquire(ModelSlot.RERANKER, model, _load)
         return handle
 
     def _get_sentiment_pipeline(self, model_name: str):
@@ -308,6 +380,44 @@ class HuggingFaceAdapter:
             )
         return {"entities": entities, "model": model, "provider": "huggingface"}
 
+    def _run_entity_extraction_batch(self, payload: Dict[str, Any], model_name: str) -> Dict[str, Any]:
+        """Batched NER: payload.items = [{id, text}]; one pipeline call per batch."""
+        items = payload.get("items") or []
+        if not isinstance(items, list) or not items:
+            return {"error": "items required", "items": [], "model": model_name or DEFAULT_NER_MODEL}
+        model = model_name or DEFAULT_NER_MODEL
+        ner = self._get_ner_pipeline(model)
+        texts = [str(item.get("text") or item.get("content") or "") for item in items]
+        non_empty_idx = [i for i, t in enumerate(texts) if t.strip()]
+        raw_batches: List[Any] = []
+        if non_empty_idx:
+            raw_batches = ner([texts[i] for i in non_empty_idx])
+            # A single-text call returns a flat entity list rather than a list of lists.
+            if raw_batches and isinstance(raw_batches[0], dict):
+                raw_batches = [raw_batches]
+        out_items: List[Dict[str, Any]] = []
+        batch_ptr = 0
+        for idx, item in enumerate(items):
+            item_id = item.get("id") or item.get("message_id")
+            if idx not in non_empty_idx:
+                out_items.append({"id": item_id, "entities": []})
+                continue
+            raw = raw_batches[batch_ptr] if batch_ptr < len(raw_batches) else []
+            batch_ptr += 1
+            entities: List[Dict[str, Any]] = []
+            for ent in raw or []:
+                entities.append(
+                    {
+                        "entity_text": ent.get("word") or ent.get("entity"),
+                        "entity_type": ent.get("entity_group") or ent.get("entity"),
+                        "confidence": float(ent.get("score", 0.0) or 0.0),
+                        "start": ent.get("start"),
+                        "end": ent.get("end"),
+                    }
+                )
+            out_items.append({"id": item_id, "entities": entities})
+        return {"items": out_items, "model": model, "provider": "huggingface"}
+
     def _run_embedding(
         self, payload: Dict[str, Any], model_name: str, config: Optional[Dict[str, Any]] = None
     ) -> Dict[str, Any]:
@@ -324,11 +434,16 @@ class HuggingFaceAdapter:
             return {
                 "vectors": [],
                 "dims": 0,
-                "model": model_name or DEFAULT_EMBEDDING_MODEL,
+                "model": model_name or active_embedding_model(),
                 "provider": "huggingface",
                 "normalized": embedding_normalize_enabled(),
             }
-        model = model_name or DEFAULT_EMBEDDING_MODEL
+        model = model_name or active_embedding_model()
+        input_role = str(
+            (config or {}).get("input_role") or payload.get("input_role") or ""
+        ).strip().lower()
+        if input_role in ("query", "passage"):
+            texts = apply_embedding_prefix(texts, model_name=model, input_role=input_role)
         batch_size = int((config or {}).get("batch_size") or payload.get("batch_size") or 32)
         embedder = self._get_embedding_model(model)
         normalize = embedding_normalize_enabled()
@@ -351,6 +466,34 @@ class HuggingFaceAdapter:
             "provider": "huggingface",
             "normalized": normalize,
         }
+
+    def _run_rerank(self, payload: Dict[str, Any], model_name: str) -> Dict[str, Any]:
+        """Cross-encoder rerank: payload = {query, candidates: [{id, text}]}."""
+        query = str(payload.get("query") or "").strip()
+        candidates = payload.get("candidates") or []
+        model = model_name or DEFAULT_RERANK_MODEL
+        if not query or not isinstance(candidates, list) or not candidates:
+            return {"error": "query and candidates required", "items": [], "model": model}
+        pairs = [(query, str(c.get("text") or "")) for c in candidates]
+        try:
+            reranker = self._get_rerank_model(model)
+            scores = reranker.predict(pairs, show_progress_bar=False)
+        except Exception as exc:
+            logger.debug("rerank unavailable (%s); returning input order", exc)
+            return {
+                "items": [
+                    {"id": c.get("id"), "rerank_score": None} for c in candidates
+                ],
+                "model": model,
+                "provider": "huggingface",
+                "status": "unavailable",
+            }
+        items = [
+            {"id": c.get("id"), "rerank_score": float(s)}
+            for c, s in zip(candidates, scores)
+        ]
+        items.sort(key=lambda item: item["rerank_score"], reverse=True)
+        return {"items": items, "model": model, "provider": "huggingface"}
 
     def _run_content_nsfw_classification(self, payload: Dict[str, Any], model_name: str) -> Dict[str, Any]:
         from ...sanitization.nsfw_classifier import classify_nsfw_batch

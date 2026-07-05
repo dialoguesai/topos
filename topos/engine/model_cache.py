@@ -24,6 +24,7 @@ class ModelSlot(str, Enum):
     SENTIMENT = "sentiment"
     NSFW = "nsfw"
     PRIVACY_FILTER = "privacy_filter"
+    RERANKER = "reranker"
 
 
 _SUBTYPE_TO_SLOT: Dict[str, ModelSlot] = {
@@ -33,7 +34,9 @@ _SUBTYPE_TO_SLOT: Dict[str, ModelSlot] = {
     "emo_27": ModelSlot.EMOTION,
     "emotion_classification_batch": ModelSlot.EMOTION,
     "entity_extraction": ModelSlot.NER,
+    "entity_extraction_batch": ModelSlot.NER,
     "embedding": ModelSlot.EMBEDDING,
+    "rerank": ModelSlot.RERANKER,
     "sentiment_classification": ModelSlot.SENTIMENT,
     "privacy_disclosure": ModelSlot.PRIVACY_FILTER,
     "content_nsfw_classification": ModelSlot.NSFW,

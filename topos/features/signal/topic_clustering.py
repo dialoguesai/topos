@@ -191,7 +191,7 @@ def load_embedding_records(
         FROM signal_embeddings
         WHERE vector_blob IS NOT NULL
           AND source_id IN ({placeholders})
-        ORDER BY embedding_id
+        ORDER BY record_id, chunk_index
         LIMIT ?
         """,
         (*ids, limit),
@@ -716,7 +716,10 @@ def _detect_bridge_clusters(clusters: List[Dict[str, Any]]) -> List[Dict[str, An
                     seen_members.add(key)
         if not entities and len(group) < 2:
             continue
-        bridge_id = f"tc_bridge_{uuid.uuid4().hex[:12]}"
+        # Deterministic from the bridge term so the ID survives recomputes.
+        import hashlib
+
+        bridge_id = f"tc_bridge_{hashlib.sha1(term.encode('utf-8')).hexdigest()[:12]}"
         bridge = _build_cluster(bridge_id, members, cluster_index=len(clusters) + len(bridges))
         bridge["dimension"] = "network_bridge"
         bridge["primary_dimension"] = "network_bridge"
@@ -1033,6 +1036,24 @@ def recompute_topic_clusters(
         }
     clusters = cluster_records_by_facet(records, k=k)
     clusters = _enrich_all_clusters(conn, clusters)
+
+    # Stable identities: rename new clusters to matched old IDs (centroid
+    # cosine, greedy) so top_topics facts / UI links / embedding cluster_id
+    # columns survive the recompute instead of churning every batch.
+    from .incremental_clustering import (
+        clear_candidate_pool,
+        load_cluster_centroids,
+        load_cluster_member_map,
+        log_recompute,
+        match_stable_cluster_ids,
+        sync_member_cluster_ids,
+    )
+
+    old_clusters = load_cluster_centroids(conn)
+    ids_preserved = match_stable_cluster_ids(
+        old_clusters, clusters, old_members=load_cluster_member_map(conn)
+    )
+
     _strip_member_vectors(clusters)
     try:
         conn.execute("BEGIN IMMEDIATE")
@@ -1043,6 +1064,15 @@ def recompute_topic_clusters(
             sync_batch_id=sync_batch_id,
             commit=False,
         )
+        clear_candidate_pool(conn)
+        log_recompute(
+            conn,
+            kind="full",
+            records_processed=len(records),
+            clusters_written=int(persist_result.get("clusters_written") or 0),
+            ids_preserved=ids_preserved,
+        )
+        sync_member_cluster_ids(conn)
         conn.commit()
     except Exception:
         conn.rollback()
@@ -1051,6 +1081,7 @@ def recompute_topic_clusters(
         "status": "completed",
         "records_loaded": len(records),
         **persist_result,
+        "ids_preserved": ids_preserved,
         "cluster_labels": [c.get("label") for c in clusters],
     }
 
@@ -1121,15 +1152,17 @@ def embed_query_text_for_ranking(query_text: str) -> Optional[List[float]]:
     if not q:
         return None
     try:
-        from ...engine.backends.huggingface import DEFAULT_EMBEDDING_MODEL, HuggingFaceAdapter
+        from ...engine.backends.huggingface import HuggingFaceAdapter, active_embedding_model
         from .query_embed_cache import get_cached_query_embedding, set_cached_query_embedding
 
-        model = DEFAULT_EMBEDDING_MODEL
+        model = active_embedding_model()
         cached = get_cached_query_embedding(q, model=model)
         if cached is not None:
             return _normalize(cached)
         hf = HuggingFaceAdapter()
-        emb = hf.run_inference({"text": q}, {"subtype": "embedding", "model": model})
+        emb = hf.run_inference(
+            {"text": q}, {"subtype": "embedding", "model": model, "input_role": "query"}
+        )
         vectors = emb.get("vectors") or []
         if not vectors:
             return None
