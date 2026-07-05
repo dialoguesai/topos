@@ -197,6 +197,71 @@ async def evaluate_fit(body: FitEvaluateBody, _api_key: str = Depends(require_ap
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
+def _entities_conn():
+    from ..core.state import get_db_connection
+
+    conn = get_db_connection()
+    if conn is None:
+        raise HTTPException(status_code=503, detail="database_unavailable")
+    return conn
+
+
+@router.get("/entities")
+async def list_entities(
+    q: Optional[str] = Query(default=None, max_length=200),
+    entity_type: Optional[str] = Query(default=None, max_length=40),
+    contacts_only: bool = Query(default=False),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+    _api_key: str = Depends(require_api_key),
+):
+    """Resolved entity registry (entity spine), sorted by mention count."""
+    from ..features.entities.reads import list_entities as _list
+
+    return _list(
+        _entities_conn(),
+        q=q,
+        entity_type=entity_type,
+        contacts_only=contacts_only,
+        limit=limit,
+        offset=offset,
+    )
+
+
+# NB: must be declared before /entities/{entity_id} so "graph" isn't captured
+# as an entity id.
+@router.get("/entities/graph")
+async def get_entity_graph(
+    limit_nodes: int = Query(default=100, ge=1, le=500),
+    limit_edges: int = Query(default=300, ge=1, le=1500),
+    min_weight: float = Query(default=0.0, ge=0.0),
+    _api_key: str = Depends(require_api_key),
+):
+    """Entity-spine graph (decayed typed edges) in list_graph node/edge shape."""
+    from ..features.entities.reads import entity_graph
+
+    return entity_graph(
+        _entities_conn(),
+        limit_nodes=limit_nodes,
+        limit_edges=limit_edges,
+        min_weight=min_weight,
+    )
+
+
+@router.get("/entities/{entity_id}")
+async def get_entity(
+    entity_id: str,
+    _api_key: str = Depends(require_api_key),
+):
+    """Entity detail: aliases, connections, recent mentions, dossier (owner view)."""
+    from ..features.entities.reads import get_entity_detail
+
+    detail = get_entity_detail(_entities_conn(), entity_id)
+    if detail is None:
+        raise HTTPException(status_code=404, detail=f"entity not found: {entity_id}")
+    return detail
+
+
 @router.get("/definitions")
 async def list_signal_definitions(_api_key: str = Depends(require_api_key)):
     service = get_signal_service()
