@@ -80,11 +80,12 @@ async def ingest_file_payload(
         except Exception as exc:
             logger.warning("[PIPELINE:RAW] Failed to install runtime source definition: %s", exc)
 
-    # If source_id not provided, find it from schema_id and source_type="file"
+    # If source_id not provided, find it from schema_id and delivery=owner_upload
     if not source_id:
+        from ..sources.definitions import is_file_delivery
         from ..sources.registry import REGISTRY
         for source in REGISTRY.values():
-            if source.schema_id == schema_id and source.source_type == "file":
+            if source.schema_id == schema_id and is_file_delivery(source):
                 source_id = source.source_id
                 logger.info(
                     "[PIPELINE:RAW] Found source_id=%s for schema_id=%s (file type)",
@@ -150,9 +151,10 @@ async def ingest_ui_payload(
     # If source_id is provided and it's a UI stream source, process directly without creating JSONL
     _LEGACY_CHAT_SOURCE_ID = "chatgpt_ui_conversation"
     if source_id:
+        from ..sources.definitions import accepts_app_ingest
         from ..sources.registry import REGISTRY
         source = REGISTRY.get(source_id)
-        if source and source.source_type == "ui_stream":
+        if source and accepts_app_ingest(source):
             effective_schema = str(source.schema_id or schema_id or "").strip() or schema_id
             return await _ingest_ui_payload_direct(
                 dataset_id=dataset_id,

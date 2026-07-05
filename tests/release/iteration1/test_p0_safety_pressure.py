@@ -62,7 +62,10 @@ class TestScrubPayloadNormalizationPressure:
 class TestDisclosureFallbackPressure:
     """Disclosure columns missing on legacy DBs (MCP work_context path)."""
 
-    def test_default_disclosure_without_content_disclosure_column(self) -> None:
+    def test_default_disclosure_fails_closed_when_disclosure_pending(self) -> None:
+        # Store construction migrates the table (adds content_disclosure). A record whose
+        # ingest privacy layer has not run has a NULL disclosure value; a grantee read must
+        # withhold the raw content rather than fall back to it.
         conn = sqlite3.connect(":memory:")
         conn.execute(
             """
@@ -81,7 +84,12 @@ class TestDisclosureFallbackPressure:
         store = SQLiteCanonicalStore(conn)
         page = store.list("journal_entries", disclosure_tier="default_disclosure", limit=5)
         assert page.total == 1
-        assert "ship" in str(page.items[0].get("content", ""))
+        content = str(page.items[0].get("content", ""))
+        assert "ship" not in content
+        assert content == "[disclosure pending]"
+        # Owner still sees the raw content.
+        owner_page = store.list("journal_entries", disclosure_tier="owner_raw", limit=5)
+        assert "ship" in str(owner_page.items[0].get("content", ""))
 
     def test_disclosure_migration_idempotent_on_legacy_table(self) -> None:
         conn = sqlite3.connect(":memory:")

@@ -11,7 +11,8 @@ def test_aggregated_read_api_modules_exist() -> None:
 
 
 def test_handlers_register_aggregated_read_message_types() -> None:
-    handlers = (Path(__file__).resolve().parents[2] / "topos" / "core" / "handlers.py").read_text()
-    assert 'msg_type == "get_sources_overview"' in handlers
-    assert 'msg_type == "get_runtime_bootstrap"' in handlers
-    assert 'msg_type == "get_database_explorer_summary"' in handlers
+    from topos.core.handlers import HANDLERS
+
+    assert "get_sources_overview" in HANDLERS
+    assert "get_runtime_bootstrap" in HANDLERS
+    assert "get_database_explorer_summary" in HANDLERS

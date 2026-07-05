@@ -12,6 +12,7 @@ from ..auth import require_api_key
 from ..core.state import get_db_connection
 from ..ingestion.ingest_helpers import ingest_file_payload, ingest_ui_payload, resolve_file_format
 from ..ingestion.local_sync import run_imessage_sync, run_signal_sync, run_signal_upload
+from ..sources.definitions import DELIVERY_LOCAL_SYNC, accepts_app_ingest, is_file_delivery
 from ..sources.registry import REGISTRY
 from ..storage.signal_identity import get_signal_identity, put_signal_identity
 from ..storage.source_settings import get_source_settings, put_source_settings, update_sync_result
@@ -55,7 +56,7 @@ async def ingest_source(
     if not source:
         return {"status": "error", "error": "unknown source_id"}
 
-    if source.source_type == "file":
+    if is_file_delivery(source):
         file = None
         if request.headers.get("content-type", "").startswith("multipart/"):
             form = await request.form()
@@ -108,7 +109,7 @@ async def ingest_source(
             file_format=resolve_file_format(source_definition=source),
         )
 
-    if source.source_type == "ui_stream":
+    if accepts_app_ingest(source):
         if payload is None:
             try:
                 payload = await request.json()
@@ -123,7 +124,7 @@ async def ingest_source(
             source_id=source_id,  # Pass source_id to enable direct processing
         )
 
-    if source.source_type == "local_sync":
+    if source.delivery == DELIVERY_LOCAL_SYNC:
         # iMessage, Signal: ingestion is via sync endpoint (POST /sources/{source_id}/sync), not file/body upload
         return {
             "status": "error",
@@ -161,7 +162,7 @@ async def put_source_settings_endpoint(
     source = REGISTRY.get(source_id)
     if not source:
         return {"status": "error", "error": "unknown source_id"}
-    if source.source_type != "local_sync":
+    if source.delivery != DELIVERY_LOCAL_SYNC:
         return {"status": "error", "error": "settings only apply to local_sync sources"}
     dataset_id = dataset_id or (body.get("dataset_id") if body else None)
     if not dataset_id:
@@ -186,7 +187,7 @@ async def sync_source(
     source = REGISTRY.get(source_id)
     if not source:
         return {"status": "error", "error": "unknown source_id"}
-    if source.source_type != "local_sync":
+    if source.delivery != DELIVERY_LOCAL_SYNC:
         return {"status": "error", "error": "sync endpoint only applies to local_sync sources"}
 
     if not dataset_id:
@@ -315,7 +316,7 @@ async def get_source_contacts(
     source = REGISTRY.get(source_id)
     if not source:
         return {"status": "error", "error": "unknown source_id"}
-    if source.source_type != "local_sync":
+    if source.delivery != DELIVERY_LOCAL_SYNC:
         return {"status": "error", "error": "contacts only apply to local_sync sources"}
     if not dataset_id:
         return {"status": "error", "error": "dataset_id required"}
@@ -368,7 +369,7 @@ async def put_source_contact(
     source = REGISTRY.get(source_id)
     if not source:
         return {"status": "error", "error": "unknown source_id"}
-    if source.source_type != "local_sync":
+    if source.delivery != DELIVERY_LOCAL_SYNC:
         return {"status": "error", "error": "contacts only apply to local_sync sources"}
     if not dataset_id:
         return {"status": "error", "error": "dataset_id required"}
@@ -395,7 +396,7 @@ async def auto_resolve_source_contacts(
     source = REGISTRY.get(source_id)
     if not source:
         return {"status": "error", "error": "unknown source_id"}
-    if source.source_type != "local_sync":
+    if source.delivery != DELIVERY_LOCAL_SYNC:
         return {"status": "error", "error": "contacts only apply to local_sync sources"}
     if not dataset_id:
         return {"status": "error", "error": "dataset_id required"}

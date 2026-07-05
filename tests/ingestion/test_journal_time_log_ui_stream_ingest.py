@@ -141,3 +141,24 @@ async def test_app_ingest_fails_when_source_not_installed() -> None:
 
     assert result["status"] == "error"
     assert "not installed" in result.get("error", "").lower()
+
+
+@pytest.mark.asyncio
+async def test_app_ingest_rejects_owner_upload_delivery() -> None:
+    result = await handle_control_plane_request(
+        {
+            "id": "req-app-ingest-file-source",
+            "type": "app_ingest",
+            "payload": {
+                "user_id": "user-1",
+                "dataset_id": "user-1:default:device1",
+                "source_id": "demo_journal_file",
+                "schema_id": "demo.journal.v1",
+                "records": [{"startDate": "2026-06-23", "goal": "Should fail"}],
+            },
+        }
+    )
+
+    assert result["status"] == "error"
+    assert "delivery='owner_upload'" in result.get("error", "")
+    assert "client_push" in result.get("error", "")

@@ -37,6 +37,46 @@ def _sanitize_nsfw(text: str) -> str:
     return text
 
 
+# Text-bearing keys on summary/score/fact items that must be PII-scrubbed for grantees.
+# Non-`rows` artifacts (summaries, scores, and future facts/dossiers) surface through these
+# keys; without scrubbing them a grantee could receive raw PII in a summary_text/topic that
+# never passed through the row-level filters (B.3 — the dense-upgrade blocker).
+_GRANTEE_TEXT_KEYS = (
+    "topic",
+    "summary_text",
+    "label",
+    "text",
+    "text_preview",
+    "content_preview",
+    "entity_text",
+    "tag",
+    "title",
+    "description",
+)
+
+
+def _scrub_grantee_text_items(items: List[Any]) -> List[Any]:
+    """Grantee content policy for non-row artifacts: drop NSFW-flagged items and PII-redact
+    every text-bearing field. Unconditional for grantees — a backstop independent of any
+    per-field transforms, mirroring the row-level ingest disclosure guarantee."""
+    from ..disclosure.content_policy import is_record_nsfw
+
+    out: List[Any] = []
+    for item in items:
+        if not isinstance(item, dict):
+            out.append(item)
+            continue
+        if is_record_nsfw(item):
+            continue
+        scrubbed = dict(item)
+        for key in _GRANTEE_TEXT_KEYS:
+            val = scrubbed.get(key)
+            if isinstance(val, str) and val:
+                scrubbed[key] = _sanitize_nsfw(_redact_pii(val))
+        out.append(scrubbed)
+    return out
+
+
 def _apply_field_transforms(rows: List[Dict[str, Any]], transforms: Optional[List[FieldTransform]]) -> List[Dict[str, Any]]:
     if not transforms:
         return rows
@@ -111,5 +151,15 @@ class DisclosureFilterPipeline:
             packet["rows"] = _apply_field_transforms(rows, transforms)
             if transforms:
                 applied.append("field_transforms")
+
+        # B.3 — grantee content filter for non-row artifacts. Runs regardless of whether rows
+        # exist (in summary/inference mode rows are stripped, so this is the ONLY content
+        # filter on the path summaries/scores/facts travel to a grantee).
+        if disclosure_tier == "default_disclosure":
+            for key in ("summaries", "scores", "semantic_hits", "facts"):
+                seq = packet.get(key)
+                if isinstance(seq, list) and seq:
+                    packet[key] = _scrub_grantee_text_items(seq)
+                    applied.append(f"grantee_scrub_{key}")
 
         return FilteredContext(context_packet=packet, filters_applied=applied)

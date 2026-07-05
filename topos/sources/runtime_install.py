@@ -58,8 +58,9 @@ def _parse_source_definition_from_version_row(version_row: Dict[str, Any]) -> Di
 
 def _build_source_definition(payload: Dict[str, Any]) -> DataSourceDefinition:
     from .bundled_canonical_triples import apply_bundled_canonical_defaults
+    from .definitions import definition_from_payload
 
-    return DataSourceDefinition(**apply_bundled_canonical_defaults(payload))
+    return definition_from_payload(apply_bundled_canonical_defaults(payload))
 
 
 def _tokenize(path: str) -> List[str]:

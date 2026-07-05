@@ -13,6 +13,36 @@ def test_resolve_disclosure_tier_owner_vs_grantee():
     assert resolve_disclosure_tier(is_grantee_request=True) == "default_disclosure"
 
 
+def test_resolve_disclosure_tier_grantee_cannot_forge_owner_raw():
+    """B.2: a grantee request must never be elevated to owner_raw via an explicit tier."""
+    # Explicit owner_raw on a grantee request is clamped to default_disclosure.
+    assert (
+        resolve_disclosure_tier(is_grantee_request=True, explicit_tier="owner_raw")
+        == "default_disclosure"
+    )
+    # Same when grantee status is inferred from a non-owner requester_id.
+    assert (
+        resolve_disclosure_tier(
+            requester_id="grantee-123", owner_id="owner-9", explicit_tier="owner_raw"
+        )
+        == "default_disclosure"
+    )
+    # A disclosure_ceiling above default must still fail closed for a grantee.
+    assert (
+        resolve_disclosure_tier(is_grantee_request=True, disclosure_ceiling="raw")
+        == "default_disclosure"
+    )
+
+
+def test_resolve_disclosure_tier_owner_explicit_tier_still_honored():
+    """Non-grantee (owner) callers may still set an explicit tier in either direction."""
+    assert resolve_disclosure_tier(requester_id="owner", explicit_tier="owner_raw") == "owner_raw"
+    assert (
+        resolve_disclosure_tier(requester_id="owner", explicit_tier="default_disclosure")
+        == "default_disclosure"
+    )
+
+
 def test_apply_disclosure_tier_swaps_content():
     rows = [
         {

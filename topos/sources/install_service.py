@@ -462,6 +462,14 @@ def install_source(
     source_def = _normalize_enrichment_bindings(source_def)
     source_def = _validate_source_contract(source_def)
     source_id = str(source_def.get("source_id") or "").strip()
+    # Lazy delivery refresh (CONNECTOR_SPEC.md §3): rows are re-serialized with
+    # delivery only when written here — existing install rows are never rewritten.
+    if not str(source_def.get("delivery") or "").strip():
+        from .definitions import derive_delivery
+
+        derived_delivery = derive_delivery(str(source_def.get("source_type") or ""), source_id)
+        if derived_delivery:
+            source_def["delivery"] = derived_delivery
 
     _validate_concrete_install_scope(scope)
     scope_key = _scope_key(scope)
