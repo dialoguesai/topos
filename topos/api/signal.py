@@ -262,6 +262,64 @@ async def get_entity(
     return detail
 
 
+@router.get("/facts")
+async def list_facts(
+    predicate: Optional[str] = Query(default=None, max_length=80),
+    dimension: Optional[str] = Query(default=None, max_length=40),
+    include_closed: bool = Query(default=False),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    _api_key: str = Depends(require_api_key),
+):
+    """Atomic owner facts with temporal validity (belief history via include_closed)."""
+    from ..features.facts.reads import list_facts as _list
+
+    return _list(
+        _entities_conn(),
+        predicate=predicate,
+        dimension=dimension,
+        include_closed=include_closed,
+        limit=limit,
+        offset=offset,
+    )
+
+
+@router.get("/insights")
+async def list_stat_insights(
+    dimension: Optional[str] = Query(default=None, max_length=40),
+    limit: int = Query(default=200, ge=1, le=500),
+    _api_key: str = Depends(require_api_key),
+):
+    """Promoted statistical insights (owner-only rhythms, session stats, trends)."""
+    from ..features.facts.reads import list_stat_insights as _list
+
+    return _list(_entities_conn(), dimension=dimension, limit=limit)
+
+
+@router.get("/timeline")
+async def list_timeline(
+    canonical_table: Optional[str] = Query(default=None, max_length=60),
+    source_id: Optional[str] = Query(default=None, max_length=120),
+    date_from: Optional[str] = Query(default=None, max_length=32),
+    date_to: Optional[str] = Query(default=None, max_length=32),
+    limit: int = Query(default=100, ge=1, le=500),
+    offset: int = Query(default=0, ge=0),
+    _api_key: str = Depends(require_api_key),
+):
+    """Unified temporal projection across canonical tables (newest first)."""
+    from ..features.facts.reads import list_timeline as _list
+
+    return _list(
+        _entities_conn(),
+        canonical_table=canonical_table,
+        source_id=source_id,
+        date_from=date_from,
+        date_to=date_to,
+        limit=limit,
+        offset=offset,
+    )
+
+
 @router.get("/definitions")
 async def list_signal_definitions(_api_key: str = Depends(require_api_key)):
     service = get_signal_service()
