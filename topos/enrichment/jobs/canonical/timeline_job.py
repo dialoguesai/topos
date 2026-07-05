@@ -31,13 +31,15 @@ class TimelineJob(BaseEnrichmentJob):
         conn = get_db_connection()
         if conn is None:
             return [{"_deferred": True, "error": "database_unavailable"}]
+        from ....features.lifecycle.exclusions import excluded_record_ids
         from ....features.stats.definitions import row_event_ts
 
+        excluded = excluded_record_ids(conn)
         written = 0
         for row in canonical_messages:
             ts = row_event_ts(row)
             record_id = _record_id(row)
-            if ts is None or not record_id:
+            if ts is None or not record_id or record_id in excluded:
                 continue
             table = _table_for_row(row)
             conn.execute(

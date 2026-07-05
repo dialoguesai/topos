@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import sqlite3
 import threading
 import time
 import uuid
@@ -46,6 +47,10 @@ class ScrubOptions:
     cleanup_vector_index: bool = True
     recompute_topic_clusters: bool = True
     refresh_dimension_briefs: bool = True
+    # Propagate into derived intelligence (entity spine, stats refold, facts,
+    # dossiers). Aggregates are non-subtractable, so this recomputes them from
+    # the remaining corpus — see features/lifecycle/derived_scrub.py.
+    purge_derived_intelligence: bool = True
     brief_dimensions: Optional[List[str]] = None
     purge_brief_revision_history: bool = False
     dry_run: bool = False
@@ -58,6 +63,8 @@ REMOVE_SOURCE_OPTIONS = ScrubOptions(
     cleanup_vector_index=False,
     recompute_topic_clusters=False,
     refresh_dimension_briefs=False,
+    # Remove keeps canonical rows, so derived intelligence stays valid.
+    purge_derived_intelligence=False,
 )
 
 SCRUB_SOURCE_OPTIONS = ScrubOptions(
@@ -67,6 +74,7 @@ SCRUB_SOURCE_OPTIONS = ScrubOptions(
     cleanup_vector_index=True,
     recompute_topic_clusters=True,
     refresh_dimension_briefs=True,
+    purge_derived_intelligence=True,
 )
 
 SCRUB_LITE_OPTIONS = ScrubOptions(
@@ -76,6 +84,7 @@ SCRUB_LITE_OPTIONS = ScrubOptions(
     cleanup_vector_index=True,
     recompute_topic_clusters=True,
     refresh_dimension_briefs=False,
+    purge_derived_intelligence=True,
 )
 
 
@@ -89,6 +98,9 @@ def scrub_options_from_dict(raw: Optional[Dict[str, Any]]) -> ScrubOptions:
         cleanup_vector_index=bool(raw.get("cleanup_vector_index", base.cleanup_vector_index)),
         recompute_topic_clusters=bool(raw.get("recompute_topic_clusters", base.recompute_topic_clusters)),
         refresh_dimension_briefs=bool(raw.get("refresh_dimension_briefs", base.refresh_dimension_briefs)),
+        purge_derived_intelligence=bool(
+            raw.get("purge_derived_intelligence", base.purge_derived_intelligence)
+        ),
         brief_dimensions=raw.get("brief_dimensions") if isinstance(raw.get("brief_dimensions"), list) else None,
         purge_brief_revision_history=bool(
             raw.get("purge_brief_revision_history", base.purge_brief_revision_history)
@@ -147,6 +159,9 @@ def normalize_scrub_payload(payload: Dict[str, Any]) -> tuple[str, ScrubOptions]
         "cleanup_vector_index": opts_raw.get("cleanup_vector_index", base.cleanup_vector_index),
         "recompute_topic_clusters": opts_raw.get("recompute_topic_clusters", base.recompute_topic_clusters),
         "refresh_dimension_briefs": opts_raw.get("refresh_dimension_briefs", base.refresh_dimension_briefs),
+        "purge_derived_intelligence": opts_raw.get(
+            "purge_derived_intelligence", base.purge_derived_intelligence
+        ),
         "brief_dimensions": opts_raw.get("brief_dimensions"),
         "purge_brief_revision_history": opts_raw.get(
             "purge_brief_revision_history", base.purge_brief_revision_history
@@ -297,13 +312,30 @@ async def _run_recompute_phase(
     opts: ScrubOptions,
     source_def: Dict[str, Any],
     source_id: str,
+    scrubbed_record_ids: Optional[set] = None,
 ) -> tuple[Dict[str, Any], bool]:
     partial = False
     recompute: Dict[str, Any] = {
         "topic_clusters": {"status": "skipped", "reason": "disabled"},
         "dimension_briefs": [],
         "dimension_profiles": {"status": "skipped", "reason": "disabled"},
+        "derived_intelligence": {"status": "skipped", "reason": "disabled"},
     }
+
+    # Derived-intelligence propagation runs first: it recomputes stats/facts/
+    # entity artifacts from the remaining corpus, which the cluster/brief
+    # refresh below then builds on.
+    if opts.purge_derived_intelligence and isinstance(conn, sqlite3.Connection):
+        try:
+            from ..features.lifecycle.derived_scrub import purge_derived_for_source
+
+            recompute["derived_intelligence"] = purge_derived_for_source(
+                conn, source_id, scrubbed_record_ids=scrubbed_record_ids
+            )
+        except Exception as exc:  # noqa: BLE001
+            recompute["derived_intelligence"] = {"status": "failed", "error": str(exc)}
+            partial = True
+
     if not (opts.recompute_topic_clusters or opts.refresh_dimension_briefs):
         return recompute, partial
 
@@ -447,6 +479,21 @@ async def scrub_source_async(
                 "runtime_handle_cleared": bool(uninstall_result.get("uninstalled")),
             }
 
+        # Snapshot the source's record ids before the attribution sweep deletes
+        # them — fact provenance (source_refs) may reference records only, and
+        # after the sweep they can no longer be attributed.
+        scrubbed_record_ids: set = set()
+        if opts.purge_derived_intelligence and opts.purge_attributed_rows:
+            try:
+                scrubbed_record_ids = {
+                    str(row[0])
+                    for row in conn.execute(
+                        "SELECT record_id FROM timeline WHERE source_id = ?", (sid,)
+                    ).fetchall()
+                }
+            except Exception:  # noqa: BLE001
+                scrubbed_record_ids = set()
+
         if opts.remove_raw_and_flat:
             table_actions.extend(remove_raw_and_flat_tables(conn, source_def, sid))
 
@@ -461,6 +508,7 @@ async def scrub_source_async(
             opts=opts,
             source_def=source_def,
             source_id=sid,
+            scrubbed_record_ids=scrubbed_record_ids,
         )
 
         report = ScrubReport(

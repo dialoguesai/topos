@@ -166,6 +166,8 @@ class EntityResolver:
         normalized = normalize_name(surface)
         if not normalized:
             raise ValueError(f"unresolvable surface text: {surface_text!r}")
+        if self._is_excluded_name(normalized):
+            raise ValueError(f"entity excluded by owner: {surface_text!r}")
 
         # Tier 1: identifier (emails/handles/phones)
         if "@" in surface or surface.startswith("+") or "." in normalized.replace(" ", ""):
@@ -210,6 +212,17 @@ class EntityResolver:
             if needle in (str(i).lower() for i in identifiers):
                 return str(entity_id)
         return None
+
+    def _is_excluded_name(self, normalized: str) -> bool:
+        """Owner tombstone: never track this entity again (see lifecycle.exclusions)."""
+        try:
+            row = self._conn.execute(
+                "SELECT 1 FROM intelligence_exclusions WHERE artifact_type='entity' AND artifact_key=?",
+                (normalized,),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            return False
+        return row is not None
 
     def _match_contact_person(self, normalized: str) -> Optional[str]:
         """Unique match against contact-seeded person entities (any NER type).

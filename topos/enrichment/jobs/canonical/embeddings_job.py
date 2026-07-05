@@ -63,13 +63,24 @@ class EmbeddingsJob(BaseEnrichmentJob):
         results: List[Dict[str, Any]] = []
         batch_size = 32
 
+        excluded: set = set()
+        try:
+            from ....core.state import get_db_connection
+            from ....features.lifecycle.exclusions import excluded_record_ids
+
+            conn = get_db_connection()
+            if conn is not None:
+                excluded = excluded_record_ids(conn)
+        except Exception:  # noqa: BLE001 — exclusion check must never block embedding
+            excluded = set()
+
         total = len(canonical_messages)
         processed = 0
         for msg in canonical_messages:
             message_id = msg.get("message_id") or msg.get("id")
             record_id = msg.get("event_id") or msg.get("record_id") or message_id
             content = embeddable_content(msg)
-            if not record_id or not content:
+            if not record_id or not content or str(record_id) in excluded:
                 processed += 1
                 continue
 

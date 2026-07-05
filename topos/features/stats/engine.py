@@ -66,8 +66,13 @@ class StatsEngine:
 
     def fold_batch(self, rows: List[Dict[str, Any]]) -> Dict[str, int]:
         """Fold a canonical batch into all matching stat definitions."""
+        from ..lifecycle.exclusions import excluded_record_ids
+
+        excluded = excluded_record_ids(self._conn)
         by_table: Dict[str, List[Dict[str, Any]]] = {}
         for row in rows:
+            if excluded and _record_id(row) in excluded:
+                continue
             table = _table_for_row(row)
             if table:
                 by_table.setdefault(table, []).append(row)
@@ -239,8 +244,21 @@ class StatsEngine:
 
         insights = render_insights(self)
         written = 0
+        excluded_keys: set = set()
+        try:
+            excluded_keys = {
+                str(r[0])
+                for r in self._conn.execute(
+                    "SELECT artifact_key FROM intelligence_exclusions WHERE artifact_type='stat_insight'"
+                ).fetchall()
+            }
+        except sqlite3.OperationalError:
+            pass
         for insight in insights:
-            fact_id = f"stat:{insight['stat_id']}:{insight.get('group_key') or 'all'}"
+            insight_key = f"{insight['stat_id']}:{insight.get('group_key') or 'all'}"
+            if insight_key in excluded_keys:
+                continue  # owner-excluded: never re-promote
+            fact_id = f"stat:{insight_key}"
             adapters.signal.put_fact(
                 {
                     "fact_id": fact_id,
