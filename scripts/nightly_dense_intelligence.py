@@ -416,6 +416,148 @@ def step_reembed(conn: sqlite3.Connection) -> Dict[str, Any]:
     }
 
 
+_REENRICH_TABLES = (
+    # (table, id_column) — content-bearing canonical tables
+    ("conversation_messages", "message_id"),
+    ("ai_chat_messages", "message_id"),
+    ("journal_entries", "entry_id"),
+)
+_REENRICH_EMBED_BATCH = 64
+_REENRICH_NER_BATCH = 32
+_REENRICH_MIN_CONTENT = 6
+
+
+def _reenrich_candidates(conn: sqlite3.Connection, table: str, id_column: str, *, missing_from: str) -> List[Dict[str, Any]]:
+    """Rows with content that lack coverage in the given derived table."""
+    other = (
+        "SELECT DISTINCT record_id FROM signal_embeddings"
+        if missing_from == "embeddings"
+        else "SELECT DISTINCT record_id FROM message_entities"
+    )
+    conn.row_factory = sqlite3.Row
+    rows = [
+        dict(r)
+        for r in conn.execute(
+            f"""
+            SELECT * FROM {table}
+            WHERE content IS NOT NULL AND LENGTH(content) > {_REENRICH_MIN_CONTENT}
+              AND {id_column} NOT IN ({other})
+            """
+        ).fetchall()
+    ]
+    conn.row_factory = None
+    for row in rows:
+        row["_table"] = table
+        row["message_id"] = row.get(id_column)
+        row["record_id"] = row.get(id_column)
+    return rows
+
+
+def step_reenrich(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """Backfill embeddings + NER coverage for canonical rows the old pipeline skipped.
+
+    Embeddings go through the production EmbeddingsJob (chunking, context
+    headers, passage prefixes, write_signal_records incl. ANN sync) so the
+    result is byte-identical to what live incremental enrichment produces.
+    NER runs batched and lands in message_entities; the entities step
+    afterwards resolves everything into the spine.
+    """
+    import asyncio
+
+    from topos.engine.backends.huggingface import HuggingFaceAdapter
+    from topos.enrichment.job_writer import write_signal_records
+    from topos.enrichment.jobs.canonical.embeddings_job import EmbeddingsJob
+    from topos.features.entities.resolver import is_valid_entity_surface
+    from topos.storage.adapters.factory import AdapterFactory
+
+    report: Dict[str, Any] = {}
+    bundle = AdapterFactory.create("local_database", conn=conn)
+
+    # ---- embeddings ----
+    t0 = time.time()
+    job = EmbeddingsJob()
+    embedded_records = 0
+    for table, id_column in _REENRICH_TABLES:
+        candidates = _reenrich_candidates(conn, table, id_column, missing_from="embeddings")
+        log("reenrich", f"{table}: {len(candidates)} rows to embed")
+        for start in range(0, len(candidates), 500):
+            chunk = candidates[start : start + 500]
+            records = asyncio.run(job.enrich(chunk))
+            if records:
+                write_signal_records(
+                    "embeddings",
+                    records,
+                    adapters=bundle,
+                    provenance={"job_id": "reenrich_backfill"},
+                    conn=conn,
+                )
+            embedded_records += len(chunk)
+            if start and start % 2000 == 0:
+                log("reenrich", f"{table}: embedded {start}/{len(candidates)}")
+    report["embed_rows"] = embedded_records
+    report["embed_seconds"] = round(time.time() - t0, 1)
+
+    # ---- NER -> message_entities ----
+    t0 = time.time()
+    adapter = HuggingFaceAdapter()
+    ner_rows = 0
+    mentions_written = 0
+    for table, id_column in _REENRICH_TABLES:
+        candidates = _reenrich_candidates(conn, table, id_column, missing_from="entities")
+        log("reenrich", f"{table}: {len(candidates)} rows for NER")
+        for start in range(0, len(candidates), _REENRICH_NER_BATCH):
+            batch = candidates[start : start + _REENRICH_NER_BATCH]
+            out = adapter.run_inference(
+                {"items": [
+                    {"id": str(r["record_id"]), "text": str(r.get("content") or "")[:2000]}
+                    for r in batch
+                ]},
+                {"subtype": "entity_extraction_batch"},
+            )
+            by_id = {str(r["record_id"]): r for r in batch}
+            for item in out.get("items") or []:
+                src_row = by_id.get(str(item.get("id")))
+                if src_row is None:
+                    continue
+                for ent in item.get("entities") or []:
+                    surface = str(ent.get("entity_text") or "").strip()
+                    if not is_valid_entity_surface(surface):
+                        continue
+                    payload = {
+                        "record_id": src_row["record_id"],
+                        "entity_text": surface,
+                        "entity_type": ent.get("entity_type"),
+                        "confidence": ent.get("confidence"),
+                        "event_at": src_row.get("event_at") or src_row.get("entry_at"),
+                        "canonical_table": table,
+                    }
+                    conn.execute(
+                        """
+                        INSERT OR REPLACE INTO message_entities (
+                            entity_id, record_id, source_id, entity_text, model, provider, payload_json
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            f"ent_{src_row['record_id']}_{abs(hash(surface)) % 10**10}",
+                            src_row["record_id"],
+                            src_row.get("source_id"),
+                            surface,
+                            out.get("model"),
+                            "huggingface",
+                            json.dumps(payload),
+                        ),
+                    )
+                    mentions_written += 1
+            ner_rows += len(batch)
+            conn.commit()
+            if start and start % 1600 == 0:
+                log("reenrich", f"{table}: NER {start}/{len(candidates)} ({mentions_written} mentions so far)")
+    report["ner_rows"] = ner_rows
+    report["ner_mentions_written"] = mentions_written
+    report["ner_seconds"] = round(time.time() - t0, 1)
+    return report
+
+
 def _probe_queries(conn: sqlite3.Connection) -> List[str]:
     probes = list(GENERIC_PROBES)
     for (name,) in conn.execute(
@@ -523,6 +665,7 @@ def main() -> int:
     conn = sqlite3.connect(str(target_db))
     step_fns = {
         "migrate": step_migrate,
+        "reenrich": step_reenrich,
         "entities": step_entities,
         "stats": step_stats,
         "facts": step_facts,
