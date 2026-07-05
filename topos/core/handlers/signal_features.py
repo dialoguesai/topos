@@ -414,3 +414,215 @@ async def handle_signal_evaluate_fit(message: Dict[str, Any]) -> Optional[Dict[s
         return {"id": req_id, "status": "error", "error": str(exc), "code": 400}
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+# --- dense-intelligence reads (P13: CP proxy parity with /v1/signal HTTP) ---
+
+
+@handles("signal_list_entities")
+async def handle_signal_list_entities(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    try:
+        from ...features.entities.reads import list_entities
+
+        conn = hub.get_db_connection()
+        result = list_entities(
+            conn,
+            q=payload.get("q"),
+            entity_type=payload.get("entity_type"),
+            contacts_only=bool(payload.get("contacts_only")),
+            limit=min(int(payload.get("limit") or 50), 200),
+            offset=max(0, int(payload.get("offset") or 0)),
+        )
+        return {"id": req_id, "status": "ok", "payload": result}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("signal_get_entity")
+async def handle_signal_get_entity(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    entity_id = str(payload.get("entity_id") or "").strip()
+    if not entity_id:
+        return {"id": req_id, "status": "error", "error": "entity_id required", "code": 400}
+    try:
+        from ...features.entities.reads import get_entity_detail
+
+        conn = hub.get_db_connection()
+        detail = get_entity_detail(conn, entity_id)
+        if detail is None:
+            return {"id": req_id, "status": "error", "error": "entity not found", "code": 404}
+        return {"id": req_id, "status": "ok", "payload": detail}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("signal_entity_graph")
+async def handle_signal_entity_graph(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    try:
+        from ...features.entities.reads import entity_graph
+
+        conn = hub.get_db_connection()
+        result = entity_graph(
+            conn,
+            limit_nodes=min(int(payload.get("limit_nodes") or 100), 500),
+            limit_edges=min(int(payload.get("limit_edges") or 300), 1500),
+            min_weight=float(payload.get("min_weight") or 0.0),
+        )
+        return {"id": req_id, "status": "ok", "payload": result}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("signal_list_facts")
+async def handle_signal_list_facts(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    try:
+        from ...features.facts.reads import list_facts
+
+        conn = hub.get_db_connection()
+        result = list_facts(
+            conn,
+            predicate=payload.get("predicate"),
+            dimension=payload.get("dimension"),
+            include_closed=bool(payload.get("include_closed")),
+            limit=min(int(payload.get("limit") or 100), 500),
+            offset=max(0, int(payload.get("offset") or 0)),
+        )
+        return {"id": req_id, "status": "ok", "payload": result}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("signal_list_insights")
+async def handle_signal_list_insights(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    try:
+        from ...features.facts.reads import list_stat_insights
+
+        conn = hub.get_db_connection()
+        result = list_stat_insights(
+            conn,
+            dimension=payload.get("dimension"),
+            limit=min(int(payload.get("limit") or 200), 500),
+        )
+        return {"id": req_id, "status": "ok", "payload": result}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("signal_list_timeline")
+async def handle_signal_list_timeline(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    try:
+        from ...features.facts.reads import list_timeline
+
+        conn = hub.get_db_connection()
+        result = list_timeline(
+            conn,
+            canonical_table=payload.get("canonical_table"),
+            source_id=payload.get("source_id"),
+            date_from=payload.get("date_from"),
+            date_to=payload.get("date_to"),
+            limit=min(int(payload.get("limit") or 100), 500),
+            offset=max(0, int(payload.get("offset") or 0)),
+        )
+        return {"id": req_id, "status": "ok", "payload": result}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("signal_list_entity_review")
+async def handle_signal_list_entity_review(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    try:
+        from ...features.entities.consolidation import list_review
+
+        conn = hub.get_db_connection()
+        items = list_review(
+            conn,
+            status=str(payload.get("status") or "pending"),
+            limit=min(int(payload.get("limit") or 100), 500),
+        )
+        return {"id": req_id, "status": "ok", "payload": {"items": items, "total": len(items)}}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("signal_entity_review_sweep")
+async def handle_signal_entity_review_sweep(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    try:
+        from ...features.entities.consolidation import propose_merges
+
+        conn = hub.get_db_connection()
+        return {"id": req_id, "status": "ok", "payload": propose_merges(conn)}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("signal_entity_review_action")
+async def handle_signal_entity_review_action(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    review_id = str(payload.get("review_id") or "").strip()
+    action = str(payload.get("action") or "").strip()
+    if not review_id or action not in ("approve", "dismiss"):
+        return {"id": req_id, "status": "error", "error": "review_id and action (approve|dismiss) required", "code": 400}
+    try:
+        from ...features.entities.consolidation import resolve_review
+
+        conn = hub.get_db_connection()
+        return {"id": req_id, "status": "ok", "payload": resolve_review(conn, review_id, action=action)}
+    except LookupError as exc:
+        return {"id": req_id, "status": "error", "error": str(exc), "code": 404}
+    except ValueError as exc:
+        return {"id": req_id, "status": "error", "error": str(exc), "code": 400}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("signal_exclude_entity")
+async def handle_signal_exclude_entity(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    entity_id = str(payload.get("entity_id") or "").strip()
+    if not entity_id:
+        return {"id": req_id, "status": "error", "error": "entity_id required", "code": 400}
+    try:
+        from ...features.lifecycle.exclusions import ExclusionStore
+
+        conn = hub.get_db_connection()
+        return {"id": req_id, "status": "ok", "payload": ExclusionStore(conn).exclude_entity(entity_ref=entity_id)}
+    except ValueError as exc:
+        return {"id": req_id, "status": "error", "error": str(exc), "code": 400}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
