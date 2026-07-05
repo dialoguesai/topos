@@ -50,3 +50,64 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             item.add_marker(pytest.mark.private)
         else:
             item.add_marker(pytest.mark.public)
+
+
+_CORE_RELOAD_MODULES = (
+    "topos.config.settings",
+    "topos.core.state",
+    "topos.storage.adapters.factory",
+)
+
+
+@pytest.fixture
+def module_reload_isolation():
+    """Isolation for tests that pop/reload core topos modules.
+
+    Reloading settings/state forks module identities: without cleanup, later
+    tests resolve a settings object instantiated under this test's env and a
+    db singleton pointed at this test's (deleted) temp database — the classic
+    symptom is order-dependent failures in tests/sources and tests/ingestion
+    that pass in isolation.
+
+    Teardown *restores the original module objects* rather than purging to
+    empty: many tests bind `topos.core.state` at collection time
+    (`from topos.core import state as core_state`) and monkeypatch attributes
+    on that object, while production code resolves lazily through sys.modules.
+    Only restoring the originals makes both lookups agree again; a bare purge
+    would leave those collection-time bindings pointing at an orphaned module.
+
+    Yields the purge function so a test can force a fresh import mid-test.
+    """
+
+    def _matching(module_names=_CORE_RELOAD_MODULES) -> list:
+        return [
+            name
+            for name in list(sys.modules)
+            if any(name == mod or name.startswith(f"{mod}.") for mod in module_names)
+        ]
+
+    def _purge(module_names=_CORE_RELOAD_MODULES) -> None:
+        for name in _matching(module_names):
+            sys.modules.pop(name, None)
+
+    def _reset_db_singleton() -> None:
+        state = sys.modules.get("topos.core.state")
+        if state is None:
+            return
+        conn = getattr(state, "db_conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:
+                pass
+        state.db_conn = None
+        state._db_conn_path = None
+
+    snapshot = {name: sys.modules[name] for name in _matching()}
+    yield _purge
+    # Close whatever fork the test created, then put the originals back.
+    _reset_db_singleton()
+    for name in _matching():
+        if name not in snapshot:
+            sys.modules.pop(name, None)
+    sys.modules.update(snapshot)
