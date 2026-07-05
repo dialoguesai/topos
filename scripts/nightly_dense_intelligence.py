@@ -446,6 +446,9 @@ def _reenrich_candidates(conn: sqlite3.Connection, table: str, id_column: str, *
         ).fetchall()
     ]
     conn.row_factory = None
+    from topos.features.signal.embed_context import is_derivable_content
+
+    rows = [r for r in rows if is_derivable_content(str(r.get("content") or ""))]
     for row in rows:
         row["_table"] = table
         row["message_id"] = row.get(id_column)
@@ -558,6 +561,73 @@ def step_reenrich(conn: sqlite3.Connection) -> Dict[str, Any]:
     return report
 
 
+def step_cleanjunk(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """Remove derived artifacts built from serialization-garbage content.
+
+    Some parsers leak undecoded rich-text payloads (iMessage attributedBody ->
+    'streamtyped' NSKeyedArchiver blobs) into canonical content. Those rows
+    stay canonical (the event happened; timeline/stats keep them) but their
+    embeddings and NER mentions are junk and are removed here; entities are
+    recounted, orphans dropped, edges rebuilt, dossiers refreshed.
+    """
+    from topos.features.lifecycle.derived_scrub import (
+        _delete_orphan_entities,
+        _rebuild_entity_edges,
+        _recount_entity_mentions,
+    )
+    from topos.features.signal.embed_context import is_derivable_content
+    from topos.storage.adapters.sqlite.vector_search import delete_vec_rows
+
+    junk_ids: List[str] = []
+    for table, id_column in _REENRICH_TABLES:
+        try:
+            rows = conn.execute(
+                f"SELECT {id_column}, content FROM {table} WHERE content IS NOT NULL"
+            ).fetchall()
+        except sqlite3.OperationalError:
+            continue
+        junk_ids.extend(str(r[0]) for r in rows if not is_derivable_content(str(r[1] or "")))
+
+    report: Dict[str, Any] = {"junk_records": len(junk_ids)}
+    embeddings_removed = 0
+    mentions_removed = 0
+    for start in range(0, len(junk_ids), 200):
+        chunk = junk_ids[start : start + 200]
+        placeholders = ",".join("?" for _ in chunk)
+        emb_ids = [
+            str(r[0])
+            for r in conn.execute(
+                f"SELECT embedding_id FROM signal_embeddings WHERE record_id IN ({placeholders})",
+                chunk,
+            ).fetchall()
+        ]
+        if emb_ids:
+            conn.execute(
+                f"DELETE FROM signal_embeddings WHERE record_id IN ({placeholders})", chunk
+            )
+            delete_vec_rows(conn, emb_ids)
+            embeddings_removed += len(emb_ids)
+        cursor = conn.execute(
+            f"DELETE FROM entity_mentions WHERE record_id IN ({placeholders})", chunk
+        )
+        mentions_removed += int(cursor.rowcount or 0)
+    conn.commit()
+
+    report["embeddings_removed"] = embeddings_removed
+    report["mentions_removed"] = mentions_removed
+    report["entities_recounted"] = _recount_entity_mentions(conn)
+    report["entities_removed"] = len(_delete_orphan_entities(conn))
+    report["edges_rebuilt"] = _rebuild_entity_edges(conn)
+    conn.commit()
+    try:
+        from topos.features.entities.dossier import refresh_dossiers
+
+        report["dossiers_refreshed"] = refresh_dossiers(conn)
+    except Exception as exc:  # noqa: BLE001
+        report["dossiers_refreshed"] = f"failed: {exc}"
+    return report
+
+
 def _probe_queries(conn: sqlite3.Connection) -> List[str]:
     probes = list(GENERIC_PROBES)
     for (name,) in conn.execute(
@@ -666,6 +736,7 @@ def main() -> int:
     step_fns = {
         "migrate": step_migrate,
         "reenrich": step_reenrich,
+        "cleanjunk": step_cleanjunk,
         "entities": step_entities,
         "stats": step_stats,
         "facts": step_facts,
