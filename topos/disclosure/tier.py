@@ -6,6 +6,8 @@ import logging
 from typing import Any, Dict, List, Literal, Optional
 
 from .field_registry import (
+    DISCLOSURE_APPLIED_MARKER,
+    DISCLOSURE_PENDING_PLACEHOLDER,
     PII_DISCLOSURE_FIELDS,
     disclosure_column,
     disclosure_hash_column,
@@ -28,18 +30,31 @@ def resolve_disclosure_tier(
     explicit_tier: Optional[DisclosureTier] = None,
     disclosure_ceiling: Optional[str] = None,
 ) -> DisclosureTier:
-    if explicit_tier in ("owner_raw", "default_disclosure"):
-        return explicit_tier
+    # Determine grantee status FIRST. A grantee request must never be elevated to
+    # owner_raw by an explicit tier in the payload — that field is requester-influenced
+    # upstream, so honoring it before the grantee check is a fail-open (B.2).
     req = str(requester_id or "").strip() or "owner"
     own = str(owner_id or "").strip() or "owner"
     is_grantee = is_grantee_request or (req != own and req != "owner" and req != "mcp")
-    if not is_grantee:
-        return "owner_raw"
-    ceiling = str(disclosure_ceiling or "default").strip().lower()
-    if ceiling in ("partial", "elevated", "raw"):
-        # Elevation not implemented — fail closed to default disclosure.
-        logger.debug("disclosure_ceiling=%s not supported; using default_disclosure", ceiling)
-    return "default_disclosure"
+
+    if is_grantee:
+        if explicit_tier == "owner_raw":
+            logger.warning(
+                "explicit_tier=owner_raw ignored for grantee request (requester=%s owner=%s); "
+                "clamping to default_disclosure",
+                req,
+                own,
+            )
+        ceiling = str(disclosure_ceiling or "default").strip().lower()
+        if ceiling in ("partial", "elevated", "raw"):
+            # Elevation not implemented — fail closed to default disclosure.
+            logger.debug("disclosure_ceiling=%s not supported; using default_disclosure", ceiling)
+        return "default_disclosure"
+
+    # Owner (or internal mcp) path: an explicit tier may be honored.
+    if explicit_tier in ("owner_raw", "default_disclosure"):
+        return explicit_tier
+    return "owner_raw"
 
 
 def apply_disclosure_tier_to_rows(
@@ -64,18 +79,35 @@ def _swap_disclosure_columns(
     out: List[Dict[str, Any]] = []
     for row in rows:
         copy = dict(row)
+        # Idempotence: once a row has been resolved by the grantee content policy, a second
+        # application must be a no-op. Without this, the already-redacted content (which no
+        # longer has a disclosure column) is mistaken for pending raw and overwritten with
+        # the placeholder — over-redacting legitimate grantee content. The read path applies
+        # disclosure more than once (store.list + retrieval, SQL pre-swap + Python), so the
+        # transform must be safe under repetition.
+        if copy.get(DISCLOSURE_APPLIED_MARKER):
+            out.append(copy)
+            continue
         for field in fields:
             disc_col = disclosure_column(field)
             disclosed = copy.get(disc_col)
+            value = copy.get(field)
             if isinstance(disclosed, str) and disclosed.strip():
                 copy[field] = disclosed
-            elif copy.get(field):
-                logger.debug(
-                    "disclosure pending for %s.%s record=%s",
+            elif isinstance(value, str) and value == DISCLOSURE_PENDING_PLACEHOLDER:
+                # Already placeholdered upstream (e.g. SQL coalesce) — fixed point, no-op.
+                continue
+            elif value:
+                # Ingest disclosure has not completed for this record and no disclosure text
+                # is available: fail CLOSED — never surface raw to a grantee.
+                logger.warning(
+                    "disclosure pending; withholding raw %s.%s from grantee record=%s",
                     table,
                     field,
                     copy.get("record_id") or copy.get("message_id"),
                 )
+                copy[field] = DISCLOSURE_PENDING_PLACEHOLDER
+        copy[DISCLOSURE_APPLIED_MARKER] = True
         out.append(copy)
     return out
 

@@ -1,0 +1,346 @@
+"""Engine config, UI config, table prefs, and identity message handlers."""
+from __future__ import annotations
+
+import topos.core.handlers as hub
+
+from .common import (
+    Any,
+    Dict,
+    List,
+    Optional,
+    get_engine_config_value,
+    get_mcp_request_counts,
+    get_uma_request_counts,
+    get_user_id,
+    json,
+    set_engine_config_value,
+    settings,
+)
+from .registry import handles
+
+
+UI_CONFIG_KEY = "ui_config"
+
+ALLOWED_PINNED_WIDGETS = {
+    "umaAllTime",
+    "uma24h",
+    "mcpRows",
+    "mcp24h",
+    "topConnector",
+    "umaStatusMix",
+    "topConnectors",
+    "mcpSources",
+}
+
+MAX_PINNED_WIDGETS = 3
+
+def _default_ui_config() -> Dict[str, Any]:
+    return {"version": 1, "topbar": {"pinnedAnalytics": []}}
+
+def _normalize_ui_config(value: Any) -> Dict[str, Any]:
+    if not isinstance(value, dict):
+        return _default_ui_config()
+    out: Dict[str, Any] = {
+        "version": int(value.get("version", 1)) if str(value.get("version", "")).isdigit() else 1,
+        "topbar": {"pinnedAnalytics": []},
+    }
+    topbar = value.get("topbar")
+    pinned = topbar.get("pinnedAnalytics") if isinstance(topbar, dict) else []
+    if not isinstance(pinned, list):
+        return out
+    seen: set[str] = set()
+    final: List[str] = []
+    for item in pinned:
+        wid = str(item or "").strip()
+        if not wid or wid in seen or wid not in ALLOWED_PINNED_WIDGETS:
+            continue
+        seen.add(wid)
+        final.append(wid)
+        if len(final) >= MAX_PINNED_WIDGETS:
+            break
+    out["topbar"]["pinnedAnalytics"] = final
+    return out
+
+@handles("migrate_browser_plugin_app_id")
+async def handle_migrate_browser_plugin_app_id(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    from ..state import _migrate_legacy_browser_plugin_app_ids
+
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    updated = _migrate_legacy_browser_plugin_app_ids(conn)
+    return {"id": req_id, "status": "ok", "payload": {"updated_rows": updated}}
+
+@handles("get_request_counts")
+async def handle_get_request_counts(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    """Return UMA + MCP request counts from engine DB (for CP proxy or direct frontend)."""
+    payload = message.get("payload") or {}
+    owner_user_id = (payload.get("owner_user_id") or "").strip()
+    since_days = min(max(int(payload.get("since_days") or 90), 1), 365)
+    conn = hub.get_db_connection()
+    if not owner_user_id and conn:
+        owner_user_id = get_user_id(conn) or ""
+    uma = get_uma_request_counts(conn, owner_user_id, since_days) if conn else {"total_read_requests": 0, "total_write_requests": 0, "by_app": []}
+    mcp = get_mcp_request_counts(conn, since_days) if conn else {"by_source": [], "by_tool": [], "total": 0}
+    return {"id": req_id, "status": "ok", "payload": {"uma": uma, "mcp": mcp}}
+
+@handles("get_ui_config")
+async def handle_get_ui_config(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    raw = get_engine_config_value(conn, UI_CONFIG_KEY)
+    if not raw:
+        return {"id": req_id, "status": "ok", "payload": _default_ui_config()}
+    try:
+        parsed = json.loads(raw)
+    except Exception:
+        parsed = {}
+    return {"id": req_id, "status": "ok", "payload": _normalize_ui_config(parsed)}
+
+@handles("put_ui_config")
+async def handle_put_ui_config(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    payload = message.get("payload") or {}
+    normalized = _normalize_ui_config(payload.get("ui_config"))
+    try:
+        set_engine_config_value(conn, UI_CONFIG_KEY, json.dumps(normalized))
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+    return {"id": req_id, "status": "ok", "payload": normalized}
+
+@handles("get_data_explorer_table_prefs")
+async def handle_get_data_explorer_table_prefs(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    from ...data_explorer_table_prefs import get_table_prefs as load_table_prefs
+
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    payload = message.get("payload") or {}
+    user_id = str(payload.get("user_id") or "").strip()
+    table_name = str(payload.get("table_name") or "").strip()
+    if not user_id or not table_name:
+        return {"id": req_id, "status": "error", "error": "user_id and table_name required"}
+    try:
+        prefs = load_table_prefs(conn, user_id=user_id, table_name=table_name)
+    except ValueError as exc:
+        return {"id": req_id, "status": "error", "error": str(exc)}
+    return {"id": req_id, "status": "ok", "payload": {"prefs": prefs}}
+
+@handles("put_data_explorer_table_prefs")
+async def handle_put_data_explorer_table_prefs(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    from ...data_explorer_table_prefs import put_table_prefs as save_table_prefs
+
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    payload = message.get("payload") or {}
+    user_id = str(payload.get("user_id") or "").strip()
+    table_name = str(payload.get("table_name") or "").strip()
+    prefs = payload.get("prefs") or {}
+    if not user_id or not table_name:
+        return {"id": req_id, "status": "error", "error": "user_id and table_name required"}
+    try:
+        saved = save_table_prefs(conn, user_id=user_id, table_name=table_name, prefs=prefs)
+    except ValueError as exc:
+        return {"id": req_id, "status": "error", "error": str(exc)}
+    return {"id": req_id, "status": "ok", "payload": {"prefs": saved}}
+
+@handles("delete_data_explorer_table_prefs")
+async def handle_delete_data_explorer_table_prefs(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    from ...data_explorer_table_prefs import delete_table_prefs as remove_table_prefs
+
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    payload = message.get("payload") or {}
+    user_id = str(payload.get("user_id") or "").strip()
+    table_name = str(payload.get("table_name") or "").strip()
+    if not user_id or not table_name:
+        return {"id": req_id, "status": "error", "error": "user_id and table_name required"}
+    try:
+        deleted = remove_table_prefs(conn, user_id=user_id, table_name=table_name)
+    except ValueError as exc:
+        return {"id": req_id, "status": "error", "error": str(exc)}
+    return {"id": req_id, "status": "ok", "payload": {"deleted": deleted}}
+
+@handles("llm_integrations_storage")
+async def handle_llm_integrations_storage(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    from ...llm_integrations_storage import handle_storage_op
+
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    payload = message.get("payload") or {}
+    op = str(payload.get("op") or "").strip()
+    args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
+    if not op:
+        return {"id": req_id, "status": "error", "error": "op is required"}
+    try:
+        result = handle_storage_op(conn, op=op, args=args)
+    except ValueError as exc:
+        return {"id": req_id, "status": "error", "error": str(exc)}
+    return {"id": req_id, "status": "ok", "payload": {"result": result}}
+
+@handles("get_user_identity")
+async def handle_get_user_identity(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    from ...storage.user_identity import get_user_identity as load_user_identity
+
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    payload = message.get("payload") or {}
+    dataset_id = str(payload.get("dataset_id") or "").strip()
+    if not dataset_id:
+        return {"id": req_id, "status": "error", "error": "dataset_id required"}
+    identity = load_user_identity(conn, dataset_id)
+    if identity is None:
+        body: Dict[str, Any] = {"status": "ok", "dataset_id": dataset_id, "display_name": None}
+    else:
+        body = {"status": "ok", "dataset_id": dataset_id, **identity}
+    return {"id": req_id, "status": "ok", "payload": body}
+
+@handles("put_user_identity")
+async def handle_put_user_identity(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    from ...storage.user_identity import put_user_identity as persist_user_identity
+
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    payload = message.get("payload") or {}
+    dataset_id = str(payload.get("dataset_id") or "").strip()
+    if not dataset_id:
+        return {"id": req_id, "status": "error", "error": "dataset_id required"}
+    raw_dn = payload.get("display_name")
+    if isinstance(raw_dn, str):
+        next_display_name = raw_dn.strip() or None
+    else:
+        next_display_name = None
+    persist_user_identity(conn, dataset_id, display_name=next_display_name)
+    return {
+        "id": req_id,
+        "status": "ok",
+        "payload": {"status": "ok", "dataset_id": dataset_id, "display_name": next_display_name},
+    }
+
+@handles("get_sanitization_ollama_config")
+async def handle_get_sanitization_ollama_config(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    from ...config.sanitization_ollama import effective_config_for_api
+
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    try:
+        data = effective_config_for_api(settings, conn)
+        return {"id": req_id, "status": "ok", "payload": {"status": "ok", **data}}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+@handles("put_sanitization_ollama_config")
+async def handle_put_sanitization_ollama_config(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    from ...config.sanitization_ollama import (
+        ENGINE_CONFIG_KEY_SANITIZATION_OLLAMA_DEVICE,
+        effective_config_for_api,
+        normalize_put_device_overrides,
+    )
+
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    payload = message.get("payload") or {}
+    try:
+        json_str = normalize_put_device_overrides(payload)
+        set_engine_config_value(conn, ENGINE_CONFIG_KEY_SANITIZATION_OLLAMA_DEVICE, json_str)
+        data = effective_config_for_api(settings, conn)
+        return {"id": req_id, "status": "ok", "payload": {"status": "ok", **data}}
+    except ValueError as exc:
+        return {"id": req_id, "status": "error", "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+@handles("delete_sanitization_ollama_config")
+async def handle_delete_sanitization_ollama_config(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    from ...config.sanitization_ollama import (
+        ENGINE_CONFIG_KEY_SANITIZATION_OLLAMA_DEVICE,
+        effective_config_for_api,
+    )
+
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    try:
+        set_engine_config_value(conn, ENGINE_CONFIG_KEY_SANITIZATION_OLLAMA_DEVICE, "{}")
+        data = effective_config_for_api(settings, conn)
+        return {"id": req_id, "status": "ok", "payload": {"status": "ok", **data}}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+@handles("get_signal_extraction_config")
+async def handle_get_signal_extraction_config(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    from ...config.signal_extraction import effective_config_for_api
+
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    try:
+        data = effective_config_for_api(settings, conn)
+        return {"id": req_id, "status": "ok", "payload": {"status": "ok", **data}}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+@handles("put_signal_extraction_config")
+async def handle_put_signal_extraction_config(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    from ...config.signal_extraction import (
+        ENGINE_CONFIG_KEY_SIGNAL_EXTRACTION_DEVICE,
+        effective_config_for_api,
+        normalize_put_device_overrides,
+    )
+
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    payload = message.get("payload") or {}
+    try:
+        json_str = normalize_put_device_overrides(payload)
+        set_engine_config_value(conn, ENGINE_CONFIG_KEY_SIGNAL_EXTRACTION_DEVICE, json_str)
+        data = effective_config_for_api(settings, conn)
+        return {"id": req_id, "status": "ok", "payload": {"status": "ok", **data}}
+    except ValueError as exc:
+        return {"id": req_id, "status": "error", "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+@handles("delete_signal_extraction_config")
+async def handle_delete_signal_extraction_config(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    from ...config.signal_extraction import (
+        ENGINE_CONFIG_KEY_SIGNAL_EXTRACTION_DEVICE,
+        effective_config_for_api,
+    )
+
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    try:
+        set_engine_config_value(conn, ENGINE_CONFIG_KEY_SIGNAL_EXTRACTION_DEVICE, "{}")
+        data = effective_config_for_api(settings, conn)
+        return {"id": req_id, "status": "ok", "payload": {"status": "ok", **data}}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}

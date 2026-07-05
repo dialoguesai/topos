@@ -183,12 +183,21 @@ async def _test_ingestion_core(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not source_def:
         raise LookupError(f"No active install found for source_id={source_id}")
 
+    from ..sources.definitions import (
+        DELIVERY_CLIENT_PUSH,
+        DELIVERY_OWNER_UI,
+        DELIVERY_OWNER_UPLOAD,
+        derive_delivery,
+    )
+
     source_type = str(source_def.get("source_type") or "file")
+    # Installed definitions serialized before the delivery rollout lack the field.
+    delivery = str(source_def.get("delivery") or "").strip() or derive_delivery(source_type, source_id)
     schema_id = str(source_def.get("schema_id") or source_def.get("parser_id") or "").strip()
     if not schema_id:
         raise ValueError("Installed source definition is missing schema_id/parser_id")
 
-    if source_type == "file":
+    if delivery == DELIVERY_OWNER_UPLOAD:
         file_path = str(payload.get("sample_file_path") or "").strip()
         if not file_path:
             raise ValueError("sample_file_path is required for file source tests")
@@ -198,7 +207,7 @@ async def _test_ingestion_core(payload: Dict[str, Any]) -> Dict[str, Any]:
             file_path=file_path,
             source_id=source_id,
         )
-    elif source_type == "ui_stream":
+    elif delivery in (DELIVERY_CLIENT_PUSH, DELIVERY_OWNER_UI):
         sample_payload = payload.get("sample_payload")
         if not isinstance(sample_payload, dict):
             raise ValueError("sample_payload object is required for ui_stream source tests")

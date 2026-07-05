@@ -38,6 +38,7 @@ PRIVATE_PATH_HINTS = (
     "test_sync_client_reliability.py",
     "test_filter_lab.py",
     "test_app_registry.py",
+    "evals/privacy",
 )
 
 

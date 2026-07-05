@@ -57,8 +57,8 @@ _NATIVE_LIST_SPECS: Dict[str, tuple[str, List[str]]] = {
     "ai_chat_messages_disclosure": (
         """
         SELECT message_id AS record_id, conversation_id, sender_type, source_id,
-               substr(coalesce(content_rendered_disclosure, content_rendered, content_disclosure, content), 1, 500) AS content_preview,
-               coalesce(content_disclosure, content) AS content,
+               substr(coalesce(content_rendered_disclosure, content_disclosure, '[disclosure pending]'), 1, 500) AS content_preview,
+               coalesce(content_disclosure, '[disclosure pending]') AS content,
                event_at
         FROM ai_chat_messages
         """,
@@ -92,8 +92,8 @@ _NATIVE_LIST_SPECS: Dict[str, tuple[str, List[str]]] = {
     "conversation_messages_disclosure": (
         """
         SELECT message_id AS record_id, conversation_id, sender_id, source_id,
-               substr(coalesce(content_disclosure, content, ''), 1, 500) AS content_preview,
-               coalesce(content_disclosure, content) AS content,
+               substr(coalesce(content_disclosure, '[disclosure pending]'), 1, 500) AS content_preview,
+               coalesce(content_disclosure, '[disclosure pending]') AS content,
                created_at AS event_at
         FROM conversation_messages
         """,
@@ -216,9 +216,9 @@ _NATIVE_LIST_SPECS: Dict[str, tuple[str, List[str]]] = {
     "journal_entries_disclosure": (
         """
         SELECT entry_id AS record_id, entry_at, mood_tag, category,
-               coalesce(content_disclosure, content) AS content,
+               coalesce(content_disclosure, '[disclosure pending]') AS content,
                source_id,
-               substr(coalesce(content_disclosure, content, ''), 1, 500) AS content_preview,
+               substr(coalesce(content_disclosure, '[disclosure pending]'), 1, 500) AS content_preview,
                entry_at AS event_at
         FROM journal_entries
         """,
@@ -245,9 +245,9 @@ _NATIVE_LIST_SPECS: Dict[str, tuple[str, List[str]]] = {
     "journal_entries_disclosure_minimal": (
         """
         SELECT entry_id AS record_id, entry_at,
-               coalesce(content_disclosure, content) AS content,
+               coalesce(content_disclosure, '[disclosure pending]') AS content,
                source_id,
-               substr(coalesce(content_disclosure, content, ''), 1, 500) AS content_preview,
+               substr(coalesce(content_disclosure, '[disclosure pending]'), 1, 500) AS content_preview,
                entry_at AS event_at
         FROM journal_entries
         """,

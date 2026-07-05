@@ -730,10 +730,12 @@ class IngestionManager(BaseObject):
 
         if not source_def:
             # Fallback: find by schema_id when caller did not specify source_id (file ingestion).
+            from ..sources.definitions import is_file_delivery
+
             for source in REGISTRY.values():
                 if source.schema_id == job.schema_id:
-                    # Prefer file type sources for file ingestion
-                    if source.source_type == "file":
+                    # Prefer owner-upload sources for file ingestion
+                    if is_file_delivery(source):
                         source_def = source
                         logger.debug(
                             "[PIPELINE:MANAGER] %s: Found file source by schema_id: source_id=%s",

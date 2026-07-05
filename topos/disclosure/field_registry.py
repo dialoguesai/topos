@@ -24,6 +24,17 @@ _GROUP_TO_TABLE = {
 }
 
 
+# Grantee-facing placeholder when a record's ingest disclosure has not completed.
+# Read paths must emit this instead of raw content (fail closed). Kept in sync with
+# the SQL fallback literal in storage/adapters/sqlite/stores.py disclosure specs.
+DISCLOSURE_PENDING_PLACEHOLDER = "[disclosure pending]"
+
+# Idempotence marker: set on a row once the grantee content policy has resolved it, so a
+# second application is a no-op instead of re-treating already-redacted content as "pending"
+# and overwriting it with the placeholder. Survives strip so re-application can see it.
+DISCLOSURE_APPLIED_MARKER = "_disclosure_applied"
+
+
 def disclosure_column(field: str) -> str:
     return f"{field}_disclosure"
 

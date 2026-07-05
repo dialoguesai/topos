@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import os
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from ..storage.adapters.factory import AdapterFactory
 from .audit import build_query_audit_event
+from .ddr import StageTimings, build_disclosure_decision_record, now_ms
 from .disclosure import DisclosureFilterPipeline
 from .fingerprint import compute_retrieval_fingerprint
 from .game_layer import DefaultGameLayer
@@ -21,6 +23,12 @@ from .session_utils import build_cache_key, validate_public_result
 from .source_generation import get_data_health_version, list_installed_source_ids
 from .turn_classifier import TurnClassifierLite
 from .types import AccessMode, QueryTurn, RetrievalError, RetrievalRequest
+
+
+def _ddr_debug_enabled() -> bool:
+    """When set, the Disclosure Decision Record is surfaced on the pipeline result for the
+    eval harness. It is always attached to the (internal) audit event regardless."""
+    return str(os.environ.get("TOPOS_QUERY_DDR") or "").strip().lower() in ("1", "true", "yes", "on")
 
 
 def _session_from_store(session_id: str, data: Dict[str, Any], requester_id: str) -> QuerySession:
@@ -92,6 +100,7 @@ class QueryPipelineOrchestrator:
         explicit_disclosure_tier: Optional[str] = None,
     ) -> Dict[str, Any]:
         session_id = query_session_id or f"qs_{uuid.uuid4()}"
+        turn_start_ms = now_ms()
         store = self._session_store()
         try:
             store.purge_expired()
@@ -251,6 +260,8 @@ class QueryPipelineOrchestrator:
                     "audit": audit,
                 }
 
+        timings = StageTimings()
+        _t0 = now_ms()
         try:
             bundle = self._retrieval.retrieve(
                 RetrievalRequest(
@@ -280,7 +291,9 @@ class QueryPipelineOrchestrator:
                 "session_id": session_id,
                 "audit": audit,
             }
+        timings.retrieval_ms = now_ms() - _t0
 
+        _t0 = now_ms()
         filtered = self._disclosure.apply(
             bundle,
             filter_manifest=filter_manifest,
@@ -288,13 +301,18 @@ class QueryPipelineOrchestrator:
             access_mode=access_mode,
             disclosure_tier=disclosure_tier,
         )
+        timings.deterministic_filter_ms = now_ms() - _t0
+
+        _t0 = now_ms()
         public = self._game_layer.apply(
             context_packet=filtered.context_packet,
             access_mode=access_mode,
             scope_id=scope_id,
             query_text=query_text,
         )
+        timings.game_layer_ms = now_ms() - _t0
         if access_mode == "inference":
+            _t0 = now_ms()
             inf = await asyncio.to_thread(
                 run_query_inference,
                 query_text=query_text,
@@ -302,9 +320,21 @@ class QueryPipelineOrchestrator:
                 scope_id=scope_id,
             )
             public.payload.update(inf)
+            timings.inference_ms = now_ms() - _t0
 
         public_dict = public.to_dict()
         validate_public_result(public_dict)
+
+        timings.total_ms = now_ms() - turn_start_ms
+        ddr = build_disclosure_decision_record(
+            tier=disclosure_tier,
+            mode=access_mode,
+            scope=scope_id,
+            retrieval_packet=bundle.context_packet,
+            filtered_packet=filtered.context_packet,
+            filters_applied=filtered.filters_applied,
+            timings=timings,
+        ).to_dict()
 
         fingerprint = compute_retrieval_fingerprint(
             scope_id=scope_id,
@@ -347,7 +377,8 @@ class QueryPipelineOrchestrator:
             retrieval_metadata=bundle.retrieval_metadata,
         )
         audit["disclosure_tier"] = disclosure_tier
-        return {
+        audit["disclosure_decision_record"] = ddr
+        result = {
             "turn_outcome": TurnOutcome.LIVE_QUERY.value,
             "public_result": public_dict,
             "game_layer_strategy": public.strategy,
@@ -356,6 +387,9 @@ class QueryPipelineOrchestrator:
             "audit": audit,
             "disclosure_tier": disclosure_tier,
         }
+        if _ddr_debug_enabled():
+            result["disclosure_decision_record"] = ddr
+        return result
 
 
 async def query_live(**kwargs) -> Dict[str, Any]:
