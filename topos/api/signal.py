@@ -262,6 +262,65 @@ async def get_entity(
     return detail
 
 
+@router.get("/entity-review")
+async def list_entity_review(
+    status: str = Query(default="pending", max_length=20),
+    limit: int = Query(default=100, ge=1, le=500),
+    _api_key: str = Depends(require_api_key),
+):
+    """Pending entity merge candidates (owner curation queue)."""
+    from ..features.entities.consolidation import list_review
+
+    items = list_review(_entities_conn(), status=status, limit=limit)
+    return {"items": items, "total": len(items)}
+
+
+@router.post("/entity-review/sweep")
+async def run_entity_review_sweep(_api_key: str = Depends(require_api_key)):
+    """Run the consolidation sweep now; returns proposal counts."""
+    from ..features.entities.consolidation import propose_merges
+
+    return propose_merges(_entities_conn())
+
+
+@router.post("/entity-review/{review_id}/approve")
+async def approve_entity_review(review_id: str, _api_key: str = Depends(require_api_key)):
+    from ..features.entities.consolidation import resolve_review
+
+    try:
+        return resolve_review(_entities_conn(), review_id, action="approve")
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/entity-review/{review_id}/dismiss")
+async def dismiss_entity_review(review_id: str, _api_key: str = Depends(require_api_key)):
+    from ..features.entities.consolidation import resolve_review
+
+    try:
+        return resolve_review(_entities_conn(), review_id, action="dismiss")
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.post("/entities/{entity_id}/exclude")
+async def exclude_entity_from_intelligence(
+    entity_id: str,
+    _api_key: str = Depends(require_api_key),
+):
+    """Owner exclusion: stop tracking this entity (tombstoned, reversible)."""
+    from ..features.lifecycle.exclusions import ExclusionStore
+
+    try:
+        return ExclusionStore(_entities_conn()).exclude_entity(entity_ref=entity_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @router.get("/facts")
 async def list_facts(
     predicate: Optional[str] = Query(default=None, max_length=80),

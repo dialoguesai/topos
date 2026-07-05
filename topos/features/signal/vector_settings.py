@@ -68,3 +68,16 @@ def rerank_candidate_limit() -> int:
 def fusion_rrf_enabled() -> bool:
     """Single RRF fusion in retrieval summary building (replaces score constants)."""
     return _flag("TOPOS_FUSION_RRF", "on")
+
+
+def cluster_max_records() -> int:
+    """Embedding rows loaded into a topic-cluster recompute.
+
+    Historic default was 5000, which silently sampled ~20% of a re-enriched
+    corpus; with the numpy k-means path the full corpus is affordable.
+    """
+    raw = os.environ.get("TOPOS_CLUSTER_MAX_RECORDS", "25000").strip()
+    try:
+        return max(100, min(200_000, int(raw)))
+    except ValueError:
+        return 25_000

@@ -175,11 +175,15 @@ def load_embedding_records(
     conn,
     *,
     source_ids: Optional[Sequence[str]] = None,
-    limit: int = 5000,
+    limit: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
     """Load embeddable rows from signal_embeddings for MVP query sources."""
     if conn is None:
         return []
+    if limit is None:
+        from .vector_settings import cluster_max_records
+
+        limit = cluster_max_records()
     ids = list(_resolved_topic_cluster_source_ids(source_ids))
     if not ids:
         return []
@@ -253,12 +257,37 @@ def _init_centroids(vectors: List[List[float]], k: int) -> List[List[float]]:
     return [list(vectors[i]) for i in indices]
 
 
+def _kmeans_assign_numpy(vectors: List[List[float]], centroids: List[List[float]], cluster_k: int) -> Optional[List[int]]:
+    """Vectorized k-means (cosine via dot on normalized vectors); None if numpy absent."""
+    try:
+        import numpy as np
+    except ImportError:
+        return None
+    X = np.asarray(vectors, dtype=np.float32)
+    C = np.asarray(centroids, dtype=np.float32)
+    assignments = np.zeros(len(vectors), dtype=np.int64)
+    for _ in range(_KMEANS_ITERATIONS):
+        new_assignments = np.argmax(X @ C.T, axis=1)
+        if np.array_equal(new_assignments, assignments):
+            break
+        assignments = new_assignments
+        for ci in range(cluster_k):
+            members = X[assignments == ci]
+            if len(members) == 0:
+                C[ci] = X[ci % len(X)]
+                continue
+            mean = members.mean(axis=0)
+            norm = np.linalg.norm(mean)
+            C[ci] = mean / norm if norm > 0 else mean
+    return [int(a) for a in assignments]
+
+
 def cluster_embedding_records(
     records: List[Dict[str, Any]],
     *,
     k: Optional[int] = None,
 ) -> List[Dict[str, Any]]:
-    """K-means (cosine) over normalized embedding vectors."""
+    """K-means (cosine) over normalized embedding vectors (numpy when available)."""
     if not records:
         return []
     vectors = [rec["vector"] for rec in records]
@@ -268,25 +297,28 @@ def cluster_embedding_records(
         return [_build_cluster("tc_single", records, cluster_index=0)]
 
     centroids = _init_centroids(vectors, cluster_k)
-    assignments = [0] * n
 
-    for _ in range(_KMEANS_ITERATIONS):
-        changed = False
-        for idx, vec in enumerate(vectors):
-            best = max(range(cluster_k), key=lambda ci: _cosine(vec, centroids[ci]))
-            if assignments[idx] != best:
-                assignments[idx] = best
-                changed = True
-        if not changed:
-            break
-        for ci in range(cluster_k):
-            members = [vectors[i] for i, a in enumerate(assignments) if a == ci]
-            if not members:
-                centroids[ci] = list(vectors[assignments[ci % n]])
-                continue
-            dim = len(members[0])
-            mean = [sum(m[d] for m in members) / len(members) for d in range(dim)]
-            centroids[ci] = _normalize(mean)
+    assignments = _kmeans_assign_numpy(vectors, centroids, cluster_k)
+    if assignments is None:
+        # Pure-Python fallback (no numpy): fine for small corpora.
+        assignments = [0] * n
+        for _ in range(_KMEANS_ITERATIONS):
+            changed = False
+            for idx, vec in enumerate(vectors):
+                best = max(range(cluster_k), key=lambda ci: _cosine(vec, centroids[ci]))
+                if assignments[idx] != best:
+                    assignments[idx] = best
+                    changed = True
+            if not changed:
+                break
+            for ci in range(cluster_k):
+                members = [vectors[i] for i, a in enumerate(assignments) if a == ci]
+                if not members:
+                    centroids[ci] = list(vectors[assignments[ci % n]])
+                    continue
+                dim = len(members[0])
+                mean = [sum(m[d] for m in members) / len(members) for d in range(dim)]
+                centroids[ci] = _normalize(mean)
 
     buckets: Dict[int, List[Dict[str, Any]]] = {i: [] for i in range(cluster_k)}
     for rec, assign in zip(records, assignments):

@@ -42,11 +42,13 @@ class EntitiesJob(BaseEnrichmentJob):
         results: List[Dict[str, Any]] = []
         total = len(canonical_messages)
 
+        from ....features.signal.embed_context import is_derivable_content
+
         eligible: List[Dict[str, Any]] = []
         for msg in canonical_messages:
             message_id = msg.get("message_id") or msg.get("id")
             content = msg.get("content", "")
-            if message_id and content:
+            if message_id and content and is_derivable_content(str(content)):
                 eligible.append(
                     {
                         "id": str(message_id),

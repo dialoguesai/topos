@@ -64,11 +64,37 @@ def context_header(msg: Dict[str, Any], *, record_type: Optional[str] = None) ->
     return " | ".join(parts[:4])
 
 
+# Serialization artifacts that leak into message content when a source parser
+# fails to decode rich-text payloads (e.g. iMessage attributedBody ->
+# NSKeyedArchiver "streamtyped" blobs). Embedding/NER over these produces junk
+# clusters and junk entities; the real fix is the parser, this is the derived-
+# layer defense.
+_BINARY_ARTIFACT_MARKERS = (
+    "streamtyped",
+    "NSKeyedArchiver",
+    "NSMutableAttributedString",
+    "NSAttributedString",
+    "NSDictionary",
+    "__kIM",
+)
+
+
+def is_derivable_content(text: str) -> bool:
+    """False for serialization garbage that must not enter derived layers."""
+    value = str(text or "")
+    if not value.strip():
+        return False
+    head = value[:200]
+    return not any(marker in head for marker in _BINARY_ARTIFACT_MARKERS)
+
+
 def embeddable_content(msg: Dict[str, Any]) -> str:
     """Primary text for embedding; falls back through descriptive fields."""
     content = str(msg.get("content") or "").strip()
-    if content:
+    if content and is_derivable_content(content):
         return content
+    if content:
+        return ""  # junk content: never fall through to title/url of a message
     parts = [
         str(msg.get(field) or "").strip()
         for field in ("title", "organization", "description", "url")
