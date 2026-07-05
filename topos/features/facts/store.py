@@ -332,14 +332,15 @@ class FactStore:
         value = payload.get("object_value")
         subject = subject_name or "owner"
         text = f"{subject} {pred} {value}"
+        # Only render a real-world period sourced from the record. valid_from
+        # is belief-validity metadata (when the fact was extracted), NOT when
+        # the claim became true — rendering "works at X since <extraction
+        # date>" is both misleading and, because it emits a bare date, trips
+        # the grantee PII redactor (dates mis-matched as phone numbers).
         period_start = payload.get("period_start")
         period_end = payload.get("period_end")
         if period_start and period_end:
             text += f" ({period_start}–{period_end})"
         elif period_start:
             text += f" (since {period_start})"
-        else:
-            since = str(fact.get("valid_from") or "")[:10]
-            if since:
-                text += f" (since {since})"
         return text

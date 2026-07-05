@@ -109,6 +109,33 @@ class TestBeliefRevision:
     def test_predicate_normalization(self) -> None:
         assert normalize_predicate("Works  At") == "works_at"
 
+    def test_render_omits_extraction_timestamp_as_since(self, conn) -> None:
+        """render must not present valid_from (extraction time) as a 'since' date.
+
+        Live-node finding: 'works at Topos (since 2026-07-05)' was both
+        misleading and tripped the grantee PII redactor (date -> phone).
+        """
+        store = FactStore(conn)
+        fact = store.assert_fact(
+            subject_entity_id="ent_self",
+            predicate="works_at",
+            object_value="Topos",
+            confidence=0.9,
+        )
+        rendered = FactStore.render(fact)
+        assert rendered == "owner works at Topos"
+        assert "since" not in rendered
+        # a real source-derived period still renders
+        dated = store.assert_fact(
+            subject_entity_id="ent_self",
+            predicate="worked_at",
+            object_value="Lumon",
+            confidence=0.9,
+            period_start="2021",
+            period_end="2024",
+        )
+        assert FactStore.render(dated) == "owner worked at Lumon (2021–2024)"
+
 
 class TestExtraction:
     def test_profile_experience_current_vs_past(self, conn) -> None:
