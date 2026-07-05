@@ -44,3 +44,27 @@ def min_similarity_threshold() -> float:
         return max(0.0, min(1.0, float(raw)))
     except ValueError:
         return 0.30
+
+
+def embed_context_headers_enabled() -> bool:
+    """Prepend source/date/conversation context to chunk text before embedding."""
+    return _flag("TOPOS_EMBED_CONTEXT_HEADERS", "on")
+
+
+def rerank_mode() -> str:
+    """off | auto | on. auto = rerank when the cross-encoder loads without error."""
+    mode = os.environ.get("TOPOS_RERANK", "auto").strip().lower()
+    return mode if mode in ("off", "auto", "on") else "auto"
+
+
+def rerank_candidate_limit() -> int:
+    raw = os.environ.get("TOPOS_RERANK_CANDIDATES", "50").strip()
+    try:
+        return max(5, min(200, int(raw)))
+    except ValueError:
+        return 50
+
+
+def fusion_rrf_enabled() -> bool:
+    """Single RRF fusion in retrieval summary building (replaces score constants)."""
+    return _flag("TOPOS_FUSION_RRF", "on")

@@ -1,0 +1,175 @@
+{
+  "cases": [
+    {
+      "id": "entity-kilnwatch",
+      "class": "entity",
+      "passed": true,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 1.0,
+      "top_ids": [
+        "chat-005",
+        "chat-002",
+        "jrn-004"
+      ]
+    },
+    {
+      "id": "entity-maya",
+      "class": "entity",
+      "passed": true,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 1.0,
+      "top_ids": [
+        "cal-004",
+        "jrn-002",
+        "jrn-006"
+      ]
+    },
+    {
+      "id": "entity-patel",
+      "class": "entity",
+      "passed": true,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 0.9197,
+      "top_ids": [
+        "jrn-005",
+        "msg-002",
+        "cal-002"
+      ]
+    },
+    {
+      "id": "entity-prior-employer",
+      "class": "entity",
+      "passed": false,
+      "recall": 0.0,
+      "mrr": 0.0,
+      "ndcg": 0.0,
+      "top_ids": [
+        "prof-001",
+        "cal-005"
+      ]
+    },
+    {
+      "id": "temporal-june-2",
+      "class": "temporal",
+      "passed": true,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 1.0,
+      "top_ids": [
+        "cal-002",
+        "msg-002"
+      ]
+    },
+    {
+      "id": "temporal-race",
+      "class": "temporal",
+      "passed": true,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 1.0,
+      "top_ids": [
+        "cal-001",
+        "jrn-003",
+        "web-003",
+        "jrn-001"
+      ]
+    },
+    {
+      "id": "semantic-knee",
+      "class": "semantic",
+      "passed": true,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 0.8529,
+      "top_ids": [
+        "jrn-001",
+        "msg-002",
+        "jrn-003",
+        "msg-003",
+        "jrn-005"
+      ]
+    },
+    {
+      "id": "semantic-ceramics-selling",
+      "class": "semantic",
+      "passed": true,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 0.906,
+      "top_ids": [
+        "chat-003",
+        "cal-003",
+        "jrn-006",
+        "msg-001",
+        "web-002"
+      ]
+    },
+    {
+      "id": "semantic-firmware",
+      "class": "semantic",
+      "passed": true,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 1.0,
+      "top_ids": [
+        "chat-002",
+        "prof-001"
+      ]
+    },
+    {
+      "id": "cross-glaze",
+      "class": "cross_source",
+      "passed": true,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 1.0,
+      "top_ids": [
+        "web-002",
+        "jrn-006",
+        "msg-001"
+      ],
+      "distinct_tables": 3
+    },
+    {
+      "id": "aggregate-running",
+      "class": "aggregate",
+      "passed": true,
+      "recall": 1.0,
+      "mrr": 1.0,
+      "ndcg": 1.0,
+      "top_ids": [
+        "jrn-003",
+        "msg-003",
+        "jrn-005",
+        "cal-001"
+      ]
+    },
+    {
+      "id": "negative-sailing",
+      "class": "negative",
+      "passed": true,
+      "top1_similarity": 0.0,
+      "recall": null,
+      "mrr": null,
+      "ndcg": null
+    }
+  ],
+  "summary": {
+    "recall_at_10": 0.9091,
+    "mrr_at_10": 0.9091,
+    "ndcg_at_10": 0.8799,
+    "negative_pass_rate": 1.0,
+    "per_class_recall": {
+      "entity": 0.75,
+      "temporal": 1.0,
+      "semantic": 1.0,
+      "cross_source": 1.0,
+      "aggregate": 1.0
+    },
+    "cases_passed": 11,
+    "cases_total": 12
+  }
+}

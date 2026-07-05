@@ -99,7 +99,8 @@ def merge_hybrid_results(
             continue
         item = dict(item)
         item["hybrid_score"] = round(score, 6)
-        item["similarity"] = item.get("similarity") or item["hybrid_score"]
+        # NB: similarity stays cosine-only; FTS-only hits carry hybrid_score alone.
+        # Conflating the two lets similarity thresholds silently drop keyword matches.
         merged.append(item)
         if len(merged) >= limit:
             break

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import os
 from typing import Any, Callable, Dict, List, Optional
 
 from ..base import BaseEnrichmentJob
@@ -14,9 +15,71 @@ from ....storage.adapters.factory import AdapterFactory
 
 logger = logging.getLogger("topos.enrichment.jobs.topic_clusters")
 
+_SMALL_BATCH_THRESHOLD = 20
+_RECLUSTER_COOLDOWN_MINUTES = 30
+_INCREMENTAL_MAX_BATCH = 200
+
+
+def incremental_clusters_enabled() -> bool:
+    return os.environ.get("TOPOS_INCREMENTAL_CLUSTERS", "on").strip().lower() not in (
+        "0",
+        "false",
+        "off",
+        "no",
+    )
+
+
+def _recent_recluster_exists(conn, *, cooldown_minutes: int = _RECLUSTER_COOLDOWN_MINUTES) -> bool:
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM topic_clusters WHERE updated_at >= datetime('now', ?) LIMIT 1",
+            (f"-{int(cooldown_minutes)} minutes",),
+        ).fetchone()
+    except Exception:
+        return False
+    return row is not None
+
+
+def _load_batch_embeddings(conn, record_ids: List[str]) -> List[Dict[str, Any]]:
+    """Load the freshly written embeddings for this batch's records."""
+    from ....features.signal.vector_codec import decode_vector
+
+    if not record_ids:
+        return []
+    out: List[Dict[str, Any]] = []
+    for start in range(0, len(record_ids), 200):
+        chunk = record_ids[start : start + 200]
+        placeholders = ",".join("?" for _ in chunk)
+        rows = conn.execute(
+            f"""
+            SELECT embedding_id, record_id, source_id, text_preview,
+                   vector_blob, vector_format, record_type
+            FROM signal_embeddings
+            WHERE record_id IN ({placeholders}) AND vector_blob IS NOT NULL
+              AND chunk_index = 0
+            """,
+            chunk,
+        ).fetchall()
+        for embedding_id, record_id, source_id, preview, blob, fmt, record_type in rows:
+            try:
+                vector = decode_vector(blob, fmt or "json")
+            except Exception:
+                continue
+            out.append(
+                {
+                    "embedding_id": embedding_id,
+                    "record_id": record_id,
+                    "source_id": source_id,
+                    "text_preview": preview,
+                    "vector": vector,
+                    "record_type": record_type,
+                }
+            )
+    return out
+
 
 class TopicClusterJob(BaseEnrichmentJob):
-    """Batch cluster canonical embeddings into memory_topic_map / top_topics."""
+    """Assign-first incremental clustering with debounced full consolidation."""
 
     def get_derived_table(self) -> str:
         return "topic_clusters"
@@ -36,9 +99,53 @@ class TopicClusterJob(BaseEnrichmentJob):
         if conn is None:
             return [{"_deferred": True, "error": "database_unavailable"}]
 
+        from ....features.signal.incremental_clustering import (
+            assign_embeddings,
+            consolidation_due,
+            load_cluster_centroids,
+        )
+
+        have_clusters = bool(load_cluster_centroids(conn))
+        use_incremental = (
+            incremental_clusters_enabled()
+            and have_clusters
+            and len(canonical_messages) <= _INCREMENTAL_MAX_BATCH
+        )
+
+        if use_incremental:
+            record_ids = [
+                str(m.get("event_id") or m.get("record_id") or m.get("message_id") or m.get("id") or "")
+                for m in canonical_messages
+            ]
+            batch_embeddings = _load_batch_embeddings(conn, [r for r in record_ids if r])
+            result = assign_embeddings(conn, batch_embeddings)
+            logger.debug(
+                "[PIPELINE:TOPIC_CLUSTERS] incremental assigned=%d pooled=%d",
+                result["assigned"],
+                result["pooled"],
+            )
+            if not consolidation_due(conn):
+                self._refresh_top_topics(conn)
+                if progress_callback:
+                    progress_callback(1, 1)
+                return []
+            logger.debug("[PIPELINE:TOPIC_CLUSTERS] consolidation due; running full recompute")
+        elif (
+            have_clusters
+            and len(canonical_messages) < _SMALL_BATCH_THRESHOLD
+            and _recent_recluster_exists(conn)
+        ):
+            # Incremental path disabled: keep the small-batch cooldown gate.
+            logger.debug(
+                "[PIPELINE:TOPIC_CLUSTERS] skipped small batch (%d records) within cooldown",
+                len(canonical_messages),
+            )
+            if progress_callback:
+                progress_callback(1, 1)
+            return []
+
         source_ids = {str(m.get("source_id") or "") for m in canonical_messages if m.get("source_id")}
         # Always cluster across all MVP query sources so a single-source ingest still participates.
-        # does not wipe cross-source memory_topic_map rollups.
         scope_ids = list(_resolved_topic_cluster_source_ids())
         if source_ids:
             logger.debug(
@@ -62,11 +169,7 @@ class TopicClusterJob(BaseEnrichmentJob):
                 progress_callback(1, 1)
             return []
 
-        try:
-            bundle = AdapterFactory.from_runtime()
-            write_top_topics_signal_facts(bundle, conn)
-        except Exception as exc:
-            logger.warning("[PIPELINE:TOPIC_CLUSTERS] top_topics write failed: %s", exc)
+        self._refresh_top_topics(conn)
 
         if progress_callback:
             progress_callback(1, 1)
@@ -77,8 +180,16 @@ class TopicClusterJob(BaseEnrichmentJob):
                 "source_id": scope_ids[0] if scope_ids else "cross_source",
                 "member_count": result.get("members_written", 0),
                 "clusters_written": result.get("clusters_written", 0),
+                "ids_preserved": result.get("ids_preserved", 0),
                 "provider": "topos",
                 "model": "kmeans_cosine_v1",
             }
             for label in (result.get("cluster_labels") or [])
         ]
+
+    def _refresh_top_topics(self, conn) -> None:
+        try:
+            bundle = AdapterFactory.from_runtime()
+            write_top_topics_signal_facts(bundle, conn)
+        except Exception as exc:
+            logger.warning("[PIPELINE:TOPIC_CLUSTERS] top_topics write failed: %s", exc)

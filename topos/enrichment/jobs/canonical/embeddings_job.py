@@ -8,6 +8,7 @@ from ..base import BaseEnrichmentJob
 from ._engine_runner import run_engine_task
 from ....engine import Engine
 from ....features.signal.chunking import DEFAULT_STRATEGY, chunk_text
+from ....features.signal.embed_context import build_embed_text, embeddable_content
 from ....features.signal.vector_settings import vector_chunking_enabled
 
 logger = logging.getLogger("topos.enrichment.jobs.embeddings")
@@ -67,15 +68,12 @@ class EmbeddingsJob(BaseEnrichmentJob):
         for msg in canonical_messages:
             message_id = msg.get("message_id") or msg.get("id")
             record_id = msg.get("event_id") or msg.get("record_id") or message_id
-            content = msg.get("content", "")
-            if not content:
-                title = msg.get("title") or ""
-                url = msg.get("url") or ""
-                content = f"{title} {url}".strip()
+            content = embeddable_content(msg)
             if not record_id or not content:
                 processed += 1
                 continue
 
+            record_type = _record_type(msg)
             parent_hash = _content_hash(str(content))
             specs = (
                 chunk_text(str(content))
@@ -83,7 +81,9 @@ class EmbeddingsJob(BaseEnrichmentJob):
                 else chunk_text(str(content), max_tokens=10_000)
             )
             for spec in specs:
-                pending_texts.append(spec.text)
+                pending_texts.append(
+                    build_embed_text(msg, spec.text, record_type=record_type)
+                )
                 pending_meta.append(
                     {
                         "message_id": record_id,
@@ -96,7 +96,7 @@ class EmbeddingsJob(BaseEnrichmentJob):
                         "content_hash": parent_hash,
                         "event_at": _event_at(msg),
                         "conversation_id": msg.get("conversation_id") or msg.get("thread_id"),
-                        "record_type": _record_type(msg),
+                        "record_type": record_type,
                         "chunk_strategy": DEFAULT_STRATEGY,
                         "chunk_count": len(specs),
                     }
@@ -122,7 +122,7 @@ class EmbeddingsJob(BaseEnrichmentJob):
             subtype="embedding",
             source_id=meta[0].get("source_id"),
             record_ids=[str(m["message_id"]) for m in meta],
-            input_payload={"texts": texts, "batch_size": 32},
+            input_payload={"texts": texts, "batch_size": 32, "input_role": "passage"},
         )
         if result.status != "completed":
             return []

@@ -67,7 +67,7 @@ class SignalService:
         hydrate: bool = False,
     ) -> Dict[str, Any]:
         from ...core.state import get_db_connection
-        from ...engine.backends.huggingface import DEFAULT_EMBEDDING_MODEL, HuggingFaceAdapter
+        from ...engine.backends.huggingface import HuggingFaceAdapter, active_embedding_model
         from .hybrid_search import fts_search, merge_hybrid_results
         from .query_embed_cache import get_cached_query_embedding, set_cached_query_embedding
         from .source_hydration import hydrate_record_text
@@ -75,7 +75,7 @@ class SignalService:
 
         q = str(query or "").strip()
         limit = max(1, min(int(limit), 100))
-        embed_model = model or DEFAULT_EMBEDDING_MODEL
+        embed_model = model or active_embedding_model()
         search_mode = (mode or "hybrid").strip().lower()
         if not q:
             return {"items": [], "total": 0, "query": "", "model": embed_model, "limit": limit, "mode": search_mode}
@@ -83,7 +83,10 @@ class SignalService:
         query_vector = get_cached_query_embedding(q, model=embed_model)
         if query_vector is None:
             hf = HuggingFaceAdapter()
-            emb = hf.run_inference({"text": q}, {"subtype": "embedding", "model": embed_model})
+            emb = hf.run_inference(
+                {"text": q},
+                {"subtype": "embedding", "model": embed_model, "input_role": "query"},
+            )
             vectors = emb.get("vectors") or []
             if not vectors:
                 return {
@@ -117,9 +120,29 @@ class SignalService:
             fts_ids = fts_search(conn, q, limit=fetch_limit)
             items = merge_hybrid_results(conn, items, fts_ids, limit=fetch_limit)
 
+        # Rank by RRF score when hybrid ran (comparable across contributors);
+        # cosine threshold applies only to items that actually have a cosine.
+        min_sim = min_similarity_threshold()
+        if min_sim > 0:
+            items = [
+                item
+                for item in items
+                if item.get("similarity") is None or float(item.get("similarity") or 0.0) >= min_sim
+            ]
+
+        rank_key = "hybrid_score" if use_hybrid else "similarity"
+
+        def _rank(row: Dict[str, Any]) -> float:
+            value = row.get(rank_key)
+            if value is None:
+                value = row.get("similarity") or row.get("hybrid_score") or 0.0
+            return float(value)
+
+        items = self._maybe_rerank(q, sorted(items, key=_rank, reverse=True))
+
         deduped: List[Dict[str, Any]] = []
         seen_records: set[str] = set()
-        for item in sorted(items, key=lambda row: float(row.get("similarity") or row.get("hybrid_score") or 0.0), reverse=True):
+        for item in items:
             record_key = str(item.get("record_id") or item.get("embedding_id") or "")
             if record_key and record_key in seen_records:
                 continue
@@ -129,14 +152,6 @@ class SignalService:
             if len(deduped) >= limit:
                 break
         items = deduped
-
-        min_sim = min_similarity_threshold()
-        if min_sim > 0:
-            items = [
-                item
-                for item in items
-                if float(item.get("similarity") or item.get("hybrid_score") or 0.0) >= min_sim
-            ]
 
         if hydrate and conn is not None:
             for item in items:
@@ -157,6 +172,44 @@ class SignalService:
             "limit": limit,
             "mode": search_mode,
         }
+
+    def _maybe_rerank(self, query: str, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        """Cross-encoder rerank of the top fused candidates (mode: off|auto|on)."""
+        from .vector_settings import rerank_candidate_limit, rerank_mode
+
+        mode = rerank_mode()
+        if mode == "off" or len(items) < 2:
+            return items
+        head = items[: rerank_candidate_limit()]
+        tail = items[len(head):]
+        candidates = []
+        for idx, item in enumerate(head):
+            text = str(item.get("search_text") or item.get("text_preview") or "")
+            if text:
+                candidates.append({"id": idx, "text": text[:512]})
+        if len(candidates) < 2:
+            return items
+        try:
+            from ...engine.backends.huggingface import HuggingFaceAdapter
+
+            result = HuggingFaceAdapter().run_inference(
+                {"query": query, "candidates": candidates}, {"subtype": "rerank"}
+            )
+        except Exception:
+            return items
+        if result.get("status") == "unavailable" or not result.get("items"):
+            return items
+        order = [item["id"] for item in result["items"] if item.get("rerank_score") is not None]
+        if not order:
+            return items
+        score_by_idx = {
+            item["id"]: item["rerank_score"] for item in result["items"]
+        }
+        reranked = [dict(head[i]) for i in order if i < len(head)]
+        for i, row in zip(order, reranked):
+            row["rerank_score"] = round(float(score_by_idx[i]), 6)
+        missing = [head[i] for i in range(len(head)) if i not in set(order)]
+        return reranked + missing + tail
 
     def get_vector_source_text(self, *, record_id: str, source_id: Optional[str] = None) -> Dict[str, Any]:
         from ...core.state import get_db_connection

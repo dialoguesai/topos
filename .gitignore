@@ -26,3 +26,6 @@ htmlcov/
 .DS_Store
 *.log
 demo/
+
+# retrieval eval run artifact (regenerated per run; baseline.json is the pinned ratchet)
+tests/evals/retrieval/scorecard.json
