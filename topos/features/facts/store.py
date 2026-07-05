@@ -68,6 +68,23 @@ class FactStore:
 
     # ------------------------------------------------------------ writes
 
+    def _is_excluded(self, subject_entity_id: str, pred: str, object_value: str) -> bool:
+        keys = (
+            f"{subject_entity_id}:{pred}",
+            f"{subject_entity_id}:{pred}:{_normalize_value(object_value)}",
+        )
+        try:
+            for key in keys:
+                row = self._conn.execute(
+                    "SELECT 1 FROM intelligence_exclusions WHERE artifact_type='fact' AND artifact_key=?",
+                    (key,),
+                ).fetchone()
+                if row:
+                    return True
+        except sqlite3.OperationalError:
+            return False
+        return False
+
     def _object_key(self, subject_entity_id: str, pred: str, object_value: str) -> str:
         key = f"fact:{subject_entity_id}:{pred}"
         if pred in MULTI_VALUED_PREDICATES:
@@ -92,6 +109,8 @@ class FactStore:
         pred = normalize_predicate(predicate)
         if not subject_entity_id or not pred or not str(object_value or "").strip():
             raise ValueError("subject, predicate and object_value are required")
+        if self._is_excluded(subject_entity_id, pred, object_value):
+            return None  # owner-excluded: never re-assert
         valid_from = valid_from or _now_iso()
         object_key = self._object_key(subject_entity_id, pred, object_value)
 

@@ -47,6 +47,7 @@ from .wiki_entities_v1 import MIGRATION_ID as WIKI_ENTITIES_V1_ID, apply_wiki_en
 from .wiki_facts_v1 import MIGRATION_ID as WIKI_FACTS_V1_ID, apply_wiki_facts_v1_up
 from .wiki_clusters_v2 import MIGRATION_ID as WIKI_CLUSTERS_V2_ID, apply_wiki_clusters_v2_up
 from .wiki_timeline_v1 import MIGRATION_ID as WIKI_TIMELINE_V1_ID, apply_wiki_timeline_v1_up
+from .wiki_lifecycle_v1 import MIGRATION_ID as WIKI_LIFECYCLE_V1_ID, apply_wiki_lifecycle_v1_up
 from .canonical_disclosure_v1 import (
     MIGRATION_ID as CANONICAL_DISCLOSURE_V1_ID,
     apply_canonical_disclosure_v1_up,
@@ -130,6 +131,7 @@ def apply_all_migrations(conn: sqlite3.Connection) -> None:
     apply_wiki_facts_v1_up(conn)
     apply_wiki_clusters_v2_up(conn)
     apply_wiki_timeline_v1_up(conn)
+    apply_wiki_lifecycle_v1_up(conn)
     apply_canonical_disclosure_v1_up(conn)
     apply_canonical_nsfw_v1_up(conn)
     apply_signal_objects_up(conn)
@@ -180,6 +182,8 @@ def ensure_migrations_applied(conn: sqlite3.Connection) -> None:
         apply_wiki_clusters_v2_up(conn)
     if not _migration_applied(conn, WIKI_TIMELINE_V1_ID):
         apply_wiki_timeline_v1_up(conn)
+    if not _migration_applied(conn, WIKI_LIFECYCLE_V1_ID):
+        apply_wiki_lifecycle_v1_up(conn)
     # Disclosure column adds are idempotent and must run after legacy DDL creates tables.
     apply_canonical_disclosure_v1_up(conn)
     if not _migration_applied(conn, CANONICAL_NSFW_V1_ID):

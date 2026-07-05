@@ -24,6 +24,7 @@ from .api import (
     ingestion_compat as ingestion_compat_routes,
     ingestion_api as ingestion_routes,
     ingestion_sources as ingestion_sources_routes,
+    intelligence_lifecycle as intelligence_lifecycle_routes,
     local_mcp as local_mcp_routes,
     llm as llm_routes,
     messenger_analytics as messenger_analytics_routes,
@@ -101,6 +102,7 @@ app.include_router(analytics_routes.router)
 app.include_router(sources_routes.router)
 app.include_router(source_install_routes.router, prefix="/v1")
 app.include_router(source_scrub_routes.router, prefix="/v1")
+app.include_router(intelligence_lifecycle_routes.router, prefix="/v1")
 app.include_router(app_registry_routes.router)
 app.include_router(ingestion_compat_routes.router)
 app.include_router(enrichment_routes.router, prefix="/v1")

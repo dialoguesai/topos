@@ -28,8 +28,12 @@ def _owner_entity_id(conn: sqlite3.Connection) -> str:
     return entity_id
 
 
-def _source_ref(table: str, record_id: Any) -> Dict[str, str]:
-    return {"table": table, "record_id": str(record_id or "")}
+def _source_ref(table: str, record_id: Any, source_id: Any = None) -> Dict[str, str]:
+    ref = {"table": table, "record_id": str(record_id or "")}
+    # source_id makes scrub attribution exact (no timeline lookup needed).
+    if source_id:
+        ref["source_id"] = str(source_id)
+    return ref
 
 
 _CURRENT_HINTS = re.compile(r"\b(present|current|currently|now|ongoing)\b", re.I)
@@ -163,10 +167,15 @@ def extract_facts_from_batch(
     rows: List[Dict[str, Any]],
 ) -> int:
     """Extract and assert facts about the owner from a canonical batch."""
+    from ..lifecycle.exclusions import excluded_record_ids
+
     store = FactStore(conn)
     owner = _owner_entity_id(conn)
+    excluded_records = excluded_record_ids(conn)
     written = 0
     for row in rows:
+        if str(row.get("record_id") or row.get("message_id") or row.get("id") or "") in excluded_records:
+            continue
         table = str(row.get("_table") or row.get("canonical_table") or "")
         if not table:
             if row.get("record_type") is not None and row.get("organization") is not None:
@@ -178,17 +187,18 @@ def extract_facts_from_batch(
             continue
         record_id = row.get("record_id") or row.get("message_id") or row.get("id")
         for spec in extractor(row):
-            store.assert_fact(
+            asserted = store.assert_fact(
                 subject_entity_id=owner,
                 predicate=spec["predicate"],
                 object_value=spec["object_value"],
                 dimension=spec.get("dimension", "profile"),
                 confidence=float(spec.get("confidence") or 0.7),
-                source_refs=[_source_ref(table, record_id)],
+                source_refs=[_source_ref(table, record_id, row.get("source_id"))],
                 valid_from=spec.get("valid_from"),
                 disclosure=spec.get("disclosure", "scoped"),
                 period_start=spec.get("period_start"),
                 period_end=spec.get("period_end"),
             )
-            written += 1
+            if asserted is not None:  # None = owner-excluded, never re-asserted
+                written += 1
     return written
