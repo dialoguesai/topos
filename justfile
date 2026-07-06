@@ -37,7 +37,22 @@ run-local host="127.0.0.1" port="9000":
 
 # Run test suites.
 test:
-    uv run pytest tests -m "public and not e2e" -q
+    uv run pytest tests -m "public and not e2e and not live and not qq_eval" -q
+
+# Per-release privacy evaluation → version-stamped scorecard in eval_reports/<version>.json
+# (+ history.jsonl trend). Exits non-zero if a tier-1 privacy gate regresses. Run right after
+# the version bump so the report is stamped with the version being shipped.
+eval-release:
+    uv run python scripts/run_release_eval.py --print
+
+# Release gate: everything ci.yml checks, runnable locally before tagging a
+# release (dep pins in sync, public test lane incl. the handled-message-types
+# protocol snapshot guards, build + release smoke).
+gate:
+    uv run python scripts/sync-dep-pins.py --check
+    uv run pytest tests -m "public and not e2e and not live and not qq_eval" -q
+    uv build
+    uv run python scripts/release_smoke_test.py
 
 # Discover local databases and exit.
 discover:
