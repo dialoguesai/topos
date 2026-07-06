@@ -21,6 +21,7 @@ the version being shipped and included in the release commit.
 from __future__ import annotations
 
 import argparse
+import html
 import json
 import subprocess
 import sys
@@ -208,6 +209,13 @@ def _write(report: Dict[str, Any]) -> Path:
     summary = _marketing_summary(report)
     with hist.open("a") as f:
         f.write(json.dumps(summary, default=str) + "\n")
+
+    # Regenerate the self-contained trend dashboard. Best-effort: a rendering
+    # slip must never fail a release (the scorecard + history are already written).
+    try:
+        _write_dashboard(out_dir)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[release-eval] dashboard generation skipped: {exc}", file=sys.stderr)
     return path
 
 
@@ -229,6 +237,212 @@ def _marketing_summary(report: Dict[str, Any]) -> Dict[str, Any]:
         "deny_p95_ms": (lat.get("deny") or {}).get("p95"),
         "gates_passed": (report.get("gates") or {}).get("passed"),
     }
+
+
+# --- Self-contained trend dashboard (eval_reports/index.html) --------------------
+# Reads the whole history.jsonl and bakes it into one static HTML file with
+# server-rendered SVG sparklines — no JS, no CDN, opens with a double-click and
+# works offline (file://). Regenerated on every release from _write().
+
+# key, label, unit, decimals, direction ("low"/"high"/"info"), target-line value
+_DASH_METRICS = [
+    ("deny_p95_ms", "Deny-path p95", " ms", 2, "low", None),
+    ("facts_reduction_open_over_negotiated", "Facts reduction", "×", 1, "high", None),
+    ("unauthorized_access_rate", "Unauthorized access", "", 2, "low", 0.0),
+    ("canary_extraction_rate", "Canary extraction", "", 2, "low", 0.0),
+    ("negotiated_disclosure_precision", "Negotiated precision", "", 2, "high", 1.0),
+    ("negotiated_sensitive_excess", "Sensitive excess", "", 0, "low", 0.0),
+]
+
+
+def _load_history(out_dir: Path) -> List[Dict[str, Any]]:
+    hist = out_dir / "history.jsonl"
+    if not hist.exists():
+        return []
+    rows: List[Dict[str, Any]] = []
+    for line in hist.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            rows.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    return rows
+
+
+def _fmt(v: Any, dec: int, unit: str = "") -> str:
+    if v is None:
+        return "—"
+    try:
+        return (str(int(round(float(v)))) if dec == 0 else f"{float(v):.{dec}f}") + unit
+    except (TypeError, ValueError):
+        return str(v)
+
+
+def _domain(key: str, vals: List[float]) -> tuple[float, float]:
+    mx = max(vals) if vals else 0.0
+    if key == "negotiated_disclosure_precision":
+        return 0.0, 1.05
+    if key == "deny_p95_ms":
+        return 0.0, max(0.3, mx * 1.3)
+    if key in ("unauthorized_access_rate", "canary_extraction_rate"):
+        return 0.0, max(0.1, mx * 1.3)
+    return 0.0, max(1.0, mx * 1.25)
+
+
+def _latest_ok(key: str, v: Any) -> bool | None:
+    if v is None:
+        return None
+    if key == "deny_p95_ms":
+        return float(v) <= DENY_P95_BUDGET_MS
+    if key in ("unauthorized_access_rate", "canary_extraction_rate", "negotiated_sensitive_excess"):
+        return float(v) <= 0
+    if key == "negotiated_disclosure_precision":
+        return float(v) >= 0.999
+    return None  # facts_reduction: informational
+
+
+def _svg_trend(vals: List[Any], lo: float, hi: float, target: Any, ok: bool | None) -> str:
+    w, h, pad = 300.0, 60.0, 7.0
+    xw, yh = w - 2 * pad, h - 2 * pad
+    n = len(vals)
+    span = (hi - lo) or 1.0
+
+    def x_at(i: int) -> float:
+        return pad + (i / (n - 1) * xw if n > 1 else xw / 2)
+
+    def y_at(v: float) -> float:
+        return pad + (1 - (v - lo) / span) * yh
+
+    pts = [(x_at(i), y_at(float(v))) for i, v in enumerate(vals) if v is not None]
+    parts = [f'<svg viewBox="0 0 {w:.0f} {h:.0f}" preserveAspectRatio="none" class="spark" role="img" aria-hidden="true">']
+    if target is not None and lo <= float(target) <= hi:
+        ty = y_at(float(target))
+        parts.append(f'<line x1="{pad:.1f}" y1="{ty:.1f}" x2="{w - pad:.1f}" y2="{ty:.1f}" class="tgt"/>')
+    if len(pts) >= 2:
+        line = " ".join(f"{x:.1f},{y:.1f}" for x, y in pts)
+        area = f"{pts[0][0]:.1f},{h - pad:.1f} " + line + f" {pts[-1][0]:.1f},{h - pad:.1f}"
+        parts.append(f'<polygon points="{area}" class="area"/>')
+        parts.append(f'<polyline points="{line}" class="line"/>')
+    for x, y in pts[:-1]:
+        parts.append(f'<circle cx="{x:.1f}" cy="{y:.1f}" r="1.7" class="dot"/>')
+    if pts:
+        lx, ly = pts[-1]
+        cls = "dot-ok" if ok else ("dot-bad" if ok is False else "dot-last")
+        parts.append(f'<circle cx="{lx:.1f}" cy="{ly:.1f}" r="3.2" class="{cls}"/>')
+    parts.append("</svg>")
+    return "".join(parts)
+
+
+_DASH_CSS = """
+:root{--bg:#faf9f5;--card:#fff;--ink:#141413;--sub:#6b6a65;--mut:#918f88;--line:#e6e4dc;
+--ok:#0f6e56;--okbg:#e1f5ee;--bad:#a32d2d;--badbg:#fcebeb;--accent:#185fa5;--area:rgba(24,95,165,.10)}
+@media(prefers-color-scheme:dark){:root{--bg:#181817;--card:#211f1d;--ink:#f5f4ef;--sub:#b7b5ab;
+--mut:#8a8880;--line:#33312d;--ok:#5dcaa5;--okbg:#0f3f34;--bad:#f09595;--badbg:#4a1b1b;--accent:#6aa4e5;--area:rgba(106,164,229,.12)}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);
+font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+-webkit-font-smoothing:antialiased}.wrap{max-width:940px;margin:0 auto;padding:32px 22px 56px}
+.head{display:flex;align-items:baseline;justify-content:space-between;flex-wrap:wrap;gap:10px;margin-bottom:4px}
+h1{font-size:20px;font-weight:500;margin:0}.sub{color:var(--sub);font-size:13px;margin:2px 0 22px}
+.badge{font-size:13px;font-weight:500;padding:4px 12px;border-radius:7px}
+.badge.ok{background:var(--okbg);color:var(--ok)}.badge.bad{background:var(--badbg);color:var(--bad)}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(210px,1fr));gap:12px;margin-bottom:26px}
+.card{background:var(--card);border:.5px solid var(--line);border-radius:12px;padding:14px 15px}
+.mrow{display:flex;align-items:baseline;justify-content:space-between;gap:8px}
+.mlabel{font-size:13px;color:var(--sub)}.mval{font-size:20px;font-weight:500;font-variant-numeric:tabular-nums}
+.mval.ok{color:var(--ok)}.mval.bad{color:var(--bad)}
+.spark{width:100%;height:56px;margin:8px 0 4px;display:block}
+.spark .line{fill:none;stroke:var(--accent);stroke-width:1.6;vector-effect:non-scaling-stroke;stroke-linejoin:round;stroke-linecap:round}
+.spark .area{fill:var(--area);stroke:none}
+.spark .tgt{stroke:var(--mut);stroke-width:1;stroke-dasharray:3 3;vector-effect:non-scaling-stroke}
+.spark .dot{fill:var(--accent)}.spark .dot-last{fill:var(--accent)}
+.spark .dot-ok{fill:var(--ok)}.spark .dot-bad{fill:var(--bad)}
+.mfoot{font-size:12px;color:var(--mut)}.mfoot .ok{color:var(--ok)}.mfoot .bad{color:var(--bad)}
+h2{font-size:15px;font-weight:500;margin:30px 0 12px}
+table{width:100%;border-collapse:collapse;font-size:13px;font-variant-numeric:tabular-nums}
+th,td{text-align:right;padding:8px 10px;border-bottom:.5px solid var(--line);white-space:nowrap}
+th:first-child,td:first-child{text-align:left}th{color:var(--sub);font-weight:500}
+td.v{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;color:var(--sub)}
+.pill{display:inline-block;width:8px;height:8px;border-radius:50%}.pill.ok{background:var(--ok)}.pill.bad{background:var(--bad)}
+.note{color:var(--mut);font-size:12px;margin-top:18px;max-width:70ch}
+"""
+
+
+def _write_dashboard(out_dir: Path) -> Path:
+    rows = _load_history(out_dir)
+    latest = rows[-1] if rows else {}
+    gates_ok = bool(latest.get("gates_passed"))
+    gen = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+
+    kpis = []
+    for key, label, unit, dec, _dir, _t in _DASH_METRICS:
+        v = latest.get(key)
+        ok = _latest_ok(key, v)
+        cls = " ok" if ok else (" bad" if ok is False else "")
+        vals = [r.get(key) for r in rows]
+        nn = [float(x) for x in vals if x is not None]
+        lo, hi = _domain(key, nn)
+        spark = _svg_trend(vals, lo, hi, _t, ok)
+        if key == "deny_p95_ms":
+            foot = f'budget {DENY_P95_BUDGET_MS:.0f} ms · <span class="{"ok" if ok else "bad"}">{"within" if ok else "over"}</span>'
+        elif key == "facts_reduction_open_over_negotiated":
+            foot = "open → negotiated · higher is better"
+        elif ok is None:
+            foot = "target " + _fmt(_t, dec)
+        else:
+            foot = f'target {_fmt(_t, dec)} · <span class="{"ok" if ok else "bad"}">{"held" if ok else "regressed"}</span>'
+        kpis.append(
+            f'<div class="card"><div class="mrow"><span class="mlabel">{html.escape(label)}</span>'
+            f'<span class="mval{cls}">{_fmt(v, dec, unit)}</span></div>{spark}'
+            f'<div class="mfoot">{foot}</div></div>'
+        )
+
+    head = [
+        "version", "sha", "generated",
+        "UAR", "CER", "facts×", "precision", "excess", "deny p95", "gate",
+    ]
+    trows = []
+    for r in reversed(rows):
+        when = str(r.get("generated_at") or "")[:16].replace("T", " ")
+        g = bool(r.get("gates_passed"))
+        trows.append(
+            "<tr>"
+            f'<td>{html.escape(str(r.get("version") or "—"))}</td>'
+            f'<td class="v">{html.escape(str(r.get("code_sha") or "—"))}</td>'
+            f"<td>{html.escape(when)}</td>"
+            f'<td>{_fmt(r.get("unauthorized_access_rate"), 2)}</td>'
+            f'<td>{_fmt(r.get("canary_extraction_rate"), 2)}</td>'
+            f'<td>{_fmt(r.get("facts_reduction_open_over_negotiated"), 1)}×</td>'
+            f'<td>{_fmt(r.get("negotiated_disclosure_precision"), 2)}</td>'
+            f'<td>{_fmt(r.get("negotiated_sensitive_excess"), 0)}</td>'
+            f'<td>{_fmt(r.get("deny_p95_ms"), 2)} ms</td>'
+            f'<td><span class="pill {"ok" if g else "bad"}" title="{"passed" if g else "failed"}"></span></td>'
+            "</tr>"
+        )
+
+    ver = html.escape(str(latest.get("version") or "—"))
+    sha = html.escape(str(latest.get("code_sha") or "—"))
+    corpus = html.escape(str(latest.get("corpus_version") or "—"))
+    doc = (
+        "<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"utf-8\">"
+        "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
+        f"<title>Topos privacy eval — v{ver}</title><style>{_DASH_CSS}</style></head><body><div class=\"wrap\">"
+        f'<div class="head"><h1>Topos privacy eval — release trend</h1>'
+        f'<span class="badge {"ok" if gates_ok else "bad"}">v{ver} · gates {"passed" if gates_ok else "FAILED"}</span></div>'
+        f'<div class="sub">{len(rows)} run(s) · corpus {corpus} · latest {sha} · deterministic lane · generated {gen}</div>'
+        f'<div class="grid">{"".join(kpis)}</div>'
+        f'<h2>All runs</h2><table><thead><tr>{"".join(f"<th>{html.escape(h)}</th>" for h in head)}</tr></thead>'
+        f'<tbody>{"".join(trows)}</tbody></table>'
+        '<p class="note">Safety floors (unauthorized access, canary extraction, sensitive excess) '
+        'are pass/fail gates pinned at target — a flat line there means no regression, which is the win. '
+        'Deny-path latency and facts reduction are the metrics with headroom to move. '
+        'Regenerated on every release by scripts/run_release_eval.py; deterministic lane, safe to publish.</p>'
+        "</div></body></html>"
+    )
+    path = out_dir / "index.html"
+    path.write_text(doc)
+    return path
 
 
 def _print_summary(report: Dict[str, Any]) -> None:
@@ -260,7 +474,18 @@ def main() -> int:
     parser.add_argument("--no-pytest", action="store_true", help="skip the privacy pytest gate (scorecard only)")
     parser.add_argument("--print", dest="do_print", action="store_true", help="print the summary")
     parser.add_argument("--json", action="store_true", help="print the full report JSON to stdout")
+    parser.add_argument(
+        "--dashboard-only",
+        action="store_true",
+        help="regenerate eval_reports/index.html from the existing history.jsonl and exit (no eval run)",
+    )
     args = parser.parse_args()
+
+    if args.dashboard_only:
+        out_dir = ROOT / "eval_reports"
+        path = _write_dashboard(out_dir)
+        print(f"[release-eval] wrote {path.relative_to(ROOT)}")
+        return 0
 
     report = _collect(run_pytest=not args.no_pytest)
     path = _write(report)
