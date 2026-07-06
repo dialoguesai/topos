@@ -25,6 +25,11 @@ from topos.storage.adapters.fakes import (
     InMemoryVectorIndex,
 )
 
+# Corpus version — pins the "ruler" so per-release scorecards are comparable across versions.
+# Bump this whenever the synthetic corpus / canary set changes (it resets the comparability
+# baseline for trend charts and marketing numbers).
+CORPUS_VERSION = "privacy-corpus-1"
+
 # The secret that must never reach a grantee, and the redacted form that may.
 RAW_CANARY = "reach me at zx-canary-7431@example-priv.net or +1-555-0199"
 REDACTED_CANARY = "reach me at [REDACTED_EMAIL] or [REDACTED_PHONE]"
