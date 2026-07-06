@@ -17,6 +17,8 @@ from .game_layer import DefaultGameLayer
 from .inference import run_query_inference
 from .intent import compute_intent_hash
 from .manifest import ScopeResolutionManifest
+from .minimizer import DisclosureMinimizer
+from .negotiation import DEFAULT_MAX_ROUNDS, build_narrow_request_response, qualify_intent
 from .retrieval import DefaultSignalRetrievalAdapter, resolve_retrieval_source_ids
 from .session import QueryArtifact, QuerySession, TurnOutcome
 from .session_utils import build_cache_key, validate_public_result
@@ -29,6 +31,40 @@ def _ddr_debug_enabled() -> bool:
     """When set, the Disclosure Decision Record is surfaced on the pipeline result for the
     eval harness. It is always attached to the (internal) audit event regardless."""
     return str(os.environ.get("TOPOS_QUERY_DDR") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _negotiation_enabled() -> bool:
+    """§C negotiation: when on, a grantee's under-specified/over-broad request gets a
+    machine-readable counter-offer instead of proceeding (or bare-denying). Default off —
+    additive and opt-in until the A/B eval validates it."""
+    return str(os.environ.get("TOPOS_NEGOTIATION") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _minimizer_enabled() -> bool:
+    """§D on-device disclosure minimizer: when on, a grantee's post-filter disclosure is
+    reduced to only the facts its intent needs, with a deterministic backstop after. Default
+    off — additive and opt-in."""
+    return str(os.environ.get("TOPOS_DISCLOSURE_MINIMIZER") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _persist_negotiation_round(store, session_id, requester_id, session_data, neg_round) -> None:
+    """Persist the negotiation round on the session so a repeat request advances the budget.
+    Preserves any existing envelope (scopes/access_modes) and never stores disclosed data."""
+    prior_env = (session_data or {}).get("envelope_json") or {}
+    env = {**prior_env, "negotiation_round": int(neg_round)}
+    ttl = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
+    try:
+        store.put(
+            {
+                "session_id": session_id,
+                "requester_id": requester_id,
+                "intent_hash": (session_data or {}).get("intent_hash") or "",
+                "envelope_json": env,
+                "ttl_expires_at": ttl,
+            }
+        )
+    except Exception:
+        pass
 
 
 def _session_from_store(session_id: str, data: Dict[str, Any], requester_id: str) -> QuerySession:
@@ -79,6 +115,9 @@ class QueryPipelineOrchestrator:
         self._disclosure = DisclosureFilterPipeline()
         self._game_layer = DefaultGameLayer()
         self._classifier = TurnClassifierLite()
+        # §D — deterministic on-device minimizer by default (KeywordRelevanceSelector as both
+        # selector and fail-closed fallback). Swap in an EngineSelector for the LLM variant.
+        self._minimizer = DisclosureMinimizer()
 
     def _session_store(self):
         return self._adapters.query_session
@@ -143,6 +182,56 @@ class QueryPipelineOrchestrator:
                 "deny_reason": "empty_query",
             }
 
+        # §C — negotiation: for grantee requests, press an under-specified / over-broad intent
+        # toward a proportional one BEFORE touching any data (fast, leaks nothing). Owner
+        # queries are never nagged. Off by default (TOPOS_NEGOTIATION).
+        if _negotiation_enabled() and is_grantee_request:
+            prior_env = (session_data or {}).get("envelope_json") or {}
+            neg_round = int(prior_env.get("negotiation_round") or 0) + 1
+            granted = list(prior_env.get("scopes") or []) or [scope_id]
+            qualification = qualify_intent(
+                scope_id=scope_id,
+                access_mode=access_mode,
+                query_text=query_text,
+                grant_ceiling=manifest.access_mode_ceiling,
+                granted_scopes=granted,
+                filter_manifest=filter_manifest,
+                round=neg_round,
+                max_rounds=DEFAULT_MAX_ROUNDS,
+            )
+            if qualification.exhausted:
+                audit = build_query_audit_event(
+                    turn_outcome=TurnOutcome.DENIED,
+                    scope_id=scope_id,
+                    access_mode=access_mode,
+                    session_id=session_id,
+                    deny_reason="negotiation_exhausted",
+                )
+                return {
+                    "turn_outcome": TurnOutcome.DENIED.value,
+                    "public_result": None,
+                    "deny_reason": "negotiation_exhausted",
+                    "session_id": session_id,
+                    "audit": audit,
+                }
+            if not qualification.ok and qualification.offer is not None:
+                _persist_negotiation_round(store, session_id, requester_id, session_data, neg_round)
+                audit = build_query_audit_event(
+                    turn_outcome=TurnOutcome.NARROW_REQUEST,
+                    scope_id=scope_id,
+                    access_mode=access_mode,
+                    session_id=session_id,
+                    deny_reason=qualification.offer.reason,
+                )
+                return build_narrow_request_response(
+                    offer=qualification.offer,
+                    scope_id=scope_id,
+                    access_mode=access_mode,
+                    session_id=session_id,
+                    audit=audit,
+                )
+            # qualification.ok → proceed to normal processing.
+
         from .retrieval import _mode_allowed
 
         if not _mode_allowed(access_mode, manifest.access_mode_ceiling):
@@ -189,6 +278,9 @@ class QueryPipelineOrchestrator:
             filter_manifest=filter_manifest,
             source_ids=resolved_source_ids,
             data_health_version=data_health_version,
+            disclosure_tier=disclosure_tier,
+            grant_id=str(requester_id),
+            field_transforms=field_transforms,
         )
 
         if classification.outcome == TurnOutcome.DENIED:
@@ -303,9 +395,25 @@ class QueryPipelineOrchestrator:
         )
         timings.deterministic_filter_ms = now_ms() - _t0
 
+        # §D — on-device minimizer: reduce a grantee's post-filter disclosure to only the facts
+        # its intent needs, with the deterministic backstop running LAST. Between the
+        # deterministic filter and the game layer; grantee-only; flag-gated.
+        final_packet = filtered.context_packet
+        minimize_result = None
+        if _minimizer_enabled() and disclosure_tier == "default_disclosure":
+            _t0 = now_ms()
+            minimize_result = await asyncio.to_thread(
+                self._minimizer.minimize,
+                filtered.context_packet,
+                intent=query_text,
+                disclosure_tier=disclosure_tier,
+            )
+            final_packet = minimize_result.packet
+            timings.minimizer_ms = now_ms() - _t0
+
         _t0 = now_ms()
         public = self._game_layer.apply(
-            context_packet=filtered.context_packet,
+            context_packet=final_packet,
             access_mode=access_mode,
             scope_id=scope_id,
             query_text=query_text,
@@ -316,7 +424,7 @@ class QueryPipelineOrchestrator:
             inf = await asyncio.to_thread(
                 run_query_inference,
                 query_text=query_text,
-                context_packet=filtered.context_packet,
+                context_packet=final_packet,
                 scope_id=scope_id,
             )
             public.payload.update(inf)
@@ -331,9 +439,11 @@ class QueryPipelineOrchestrator:
             mode=access_mode,
             scope=scope_id,
             retrieval_packet=bundle.context_packet,
-            filtered_packet=filtered.context_packet,
+            filtered_packet=final_packet,
             filters_applied=filtered.filters_applied,
             timings=timings,
+            minimizer=minimize_result.ddr_summary() if minimize_result else None,
+            backstop_hits=minimize_result.backstop_hits if minimize_result else None,
         ).to_dict()
 
         fingerprint = compute_retrieval_fingerprint(
@@ -342,6 +452,9 @@ class QueryPipelineOrchestrator:
             filter_manifest=filter_manifest,
             source_ids=resolved_source_ids,
             data_health_version=data_health_version,
+            disclosure_tier=disclosure_tier,
+            grant_id=str(requester_id),
+            field_transforms=field_transforms,
         )
         cache_key = build_cache_key(scope_id=scope_id, access_mode=access_mode, intent_hash=intent_hash)
         ttl = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()

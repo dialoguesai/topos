@@ -17,6 +17,9 @@ class TurnOutcome(str, Enum):
     EXPAND_BOUNDARY = "expand_boundary"
     REQUALIFY = "requalify"
     DENIED = "denied"
+    # Negotiation (§C): the request is under-specified/over-broad; the response carries a
+    # machine-readable counter-offer telling the requester what to narrow.
+    NARROW_REQUEST = "narrow_request"
 
 
 @dataclass

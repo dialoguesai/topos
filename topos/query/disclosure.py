@@ -14,6 +14,12 @@ from .types import FilteredContext, RetrievalBundle
 
 _EMAIL_RE = re.compile(r"[\w.-]+@[\w.-]+\.\w+")
 _PHONE_RE = re.compile(r"\+?\d[\d\s()-]{7,}\d")
+# The loose phone pattern also catches ISO dates (YYYY-MM-DD[ T]HH:MM). Skip candidates that
+# begin with a date shape so a bare date is not redacted as a phone number — while still
+# redacting real phone numbers (which never start with \d{4}-\d{2}-\d{2}). Guarding here rather
+# than tightening the phone pattern avoids UNDER-redacting phones (a leak is worse than an
+# over-redacted date).
+_ISO_DATE_PREFIX_RE = re.compile(r"\d{4}-\d{2}-\d{2}")
 _NSFW_TOKENS = ("nsfw", "xxx")
 
 
@@ -23,9 +29,16 @@ def _transform_field(tf: Any, field: str, default: Any = None) -> Any:
     return getattr(tf, field, default)
 
 
+def _redact_phone(match: "re.Match[str]") -> str:
+    candidate = match.group(0)
+    if _ISO_DATE_PREFIX_RE.match(candidate):
+        return candidate  # a date (or datetime), not a phone number
+    return "[REDACTED_PHONE]"
+
+
 def _redact_pii(text: str) -> str:
     text = _EMAIL_RE.sub("[REDACTED_EMAIL]", text)
-    text = _PHONE_RE.sub("[REDACTED_PHONE]", text)
+    text = _PHONE_RE.sub(_redact_phone, text)
     return text
 
 

@@ -10,5 +10,7 @@ def test_turn_outcome_enum_values() -> None:
         "expand_boundary",
         "requalify",
         "denied",
+        # §C negotiation
+        "narrow_request",
     }
     assert {outcome.value for outcome in TurnOutcome} == expected

@@ -100,6 +100,10 @@ class Settings(BaseSettings):
     engine_ollama_base_url: str = Field("http://localhost:11434", env="ENGINE_OLLAMA_BASE_URL")
     ollama_query_model: str = Field("llama3.2:latest", env="TOPOS_OLLAMA_QUERY_MODEL")
     engine_default_provider: str = Field("huggingface", env="ENGINE_DEFAULT_PROVIDER")
+    # §D minimizer runs on EVERY grantee query, so it uses a small/fast local model. The judge
+    # only runs in nightly privacy evals (F.4/CER semantic scoring), so it can be larger/slower.
+    disclosure_minimizer_model: str = Field("llama3.2:latest", env="TOPOS_DISCLOSURE_MINIMIZER_MODEL")
+    privacy_judge_model: str = Field("qwen3.5:9b-mlx", env="TOPOS_PRIVACY_JUDGE_MODEL")
 
     engine_max_resident_models: int = Field(3, env="ENGINE_MAX_RESIDENT_MODELS")
     engine_model_idle_ttl_sec: int = Field(0, env="ENGINE_MODEL_IDLE_TTL_SEC")

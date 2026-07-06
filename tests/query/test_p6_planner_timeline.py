@@ -84,13 +84,13 @@ class TestTimelineJob:
             {"record_id": "c1", "_table": "calendar_events", "title": "PT", "starts_at": "2026-06-02T17:00:00Z"},
             {"record_id": "skip", "_table": "journal_entries"},  # no timestamp
         ]
-        asyncio.get_event_loop().run_until_complete(TimelineJob().enrich(rows))
+        asyncio.run(TimelineJob().enrich(rows))
         stored = conn.execute(
             "SELECT record_id, canonical_table FROM timeline ORDER BY event_at"
         ).fetchall()
         assert [r[0] for r in stored] == ["j1", "c1"]
         # idempotent re-run
-        asyncio.get_event_loop().run_until_complete(TimelineJob().enrich(rows))
+        asyncio.run(TimelineJob().enrich(rows))
         assert conn.execute("SELECT COUNT(*) FROM timeline").fetchone()[0] == 2
 
 
