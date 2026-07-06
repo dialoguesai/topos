@@ -1045,6 +1045,12 @@ def _build_summary_items(
     fact_items.sort(key=lambda item: float(item.get("relevance_score") or 0.0), reverse=True)
 
     # Entity spine: link query entities, contribute dossier/mention items.
+    # Entity/fact/stat contributors need a raw sqlite handle. Use the bundle's
+    # connection so they read the same database the query targets (the global
+    # singleton may point at a different db when adapters were built from an
+    # explicit conn/path — e.g. multi-db verification runs and seeded tests).
+    raw_conn = getattr(adapters.signal, "_conn", None)
+
     entity_items: List[Dict[str, Any]] = []
     fact_store_items: List[Dict[str, Any]] = []
     if query_text:
@@ -1052,7 +1058,7 @@ def _build_summary_items(
             from ..core.state import get_db_connection
             from ..features.entities.linking import entity_context_items, link_query_entities
 
-            conn = get_db_connection()
+            conn = raw_conn if raw_conn is not None else get_db_connection()
             if conn is not None:
                 linked = link_query_entities(conn, query_text)
                 entity_items = [
@@ -1074,7 +1080,7 @@ def _build_summary_items(
             from ..core.state import get_db_connection
 
             stat_items = _load_stat_insight_items(
-                get_db_connection(),
+                raw_conn if raw_conn is not None else get_db_connection(),
                 query_text,
                 dimensions=getattr(plan, "dimensions", None),
                 disclosure_tier=disclosure_tier,
