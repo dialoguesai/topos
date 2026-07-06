@@ -17,7 +17,8 @@ pytestmark = pytest.mark.gap
 
 def test_post_canonical_hook_logs_signal_derive_stub(caplog) -> None:
     logger = logging.getLogger("topos.ingestion.manager")
-    with caplog.at_level(logging.INFO, logger="topos.ingestion.manager"):
+    # Stage logs are DEBUG since 1.0.2 (5c4af45 quieted pipeline log noise).
+    with caplog.at_level(logging.DEBUG, logger="topos.ingestion.manager"):
         envelope = enqueue_signal_derive_stub(
             logger,
             source_id="chatgpt_file_ingestion",

@@ -111,3 +111,11 @@ def module_reload_isolation():
         if name not in snapshot:
             sys.modules.pop(name, None)
     sys.modules.update(snapshot)
+    # Also re-point parent-package attributes: pytest monkeypatch resolves
+    # dotted targets by getattr traversal (topos.config → .settings), so a
+    # stale parent attr would still expose a forked module.
+    for name, module in snapshot.items():
+        parent_name, _, child = name.rpartition(".")
+        parent = sys.modules.get(parent_name) if parent_name else None
+        if parent is not None:
+            setattr(parent, child, module)

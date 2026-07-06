@@ -9,10 +9,18 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.gap
-
 REPO_ROOT = Path(__file__).resolve().parents[5]
 MATRIX = REPO_ROOT / "topos-control-plane" / "docs" / "WIKI_MVP_PARITY_MATRIX.md"
+
+# The matrix doc lives in the (private) control-plane repo; this guard only
+# applies when it is checked out as a sibling (monorepo / CP CI layout).
+pytestmark = [
+    pytest.mark.gap,
+    pytest.mark.skipif(
+        not MATRIX.parent.parent.is_dir(),
+        reason="sibling topos-control-plane checkout not present",
+    ),
+]
 
 
 def test_parity_matrix_doc_exists_with_required_sections() -> None:
