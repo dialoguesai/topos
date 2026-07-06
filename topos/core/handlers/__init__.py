@@ -150,6 +150,7 @@ from . import (  # noqa: F401  (imported for handler registration side effects)
     config,
     sources,
     filter_lab,
+    enrichment_lab,
     home_chat,
     routines,
     device,
