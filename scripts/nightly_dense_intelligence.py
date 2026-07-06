@@ -279,10 +279,18 @@ def step_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
 
 
 def step_facts(conn: sqlite3.Connection) -> Dict[str, Any]:
-    from topos.features.facts.extract import extract_facts_from_batch
+    from topos.features.facts.extract import (
+        derive_location_facts,
+        extract_facts_from_batch,
+    )
 
     rows: List[Dict[str, Any]] = []
-    for table in ("profile_records", "journal_entries"):
+    for table in (
+        "profile_records",
+        "journal_entries",
+        "conversation_messages",
+        "ai_chat_messages",
+    ):
         try:
             table_rows = dict_rows(conn, f"SELECT * FROM {table}")
         except sqlite3.OperationalError:
@@ -291,6 +299,8 @@ def step_facts(conn: sqlite3.Connection) -> Dict[str, Any]:
             row["_table"] = table
         rows.extend(table_rows)
     written = extract_facts_from_batch(conn, rows)
+    written += derive_location_facts(conn)
+    conn.commit()
     active = conn.execute(
         "SELECT COUNT(*) FROM signal_objects WHERE object_type='fact' AND valid_to IS NULL"
     ).fetchone()[0]
