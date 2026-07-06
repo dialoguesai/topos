@@ -31,12 +31,14 @@ jobs:
         run: python scripts/sync-dep-pins.py --check
 
       - name: Run public test lane
-        run: uv run pytest tests -m "public and not e2e" -q
+        run: uv run pytest tests -m "public and not e2e and not live and not qq_eval" -q
 
       - name: Home chat Wave A routing and retrieval gates
+        # CP-side integration (scope_query_router, adversarial privacy) runs in
+        # the control-plane repo's CI, which checks this engine out as a sibling.
+        # This workflow must stay self-contained: no ../ references.
         run: |
           uv run pytest tests/query/test_retrieval_calendar_compare.py tests/query/test_retrieval_messages_multi_source.py tests/query/test_resolve_source_ids_installed_filter.py tests/query/test_fingerprint_invalidation.py tests/query/test_query_multi_turn_cache.py -q
-          uv run pytest ../topos-control-plane/tests/control_plane/test_scope_query_router.py -q
           HARN_DB="$(mktemp /tmp/harness-ci.XXXXXX)"
           uv run python demo/signal_dimension_harness/seed_ci_harness_db.py --db "${HARN_DB}"
           uv run python demo/signal_dimension_harness/run_multi_turn_catalog.py --db "${HARN_DB}"
@@ -45,6 +47,15 @@ jobs:
           grep -q "Signal: 70/70" /tmp/query-catalog.out
           grep -q "quality 70/70" /tmp/query-catalog.out
           uv run python demo/signal_dimension_harness/evaluate_harness.py --db "${HARN_DB}"
+
+      - name: Privacy firewall + eval gates
+        # The privacy evals are marked `private` (excluded from the public lane by design), so
+        # run them by path here: UAR/CER (zero-leak), minimality (sensitive-excess=0),
+        # negotiation ratchet, minimizer subset/injection, disclosure idempotence + existence
+        # parity + phone/date redaction, cache isolation, and the dense-artifact sparsification
+        # gates. Deterministic (no live LLM). The CP-side adversarial probes run in the
+        # control-plane repo's CI (its hermetic suite includes tests/adversarial).
+        run: uv run pytest tests/evals/privacy/ -q
 
       - name: Build package artifacts
         run: uv build
