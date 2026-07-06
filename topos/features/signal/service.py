@@ -164,6 +164,8 @@ class SignalService:
                 if hydrated.found:
                     item["source_text"] = hydrated.content
 
+        from ...storage.adapters.sqlite.vector_search import last_search_backend
+
         return {
             "items": items,
             "total": page.total,
@@ -171,13 +173,20 @@ class SignalService:
             "model": embed_model,
             "limit": limit,
             "mode": search_mode,
+            "backend": last_search_backend(),
+            "rerank": getattr(self, "last_rerank_state", "skipped"),
         }
 
     def _maybe_rerank(self, query: str, items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-        """Cross-encoder rerank of the top fused candidates (mode: off|auto|on)."""
+        """Cross-encoder rerank of the top fused candidates (mode: off|auto|on).
+
+        Sets ``self.last_rerank_state`` so callers can report whether reranking
+        actually ran (auto mode degrades silently otherwise).
+        """
         from .vector_settings import rerank_candidate_limit, rerank_mode
 
         mode = rerank_mode()
+        self.last_rerank_state = "off" if mode == "off" else "skipped"
         if mode == "off" or len(items) < 2:
             return items
         head = items[: rerank_candidate_limit()]
@@ -202,6 +211,7 @@ class SignalService:
         order = [item["id"] for item in result["items"] if item.get("rerank_score") is not None]
         if not order:
             return items
+        self.last_rerank_state = "reranked"
         score_by_idx = {
             item["id"]: item["rerank_score"] for item in result["items"]
         }

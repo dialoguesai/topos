@@ -434,6 +434,15 @@ class QueryPipelineOrchestrator:
         validate_public_result(public_dict)
 
         timings.total_ms = now_ms() - turn_start_ms
+        # Module-level last-backend is telemetry-grade: concurrent queries can
+        # interleave, but per-process it reliably surfaces sustained silent
+        # degradation (brute-force scans when the ANN table is missing).
+        try:
+            from ..storage.adapters.sqlite.vector_search import last_search_backend
+
+            retrieval_meta = {"vector_backend": last_search_backend()}
+        except Exception:  # noqa: BLE001
+            retrieval_meta = {}
         ddr = build_disclosure_decision_record(
             tier=disclosure_tier,
             mode=access_mode,
@@ -444,6 +453,7 @@ class QueryPipelineOrchestrator:
             timings=timings,
             minimizer=minimize_result.ddr_summary() if minimize_result else None,
             backstop_hits=minimize_result.backstop_hits if minimize_result else None,
+            retrieval=retrieval_meta,
         ).to_dict()
 
         fingerprint = compute_retrieval_fingerprint(

@@ -628,6 +628,33 @@ def step_cleanjunk(conn: sqlite3.Connection) -> Dict[str, Any]:
     return report
 
 
+def step_statsreset(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """Clear folded stat state so the next ``stats`` step refolds all history.
+
+    Needed once after changing stat definitions in a way that alters bucketing
+    (e.g. enabling d30/d90 windows: rows folded before the change live only in
+    the all-time bucket and are dedup-skipped by stat_seen, so daily buckets
+    would otherwise cover new data only). Derived + rebuildable: safe.
+    """
+    counts = {}
+    for table in ("stat_state", "stat_seen"):
+        try:
+            counts[table] = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            conn.execute(f"DELETE FROM {table}")
+        except sqlite3.OperationalError:
+            counts[table] = 0
+    conn.commit()
+    return {"cleared": counts}
+
+
+def step_gc(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """Derived-layer garbage collection (stale objects, brief compaction,
+    audit retention, junk embeddings). See topos.features.lifecycle.gc."""
+    from topos.features.lifecycle.gc import run_gc
+
+    return run_gc(conn)
+
+
 def _probe_queries(conn: sqlite3.Connection) -> List[str]:
     probes = list(GENERIC_PROBES)
     for (name,) in conn.execute(
@@ -737,6 +764,8 @@ def main() -> int:
         "migrate": step_migrate,
         "reenrich": step_reenrich,
         "cleanjunk": step_cleanjunk,
+        "gc": step_gc,
+        "statsreset": step_statsreset,
         "entities": step_entities,
         "stats": step_stats,
         "facts": step_facts,

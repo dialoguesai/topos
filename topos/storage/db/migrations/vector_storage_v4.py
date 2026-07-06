@@ -47,6 +47,21 @@ def declared_vec_dims(conn: sqlite3.Connection) -> int:
     return int(match.group(1)) if match else 0
 
 
+def vec_table_uses_cosine(conn: sqlite3.Connection) -> bool:
+    """True when the vec0 DDL declares cosine distance.
+
+    Without it vec0 defaults to L2: ordering stays correct for normalized
+    vectors, but `1 - distance` is then NOT a cosine similarity, and the
+    service-level min-similarity threshold silently drops nearly every hit
+    (caught by the retrieval eval the first time ANN actually ran in tests).
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name=?",
+        (_VEC_TABLE,),
+    ).fetchone()
+    return bool(row and row[0] and "distance_metric=cosine" in str(row[0]))
+
+
 def _active_model_dims() -> int:
     try:
         from ....engine.backends.huggingface import (
@@ -76,13 +91,50 @@ def rebuild_vec_table(conn: sqlite3.Connection, dims: int) -> int:
         f"""
         CREATE VIRTUAL TABLE {_VEC_TABLE} USING vec0(
             embedding_id TEXT PRIMARY KEY,
-            embedding float[{int(dims)}]
+            embedding float[{int(dims)}] distance_metric=cosine
         )
         """
     )
     rows = conn.execute(
         "SELECT embedding_id, vector_blob, vector_format FROM signal_embeddings"
         " WHERE vector_blob IS NOT NULL"
+    ).fetchall()
+    written = 0
+    for embedding_id, blob, vector_format in rows:
+        try:
+            vector = decode_vector(blob, vector_format or "json")
+        except Exception:
+            continue
+        if len(vector) != dims:
+            continue
+        conn.execute(
+            f"INSERT OR REPLACE INTO {_VEC_TABLE}(embedding_id, embedding) VALUES (?, ?)",
+            (embedding_id, encode_f32(vector)),
+        )
+        written += 1
+    return written
+
+
+def top_up_vec_rows(conn: sqlite3.Connection, dims: int) -> int:
+    """Insert embeddings missing from the ANN table (cheap no-op when in sync)."""
+    from ....features.signal.vector_codec import decode_vector, encode_f32
+
+    counts = conn.execute(
+        f"""
+        SELECT
+            (SELECT COUNT(*) FROM signal_embeddings WHERE vector_blob IS NOT NULL),
+            (SELECT COUNT(*) FROM {_VEC_TABLE})
+        """
+    ).fetchone()
+    if counts is None or int(counts[0] or 0) <= int(counts[1] or 0):
+        return 0
+    rows = conn.execute(
+        f"""
+        SELECT embedding_id, vector_blob, vector_format
+        FROM signal_embeddings
+        WHERE vector_blob IS NOT NULL
+          AND embedding_id NOT IN (SELECT embedding_id FROM {_VEC_TABLE})
+        """
     ).fetchall()
     written = 0
     for embedding_id, blob, vector_format in rows:
@@ -122,16 +174,32 @@ def apply_vector_storage_v4_up(conn: sqlite3.Connection) -> None:
         "CREATE INDEX IF NOT EXISTS idx_embedding_entities_entity ON embedding_entities(entity_id)"
     )
 
-    # Rebuild the ANN table if the active embedding model's dims diverge from
-    # the declared column. Runs on every startup path (cheap no-op when equal).
-    if _sqlite_vec_available(conn):
+    # Keep the ANN table aligned with the active embedding model. Runs on
+    # every startup path (cheap count-compare no-op when in sync):
+    #   * missing table (extension installed after embeddings were written,
+    #     or a fresh install) -> create + full backfill
+    #   * dims divergence -> rebuild at active dims
+    #   * row gap (embeddings written while the extension was unavailable)
+    #     -> top up only the missing rows
+    if _sqlite_vec_available(conn) and "signal_embeddings" in _tables(conn):
         active_dims = _active_model_dims()
         declared = declared_vec_dims(conn)
-        if active_dims and declared and declared != active_dims:
+        needs_rebuild = active_dims and (
+            declared != active_dims or (declared and not vec_table_uses_cosine(conn))
+        )
+        if needs_rebuild:
             written = rebuild_vec_table(conn, active_dims)
             logger.info(
-                "Rebuilt %s at %d dims (%d vectors)", _VEC_TABLE, active_dims, written
+                "%s %s at %d dims, cosine (%d vectors)",
+                "Created" if declared == 0 else "Rebuilt",
+                _VEC_TABLE,
+                active_dims,
+                written,
             )
+        elif active_dims and declared == active_dims:
+            topped_up = top_up_vec_rows(conn, active_dims)
+            if topped_up:
+                logger.info("Topped up %s with %d missing vectors", _VEC_TABLE, topped_up)
 
     conn.execute(
         "INSERT OR IGNORE INTO wiki_schema_migrations (migration_id) VALUES (?)",

@@ -14,6 +14,33 @@ logger = logging.getLogger(__name__)
 
 _VEC_TABLE = "signal_embeddings_vec"
 
+# Which backend served the most recent search ("sqlite_vec" | "brute_force").
+# Degrading to a linear scan must be observable, not silent: service responses
+# and probe telemetry read this after each call.
+_last_backend: str = "none"
+_brute_force_warned = False
+_BRUTE_FORCE_WARN_ROWS = 10_000
+
+
+def last_search_backend() -> str:
+    return _last_backend
+
+
+def _record_backend(backend: str, *, scanned: int = 0) -> None:
+    global _last_backend, _brute_force_warned
+    _last_backend = backend
+    if (
+        backend == "brute_force"
+        and not _brute_force_warned
+        and scanned >= _BRUTE_FORCE_WARN_ROWS
+    ):
+        _brute_force_warned = True
+        logger.warning(
+            "Vector search is brute-forcing %d rows per query (no ANN index). "
+            "Install the sqlite-vec extension and restart to build signal_embeddings_vec.",
+            scanned,
+        )
+
 
 def _sqlite_vec_ready(conn: sqlite3.Connection) -> bool:
     row = conn.execute(
@@ -224,10 +251,11 @@ def search_similar(
             fetch_limit=fetch_limit,
         )
         if ann is not None:
+            _record_backend("sqlite_vec")
             return ann
         if mode == "sqlite_vec":
             logger.warning("TOPOS_VECTOR_ANN=sqlite_vec but ANN unavailable; falling back to brute-force")
-    return search_similar_brute_force(
+    results, scanned = search_similar_brute_force(
         conn,
         query_vector,
         source_id=source_id,
@@ -238,3 +266,5 @@ def search_similar(
         limit=limit,
         fetch_limit=fetch_limit,
     )
+    _record_backend("brute_force", scanned=scanned)
+    return results, scanned

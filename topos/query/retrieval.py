@@ -118,11 +118,15 @@ def _load_user_goal_summaries(
     *,
     source_ids: Optional[List[str]] = None,
     limit: int = _SUMMARY_ITEM_CAP,
+    conn: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
     try:
-        from ..core.state import get_db_connection
+        # Prefer the query's own connection (multi-db verification, seeded evals);
+        # the global singleton may point at a different database.
+        if conn is None:
+            from ..core.state import get_db_connection
 
-        conn = get_db_connection()
+            conn = get_db_connection()
         if conn is None:
             return []
         params: List[Any] = []
@@ -372,11 +376,14 @@ def _load_canonical_summary_items(
     return items[:_SUMMARY_ITEM_CAP]
 
 
-def _load_brief_summary_items(dimensions: List[str]) -> List[Dict[str, Any]]:
+def _load_brief_summary_items(
+    dimensions: List[str], *, conn: Optional[Any] = None
+) -> List[Dict[str, Any]]:
     try:
-        from ..core.state import get_db_connection
+        if conn is None:
+            from ..core.state import get_db_connection
 
-        conn = get_db_connection()
+            conn = get_db_connection()
         if conn is None:
             return []
         items: List[Dict[str, Any]] = []
@@ -882,6 +889,75 @@ def _load_stat_insight_items(
     return [item for _, item in scored[:limit]]
 
 
+_RECENT_WINDOW_DAYS = 14
+_RECENT_ITEM_LIMIT = 10
+
+
+def _default_conn():
+    try:
+        from ..core.state import get_db_connection
+
+        return get_db_connection()
+    except Exception:
+        return None
+
+
+def _load_recent_summary_items(
+    conn,
+    *,
+    source_ids: Optional[List[str]] = None,
+    days: int = _RECENT_WINDOW_DAYS,
+    limit: int = _RECENT_ITEM_LIMIT,
+) -> List[Dict[str, Any]]:
+    """Freshest records as an ordered fusion contributor.
+
+    Guarantees the last two weeks are always *representable* in the summary
+    regardless of semantic similarity — recency is a first-class relevance
+    signal, not a tiebreaker.
+    """
+    if conn is None:
+        return []
+    cutoff = (datetime.now(timezone.utc) - timedelta(days=max(1, days))).isoformat()
+    params: List[Any] = [cutoff]
+    source_sql = ""
+    ids = [str(s) for s in (source_ids or []) if str(s).strip()]
+    if ids:
+        source_sql = f" AND source_id IN ({','.join('?' for _ in ids)})"
+        params.extend(ids)
+    params.append(max(1, limit))
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT record_id, source_id, signal_dimension, text_preview, event_at
+            FROM signal_embeddings
+            WHERE chunk_index = 0 AND event_at IS NOT NULL AND event_at >= ?{source_sql}
+            ORDER BY event_at DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+    except Exception as exc:
+        logger.debug("recent summary items skipped: %s", exc)
+        return []
+    items: List[Dict[str, Any]] = []
+    for record_id, source_id, dimension, preview, event_at in rows:
+        text = str(preview or "").strip()
+        if not text:
+            continue
+        items.append(
+            {
+                "topic": text[:120],
+                "summary_text": text,
+                "record_id": record_id,
+                "source_id": source_id,
+                "signal_dimension": dimension,
+                "event_at": event_at,
+                "retrieval_source": "recent",
+            }
+        )
+    return items
+
+
 def _fusion_item_key(item: Dict[str, Any]) -> str:
     record_id = str(item.get("record_id") or "")
     if record_id:
@@ -892,11 +968,35 @@ def _fusion_item_key(item: Dict[str, Any]) -> str:
     return f"txt:{str(item.get('retrieval_source') or '')}:{str(item.get('topic') or '')[:80]}"
 
 
+# Contributors whose items describe *current state* rather than events in
+# time: facts carry their own validity intervals, stats fold their own
+# windows, briefs and dossiers are maintained snapshots. Decaying these by
+# created_at would punish exactly the artifacts built to stay current.
+_NO_DECAY_FUSION_SOURCES = frozenset(
+    {"stat_insights", "facts_store", "entities", "briefs", "goals"}
+)
+
+
+def _recency_decay_factor(
+    item: Dict[str, Any],
+    *,
+    now: datetime,
+    half_life_days: float,
+    floor: float,
+) -> float:
+    ts = _parse_row_timestamp(item)
+    if ts is None:
+        return 1.0
+    age_days = max(0.0, (now - ts).total_seconds() / 86400.0)
+    return max(floor, 0.5 ** (age_days / half_life_days))
+
+
 def _rrf_fuse_summary_lists(
     lists: List[Tuple[str, float, List[Dict[str, Any]]]],
     *,
     k: int = 60,
     cap: int = _SUMMARY_ITEM_CAP,
+    now: Optional[datetime] = None,
 ) -> List[Dict[str, Any]]:
     """Fuse ordered contributor lists with weighted reciprocal rank fusion.
 
@@ -904,17 +1004,42 @@ def _rrf_fuse_summary_lists(
     contributors are never compared directly — only ranks are, which is the
     whole point: cosine similarities, keyword overlaps, and fixed brief scores
     live on incomparable scales.
+
+    Time-stamped event items (vector hits, canonical rows) additionally decay
+    by 2^(-age/half_life) toward a floor, so "relevant" drifts with the
+    present instead of treating a message from last year and last night as
+    interchangeable. Current-state contributors are exempt (see
+    _NO_DECAY_FUSION_SOURCES).
     """
+    from ..features.signal.vector_settings import (
+        fusion_recency_enabled,
+        fusion_recency_floor,
+        fusion_recency_half_life_days,
+    )
+
+    decay_on = fusion_recency_enabled()
+    half_life = fusion_recency_half_life_days()
+    floor = fusion_recency_floor()
+    now = now or datetime.now(timezone.utc)
+
     scores: Dict[str, float] = {}
     best_item: Dict[str, Dict[str, Any]] = {}
     contributors: Dict[str, List[str]] = {}
     for source_name, weight, ordered in lists:
+        apply_decay = decay_on and source_name not in _NO_DECAY_FUSION_SOURCES
         for rank, item in enumerate(ordered):
             key = _fusion_item_key(item)
-            scores[key] = scores.get(key, 0.0) + weight / (k + rank + 1)
+            decay = (
+                _recency_decay_factor(item, now=now, half_life_days=half_life, floor=floor)
+                if apply_decay
+                else 1.0
+            )
+            scores[key] = scores.get(key, 0.0) + weight * decay / (k + rank + 1)
             contributors.setdefault(key, []).append(source_name)
             if key not in best_item:
                 best_item[key] = dict(item)
+                if apply_decay and decay < 1.0:
+                    best_item[key]["recency_factor"] = round(decay, 4)
 
     if not scores:
         return []
@@ -946,9 +1071,16 @@ def _build_summary_items(
     work_scope = manifest.scope_id == "work_context:read"
     source_ids = _resolve_source_ids(manifest, installed_source_ids)
 
+    # The query's own connection — goal/brief contributors must read the same
+    # database the query targets (the global singleton may point elsewhere in
+    # multi-db verification runs and seeded evals).
+    bundle_conn = getattr(adapters.signal, "_conn", None)
+
     goal_items: List[Dict[str, Any]] = []
     if prefer_goals or work_scope:
-        goal_items = _load_user_goal_summaries(query_text, source_ids=source_ids or None)
+        goal_items = _load_user_goal_summaries(
+            query_text, source_ids=source_ids or None, conn=bundle_conn
+        )
 
     canonical_items = _load_canonical_summary_items(
         manifest=manifest,
@@ -961,7 +1093,7 @@ def _build_summary_items(
     brief_dims = list(manifest.primary_dimensions)
     if manifest.scope_id == "activity:read":
         brief_dims.append("Profile")
-    brief_items = _load_brief_summary_items(brief_dims)
+    brief_items = _load_brief_summary_items(brief_dims, conn=bundle_conn)
 
     # Legacy work-scope employer heuristic (scheduled for deletion once the
     # query planner covers it); contributes ordered items, not fake scores.
@@ -1045,11 +1177,9 @@ def _build_summary_items(
     fact_items.sort(key=lambda item: float(item.get("relevance_score") or 0.0), reverse=True)
 
     # Entity spine: link query entities, contribute dossier/mention items.
-    # Entity/fact/stat contributors need a raw sqlite handle. Use the bundle's
-    # connection so they read the same database the query targets (the global
-    # singleton may point at a different db when adapters were built from an
-    # explicit conn/path — e.g. multi-db verification runs and seeded tests).
-    raw_conn = getattr(adapters.signal, "_conn", None)
+    # Entity/fact/stat contributors need a raw sqlite handle; reuse the bundle
+    # connection resolved above for the goal/brief contributors.
+    raw_conn = bundle_conn
 
     entity_items: List[Dict[str, Any]] = []
     fact_store_items: List[Dict[str, Any]] = []
@@ -1090,6 +1220,10 @@ def _build_summary_items(
             logger.debug("stat insight load skipped: %s", exc)
 
     if fusion_rrf_enabled():
+        recent_items = _load_recent_summary_items(
+            raw_conn if raw_conn is not None else _default_conn(),
+            source_ids=source_ids or None,
+        )
         canonical_weight = 2.0 if work_scope else 1.0
         return _rrf_fuse_summary_lists(
             [
@@ -1102,6 +1236,7 @@ def _build_summary_items(
                 ("clusters", 0.8, cluster_items),
                 ("vector", 0.6 if work_scope else 1.0, vector_items),
                 ("signal_facts", 1.0, fact_items),
+                ("recent", 1.0, recent_items),
             ]
         )
 
