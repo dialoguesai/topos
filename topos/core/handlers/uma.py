@@ -27,6 +27,7 @@ from .common import (
     settings,
     strip_contact_runtime_filters,
 )
+from ...uma_filters import enrichment_filters_in_manifest, strip_enrichment_retrieval_filters
 from .registry import handles
 
 
@@ -70,6 +71,37 @@ def _build_uma_scope_clause(
         return ' WHERE "tenant_id" = ?', (tenant_id,)
     return "", ()
 
+def _semantic_narrowing_ids(query_text: str, *, limit: int = 400) -> Optional[set]:
+    """Vector/hybrid search over signal_embeddings to pre-filter UMA reads.
+
+    Returns matching canonical record ids, or None when semantic search is
+    unavailable (caller then falls back to chronological reads)."""
+    text = str(query_text or "").strip()
+    if not text:
+        return None
+    try:
+        from ...features.signal.service import get_signal_service
+
+        result = get_signal_service().search_vectors(query=text, limit=limit, mode="hybrid")
+        items = result.get("items") or []
+        ids = {str(item.get("record_id")) for item in items if item.get("record_id")}
+        return ids
+    except Exception as exc:  # noqa: BLE001 — narrowing is best-effort
+        logger.debug("[PIPELINE:UMA] semantic narrowing unavailable: %s", exc)
+        return None
+
+
+def _narrowing_sql(ids: Optional[set], table_prefix: str) -> tuple[str, list]:
+    """IN-clause for narrowed record ids; empty hit set fails closed."""
+    if ids is None:
+        return "", []
+    if not ids:
+        return " AND 1=0", []
+    id_list = sorted(ids)[:900]  # stay under SQLite parameter limits
+    placeholders = ",".join("?" for _ in id_list)
+    return f" AND {table_prefix}message_id IN ({placeholders})", id_list
+
+
 @handles("uma_get_messages")
 async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
@@ -98,6 +130,12 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
     requesting_app_id = (payload.get("requesting_app_id") or "").strip() or None
     requesting_app_name = (payload.get("requesting_app_name") or "").strip() or None
     app_display = requesting_app_name or requesting_app_id or "(unknown app)"
+    # Optional semantic narrowing: "about" pre-filters record ids via the
+    # embeddings enrichment before SQL, turning chronological dumps into
+    # precise slices (and shrinking the rows that need LLM sanitization).
+    about_text = str(payload.get("about") or "").strip()
+    narrowing_ids: Optional[set] = _semantic_narrowing_ids(about_text) if about_text else None
+    enrichment_filter_ids = enrichment_filters_in_manifest(filter_manifest)
     logger.debug(
         "[PIPELINE:UMA] uma_get_messages: message_stream=%s, resource_id=%s, dataset_id=%s, limit=%s, offset=%s, requesting_user_email=%s, requesting_app=%s",
         message_stream,
@@ -158,8 +196,9 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
         if message_stream == "conversation":
             if _table_exists(db_conn, "conversation_messages") and dataset_id:
                 filter_where_m, filter_params = build_sql_constraints(
-                    filter_manifest, "m.", logical_table_id="conversation_messages"
+                    filter_manifest, "m.", logical_table_id="conversation_messages", conn=db_conn
                 )
+                narrowing_where, narrowing_params = _narrowing_sql(narrowing_ids, "m.")
                 query = (
                     """
                         SELECT m.message_id, m.conversation_id, m.sender_type, m.sender_id,
@@ -171,12 +210,16 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
                         WHERE m.dataset_id = ?
                         """
                     + filter_where_m
+                    + narrowing_where
                     + """
                         ORDER BY m.event_at DESC
                         LIMIT ? OFFSET ?
                         """
                 )
-                cursor = db_conn.execute(query, (dataset_id,) + tuple(filter_params) + (limit, offset))
+                cursor = db_conn.execute(
+                    query,
+                    (dataset_id,) + tuple(filter_params) + tuple(narrowing_params) + (limit, offset),
+                )
                 messages = []
                 for row in cursor.fetchall():
                     messages.append(
@@ -239,7 +282,9 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
                         name_nf is None or bool(name_nf.params.get("enabled"))
                     )
                     pre_name_rows = sum(1 for row in after_contact if row.get("sender_display_name"))
-                    manifest_for_generic = strip_contact_runtime_filters(filter_manifest)
+                    manifest_for_generic = strip_enrichment_retrieval_filters(
+                        strip_contact_runtime_filters(filter_manifest)
+                    )
                     transform_diag: Dict[str, Any] = {}
                     logger.debug(
                         "[PIPELINE:UMA][TRANSFORM] req=%s stage=conversation_messages start rows=%s",
@@ -289,6 +334,16 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
                             "sender_display_name_rows_final": post_name_rows,
                         },
                         "message_owner": (uma_contact_sidecar.get("message_owner") or {}),
+                        "enrichment_filters_applied": enrichment_filter_ids,
+                        "semantic_narrowing": (
+                            {
+                                "about": about_text,
+                                "candidate_records": len(narrowing_ids) if narrowing_ids is not None else None,
+                                "applied": narrowing_ids is not None,
+                            }
+                            if about_text
+                            else None
+                        ),
                     }
                 except UMAFilterError as exc:
                     return {"id": req_id, "status": "error", "error": str(exc)}
@@ -299,11 +354,17 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
             has_conversations_table = _table_exists(db_conn, "ai_chat_conversations")
             has_emotions_table = _table_exists(db_conn, "message_emotions")
             filter_where_m, filter_params = build_sql_constraints(
-                filter_manifest, "m.", logical_table_id="ai_chat_messages"
+                filter_manifest, "m.", logical_table_id="ai_chat_messages", conn=db_conn
             )
             filter_where_plain, filter_params_plain = build_sql_constraints(
-                filter_manifest, "", logical_table_id="ai_chat_messages"
+                filter_manifest, "", logical_table_id="ai_chat_messages", conn=db_conn
             )
+            narrowing_where_m, narrowing_params_m = _narrowing_sql(narrowing_ids, "m.")
+            narrowing_where_plain, narrowing_params_plain = _narrowing_sql(narrowing_ids, "")
+            filter_where_m += narrowing_where_m
+            filter_params = list(filter_params) + list(narrowing_params_m)
+            filter_where_plain += narrowing_where_plain
+            filter_params_plain = list(filter_params_plain) + list(narrowing_params_plain)
             if has_conversations_table and dataset_id:
                 user_id = dataset_id.split(":")[0] if ":" in dataset_id else dataset_id
                 if has_emotions_table:
@@ -453,7 +514,7 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
             )
             messages = await apply_filter_manifest_async(
                 messages,
-                filter_manifest,
+                strip_enrichment_retrieval_filters(filter_manifest),
                 field_transforms=field_transforms,
                 table_id="ai_chat_messages",
                 diagnostics=transform_diag,
@@ -473,6 +534,16 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
                 "contact_rows_filtered_count": max(0, pre_contact_len - len(messages)),
                 "field_transforms": transform_diag,
                 "message_owner": (uma_contact_sidecar.get("message_owner") or {}),
+                "enrichment_filters_applied": enrichment_filter_ids,
+                "semantic_narrowing": (
+                    {
+                        "about": about_text,
+                        "candidate_records": len(narrowing_ids) if narrowing_ids is not None else None,
+                        "applied": narrowing_ids is not None,
+                    }
+                    if about_text
+                    else None
+                ),
             }
             return _uma_messages_record_and_return(messages, debug_metadata)
         messages = load_raw_messages(

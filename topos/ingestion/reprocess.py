@@ -224,6 +224,9 @@ async def reprocess_source(
                 canonical_records=canonical_records,
                 sync_batch_id=batch_id,
                 run_enrichment=True,
+                # Reprocess is a deliberate owner action: run the signal lane
+                # even for manual-trigger sources.
+                force_signal=True,
             )
             derive_result = pipeline_outcome.get("signal_derivation") or {}
             signal_status = "completed" if derive_result.get("jobs_run") else "deferred"
