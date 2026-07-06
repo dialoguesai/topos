@@ -64,11 +64,31 @@ def engine_runtime_isolation():
     # Keep tests deterministic even when they still set legacy variable names.
     os.environ.setdefault("TOPOS_KEY", "test-key")
     os.environ.setdefault("ENABLE_HEALTH_AUTH", "false")
+    # Snapshot original module objects so teardown restores identities. A bare
+    # purge forks modules: later tests that bound topos.core.handlers/state at
+    # collection time monkeypatch the old objects while re-imports resolve fresh
+    # ones (same disease and cure as module_reload_isolation in the root conftest).
+    snapshot = {
+        name: sys.modules[name]
+        for name in list(sys.modules)
+        if any(name == p or name.startswith(f"{p}.") for p in _MODULE_PREFIXES)
+    }
     _reset_db_singleton()
     _purge_modules(_MODULE_PREFIXES)
     yield
     _reset_db_singleton()
     _purge_modules(_MODULE_PREFIXES)
+    sys.modules.update(snapshot)
+    # Re-point parent-package attributes at the originals too: pytest's
+    # monkeypatch resolves dotted targets by getattr traversal (topos.core →
+    # .handlers), not via sys.modules, so a stale parent attr still exposes the
+    # forked module to later tests.
+    for name, module in snapshot.items():
+        parent_name, _, child = name.rpartition(".")
+        parent = sys.modules.get(parent_name) if parent_name else None
+        if parent is not None:
+            setattr(parent, child, module)
+    _reset_db_singleton()
     for key, value in original_env.items():
         if value is None:
             os.environ.pop(key, None)

@@ -18,11 +18,19 @@ pytestmark = pytest.mark.gap
 @pytest.mark.asyncio
 async def test_entities_job_produces_ner_rows(monkeypatch) -> None:
     job = EntitiesJob(engine=MagicMock())
+    # Batched contract: entity_extraction_batch returns per-message items.
     mock_result = ProcessingResult(
         task_id="t1",
         status="completed",
         output={
-            "entities": [{"entity_text": "Alice", "entity_type": "PER", "confidence": 0.9}],
+            "items": [
+                {
+                    "id": "m1",
+                    "entities": [
+                        {"entity_text": "Alice", "entity_type": "PER", "confidence": 0.9}
+                    ],
+                }
+            ],
             "model": "dslim/bert-base-NER",
             "provider": "huggingface",
         },

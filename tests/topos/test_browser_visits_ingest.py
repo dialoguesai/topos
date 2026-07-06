@@ -41,7 +41,10 @@ async def test_browser_visits_writes_flat_table(monkeypatch, tmp_path) -> None:
     assert row["url"] == "https://example.com/docs"
     assert row["title"] == "Example Docs"
     assert row["hostname"] == "example.com"
-    raw_count = conn.execute(f"SELECT COUNT(*) FROM {RAW_BROWSER_VISITS_TABLE}").fetchone()[0]
+    # Since cb9172f, browser_* ui_stream ingest retains raw payloads in the
+    # generic raw_<source>_ui_stream table (payload_json), not the legacy flat
+    # RAW_BROWSER_VISITS_TABLE (which backfill still reads for old databases).
+    raw_count = conn.execute("SELECT COUNT(*) FROM raw_browservisits_ui_stream").fetchone()[0]
     assert raw_count == 1
     conn.close()
 

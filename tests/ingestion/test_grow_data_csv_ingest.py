@@ -19,6 +19,12 @@ from topos.storage.raw.file_store import RawFileStore
 
 GROW_CSV = Path(__file__).resolve().parents[3] / "Grow_Data (12).csv"
 
+# The Grow export lives in the owner's workspace root, not the repo — these
+# tests validate real-export ingestion locally and must skip elsewhere (CI).
+pytestmark = pytest.mark.skipif(
+    not GROW_CSV.is_file(), reason=f"Grow export not present: {GROW_CSV}"
+)
+
 SESSION_COLUMNS = [
     {"name": "record_id", "type": "text", "primary_key": True},
     {"name": "entry_at", "type": "text"},
