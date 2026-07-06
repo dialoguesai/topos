@@ -8,6 +8,9 @@ import pytest
 os.environ.setdefault("TOPOS_KEY", "test-key")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 os.environ.setdefault("CONTROL_PLANE_URL", "")
+# No live-model calls from unit tests: cluster recomputes would otherwise try
+# the local Ollama labeler (auto mode). Labeler tests inject `complete`.
+os.environ.setdefault("TOPOS_CLUSTER_LLM_LABELS", "off")
 
 # Project root on sys.path for editable installs and `pytest` without install (development).
 ROOT = Path(__file__).resolve().parent.parent

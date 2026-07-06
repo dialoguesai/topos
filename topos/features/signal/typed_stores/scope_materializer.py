@@ -367,6 +367,15 @@ def materialize_scope_signal_objects(conn: sqlite3.Connection) -> Dict[str, int]
         "activity_tags": _materialize_activity_tags(store, conn),
         "top_topics": _materialize_top_topics(store, conn),
     }
+    # Steady-state reconciliation: before cluster IDs became stable, every
+    # recompute minted new ids and this materializer accumulated a fresh
+    # top_topics object per id, forever (11k stale rows on the live node).
+    try:
+        from ...lifecycle.gc import reconcile_top_topics_objects
+
+        counts["top_topics_pruned"] = reconcile_top_topics_objects(conn)
+    except Exception:  # noqa: BLE001 — reconciliation must never block materialization
+        counts["top_topics_pruned"] = 0
     aggregates = recompute_all_gate_aggregates(store)
     counts["aggregates"] = sum(int(v or 0) for v in aggregates.values())
     return counts

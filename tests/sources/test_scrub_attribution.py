@@ -22,6 +22,10 @@ def conn(tmp_path) -> sqlite3.Connection:
 
 
 def _ensure_vec_table(conn: sqlite3.Connection) -> None:
+    # With sqlite-vec loaded (process-wide auto-extension since connection
+    # tuning landed) the migrations already created the real vec0 table and
+    # this is a no-op; the plain-table fallback keeps the test meaningful
+    # in environments without the extension.
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS signal_embeddings_vec (
@@ -30,6 +34,13 @@ def _ensure_vec_table(conn: sqlite3.Connection) -> None:
         )
         """
     )
+
+
+def _vec_blob() -> bytes:
+    # Valid 384-dim unit vector — the real vec0 table enforces declared dims.
+    import struct
+
+    return struct.pack("<384f", 1.0, *([0.0] * 383))
 
 
 def test_scrub_attributed_rows_removes_one_source_and_keeps_other(conn: sqlite3.Connection) -> None:
@@ -75,7 +86,7 @@ def test_scrub_attributed_rows_deletes_vec_sidecar_rows(conn: sqlite3.Connection
     )
     conn.execute(
         "INSERT INTO signal_embeddings_vec (embedding_id, embedding) VALUES (?, ?)",
-        ("emb-1", b"\x00" * 16),
+        ("emb-1", _vec_blob()),
     )
     conn.commit()
 

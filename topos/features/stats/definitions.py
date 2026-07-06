@@ -97,6 +97,7 @@ SEED_DEFINITIONS: List[Dict[str, Any]] = [
         "stat_kind": "histogram",
         "value_expr": "hour_of_week",
         "dimension": "interests",
+        "windows_json": '["all", "d30", "d90"]',
     },
     {
         "stat_id": "ai_chat.hour_of_week",
@@ -105,6 +106,7 @@ SEED_DEFINITIONS: List[Dict[str, Any]] = [
         "stat_kind": "histogram",
         "value_expr": "hour_of_week",
         "dimension": "work",
+        "windows_json": '["all", "d30", "d90"]',
     },
     # Wellbeing: session durations and category mix from journals
     {
@@ -114,6 +116,7 @@ SEED_DEFINITIONS: List[Dict[str, Any]] = [
         "stat_kind": "mean_var",
         "value_expr": "duration_minutes",
         "dimension": "wellbeing",
+        "windows_json": '["all", "d30", "d90"]',
     },
     {
         "stat_id": "journal.category.mix",
@@ -122,6 +125,7 @@ SEED_DEFINITIONS: List[Dict[str, Any]] = [
         "stat_kind": "histogram",
         "value_expr": "category",
         "dimension": "wellbeing",
+        "windows_json": '["all", "d30", "d90"]',
     },
     # Relationships: message volume and cadence per contact
     {
@@ -131,6 +135,7 @@ SEED_DEFINITIONS: List[Dict[str, Any]] = [
         "stat_kind": "count",
         "value_expr": "one",
         "dimension": "relationships",
+        "windows_json": '["all", "d7", "d30", "d90"]',
     },
     {
         "stat_id": "messages.cadence.by_contact",
@@ -139,6 +144,7 @@ SEED_DEFINITIONS: List[Dict[str, Any]] = [
         "stat_kind": "intervals",
         "value_expr": "one",
         "dimension": "relationships",
+        "windows_json": '["all", "d30", "d90"]',
     },
     # Resources: spend by category (daily buckets enable window trends)
     {
@@ -158,6 +164,7 @@ SEED_DEFINITIONS: List[Dict[str, Any]] = [
         "stat_kind": "mean_var",
         "value_expr": "duration_minutes",
         "dimension": "time",
+        "windows_json": '["all", "d30", "d90"]',
     },
 ]
 
@@ -184,6 +191,7 @@ def seed_definitions(conn) -> int:
                 stat_kind=excluded.stat_kind,
                 value_expr=excluded.value_expr,
                 dimension=excluded.dimension,
+                decay_half_life_days=excluded.decay_half_life_days,
                 windows_json=excluded.windows_json
             """,
             (
