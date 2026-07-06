@@ -174,6 +174,33 @@ async def test_control_plane_client_sends_busy_error_when_saturated(monkeypatch)
     assert any(msg.get("id") == "req-b" and msg.get("status") == "error" for msg in sent)
 
 
+@pytest.mark.asyncio
+async def test_control_plane_client_replies_pong_to_ping_without_handler():
+    ws = FakeWebSocket([])
+    handler_called = False
+
+    async def handler(_message):
+        nonlocal handler_called
+        handler_called = True
+        return None
+
+    client = ControlPlaneClient(
+        control_plane_url="ws://example/ws/engine",
+        api_key="test-key",
+        handler=handler,
+        verify_ssl=False,
+    )
+
+    await client._handle_message(ws, {"type": "ping"})
+    assert not handler_called
+    assert json.loads(ws.sent[0]) == {"type": "pong"}
+
+    ws.sent.clear()
+    await client._handle_message(ws, {"type": "ping", "id": "ping-1"})
+    assert not handler_called
+    assert json.loads(ws.sent[0]) == {"type": "pong", "id": "ping-1"}
+
+
 def test_record_failure_logs_endpoint_context(monkeypatch, caplog):
     async def handler(_message):
         return None

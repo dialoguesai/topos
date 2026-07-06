@@ -319,6 +319,14 @@ class ControlPlaneClient:
             return False
 
     async def _handle_message(self, ws, data: Dict[str, Any]) -> None:
+        msg_type = str(data.get("type") or "").strip().lower()
+        if msg_type == "ping":
+            pong: Dict[str, Any] = {"type": "pong"}
+            ping_id = data.get("id")
+            if ping_id is not None:
+                pong["id"] = ping_id
+            await self._send_ws_json(ws, pong)
+            return
         try:
             resp = await self.handler(data)
         except Exception as exc:  # noqa: BLE001
