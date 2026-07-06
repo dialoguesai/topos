@@ -28,8 +28,11 @@ CONFLICT_CONFIDENCE_MARGIN = 0.10
 KNOWN_PREDICATES = {
     "works_at",
     "worked_at",
+    "works_on",
     "role_is",
     "certified_in",
+    "studied_at",
+    "skilled_in",
     "lives_in",
     "member_of",
     "prefers",
@@ -42,8 +45,11 @@ KNOWN_PREDICATES = {
 # single-valued predicates supersede on contradiction.
 MULTI_VALUED_PREDICATES = {
     "worked_at",
+    "works_on",
     "advises",
     "certified_in",
+    "studied_at",
+    "skilled_in",
     "member_of",
     "practices",
     "prefers",
