@@ -760,6 +760,15 @@ def main() -> int:
         log("copy", str(report["steps"]["copy"]))
 
     conn = sqlite3.connect(str(target_db))
+    try:
+        # WAL + sqlite-vec on the runner's own connection: without it the
+        # migrate step cannot build/refresh the ANN table (extension is
+        # per-connection) and vec-sidecar deletes silently no-op.
+        from topos.storage.db.connection_tuning import tune_connection
+
+        report["tuning"] = tune_connection(conn)
+    except Exception as exc:  # noqa: BLE001
+        report["tuning"] = {"error": str(exc)}
     step_fns = {
         "migrate": step_migrate,
         "reenrich": step_reenrich,
