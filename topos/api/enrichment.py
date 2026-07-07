@@ -651,12 +651,15 @@ async def _find_unprocessed_messages(
     source_def = REGISTRY.get(source_id)
     if not source_def:
         raise ValueError(f"Source {source_id} not found")
-    
-    if not source_def.canonical_enrichment_jobs:
+
+    from ..enrichment.source_overrides import effective_canonical_enrichment_jobs
+
+    configured_jobs = effective_canonical_enrichment_jobs(source_def)
+    if not configured_jobs:
         return []
-    
+
     # Determine which jobs to check (default to all canonical enrichment jobs)
-    jobs_to_check = job_names or source_def.canonical_enrichment_jobs
+    jobs_to_check = job_names or configured_jobs
     
     # Get database connection
     db_conn = get_db_connection()
@@ -876,9 +879,11 @@ async def _process_enrichment_core(
     source_def = REGISTRY.get(source_id)
     if not source_def:
         raise ValueError(f"Source {source_id} not found")
-    
+
+    from ..enrichment.source_overrides import effective_canonical_enrichment_jobs
+
     # Determine which jobs to run
-    jobs_to_run = job_names or source_def.canonical_enrichment_jobs
+    jobs_to_run = job_names or effective_canonical_enrichment_jobs(source_def)
     if not jobs_to_run:
         return {
             "status": "ok",
@@ -1300,6 +1305,60 @@ async def list_source_enrichments(source_id: str) -> Dict[str, Any]:
         return _list_source_enrichments_core(source_id)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+def _toggle_source_enrichment_core(
+    source_id: str, job_name: str, enabled: Optional[bool]
+) -> Dict[str, Any]:
+    """Enable/disable an enrichment for one source (shared by HTTP and WS)."""
+    from ..enrichment.catalog import jobs_configured_for_source
+    from ..enrichment.source_overrides import set_source_enrichment_override
+
+    source_def = REGISTRY.get(source_id)
+    if not source_def:
+        raise ValueError(f"Source {source_id} not found")
+    overrides = set_source_enrichment_override(source_id, job_name, enabled)
+    lanes = jobs_configured_for_source(source_def)
+    enabled_lanes = [lane for lane, jobs in lanes.items() if job_name in (jobs or [])]
+    return {
+        "status": "ok",
+        "source_id": source_id,
+        "job_id": job_name,
+        "enabled": bool(enabled_lanes),
+        "enabled_lanes": enabled_lanes,
+        "override": overrides.get(job_name),
+    }
+
+
+@router.patch(
+    "/sources/{source_id}/enrichments/{enrichment_name}",
+    dependencies=[Depends(require_api_key)],
+)
+async def toggle_source_enrichment(
+    source_id: str,
+    enrichment_name: str,
+    body: Dict[str, Any] = Body(default_factory=dict),
+) -> Dict[str, Any]:
+    """Attach/detach an enrichment for this source at runtime.
+
+    Body: ``{"enabled": true | false | null}`` — null clears the override,
+    reverting to the source definition's default.
+    """
+    if "enabled" not in body:
+        raise HTTPException(
+            status_code=400, detail="body must include 'enabled' (true, false, or null)"
+        )
+    enabled = body.get("enabled")
+    if enabled is not None and not isinstance(enabled, bool):
+        raise HTTPException(status_code=400, detail="'enabled' must be true, false, or null")
+    try:
+        return _toggle_source_enrichment_core(source_id, enrichment_name, enabled)
+    except ValueError as exc:
+        message = str(exc)
+        status = 404 if "not found" in message.lower() else 400
+        raise HTTPException(status_code=status, detail=message) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @router.post(

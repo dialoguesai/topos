@@ -21,7 +21,8 @@ MAX_MODELS_PER_GROUP = 4
 MAX_NODE_SAMPLE = 25
 DEFAULT_NODE_SAMPLE = 8
 
-_HF_REPO_RE = re.compile(r"^[\w.\-]+/[\w.\-]+$")
+# "org/model" plus legacy root-level ids ("gpt2", "distilbert-base-uncased-...").
+_HF_REPO_RE = re.compile(r"^[\w.\-]+(/[\w.\-]+)?$")
 
 
 def schedule_process_job_group(group_id: str) -> None:

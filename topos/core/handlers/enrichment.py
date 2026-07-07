@@ -146,7 +146,9 @@ async def handle_enrichment_process_source(message: Dict[str, Any]) -> Optional[
             print(f"\033[93m[CRITICAL TOPOS HANDLER] ERROR: Source {source_id} not found\033[0m", file=sys.stderr, flush=True)
             return {"id": req_id, "status": "error", "error": f"Source {source_id} not found"}
         
-        jobs_to_run = job_names or source_def.canonical_enrichment_jobs
+        from ...enrichment.source_overrides import effective_canonical_enrichment_jobs
+
+        jobs_to_run = job_names or effective_canonical_enrichment_jobs(source_def)
         if not jobs_to_run:
             print(f"\033[93m[CRITICAL TOPOS HANDLER] No jobs configured, returning early\033[0m", file=sys.stderr, flush=True)
             return {
@@ -514,6 +516,37 @@ async def handle_source_enrichment_delete(message: Dict[str, Any]) -> Optional[D
         return {"id": req_id, "status": "ok", "payload": result}
     except Exception as exc:  # noqa: BLE001
         logger.error("[PIPELINE:ENRICHMENT] source_enrichment_delete error: %s", exc)
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("source_enrichment_toggle")
+async def handle_source_enrichment_toggle(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    source_id = payload.get("source_id")
+    enrichment_name = payload.get("enrichment_name")
+    if not source_id:
+        return {"id": req_id, "status": "error", "error": "source_id required"}
+    if not enrichment_name:
+        return {"id": req_id, "status": "error", "error": "enrichment_name required"}
+    enabled = payload.get("enabled")
+    if enabled is not None and not isinstance(enabled, bool):
+        return {"id": req_id, "status": "error", "error": "'enabled' must be true, false, or null"}
+    try:
+        from ...api.enrichment import _toggle_source_enrichment_core
+
+        result = _toggle_source_enrichment_core(source_id, enrichment_name, enabled)
+        logger.debug(
+            "[PIPELINE:ENRICHMENT] source_enrichment_toggle complete: source_id=%s enrichment=%s enabled=%s",
+            source_id,
+            enrichment_name,
+            result.get("enabled"),
+        )
+        return {"id": req_id, "status": "ok", "payload": result}
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[PIPELINE:ENRICHMENT] source_enrichment_toggle error: %s", exc)
         return {"id": req_id, "status": "error", "error": str(exc)}
 
 

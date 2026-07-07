@@ -51,6 +51,136 @@ def parse_model_tag(tag: str, *, default_provider: Optional[str]) -> Tuple[Optio
     return default_provider or "huggingface", clean
 
 
+def _hf_model_cached(model: str) -> bool:
+    """True when the model snapshot is already in the local HF cache."""
+    try:
+        from huggingface_hub import snapshot_download
+
+        snapshot_download(
+            repo_id=model,
+            local_files_only=True,
+            ignore_patterns=list(_SNAPSHOT_IGNORE_PATTERNS),
+        )
+        return True
+    except Exception:  # noqa: BLE001 — any miss means "not cached"
+        return False
+
+
+_DISK_HEADROOM = 1.2
+
+
+def _disk_space_error(size_bytes: Optional[int]) -> Optional[str]:
+    """Refuse a download that clearly cannot fit on disk (when size is known)."""
+    if not size_bytes or size_bytes <= 0:
+        return None
+    try:
+        import os
+        import shutil
+
+        from huggingface_hub.constants import HF_HUB_CACHE
+
+        from . import model_resolve
+
+        path = str(HF_HUB_CACHE)
+        while path and not os.path.exists(path):
+            parent = os.path.dirname(path)
+            if parent == path:
+                break
+            path = parent
+        free = shutil.disk_usage(path or "/").free
+    except Exception:  # noqa: BLE001 — never block on the pre-check itself
+        return None
+    needed = int(size_bytes * _DISK_HEADROOM)
+    if free < needed:
+        return (
+            "insufficient_disk_space: model weights need ~"
+            f"{model_resolve.format_size(needed)} but only "
+            f"{model_resolve.format_size(free)} is free"
+        )
+    return None
+
+
+# Weight formats the torch runtime never loads; skipping them avoids
+# downloading the same model two or three times over.
+_SNAPSHOT_IGNORE_PATTERNS = (
+    "*.h5",
+    "*.msgpack",
+    "*.tflite",
+    "*.ot",
+    "*.onnx",
+    "onnx/**",
+    "openvino/**",
+    "*.gguf",
+)
+
+
+def _ensure_hf_model(model: str) -> Optional[str]:
+    """Download the model snapshot; returns a user-facing error or None."""
+    try:
+        from huggingface_hub import snapshot_download
+        from huggingface_hub.errors import GatedRepoError, RepositoryNotFoundError
+    except ImportError:
+        return None  # let the lazy from_pretrained path handle it
+    try:
+        snapshot_download(repo_id=model, ignore_patterns=list(_SNAPSHOT_IGNORE_PATTERNS))
+        return None
+    except GatedRepoError:
+        return (
+            f"Model '{model}' is gated on HuggingFace; accept its license on "
+            "huggingface.co and configure an HF token, then retry"
+        )
+    except RepositoryNotFoundError:
+        return f"Model '{model}' was not found on the HuggingFace Hub"
+    except Exception as exc:  # noqa: BLE001 — network, disk, corrupt snapshot
+        return f"download_failed: {str(exc)[:300]}"
+
+
+def _prepare_hf_model(
+    conn: Any, job_id: str, model: str, model_runs: List[Dict[str, Any]]
+) -> Optional[str]:
+    """Pre-flight an explicit HF model: task fit, disk space, download.
+
+    Returns an error string (fails the model's runs) or None to proceed.
+    Hub-unreachable resolution never blocks: offline nodes can still run
+    already-downloaded models.
+    """
+    from . import model_resolve
+
+    resolved = model_resolve.resolve_model(model)
+    status = resolved.get("status")
+    if status == "not_found":
+        return f"Model '{model}' was not found on the HuggingFace Hub"
+    if status == "unauthorized":
+        return (
+            f"Model '{model}' is gated or private; accept its license on "
+            "huggingface.co and configure an HF token"
+        )
+    if status == "ok":
+        fit = model_resolve.task_compatibility(job_id, resolved.get("pipeline_tag"))
+        if fit is False:
+            from ..enrichment.catalog import get_catalog_entry
+
+            entry = get_catalog_entry(job_id)
+            expected = (entry.hf_task if entry else None) or "unknown"
+            return (
+                f"task_mismatch: model '{model}' is tagged "
+                f"'{resolved.get('pipeline_tag')}' but this enrichment expects "
+                f"'{expected}'"
+            )
+
+    if _hf_model_cached(model):
+        return None
+
+    if status == "ok":
+        disk_error = _disk_space_error(resolved.get("size_bytes"))
+        if disk_error:
+            return disk_error
+
+    for run in model_runs:
+        store.update_run(conn, run["id"], status="downloading_model")
+    return _ensure_hf_model(model)
+
+
 def _build_job(job_id: str, engine: Any) -> Any:
     from ..enrichment.jobs import (
         EmbeddingsJob,
@@ -134,6 +264,22 @@ async def _process_group(group_id: str) -> None:
     any_failed = False
     for model_tag, model_runs in runs_by_model.items():
         provider, model = parse_model_tag(model_tag, default_provider=default_provider)
+
+        if provider == "huggingface" and model:
+            prep_error = _prepare_hf_model(conn, job_id, model, model_runs)
+            if prep_error:
+                finished = store.utc_now_iso()
+                for run in model_runs:
+                    store.update_run(
+                        conn,
+                        run["id"],
+                        status="failed",
+                        finished_at=finished,
+                        error_code=prep_error,
+                    )
+                any_failed = True
+                continue
+
         engine: Any = Engine()
         if provider or model:
             engine = _ModelOverrideEngine(engine, provider, model)

@@ -595,10 +595,11 @@ async def run_post_canonical_pipeline(
         return outcome
 
     source_id = source_def.source_id
+    from ..enrichment.source_overrides import effective_canonical_enrichment_jobs
     from ..sources.canonical_signal_defaults import resolved_signal_derivation_jobs
 
     signal_jobs = resolved_signal_derivation_jobs(source_def, explicit_jobs=job_names)
-    canonical_jobs = list(getattr(source_def, "canonical_enrichment_jobs", []) or [])
+    canonical_jobs = effective_canonical_enrichment_jobs(source_def)
     enrichment_trigger = getattr(source_def, "enrichment_trigger", "automatic")
     records_for_signal = list(canonical_records)
     records_for_enrichment = (

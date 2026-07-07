@@ -341,12 +341,18 @@ def coverage_table_for_job(job_id: str) -> Optional[str]:
 
 
 def jobs_configured_for_source(source_def: Any) -> Dict[str, List[str]]:
-    """Effective enrichment jobs per lane for a source definition."""
+    """Effective enrichment jobs per lane for a source definition.
+
+    Includes runtime per-source overrides (user attach/detach): the canonical
+    lane goes through ``effective_canonical_enrichment_jobs`` and the signal
+    lane through ``resolved_signal_derivation_jobs``, which applies them too.
+    """
     from ..sources.canonical_signal_defaults import resolved_signal_derivation_jobs
+    from .source_overrides import effective_canonical_enrichment_jobs
 
     return {
         LANE_RAW: list(getattr(source_def, "raw_enrichment_jobs", []) or []),
-        LANE_CANONICAL: list(getattr(source_def, "canonical_enrichment_jobs", []) or []),
+        LANE_CANONICAL: effective_canonical_enrichment_jobs(source_def),
         LANE_SIGNAL: resolved_signal_derivation_jobs(source_def),
     }
 
