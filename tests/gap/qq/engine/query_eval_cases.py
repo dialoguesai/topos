@@ -13,6 +13,20 @@ from topos.query.types import FORBIDDEN_INFERENCE_PUBLIC_KEYS
 
 EvalFn = Callable[[Dict[str, Any]], Tuple[bool, str]]
 
+# Version stamp for the request catalog. Bump when cases are added, removed,
+# or their rubrics change — reports keyed to a catalog version stay comparable
+# only within that version.
+#   qq-catalog-1: Q1-Q6, P1, PB1-PB3
+#   qq-catalog-2: + D1-D4 dense-intelligence series (entity dossiers, stat
+#                 insights, retrieval diversity) after the dense upgrade.
+#   qq-catalog-3: + graded composition lanes — C-series (live-DB oracles,
+#                 composition_eval_cases.py) and S-series (seeded needles,
+#                 composition_seed_corpus.py). Scored 0-1, reported not gated.
+# qq-catalog-4 (Phase 1): +C13–C30 live composition cases, +N1–N12 per-scope negative
+# controls, +G1–G5 generative cases. Comparability break vs qq-catalog-3 by design; the
+# iteration gauge still pairs the case_ids the versions share.
+QUERY_CATALOG_VERSION = "qq-catalog-4"
+
 _DEFAULT_LATENCY_MS = {
     "summary": int(os.environ.get("TOPOS_QQ_LATENCY_SUMMARY_MS", "10000")),
     "inference": int(os.environ.get("TOPOS_QQ_LATENCY_INFERENCE_MS", "25000")),
@@ -119,6 +133,80 @@ def eval_q6_git_raw(response: Dict[str, Any]) -> Tuple[bool, str]:
     return False, "rows present but no git-related content"
 
 
+def _summary_items(response: Dict[str, Any]) -> List[Dict[str, Any]]:
+    pr = _public_result(response)
+    items = pr.get("summaries") or pr.get("summary_items") or pr.get("scores") or []
+    return [i for i in items if isinstance(i, dict)] if isinstance(items, list) else []
+
+
+def _sources(items: List[Dict[str, Any]]) -> Dict[str, int]:
+    counts: Dict[str, int] = {}
+    for item in items:
+        src = str(item.get("retrieval_source") or "?")
+        counts[src] = counts.get(src, 0) + 1
+    return counts
+
+
+def eval_d1_entity_dossier(response: Dict[str, Any]) -> Tuple[bool, str]:
+    ok, msg = _not_denied(response)
+    if not ok:
+        return ok, msg
+    items = _summary_items(response)
+    if not items:
+        return False, "no summary items"
+    dossiers = [i for i in items if i.get("retrieval_source") == "entity_dossier"]
+    if not any("topos" in _blob(i) for i in dossiers):
+        return False, f"no Topos entity_dossier item (sources: {_sources(items)})"
+    entity_kinds = sum(v for k, v in _sources(items).items() if k.startswith("entity"))
+    if entity_kinds < 2:
+        return False, f"entity spine thin: only {entity_kinds} entity items"
+    return True, f"Topos dossier + {entity_kinds} entity items"
+
+
+def eval_d2_stat_insight(response: Dict[str, Any]) -> Tuple[bool, str]:
+    ok, msg = _not_denied(response)
+    if not ok:
+        return ok, msg
+    items = _summary_items(response)
+    stats = [i for i in items if i.get("retrieval_source") == "stat_insight"]
+    if not stats:
+        return False, f"no stat_insight items (sources: {_sources(items)})"
+    if not any("dining" in _blob(i) for i in stats):
+        return False, "stat insights present but none about dining"
+    return True, f"{len(stats)} stat insights incl. dining aggregate"
+
+
+def eval_d3_retrieval_diversity(response: Dict[str, Any]) -> Tuple[bool, str]:
+    ok, msg = _not_denied(response)
+    if not ok:
+        return ok, msg
+    items = _summary_items(response)
+    sources = _sources(items)
+    if len(items) < 10:
+        return False, f"sparse result: {len(items)} items"
+    if len(sources) < 4:
+        return False, f"low retrieval diversity: {sorted(sources)}"
+    return True, f"{len(items)} items from {len(sources)} sources: {sorted(sources)}"
+
+
+def eval_d4_person_dossier(response: Dict[str, Any]) -> Tuple[bool, str]:
+    ok, msg = _not_denied(response)
+    if not ok:
+        return ok, msg
+    items = _summary_items(response)
+    if not items:
+        return False, "no summary items"
+    dossier = any(
+        i.get("retrieval_source") == "entity_dossier" and "luc" in _blob(i) for i in items
+    )
+    mentions = sum(1 for i in items if i.get("retrieval_source") == "entity_mention" and "luc" in _blob(i))
+    if not dossier:
+        return False, f"no Luc dossier item (sources: {_sources(items)})"
+    if mentions < 1:
+        return False, "dossier present but no supporting mentions"
+    return True, f"Luc dossier + {mentions} mentions"
+
+
 def eval_no_forbidden_inference_keys(response: Dict[str, Any]) -> Tuple[bool, str]:
     pr = _public_result(response)
     if not pr:
@@ -198,6 +286,17 @@ QUALITY_CASES: List[QueryQualityCase] = [
                      description="Distinct from Q1 — illustration/sketch clusters", optional_seed=True),
     QueryQualityCase("Q6", "git GitHub messages", "ai_conversations:read", "raw", eval_q6_git_raw,
                      description="Raw mode returns git-related canonical rows", optional_seed=True),
+    # D-series: dense-intelligence probes (entity spine, stats layer, fusion
+    # diversity). These measure whether the intelligence-density upgrades
+    # actually surface in query responses.
+    QueryQualityCase("D1", "Tell me about Topos", "work_context:read", "summary", eval_d1_entity_dossier,
+                     description="Entity spine surfaces the Topos dossier + mentions"),
+    QueryQualityCase("D2", "How much do I typically spend on dining?", "resources:read", "summary", eval_d2_stat_insight,
+                     description="Aggregate intent routes to stat insights (dining spend)"),
+    QueryQualityCase("D3", "What have I been working on lately?", "ai_conversations:read", "summary", eval_d3_retrieval_diversity,
+                     description="Broad query fuses >=4 retrieval sources, >=10 items"),
+    QueryQualityCase("D4", "Who is Luc?", "relationship_context:read", "summary", eval_d4_person_dossier,
+                     description="Person query returns dossier + supporting mentions"),
 ]
 
 PRIVACY_CASES: List[QueryQualityCase] = [
