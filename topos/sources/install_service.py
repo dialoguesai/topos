@@ -883,6 +883,16 @@ def get_active_source_definition(*, source_id: str, scope: Optional[Dict[str, An
     return None
 
 
+def _is_rehydratable_source_definition(source_def: Dict[str, Any]) -> bool:
+    """Active installs must carry a full source contract before runtime install."""
+    if not isinstance(source_def, dict) or not source_def:
+        return False
+    for key in ("source_id", "source_type", "schema_id", "parser_id"):
+        if not str(source_def.get(key) or "").strip():
+            return False
+    return True
+
+
 def rehydrate_active_installs_runtime(*, source_id: Optional[str] = None) -> Dict[str, int]:
     """Ensure active installs are present in runtime registries after restarts.
 
@@ -897,6 +907,13 @@ def rehydrate_active_installs_runtime(*, source_id: Optional[str] = None) -> Dic
         for rec in records:
             source_def = rec.source_definition_json if isinstance(rec.source_definition_json, dict) else {}
             if not source_def:
+                continue
+            if not _is_rehydratable_source_definition(source_def):
+                logger.debug(
+                    "Skipping rehydrate for incomplete source install: source_id=%s scope=%s",
+                    rec.source_id,
+                    rec.scope,
+                )
                 continue
             try:
                 scope_key = _scope_key(rec.scope)
