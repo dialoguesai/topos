@@ -15,6 +15,7 @@ from .demo_file_parsers import (
     DemoPlacesParser,
     DemoProfileParser,
 )
+from .github_activity_parser import GithubActivityParser
 from .grok_parser import GrokParser
 from .messenger_parser import ImessageParser, SignalParser
 from .voxterm_parser import VoxtermTranscriptParser
@@ -27,6 +28,7 @@ PARSER_REGISTRY = {
     "browser.visits.v1": BrowserParser,  # Sprint 3: Browser plugin visits
     "managed.file.browser_history_dem.v1": BrowserParser,  # Hosted browser demo source alias
     "browser.events.v1": BrowserEventsParser,  # Clicks, highlights, star_page, VIDEO_PLAY
+    "github.activity.v1": GithubActivityParser,  # Remote connectors: GitHub REST user events
     "imessage.messages.v1": ImessageParser,  # Sprint 02: Messenger ingestion
     "signal.messages.v1": SignalParser,
     "demo.messenger.v1": DemoMessengerParser,
@@ -47,6 +49,7 @@ __all__ = [
     "BrowserParser",
     "BrowserEventsParser",
     "ChatGPTParser",
+    "GithubActivityParser",
     "GrokParser",
     "CalendarParser",
     "ImessageParser",

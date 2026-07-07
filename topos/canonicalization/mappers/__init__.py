@@ -13,6 +13,7 @@ from .demo_mappers import (
     DemoPlacesMapper,
     DemoProfileMapper,
 )
+from .github_activity_mapper import GithubActivityCanonicalMapper
 from .grok_mapper import GrokCanonicalMapper
 from .messenger_mapper import ImessageCanonicalMapper, SignalCanonicalMapper, VoxtermTranscriptCanonicalMapper
 
@@ -23,6 +24,7 @@ MAPPER_REGISTRY = {
     "signal": SignalCanonicalMapper,
     "voxterm_transcript": VoxtermTranscriptCanonicalMapper,
     "browser_activity": BrowserActivityCanonicalMapper,
+    "github_activity": GithubActivityCanonicalMapper,
     "demo_messenger": DemoMessengerMapper,
     "demo_calendar": DemoCalendarMapper,
     "demo_journal": DemoJournalMapper,
@@ -37,6 +39,7 @@ __all__ = [
     "BrowserActivityCanonicalMapper",
     "CanonicalMapper",
     "ChatGPTCanonicalMapper",
+    "GithubActivityCanonicalMapper",
     "GrokCanonicalMapper",
     "ImessageCanonicalMapper",
     "SignalCanonicalMapper",

@@ -14,6 +14,7 @@ BUNDLED_CANONICAL_TRIPLES: Dict[str, Tuple[str, str]] = {
     "browser.visits.v1": ("browser_activity", "activity"),
     "managed.file.browser_history_dem.v1": ("browser_activity", "activity"),
     "browser.events.v1": ("browser_activity", "activity"),
+    "github.activity.v1": ("github_activity", "activity"),
     "imessage.messages.v1": ("imessage", "conversations"),
     "signal.messages.v1": ("signal", "conversations"),
     "voxterm.transcript.v1": ("voxterm_transcript", "conversations"),

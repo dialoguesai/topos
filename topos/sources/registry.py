@@ -160,6 +160,38 @@ BROWSER_EVENTS = _source(
     ],
 )
 
+# Remote connectors: GitHub user events fetched via remote MCP tools, saved via app_ingest
+GITHUB_ACTIVITY = _source(
+    source_id="github_activity",
+    display_name="GitHub Activity",
+    source_type="ui_stream",
+    delivery="client_push",
+    schema_id="github.activity.v1",
+    parser_id="github.activity.v1",
+    canonical_group_id="activity",
+    raw_enrichment_jobs=[],
+    canonical_enrichment_jobs=[],
+    analytics_profile_id=None,
+    enrichment_trigger="automatic",
+    ingestion_trigger="automatic",
+    default_scope_id="activity",
+    allowed_scope_ids=["activity:read", "activity:write"],
+    default_filter_hints=["rolling_window_days", "timestamp_to_date"],
+    filter_tier_kind="inferability",
+    default_filter_tiers={
+        "low": _manifest(FilterInstance(filter_id="rolling_window_days", params={"days": 30})),
+        "medium": _manifest(
+            FilterInstance(filter_id="rolling_window_days", params={"days": 14}),
+            FilterInstance(filter_id="timestamp_to_date", params={}),
+        ),
+        "high": _manifest(
+            FilterInstance(filter_id="rolling_window_days", params={"days": 7}),
+            FilterInstance(filter_id="timestamp_to_date", params={}),
+            FilterInstance(filter_id="max_rows", params={"count": 250}),
+        ),
+    },
+)
+
 # Sprint 02: Messenger ingestion (local_sync -> conversation_messages)
 IMESSAGE = _source(
     source_id="imessage",
@@ -448,6 +480,7 @@ REGISTRY = {
     CHATGPT_UI.source_id: CHATGPT_UI,
     BROWSER_VISITS.source_id: BROWSER_VISITS,
     BROWSER_EVENTS.source_id: BROWSER_EVENTS,
+    GITHUB_ACTIVITY.source_id: GITHUB_ACTIVITY,
     VOXTERM_TRANSCRIPTS.source_id: VOXTERM_TRANSCRIPTS,
     IMESSAGE.source_id: IMESSAGE,
     SIGNAL.source_id: SIGNAL,
