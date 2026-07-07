@@ -308,17 +308,17 @@ async def handle_start_ingestion(message: Dict[str, Any]) -> Optional[Dict[str, 
     dataset_id = payload.get("dataset_id")
     owner_user_id = _owner_user_id_from_dataset_id(dataset_id)
     schema_id = payload.get("schema_id") or "chatgpt.conversation.v1"
-    file_format = resolve_file_format(
-        source_definition=source_definition,
-        file_path=file_path,
-        default=str(payload.get("file_format") or "jsonl"),
-    )
     file_url = payload.get("file_url")
     file_base64 = payload.get("file_base64")
     file_path = payload.get("file_path")
     job_id = payload.get("job_id")
     source_id = payload.get("source_id")  # Optional source_id from control plane
     source_definition = payload.get("source_definition")
+    file_format = resolve_file_format(
+        source_definition=source_definition,
+        file_path=file_path,
+        default=str(payload.get("file_format") or "jsonl"),
+    )
     
     print(f"\033[93m[CRITICAL TOPOS HANDLER] start_ingestion params: job_id={job_id}, dataset_id={dataset_id}, schema_id={schema_id}\033[0m", file=sys.stderr, flush=True)
     

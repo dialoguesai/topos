@@ -41,6 +41,7 @@ from .api import (
     sanitization_ollama_config as sanitization_ollama_config_routes,
     signal_extraction_config as signal_extraction_config_routes,
     filter_lab as filter_lab_routes,
+    enrichment_lab as enrichment_lab_routes,
     home_chat as home_chat_routes,
     privacy_disclose as privacy_disclose_routes,
     signal as signal_routes,
@@ -119,6 +120,7 @@ app.include_router(user_identity_routes.router)
 app.include_router(sanitization_ollama_config_routes.router)
 app.include_router(signal_extraction_config_routes.router)
 app.include_router(filter_lab_routes.router)
+app.include_router(enrichment_lab_routes.router)
 app.include_router(home_chat_routes.router)
 app.include_router(privacy_disclose_routes.router)
 app.include_router(compute_remote_routes.router)

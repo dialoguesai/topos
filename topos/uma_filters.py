@@ -128,10 +128,78 @@ def get_limit_cap(requested_limit: int, manifest: Optional[FilterManifest], logi
     return min(requested_limit, min(caps))
 
 
+# Enrichment-backed retrieval filters: filter_id -> (params key, derived table,
+# value column). Pushed into SQL as message-id subqueries against enrichment
+# output tables; fail closed when the enrichment table/column is unavailable.
+ENRICHMENT_RETRIEVAL_FILTERS: Dict[str, Tuple[str, str, str]] = {
+    "topic_filter": ("topics", "message_topics", "topic"),
+    "entity_filter": ("entities", "message_entities", "entity_text"),
+    "emotion_filter": ("emotions", "message_emotions", "emotion_label"),
+}
+
+# Canonical message tables whose ids match enrichment-table record ids.
+_ENRICHMENT_FILTERABLE_TABLES = frozenset({"conversation_messages", "ai_chat_messages"})
+
+
+def _sqlite_table_columns(conn: Any, table: str) -> set:
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return {str(row[1]) for row in rows}
+    except Exception:
+        return set()
+
+
+def _enrichment_filter_condition(
+    conn: Any,
+    table_prefix: str,
+    table: str,
+    value_col: str,
+    values: List[str],
+) -> Tuple[str, List[Any]]:
+    """Subquery condition matching canonical message ids against an enrichment
+    table. Fails closed (1=0) when the enrichment output is not available."""
+    cols = _sqlite_table_columns(conn, table) if conn is not None else set()
+    if value_col not in cols:
+        return "1=0", []
+    id_cols = [c for c in ("message_id", "record_id") if c in cols]
+    if not id_cols:
+        return "1=0", []
+    lowered = [str(v).strip().lower() for v in values if str(v).strip()]
+    if not lowered:
+        return "1=0", []
+    placeholders = ",".join("?" for _ in lowered)
+    subqueries = [
+        f"{table_prefix}message_id IN "
+        f"(SELECT {id_col} FROM {table} WHERE LOWER({value_col}) IN ({placeholders}))"
+        for id_col in id_cols
+    ]
+    condition = "(" + " OR ".join(subqueries) + ")"
+    return condition, list(lowered) * len(id_cols)
+
+
+def enrichment_filters_in_manifest(manifest: Optional[FilterManifest]) -> List[str]:
+    """Ids of enrichment-backed retrieval filters present in the manifest."""
+    if manifest is None:
+        return []
+    return [f.filter_id for f in manifest.filters if f.filter_id in ENRICHMENT_RETRIEVAL_FILTERS]
+
+
+def strip_enrichment_retrieval_filters(manifest: Optional[FilterManifest]) -> Optional[FilterManifest]:
+    """Remove enrichment filters already applied via SQL pushdown so the
+    post-fetch manifest pass does not double-apply or fail on them."""
+    if manifest is None:
+        return None
+    kept = [f for f in manifest.filters if f.filter_id not in ENRICHMENT_RETRIEVAL_FILTERS]
+    if len(kept) == len(manifest.filters):
+        return manifest
+    return manifest.model_copy(update={"filters": kept})
+
+
 def build_sql_constraints(
     manifest: Optional[FilterManifest],
     table_prefix: str,
     logical_table_id: Optional[str] = None,
+    conn: Any = None,
 ) -> Tuple[str, List[Any]]:
     if manifest is None:
         return "", []
@@ -159,6 +227,17 @@ def build_sql_constraints(
                 placeholders = ",".join("?" for _ in source_ids)
                 conditions.append(f"{table_prefix}source_id IN ({placeholders})")
                 params.extend(str(sid) for sid in source_ids)
+        elif item.filter_id in ENRICHMENT_RETRIEVAL_FILTERS:
+            if (logical_table_id or "").strip() not in _ENRICHMENT_FILTERABLE_TABLES:
+                continue
+            param_key, table, value_col = ENRICHMENT_RETRIEVAL_FILTERS[item.filter_id]
+            raw_values = item.params.get(param_key)
+            values = [str(v) for v in raw_values] if isinstance(raw_values, list) else []
+            condition, cond_params = _enrichment_filter_condition(
+                conn, table_prefix, table, value_col, values
+            )
+            conditions.append(condition)
+            params.extend(cond_params)
     if not conditions:
         return "", []
     return " AND " + " AND ".join(conditions), params
@@ -227,6 +306,49 @@ def _apply_source(items: List[Dict[str, Any]], source_ids: Optional[List[str]] =
     if not allowed:
         return items
     return [row for row in items if row.get("source_id") in allowed]
+
+
+# Row-level fallback keys for enrichment filters when SQL pushdown was not
+# available (e.g. query-pipeline disclosure). Rows lacking any of these keys
+# are dropped (fail closed) rather than leaked.
+_ENRICHMENT_ROW_KEYS: Dict[str, Tuple[str, ...]] = {
+    "topic_filter": ("topic", "topics"),
+    "entity_filter": ("entity_text", "entities"),
+    "emotion_filter": ("emotion", "emotion_label", "emotions"),
+}
+
+
+def _apply_enrichment_filter_rows(
+    items: List[Dict[str, Any]],
+    filter_id: str,
+    values: List[str],
+) -> List[Dict[str, Any]]:
+    wanted = {str(v).strip().lower() for v in values if str(v).strip()}
+    if not wanted:
+        return []
+    keys = _ENRICHMENT_ROW_KEYS.get(filter_id, ())
+    out: List[Dict[str, Any]] = []
+    for row in items:
+        matched = False
+        for key in keys:
+            val = row.get(key)
+            if isinstance(val, str) and val.strip().lower() in wanted:
+                matched = True
+                break
+            if isinstance(val, list) and any(
+                str(v).strip().lower() in wanted for v in val
+            ):
+                matched = True
+                break
+        if matched:
+            out.append(row)
+    if items and not out:
+        logger.debug(
+            "Enrichment filter %s dropped all %d rows post-fetch (fail closed; rows lack enrichment fields)",
+            filter_id,
+            len(items),
+        )
+    return out
 
 
 def _apply_timestamp_to_date(items: List[Dict[str, Any]], field: str = "event_at") -> List[Dict[str, Any]]:
@@ -456,6 +578,13 @@ def apply_filter_manifest(
                 continue
             elif item.filter_id == "event_contact_participation":
                 continue
+            elif item.filter_id in ENRICHMENT_RETRIEVAL_FILTERS:
+                # Normally pushed into SQL (and stripped before this pass);
+                # here we match row-level enrichment fields, failing closed.
+                param_key = ENRICHMENT_RETRIEVAL_FILTERS[item.filter_id][0]
+                raw_values = item.params.get(param_key)
+                values = [str(v) for v in raw_values] if isinstance(raw_values, list) else []
+                filtered = _apply_enrichment_filter_rows(filtered, item.filter_id, values)
             else:
                 raise UMAFilterError(f"Unsupported manifest filter for this endpoint: {item.filter_id}")
     if eff_row_cap is not None:
@@ -637,6 +766,13 @@ async def apply_filter_manifest_async(
                 continue
             elif item.filter_id == "event_contact_participation":
                 continue
+            elif item.filter_id in ENRICHMENT_RETRIEVAL_FILTERS:
+                # Normally pushed into SQL (and stripped before this pass);
+                # here we match row-level enrichment fields, failing closed.
+                param_key = ENRICHMENT_RETRIEVAL_FILTERS[item.filter_id][0]
+                raw_values = item.params.get(param_key)
+                values = [str(v) for v in raw_values] if isinstance(raw_values, list) else []
+                filtered = _apply_enrichment_filter_rows(filtered, item.filter_id, values)
             else:
                 raise UMAFilterError(f"Unsupported manifest filter for this endpoint: {item.filter_id}")
     if eff_row_cap is not None:

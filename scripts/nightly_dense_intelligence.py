@@ -279,10 +279,18 @@ def step_stats(conn: sqlite3.Connection) -> Dict[str, Any]:
 
 
 def step_facts(conn: sqlite3.Connection) -> Dict[str, Any]:
-    from topos.features.facts.extract import extract_facts_from_batch
+    from topos.features.facts.extract import (
+        derive_location_facts,
+        extract_facts_from_batch,
+    )
 
     rows: List[Dict[str, Any]] = []
-    for table in ("profile_records", "journal_entries"):
+    for table in (
+        "profile_records",
+        "journal_entries",
+        "conversation_messages",
+        "ai_chat_messages",
+    ):
         try:
             table_rows = dict_rows(conn, f"SELECT * FROM {table}")
         except sqlite3.OperationalError:
@@ -291,6 +299,8 @@ def step_facts(conn: sqlite3.Connection) -> Dict[str, Any]:
             row["_table"] = table
         rows.extend(table_rows)
     written = extract_facts_from_batch(conn, rows)
+    written += derive_location_facts(conn)
+    conn.commit()
     active = conn.execute(
         "SELECT COUNT(*) FROM signal_objects WHERE object_type='fact' AND valid_to IS NULL"
     ).fetchone()[0]
@@ -628,6 +638,33 @@ def step_cleanjunk(conn: sqlite3.Connection) -> Dict[str, Any]:
     return report
 
 
+def step_statsreset(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """Clear folded stat state so the next ``stats`` step refolds all history.
+
+    Needed once after changing stat definitions in a way that alters bucketing
+    (e.g. enabling d30/d90 windows: rows folded before the change live only in
+    the all-time bucket and are dedup-skipped by stat_seen, so daily buckets
+    would otherwise cover new data only). Derived + rebuildable: safe.
+    """
+    counts = {}
+    for table in ("stat_state", "stat_seen"):
+        try:
+            counts[table] = conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            conn.execute(f"DELETE FROM {table}")
+        except sqlite3.OperationalError:
+            counts[table] = 0
+    conn.commit()
+    return {"cleared": counts}
+
+
+def step_gc(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """Derived-layer garbage collection (stale objects, brief compaction,
+    audit retention, junk embeddings). See topos.features.lifecycle.gc."""
+    from topos.features.lifecycle.gc import run_gc
+
+    return run_gc(conn)
+
+
 def _probe_queries(conn: sqlite3.Connection) -> List[str]:
     probes = list(GENERIC_PROBES)
     for (name,) in conn.execute(
@@ -733,10 +770,21 @@ def main() -> int:
         log("copy", str(report["steps"]["copy"]))
 
     conn = sqlite3.connect(str(target_db))
+    try:
+        # WAL + sqlite-vec on the runner's own connection: without it the
+        # migrate step cannot build/refresh the ANN table (extension is
+        # per-connection) and vec-sidecar deletes silently no-op.
+        from topos.storage.db.connection_tuning import tune_connection
+
+        report["tuning"] = tune_connection(conn)
+    except Exception as exc:  # noqa: BLE001
+        report["tuning"] = {"error": str(exc)}
     step_fns = {
         "migrate": step_migrate,
         "reenrich": step_reenrich,
         "cleanjunk": step_cleanjunk,
+        "gc": step_gc,
+        "statsreset": step_statsreset,
         "entities": step_entities,
         "stats": step_stats,
         "facts": step_facts,

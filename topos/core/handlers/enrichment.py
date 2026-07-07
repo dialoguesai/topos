@@ -433,6 +433,90 @@ async def handle_source_enrichment_backfill(message: Dict[str, Any]) -> Optional
         logger.error("[PIPELINE:ENRICHMENT] source_enrichment_backfill error: %s", exc)
         return {"id": req_id, "status": "error", "error": str(exc)}
 
+@handles("enrichment_catalog")
+async def handle_enrichment_catalog(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    try:
+        from ...api.enrichment import _enrichment_catalog_core
+
+        result = _enrichment_catalog_core(source_id=payload.get("source_id"))
+        return {"id": req_id, "status": "ok", "payload": result}
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[PIPELINE:ENRICHMENT] enrichment_catalog error: %s", exc)
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("enrichment_preview")
+async def handle_enrichment_preview(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    source_id = payload.get("source_id")
+    if not source_id:
+        return {"id": req_id, "status": "error", "error": "source_id required"}
+    try:
+        from ...api.enrichment import _enrichment_preview_core
+
+        result = _enrichment_preview_core(
+            source_id=source_id, limit=int(payload.get("limit") or 20)
+        )
+        return {"id": req_id, "status": "ok", "payload": result}
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[PIPELINE:ENRICHMENT] enrichment_preview error: %s", exc)
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("enrichment_coverage")
+async def handle_enrichment_coverage(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    source_id = payload.get("source_id")
+    if not source_id:
+        return {"id": req_id, "status": "error", "error": "source_id required"}
+    try:
+        from ...api.enrichment import _enrichment_coverage_core
+
+        result = _enrichment_coverage_core(source_id=source_id)
+        return {"id": req_id, "status": "ok", "payload": result}
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[PIPELINE:ENRICHMENT] enrichment_coverage error: %s", exc)
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("source_enrichment_delete")
+async def handle_source_enrichment_delete(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    source_id = payload.get("source_id")
+    enrichment_name = payload.get("enrichment_name")
+    if not source_id:
+        return {"id": req_id, "status": "error", "error": "source_id required"}
+    if not enrichment_name:
+        return {"id": req_id, "status": "error", "error": "enrichment_name required"}
+    try:
+        from ...api.enrichment import _delete_enrichment_data_core
+
+        result = _delete_enrichment_data_core(source_id=source_id, job_name=enrichment_name)
+        logger.debug(
+            "[PIPELINE:ENRICHMENT] source_enrichment_delete complete: source_id=%s enrichment=%s deleted=%s",
+            source_id,
+            enrichment_name,
+            result.get("deleted_total"),
+        )
+        return {"id": req_id, "status": "ok", "payload": result}
+    except Exception as exc:  # noqa: BLE001
+        logger.error("[PIPELINE:ENRICHMENT] source_enrichment_delete error: %s", exc)
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
 @handles("source_enrichment_test")
 async def handle_source_enrichment_test(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")

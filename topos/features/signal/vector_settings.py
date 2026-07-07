@@ -70,6 +70,61 @@ def fusion_rrf_enabled() -> bool:
     return _flag("TOPOS_FUSION_RRF", "on")
 
 
+def fusion_recency_enabled() -> bool:
+    """Exponential recency decay on time-stamped fusion contributors."""
+    return _flag("TOPOS_FUSION_RECENCY", "on")
+
+
+def fusion_recency_half_life_days() -> float:
+    raw = os.environ.get("TOPOS_RECENCY_HALF_LIFE_DAYS", "45").strip()
+    try:
+        return max(1.0, min(3650.0, float(raw)))
+    except ValueError:
+        return 45.0
+
+
+def fusion_recency_floor() -> float:
+    """Decay never drops below this: old-but-exact matches must stay reachable."""
+    raw = os.environ.get("TOPOS_RECENCY_FLOOR", "0.2").strip()
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except ValueError:
+        return 0.2
+
+
+def cluster_max_k() -> int:
+    """Upper bound on k per clustering facet.
+
+    The historic per-facet cap of 6 collapsed a 20k-record corpus into six
+    mega-clusters (55% of members in one). k grows as sqrt(n) up to this cap.
+    """
+    raw = os.environ.get("TOPOS_CLUSTER_MAX_K", "64").strip()
+    try:
+        return max(2, min(512, int(raw)))
+    except ValueError:
+        return 64
+
+
+def cluster_assign_threshold() -> float:
+    """Min cosine for incremental assignment to an existing cluster.
+
+    Below it, embeddings go to the candidate pool for the next consolidation.
+    0.60 let mega-clusters absorb everything; 0.75 is deliberately strict.
+    """
+    raw = os.environ.get("TOPOS_CLUSTER_ASSIGN_THRESHOLD", "0.75").strip()
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except ValueError:
+        return 0.75
+
+
+def cluster_llm_labels_mode() -> str:
+    """off | auto | on. auto = LLM labels when the local model answers; any
+    failure falls back to the deterministic term labels."""
+    mode = os.environ.get("TOPOS_CLUSTER_LLM_LABELS", "auto").strip().lower()
+    return mode if mode in ("off", "auto", "on") else "auto"
+
+
 def cluster_max_records() -> int:
     """Embedding rows loaded into a topic-cluster recompute.
 

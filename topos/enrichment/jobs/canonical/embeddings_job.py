@@ -8,7 +8,11 @@ from ..base import BaseEnrichmentJob
 from ._engine_runner import run_engine_task
 from ....engine import Engine
 from ....features.signal.chunking import DEFAULT_STRATEGY, chunk_text
-from ....features.signal.embed_context import build_embed_text, embeddable_content
+from ....features.signal.embed_context import (
+    build_embed_text,
+    dimension_for_record,
+    embeddable_content,
+)
 from ....features.signal.vector_settings import vector_chunking_enabled
 
 logger = logging.getLogger("topos.enrichment.jobs.embeddings")
@@ -102,7 +106,7 @@ class EmbeddingsJob(BaseEnrichmentJob):
                         "source_id": msg.get("source_id"),
                         "text_preview": spec.text[:200],
                         "search_text": spec.text[:2000],
-                        "signal_dimension": msg.get("signal_dimension") or "memory",
+                        "signal_dimension": dimension_for_record(msg, record_type=record_type),
                         "chunk_index": spec.chunk_index,
                         "content_hash": parent_hash,
                         "event_at": _event_at(msg),

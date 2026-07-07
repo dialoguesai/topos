@@ -37,6 +37,9 @@ def _resolved_topic_cluster_source_ids(source_ids: Optional[Sequence[str]] = Non
     return configured or MVP_QUERY_SOURCE_IDS
 
 _MIN_CLUSTER_RECORDS = 3
+# Legacy fallback caps. The effective cap is cluster_max_k() (TOPOS_CLUSTER_MAX_K,
+# default 64): the old hard cap of 6 per facet collapsed a 20k-record corpus
+# into six mega-clusters, one holding 55% of all members.
 _MAX_CLUSTERS = 12
 _MAX_CLUSTERS_PER_FACET = 6
 _KMEANS_ITERATIONS = 25
@@ -44,6 +47,12 @@ _MIN_MEANINGFUL_CLUSTER_SIZE = 3
 _SIMILAR_CLUSTER_COSINE = 0.85
 _ENTITY_RANK_BOOST = 2
 _SEMANTIC_RANK_WEIGHT = 10.0
+
+
+def _effective_max_k() -> int:
+    from .vector_settings import cluster_max_k
+
+    return cluster_max_k()
 
 _STOPWORDS = frozenset(
     {
@@ -83,6 +92,40 @@ _STOPWORDS = frozenset(
         "very",
         "will",
         "task",
+        # Web/URL artifacts — dominated live cluster labels ("https / good / here").
+        "https",
+        "http",
+        "href",
+        "html",
+        "utm",
+        # Low-signal conversational fillers over personal corpora.
+        "good",
+        "here",
+        "people",
+        "think",
+        "know",
+        "want",
+        "going",
+        "really",
+        "said",
+        "says",
+        "yeah",
+        "okay",
+        "sure",
+        "thanks",
+        "thank",
+        "message",
+        "sent",
+        "still",
+        "much",
+        "well",
+        "make",
+        "made",
+        "back",
+        "right",
+        "need",
+        "things",
+        "thing",
     }
 )
 
@@ -200,6 +243,7 @@ def load_embedding_records(
         """,
         (*ids, limit),
     ).fetchall()
+    from .embed_context import is_derivable_content
     from .vector_codec import decode_vector, is_normalized
     from .vector_settings import cluster_collapse_chunks_enabled
 
@@ -208,6 +252,11 @@ def load_embedding_records(
     for row in rows:
         blob = row[5]
         if not blob:
+            continue
+        # Serialization garbage (NSKeyedArchiver / streamtyped blobs) must not
+        # cluster: on the live node it formed a 2k-member junk cluster.
+        preview_text = str(row[4] or "")
+        if preview_text and not is_derivable_content(preview_text):
             continue
         try:
             vector = decode_vector(blob, row[7] or "json")
@@ -292,7 +341,7 @@ def cluster_embedding_records(
         return []
     vectors = [rec["vector"] for rec in records]
     n = len(vectors)
-    cluster_k = _choose_k(n, k)
+    cluster_k = _choose_k(n, k, max_clusters=_effective_max_k())
     if cluster_k <= 1:
         return [_build_cluster("tc_single", records, cluster_index=0)]
 
@@ -579,11 +628,12 @@ def cluster_records_by_facet(
     for facet, facet_records in sorted(by_facet.items()):
         if len(facet_records) < _MIN_CLUSTER_RECORDS and len(by_facet) > 1:
             continue
+        max_k = _effective_max_k()
         facet_k = k
         if facet_k is None:
-            facet_k = _choose_k(len(facet_records), max_clusters=_MAX_CLUSTERS_PER_FACET)
+            facet_k = _choose_k(len(facet_records), max_clusters=max_k)
         else:
-            facet_k = min(facet_k, _MAX_CLUSTERS_PER_FACET, len(facet_records))
+            facet_k = min(facet_k, max_k, len(facet_records))
         facet_clusters = cluster_embedding_records(facet_records, k=facet_k)
         for cluster in facet_clusters:
             cluster["dimension"] = facet
@@ -1049,6 +1099,63 @@ def write_top_topics_signal_facts(
     return written
 
 
+_MAX_SHARE_ALERT = 0.25
+
+
+def compute_cluster_metrics(
+    clusters: List[Dict[str, Any]],
+    *,
+    records_loaded: int,
+) -> Dict[str, Any]:
+    """Snapshot quality metrics logged with every recompute.
+
+    The live mega-cluster collapse (one cluster holding 55% of members) was
+    only visible by manual inspection; max_cluster_share in the recompute log
+    makes it an alert instead.
+    """
+    sizes = sorted((int(c.get("member_count") or 0) for c in clusters), reverse=True)
+    total = sum(sizes)
+    metrics: Dict[str, Any] = {
+        "clusters": len(clusters),
+        "records_loaded": records_loaded,
+        "max_cluster_share": round(sizes[0] / total, 4) if total else 0.0,
+        "median_cluster_size": sizes[len(sizes) // 2] if sizes else 0,
+    }
+    cohesion = _weighted_cohesion(clusters)
+    if cohesion is not None:
+        metrics["mean_cohesion"] = round(cohesion, 4)
+    if metrics["max_cluster_share"] > _MAX_SHARE_ALERT and len(clusters) > 2:
+        logger.warning(
+            "Cluster quality alert: one cluster holds %.0f%% of %d members",
+            metrics["max_cluster_share"] * 100,
+            total,
+        )
+    return metrics
+
+
+def _weighted_cohesion(clusters: List[Dict[str, Any]]) -> Optional[float]:
+    """Member-weighted mean cosine to own centroid (needs member vectors)."""
+    try:
+        import numpy as np
+    except ImportError:
+        return None
+    weighted_sum = 0.0
+    weighted_n = 0
+    for cluster in clusters:
+        centroid = cluster.get("centroid_vector")
+        members = cluster.get("members") or []
+        vectors = [m.get("vector") for m in members if isinstance(m.get("vector"), list)]
+        if not centroid or not vectors:
+            continue
+        X = np.asarray(vectors, dtype=np.float32)
+        c = np.asarray(centroid, dtype=np.float32)
+        weighted_sum += float((X @ c).sum())
+        weighted_n += len(vectors)
+    if not weighted_n:
+        return None
+    return weighted_sum / weighted_n
+
+
 def recompute_topic_clusters(
     conn,
     *,
@@ -1068,6 +1175,12 @@ def recompute_topic_clusters(
         }
     clusters = cluster_records_by_facet(records, k=k)
     clusters = _enrich_all_clusters(conn, clusters)
+
+    metrics = compute_cluster_metrics(clusters, records_loaded=len(records))
+
+    from .cluster_labels import apply_llm_cluster_labels
+
+    metrics["llm_labels"] = apply_llm_cluster_labels(clusters)
 
     # Stable identities: rename new clusters to matched old IDs (centroid
     # cosine, greedy) so top_topics facts / UI links / embedding cluster_id
@@ -1103,6 +1216,7 @@ def recompute_topic_clusters(
             records_processed=len(records),
             clusters_written=int(persist_result.get("clusters_written") or 0),
             ids_preserved=ids_preserved,
+            metrics=metrics,
         )
         sync_member_cluster_ids(conn)
         conn.commit()
@@ -1115,6 +1229,7 @@ def recompute_topic_clusters(
         **persist_result,
         "ids_preserved": ids_preserved,
         "cluster_labels": [c.get("label") for c in clusters],
+        "metrics": metrics,
     }
 
 

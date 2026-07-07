@@ -256,6 +256,11 @@ class StatsEngine:
             pass
         for insight in insights:
             insight_key = f"{insight['stat_id']}:{insight.get('group_key') or 'all'}"
+            window = str(insight.get("window") or "")
+            if window:
+                # Windowed variants get their own stable fact id; the base
+                # key stays unchanged so existing exclusions keep working.
+                insight_key = f"{insight_key}:{window}"
             if insight_key in excluded_keys:
                 continue  # owner-excluded: never re-promote
             fact_id = f"stat:{insight_key}"
@@ -270,6 +275,7 @@ class StatsEngine:
                     "summary_text": insight["text"],
                     "stat_summary": insight.get("summary"),
                     "group_key": insight.get("group_key"),
+                    "window": insight.get("window"),
                     "confidence": insight.get("confidence"),
                     "disclosure": "owner_only",
                     "provider": "topos",

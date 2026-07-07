@@ -111,6 +111,12 @@ class AdapterFactory:
             conn = sqlite3.connect(str(db_path))
             conn.row_factory = sqlite3.Row
 
+        # Tune before migrations so vector_storage_v4 sees the vec extension
+        # and can create/backfill the ANN table.
+        from ..db.connection_tuning import tune_connection
+
+        tune_connection(conn)
+
         from ..db.migrations import ensure_migrations_applied
 
         ensure_migrations_applied(conn)

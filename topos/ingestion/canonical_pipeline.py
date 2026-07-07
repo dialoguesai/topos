@@ -571,9 +571,17 @@ async def run_post_canonical_pipeline(
     job_names: Optional[List[str]] = None,
     run_signal: bool = True,
     run_enrichment: bool = True,
+    force_signal: bool = False,
     enrichment_records: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
-    """Run privacy disclosure, canonical enrichment, then signal derivation."""
+    """Run privacy disclosure, canonical enrichment, then signal derivation.
+
+    ``enrichment_trigger="manual"`` gates BOTH ML lanes (canonical enrichment
+    and signal derivation) on the automatic ingest path. The privacy
+    disclosure layer always runs. Deliberate invocations (manual process,
+    backfill, reprocess) either pass explicit ``job_names`` or set
+    ``force_signal=True`` to run the signal lane regardless of trigger.
+    """
     from ..enrichment.derived_tables import DerivedTablesManager
     from ..enrichment.jobs.canonical.url_classification_core import merge_url_classification_into_records
     from ..enrichment.orchestrator import EnrichmentOrchestrator, SignalDerivationOrchestrator
@@ -691,7 +699,20 @@ async def run_post_canonical_pipeline(
             len(canonical_records),
         )
 
-    if run_signal and signal_jobs:
+    # Signal derivation honors the same manual gate as canonical enrichment,
+    # unless the caller deliberately requested it (explicit job_names or
+    # force_signal from backfill/reprocess paths).
+    signal_gate_open = (
+        enrichment_trigger == "automatic" or force_signal or job_names is not None
+    )
+    if run_signal and signal_jobs and not signal_gate_open:
+        logger.debug(
+            "[PIPELINE:SIGNAL_DERIVE] Skipping signal derivation (manual trigger): source_id=%s records=%d",
+            source_id,
+            len(records_for_signal),
+        )
+        outcome["signal_derivation"] = {"skipped": "manual_trigger", "jobs_run": 0}
+    elif run_signal and signal_jobs:
         try:
             orchestrator = SignalDerivationOrchestrator(tables_manager=derived)
             outcome["signal_derivation"] = await orchestrator.run_signal_derivation(
