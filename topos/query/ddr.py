@@ -91,6 +91,9 @@ class DisclosureDecisionRecord:
     minimizer: Dict[str, Any] = field(default_factory=lambda: {"ran": False})
     backstop_hits: List[str] = field(default_factory=list)
     timings: StageTimings = field(default_factory=StageTimings)
+    # Which quality tier actually served retrieval (ann vs brute-force scan,
+    # rerank ran or degraded) — silent fallbacks were invisible before.
+    retrieval: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -104,6 +107,7 @@ class DisclosureDecisionRecord:
             "minimizer": dict(self.minimizer),
             "backstop_hits": list(self.backstop_hits),
             "timings": self.timings.to_dict(),
+            "retrieval": dict(self.retrieval),
         }
 
 
@@ -118,6 +122,7 @@ def build_disclosure_decision_record(
     timings: StageTimings,
     minimizer: Optional[Dict[str, Any]] = None,
     backstop_hits: Optional[List[str]] = None,
+    retrieval: Optional[Dict[str, Any]] = None,
 ) -> DisclosureDecisionRecord:
     artifacts_in = count_artifacts(retrieval_packet)
     artifacts_out = count_artifacts(filtered_packet)
@@ -132,4 +137,5 @@ def build_disclosure_decision_record(
         minimizer=minimizer or {"ran": False},
         backstop_hits=list(backstop_hits or []),
         timings=timings,
+        retrieval=dict(retrieval or {}),
     )

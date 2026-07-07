@@ -136,6 +136,36 @@ FILTER_CATALOG: Dict[str, FilterDefinition] = {
         handler_id="retrieval.source_filter",
         ui_group="Sources",
     ),
+    # Enrichment-backed retrieval filters: match against derived enrichment
+    # tables (topics/entities/emotions) via SQL pushdown on UMA table reads.
+    # Fail closed when enrichment output is unavailable.
+    "topic_filter": _catalog_entry(
+        "topic_filter",
+        FilterCategory.RETRIEVAL,
+        "Limit results to records tagged with any of the given topics (topics enrichment).",
+        parameter_schema=[FilterParamSpec("topics", "list", required=True, item_type="str")],
+        runtime_status=FilterRuntimeStatus.SUPPORTED_NOW,
+        handler_id="retrieval.topic_filter",
+        ui_group="Signals",
+    ),
+    "entity_filter": _catalog_entry(
+        "entity_filter",
+        FilterCategory.RETRIEVAL,
+        "Limit results to records mentioning any of the given entities (entities enrichment).",
+        parameter_schema=[FilterParamSpec("entities", "list", required=True, item_type="str")],
+        runtime_status=FilterRuntimeStatus.SUPPORTED_NOW,
+        handler_id="retrieval.entity_filter",
+        ui_group="Signals",
+    ),
+    "emotion_filter": _catalog_entry(
+        "emotion_filter",
+        FilterCategory.RETRIEVAL,
+        "Limit results to records classified with any of the given emotions (emotion enrichment).",
+        parameter_schema=[FilterParamSpec("emotions", "list", required=True, item_type="str")],
+        runtime_status=FilterRuntimeStatus.SUPPORTED_NOW,
+        handler_id="retrieval.emotion_filter",
+        ui_group="Signals",
+    ),
     "column_allowlist": _catalog_entry(
         "column_allowlist",
         FilterCategory.FIELD_LEVEL,

@@ -64,6 +64,59 @@ def context_header(msg: Dict[str, Any], *, record_type: Optional[str] = None) ->
     return " | ".join(parts[:4])
 
 
+# Canonical record kind -> signal dimension. Before 2026-07-06 every
+# embedding defaulted to 'memory', which made all per-dimension machinery
+# (faceted clustering, dimension-filtered search, brief scoping) a silent
+# no-op. Keys cover record_type values, canonical table names, and the
+# profile record kinds observed live.
+_DIMENSION_BY_RECORD_KIND = {
+    "conversation_message": "relationships",
+    "conversation_messages": "relationships",
+    "contact": "relationships",
+    "contacts": "relationships",
+    "journal_entry": "wellbeing",
+    "journal_entries": "wellbeing",
+    "activity_event": "interests",
+    "activity_events": "interests",
+    "browser_visit": "interests",
+    "browser_visits": "interests",
+    "calendar_event": "time",
+    "calendar_events": "time",
+    "financial_transaction": "resources",
+    "financial_transactions": "resources",
+    "location_event": "places",
+    "location_events": "places",
+    "profile_record": "work",
+    "profile_records": "work",
+    # profile_records.record_type values
+    "experience": "work",
+    "education": "work",
+    "skill": "work",
+    "certification": "work",
+    "bio": "work",
+    # AI chat is genuinely cross-cutting; it stays in the default dimension.
+    "ai_chat_message": "memory",
+    "ai_chat_messages": "memory",
+}
+
+
+def dimension_for_record(msg: Dict[str, Any], *, record_type: Optional[str] = None) -> str:
+    """Signal dimension for a canonical record (default 'memory')."""
+    explicit = str(msg.get("signal_dimension") or "").strip()
+    if explicit:
+        return explicit
+    for kind in (
+        record_type,
+        msg.get("record_type"),
+        msg.get("_table"),
+        msg.get("canonical_table"),
+    ):
+        key = str(kind or "").strip().lower()
+        if key and key in _DIMENSION_BY_RECORD_KIND:
+            return _DIMENSION_BY_RECORD_KIND[key]
+    return "memory"
+
+
 # Serialization artifacts that leak into message content when a source parser
 # fails to decode rich-text payloads (e.g. iMessage attributedBody ->
 # NSKeyedArchiver "streamtyped" blobs). Embedding/NER over these produces junk
@@ -76,6 +129,11 @@ _BINARY_ARTIFACT_MARKERS = (
     "NSAttributedString",
     "NSDictionary",
     "__kIM",
+    # bplist class-table fragments survive even when the archiver header is
+    # truncated away ("Z$classnameX$classesWNSValue…") — 761 such embeddings
+    # were live on 2026-07-06 and formed part of a junk cluster.
+    "$classname",
+    "$classes",
 )
 
 

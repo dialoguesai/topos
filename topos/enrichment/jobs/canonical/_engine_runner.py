@@ -23,6 +23,18 @@ async def run_engine_task(
     provider: str = "huggingface",
     model: Optional[str] = None,
 ) -> Any:
+    if model is None:
+        # Device-level per-job override (set from the Enrichment Lab's
+        # "apply preferred"). Explicitly requested models always win.
+        try:
+            from ...model_overrides import get_override_for_subtype
+
+            override = get_override_for_subtype(subtype)
+            if override:
+                provider = override.get("provider") or provider
+                model = override.get("model")
+        except Exception:  # noqa: BLE001 — never block enrichment on overrides
+            pass
     task = ProcessingTask(
         id=task_id,
         type="enrichment",

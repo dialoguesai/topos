@@ -269,6 +269,17 @@ def get_db_connection() -> Optional[sqlite3.Connection]:
         _db_conn_path = resolved
         logger.debug("Created database connection: %s", db_path)
         try:
+            from ..storage.db.connection_tuning import tune_connection
+
+            tuning = tune_connection(db_conn)
+            logger.info(
+                "DB tuning: journal_mode=%s sqlite_vec=%s",
+                tuning.get("journal_mode"),
+                tuning.get("sqlite_vec"),
+            )
+        except Exception as tuning_exc:  # noqa: BLE001
+            logger.warning("Connection tuning skipped: %s", tuning_exc)
+        try:
             from ..storage.db.migrations import ensure_migrations_applied
 
             ensure_migrations_applied(db_conn)

@@ -16,12 +16,15 @@ import sqlite3
 import uuid
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
-from .vector_codec import decode_vector, encode_f32
+from .vector_codec import decode_vector
 from .vector_math import cosine_similarity
 from .topic_clustering import _normalize
 
 logger = logging.getLogger("topos.features.signal.incremental_clustering")
 
+# Legacy fallback; the effective threshold is cluster_assign_threshold()
+# (TOPOS_CLUSTER_ASSIGN_THRESHOLD, default 0.75). 0.60 was permissive enough
+# that mega-clusters absorbed nearly every new embedding.
 ASSIGN_THRESHOLD = 0.60
 STABLE_MATCH_THRESHOLD = 0.70
 CONSOLIDATE_POOL_SIZE = 100
@@ -63,24 +66,27 @@ def load_cluster_centroids(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     return out
 
 
-def _nudge_centroid(centroid: Sequence[float], vector: Sequence[float], count: int) -> List[float]:
-    """Incremental mean update, renormalized (count = members before this one)."""
-    n = max(1, count)
-    merged = [(c * n + v) / (n + 1) for c, v in zip(centroid, vector)]
-    return _normalize(merged)
-
-
 def assign_embeddings(
     conn: sqlite3.Connection,
     embedding_rows: List[Dict[str, Any]],
     *,
-    threshold: float = ASSIGN_THRESHOLD,
+    threshold: Optional[float] = None,
 ) -> Dict[str, int]:
     """Assign new embeddings to existing clusters or the candidate pool.
 
     embedding_rows: [{embedding_id, record_id, source_id, vector, text_preview,
                       record_type}]
+
+    Centroids are intentionally NOT updated here. Online nudging was a
+    rich-get-richer loop: large clusters sit near the corpus mean, win
+    assignments, and drift further toward the mean — the fixed point is one
+    mega-cluster. Centroids now move only at full consolidation, and anything
+    that doesn't clearly belong waits in the candidate pool until then.
     """
+    if threshold is None:
+        from .vector_settings import cluster_assign_threshold
+
+        threshold = cluster_assign_threshold()
     clusters = load_cluster_centroids(conn)
     assigned = 0
     pooled = 0
@@ -114,20 +120,15 @@ def assign_embeddings(
                     round(float(best_sim), 4),
                 ),
             )
-            new_centroid = _nudge_centroid(
-                best_cluster["centroid"], vector, best_cluster["member_count"]
-            )
-            best_cluster["centroid"] = new_centroid
             best_cluster["member_count"] += 1
             conn.execute(
                 """
                 UPDATE topic_clusters
                 SET member_count = member_count + 1,
-                    centroid_vector = ?,
                     updated_at = datetime('now')
                 WHERE cluster_id = ?
                 """,
-                (encode_f32(new_centroid), best_cluster["cluster_id"]),
+                (best_cluster["cluster_id"],),
             )
             _set_embedding_cluster(conn, row.get("embedding_id"), best_cluster["cluster_id"])
             assigned += 1
@@ -265,6 +266,22 @@ def clear_candidate_pool(conn: sqlite3.Connection) -> None:
         pass
 
 
+def _ensure_metrics_column(conn: sqlite3.Connection) -> bool:
+    try:
+        cols = {row[1] for row in conn.execute("PRAGMA table_info(cluster_recompute_log)").fetchall()}
+    except sqlite3.OperationalError:
+        return False
+    if not cols:
+        return False
+    if "metrics_json" in cols:
+        return True
+    try:
+        conn.execute("ALTER TABLE cluster_recompute_log ADD COLUMN metrics_json TEXT")
+        return True
+    except sqlite3.OperationalError:
+        return False
+
+
 def log_recompute(
     conn: sqlite3.Connection,
     *,
@@ -272,15 +289,26 @@ def log_recompute(
     records_processed: int,
     clusters_written: int,
     ids_preserved: int,
+    metrics: Optional[Dict[str, Any]] = None,
 ) -> None:
     try:
-        conn.execute(
-            """
-            INSERT INTO cluster_recompute_log (kind, records_processed, clusters_written, ids_preserved)
-            VALUES (?, ?, ?, ?)
-            """,
-            (kind, records_processed, clusters_written, ids_preserved),
-        )
+        if metrics is not None and _ensure_metrics_column(conn):
+            conn.execute(
+                """
+                INSERT INTO cluster_recompute_log
+                    (kind, records_processed, clusters_written, ids_preserved, metrics_json)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (kind, records_processed, clusters_written, ids_preserved, json.dumps(metrics)),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO cluster_recompute_log (kind, records_processed, clusters_written, ids_preserved)
+                VALUES (?, ?, ?, ?)
+                """,
+                (kind, records_processed, clusters_written, ids_preserved),
+            )
     except sqlite3.OperationalError:
         pass
 

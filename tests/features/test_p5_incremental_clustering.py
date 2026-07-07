@@ -108,17 +108,23 @@ class TestAssignFirst:
         assert result == {"assigned": 0, "pooled": 1}
         assert candidate_pool_size(conn) == 1
 
-    def test_centroid_nudges_toward_new_member(self, conn) -> None:
+    def test_centroid_fixed_between_consolidations(self, conn) -> None:
+        # 2026-07-06 redesign: online centroid nudging was a rich-get-richer
+        # loop (big clusters drift to the corpus mean and absorb everything).
+        # Assignment must succeed without moving the centroid; centroids move
+        # only at full consolidation.
         _seed_cluster(conn, "tc_stable_1", axis=0, member_count=1)
-        # vector tilted toward axis 1 but still close to axis 0
+        before = load_cluster_centroids(conn)[0]["centroid"]
+        # vector tilted toward axis 1 but still close to axis 0 (cosine ~0.86)
         vec = _unit([1.0, 0.6, 0, 0, 0, 0, 0, 0])
-        assign_embeddings(
+        result = assign_embeddings(
             conn,
             [{"embedding_id": "e1", "record_id": "r1", "source_id": "s", "vector": vec, "text_preview": "p"}],
         )
+        assert result["assigned"] == 1
         clusters = load_cluster_centroids(conn)
-        centroid = clusters[0]["centroid"]
-        assert centroid[1] > 0.1, "centroid did not move toward the new member"
+        assert clusters[0]["centroid"] == pytest.approx(before)
+        assert clusters[0]["member_count"] == 2
 
 
 class TestStableIds:

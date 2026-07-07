@@ -190,6 +190,433 @@ _RAW_SOURCE_BACKFILL_HANDLERS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Unified catalog, coverage, generic backfill, and lifecycle (WS-A)
+# ---------------------------------------------------------------------------
+
+# Canonical table + record-id column per canonical_group_id, used for coverage
+# totals and generic backfill record loading.
+_CANONICAL_TABLE_BY_GROUP: Dict[str, tuple[str, str]] = {
+    "ai_messages": ("ai_chat_messages", "message_id"),
+    "conversations": ("conversation_messages", "message_id"),
+    "activity": ("activity_events", "event_id"),
+    "schedule": ("calendar_events", "event_id"),
+    "journal": ("journal_entries", "entry_id"),
+    "profile": ("profile_records", "record_id"),
+    "financial": ("financial_transactions", "transaction_id"),
+    "places": ("location_events", "event_id"),
+    "contacts": ("contacts", "contact_id"),
+}
+
+_RECORD_ID_KEYS = (
+    "message_id",
+    "record_id",
+    "event_id",
+    "entry_id",
+    "transaction_id",
+    "contact_id",
+)
+
+
+def _record_identifier(record: Dict[str, Any]) -> Optional[str]:
+    for key in _RECORD_ID_KEYS:
+        value = record.get(key)
+        if value:
+            return str(value)
+    return None
+
+
+def _table_exists(conn, table: str) -> bool:
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name=?", (table,)
+        ).fetchone()
+        return row is not None
+    except Exception:
+        return False
+
+
+def _table_columns(conn, table: str) -> set[str]:
+    try:
+        rows = conn.execute(f"PRAGMA table_info({table})").fetchall()
+        return {str(row[1]) for row in rows}
+    except Exception:
+        return set()
+
+
+def _canonical_table_for_source(source_def) -> Optional[tuple[str, str]]:
+    group = str(getattr(source_def, "canonical_group_id", None) or "").strip()
+    return _CANONICAL_TABLE_BY_GROUP.get(group)
+
+
+def _count_canonical_records(conn, source_def) -> Optional[int]:
+    table_info = _canonical_table_for_source(source_def)
+    if not table_info:
+        return None
+    table, _id_col = table_info
+    if not _table_exists(conn, table):
+        return 0
+    try:
+        row = conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE source_id=?",
+            (source_def.source_id,),
+        ).fetchone()
+        return int(row[0]) if row else 0
+    except Exception as exc:
+        logger.warning("Coverage count failed for %s: %s", table, exc)
+        return None
+
+
+def _enrichment_catalog_core(source_id: Optional[str] = None) -> Dict[str, Any]:
+    """Unified catalog, optionally annotated with a source's configuration."""
+    from ..enrichment.catalog import jobs_configured_for_source, list_catalog_entries
+
+    entries = list_catalog_entries()
+    payload: Dict[str, Any] = {"status": "ok", "enrichments": entries}
+    if source_id:
+        source_def = REGISTRY.get(source_id)
+        if not source_def:
+            raise ValueError(f"Source {source_id} not found")
+        lanes = jobs_configured_for_source(source_def)
+        enabled: Dict[str, List[str]] = {}
+        for lane, jobs in lanes.items():
+            for job in jobs:
+                enabled.setdefault(job, []).append(lane)
+        for entry in entries:
+            entry["enabled_lanes"] = enabled.get(entry["job_id"], [])
+            entry["enabled"] = bool(entry["enabled_lanes"])
+        payload["source_id"] = source_id
+        payload["enrichment_trigger"] = getattr(source_def, "enrichment_trigger", "automatic")
+    return payload
+
+
+def _enrichment_coverage_core(source_id: str) -> Dict[str, Any]:
+    """Per-job coverage stats for one source: rows enriched vs canonical total."""
+    from ..enrichment.catalog import (
+        all_jobs_for_source,
+        coverage_table_for_job,
+        get_catalog_entry,
+    )
+
+    source_def = REGISTRY.get(source_id)
+    if not source_def:
+        raise ValueError(f"Source {source_id} not found")
+    conn = get_db_connection()
+    if not conn:
+        return {"status": "error", "source_id": source_id, "message": "Database connection not available", "jobs": []}
+
+    total = _count_canonical_records(conn, source_def)
+    jobs_payload: List[Dict[str, Any]] = []
+    for job_id in all_jobs_for_source(source_def):
+        entry = get_catalog_entry(job_id)
+        job_info: Dict[str, Any] = {
+            "job_id": job_id,
+            "title": entry.title if entry else job_id,
+            "baseline": bool(entry and entry.baseline),
+            "output_tables": list(entry.output_tables) if entry else [],
+            "enriched_records": None,
+            "coverage_percent": None,
+            "output_rows": {},
+        }
+        coverage_table = coverage_table_for_job(job_id)
+        if coverage_table and _table_exists(conn, coverage_table):
+            cols = _table_columns(conn, coverage_table)
+            id_col = "message_id" if "message_id" in cols else "record_id"
+            if "source_id" in cols and id_col in cols:
+                try:
+                    row = conn.execute(
+                        f"SELECT COUNT(DISTINCT {id_col}) FROM {coverage_table} WHERE source_id=?",
+                        (source_id,),
+                    ).fetchone()
+                    enriched = int(row[0]) if row else 0
+                    job_info["enriched_records"] = enriched
+                    if total:
+                        job_info["coverage_percent"] = round(min(100.0, enriched / total * 100.0), 1)
+                    elif total == 0:
+                        job_info["coverage_percent"] = 0.0
+                except Exception as exc:
+                    logger.warning("Coverage query failed for %s: %s", coverage_table, exc)
+        for table in job_info["output_tables"]:
+            if not _table_exists(conn, table):
+                continue
+            cols = _table_columns(conn, table)
+            if "source_id" not in cols:
+                continue
+            try:
+                row = conn.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE source_id=?", (source_id,)
+                ).fetchone()
+                job_info["output_rows"][table] = int(row[0]) if row else 0
+            except Exception:
+                continue
+        jobs_payload.append(job_info)
+
+    return {
+        "status": "ok",
+        "source_id": source_id,
+        "total_records": total,
+        "enrichment_trigger": getattr(source_def, "enrichment_trigger", "automatic"),
+        "jobs": jobs_payload,
+    }
+
+
+# Extra WHERE constraints when deleting shared tables so one job's delete does
+# not wipe another job's rows in the same table.
+_DELETE_CONSTRAINTS: Dict[tuple[str, str], tuple[str, tuple]] = {
+    ("url_classification", "signal_facts"): ("dimension = ?", ("interests",)),
+    ("statistics", "signal_facts"): ("fact_id LIKE ?", ("stat:%",)),
+}
+
+
+def _delete_enrichment_data_core(source_id: str, job_name: str) -> Dict[str, Any]:
+    """Delete one enrichment's output rows for one source (owner lifecycle)."""
+    from ..enrichment.catalog import get_catalog_entry
+
+    source_def = REGISTRY.get(source_id)
+    if not source_def:
+        raise ValueError(f"Source {source_id} not found")
+    entry = get_catalog_entry(job_name)
+    if not entry:
+        raise ValueError(f"Unknown enrichment job: {job_name}")
+    if not entry.supports_delete or not entry.output_tables:
+        raise ValueError(f"Enrichment '{job_name}' has no deletable output tables")
+
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError("Database connection not available")
+
+    deleted: Dict[str, int] = {}
+    for table in entry.output_tables:
+        if not _table_exists(conn, table):
+            continue
+        cols = _table_columns(conn, table)
+        if "source_id" not in cols:
+            continue
+        where = "source_id = ?"
+        params: tuple = (source_id,)
+        extra = _DELETE_CONSTRAINTS.get((job_name, table))
+        if extra:
+            where += f" AND {extra[0]}"
+            params = params + extra[1]
+        try:
+            if table == "signal_embeddings":
+                ids = [
+                    str(row[0])
+                    for row in conn.execute(
+                        f"SELECT embedding_id FROM signal_embeddings WHERE {where}", params
+                    ).fetchall()
+                ]
+                cur = conn.execute(f"DELETE FROM signal_embeddings WHERE {where}", params)
+                try:
+                    from ..storage.adapters.sqlite.vector_search import delete_vec_rows
+
+                    delete_vec_rows(conn, ids)
+                except Exception as exc:
+                    logger.warning("Vector companion cleanup failed: %s", exc)
+            else:
+                cur = conn.execute(f"DELETE FROM {table} WHERE {where}", params)
+            conn.commit()
+            deleted[table] = int(cur.rowcount if cur.rowcount is not None else 0)
+        except Exception as exc:
+            conn.rollback()
+            logger.error("Enrichment delete failed for %s.%s: %s", source_id, table, exc)
+            raise
+
+    return {
+        "status": "ok",
+        "source_id": source_id,
+        "enrichment_name": job_name,
+        "deleted_rows": deleted,
+        "deleted_total": sum(deleted.values()),
+    }
+
+
+# Per-record enrichment lookup tables for the preview endpoint: job -> (table,
+# value column). All key rows by record_id/message_id and carry source_id.
+_PREVIEW_TABLES: List[tuple[str, str, str]] = [
+    ("emotions", "message_emotions", "emotion_label"),
+    ("topics", "message_topics", "topic"),
+    ("sentiment", "message_sentiment", "label"),
+    ("entities", "message_entities", "entity_text"),
+    ("tags", "signal_tags", "tag"),
+    ("goals", "user_goals", "goal_text"),
+]
+
+
+def _enrichment_preview_core(source_id: str, limit: int = 20) -> Dict[str, Any]:
+    """Recent canonical records joined with their stored enrichment outputs.
+
+    Powers the 'see the value' surface: each record carries chips (emotions,
+    topics, sentiment, entities, tags, goals) from the derived tables.
+    """
+    from ..ingestion.canonical_pipeline import load_canonical_records_for_signal
+
+    source_def = REGISTRY.get(source_id)
+    if not source_def:
+        raise ValueError(f"Source {source_id} not found")
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError("Database connection not available")
+
+    limit = max(1, min(int(limit or 20), 100))
+    records = load_canonical_records_for_signal(conn, source_def, limit=limit)[:limit]
+    record_ids = [rid for rid in (_record_identifier(r) for r in records) if rid]
+    if not record_ids:
+        return {"status": "ok", "source_id": source_id, "records": []}
+
+    placeholders = ",".join("?" * len(record_ids))
+    by_record: Dict[str, Dict[str, List[str]]] = {rid: {} for rid in record_ids}
+    for kind, table, value_col in _PREVIEW_TABLES:
+        if not _table_exists(conn, table):
+            continue
+        cols = _table_columns(conn, table)
+        if value_col not in cols:
+            continue
+        id_col = "message_id" if "message_id" in cols else "record_id"
+        if id_col not in cols:
+            continue
+        try:
+            rows = conn.execute(
+                f"SELECT {id_col}, {value_col} FROM {table} "
+                f"WHERE {id_col} IN ({placeholders})",
+                record_ids,
+            ).fetchall()
+        except Exception as exc:
+            logger.debug("Enrichment preview query failed for %s: %s", table, exc)
+            continue
+        for rid, value in rows:
+            if rid is None or value is None:
+                continue
+            bucket = by_record.setdefault(str(rid), {})
+            values = bucket.setdefault(kind, [])
+            text = str(value).strip()
+            if text and text not in values and len(values) < 8:
+                values.append(text)
+
+    out_records: List[Dict[str, Any]] = []
+    for record in records:
+        rid = _record_identifier(record)
+        if not rid:
+            continue
+        preview = str(
+            record.get("content")
+            or record.get("title")
+            or record.get("description")
+            or record.get("url")
+            or ""
+        )[:300]
+        out_records.append(
+            {
+                "record_id": rid,
+                "preview": preview,
+                "event_at": record.get("event_at")
+                or record.get("ts")
+                or record.get("occurred_at")
+                or record.get("entry_at")
+                or record.get("starts_at"),
+                "enrichments": by_record.get(rid, {}),
+            }
+        )
+    return {"status": "ok", "source_id": source_id, "records": out_records}
+
+
+async def _generic_backfill_core(
+    *,
+    source_def,
+    job_name: str,
+    only_missing: bool = True,
+    limit: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Backfill any catalog enrichment over a source's canonical records.
+
+    Loads canonical rows for the source (all canonical groups supported),
+    optionally filters to records missing output for this job, then routes to
+    the signal lane (preferred: writes adapter + legacy tables) or the
+    canonical lane.
+    """
+    import uuid as _uuid
+
+    from ..enrichment.catalog import coverage_table_for_job, jobs_configured_for_source
+    from ..ingestion.canonical_pipeline import (
+        load_canonical_records_for_signal,
+        run_post_canonical_pipeline,
+    )
+
+    db_conn = get_db_connection()
+    if not db_conn:
+        raise RuntimeError("Database connection not available")
+
+    source_id = source_def.source_id
+    load_limit = limit if isinstance(limit, int) and limit > 0 else 5000
+    records = load_canonical_records_for_signal(db_conn, source_def, limit=max(load_limit, 1))
+    scanned = len(records)
+
+    if only_missing:
+        coverage_table = coverage_table_for_job(job_name)
+        if coverage_table and _table_exists(db_conn, coverage_table):
+            cols = _table_columns(db_conn, coverage_table)
+            id_col = "message_id" if "message_id" in cols else "record_id"
+            if "source_id" in cols and id_col in cols:
+                done = {
+                    str(row[0])
+                    for row in db_conn.execute(
+                        f"SELECT DISTINCT {id_col} FROM {coverage_table} WHERE source_id=?",
+                        (source_id,),
+                    ).fetchall()
+                    if row[0]
+                }
+                records = [r for r in records if _record_identifier(r) not in done]
+
+    if isinstance(limit, int) and limit > 0:
+        records = records[:limit]
+
+    if not records:
+        return {
+            "rows_scanned": scanned,
+            "rows_processed": 0,
+            "rows_skipped": scanned,
+            "rows_failed": 0,
+            "errors": [],
+        }
+
+    lanes = jobs_configured_for_source(source_def)
+    use_signal_lane = job_name in (lanes.get("signal") or [])
+
+    errors: List[Any] = []
+    processed = 0
+    if use_signal_lane:
+        outcome = await run_post_canonical_pipeline(
+            source_def=source_def,
+            canonical_records=records,
+            sync_batch_id=f"backfill_{source_id}_{_uuid.uuid4().hex[:12]}",
+            run_enrichment=False,
+            force_signal=True,
+            job_names=[job_name],
+        )
+        derive_result = outcome.get("signal_derivation") or {}
+        processed = sum((derive_result.get("records_created") or {}).values())
+        errors = list(derive_result.get("errors") or [])
+    else:
+        from ..enrichment.derived_tables import DerivedTablesManager
+        from ..enrichment.orchestrator import EnrichmentOrchestrator
+        from ..engine import Engine
+
+        orchestrator = EnrichmentOrchestrator(
+            tables_manager=DerivedTablesManager(conn=db_conn), engine=Engine()
+        )
+        result = await orchestrator.run_canonical(records, job_names=[job_name])
+        processed = sum((result.get("records_created") or {}).values())
+        errors = list(result.get("errors") or [])
+
+    return {
+        "rows_scanned": scanned,
+        "rows_processed": int(processed),
+        "rows_skipped": max(scanned - len(records), 0),
+        "rows_failed": len(errors),
+        "errors": errors[:100],
+    }
+
+
 def _get_enriched_message_ids(table_name: str, conn) -> set[str]:
     """Get set of message_ids that have enrichment records in the given table."""
     if not conn:
@@ -392,19 +819,25 @@ async def _find_unprocessed_messages(
         logger.debug("No canonical messages found for source_id=%s, dataset_id=%s", source_id, dataset_id)
         return []
     
-    # Check which messages have already been enriched
-    # Get enriched message IDs for each job's table
-    enriched_ids: set[str] = set()
+    # Check which messages have already been enriched.
+    # A message only counts as processed when EVERY checked job has produced a
+    # row for it (intersection). The previous union behavior skipped messages
+    # that had been enriched by any single job, leaving partial enrichment
+    # permanently un-backfillable.
+    enriched_ids: Optional[set[str]] = None
     # Create a mapping from job name to table name using the job registry
     job_to_table = {job.get_job_name(): job.get_derived_table() for job in CANONICAL_JOBS}
-    
+
     for job_name in jobs_to_check:
         table_name = job_to_table.get(job_name)
         if table_name:
-            enriched_ids.update(_get_enriched_message_ids(table_name, db_conn))
+            job_ids = _get_enriched_message_ids(table_name, db_conn)
+            enriched_ids = job_ids if enriched_ids is None else (enriched_ids & job_ids)
         else:
             logger.warning("Unknown enrichment job: %s (skipping check)", job_name)
-    
+    if enriched_ids is None:
+        enriched_ids = set()
+
     # Filter to unprocessed messages
     unprocessed = [
         msg for msg in canonical_messages
@@ -426,6 +859,7 @@ async def _process_enrichment_core(
     dataset_id: Optional[str] = None,
     job_names: Optional[List[str]] = None,
     force_reprocess: bool = False,
+    include_signal: bool = True,
 ) -> Dict[str, Any]:
     """Core logic for processing enrichment (reusable from HTTP and WebSocket).
     
@@ -590,7 +1024,32 @@ async def _process_enrichment_core(
         job_names=jobs_to_run,
         progress_callback=progress_callback,
     )
-    
+
+    # Manual processing is the deliberate counterpart of the automatic ingest
+    # path, so it must also run the signal-derivation lane (embeddings,
+    # clusters, facts, ...) that the ingest path skips for manual sources.
+    signal_result: Dict[str, Any] = {}
+    if include_signal:
+        try:
+            import uuid as _uuid
+
+            from ..ingestion.canonical_pipeline import run_post_canonical_pipeline
+            from ..sources.canonical_signal_defaults import resolved_signal_derivation_jobs
+
+            if resolved_signal_derivation_jobs(source_def):
+                pipeline_outcome = await run_post_canonical_pipeline(
+                    source_def=source_def,
+                    canonical_records=unprocessed_messages,
+                    sync_batch_id=f"manual_enrichment_{_uuid.uuid4().hex[:12]}",
+                    tables_manager=tables_manager,
+                    run_enrichment=False,
+                    force_signal=True,
+                )
+                signal_result = pipeline_outcome.get("signal_derivation") or {}
+        except Exception as exc:  # noqa: BLE001
+            logger.error("Manual signal derivation failed for %s: %s", source_id, exc, exc_info=True)
+            signal_result = {"errors": [str(exc)]}
+
     return {
         "status": "ok",
         "source_id": source_id,
@@ -598,6 +1057,7 @@ async def _process_enrichment_core(
         "jobs_run": enrichment_result.get("jobs_run", 0),
         "records_created": enrichment_result.get("records_created", {}),
         "errors": enrichment_result.get("errors", []),
+        "signal_derivation": signal_result,
     }
 
 
@@ -760,6 +1220,8 @@ async def get_processing_status(
 
 def _list_source_enrichments_core(source_id: str) -> Dict[str, Any]:
     """List enrichment capabilities for a specific source (shared by HTTP and batch handlers)."""
+    from ..enrichment.catalog import get_catalog_entry, jobs_configured_for_source
+
     source_def = REGISTRY.get(source_id)
     if not source_def:
         raise ValueError(f"Source {source_id} not found")
@@ -774,14 +1236,45 @@ def _list_source_enrichments_core(source_id: str) -> Dict[str, Any]:
     capabilities: List[Dict[str, Any]] = []
     for name in raw_jobs:
         key = (source_id, name)
+        entry = get_catalog_entry(name)
         capabilities.append(
             {
                 "name": name,
-                "supports_backfill": key in _RAW_SOURCE_BACKFILL_HANDLERS,
+                "supports_backfill": key in _RAW_SOURCE_BACKFILL_HANDLERS
+                or bool(entry and entry.supports_backfill and not entry.stub),
                 "supports_test": key in _RAW_SOURCE_TEST_HANDLERS,
                 "test_input_schema": _RAW_SOURCE_TEST_SCHEMAS.get(key),
             }
         )
+
+    # Unified per-job view across all three lanes, driven by the catalog.
+    lanes = jobs_configured_for_source(source_def)
+    unified: List[Dict[str, Any]] = []
+    seen: set[str] = set()
+    for lane in ("raw", "canonical", "signal"):
+        for job_id in lanes.get(lane) or []:
+            if job_id in seen:
+                continue
+            seen.add(job_id)
+            entry = get_catalog_entry(job_id)
+            job_lanes = [l for l in ("raw", "canonical", "signal") if job_id in (lanes.get(l) or [])]
+            unified.append(
+                {
+                    "job_id": job_id,
+                    "title": entry.title if entry else job_id,
+                    "description": entry.description if entry else "",
+                    "lanes": job_lanes,
+                    "baseline": bool(entry and entry.baseline),
+                    "cost_tier": entry.cost_tier if entry else None,
+                    "default_provider": entry.default_provider if entry else None,
+                    "default_model": entry.default_model if entry else None,
+                    "output_tables": list(entry.output_tables) if entry else [],
+                    "supports_backfill": bool(entry and entry.supports_backfill),
+                    "supports_delete": bool(entry and entry.supports_delete),
+                    "supports_test": (source_id, job_id) in _RAW_SOURCE_TEST_HANDLERS,
+                    "stub": bool(entry and entry.stub),
+                }
+            )
 
     return {
         "status": "ok",
@@ -791,6 +1284,8 @@ def _list_source_enrichments_core(source_id: str) -> Dict[str, Any]:
         "raw_enrichments": raw_jobs,
         "raw_enrichment_capabilities": capabilities,
         "canonical_enrichments": canonical_jobs,
+        "signal_enrichments": list(lanes.get("signal") or []),
+        "enrichments": unified,
         "raw_backfill_supported": implemented_backfills,
     }
 
@@ -822,22 +1317,25 @@ async def backfill_source_enrichment(
     This endpoint is source-scoped (raw/source layer), separate from canonical
     message enrichment endpoints.
     """
+    from ..enrichment.catalog import all_jobs_for_source, get_catalog_entry
+
     source_def = REGISTRY.get(source_id)
     if not source_def:
         raise HTTPException(status_code=404, detail=f"Source {source_id} not found")
 
-    configured_raw_jobs = set(getattr(source_def, "raw_enrichment_jobs", []) or [])
-    if enrichment_name not in configured_raw_jobs:
+    configured_jobs = set(all_jobs_for_source(source_def))
+    if enrichment_name not in configured_jobs:
         raise HTTPException(
             status_code=400,
             detail=(
                 f"Enrichment '{enrichment_name}' is not configured for source '{source_id}'. "
-                f"Configured raw enrichments: {sorted(configured_raw_jobs)}"
+                f"Configured enrichments: {sorted(configured_jobs)}"
             ),
         )
 
+    catalog_entry = get_catalog_entry(enrichment_name)
     handler = _RAW_SOURCE_BACKFILL_HANDLERS.get((source_id, enrichment_name))
-    if not handler:
+    if not handler and (not catalog_entry or not catalog_entry.supports_backfill or catalog_entry.stub):
         raise HTTPException(
             status_code=501,
             detail=f"Backfill for source='{source_id}' enrichment='{enrichment_name}' is not implemented",
@@ -848,11 +1346,19 @@ async def backfill_source_enrichment(
         raise HTTPException(status_code=503, detail="Database connection not available")
 
     try:
-        result = await handler(
-            db_conn=db_conn,
-            only_missing=only_missing,
-            limit=limit,
-        )
+        if handler:
+            result = await handler(
+                db_conn=db_conn,
+                only_missing=only_missing,
+                limit=limit,
+            )
+        else:
+            result = await _generic_backfill_core(
+                source_def=source_def,
+                job_name=enrichment_name,
+                only_missing=only_missing,
+                limit=limit,
+            )
         return {
             "status": "ok",
             "source_id": source_id,
@@ -918,6 +1424,67 @@ async def test_source_enrichment(
     except Exception as exc:  # noqa: BLE001
         logger.error(
             "Source enrichment test failed: source=%s enrichment=%s error=%s",
+            source_id,
+            enrichment_name,
+            exc,
+            exc_info=True,
+        )
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/enrichments/catalog", dependencies=[Depends(require_api_key)])
+async def get_enrichments_catalog(source_id: Optional[str] = None) -> Dict[str, Any]:
+    """Unified enrichment catalog across all lanes, optionally annotated per source."""
+    try:
+        return _enrichment_catalog_core(source_id=source_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@router.get("/enrichments/preview", dependencies=[Depends(require_api_key)])
+async def get_enrichments_preview(source_id: str, limit: int = 20) -> Dict[str, Any]:
+    """Recent records for a source with their enrichment outputs attached."""
+    try:
+        return _enrichment_preview_core(source_id=source_id, limit=limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Enrichment preview failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.get("/enrichments/coverage", dependencies=[Depends(require_api_key)])
+async def get_enrichments_coverage(source_id: str) -> Dict[str, Any]:
+    """Per-enrichment coverage stats (rows enriched vs canonical total) for a source."""
+    try:
+        return _enrichment_coverage_core(source_id=source_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.error("Enrichment coverage failed: %s", exc, exc_info=True)
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+@router.delete(
+    "/sources/{source_id}/enrichments/{enrichment_name}/data",
+    dependencies=[Depends(require_api_key)],
+)
+async def delete_source_enrichment_data(
+    source_id: str,
+    enrichment_name: str,
+) -> Dict[str, Any]:
+    """Delete one enrichment's output rows for a source (owner lifecycle control)."""
+    try:
+        return _delete_enrichment_data_core(source_id=source_id, job_name=enrichment_name)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RuntimeError as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    except Exception as exc:  # noqa: BLE001
+        logger.error(
+            "Enrichment delete failed: source=%s enrichment=%s error=%s",
             source_id,
             enrichment_name,
             exc,

@@ -30,6 +30,10 @@ from .signal_dimension_harness import (
     MIGRATION_ID as HARNESS_ID,
     apply_signal_dimension_harness_up,
 )
+from .signal_dimension_backfill_v1 import (
+    MIGRATION_ID as SIGNAL_DIMENSION_BACKFILL_V1_ID,
+    apply_signal_dimension_backfill_v1_up,
+)
 from .scope_source_generation import (
     MIGRATION_ID as SOURCE_GENERATION_ID,
     apply_scope_source_generation_up,
@@ -144,6 +148,7 @@ def apply_all_migrations(conn: sqlite3.Connection) -> None:
     apply_journal_entries_ends_at_v1_up(conn)
     apply_journal_entries_starts_at_v1_up(conn)
     apply_signal_objects_updated_by_v1_up(conn)
+    apply_signal_dimension_backfill_v1_up(conn)
 
 
 def ensure_migrations_applied(conn: sqlite3.Connection) -> None:
@@ -202,3 +207,5 @@ def ensure_migrations_applied(conn: sqlite3.Connection) -> None:
     apply_journal_entries_ends_at_v1_up(conn)
     apply_journal_entries_starts_at_v1_up(conn)
     apply_signal_objects_updated_by_v1_up(conn)
+    if not _migration_applied(conn, SIGNAL_DIMENSION_BACKFILL_V1_ID):
+        apply_signal_dimension_backfill_v1_up(conn)
