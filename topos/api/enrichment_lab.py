@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 from typing import Any, Dict, List, Optional
@@ -10,6 +11,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException, Query
 
 from ..auth import require_api_key
 from ..enrichment_lab import bundles as bundles_mod
+from ..enrichment_lab import model_resolve
 from ..enrichment_lab import service as lab_service
 from ..enrichment_lab import store
 
@@ -29,6 +31,17 @@ async def enrichment_lab_get_bundle(bundle_id: str) -> Dict[str, Any]:
     if not data:
         raise HTTPException(status_code=404, detail="Bundle not found")
     return data
+
+
+@router.get("/v1/enrichment-lab/models/resolve", dependencies=[Depends(require_api_key)])
+async def enrichment_lab_resolve_model(model_id: str = Query(...)) -> Dict[str, Any]:
+    """Resolve a pasted HuggingFace model id against the hub (task, size, fit).
+
+    Always 200: outcome is in the payload's ``status`` field ("ok",
+    "not_found", "unauthorized", "invalid", "unreachable") so the UI can
+    render each case instead of handling transport errors.
+    """
+    return await asyncio.to_thread(model_resolve.resolve_model, model_id)
 
 
 @router.get("/v1/enrichment-lab/node-sample", dependencies=[Depends(require_api_key)])

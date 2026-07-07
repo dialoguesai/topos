@@ -1,6 +1,8 @@
 """Enrichment Lab message handlers."""
 from __future__ import annotations
 
+import asyncio
+
 import topos.core.handlers as hub
 
 from .common import (
@@ -10,6 +12,18 @@ from .common import (
     json,
 )
 from .registry import handles
+
+
+@handles("get_enrichment_lab_model_resolve")
+async def handle_get_enrichment_lab_model_resolve(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    from ...enrichment_lab import model_resolve
+
+    model_id = str((message.get("payload") or {}).get("model_id") or "").strip()
+    if not model_id:
+        return {"id": req_id, "status": "error", "error": "model_id required"}
+    result = await asyncio.to_thread(model_resolve.resolve_model, model_id)
+    return {"id": req_id, "status": "ok", "payload": result}
 
 
 @handles("get_enrichment_lab_bundles")

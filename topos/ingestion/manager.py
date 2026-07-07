@@ -1004,10 +1004,13 @@ class IngestionManager(BaseObject):
                 from ..pipeline.audit import SQLiteIngestAuditStore, StageAuditRow
                 from ..pipeline.stages import PipelineStage
 
+                from ..enrichment.source_overrides import effective_canonical_enrichment_jobs
+
                 enrichment_trigger = getattr(source_def, "enrichment_trigger", "automatic")
+                effective_canonical_jobs = effective_canonical_enrichment_jobs(source_def)
                 enrichment_records: Optional[List[Any]] = canonical_messages
                 if (
-                    source_def.canonical_enrichment_jobs
+                    effective_canonical_jobs
                     and enrichment_trigger == "automatic"
                     and tables_manager
                 ):
@@ -1017,11 +1020,11 @@ class IngestionManager(BaseObject):
                         source_def.source_id,
                         enrichment_trigger,
                         len(canonical_messages),
-                        source_def.canonical_enrichment_jobs,
+                        effective_canonical_jobs,
                     )
                     enrichment_records = _filter_unenriched_messages(
                         canonical_messages,
-                        source_def.canonical_enrichment_jobs,
+                        effective_canonical_jobs,
                         tables_manager,
                         source_id=source_def.source_id,
                         dataset_id=job.dataset_id,
@@ -1032,7 +1035,7 @@ class IngestionManager(BaseObject):
                             self,
                             len(canonical_messages),
                         )
-                elif source_def.canonical_enrichment_jobs and enrichment_trigger == "manual":
+                elif effective_canonical_jobs and enrichment_trigger == "manual":
                     logger.debug(
                         "[PIPELINE:ENRICHMENT] %s: Skipping enrichment (manual trigger): %d canonical messages will be enriched later via POST /v1/enrichment/process",
                         self,

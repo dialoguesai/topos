@@ -112,6 +112,9 @@ async def test_lab_dry_run_writes_only_lab_tables(conn, monkeypatch):
     import topos.enrichment_lab.worker as worker_mod
 
     monkeypatch.setattr(worker_mod, "_ModelOverrideEngine", lab_worker._ModelOverrideEngine)
+    # HF pre-flight (hub resolve + snapshot download) is covered in
+    # test_enrichment_lab_worker_prep.py; this test is about dry-run mechanics.
+    monkeypatch.setattr(worker_mod, "_prepare_hf_model", lambda *a, **k: None)
 
     import topos.engine as engine_mod
 
@@ -178,8 +181,10 @@ async def test_lab_apply_preferred_sets_device_override(conn, monkeypatch):
 
     fake = _FakeEngine()
     import topos.engine as engine_mod
+    import topos.enrichment_lab.worker as worker_mod
 
     monkeypatch.setattr(engine_mod, "Engine", lambda: fake)
+    monkeypatch.setattr(worker_mod, "_prepare_hf_model", lambda *a, **k: None)
 
     gid = lab_service.create_job_group(
         job_id="sentiment",

@@ -35,18 +35,26 @@ def resolved_signal_derivation_jobs(
     Canonical-mapped sources always receive CANONICAL_BASELINE_SIGNAL_JOBS
     (embeddings, briefs, topic clusters, graph). Source definitions may list
     additional lane-specific jobs; repeating baseline jobs is optional.
+    Runtime per-source overrides (user attach/detach) are applied last unless
+    the caller passed explicit jobs.
     """
     if explicit_jobs is not None:
         return list(explicit_jobs)
 
     extra_jobs = list(getattr(source_def, "signal_derivation_jobs", None) or [])
     if not maps_to_canonical_table(source_def):
-        return extra_jobs
+        merged = list(extra_jobs)
+    else:
+        merged = []
+        for job in (*CANONICAL_BASELINE_SIGNAL_JOBS, *extra_jobs):
+            if job and job not in merged:
+                merged.append(job)
 
-    merged: List[str] = []
-    for job in (*CANONICAL_BASELINE_SIGNAL_JOBS, *extra_jobs):
-        if job and job not in merged:
-            merged.append(job)
+    source_id = str(getattr(source_def, "source_id", "") or "")
+    if source_id:
+        from ..enrichment.source_overrides import apply_overrides_to_jobs
+
+        merged = apply_overrides_to_jobs(source_id, "signal", merged)
     return merged
 
 
