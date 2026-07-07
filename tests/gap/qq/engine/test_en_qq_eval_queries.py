@@ -35,7 +35,27 @@ pytestmark = [
 @pytest.fixture(scope="module")
 def live_orchestrator() -> QueryPipelineOrchestrator:
     adapters = AdapterFactory.create("local_database", db_path=LIVE_DB_PATH)
-    return QueryPipelineOrchestrator(adapters=adapters)
+    orch = QueryPipelineOrchestrator(adapters=adapters)
+    # Warmup: first query pays one-time model loading (embeddings et al.), which
+    # would otherwise be billed to whichever case runs first and blow its budget.
+    import asyncio
+
+    # The query must be realistic (multi-token, hits the vector path) — a bare
+    # "warmup" token skips the semantic search that loads the embedding model —
+    # and unique per run, or the query-memory cache serves it without touching
+    # the vector path and the first real case pays the model load instead.
+    import uuid
+
+    asyncio.run(
+        orch.execute(
+            query_text=f"warmup pass over recent project notes {uuid.uuid4().hex[:8]}",
+            scope_id="ai_conversations:read",
+            access_mode="summary",
+            manifest=manifest_for_scope("ai_conversations:read"),
+            query_session_id="qq-eval-warmup",
+        )
+    )
+    return orch
 
 
 async def _run_case(orch: QueryPipelineOrchestrator, case: QueryQualityCase) -> tuple[Dict[str, Any], float]:
