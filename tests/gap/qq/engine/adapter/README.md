@@ -12,6 +12,7 @@ engine, not in the portable package.
 | File | Implements |
 |---|---|
 | `target_engine.py` | `QueryTarget` via the in-process pipeline; `EvidencePacket` from the DDR (`TOPOS_QUERY_DDR=1`); `normalize_result` reused by the runner |
+| `target_mcp.py` | `QueryTarget` over the CP MCP gateway (owner `query_scope`, persistent session, `X-Topos-Client: topos-home-chat/1`); reuses `target_engine.normalize_result` — one normalizer, two transports. Grantee/`shared_*` parity is a later lane (refused loudly, not half-measured) |
 | `sql_oracle.py` | `Oracle` — needle groups + topic terms → graded 0/1/2 relevance, per-case truth computed once from SQL |
 | `llm_judge.py` | `Judge` on local Ollama (`qwen3.5:9b-mlx`, think-off JSON verdicts); localhost-only, enforced |
 
@@ -21,11 +22,8 @@ plus `../negative_eval_cases.py` (N-series) and `../generative_eval_cases.py` (G
 
 ## Future work (created when implemented — no stub files)
 
-- `target_mcp.py` — `QueryTarget` over the CP MCP gateway (`query_scope` /
-  `shared_query_scope`). Reuse the MCP client pattern in
-  `topos/scripts/run_query_eval.py::run_mcp_eval`; a denial/503 is a valid
-  `Response(turn_outcome="denied")`, never an exception. The runner's existing MCP lane
-  covers engine↔MCP parity until then.
+- `target_mcp.py` grantee lane — parity over the `shared_*` tool surface with UMA auth
+  (v1 is owner-only; see the module docstring).
 - `corpus_builder.py` — the `qq-seeded-3` persona pack via engine migrations (Phase 2):
   therapy-adjacent journal canary, validity-windowed employment fact, warm/cold contact
   pair, NSFW canary per layer, code-switched needles.
