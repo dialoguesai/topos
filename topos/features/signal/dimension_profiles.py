@@ -9,7 +9,7 @@ from typing import List, Optional
 
 from ...storage.adapters.factory import AdapterBundle
 from .data_health import DataHealthComputer
-from .dimension_registry import MVP_DIMENSIONS
+from .dimension_registry import SIGNAL_DIMENSIONS
 
 
 class DimensionProfileUpdater:
@@ -18,13 +18,22 @@ class DimensionProfileUpdater:
         self._conn = conn
 
     def upsert_all(self, deferred_jobs: Optional[List[str]] = None) -> int:
-        profiles = DataHealthComputer(self._adapters).compute(deferred_jobs=deferred_jobs)
+        profiles = DataHealthComputer(self._adapters, self._conn).compute(
+            deferred_jobs=deferred_jobs
+        )
+        measured = {
+            dim_id: profile for dim_id, profile in profiles.items() if profile.get("measured")
+        }
         if not self._conn:
-            return len(profiles)
+            return len(measured)
         written = 0
-        for dim in MVP_DIMENSIONS:
+        for dim in SIGNAL_DIMENSIONS:
             dim_id = dim["id"]
-            profile = profiles.get(dim_id) or {}
+            profile = measured.get(dim_id)
+            if not profile:
+                # Honesty rule: no real signal → no health row; the dimension
+                # renders as "not yet measured", never a zero bar.
+                continue
             profile_id = str(uuid.uuid4())
             payload = json.dumps(profile)
             self._conn.execute(
@@ -37,7 +46,7 @@ class DimensionProfileUpdater:
                 (profile_id, dim_id, None, payload, profile.get("model"), profile.get("provider")),
             )
             health_id = str(uuid.uuid4())
-            score = float(profile.get("coverage_score") or 0.0)
+            score = float(profile.get("score") or 0.0)
             self._conn.execute(
                 """
                 INSERT INTO data_health_dimension (

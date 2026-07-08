@@ -47,6 +47,24 @@ DIMENSION_SIGNAL_OBJECTS: Dict[str, List[str]] = {
     "intentions": ["user_goals", "goal_inference", "intentions_living_brief"],
 }
 
+# Signal-row targets for data health volume scoring: the count at which a
+# dimension's volume component reaches 50% (see data_health.volume_score;
+# saturating curve, never a hard 100% cliff). High-traffic dimensions need
+# more rows to look healthy than sparse ones (e.g. places, wellbeing).
+DIMENSION_VOLUME_TARGETS: Dict[str, int] = {
+    "memory": 200,
+    "relationships": 200,
+    "interests": 100,
+    "work": 75,
+    "time": 50,
+    "profile": 40,
+    "intentions": 40,
+    "wellbeing": 25,
+    "resources": 25,
+    "places": 25,
+}
+DEFAULT_VOLUME_TARGET = 50
+
 # Target canonical tables per dimension (wiki Layer 2); ingestion fills these over time.
 DIMENSION_CANONICAL_TABLES: Dict[str, List[str]] = {
     "profile": ["public_bio", "personal_profile", "skill", "experience", "activity_events", "profile_records", "journal_entries"],

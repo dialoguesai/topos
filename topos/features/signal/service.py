@@ -7,7 +7,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ...storage.adapters.factory import AdapterBundle
 from .data_health import DataHealthComputer
-from .dimension_registry import MVP_DIMENSIONS
+from .dimension_registry import SIGNAL_DIMENSIONS
 from .schemas import strip_vector_fields
 
 _DATA_HEALTH_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
@@ -286,27 +286,41 @@ class SignalService:
         nodes, edges = ensure_graph_endpoints(nodes, edges)
         return {"nodes": nodes, "edges": edges}
 
+    def _health_conn(self) -> Any:
+        if self._conn is not None:
+            return self._conn
+        try:
+            from ...core.state import get_db_connection
+
+            return get_db_connection()
+        except Exception:
+            return None
+
     def _cached_profiles(self, deferred_jobs: Optional[List[str]] = None) -> Dict[str, Dict[str, Any]]:
         cache_key = ",".join(sorted(deferred_jobs or []))
         now = time.monotonic()
         cached = _DATA_HEALTH_CACHE.get(cache_key)
         if cached and (now - cached[0]) < _DATA_HEALTH_TTL_SEC:
             return cached[1]
-        profiles = DataHealthComputer(self._adapters).compute(deferred_jobs=deferred_jobs)
+        profiles = DataHealthComputer(self._adapters, self._health_conn()).compute(
+            deferred_jobs=deferred_jobs
+        )
         _DATA_HEALTH_CACHE[cache_key] = (now, profiles)
         return profiles
 
     def list_dimensions(self) -> Dict[str, Any]:
         profiles = self._cached_profiles()
         dimensions = []
-        for dim in MVP_DIMENSIONS:
+        for dim in SIGNAL_DIMENSIONS:
             p = profiles.get(dim["id"], {})
             dimensions.append(
                 {
                     "id": dim["id"],
                     "label": dim["label"],
+                    "score": p.get("score", 0.0),
                     "coverage_score": p.get("coverage_score", 0.0),
                     "freshness_score": p.get("freshness_score", 0.0),
+                    "measured": p.get("measured", False),
                     "canonical_sources": p.get("canonical_sources", []),
                     "updated_at": p.get("updated_at"),
                 }
@@ -314,24 +328,28 @@ class SignalService:
         return {"dimensions": dimensions}
 
     def get_data_health(self, deferred_jobs: Optional[List[str]] = None) -> Dict[str, Any]:
+        from .data_health import check_provider_status
+        from .model_recommendations import signal_model_recommendation
+
         profiles = self._cached_profiles(deferred_jobs=deferred_jobs)
-        ollama_up = "ollama_unreachable" not in {
-            f for p in profiles.values() for f in p.get("provider_failures") or []
-        }
         fit_readiness: Dict[str, float] = {}
+        conn = self._health_conn()
         try:
-            from ...core.state import get_db_connection
             from ..fit.evaluator import compute_fit_readiness
 
-            conn = self._conn if self._conn is not None else get_db_connection()
             if conn is not None:
                 fit_readiness = compute_fit_readiness(conn)
         except Exception:
             fit_readiness = {}
+        try:
+            model_recommendations = signal_model_recommendation(conn)
+        except Exception:
+            model_recommendations = {}
         return {
             "dimensions": list(profiles.values()),
             "fit_readiness": fit_readiness,
-            "provider_status": {"ollama": "up" if ollama_up else "down", "huggingface": "up"},
+            "provider_status": check_provider_status(),
+            "model_recommendations": model_recommendations,
             "updated_at": profiles.get("memory", {}).get("updated_at"),
         }
 

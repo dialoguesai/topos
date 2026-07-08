@@ -19,7 +19,7 @@ from topos.storage.adapters.factory import AdapterBundle
 pytestmark = pytest.mark.gap
 
 
-def test_data_health_computer_returns_five_dimensions() -> None:
+def test_data_health_computer_returns_all_ten_dimensions() -> None:
     bundle = AdapterBundle(
         canonical=InMemoryCanonicalStore(),
         signal=InMemorySignalFeatureStore(),
@@ -30,6 +30,19 @@ def test_data_health_computer_returns_five_dimensions() -> None:
         backend="memory",
     )
     profiles = DataHealthComputer(bundle).compute(deferred_jobs=["topics"])
-    assert set(profiles.keys()) == {"time", "relationships", "memory", "profile", "interests"}
+    assert set(profiles.keys()) == {
+        "profile",
+        "time",
+        "interests",
+        "relationships",
+        "work",
+        "memory",
+        "wellbeing",
+        "resources",
+        "places",
+        "intentions",
+    }
     assert "coverage_score" in profiles["memory"]
+    assert "score" in profiles["memory"]
+    assert profiles["memory"]["measured"] is False  # empty stores → unmeasured
     assert "ollama_unreachable" in profiles["memory"]["provider_failures"]
