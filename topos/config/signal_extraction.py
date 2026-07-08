@@ -66,7 +66,11 @@ def resolve_signal_extraction_config(
     if provider not in SIGNAL_EXTRACTION_PROVIDERS:
         provider = "ollama"
     model_override = str(device.query_model or "").strip()
-    default_model = str(settings.ollama_query_model or "llama3.2:latest").strip()
+    # Ingest extraction prefers the quality model (plan C1) — ingest is slow-tolerant; the
+    # fast ollama_query_model is for query-time inference. Empty extraction model ⇒ fall back.
+    default_model = str(
+        getattr(settings, "ollama_extraction_model", "") or settings.ollama_query_model or "llama3.2:latest"
+    ).strip()
     if provider == "platform":
         default_model = str(settings.openai_model or "gpt-4o-mini").strip()
     elif provider == "redpill":
