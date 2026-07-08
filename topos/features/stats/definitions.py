@@ -75,6 +75,18 @@ def group_key_for(row: Dict[str, Any], group_by: str) -> Optional[str]:
     if group_by == "category":
         value = row.get("category") or row.get("url_category") or _row_meta(row).get("category")
         return str(value).strip().lower() if value else None
+    if group_by == "city":
+        value = row.get("city")
+        return str(value).strip() if value else None
+    if group_by == "place_name":
+        value = row.get("place_name")
+        return str(value).strip() if value else None
+    if group_by == "mood_tag":
+        value = row.get("mood_tag")
+        return str(value).strip().lower() if value else None
+    if group_by == "title":
+        value = str(row.get("title") or "").strip()
+        return value[:60] if value else None
     if group_by == "contact_id":
         value = row.get("sender_id") or row.get("contact_id") or row.get("from")
         return str(value).strip() if value else None
@@ -166,10 +178,50 @@ SEED_DEFINITIONS: List[Dict[str, Any]] = [
         "dimension": "time",
         "windows_json": '["all", "d30", "d90"]',
     },
+    # Places: visit frequency by city and by place — "which cities/places do I
+    # go" is a frequency question a recency-ordered browse can't answer.
+    {
+        "stat_id": "places.visits.by_city",
+        "canonical_table": "location_events",
+        "group_by": "city",
+        "stat_kind": "count",
+        "value_expr": "one",
+        "dimension": "places",
+        "windows_json": '["all", "d30", "d90"]',
+    },
+    {
+        "stat_id": "places.visits.by_place",
+        "canonical_table": "location_events",
+        "group_by": "place_name",
+        "stat_kind": "count",
+        "value_expr": "one",
+        "dimension": "places",
+        "windows_json": '["all", "d30", "d90"]',
+    },
+    # Wellbeing: mood mix ("what moods do I record most often").
+    {
+        "stat_id": "journal.mood.mix",
+        "canonical_table": "journal_entries",
+        "group_by": "none",
+        "stat_kind": "histogram",
+        "value_expr": "mood_tag",
+        "dimension": "wellbeing",
+        "windows_json": '["all", "d30", "d90"]',
+    },
+    # Interests: most-visited pages ("what do I browse the most").
+    {
+        "stat_id": "activity.visits.by_title",
+        "canonical_table": "activity_events",
+        "group_by": "title",
+        "stat_kind": "count",
+        "value_expr": "one",
+        "dimension": "interests",
+        "windows_json": '["all", "d30", "d90"]',
+    },
 ]
 
 # Histogram value extractors keyed off value_expr when kind == histogram
-HISTOGRAM_VALUE_KEYS = {"hour_of_week", "hour_of_day", "weekday", "category"}
+HISTOGRAM_VALUE_KEYS = {"hour_of_week", "hour_of_day", "weekday", "category", "mood_tag"}
 
 
 def histogram_value(row: Dict[str, Any], value_expr: str) -> Optional[str]:

@@ -234,22 +234,53 @@ def _contact_names_for_identifier(conn: sqlite3.Connection, identifier: str) -> 
 
 
 def oracle_c1_top_contact_volume(conn: sqlite3.Connection) -> Oracle:
+    # Top NON-self contact: 'self' can be the max-n group_key (notes to self) but
+    # is not a "most frequent contact", and as a needle it substring-matches
+    # everywhere (json keys, 'yourself', ...).
     row = _one(
         conn,
         """SELECT payload_json FROM signal_facts
            WHERE fact_id LIKE 'stat:messages.volume.by_contact:%'
+             AND json_extract(payload_json, '$.group_key') NOT IN ('self', '')
            ORDER BY json_extract(payload_json, '$.stat_summary.n') DESC LIMIT 1""",
     )
     if not row:
         return Oracle([], "no messages.volume stat insights in DB", ok=False)
     payload = json.loads(row[0])
     ident = str(payload.get("group_key") or "")
-    n = payload.get("stat_summary", {}).get("n")
     who = [ident, *(_contact_names_for_identifier(conn, ident))]
-    groups = [ [a for a in who if a] ]
-    if n:
-        groups.append([str(n)])
-    return Oracle(groups, f"top contact by volume: {who[-1] if who else '?'} ({n} msgs)")
+    groups = [[a for a in who if a and len(a) >= 5]]
+    if not groups[0]:
+        return Oracle([], "top contact has no usable identifier/name", ok=False)
+    # The count group accepts ANY window's n for this contact: the max-n row is the
+    # all-time aggregate, but retrieval may (correctly) serve the d30/d7 row instead —
+    # grading only the all-time count punished a working surface.
+    n_rows = _all(
+        conn,
+        """SELECT json_extract(payload_json, '$.stat_summary.n') FROM signal_facts
+           WHERE fact_id LIKE 'stat:messages.volume.by_contact:%'
+             AND json_extract(payload_json, '$.group_key') = ?""",
+        ident,
+    )
+    counts = sorted(
+        {str(int(n)) for (n,) in n_rows if isinstance(n, (int, float)) and float(n) > 0}
+    )
+    if counts:
+        groups.append(counts)
+    return Oracle(groups, f"top contact by volume: {who[-1] if who else '?'} (any-window count)")
+
+
+def _clean_snippet(content: str, n_words: int = 5) -> str:
+    """First n words of content as a matchable needle, or '' if degenerate.
+    Guards: strip leading punctuation/quote artifacts, require ≥2 real words,
+    and require the snippet to appear verbatim in the raw content (a needle
+    that only exists in a whitespace-normalized copy can never match the blob)."""
+    words = re.sub(r"\s+", " ", content).strip()
+    snippet = " ".join(words.split(" ")[:n_words]).lstrip("+([{<\"'`~*-_ ")
+    real_words = [w for w in snippet.split(" ") if re.search(r"[a-zA-Z]{3,}", w)]
+    if len(snippet) <= 15 or len(real_words) < 2:
+        return ""
+    return snippet if snippet.lower() in content.lower() else ""
 
 
 def oracle_c2_recent_messages(conn: sqlite3.Connection) -> Oracle:
@@ -257,14 +288,15 @@ def oracle_c2_recent_messages(conn: sqlite3.Connection) -> Oracle:
         conn,
         """SELECT content FROM conversation_messages
            WHERE content IS NOT NULL AND length(content) > 40
-           ORDER BY event_at DESC LIMIT 3""",
+           ORDER BY event_at DESC LIMIT 10""",
     )
     groups = []
     for (content,) in rows:
-        words = re.sub(r"\s+", " ", str(content)).strip()
-        snippet = " ".join(words.split(" ")[:5])
-        if len(snippet) > 15:
+        snippet = _clean_snippet(str(content))
+        if snippet and [snippet] not in groups:
             groups.append([snippet])
+        if len(groups) == 3:
+            break
     if not groups:
         return Oracle([], "no recent conversation_messages with content", ok=False)
     return Oracle(groups, f"{len(groups)} newest message snippets")
@@ -470,16 +502,31 @@ def _distinctive_words(text: str, k: int) -> List[str]:
 
 def _known_item(conn: sqlite3.Connection, sql: str) -> Optional[Tuple[str, str]]:
     """(query_keywords, needle_snippet) from the longest row the SQL returns: keywords come
-    from the first half of the content, the needle from the second half."""
+    from the first half of the content, the needle from the second half. The needle is the
+    first 4-word window of the second half that carries ≥2 distinctive words and appears
+    verbatim in the raw content — mid-sentence fragments like 'coverage, and pursue' or
+    windows broken across newlines are unmatchable noise, not needles."""
     row = _one(conn, sql)
     if not row or not row[0]:
         return None
-    content = re.sub(r"\s+", " ", str(row[0])).strip()
+    raw = str(row[0])
+    content = re.sub(r"\s+", " ", raw).strip()
     half = len(content) // 2
     keywords = _distinctive_words(content[:half], 3)
-    tail_words = content[half:].split(" ")
-    needle = " ".join(tail_words[1:5])  # skip the possibly-split first word
-    if len(keywords) < 2 or len(needle) < 12:
+    tail_words = [w for w in content[half:].split(" ")[1:] if w]  # skip split first word
+    needle = ""
+    for i in range(max(0, len(tail_words) - 3)):
+        window = tail_words[i : i + 4]
+        distinct = sum(
+            1 for w in window
+            if re.fullmatch(r"[a-zA-Z]{5,}", w.strip(".,!?;:()\"'"))
+            and w.lower().strip(".,!?;:()\"'") not in _STOPWORDS
+        )
+        candidate = " ".join(window)
+        if distinct >= 2 and len(candidate) >= 12 and candidate.lower() in raw.lower():
+            needle = candidate
+            break
+    if len(keywords) < 2 or not needle:
         return None
     return " ".join(keywords), needle
 
@@ -717,37 +764,53 @@ def oracle_c27_entity2(conn: sqlite3.Connection) -> Oracle:
 
 
 def oracle_c28_cadence(conn: sqlite3.Connection) -> Oracle:
-    row = _one(
+    # "What is my messaging cadence?" is answered by ANY real cadence-by-contact
+    # stat — the old LIMIT-1 (no ORDER BY) oracle picked one arbitrary all-time row
+    # and scored 0 while retrieval correctly served d30 cadence rows for other
+    # contacts. Alternatives span all windows and contacts.
+    rows = _all(
         conn,
         """SELECT payload_json FROM signal_facts
-           WHERE fact_id LIKE 'stat:messages.cadence.by_contact:%' LIMIT 1""",
+           WHERE fact_id LIKE 'stat:messages.cadence.by_contact:%'
+           ORDER BY created_at DESC LIMIT 40""",
     )
-    if not row:
+    if not rows:
         return Oracle([], "no cadence stats", ok=False)
-    payload = json.loads(row[0])
-    ident = str(payload.get("group_key") or payload.get("fact_id", "").rsplit(":", 1)[-1])
-    who = [ident, *(_contact_names_for_identifier(conn, ident))]
-    who = [w for w in who if w]
-    if not who:
-        return Oracle([], "cadence stat has no contact", ok=False)
-    return Oracle([who], f"messaging cadence for {who[-1]!r}")
+    alts: List[str] = []
+    for (payload,) in rows:
+        ident = str(json.loads(payload).get("group_key") or "")
+        if ident in ("", "self") or len(ident) < 5:
+            continue  # 'self'/short keys substring-match everywhere — not needles
+        for alt in (ident, *_contact_names_for_identifier(conn, ident)):
+            if alt and len(alt) >= 5 and alt not in alts:
+                alts.append(alt)
+    if not alts:
+        return Oracle([], "cadence stats have no usable contacts", ok=False)
+    return Oracle([alts], f"any cadence-by-contact stat counts ({len(alts)} alternatives)")
 
 
 def oracle_c29_goals(conn: sqlite3.Connection) -> Oracle:
+    # Read the user_goals table — the store retrieval actually serves — not
+    # signal_objects (which holds duplicated/partial rows and produced two
+    # identical needle groups). "Current goals" means the NEWEST distinct goals
+    # (ordering by length graded an arbitrary property retrieval rightly
+    # doesn't rank by).
     rows = _all(
         conn,
-        """SELECT payload_json FROM signal_objects WHERE object_type = 'user_goals'
-           ORDER BY LENGTH(payload_json) DESC LIMIT 2""",
+        """SELECT goal_text, MAX(created_at) AS newest FROM user_goals
+           WHERE goal_text IS NOT NULL AND length(goal_text) > 20
+           GROUP BY goal_text ORDER BY newest DESC LIMIT 8""",
     )
-    groups = []
-    for (payload,) in rows:
-        goal = str(json.loads(payload).get("goal_text") or "")
-        words = " ".join(goal.split(" ")[:5])
-        if len(words) > 12:
-            groups.append([words])
+    groups: List[List[str]] = []
+    for goal, _newest in rows:
+        snippet = _clean_snippet(str(goal))
+        if snippet and [snippet] not in groups:
+            groups.append([snippet])
+        if len(groups) == 2:
+            break
     if not groups:
-        return Oracle([], "no user_goals with goal_text", ok=False)
-    return Oracle(groups, f"{len(groups)} goal snippets")
+        return Oracle([], "no user_goals with usable goal_text", ok=False)
+    return Oracle(groups, f"{len(groups)} newest distinct goal snippets")
 
 
 def oracle_c30_temporal_month(conn: sqlite3.Connection) -> Oracle:

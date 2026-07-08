@@ -35,6 +35,158 @@ _CLUSTER_LIMIT = 5
 _GOAL_SUMMARY_BOOST = 0.88
 _VECTOR_WORK_SCOPE_DAMPEN = 0.55
 
+# --- Query routing vocabulary ---------------------------------------------------------
+# A query that names a surface ("what's on my calendar", "show my messages") makes that
+# surface topically relevant per se: with no further content tokens it is a BROWSE of
+# that surface (recent rows). Content tokens beyond the surface words are the actual
+# ask and must match rows — an unmatched specific ask contributes nothing (absence
+# honesty; the negative-control lane).
+_SURFACE_INTENT_TERMS: Dict[str, Tuple[str, ...]] = {
+    "conversation_messages": (
+        "message", "texted", "text message", "chat", "conversation", "sms", "imessage",
+    ),
+    "ai_chat_messages": (
+        "ai conversation", "ai chat", "assistant", "chatgpt", "prompt", "ai message",
+    ),
+    "calendar_events": (
+        "calendar", "meeting", "schedule", "event", "appointment", "standup",
+        "agenda", "busy", "free", "availability",
+    ),
+    "journal_entries": ("journal", "diary", "mood", "wrote", "writing"),
+    "location_events": (
+        "place", "where", "location", "visit", "went", "travel", "city", "cities",
+    ),
+    # NB: content words like 'github' are deliberately NOT surface terms — they
+    # must stay in the residual so rows are matched by them (C21).
+    "activity_events": (
+        "brows", "website", "site", "url", "reading", "read", "looked", "looking",
+        "visit", "online", "activity", "watched",
+    ),
+    "financial_transactions": (
+        "spend", "spent", "transaction", "purchase", "bought", "money", "cost",
+        "paid", "finance", "financial", "expense",
+    ),
+    "contacts": ("contact", "phone", "number", "email", "reach", "person", "people"),
+    "contact_identifiers": ("contact", "phone", "number", "email", "identifier"),
+    "profile_records": (
+        "profile", "bio", "experience", "job", "work history", "resume", "employer",
+        "certification", "education",
+    ),
+}
+# Non-canonical surfaces that participate in the same routing decision.
+_EXTRA_SURFACE_TERMS: Tuple[str, ...] = ("goal", "objective", "priorit", "working on")
+_RECENCY_TERMS = frozenset(
+    {"recent", "recently", "latest", "newest", "last", "today", "yesterday",
+     "now", "current", "currently"}
+)
+
+
+def _surface_intent(table: str, query_lower: str) -> bool:
+    return any(term in query_lower for term in _SURFACE_INTENT_TERMS.get(table, ()))
+
+
+def _residual_content_tokens(tokens: List[str], tables: Optional[List[str]] = None) -> List[str]:
+    """Query tokens that are the *content* of the ask — not surface names, not
+    recency framing. These are what retrieved rows must actually match."""
+    blobs = [
+        " ".join(terms)
+        for tbl, terms in _SURFACE_INTENT_TERMS.items()
+        if tables is None or tbl in tables
+    ]
+    blobs.append(" ".join(_EXTRA_SURFACE_TERMS))
+    surface_blob = " ".join(blobs)
+    out: List[str] = []
+    for token in tokens:
+        if token in _RECENCY_TERMS:
+            continue
+        # Plural-insensitive: "goals"/"meetings" name the same surface as
+        # "goal"/"meeting".
+        if token in surface_blob or token.rstrip("s") in surface_blob:
+            continue
+        out.append(token)
+    return out
+
+
+def _rare_tokens(conn, tokens: List[str]) -> Dict[str, int]:
+    """Tokens with low document frequency in the FTS index, mapped to their df —
+    the discriminative part of a specific ask. df==0 means the term appears
+    nowhere in the indexed corpus (fabricated topics). Porter stemming on both
+    sides makes 'committed' meet 'commitment'. Iteration yields the tokens, so
+    callers that only need membership can treat the result like a list."""
+    if conn is None or not tokens:
+        return {}
+    from ..features.signal.vector_settings import rare_token_df_max
+
+    df_max = rare_token_df_max()
+    try:
+        total_row = conn.execute("SELECT count(*) FROM signal_embeddings_fts").fetchone()
+        if not total_row or int(total_row[0]) < df_max * 10:
+            # An empty/tiny FTS index carries no frequency signal — treating
+            # every token as rare would abstain on everything (fresh DBs,
+            # seeded test corpora).
+            return {}
+    except Exception:
+        return {}
+    rare: Dict[str, int] = {}
+    for token in tokens:
+        clean = re.sub(r"[^a-z0-9]", "", token.lower())
+        if len(clean) < 3:
+            continue
+        try:
+            row = conn.execute(
+                "SELECT count(*) FROM signal_embeddings_fts WHERE signal_embeddings_fts MATCH ?",
+                (f'"{clean}"',),
+            ).fetchone()
+        except Exception:
+            return {}  # no FTS index (fresh DB) — treat nothing as rare
+        df = int(row[0]) if row else 0
+        if df < df_max:
+            rare[token] = df
+    return rare
+
+
+def _item_text_blob(item: Dict[str, Any]) -> str:
+    return " ".join(
+        str(item.get(f) or "")
+        for f in ("topic", "summary_text", "content", "text_preview", "content_preview")
+    ).lower()
+
+
+def _sqlite_main_path(conn) -> str:
+    try:
+        for row in conn.execute("PRAGMA database_list").fetchall():
+            if row[1] == "main":
+                import os as _os
+
+                return _os.path.realpath(str(row[2] or ""))
+    except Exception:
+        pass
+    return ""
+
+
+def _bundle_is_global_db(adapters: AdapterBundle) -> bool:
+    """True when this query's adapter bundle targets the same database as the
+    global singleton — i.e. the global-connection layers (vector search, topic
+    clusters) actually describe THIS query's data. On mismatch (seeded eval
+    corpora, multi-db verification) those layers must not contribute: they
+    would silently serve another database's content."""
+    bundle_conn = getattr(adapters.signal, "_conn", None)
+    if bundle_conn is None:
+        return True  # non-sqlite/fake bundles: nothing to compare
+    try:
+        from ..core.state import get_db_connection
+
+        global_conn = get_db_connection()
+    except Exception:
+        return True
+    if global_conn is None:
+        return True
+    bundle_path = _sqlite_main_path(bundle_conn)
+    global_path = _sqlite_main_path(global_conn)
+    if not bundle_path or not global_path:
+        return True
+    return bundle_path == global_path
+
 
 def resolve_retrieval_source_ids(
     manifest: ScopeResolutionManifest,
@@ -140,12 +292,22 @@ def _load_user_goal_summaries(
         rows = conn.execute(query, tuple(params)).fetchall()
         items: List[Dict[str, Any]] = []
         tokens = _query_tokens(query_text)
+        query_lower = (query_text or "").lower()
+        goal_intent = any(term in query_lower for term in _EXTRA_SURFACE_TERMS)
+        seen_texts: set = set()
         for goal_id, record_id, source_id, goal_text in rows:
             text = str(goal_text or "").strip()
             if not text:
                 continue
-            if tokens and not any(token in text.lower() for token in tokens):
+            key = text.lower()
+            if key in seen_texts:
                 continue
+            token_match = bool(tokens) and any(token in key for token in tokens)
+            # A goal rides on token overlap OR on explicit goal intent ("what are
+            # my goals") — never as unconditional filler.
+            if tokens and not token_match and not goal_intent:
+                continue
+            seen_texts.add(key)
             items.append(
                 {
                     "topic": text,
@@ -158,24 +320,6 @@ def _load_user_goal_summaries(
                     "retrieval_source": "user_goal",
                 }
             )
-        items.sort(key=lambda item: float(item.get("relevance_score") or 0.0), reverse=True)
-        if not items and rows:
-            for goal_id, record_id, source_id, goal_text in rows[:limit]:
-                text = str(goal_text or "").strip()
-                if not text:
-                    continue
-                items.append(
-                    {
-                        "topic": text,
-                        "summary_text": text,
-                        "goal_id": goal_id,
-                        "record_id": record_id,
-                        "source_id": source_id,
-                        "dimension": "work",
-                        "relevance_score": round(_goal_relevance(text, query_text), 4),
-                        "retrieval_source": "user_goal",
-                    }
-                )
         items.sort(key=lambda item: float(item.get("relevance_score") or 0.0), reverse=True)
         return items[:limit]
     except Exception as exc:
@@ -190,6 +334,7 @@ def _list_canonical_rows(
     source_ids: List[str],
     limit: int = 100,
     disclosure_tier: str = "owner_raw",
+    contains: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     # canonical.list() already applies the disclosure tier (SQL adapters via the
     # per-table _disclosure spec; in-memory fake via apply_disclosure_tier_to_rows), so the
@@ -200,24 +345,43 @@ def _list_canonical_rows(
     seen: set[str] = set()
     candidates = source_ids or [None]
     for source_id in candidates:
-        page = adapters.canonical.list(
-            table,
-            limit=limit,
-            offset=0,
-            source_id=source_id,
-            disclosure_tier=disclosure_tier,
-        )
+        try:
+            page = adapters.canonical.list(
+                table,
+                limit=limit,
+                offset=0,
+                source_id=source_id,
+                disclosure_tier=disclosure_tier,
+                contains=contains,
+            )
+        except TypeError:
+            # Adapter predates the contains filter — fall back to a plain page.
+            page = adapters.canonical.list(
+                table,
+                limit=limit,
+                offset=0,
+                source_id=source_id,
+                disclosure_tier=disclosure_tier,
+            )
         for row in page.items:
             record_id = str(row.get("record_id") or row.get("message_id") or "")
-            key = record_id or str(row)
+            # contact_identifiers rows share record_id (= contact_id) across
+            # distinct identifiers — the identifier is part of the row identity.
+            key = (record_id + "|" + str(row.get("identifier") or "")) if record_id else str(row)
             if key in seen:
                 continue
             seen.add(key)
             item = dict(row)
             item.setdefault("_table", table)
             rows.append(item)
-            if len(rows) >= limit:
-                return rows
+    # Global recency: each source's page is already newest-first, but sources
+    # are concatenated in manifest order — without a merge sort the first
+    # source's (often demo-fixture) rows outrank every real source's newest.
+    def _ts(row: Dict[str, Any]) -> str:
+        return str(row.get("event_at") or row.get("starts_at") or row.get("entry_at") or "")
+
+    if any(_ts(r) for r in rows):
+        rows.sort(key=_ts, reverse=True)
     return rows[:limit]
 
 
@@ -328,6 +492,96 @@ def _canonical_relevance(text: str, query_text: str) -> float:
     return min(1.0, 0.6 + overlap / len(tokens) * 0.4)
 
 
+def _route_canonical_rows(
+    adapters: AdapterBundle,
+    table: str,
+    *,
+    manifest: ScopeResolutionManifest,
+    query_text: str,
+    source_ids: List[str],
+    limit: int,
+    disclosure_tier: str,
+    rare_query_tokens: Optional[List[str]] = None,
+    browse_fallback: bool = False,
+) -> List[Dict[str, Any]]:
+    """Router: content tokens must MATCH rows (full-table SQL filter); a query
+    that only names the surface (or has no tokens) BROWSES recent rows; a
+    specific ask that matches nothing contributes nothing — no unfiltered
+    fallback page. Fabricated topics must come back empty.
+
+    browse_fallback=True (inference mode) keeps the recency browse even without
+    surface intent: the inference packet is derived existence signal, not
+    content, and the answerer needs candidates — but the rare-token honesty
+    check still applies, so unanswerable specifics stay empty."""
+    query_lower = (query_text or "").lower()
+    tokens = _query_tokens(query_text)
+    residual = _residual_content_tokens(tokens, tables=[table])
+    date_hints = _iso_date_hints(query_text)
+
+    if not tokens and not date_hints:
+        # No query content at all — recency browse.
+        return _list_canonical_rows(
+            adapters, table, source_ids=source_ids, limit=limit,
+            disclosure_tier=disclosure_tier,
+        )
+
+    matched: List[Dict[str, Any]] = []
+    if residual or date_hints:
+        matched = _list_canonical_rows(
+            adapters, table, source_ids=source_ids, limit=limit,
+            disclosure_tier=disclosure_tier,
+            contains=[*residual, *date_hints],
+        )
+    if matched:
+        if table == "calendar_events":
+            all_rows = _list_canonical_rows(
+                adapters, table, source_ids=source_ids, limit=max(limit, 100),
+                disclosure_tier=disclosure_tier,
+            )
+            matched = _expand_calendar_week_context(matched, all_rows, query_text)
+        return matched
+
+    # Identifiers join their contact: "find the contact record for Jessica"
+    # must surface Jessica's phone/email rows even though those rows don't
+    # contain her name — match contacts by name, then identifiers by contact id.
+    if table == "contact_identifiers" and residual:
+        contact_rows = _list_canonical_rows(
+            adapters, "contacts", source_ids=source_ids, limit=20,
+            disclosure_tier=disclosure_tier, contains=residual,
+        )
+        ids = [str(r.get("record_id") or "") for r in contact_rows if r.get("record_id")]
+        if ids:
+            # No source filter here: identifier rows carry the provenance of the
+            # channel that observed them (imessage/signal/'*'), not the contact's
+            # source — the contact itself is already scope-authorized.
+            ident_rows = _list_canonical_rows(
+                adapters, table, source_ids=[], limit=limit,
+                disclosure_tier=disclosure_tier, contains=ids,
+            )
+            if ident_rows:
+                return ident_rows
+
+    # Nothing matched the content tokens. Browse is honest only when the surface
+    # itself was asked for AND the ask carried no effectively-absent token
+    # (df ≤ 2 — zero, or a porter-stem collision) — a term the corpus does not
+    # contain means the specific thing isn't there. Weakly-rare df>2 framing
+    # ('spend') and answer-shape words (stoplisted upstream) must not block.
+    rare_dfs = (
+        dict(rare_query_tokens)
+        if isinstance(rare_query_tokens, dict)
+        else {t: 0 for t in (rare_query_tokens or [])}
+    )
+    if any(df <= 2 and t in residual for t, df in rare_dfs.items()):
+        return []
+    work_profile = manifest.scope_id == "work_context:read" and table == "profile_records"
+    if _surface_intent(table, query_lower) or work_profile or browse_fallback:
+        return _list_canonical_rows(
+            adapters, table, source_ids=source_ids, limit=limit,
+            disclosure_tier=disclosure_tier,
+        )
+    return []
+
+
 def _load_canonical_summary_items(
     *,
     manifest: ScopeResolutionManifest,
@@ -335,25 +589,22 @@ def _load_canonical_summary_items(
     query_text: str,
     source_ids: List[str],
     disclosure_tier: str = "owner_raw",
+    rare_query_tokens: Optional[List[str]] = None,
+    browse_fallback: bool = False,
 ) -> List[Dict[str, Any]]:
     items: List[Dict[str, Any]] = []
     for table in manifest.canonical_tables or []:
-        rows = _list_canonical_rows(
+        rows = _route_canonical_rows(
             adapters,
             table,
+            manifest=manifest,
+            query_text=query_text,
             source_ids=source_ids,
             limit=50,
             disclosure_tier=disclosure_tier,
+            rare_query_tokens=rare_query_tokens,
+            browse_fallback=browse_fallback,
         )
-        all_rows = list(rows)
-        if query_text and not (
-            manifest.scope_id == "work_context:read" and table == "profile_records"
-        ):
-            filtered = _filter_rows_by_query(rows, query_text)
-            if filtered:
-                rows = filtered
-            if table == "calendar_events" and filtered:
-                rows = _expand_calendar_week_context(filtered, all_rows, query_text)
         for row in rows:
             clean = _redact_row_for_scope(manifest.scope_id, table, row)
             text = _row_summary_text(table, clean, scope_id=manifest.scope_id)
@@ -473,6 +724,51 @@ def _query_tokens(query_text: str) -> List[str]:
             "based",
             "into",
             "without",
+            # query framing — never content
+            "which",
+            "does",
+            "show",
+            "find",
+            "tell",
+            "know",
+            "most",
+            "often",
+            "usually",
+            "typically",
+            "involving",
+            "list",
+            "whats",
+            "record",
+            "records",
+            "long",
+            "much",
+            "many",
+            "time",
+            "say",
+            "says",
+            "everything",
+            "anything",
+            "something",
+            "stuff",
+            "year",
+            "years",
+            # answer-shape words: they describe the KIND of aggregate wanted,
+            # never row content — derived layers answer them without containing
+            # them ('cadence' df 1 in a corpus whose stat tags say "every 5.8 h")
+            "cadence",
+            "frequency",
+            "frequently",
+            "rhythm",
+            "pattern",
+            "patterns",
+            "habit",
+            "habits",
+            "routine",
+            "routines",
+            "trend",
+            "trends",
+            "average",
+            "typical",
         }
     )
     return [
@@ -781,26 +1077,37 @@ def _load_fact_store_items(
     *,
     disclosure_tier: str,
     manifest: ScopeResolutionManifest,
+    temporal_shift: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
-    """Atomic facts: subject-first for linked entities, then token search."""
+    """Atomic facts: subject-first for linked entities, then token search.
+
+    temporal_shift='past' (the planner's before/prior/used-to signal) widens the
+    read to superseded revisions — the bi-temporal store keeps closed facts and
+    a past-tense question is exactly what they answer. Superseded facts are
+    rendered with an explicit no-longer-current marker so they can never read
+    as present-tense truth."""
     try:
         from ..features.facts.store import FactStore
     except Exception:
         return []
     store = FactStore(conn)
+    include_closed = temporal_shift == "past"
     facts: List[Dict[str, Any]] = []
+    subject_linked: set = set()
     seen_ids: set = set()
     try:
-        subject_ids = [e["entity_id"] for e in linked_entities]
-        self_row = conn.execute("SELECT entity_id FROM entities WHERE is_self=1 LIMIT 1").fetchone()
-        if self_row and self_row[0] not in subject_ids:
-            subject_ids.append(str(self_row[0]))
-        for subject_id in subject_ids:
-            for fact in store.facts_for_subject(subject_id):
+        # Subject-first ONLY for entities the query actually names. The old
+        # behavior also dumped every self-entity fact into every query — the
+        # "owner lives in San Francisco" padding on all results.
+        for entity in linked_entities:
+            for fact in store.facts_for_subject(
+                entity["entity_id"], include_closed=include_closed
+            ):
                 if fact["object_id"] not in seen_ids:
                     facts.append(fact)
                     seen_ids.add(fact["object_id"])
-        for fact in store.search(_query_tokens(query_text)):
+                    subject_linked.add(fact["object_id"])
+        for fact in store.search(_query_tokens(query_text), include_closed=include_closed):
             if fact["object_id"] not in seen_ids:
                 facts.append(fact)
                 seen_ids.add(fact["object_id"])
@@ -816,8 +1123,20 @@ def _load_fact_store_items(
         if not _fact_disclosure_allowed(gate_item, disclosure_tier, manifest):
             continue
         text = FactStore.render(fact)
-        blob = text.lower()
-        overlap = sum(1 for t in tokens if t in blob)
+        valid_to = fact.get("valid_to")
+        if valid_to:
+            text += f" (no longer current — superseded {str(valid_to)[:10]})"
+        # Overlap graded on the fact's own content — the rendered "owner …"
+        # subject prefix guaranteed fake overlap on owner-phrased queries.
+        content_blob = " ".join(
+            [
+                str(payload.get("predicate") or "").replace("_", " "),
+                str(payload.get("object_value") or ""),
+            ]
+        ).lower()
+        overlap = sum(1 for t in tokens if t in content_blob)
+        if overlap == 0 and fact["object_id"] not in subject_linked and tokens:
+            continue
         items.append(
             {
                 "topic": text[:120],
@@ -848,8 +1167,11 @@ def _load_stat_insight_items(
     if conn is None:
         return []
     try:
+        # No recency window: stats are keyed artifacts, not a stream — a
+        # LIMIT-by-created_at made older stat families permanently unreachable
+        # (calendar.commitment sat at rank 558/558). The safety cap is generous.
         rows = conn.execute(
-            "SELECT payload_json FROM signal_facts WHERE fact_id LIKE 'stat:%' ORDER BY created_at DESC LIMIT 200"
+            "SELECT payload_json FROM signal_facts WHERE fact_id LIKE 'stat:%' ORDER BY created_at DESC LIMIT 5000"
         ).fetchall()
     except Exception:
         return []
@@ -867,14 +1189,27 @@ def _load_stat_insight_items(
         if not text:
             continue
         blob = f"{text} {fact.get('group_key') or ''} {fact.get('record_id') or ''}".lower()
-        overlap = sum(1 for t in tokens if t in blob)
+        # Prefix matching bridges morphology ("committed"→"commitment",
+        # "journaling"→"journal") — stat tags are terse, exact-token overlap
+        # missed them.
+        overlap = sum(1 for t in tokens if (t[:5] if len(t) >= 5 else t) in blob)
         dim_bonus = 1.0 if str(fact.get("dimension") or "").lower() in wanted_dims else 0.0
-        score = overlap + dim_bonus
-        if score <= 0:
+        # Token evidence is required; the dimension bonus only reorders. A
+        # dimension match alone must not qualify stats for a query about a
+        # topic that does not exist.
+        if overlap <= 0:
             continue
+        score = overlap + dim_bonus
+        # Tie-break equal lexical scores by the stat's own sample size: for
+        # per-group count families ("Most visited: …") hundreds of groups
+        # match the same query words, and the high-n groups ARE the answer.
+        try:
+            n_weight = float((fact.get("stat_summary") or {}).get("n") or 0.0)
+        except (TypeError, ValueError):
+            n_weight = 0.0
         scored.append(
             (
-                score,
+                (score, n_weight),
                 {
                     "topic": text[:120],
                     "summary_text": text,
@@ -997,6 +1332,8 @@ def _rrf_fuse_summary_lists(
     k: int = 60,
     cap: int = _SUMMARY_ITEM_CAP,
     now: Optional[datetime] = None,
+    context_sources: frozenset = frozenset(),
+    rare_tokens: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Fuse ordered contributor lists with weighted reciprocal rank fusion.
 
@@ -1010,12 +1347,53 @@ def _rrf_fuse_summary_lists(
     present instead of treating a message from last year and last night as
     interchangeable. Current-state contributors are exempt (see
     _NO_DECAY_FUSION_SOURCES).
+
+    Abstention: `context_sources` name contributors that only add color around
+    real findings (briefs, recent window, dimension filler) — they can never
+    justify a non-empty result by themselves. And when the query carried
+    `rare_tokens` (a specific ask), at least one evidence item must actually
+    contain one of them, or the honest answer is nothing.
     """
     from ..features.signal.vector_settings import (
         fusion_recency_enabled,
         fusion_recency_floor,
         fusion_recency_half_life_days,
     )
+
+    evidence_items = [
+        item for source_name, _, ordered in lists
+        if source_name not in context_sources
+        for item in ordered
+    ]
+    if not evidence_items:
+        return []
+    if rare_tokens:
+        rare_dfs: Dict[str, int] = (
+            dict(rare_tokens) if isinstance(rare_tokens, dict)
+            else {t: 1 for t in rare_tokens}
+        )
+        blobs = [_item_text_blob(item) for item in evidence_items]
+
+        def _evidenced(token: str) -> bool:
+            t = token.lower()
+            return any(t in blob for blob in blobs)
+
+        # Every effectively-absent token (df ≤ 2: zero, or a porter-stem
+        # collision like 'falconer'→'falcon' df 1) must be evidenced by the
+        # returned items themselves, or the ask is about something that does
+        # not exist. Answer-shape vocabulary ('cadence', 'frequency') is
+        # excluded upstream by the token stoplist — it describes the aggregate
+        # wanted, not row content.
+        if any(df <= 2 and not _evidenced(t) for t, df in rare_dfs.items()):
+            return []
+        # A query with SEVERAL rare tokens is a specific ask even when stem
+        # collisions keep each df nonzero ('years as a competitive falconer':
+        # falconer→'falcon' df 1, competitive df 26): if NONE of them is
+        # evidenced, nothing retrieved is about the ask. A single weakly-rare
+        # token ('journaling' df 5, 'cadence' df 1) never vetoes alone — the
+        # derived layers may answer it without containing the word.
+        if len(rare_dfs) >= 2 and not any(_evidenced(t) for t in rare_dfs):
+            return []
 
     decay_on = fusion_recency_enabled()
     half_life = fusion_recency_half_life_days()
@@ -1064,7 +1442,7 @@ def _build_summary_items(
     disclosure_tier: str = "owner_raw",
     plan=None,
 ) -> List[Dict[str, Any]]:
-    from ..features.signal.vector_settings import fusion_rrf_enabled
+    from ..features.signal.vector_settings import fusion_rrf_enabled, vector_evidence_min
 
     hit_record_ids = {str(h.get("record_id")) for h in semantic_hits if h.get("record_id")}
     prefer_goals = "user_goals" in (manifest.signal_objects or [])
@@ -1075,6 +1453,13 @@ def _build_summary_items(
     # database the query targets (the global singleton may point elsewhere in
     # multi-db verification runs and seeded evals).
     bundle_conn = getattr(adapters.signal, "_conn", None)
+
+    # Specific-ask detection: the discriminative (rare-in-corpus) content tokens
+    # of the query. If the query carries these and nothing matches them, the
+    # honest result is empty — see the rare gate in _rrf_fuse_summary_lists.
+    query_tokens = _query_tokens(query_text)
+    residual_tokens = _residual_content_tokens(query_tokens)
+    rare_query_tokens = _rare_tokens(bundle_conn, residual_tokens)
 
     goal_items: List[Dict[str, Any]] = []
     if prefer_goals or work_scope:
@@ -1088,6 +1473,7 @@ def _build_summary_items(
         query_text=query_text,
         source_ids=source_ids,
         disclosure_tier=disclosure_tier,
+        rare_query_tokens=rare_query_tokens,
     )
 
     brief_dims = list(manifest.primary_dimensions)
@@ -1117,6 +1503,7 @@ def _build_summary_items(
                     },
                 )
 
+    # Zero-scored clusters are unranked filler, not findings.
     cluster_items = [
         {
             "topic": cluster.get("label"),
@@ -1128,20 +1515,32 @@ def _build_summary_items(
             "retrieval_source": "cluster",
         }
         for cluster in ranked_clusters
+        if float(cluster.get("relevance_score") or 0.0) > 0.0
     ]
 
-    vector_items = [
-        {
+    # Vector hits split by strength: a strong hit (cosine ≥ evidence floor) or a
+    # lexical match on the query's content tokens is evidence; a weak FTS-OR or
+    # low-cosine hit only rides along when real evidence exists.
+    evidence_floor = vector_evidence_min()
+    vector_items: List[Dict[str, Any]] = []
+    vector_context_items: List[Dict[str, Any]] = []
+    for hit in semantic_hits:
+        preview_lower = str(hit.get("text_preview") or "").lower()
+        similarity = float(hit.get("similarity") or 0.0)
+        item = {
             "topic": hit.get("text_preview"),
             "summary_text": hit.get("text_preview"),
             "record_id": hit.get("record_id"),
             "source_id": hit.get("source_id"),
             "signal_dimension": hit.get("signal_dimension"),
-            "relevance_score": round(float(hit.get("similarity") or 0.0), 4),
+            "relevance_score": round(similarity, 4),
             "retrieval_source": "vector",
         }
-        for hit in semantic_hits
-    ]
+        lexical = any(t in preview_lower for t in residual_tokens)
+        if similarity >= evidence_floor or lexical:
+            vector_items.append(item)
+        else:
+            vector_context_items.append(item)
 
     # Minimal-disclosure gate: owner-only facts (e.g. stat_insight aggregates —
     # work rhythms, spend patterns, contact cadence) are dense fingerprints of
@@ -1160,6 +1559,16 @@ def _build_summary_items(
             record_id = str(fact.get("record_id") or fact.get("fact_id") or "")
             if hit_record_ids and record_id and record_id not in hit_record_ids and not fact.get("goal_text"):
                 continue
+            if fact.get("goal_text"):
+                # Same rule as the goals contributor: a goal rides on token
+                # overlap or explicit goal intent — never as filler. Undated
+                # goal texts dodge recency decay and were outranking on-topic
+                # evidence on niche queries (C8's top-5).
+                goal_lower = str(fact.get("goal_text")).lower()
+                tokens_q = _query_tokens(query_text)
+                goal_intent = any(term in (query_text or "").lower() for term in _EXTRA_SURFACE_TERMS)
+                if tokens_q and not goal_intent and not any(t in goal_lower for t in tokens_q):
+                    continue
             score = (
                 _goal_relevance(str(fact.get("goal_text")), query_text)
                 if fact.get("goal_text")
@@ -1197,22 +1606,27 @@ def _build_summary_items(
                     if _fact_disclosure_allowed(item, disclosure_tier, manifest)
                 ]
                 fact_store_items = _load_fact_store_items(
-                    conn, query_text, linked, disclosure_tier=disclosure_tier, manifest=manifest
+                    conn, query_text, linked, disclosure_tier=disclosure_tier,
+                    manifest=manifest,
+                    temporal_shift=getattr(plan, "temporal_shift", None) if plan else None,
                 )
         except Exception as exc:
             logger.debug("entity linking skipped: %s", exc)
 
-    # Aggregate-shaped queries ("how often…", "average…") answer best from
-    # the statistics layer; give those insights a heavyweight list.
+    # The statistics layer is a first-class surface, not an intent special
+    # case: frequency questions ("what cities…", "which moods…") often carry
+    # no aggregate keyword yet answer best from stat insights, and the loader
+    # self-qualifies on token overlap (the rare gate protects negatives). The
+    # planner's aggregate flag remains a dimension hint only.
     stat_items: List[Dict[str, Any]] = []
-    if plan is not None and getattr(plan, "aggregate_intent", False):
+    if query_text:
         try:
             from ..core.state import get_db_connection
 
             stat_items = _load_stat_insight_items(
                 raw_conn if raw_conn is not None else get_db_connection(),
                 query_text,
-                dimensions=getattr(plan, "dimensions", None),
+                dimensions=getattr(plan, "dimensions", None) if plan else None,
                 disclosure_tier=disclosure_tier,
                 manifest=manifest,
             )
@@ -1224,7 +1638,13 @@ def _build_summary_items(
             raw_conn if raw_conn is not None else _default_conn(),
             source_ids=source_ids or None,
         )
+        recency_intent = any(t in (query_text or "").lower() for t in _RECENCY_TERMS)
         canonical_weight = 2.0 if work_scope else 1.0
+        vector_weight = 0.6 if work_scope else 1.0
+        # NOTE: cosine similarity must NOT waive the zero-df gate — a strong hit
+        # on the generic half of a query ("compiler rewrite") cannot evidence a
+        # name the corpus does not contain ("Threnody-7"). The N-lane found
+        # exactly this leak when a strong-vector waiver existed here.
         return _rrf_fuse_summary_lists(
             [
                 ("stat_insights", 2.0, stat_items),
@@ -1234,16 +1654,22 @@ def _build_summary_items(
                 ("canonical", canonical_weight, canonical_items),
                 ("briefs", 0.8, brief_items),
                 ("clusters", 0.8, cluster_items),
-                ("vector", 0.6 if work_scope else 1.0, vector_items),
+                ("vector", vector_weight, vector_items),
+                ("vector_context", vector_weight * 0.8, vector_context_items),
                 ("signal_facts", 1.0, fact_items),
                 ("recent", 1.0, recent_items),
-            ]
+            ],
+            context_sources=frozenset(
+                {"briefs", "signal_facts", "vector_context"}
+                | (set() if recency_intent else {"recent"})
+            ),
+            rare_tokens=rare_query_tokens,
         )
 
     # Legacy path (TOPOS_FUSION_RRF=off): incomparable absolute scores.
     for item in entity_items + fact_store_items + stat_items:
         item.setdefault("relevance_score", 0.9)
-    items = stat_items + fact_store_items + entity_items + goal_items + canonical_items + brief_items + cluster_items + vector_items + fact_items
+    items = stat_items + fact_store_items + entity_items + goal_items + canonical_items + brief_items + cluster_items + vector_items + vector_context_items + fact_items
     if work_scope:
         for item in items:
             if str(item.get("retrieval_source") or "").startswith("canonical:profile_records"):
@@ -1310,9 +1736,15 @@ class DefaultSignalRetrievalAdapter:
         if plan and plan.semantic_residual and len(plan.semantic_residual) >= 6:
             semantic_query = plan.semantic_residual
 
+        # The vector/cluster services read the GLOBAL db connection. When this
+        # query's adapter bundle targets a different database (seeded eval
+        # corpora, multi-db verification), those layers would silently serve
+        # another database's content — the cross-db leak class of bce067a.
+        global_layers_apply = _bundle_is_global_db(self._adapters)
+
         semantic_hits: List[Dict[str, Any]] = []
         vector_error: Optional[str] = None
-        if query_text and request.access_mode in ("summary", "inference"):
+        if query_text and global_layers_apply and request.access_mode in ("summary", "inference"):
             semantic_hits, vector_error = _semantic_hits(
                 semantic_query, source_id=source_filter, time_range=time_range
             )
@@ -1333,7 +1765,7 @@ class DefaultSignalRetrievalAdapter:
                 logger.debug("vector search unavailable: %s", vector_error)
 
         ranked_clusters: List[Dict[str, Any]] = []
-        if request.access_mode in ("summary", "inference"):
+        if global_layers_apply and request.access_mode in ("summary", "inference"):
             ranked_clusters = _load_ranked_clusters(
                 query_text,
                 primary_dimensions=manifest.primary_dimensions,
@@ -1359,13 +1791,25 @@ class DefaultSignalRetrievalAdapter:
         mode = request.access_mode
         if mode == "raw":
             rows: List[Dict[str, Any]] = []
+            raw_rare_tokens: List[str] = []
+            if query_text:
+                try:
+                    raw_conn_for_df = getattr(self._adapters.signal, "_conn", None)
+                    raw_rare_tokens = _rare_tokens(
+                        raw_conn_for_df, _residual_content_tokens(_query_tokens(query_text))
+                    )
+                except Exception:
+                    raw_rare_tokens = []
             for table in manifest.canonical_tables:
-                table_rows = _list_canonical_rows(
+                table_rows = _route_canonical_rows(
                     self._adapters,
                     table,
+                    manifest=manifest,
+                    query_text=query_text,
                     source_ids=source_ids,
                     limit=100,
                     disclosure_tier=request.disclosure_tier,
+                    rare_query_tokens=raw_rare_tokens,
                 )
                 table_rows = [_redact_row_for_scope(manifest.scope_id, table, row) for row in table_rows]
                 touched.append("canonical")
@@ -1396,19 +1840,11 @@ class DefaultSignalRetrievalAdapter:
                         ]
                     if typed:
                         table_rows = typed
-                if query_text:
-                    if table == "calendar_events":
-                        table_rows = _filter_calendar_rows(table_rows, query_text)
-                        if table_rows:
-                            retrieval_meta["retrieval_strategy"] = "raw_query_filter"
-                    else:
-                        filtered = _filter_rows_by_query(table_rows, query_text)
-                        if table == "profile_records" and re.search(r"\b(list|show)\b", query_text, re.I):
-                            table_rows = filtered if filtered else table_rows
-                        else:
-                            table_rows = filtered if filtered else table_rows
-                        if filtered:
-                            retrieval_meta["retrieval_strategy"] = "raw_query_filter"
+                # Query-token filtering (incl. calendar date awareness) happened
+                # in _route_canonical_rows — SQL-side, over the full table, with
+                # no unfiltered-fallback page.
+                if query_text and table_rows:
+                    retrieval_meta["retrieval_strategy"] = "raw_query_filter"
                 table_rows = _apply_filter_manifest_rows(table_rows, request.filter_manifest)
                 max_rows = int((request.filter_manifest or {}).get("max_rows") or 0)
                 if max_rows > 0:
@@ -1444,11 +1880,15 @@ class DefaultSignalRetrievalAdapter:
                             summaries.append({k: v for k, v in item.items() if k != "content"})
             packet["summaries"] = summaries
             counts["summaries"] = len(summaries)
-            if semantic_hits:
+            # Abstention is a complete answer: when a query found nothing, do not
+            # dress the empty result with semantic/cluster/graph furniture that
+            # reads as confident content about a topic that does not exist.
+            abstained = bool(query_text) and not summaries
+            if semantic_hits and not abstained:
                 packet["semantic_hits"] = semantic_hits
-            if ranked_clusters:
+            if ranked_clusters and not abstained:
                 packet["topic_clusters"] = ranked_clusters
-            if manifest.scope_id in ("relationship_context:read", "messages:read"):
+            if manifest.scope_id in ("relationship_context:read", "messages:read") and not abstained:
                 graph = self._adapters.graph.list_graph(limit_nodes=50, limit_edges=100)
                 if graph.get("edges") or graph.get("nodes"):
                     touched.append("graph")
@@ -1458,12 +1898,23 @@ class DefaultSignalRetrievalAdapter:
                     }
         elif mode == "inference":
             scores: List[Dict[str, Any]] = []
+            inference_rare: List[str] = []
+            if query_text:
+                try:
+                    inference_rare = _rare_tokens(
+                        getattr(self._adapters.signal, "_conn", None),
+                        _residual_content_tokens(_query_tokens(query_text)),
+                    )
+                except Exception:
+                    inference_rare = []
             canon_items = _load_canonical_summary_items(
                 manifest=manifest,
                 adapters=self._adapters,
                 query_text=query_text,
                 source_ids=source_ids,
                 disclosure_tier=request.disclosure_tier,
+                rare_query_tokens=inference_rare,
+                browse_fallback=True,
             )
             for item in canon_items:
                 scores.append({k: v for k, v in item.items() if k not in _INFERENCE_CANONICAL_EXCLUDED_KEYS})

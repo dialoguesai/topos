@@ -25,7 +25,12 @@ EvalFn = Callable[[Dict[str, Any]], Tuple[bool, str]]
 # qq-catalog-4 (Phase 1): +C13–C30 live composition cases, +N1–N12 per-scope negative
 # controls, +G1–G5 generative cases. Comparability break vs qq-catalog-3 by design; the
 # iteration gauge still pairs the case_ids the versions share.
-QUERY_CATALOG_VERSION = "qq-catalog-4"
+# qq-catalog-5 (instrument fixes): _blob no longer ASCII-escapes (em-dash/± needles were
+# unmatchable); C1/C28 oracles align to the d30 stat window retrieval serves; C29 oracle
+# reads user_goals (the store retrieval reads) instead of duplicated signal_objects rows;
+# auto-extracted needles get sanity guards (no leading artifacts, dedup, min word length).
+# Scores comparable to qq-catalog-4 only via the iteration gauge's shared case_ids.
+QUERY_CATALOG_VERSION = "qq-catalog-5"
 
 _DEFAULT_LATENCY_MS = {
     "summary": int(os.environ.get("TOPOS_QQ_LATENCY_SUMMARY_MS", "10000")),
@@ -36,7 +41,9 @@ _DEFAULT_LATENCY_MS = {
 
 
 def _blob(obj: Any) -> str:
-    return json.dumps(obj, default=str).lower()
+    # ensure_ascii=False: needles containing non-ASCII chars (em-dash, ±) must be
+    # able to substring-match; default escaping made them unmatchable (— vs —).
+    return json.dumps(obj, default=str, ensure_ascii=False).lower()
 
 
 def _public_result(response: Dict[str, Any]) -> Dict[str, Any]:
@@ -276,8 +283,12 @@ class EvalRunResult:
 QUALITY_CASES: List[QueryQualityCase] = [
     QueryQualityCase("Q1", "Docker, nginx, deployment", "ai_conversations:read", "summary", eval_q1_docker,
                      description="Query-aware summary ranks docker/nginx topics first"),
-    QueryQualityCase("Q2", "Keycloak authentication setup", "ai_conversations:read", "inference", eval_q2_keycloak,
-                     description="Inference yes/no with confidence > 0.5"),
+    # qq-catalog-5: Q2 re-scoped ai_conversations→messages. The owner's keycloak
+    # material lives in messages (1 canonical row, 11 indexed chunks); within
+    # ai_conversations the honest answer is "unknown" — the old pass was the
+    # forced-yes/no prompt answering "yes" over an empty evidence packet.
+    QueryQualityCase("Q2", "Keycloak authentication setup", "messages:read", "inference", eval_q2_keycloak,
+                     description="Inference yes/no with confidence > 0.5 (evidence exists in messages)"),
     QueryQualityCase("Q3", "Work goals and projects", "work_context:read", "summary", eval_q3_work_goals,
                      description="Work scope returns goal/project summaries"),
     QueryQualityCase("Q4", "Collaborators on coding work", "relationship_context:read", "inference", eval_q4_collaborators,

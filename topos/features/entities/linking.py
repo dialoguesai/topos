@@ -15,6 +15,40 @@ from .resolver import normalize_name
 
 _MAX_LINKED = 5
 
+# Function/framing words that NER junk entities are named after ('IS', 'Go',
+# 'and', 'of', 'At', 'Am', 'In', 'The One'). An entity whose name is one of
+# these matches virtually every query ("which gym does the owner GO to" linked
+# entity 'Go' at 1.0) and floods the top-5 with dossier/mention filler.
+_LINK_STOPWORDS = frozenset(
+    {
+        "a", "an", "and", "or", "of", "at", "am", "is", "are", "was", "were",
+        "be", "been", "in", "on", "to", "the", "it", "its", "as", "by", "for",
+        "with", "from", "this", "that", "these", "those", "he", "she", "they",
+        "we", "you", "i", "me", "my", "do", "did", "does", "go", "went", "get",
+        "got", "has", "have", "had", "not", "no", "yes", "so", "if", "but",
+        "one", "all", "any", "can", "will", "just", "now", "new", "old", "out",
+        "up", "down", "here", "there", "place", "thing", "things", "some",
+        "more", "most", "other", "into", "about", "over", "under", "our",
+        # time words — NER mints entities like 'Time', 'Long Time', 'Tomorrow'
+        "time", "times", "long", "day", "days", "week", "weeks", "month",
+        "months", "year", "years", "today", "tomorrow", "yesterday", "night",
+        "morning", "evening", "hour", "hours",
+        # speech/description words — junk entities 'Bio', 'Public Cha',
+        # 'Mean What We Say' linked on query framing ("what does my public
+        # bio say about…")
+        "what", "say", "says", "said", "mean", "means", "public", "bio",
+    }
+)
+
+
+def _linkable_candidate(cand: str) -> bool:
+    """A candidate name is linkable only if it carries at least one real word:
+    ≥3 chars and not a function word. 'Luc' links; 'IS', 'Go', 'The One' do not."""
+    words = [w for w in cand.split() if w]
+    if not words:
+        return False
+    return any(len(w) >= 3 and w not in _LINK_STOPWORDS for w in words)
+
 
 def link_query_entities(conn: sqlite3.Connection, query_text: str) -> List[Dict[str, Any]]:
     query_norm = normalize_name(query_text)
@@ -47,12 +81,14 @@ def link_query_entities(conn: sqlite3.Connection, query_text: str) -> List[Dict[
             pass
         best = 0.0
         for cand in candidates:
-            if not cand:
+            if not cand or not _linkable_candidate(cand):
                 continue
             if f" {cand} " in padded_query:
                 best = max(best, 1.0)  # full name appears in query
                 continue
-            cand_tokens = {t for t in cand.split() if len(t) > 1}
+            cand_tokens = {
+                t for t in cand.split() if len(t) >= 3 and t not in _LINK_STOPWORDS
+            }
             if not cand_tokens:
                 continue
             overlap = query_tokens & cand_tokens

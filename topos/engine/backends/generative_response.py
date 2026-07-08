@@ -94,8 +94,15 @@ def parse_generative_response(
     if subtype == "query_inference":
         parsed = parse_json_object(response_text)
         if isinstance(parsed, dict):
+            answer = parsed.get("answer")
+            # Typed answers: strings and lists are both valid; normalize other
+            # shapes to short strings so downstream packaging stays stable.
+            if isinstance(answer, list):
+                answer = [str(a)[:200] for a in answer[:20]]
+            elif answer is not None and not isinstance(answer, str):
+                answer = str(answer)[:500]
             return {
-                "answer": parsed.get("answer"),
+                "answer": answer,
                 "confidence": parsed.get("confidence"),
                 "model": model,
             }

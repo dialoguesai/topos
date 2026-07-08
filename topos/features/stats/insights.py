@@ -141,6 +141,9 @@ def _render_text(
             bands = ", ".join(f"{t['bucket']}" for t in top[:3])
             subject = "web activity" if stat_id.startswith("activity") else "AI chat activity"
             return f"Most {subject} happens around: {bands} (n={summary.get('n')})."
+        if str(defn.get("value_expr")) == "mood_tag":
+            mix = ", ".join(f"{t['bucket']} {t['share'] * 100:.0f}%" for t in top[:3])
+            return f"Journal moods recorded most often: {mix} (n={summary.get('n')})."
         label = str(defn["canonical_table"]).replace("_", " ")
         mix = ", ".join(f"{t['bucket']} {t['share'] * 100:.0f}%" for t in top[:3])
         return (
@@ -159,6 +162,12 @@ def _render_text(
             return f"Typical calendar commitment: {_fmt_minutes(mean)} ± {_fmt_minutes(sd)} (n={summary.get('n')})."
         return f"{stat_id} [{group_key}]: mean {mean:.1f} ± {sd:.1f} (n={summary.get('n')})."
     if kind == "count":
+        if stat_id == "places.visits.by_city":
+            return f"Cities visited: {group_key} — {summary.get('n')} visits."
+        if stat_id == "places.visits.by_place":
+            return f"Places visited most: {group_key} — {summary.get('n')} visits."
+        if stat_id == "activity.visits.by_title":
+            return f"Most visited while browsing: {group_key} — {summary.get('n')} visits."
         return f"{summary.get('n')} messages with {group_key}."
     if kind == "intervals":
         gap_h = summary.get("mean_gap_hours")

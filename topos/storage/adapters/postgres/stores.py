@@ -53,6 +53,7 @@ class PostgresCanonicalAdapter:
         limit: int = 100,
         offset: int = 0,
         disclosure_tier: str = "owner_raw",
+        contains: Optional[List[str]] = None,
     ) -> ListPage:
         _ = disclosure_tier
         if table not in self._NATIVE_TABLES:
@@ -72,6 +73,14 @@ class PostgresCanonicalAdapter:
             )
             cols = [d.name if hasattr(d, "name") else d[0] for d in cur.description]
             items = [dict(zip(cols, row)) for row in cur.fetchall()]
+            tokens = [str(t).strip().lower() for t in (contains or []) if str(t).strip()]
+            if tokens:
+                # Page-level filter only (parity stopgap — the sqlite adapter
+                # filters in SQL over the full table).
+                items = [
+                    r for r in items
+                    if any(t in " ".join(str(v) for v in r.values()).lower() for t in tokens)
+                ]
             return ListPage(items=items, total=total, offset=offset, limit=limit)
         finally:
             cur.close()

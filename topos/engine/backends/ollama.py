@@ -43,6 +43,14 @@ def _num_predict_for_subtype(subtype: str) -> Optional[int]:
     return None
 
 
+def _temperature_for_subtype(subtype: str) -> Optional[float]:
+    """Query inference must be deterministic: at default temperature llama3.2
+    flips yes↔unknown on identical score-only evidence packets."""
+    if subtype == "query_inference":
+        return 0.0
+    return None
+
+
 class OllamaAdapter:
     """BackendAdapter for Ollama (http://localhost:11434)."""
 
@@ -54,6 +62,15 @@ class OllamaAdapter:
             except Exception:
                 base_url = "http://localhost:11434"
         self._base_url = str(base_url).rstrip("/")
+
+    def is_reachable(self, *, timeout: float = 2.0) -> bool:
+        """True when the Ollama server answers /api/tags (fast health probe)."""
+        req = urllib.request.Request(f"{self._base_url}/api/tags", method="GET")
+        try:
+            with urllib.request.urlopen(req, timeout=timeout):
+                return True
+        except Exception:
+            return False
 
     def list_models(self) -> List[str]:
         """Return list of model names available on the server (from /api/tags)."""
@@ -153,6 +170,7 @@ class OllamaAdapter:
                 num_predict=_num_predict_for_subtype(subtype),
                 keep_alive=None,
                 think=_think_for_subtype(subtype),
+                temperature=_temperature_for_subtype(subtype),
             )
             out = parse_generative_response(response_text, subtype, model, payload=payload)
             out["model"] = model
@@ -178,6 +196,7 @@ class OllamaAdapter:
         num_predict: Optional[int] = None,
         keep_alive: Optional[str] = None,
         think: Optional[bool] = None,
+        temperature: Optional[float] = None,
     ) -> str:
         body: Dict[str, Any] = {"model": model, "prompt": prompt, "stream": False}
         if keep_alive is not None:
@@ -187,6 +206,8 @@ class OllamaAdapter:
         options: Dict[str, Any] = {}
         if num_predict is not None:
             options["num_predict"] = num_predict
+        if temperature is not None:
+            options["temperature"] = temperature
         if options:
             body["options"] = options
         req = urllib.request.Request(

@@ -16,7 +16,41 @@ _INFERENCE_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="query_in
 
 
 def build_inference_context_packet(filtered_context: Dict[str, Any], *, max_chars: int = DEFAULT_MAX_CONTEXT_CHARS) -> Dict[str, Any]:
-    raw = json.dumps(filtered_context, default=str, separators=(",", ":"))
+    """Bound the context for the inference model, strongest evidence first.
+
+    The retrieval packet lists `scores` LAST (after clusters/hits/graph), so a
+    naive prefix truncation amputated exactly the evidence the model needed —
+    it then honestly answered "unknown" to well-supported queries. Reorder to
+    evidence-first and trim the low-signal furniture before cutting."""
+    ctx = dict(filtered_context or {})
+    compact: Dict[str, Any] = {}
+    for key in ("scope_id", "access_mode"):
+        if key in ctx:
+            compact[key] = ctx[key]
+    scores = ctx.get("scores")
+    if isinstance(scores, list) and scores:
+        ranked = sorted(
+            (s for s in scores if isinstance(s, dict)),
+            key=lambda s: float(s.get("relevance_score") or 0.0),
+            reverse=True,
+        )
+        compact["scores"] = ranked[:15]
+    hits = ctx.get("semantic_hits")
+    if isinstance(hits, list) and hits:
+        strong = [h for h in hits if isinstance(h, dict) and h.get("similarity") is not None]
+        strong.sort(key=lambda h: float(h.get("similarity") or 0.0), reverse=True)
+        if strong:
+            compact["semantic_hits"] = strong[:10]
+    clusters = ctx.get("topic_clusters")
+    if isinstance(clusters, list) and clusters:
+        compact["topic_clusters"] = [
+            {k: c.get(k) for k in ("label", "relevance_score") if isinstance(c, dict)}
+            for c in clusters[:3]
+        ]
+    for key, value in ctx.items():
+        if key not in compact and key not in ("semantic_hits", "topic_clusters", "graph", "scores"):
+            compact[key] = value
+    raw = json.dumps(compact, default=str, separators=(",", ":"))
     truncated = len(raw) > max_chars
     if truncated:
         raw = raw[:max_chars]

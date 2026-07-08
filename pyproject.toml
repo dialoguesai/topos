@@ -73,6 +73,12 @@ dev = [
 [project.scripts]
 topos-node = "topos.cli.commands:main"
 
+[tool.setuptools]
+# Data files (scope_registry.json, signal definitions, …) must ship in the wheel —
+# a wheel without them serves a node that denies every scoped query (missing
+# topos/query/scope_registry.json). Patterns live in MANIFEST.in.
+include-package-data = true
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["topos*", "shared*"]

@@ -76,6 +76,24 @@ _NATIVE_LIST_SPECS: Dict[str, tuple[str, List[str]]] = {
         """
         SELECT message_id AS record_id, conversation_id, sender_id, source_id,
                substr(coalesce(content, ''), 1, 500) AS content_preview,
+               content, coalesce(event_at, created_at) AS event_at
+        FROM conversation_messages
+        """,
+        [
+            "record_id",
+            "conversation_id",
+            "sender_id",
+            "source_id",
+            "content_preview",
+            "content",
+            "event_at",
+        ],
+    ),
+    # Pre-event_at schemas (older DBs, minimal test fixtures).
+    "conversation_messages_legacy": (
+        """
+        SELECT message_id AS record_id, conversation_id, sender_id, source_id,
+               substr(coalesce(content, ''), 1, 500) AS content_preview,
                content, created_at AS event_at
         FROM conversation_messages
         """,
@@ -94,6 +112,24 @@ _NATIVE_LIST_SPECS: Dict[str, tuple[str, List[str]]] = {
         SELECT message_id AS record_id, conversation_id, sender_id, source_id,
                substr(coalesce(content_disclosure, '[disclosure pending]'), 1, 500) AS content_preview,
                coalesce(content_disclosure, '[disclosure pending]') AS content,
+               coalesce(event_at, created_at) AS event_at
+        FROM conversation_messages
+        """,
+        [
+            "record_id",
+            "conversation_id",
+            "sender_id",
+            "source_id",
+            "content_preview",
+            "content",
+            "event_at",
+        ],
+    ),
+    "conversation_messages_disclosure_legacy": (
+        """
+        SELECT message_id AS record_id, conversation_id, sender_id, source_id,
+               substr(coalesce(content_disclosure, '[disclosure pending]'), 1, 500) AS content_preview,
+               coalesce(content_disclosure, '[disclosure pending]') AS content,
                created_at AS event_at
         FROM conversation_messages
         """,
@@ -108,6 +144,16 @@ _NATIVE_LIST_SPECS: Dict[str, tuple[str, List[str]]] = {
         ],
     ),
     "activity_events": (
+        """
+        SELECT event_id AS record_id, source_id, url,
+               substr(coalesce(title, ''), 1, 500) AS content_preview,
+               coalesce(title, '') AS content, occurred_at AS event_at
+        FROM activity_events
+        """,
+        ["record_id", "source_id", "url", "content_preview", "content", "event_at"],
+    ),
+    # Pre-url schemas (minimal test fixtures).
+    "activity_events_legacy": (
         """
         SELECT event_id AS record_id, source_id,
                substr(coalesce(title, ''), 1, 500) AS content_preview,
@@ -274,6 +320,38 @@ _DISCLOSURE_LIST_TABLES = frozenset(
     {"ai_chat_messages", "conversation_messages", "journal_entries"}
 )
 
+# Columns (aliased, per the list specs) a `contains` token filter may match.
+# Intersected with the active spec's columns at query time — disclosure/minimal
+# spec variants carry fewer columns than the full spec.
+_NATIVE_FILTER_COLS: Dict[str, tuple] = {
+    "ai_chat_messages": ("content",),
+    "conversation_messages": ("content",),
+    "activity_events": ("content", "url"),
+    "financial_transactions": ("content", "category"),
+    "location_events": ("content", "place_name", "city", "region", "country"),
+    "profile_records": ("content", "title", "organization", "record_type"),
+    "calendar_events": ("content", "starts_at"),
+    "journal_entries": ("content", "mood_tag", "category", "people", "place_name"),
+    "contacts": ("display_name",),
+    "contact_identifiers": ("identifier", "identifier_type", "record_id"),
+}
+
+# List ordering: recency for event-shaped tables (a "recent rows" page must
+# actually be recent — ORDER BY record_id is UUID-arbitrary), stable id order
+# for registries.
+_NATIVE_ORDER_COL: Dict[str, tuple] = {
+    "ai_chat_messages": ("event_at", "DESC"),
+    "conversation_messages": ("event_at", "DESC"),
+    "activity_events": ("event_at", "DESC"),
+    "financial_transactions": ("event_at", "DESC"),
+    "location_events": ("event_at", "DESC"),
+    "calendar_events": ("starts_at", "DESC"),
+    "journal_entries": ("event_at", "DESC"),
+    "profile_records": ("record_id", "ASC"),
+    "contacts": ("record_id", "ASC"),
+    "contact_identifiers": ("record_id", "ASC"),
+}
+
 
 def _table_has_column(conn: sqlite3.Connection, table: str, column: str) -> bool:
     cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
@@ -285,6 +363,16 @@ def _native_list_spec_key(
     table: str,
     disclosure_tier: str,
 ) -> str:
+    if table == "conversation_messages":
+        legacy = "" if _table_has_column(conn, table, "event_at") else "_legacy"
+        if (
+            disclosure_tier == "default_disclosure"
+            and _table_has_column(conn, table, "content_disclosure")
+        ):
+            return f"conversation_messages_disclosure{legacy}"
+        return f"conversation_messages{legacy}"
+    if table == "activity_events" and not _table_has_column(conn, table, "url"):
+        return "activity_events_legacy"
     if table == "journal_entries":
         has_mood = _table_has_column(conn, table, "mood_tag")
         has_disclosure = _table_has_column(conn, table, "content_disclosure")
@@ -328,6 +416,7 @@ class SQLiteCanonicalStore:
         limit: int = 100,
         offset: int = 0,
         disclosure_tier: str = "owner_raw",
+        contains: Optional[List[str]] = None,
     ) -> ListPage:
         if table not in self._NATIVE_TABLES:
             return ListPage(items=[], total=0, offset=offset, limit=limit)
@@ -335,13 +424,31 @@ class SQLiteCanonicalStore:
         spec_key = _native_list_spec_key(self._conn, table, disclosure_tier)
         base, col_names = _NATIVE_LIST_SPECS[spec_key]
         params: List[Any] = []
-        query = base
+        clauses: List[str] = []
+        # Wrap the spec so filters/ordering see its aliased columns (content,
+        # event_at, …) uniformly across tables.
+        query = f"SELECT * FROM ({base})"
         if source_id is not None:
-            query += " WHERE source_id=?"
+            clauses.append("source_id=?")
             params.append(source_id)
+        tokens = [str(t).strip().lower() for t in (contains or []) if str(t).strip()]
+        if tokens:
+            cols = [c for c in _NATIVE_FILTER_COLS.get(table, ("content",)) if c in col_names]
+            if cols:
+                per_token: List[str] = []
+                for token in tokens:
+                    like = f"%{token}%"
+                    per_token.append("(" + " OR ".join(f"lower({c}) LIKE ?" for c in cols) + ")")
+                    params.extend([like] * len(cols))
+                clauses.append("(" + " OR ".join(per_token) + ")")
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
         count_row = self._conn.execute(f"SELECT COUNT(*) FROM ({query})", params).fetchone()
         total = int(count_row[0]) if count_row else 0
-        query += " ORDER BY record_id LIMIT ? OFFSET ?"
+        order_col, direction = _NATIVE_ORDER_COL.get(table, ("record_id", "ASC"))
+        if order_col not in col_names:
+            order_col, direction = "record_id", "ASC"
+        query += f" ORDER BY {order_col} {direction} LIMIT ? OFFSET ?"
         params.extend([limit, offset])
         rows = self._conn.execute(query, params).fetchall()
         items = [dict(zip(col_names, row)) for row in rows]
@@ -390,6 +497,7 @@ class SQLiteCanonicalStore:
         limit: int = 100,
         offset: int = 0,
         disclosure_tier: str = "owner_raw",
+        contains: Optional[List[str]] = None,
     ) -> ListPage:
         if table in self._NATIVE_TABLES:
             return self._list_native(
@@ -398,6 +506,7 @@ class SQLiteCanonicalStore:
                 limit=limit,
                 offset=offset,
                 disclosure_tier=disclosure_tier,
+                contains=contains,
             )
 
         query = "SELECT payload_json FROM wiki_canonical_records WHERE table_name=?"
@@ -405,6 +514,10 @@ class SQLiteCanonicalStore:
         if source_id is not None:
             query += " AND source_id=?"
             params.append(source_id)
+        tokens = [str(t).strip().lower() for t in (contains or []) if str(t).strip()]
+        if tokens:
+            query += " AND (" + " OR ".join("lower(payload_json) LIKE ?" for _ in tokens) + ")"
+            params.extend(f"%{t}%" for t in tokens)
         count_row = self._conn.execute(
             f"SELECT COUNT(*) FROM ({query})",
             params,
