@@ -302,16 +302,25 @@ class FactStore:
         ).fetchall()
         return [self._row_to_fact(r) for r in rows]
 
-    def search(self, query_tokens: List[str], *, limit: int = 10) -> List[Dict[str, Any]]:
-        """Token match over active facts' predicate + object_value."""
+    def search(
+        self,
+        query_tokens: List[str],
+        *,
+        limit: int = 10,
+        include_closed: bool = False,
+    ) -> List[Dict[str, Any]]:
+        """Token match over facts' predicate + object_value. Active facts only by
+        default; include_closed=True adds superseded revisions (past-tense
+        queries — "where did I work before")."""
         if not query_tokens:
             return []
+        closed_filter = "" if include_closed else "AND valid_to IS NULL"
         rows = self._conn.execute(
-            """
+            f"""
             SELECT object_id, signal_dimension, payload_json, confidence,
                    source_refs_json, valid_from, valid_to
             FROM signal_objects
-            WHERE object_type='fact' AND valid_to IS NULL
+            WHERE object_type='fact' {closed_filter}
             ORDER BY updated_at DESC LIMIT 500
             """
         ).fetchall()

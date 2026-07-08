@@ -59,14 +59,19 @@ def live_orchestrator() -> QueryPipelineOrchestrator:
 
 
 async def _run_case(orch: QueryPipelineOrchestrator, case: QueryQualityCase) -> tuple[Dict[str, Any], float]:
+    import uuid
+
     manifest = manifest_for_scope(case.scope_id)
     t0 = time.perf_counter()
+    # Unique per run (like the report runner): a stable session id keeps a
+    # boundary from an OLD catalog version — re-scoping a case then classifies
+    # the same session as EXPAND_BOUNDARY and the case never runs.
     out = await orch.execute(
         query_text=case.query,
         scope_id=case.scope_id,
         access_mode=case.access_mode,  # type: ignore[arg-type]
         manifest=manifest,
-        query_session_id=f"qq-eval-{case.id}",
+        query_session_id=f"qq-eval-{case.id}-{uuid.uuid4().hex[:8]}",
     )
     elapsed_ms = (time.perf_counter() - t0) * 1000
     return out, elapsed_ms

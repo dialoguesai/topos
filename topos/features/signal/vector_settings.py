@@ -92,6 +92,29 @@ def fusion_recency_floor() -> float:
         return 0.2
 
 
+def vector_evidence_min() -> float:
+    """Cosine floor above which a vector hit counts as *evidence* (can justify a
+    non-empty result on its own). Hits between the retrieval min-similarity and
+    this line still contribute context when other evidence exists — they just
+    can't rescue a query about something that isn't there."""
+    raw = os.environ.get("TOPOS_VECTOR_EVIDENCE_MIN", "0.40").strip()
+    try:
+        return max(0.0, min(1.0, float(raw)))
+    except ValueError:
+        return 0.40
+
+
+def rare_token_df_max() -> int:
+    """A query token whose FTS document frequency is below this is *rare* —
+    the query is asking for something specific, and honest retrieval must
+    either match it or return nothing (absence honesty)."""
+    raw = os.environ.get("TOPOS_RARE_TOKEN_DF_MAX", "30").strip()
+    try:
+        return max(0, min(10_000, int(raw)))
+    except ValueError:
+        return 30
+
+
 def cluster_max_k() -> int:
     """Upper bound on k per clustering facet.
 

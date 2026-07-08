@@ -71,10 +71,30 @@ def build_generative_prompt(subtype: str, payload: Dict[str, Any]) -> str:
             f"{text}"
         )
     if subtype == "query_inference":
+        # Typed answers, not forced booleans: the old "yes|no|unknown" template
+        # made every who/what/list question structurally unanswerable (the
+        # model replied "yes" at confidence 1.0 to "Who do I message most?").
         ctx = payload.get("context") or ""
         q = payload.get("query") or text
         return (
-            f"Answer yes or no with confidence 0-1. Reply JSON only: "
-            f'{{"answer": "yes|no|unknown", "confidence": 0.5}}\n\nQuery: {q}\n\nContext: {ctx[:3500]}'
+            "You answer a question about the owner's personal data using ONLY the "
+            "provided context.\n"
+            'Reply JSON only: {"answer": <answer>, "confidence": <0.0-1.0>}\n'
+            '- Yes/no question: answer "yes" or "no".\n'
+            "- Who/what/which/when/how-much question: answer with the specific "
+            "name(s) or value(s) found in the context, as a short phrase.\n"
+            '- List question: answer with a JSON array of short strings.\n'
+            "- If the query is a topic rather than a question, answer \"yes\" or "
+            '"no" for whether the context contains relevant material, with '
+            "confidence reflecting how strong that material is.\n"
+            "- The context is privacy-filtered: records appear as relevance/"
+            "similarity scores without their text. Scored records ARE the "
+            "owner's matching data. Decision rule for topic queries: if any "
+            'record has relevance_score or similarity >= 0.6, answer "yes" with '
+            "confidence = the highest such score. Only when NO record scores "
+            '>= 0.6 may you answer "no" or "unknown".\n'
+            '- If the context does not contain the information, answer "unknown" '
+            "with confidence 0.0. Never guess beyond the context.\n\n"
+            f"Query: {q}\n\nContext: {ctx[:3500]}"
         )
     return str(payload) if payload else ""

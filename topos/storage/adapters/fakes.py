@@ -34,10 +34,17 @@ class InMemoryCanonicalStore:
         limit: int = 100,
         offset: int = 0,
         disclosure_tier: str = "owner_raw",
+        contains: Optional[List[str]] = None,
     ) -> ListPage:
         rows = list(self._tables.get(table, {}).values())
         if source_id is not None:
             rows = [r for r in rows if r.get("source_id") == source_id]
+        tokens = [str(t).strip().lower() for t in (contains or []) if str(t).strip()]
+        if tokens:
+            rows = [
+                r for r in rows
+                if any(t in " ".join(str(v) for v in r.values()).lower() for t in tokens)
+            ]
         total = len(rows)
         page = rows[offset : offset + limit]
         from topos.disclosure.tier import apply_disclosure_tier_to_rows

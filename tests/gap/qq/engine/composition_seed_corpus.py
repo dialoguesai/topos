@@ -24,7 +24,10 @@ from composition_eval_cases import CompositionCase, Oracle
 # qq-seeded-1 used synthetic source_ids that canonical retrieval filters out
 # (manifest default_source_ids gate) — its canonical scores measured the corpus,
 # not retrieval. qq-seeded-2 seeds rows under each scope's default sources.
-SEEDED_CORPUS_VERSION = "qq-seeded-2"
+# qq-seeded-3: +T-series bi-temporal facts (a supersession chain planted through
+# FactStore itself, so belief revision is exercised for real) and the T1/T2
+# temporal-integrity cases (PLAN_QUERY_EVAL_DEEP_SUITE.md §T).
+SEEDED_CORPUS_VERSION = "qq-seeded-3"
 
 _NOW = datetime.now(timezone.utc)
 
@@ -46,6 +49,9 @@ NEEDLES = {
     "location_events": "Fennel Street Studio",
     "contacts": "peridot.vale@example.com",
     "financial_transactions": "cobalt kayak deposit",
+    # T-series bi-temporal chain: the old value is superseded by the new one.
+    "fact_current": "the Foxglove Atelier",
+    "fact_superseded": "the Larkspur Annex",
 }
 
 
@@ -200,6 +206,34 @@ def build_seeded_corpus(db_path: Path) -> Path:
             (_iso(4), NEEDLES["financial_transactions"]),
         )
 
+        # Layer: bi-temporal fact store (T-series). Asserted through FactStore so
+        # the supersession logic itself runs: the second assert closes the first
+        # fact's validity window (valid_to set, row kept — never deleted).
+        conn.execute(
+            """INSERT INTO entities
+               (entity_id, entity_type, canonical_name, normalized_name, mention_count,
+                first_seen, last_seen, is_self)
+               VALUES ('seed-self-1', 'person', 'Owner', 'owner', 1, ?, ?, 1)""",
+            (_iso(90), _iso(1)),
+        )
+        from topos.features.facts.store import FactStore
+
+        fact_store = FactStore(conn)
+        fact_store.assert_fact(
+            subject_entity_id="seed-self-1",
+            predicate="studio space",
+            object_value=NEEDLES["fact_superseded"],
+            dimension="work",
+            valid_from=_iso(60),
+        )
+        fact_store.assert_fact(
+            subject_entity_id="seed-self-1",
+            predicate="studio space",
+            object_value=NEEDLES["fact_current"],
+            dimension="work",
+            valid_from=_iso(10),
+        )
+
         conn.commit()
     finally:
         conn.close()
@@ -288,4 +322,30 @@ SEEDED_COMPOSITION_CASES: List[CompositionCase] = [
         lambda conn: Oracle([], "fabricated topic on a canary-only DB"),
         negative=True, layer="negative_control",
         description="Nothing but canaries exists — a fabricated topic must return nothing"),
+    # --- T-series: temporal integrity (PLAN_QUERY_EVAL_DEEP_SUITE.md §T) --------------
+    CompositionCase(
+        "T1", "seeded", "What is my current studio space?", "work_context:read", "summary",
+        _needle_oracle("fact_current"),
+        topic_terms=("studio", "atelier", "foxglove"),
+        layer="facts:bitemporal_current",
+        description="T1a as-of-now: the ACTIVE fact answers; the superseded one must not "
+                    "read as current"),
+    CompositionCase(
+        "T2", "seeded", "Where was my studio space before?", "work_context:read", "summary",
+        lambda conn: Oracle(
+            [[NEEDLES["fact_superseded"]], ["no longer current"]],
+            "superseded fact must surface for a past-tense ask, marked stale",
+        ),
+        topic_terms=("studio", "larkspur", "annex"),
+        layer="facts:bitemporal_history",
+        description="T1b belief revision: planner temporal_shift='past' widens the fact "
+                    "read to closed revisions; T3 staleness honesty: the superseded fact "
+                    "carries an explicit no-longer-current marker"),
+    CompositionCase(
+        "T3", "seeded", "What is on my calendar from the last week and coming days?",
+        "schedule:read", "summary",
+        lambda conn: Oracle([], "graded on dated items within the window"),
+        temporal_days=7, layer="planner:time_window_seeded",
+        description="T2 window arithmetic on a deterministic corpus (seeded sibling of "
+                    "the live C9/C30 lanes)"),
 ]

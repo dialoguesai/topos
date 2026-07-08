@@ -147,7 +147,13 @@ def is_derivable_content(text: str) -> bool:
 
 
 def embeddable_content(msg: Dict[str, Any]) -> str:
-    """Primary text for embedding; falls back through descriptive fields."""
+    """Primary text for embedding; falls back through descriptive fields.
+
+    The fallback list must cover identifier-bearing record types that have no
+    `content` column — contacts (display_name), contact_identifiers
+    (identifier), location events (place_name/city) — or those records never
+    enter the vector/FTS index at all (found by the query-quality eval: phone
+    numbers and place names were structurally unindexable)."""
     content = str(msg.get("content") or "").strip()
     if content and is_derivable_content(content):
         return content
@@ -155,7 +161,16 @@ def embeddable_content(msg: Dict[str, Any]) -> str:
         return ""  # junk content: never fall through to title/url of a message
     parts = [
         str(msg.get(field) or "").strip()
-        for field in ("title", "organization", "description", "url")
+        for field in (
+            "title",
+            "organization",
+            "description",
+            "url",
+            "place_name",
+            "city",
+            "display_name",
+            "identifier",
+        )
     ]
     return " — ".join(p for p in parts if p)
 

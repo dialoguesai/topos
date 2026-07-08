@@ -509,25 +509,75 @@ def topic_cluster_source_ids() -> Tuple[str, ...]:
     return topic_cluster_eligible_source_ids(REGISTRY.values())
 
 
+def _scope_matches(scope_id: str, scope_base: str, default_scope: str, allowed: List[str]) -> bool:
+    return (
+        (default_scope or "").strip() in (scope_id, scope_base)
+        or any(
+            (a or "").strip() == scope_id or (a or "").strip().split(":", 1)[0] == scope_base
+            for a in (allowed or [])
+        )
+    )
+
+
+def _runtime_installed_sources_by_scope(scope_id: str, scope_base: str) -> List[str]:
+    """Active RUNTIME-installed sources (grow exports, address-book merges, …)
+    whose definitions match the scope. These live in source_runtime_installs,
+    not the static registry — and nothing repopulates the in-memory registry
+    after a restart (rehydrate_active_installs_runtime has no caller), so scope
+    resolution must read the persisted rows directly or runtime sources' data
+    is invisible to queries (the query-quality eval found places/health/contacts
+    scopes serving demo fixtures while 1.9k real rows sat unreachable)."""
+    try:
+        from ..core.state import get_db_connection
+
+        conn = get_db_connection()
+        if conn is None:
+            return []
+        rows = conn.execute(
+            """SELECT source_id, source_definition_json FROM source_runtime_installs
+               WHERE is_active=1 AND status IN ('installed', 'active', 'ready')"""
+        ).fetchall()
+    except Exception:
+        return []
+    import json as _json
+
+    out: List[str] = []
+    for source_id, def_json in rows:
+        try:
+            source_def = _json.loads(def_json) if isinstance(def_json, str) else (def_json or {})
+        except _json.JSONDecodeError:
+            continue
+        if _scope_matches(
+            scope_id,
+            scope_base,
+            str(source_def.get("default_scope_id") or ""),
+            list(source_def.get("allowed_scope_ids") or []),
+        ):
+            sid = str(source_id or "").strip()
+            if sid and sid not in out:
+                out.append(sid)
+    return out
+
+
 def get_sources_by_scope(scope_id: str) -> List[str]:
     """
     Return source_id list for sources whose default_scope_id or allowed_scope_ids match scope_id.
     scope_id may be the base name without :read/:write (e.g. 'messages') or a full MVP scope id.
+    Covers the static registry AND active runtime-installed sources.
     Used by Topos/Control Plane for scope → source resolution.
     """
     scope_id = (scope_id or "").strip()
     if not scope_id:
         return []
     scope_base = scope_id.split(":", 1)[0]
-    return [
+    ids = [
         defn.source_id
         for defn in REGISTRY.values()
-        if (
-            (defn.default_scope_id or "").strip() == scope_id
-            or (defn.default_scope_id or "").strip() == scope_base
-            or any(
-                (allowed or "").strip() == scope_id or (allowed or "").strip().split(":", 1)[0] == scope_base
-                for allowed in (defn.allowed_scope_ids or [])
-            )
+        if _scope_matches(
+            scope_id, scope_base, defn.default_scope_id or "", list(defn.allowed_scope_ids or [])
         )
     ]
+    for sid in _runtime_installed_sources_by_scope(scope_id, scope_base):
+        if sid not in ids:
+            ids.append(sid)
+    return ids
