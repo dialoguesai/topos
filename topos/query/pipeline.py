@@ -47,6 +47,41 @@ def _minimizer_enabled() -> bool:
     return str(os.environ.get("TOPOS_DISCLOSURE_MINIMIZER") or "").strip().lower() in ("1", "true", "yes", "on")
 
 
+def _selector_enforcement_enabled() -> bool:
+    """Selector-aware disclosure enforcement (plan A2). Default OFF: the safe-floor policy
+    (deny a grantee ANY named person) over-blocks legitimate flows where a person is named
+    incidentally within an authorized task ("prep the launch meeting with Alex"). Turning it
+    on by default awaits the A2.1 grant-schema, which will carry per-grant
+    accessible_entity_ids so authorized people pass while unauthorized selection is denied.
+    The mechanism is proven by the SEL eval lane, which sets this flag."""
+    return str(os.environ.get("TOPOS_SELECTOR_ENFORCEMENT") or "").strip().lower() in ("1", "true", "yes", "on")
+
+
+def _selector_unauthorized(db_conn, query_text: str, manifest) -> bool:
+    """Selector-aware disclosure (plan A2, the Maya problem): True when a GRANTEE query
+    names a real third-party PERSON entity the grant does not authorize selecting.
+
+    Default-deny floor: with no entity-level grant (manifest.accessible_entity_ids empty),
+    a grantee may not select ANY named person — because when the requester supplies the
+    selector, response-side redaction is meaningless (they conditioned the whole answer on
+    that person). Topic/place entities are NOT selectors and pass through. Fabricated names
+    don't link, so they never trigger this — which is exactly what makes the real-person
+    refusal indistinguishable from an absent-person query (both yield an empty result)."""
+    if not query_text or db_conn is None:
+        return False
+    try:
+        from ..features.entities.linking import link_query_entities
+
+        linked = link_query_entities(db_conn, query_text)
+    except Exception:
+        return False
+    persons = [e for e in linked if str(e.get("entity_type") or "").lower() == "person"]
+    if not persons:
+        return False
+    accessible = {str(x).strip() for x in (getattr(manifest, "accessible_entity_ids", None) or [])}
+    return any(str(e.get("entity_id") or "").strip() not in accessible for e in persons)
+
+
 def _persist_negotiation_round(store, session_id, requester_id, session_data, neg_round) -> None:
     """Persist the negotiation round on the session so a repeat request advances the budget.
     Preserves any existing envelope (scopes/access_modes) and never stores disclosed data."""
@@ -352,6 +387,15 @@ class QueryPipelineOrchestrator:
                     "audit": audit,
                 }
 
+        # Selector-aware disclosure (plan A2): a grantee naming an unauthorized third-party
+        # person is answered as if that person is absent — empty, mode-appropriate, and
+        # byte-identical to a fabricated-name query. Owner requests are never suppressed.
+        suppress_selectors = (
+            _selector_enforcement_enabled()
+            and bool(is_grantee_request)
+            and _selector_unauthorized(db_conn, query_text, manifest)
+        )
+
         timings = StageTimings()
         _t0 = now_ms()
         try:
@@ -366,6 +410,7 @@ class QueryPipelineOrchestrator:
                     installed_source_ids=installed_source_ids or None,
                     disclosure_tier=disclosure_tier,
                     requester_id=requester_id,
+                    suppress_selectors=suppress_selectors,
                 )
             )
         except RetrievalError as exc:

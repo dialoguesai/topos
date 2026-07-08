@@ -30,6 +30,11 @@ class RetrievalRequest:
     disclosure_tier: str = "owner_raw"
     requester_id: str = "owner"
     owner_id: str = "owner"
+    # Selector-aware disclosure (plan A2): the query names a third-party entity this grantee
+    # may not select. Retrieval must produce an empty, mode-appropriate result — the entity's
+    # data never participates (PermLLM access-advantage=0), and the shape is identical to a
+    # query about a nonexistent entity (CQE indistinguishability).
+    suppress_selectors: bool = False
 
 
 @dataclass

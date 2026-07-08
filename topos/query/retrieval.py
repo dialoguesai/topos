@@ -1715,6 +1715,27 @@ class DefaultSignalRetrievalAdapter:
         }
         packet: Dict[str, Any] = {"scope_id": manifest.scope_id, "access_mode": request.access_mode}
 
+        # Selector-aware suppression (plan A2): the query names a third-party entity this
+        # grantee may not select. Produce an empty, mode-appropriate result WITHOUT touching
+        # the entity's data — access-advantage=0 (PermLLM) — and shaped identically to a query
+        # about a nonexistent entity (CQE indistinguishability: same keys, empty). Mode
+        # ceiling is still enforced above so an over-broad access_mode still denies first.
+        if request.suppress_selectors:
+            mode = request.access_mode
+            if mode == "raw":
+                packet["rows"] = []
+            elif mode == "inference":
+                packet["scores"] = []
+            else:
+                packet["answer_type"] = "summary"
+                packet["summaries"] = []
+            retrieval_meta["retrieval_strategy"] = "selector_suppressed"
+            self._last_stores = []
+            return RetrievalBundle(
+                context_packet=packet, stores_touched=[], record_counts={},
+                retrieval_metadata=retrieval_meta,
+            )
+
         source_filter = manifest.default_source_id
         source_ids = _resolve_source_ids(manifest, request.installed_source_ids)
 
