@@ -1,6 +1,12 @@
 """Re-embed the vector store with a chosen embedding model — the A/B substrate for the
 embedder upgrade (plan C2, PLAN_NODE_UPGRADE_AND_EVAL_EXPANSION.md).
 
+KNOWN LIMITATION: this updates signal_embeddings.vector_blob (the brute-force path) but
+NOT the sqlite-vec ANN shadow table (vec0), because sqlite-vec isn't loaded in a plain
+sqlite3 connection — sync_vec_row silently no-ops. So A/B benches must force brute-force
+(TOPOS_VECTOR_ANN=brute_force) to read the fresh vectors; the ANN path would serve stale
+vectors. A real production swap must rebuild vec0 through the engine's vector migration.
+
 Operates on a COPY of the DB by default (never mutates the live index unless --in-place).
 Re-embeds every signal_embeddings row's stored search_text with the target model, rewrites
 vector_blob (+ the sqlite-vec shadow table), and stamps the model column, so the eval can run
