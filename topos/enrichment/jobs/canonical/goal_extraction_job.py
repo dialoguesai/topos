@@ -83,8 +83,13 @@ class GoalExtractionJob(BaseEnrichmentJob):
                     return []
                 rows: List[Dict[str, Any]] = []
                 for goal in result.output.get("goals") or []:
-                    goal_text = goal.get("text")
-                    if not goal_text:
+                    goal_text = str(goal.get("text") or "").strip()
+                    # Reject empty AND too-short junk ("Let", "a"). NB (plan C1, measured
+                    # 2026-07-08): goal-emptiness is ~50% across ALL extraction models
+                    # (llama3.2-3b, qwen-9b, gemma4-12b) — it is the INPUT distribution (half
+                    # the ai_chat messages carry no goal), not model quality. A bigger model
+                    # does not fix it; this filter just stops storing the short-junk rows.
+                    if len(goal_text) < 6 or len(goal_text.split()) < 2:
                         continue
                     rows.append(
                         {
