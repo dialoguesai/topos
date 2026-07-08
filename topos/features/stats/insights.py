@@ -34,13 +34,14 @@ def _windowed_insight(
     *,
     group_key: str,
     window: str,
+    label_map: Dict[str, str] | None = None,
 ) -> Dict[str, Any] | None:
     state = engine.read_state(defn["stat_id"], group_key=group_key, window=window)
     n = int(state.get("n") or 0)
     if n < _MIN_N:
         return None
     summary = summarize(defn["stat_kind"], state)
-    text = _render_text(defn["stat_id"], defn["stat_kind"], group_key, summary, defn)
+    text = _render_text(defn["stat_id"], defn["stat_kind"], group_key, summary, defn, label_map or {})
     if not text:
         return None
     label = _WINDOW_LABELS.get(window, window)
@@ -55,10 +56,42 @@ def _windowed_insight(
     }
 
 
+def _contact_label_map(conn) -> Dict[str, str]:
+    """identifier -> display name for message/cadence stat groups (plan C6). Stat tags
+    read 'Messages with +17184834576'; a name is both more useful and closes an
+    oracle↔human agreement class. Best-effort: returns {} if the tables are absent."""
+    try:
+        rows = conn.execute(
+            """SELECT ci.identifier, c.display_name FROM contact_identifiers ci
+               JOIN contacts c ON c.contact_id = ci.contact_id
+               WHERE c.display_name IS NOT NULL AND length(c.display_name) > 1
+                 AND c.is_self = 0"""
+        ).fetchall()
+    except Exception:
+        return {}
+    label: Dict[str, str] = {}
+    for ident, name in rows:
+        ident = str(ident or "").strip()
+        # First non-empty display name wins; identifiers can map to several rows.
+        if ident and ident not in label:
+            label[ident] = str(name).strip()
+    return label
+
+
+def _group_label(group_key: str, label_map: Dict[str, str]) -> str:
+    """Render a message-group key as a human label: display name (with identifier for
+    disambiguation) when resolvable, 'myself' for the self bucket, else the raw key."""
+    if group_key == "self":
+        return "myself"
+    name = label_map.get(group_key)
+    return f"{name} ({group_key})" if name else group_key
+
+
 def render_insights(engine) -> List[Dict[str, Any]]:
     out: List[Dict[str, Any]] = []
     from . import definitions as defs
 
+    label_map = _contact_label_map(engine._conn)
     for defn in defs.load_enabled_definitions(engine._conn):
         stat_id = defn["stat_id"]
         kind = defn["stat_kind"]
@@ -95,7 +128,7 @@ def render_insights(engine) -> List[Dict[str, Any]]:
             if n < _MIN_N or not group_key:
                 continue
             summary = summarize(kind, state)
-            text = _render_text(stat_id, kind, group_key, summary, defn)
+            text = _render_text(stat_id, kind, group_key, summary, defn, label_map)
             if text:
                 out.append(
                     {
@@ -114,7 +147,7 @@ def render_insights(engine) -> List[Dict[str, Any]]:
         if window and emitted_groups:
             emitted_groups.sort(reverse=True)
             for _, group_key in emitted_groups[:_WINDOWED_GROUP_CAP]:
-                recent = _windowed_insight(engine, defn, group_key=group_key, window=window)
+                recent = _windowed_insight(engine, defn, group_key=group_key, window=window, label_map=label_map)
                 if recent:
                     out.append(recent)
     return out
@@ -132,7 +165,9 @@ def _render_text(
     group_key: str,
     summary: Dict[str, Any],
     defn: Dict[str, Any],
+    label_map: Dict[str, str] | None = None,
 ) -> str:
+    label_map = label_map or {}
     if kind == "histogram":
         top = summary.get("top") or []
         if not top:
@@ -168,7 +203,8 @@ def _render_text(
             return f"Places visited most: {group_key} — {summary.get('n')} visits."
         if stat_id == "activity.visits.by_title":
             return f"Most visited while browsing: {group_key} — {summary.get('n')} visits."
-        return f"{summary.get('n')} messages with {group_key}."
+        # message volume: group_key is a contact identifier — render the name (C6).
+        return f"{summary.get('n')} messages with {_group_label(group_key, label_map)}."
     if kind == "intervals":
         gap_h = summary.get("mean_gap_hours")
         cv = summary.get("burstiness_cv")
@@ -178,7 +214,7 @@ def _render_text(
         style = ""
         if cv is not None:
             style = " (bursty)" if float(cv) > 1.2 else " (steady)" if float(cv) < 0.6 else ""
-        return f"Messages with {group_key} roughly every {gap_txt}{style} (n={summary.get('n')})."
+        return f"Messages with {_group_label(group_key, label_map)} roughly every {gap_txt}{style} (n={summary.get('n')})."
     if kind == "sum":
         total = float(summary.get("total") or 0.0)
         return f"Total {group_key} spend: {total:.2f} across {summary.get('n')} transactions."

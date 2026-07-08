@@ -66,6 +66,14 @@ class CompositionCase:
     layer: str = ""  # storage layer this case probes (for the coverage matrix)
     description: str = ""
     max_latency_ms: int = 0
+    # Query class drives class-specific grading (plan D2.1/D2.2, TREC lineage):
+    #   known_item  — one canonical target; alias-aware substring recall (today's default)
+    #   browse      — any legitimate row of the requested surface answers; correctness is a
+    #                 surface-membership predicate, not a needle
+    #   recency     — freshness-window graded (uses temporal_days as the window)
+    #   aggregate   — coverage of expected aspects; needle recall approximates it for now
+    # Default known_item keeps every existing case's grading byte-identical.
+    query_class: str = "known_item"
 
     def __post_init__(self) -> None:
         if self.max_latency_ms <= 0:
@@ -424,7 +432,7 @@ LIVE_COMPOSITION_CASES: List[CompositionCase] = [
         "C3", "live", "What is on my calendar, what meetings do I have?", "schedule:read", "summary",
         oracle_c3_calendar, expected_sources=("canonical:calendar_events",),
         topic_terms=("meeting", "calendar", "standup", "session", "event"),
-        layer="canonical:calendar_events",
+        layer="canonical:calendar_events", query_class="browse",
         description="Schedule scope surfaces actual event titles"),
     CompositionCase(
         "C4", "live", "How often do I journal, and what about?", "health:read", "summary",
@@ -436,13 +444,13 @@ LIVE_COMPOSITION_CASES: List[CompositionCase] = [
         "C5", "live", "Where do I spend my time? Which places do I go?", "places:read", "summary",
         oracle_c5_places, expected_sources=("canonical:location_events",),
         topic_terms=("place", "location", "apt", "fitness", "trail"),
-        layer="canonical:location_events",
+        layer="canonical:location_events", query_class="browse",
         description="Places scope surfaces actual top locations"),
     CompositionCase(
         "C6", "live", "What have I been browsing and reading online?", "activity:read", "summary",
         oracle_c6_browsing, expected_sources=("canonical:activity_events",),
         topic_terms=("brows", "read", "web", "site", "watch"),
-        layer="canonical:activity_events",
+        layer="canonical:activity_events", query_class="browse",
         description="Activity scope surfaces actual browsing titles"),
     CompositionCase(
         "C7", "live", query_c7_contact, "contacts:resolve", "raw", oracle_c7_contact,
@@ -853,25 +861,25 @@ LIVE_COMPOSITION_CASES.extend([
         "C19", "live", "Which cities have I spent time in?", "places:read", "summary",
         oracle_c19_cities, expected_sources=("canonical:location_events",),
         topic_terms=("city", "san", "austin", "travel", "location"),
-        layer="canonical:location_events",
+        layer="canonical:location_events", query_class="browse",
         description="City-level aggregation over location events"),
     CompositionCase(
         "C20", "live", "What websites do I visit the most?", "activity:read", "summary",
         oracle_c20_domains, expected_sources=("canonical:activity_events",),
         topic_terms=("visit", "site", "web", "brows"),
-        layer="canonical:activity_events",
+        layer="canonical:activity_events", query_class="browse",
         description="Domain-level aggregation over browsing activity"),
     CompositionCase(
         "C21", "live", query_c21_repo, "activity:read", "summary", oracle_c21_repo,
         expected_sources=("canonical:activity_events",),
         topic_terms=("github", "repo", "code"),
-        layer="canonical:activity_events",
+        layer="canonical:activity_events", query_class="browse",
         description="Topic-scoped activity lookup (github)"),
     CompositionCase(
         "C22", "live", "What moods do I record most often in my journal?", "health:read", "summary",
         oracle_c22_moods, expected_sources=("canonical:journal_entries",),
         topic_terms=("mood", "journal", "feel"),
-        layer="canonical:journal_entries",
+        layer="canonical:journal_entries", query_class="browse",
         description="Mood-tag aggregation over journal entries"),
     CompositionCase(
         "C23", "live", "How long do I usually spend journaling?", "health:read", "summary",

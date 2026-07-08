@@ -30,7 +30,12 @@ EvalFn = Callable[[Dict[str, Any]], Tuple[bool, str]]
 # reads user_goals (the store retrieval reads) instead of duplicated signal_objects rows;
 # auto-extracted needles get sanity guards (no leading artifacts, dedup, min word length).
 # Scores comparable to qq-catalog-4 only via the iteration gauge's shared case_ids.
-QUERY_CATALOG_VERSION = "qq-catalog-5"
+# qq-catalog-6 (D2 oracle classes + D1.1 hard negatives): CompositionCase gains query_class
+# (known_item|browse|recency|aggregate); the SqlOracle grades canonical surface rows of a
+# browse case as direct answers (closes the oracle-human gap on browse queries). +NH1-NH3
+# common-word negatives (own negative_hard lane, red-first — the zero-df gate's blind
+# flank). Composite comparable to qq-catalog-5 via the iteration gauge's shared case_ids.
+QUERY_CATALOG_VERSION = "qq-catalog-6"
 
 _DEFAULT_LATENCY_MS = {
     "summary": int(os.environ.get("TOPOS_QQ_LATENCY_SUMMARY_MS", "10000")),

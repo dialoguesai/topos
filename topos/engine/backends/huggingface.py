@@ -31,6 +31,20 @@ EMBEDDING_MODEL_PROFILES: Dict[str, Dict[str, Any]] = {
         "query_prefix": "Represent this sentence for searching relevant passages: ",
         "passage_prefix": "",
     },
+    # Snowflake Arctic Embed (Apache-2.0): retrieval-tuned, query-side prefix only.
+    # arctic-s is 384d — a drop-in for the MiniLM vec table width (re-embed, no schema
+    # change). arctic-m-v1.5 is 768d (Performance tier — needs a new vec0 table). See
+    # PLAN_NODE_UPGRADE_AND_EVAL_EXPANSION.md §E1/§E1b.
+    "Snowflake/snowflake-arctic-embed-s": {
+        "dims": 384,
+        "query_prefix": "Represent this sentence for searching relevant passages: ",
+        "passage_prefix": "",
+    },
+    "Snowflake/snowflake-arctic-embed-m-v1.5": {
+        "dims": 768,
+        "query_prefix": "Represent this sentence for searching relevant passages: ",
+        "passage_prefix": "",
+    },
     "BAAI/bge-base-en-v1.5": {
         "dims": 768,
         "query_prefix": "Represent this sentence for searching relevant passages: ",

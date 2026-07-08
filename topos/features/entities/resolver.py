@@ -74,12 +74,37 @@ def map_ner_type(ner_label: Optional[str]) -> str:
     return _NER_TYPE_MAP.get(str(ner_label or "").upper(), "topic")
 
 
+# Function/common words that NER routinely mislabels as MISC/topic entities.
+# A surface made ENTIRELY of these is junk ('IS', 'Go', 'and', 'of', 'The One',
+# 'Place') — 634 such entities polluted the live spine, dossiers, and mentions.
+# The query-time linking guard already refuses to LINK them; this stops them
+# being MINTED at all (plan C4). A real name with one stopword token ('The
+# Weeknd', 'Kim Do') survives because not *every* token is a stopword.
+_JUNK_SURFACE_WORDS = frozenset(
+    {
+        "a", "an", "and", "or", "of", "at", "am", "is", "are", "was", "were",
+        "be", "been", "in", "on", "to", "the", "it", "its", "as", "by", "for",
+        "with", "from", "this", "that", "these", "those", "he", "she", "they",
+        "we", "you", "i", "me", "my", "do", "did", "does", "go", "went", "get",
+        "got", "has", "have", "had", "not", "no", "yes", "so", "if", "but",
+        "one", "all", "any", "can", "just", "now", "out",
+        "up", "down", "here", "there", "place", "thing", "things", "some",
+        "more", "most", "other", "into", "about", "over", "under", "our",
+        "time", "times", "long", "today",
+        "tomorrow", "yesterday", "what", "who", "how", "when", "where", "why",
+        "much", "many", "then", "than", "also", "very",
+        # NB: deliberately NOT denylisting will/good/back/new/old/day/well —
+        # each is a plausible given name or surname; bare function words only.
+    }
+)
+
+
 def is_valid_entity_surface(text: str) -> bool:
     """Reject NER artifacts before they become entities.
 
     BERT-style NER emits sub-word fragments ('##dy', '##ccelerator') when an
-    entity spans wordpieces; those and digit/punctuation-only surfaces must
-    never enter the registry.
+    entity spans wordpieces; those, digit/punctuation-only surfaces, and
+    all-stopword surfaces ('IS', 'Go', 'The One') must never enter the registry.
     """
     surface = str(text or "").strip()
     if not surface or "##" in surface:
@@ -88,6 +113,11 @@ def is_valid_entity_surface(text: str) -> bool:
     if len(normalized) < 2:
         return False
     if not any(c.isalpha() for c in normalized):
+        return False
+    # All-stopword surface → junk. Keep names where at least one token is a
+    # real word ('Kim Do', 'The Weeknd', 'LA Fitness').
+    alpha_tokens = [t for t in normalized.split() if any(c.isalpha() for c in t)]
+    if alpha_tokens and all(t in _JUNK_SURFACE_WORDS for t in alpha_tokens):
         return False
     return True
 
