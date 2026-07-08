@@ -28,7 +28,24 @@ from topos_eval.protocols.target import Request
 
 
 def _blob(obj: Any) -> str:
-    return json.dumps(obj, default=str).lower()
+    return json.dumps(obj, default=str, ensure_ascii=False).lower()
+
+
+def _is_surface_member(source: str, surfaces: Tuple[str, ...]) -> bool:
+    """A retrieval_source is 'of the surface' if it equals or refines an expected source.
+    'canonical:location_events' matches expected 'canonical:location_events'; a stat family
+    'stat_insight' matches expected 'stat_insight'. Prefix match both directions so
+    'canonical:location_events' also satisfies an expected 'canonical' shorthand."""
+    return any(source == s or source.startswith(s) or s.startswith(source) for s in surfaces if s)
+
+
+def _has_content(item: Dict[str, Any]) -> bool:
+    """A surface row only counts as a direct answer if it carries real text — guards
+    against empty/degenerate rows getting browse-membership credit."""
+    for field in ("topic", "summary_text", "content", "text_preview", "display_name", "identifier"):
+        if str(item.get(field) or "").strip():
+            return True
+    return False
 
 
 @dataclass(frozen=True)
@@ -39,6 +56,8 @@ class CaseTruth:
     topic_terms: Tuple[str, ...] = ()
     negative: bool = False  # correct behavior is abstention
     vacuous: bool = False  # the DB lacks data to grade this case
+    query_class: str = "known_item"  # known_item | browse | recency | aggregate (plan D2)
+    surface_sources: Tuple[str, ...] = ()  # retrieval_source prefixes that ARE the surface
 
 
 class SqlOracle:
@@ -67,6 +86,8 @@ class SqlOracle:
                 topic_terms=list(getattr(case, "topic_terms", ()) or ()),
                 negative=bool(getattr(case, "negative", False)),
                 vacuous=not case_oracle.ok,
+                query_class=str(getattr(case, "query_class", "known_item") or "known_item"),
+                surface_sources=tuple(getattr(case, "expected_sources", ()) or ()),
             )
         return oracle
 
@@ -78,12 +99,16 @@ class SqlOracle:
         topic_terms: List[str] | None = None,
         negative: bool = False,
         vacuous: bool = False,
+        query_class: str = "known_item",
+        surface_sources: Iterable[str] = (),
     ) -> None:
         self._truth[query_text] = CaseTruth(
             needle_groups=tuple(tuple(g) for g in needle_groups),
             topic_terms=tuple(topic_terms or ()),
             negative=negative,
             vacuous=vacuous,
+            query_class=query_class,
+            surface_sources=tuple(surface_sources),
         )
 
     def truth_for(self, request: Request) -> CaseTruth | None:
@@ -96,9 +121,26 @@ class SqlOracle:
         if truth is None or truth.negative:
             return 0  # nothing is relevant to a fabricated topic
         blob = _blob(item)
+        # Needle match is a direct answer in every class.
         for group in truth.needle_groups:
             if any(alt.lower() in blob for alt in group):
                 return 2
+        # Browse class (plan D2.2): a legitimate row of the requested CANONICAL surface is
+        # ON-TOPIC (grade 1), even without the specific needle. NB: we measured that
+        # granting these grade 2 (direct answer) OVER-credits vs human labels — humans
+        # grade browse relevance by prominence (the frequent place is the answer; an
+        # incidental one is supporting), which a flat membership predicate can't capture.
+        # So membership earns grade 1 only; the real convergence fix is per-class metrics +
+        # stratified PPI (plan D2.4), not grade-remapping. Scoped to canonical:* sources
+        # (unambiguous) with real content (no junk/empty rows).
+        if truth.query_class == "browse" and truth.surface_sources:
+            source = str(item.get("retrieval_source") or "")
+            if (
+                source.startswith("canonical:")
+                and _is_surface_member(source, truth.surface_sources)
+                and _has_content(item)
+            ):
+                return 1
         if any(term.lower() in blob for term in truth.topic_terms):
             return 1
         return 0

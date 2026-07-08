@@ -1,0 +1,363 @@
+{
+  "meta": {
+    "timestamp_utc": "2026-07-08T01:32:47+00:00",
+    "platform": "macOS-26.5.1-arm64-arm-64bit",
+    "machine": "arm64",
+    "python": "3.10.16",
+    "torch": "2.11.0",
+    "sentence_transformers": "5.6.0",
+    "torch_num_threads": 6,
+    "mps_available": true,
+    "seed": 1234,
+    "corpus": {
+      "n_texts": 200,
+      "words_min": 2,
+      "words_median": 29,
+      "words_max": 169
+    },
+    "chip": "Apple M3 Pro",
+    "ram_gb": 36.0,
+    "perf_cores": "6",
+    "eff_cores": "6",
+    "args": {
+      "seed": 1234,
+      "devices": null,
+      "runs": 50,
+      "warmup": 5,
+      "batch_runs": 3,
+      "batch_size": 32,
+      "ce_runs": 20,
+      "ce_warmup": 5,
+      "models": null,
+      "quick": false
+    }
+  },
+  "bi_encoders": [
+    {
+      "model": "sentence-transformers/all-MiniLM-L6-v2",
+      "device": "cpu",
+      "error": null,
+      "download_or_cache_check_s": 0.16,
+      "load_s": 1.15,
+      "load_rss_delta_mb": 22.9,
+      "params_m": 22.7,
+      "embedding_dim": 384,
+      "max_seq_length": 256,
+      "singleton": {
+        "median_ms": 8.865,
+        "p95_ms": 14.106,
+        "min_ms": 6.802,
+        "max_ms": 14.988,
+        "runs": 50,
+        "capped": false
+      },
+      "batch": {
+        "batch_size": 32,
+        "corpus_size": 200,
+        "median_total_s": 1.141,
+        "texts_per_s": 175.2,
+        "runs": 3,
+        "capped": false
+      }
+    },
+    {
+      "model": "Snowflake/snowflake-arctic-embed-s",
+      "device": "cpu",
+      "error": null,
+      "download_or_cache_check_s": 16.46,
+      "load_s": 1.37,
+      "load_rss_delta_mb": 5.4,
+      "params_m": 33.2,
+      "embedding_dim": 384,
+      "max_seq_length": 512,
+      "singleton": {
+        "median_ms": 17.526,
+        "p95_ms": 22.526,
+        "min_ms": 13.279,
+        "max_ms": 31.135,
+        "runs": 50,
+        "capped": false
+      },
+      "batch": {
+        "batch_size": 32,
+        "corpus_size": 200,
+        "median_total_s": 2.106,
+        "texts_per_s": 95.0,
+        "runs": 3,
+        "capped": false
+      }
+    },
+    {
+      "model": "Snowflake/snowflake-arctic-embed-m-v1.5",
+      "device": "cpu",
+      "error": null,
+      "download_or_cache_check_s": 84.05,
+      "load_s": 2.12,
+      "load_rss_delta_mb": 5.5,
+      "params_m": 108.9,
+      "embedding_dim": 768,
+      "max_seq_length": 512,
+      "singleton": {
+        "median_ms": 60.574,
+        "p95_ms": 70.946,
+        "min_ms": 46.512,
+        "max_ms": 85.592,
+        "runs": 50,
+        "capped": false
+      },
+      "batch": {
+        "batch_size": 32,
+        "corpus_size": 200,
+        "median_total_s": 5.774,
+        "texts_per_s": 34.6,
+        "runs": 3,
+        "capped": false
+      }
+    },
+    {
+      "model": "BAAI/bge-small-en-v1.5",
+      "device": "cpu",
+      "error": null,
+      "download_or_cache_check_s": 7.76,
+      "load_s": 1.82,
+      "load_rss_delta_mb": 3.4,
+      "params_m": 33.4,
+      "embedding_dim": 384,
+      "max_seq_length": 512,
+      "singleton": {
+        "median_ms": 18.605,
+        "p95_ms": 22.771,
+        "min_ms": 15.248,
+        "max_ms": 24.339,
+        "runs": 50,
+        "capped": false
+      },
+      "batch": {
+        "batch_size": 32,
+        "corpus_size": 200,
+        "median_total_s": 2.076,
+        "texts_per_s": 96.4,
+        "runs": 3,
+        "capped": false
+      }
+    },
+    {
+      "model": "sentence-transformers/all-MiniLM-L6-v2",
+      "device": "mps",
+      "error": null,
+      "download_or_cache_check_s": 0.11,
+      "load_s": 1.41,
+      "load_rss_delta_mb": 2.3,
+      "params_m": 22.7,
+      "embedding_dim": 384,
+      "max_seq_length": 256,
+      "singleton": {
+        "median_ms": 9.483,
+        "p95_ms": 14.553,
+        "min_ms": 6.875,
+        "max_ms": 53.803,
+        "runs": 50,
+        "capped": false
+      },
+      "batch": {
+        "batch_size": 32,
+        "corpus_size": 200,
+        "median_total_s": 0.271,
+        "texts_per_s": 738.9,
+        "runs": 3,
+        "capped": false
+      }
+    },
+    {
+      "model": "Snowflake/snowflake-arctic-embed-s",
+      "device": "mps",
+      "error": null,
+      "download_or_cache_check_s": 0.08,
+      "load_s": 1.44,
+      "load_rss_delta_mb": 2.8,
+      "params_m": 33.2,
+      "embedding_dim": 384,
+      "max_seq_length": 512,
+      "singleton": {
+        "median_ms": 14.213,
+        "p95_ms": 21.274,
+        "min_ms": 11.253,
+        "max_ms": 38.522,
+        "runs": 50,
+        "capped": false
+      },
+      "batch": {
+        "batch_size": 32,
+        "corpus_size": 200,
+        "median_total_s": 0.496,
+        "texts_per_s": 402.9,
+        "runs": 3,
+        "capped": false
+      }
+    },
+    {
+      "model": "Snowflake/snowflake-arctic-embed-m-v1.5",
+      "device": "mps",
+      "error": null,
+      "download_or_cache_check_s": 0.14,
+      "load_s": 1.69,
+      "load_rss_delta_mb": 5.2,
+      "params_m": 108.9,
+      "embedding_dim": 768,
+      "max_seq_length": 512,
+      "singleton": {
+        "median_ms": 15.984,
+        "p95_ms": 22.194,
+        "min_ms": 12.772,
+        "max_ms": 50.368,
+        "runs": 50,
+        "capped": false
+      },
+      "batch": {
+        "batch_size": 32,
+        "corpus_size": 200,
+        "median_total_s": 1.108,
+        "texts_per_s": 180.5,
+        "runs": 3,
+        "capped": false
+      }
+    },
+    {
+      "model": "BAAI/bge-small-en-v1.5",
+      "device": "mps",
+      "error": null,
+      "download_or_cache_check_s": 0.13,
+      "load_s": 1.48,
+      "load_rss_delta_mb": 1.0,
+      "params_m": 33.4,
+      "embedding_dim": 384,
+      "max_seq_length": 512,
+      "singleton": {
+        "median_ms": 13.774,
+        "p95_ms": 19.812,
+        "min_ms": 11.197,
+        "max_ms": 22.25,
+        "runs": 50,
+        "capped": false
+      },
+      "batch": {
+        "batch_size": 32,
+        "corpus_size": 200,
+        "median_total_s": 0.498,
+        "texts_per_s": 401.3,
+        "runs": 3,
+        "capped": false
+      }
+    }
+  ],
+  "cross_encoders": [
+    {
+      "model": "cross-encoder/ms-marco-TinyBERT-L2-v2",
+      "device": "cpu",
+      "error": null,
+      "download_or_cache_check_s": 0.14,
+      "load_s": 0.82,
+      "load_rss_delta_mb": 0.3,
+      "params_m": 4.4,
+      "pairs_20": {
+        "median_ms": 28.467,
+        "p95_ms": 31.186,
+        "min_ms": 25.159,
+        "max_ms": 32.228,
+        "runs": 20,
+        "capped": false,
+        "ms_per_pair_median": 1.42
+      },
+      "pairs_50": {
+        "median_ms": 51.578,
+        "p95_ms": 53.122,
+        "min_ms": 45.784,
+        "max_ms": 62.485,
+        "runs": 20,
+        "capped": false,
+        "ms_per_pair_median": 1.03
+      }
+    },
+    {
+      "model": "cross-encoder/ms-marco-MiniLM-L6-v2",
+      "device": "cpu",
+      "error": null,
+      "download_or_cache_check_s": 32.09,
+      "load_s": 0.98,
+      "load_rss_delta_mb": 0.8,
+      "params_m": 22.7,
+      "pairs_20": {
+        "median_ms": 294.865,
+        "p95_ms": 371.317,
+        "min_ms": 261.001,
+        "max_ms": 384.062,
+        "runs": 20,
+        "capped": false,
+        "ms_per_pair_median": 14.74
+      },
+      "pairs_50": {
+        "median_ms": 489.789,
+        "p95_ms": 537.178,
+        "min_ms": 472.408,
+        "max_ms": 617.267,
+        "runs": 20,
+        "capped": false,
+        "ms_per_pair_median": 9.8
+      }
+    },
+    {
+      "model": "cross-encoder/ms-marco-TinyBERT-L2-v2",
+      "device": "mps",
+      "error": null,
+      "download_or_cache_check_s": 0.06,
+      "load_s": 0.95,
+      "load_rss_delta_mb": 0.0,
+      "params_m": 4.4,
+      "pairs_20": {
+        "median_ms": 16.744,
+        "p95_ms": 19.682,
+        "min_ms": 15.003,
+        "max_ms": 21.589,
+        "runs": 20,
+        "capped": false,
+        "ms_per_pair_median": 0.84
+      },
+      "pairs_50": {
+        "median_ms": 35.651,
+        "p95_ms": 39.313,
+        "min_ms": 31.224,
+        "max_ms": 40.66,
+        "runs": 20,
+        "capped": false,
+        "ms_per_pair_median": 0.71
+      }
+    },
+    {
+      "model": "cross-encoder/ms-marco-MiniLM-L6-v2",
+      "device": "mps",
+      "error": null,
+      "download_or_cache_check_s": 0.09,
+      "load_s": 1.25,
+      "load_rss_delta_mb": 0.0,
+      "params_m": 22.7,
+      "pairs_20": {
+        "median_ms": 82.311,
+        "p95_ms": 87.998,
+        "min_ms": 77.169,
+        "max_ms": 88.002,
+        "runs": 20,
+        "capped": false,
+        "ms_per_pair_median": 4.12
+      },
+      "pairs_50": {
+        "median_ms": 139.109,
+        "p95_ms": 146.491,
+        "min_ms": 133.755,
+        "max_ms": 157.761,
+        "runs": 20,
+        "capped": false,
+        "ms_per_pair_median": 2.78
+      }
+    }
+  ]
+}
