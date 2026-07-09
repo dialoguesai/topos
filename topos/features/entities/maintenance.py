@@ -166,13 +166,18 @@ def rebuild_entity_graph(
     *,
     prune_orphans: bool = True,
     refresh: bool = True,
+    materialize_facts: bool = True,
 ) -> Dict[str, object]:
-    """Full cheap rebuild of the entity graph from existing mentions.
+    """Full cheap rebuild of the entity graph from existing derived data.
 
     Recounts mention totals, optionally prunes mention-orphaned entities,
-    rebuilds evidence edges, and refreshes dossiers. Returns a before/after
-    report. No NER re-run — bounded by the current `entity_mentions` set. To
-    grow the mention set, re-run the `entities` enrichment job (force_reprocess).
+    rebuilds co-occurrence/communicates evidence edges from mentions, and
+    (by default) materializes facts + topic clusters from signal_objects into
+    labeled temporal edges. Refreshes dossiers. Returns a before/after report.
+
+    No NER re-run — bounded by the current `entity_mentions` + `signal_objects`.
+    To grow the mention set, re-run the `entities` enrichment job
+    (force_reprocess).
     """
     from ..lifecycle.derived_scrub import _delete_orphan_entities, _recount_entity_mentions
 
@@ -181,6 +186,15 @@ def rebuild_entity_graph(
     _recount_entity_mentions(conn)
     orphaned = _delete_orphan_entities(conn) if prune_orphans else []
     edge_counts = rebuild_evidence_edges(conn)
+
+    mz = {"topic_edges": 0, "fact_edges": 0}
+    if materialize_facts:
+        try:
+            from .fact_materializer import materialize_signal_objects_to_graph
+
+            mz = materialize_signal_objects_to_graph(conn)
+        except Exception as exc:  # materialization is best-effort
+            logger.warning("fact materialization during rebuild failed: %s", exc)
 
     dossiers = 0
     if refresh:
@@ -198,6 +212,8 @@ def rebuild_entity_graph(
         "edges_after": edges_after,
         "co_occurrence": edge_counts["co_occurrence"],
         "communicates_with": edge_counts["communicates_with"],
+        "topic_edges": mz["topic_edges"],
+        "fact_edges": mz["fact_edges"],
         "orphans_pruned": len(orphaned),
         "dossiers_refreshed": dossiers,
     }
