@@ -37,11 +37,14 @@ Ollama is configured/reachable, the real model is used.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import os
 import re
 import sqlite3
-from typing import Any, Callable, Dict, List, Optional
+from concurrent.futures import ThreadPoolExecutor
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 from ..provenance.posture import make_posture_resolver
 from ..provenance.roles import (
@@ -93,6 +96,14 @@ DEFAULT_CONFIDENCE = 0.55  # below resume/profile facts so a chat remark never
 # silently supersedes a strong incumbent (CONFLICT_CONFIDENCE_MARGIN=0.10).
 _MAX_CONTENT_CHARS = 4000  # keep the prompt bounded; ingest is slow-tolerant.
 _NUM_PREDICT = 512  # bounded output tokens for the JSON array.
+
+# Bounded concurrency for the (slow, ~25s each) ollama calls. Mirrors
+# GoalExtractionJob.GOAL_BATCH_CONCURRENCY's semaphore approach — the LLM calls
+# fan out under a semaphore, but the sqlite writes stay serialized on the
+# calling thread (one connection is not threadsafe). Env-overridable so a big
+# re-enrichment can be tuned to the box; kept modest so we never starve the
+# concurrent LongMemEval / query traffic on the same ollama.
+FACTS_LLM_CONCURRENCY = max(1, int(os.environ.get("TOPOS_FACTS_LLM_CONCURRENCY", "4")))
 
 # Subject tokens that mean "the owner" (first person). Anything else is a
 # third party and its triple is dropped — we never mint an owner fact about
@@ -289,6 +300,111 @@ def _is_owner_subject(triple: Dict[str, Any]) -> bool:
 
 
 # ---------------------------------------------------------------------------
+# Durable-fact pre-filter (skips rows that cannot carry an owner self-fact
+# BEFORE spending a ~25s LLM call). CONSERVATIVE by construction: a false
+# negative here only costs one wasted LLM call (the row is processed anyway),
+# but a false positive would drop a real fact — so every rule below fires only
+# on content that is *unambiguously* devoid of a durable self-fact (pure
+# greeting/ack, bare logistics, or link-only). Role gate / attribution are
+# untouched: this runs AFTER eligibility is decided, purely to save an LLM call.
+# ---------------------------------------------------------------------------
+
+_MIN_FACT_CONTENT_CHARS = 15  # below this, no room for a durable SPO self-fact.
+
+_URL_RE = re.compile(r"https?://\S+|www\.\S+", re.I)
+
+# Exact-match throwaways: greetings, acknowledgements, and one-liners that never
+# state a durable fact. Matched against the fully-normalized content (lowercased,
+# stripped of trailing punctuation/emoji whitespace). Kept SHORT and literal so a
+# fact-bearing sentence that merely *starts* with "ok" ("ok so I moved to Berlin")
+# is never skipped — only content that IS one of these, whole, is dropped.
+_GREETING_ACK_PHRASES = frozenset(
+    {
+        "hi", "hii", "hey", "heyy", "hello", "helloo", "yo", "sup", "hiya",
+        "gm", "good morning", "good afternoon", "good evening", "good night",
+        "gn", "night", "morning", "afternoon", "evening",
+        "ok", "okay", "k", "kk", "okey", "okey dokey", "cool", "nice", "great",
+        "sure", "yep", "yup", "yeah", "yes", "no", "nope", "nah", "yea",
+        "thanks", "thank you", "thanks!", "thx", "ty", "tysm", "np", "no problem",
+        "you're welcome", "yw", "welcome", "cheers", "ok cool", "sounds good",
+        "sg", "got it", "gotcha", "roger", "understood", "makes sense",
+        "lol", "lmao", "haha", "hahaha", "hah", "hehe", "nice one", "amazing",
+        "bye", "goodbye", "cya", "see you", "see ya", "later", "ttyl", "take care",
+        "on my way", "omw", "be right there", "brb", "one sec", "one moment",
+        "hold on", "coming", "here", "im here", "i'm here", "almost there",
+        "are you around", "you around", "you there", "u there", "you free",
+        "u free", "you up", "u up", "wyd", "what's up", "whats up", "how are you",
+        "how's it going", "hows it going", "how are things", "wassup",
+        "sorry", "my bad", "oops", "np np", "all good", "no worries", "np!",
+        "please", "pls", "plz", "asap", "done", "finished", "ready", "wait",
+        "hmm", "hm", "huh", "what", "why", "when", "where", "who", "how",
+        "really", "wow", "omg", "oh", "ah", "ahh", "oh ok", "oh okay", "i see",
+        "will do", "sounds great", "perfect", "awesome", "congrats",
+        "congratulations", "happy birthday", "hbd", "welcome back",
+    }
+)
+
+# Bare logistics-question shells that carry no durable self-fact ("what time?",
+# "where at?"). Anchored so a fact-bearing clause after the shell is never lost.
+_LOGISTICS_SHELL_RE = re.compile(
+    r"^(?:what time|where|when|what about|how about|can you|could you|will you|"
+    r"are you|is it|do you|did you|have you|should we|shall we|want to|wanna)\b"
+    r"[^.?!]*\?+\s*$",
+    re.I,
+)
+
+
+def _strip_for_prefilter(content: str) -> str:
+    """Normalized comparison form: lowercased, collapsed whitespace, trailing
+    punctuation/emoji-ish trailer removed. Only used by the pre-filter — the
+    prompt/extractor still see the raw content."""
+    text = str(content or "").strip().lower()
+    # collapse internal whitespace so "ok   cool" == "ok cool"
+    text = re.sub(r"\s+", " ", text)
+    # drop a trailing run of punctuation / emoji-ish non-word chars
+    text = re.sub(r"[\s\W]+$", "", text)
+    return text.strip()
+
+
+def _likely_has_owner_fact(content: str) -> bool:
+    """Conservative gate: return False ONLY when the row is unambiguously a
+    greeting/ack, a bare logistics question, or link-only — i.e. cannot carry a
+    durable owner self-fact. Everything else returns True (spend the LLM call).
+
+    NB: false negatives (returning False on a fact-bearing row) would DROP a
+    real fact, so every branch here is deliberately narrow. False positives
+    (returning True on junk) only cost one LLM call — acceptable.
+    """
+    raw = str(content or "")
+    stripped = raw.strip()
+
+    # 1) Too short to hold a subject-predicate-object self-fact.
+    if len(stripped) < _MIN_FACT_CONTENT_CHARS:
+        return False
+
+    # 2) URL-only / link-dominated: strip every URL; if almost nothing durable
+    #    remains (< 15 chars of non-URL text), there is no self-fact to extract.
+    without_urls = _URL_RE.sub(" ", raw)
+    residue = re.sub(r"\s+", " ", without_urls).strip(" \t\n\r-—–|:>·•")
+    if _URL_RE.search(raw) and len(residue) < _MIN_FACT_CONTENT_CHARS:
+        return False
+
+    normalized = _strip_for_prefilter(raw)
+    if not normalized:
+        return False
+
+    # 3) Whole-message greeting / acknowledgement / one-liner.
+    if normalized in _GREETING_ACK_PHRASES:
+        return False
+
+    # 4) Bare logistics-question shell ("what time?", "where at?") — no fact.
+    if _LOGISTICS_SHELL_RE.match(stripped):
+        return False
+
+    return True
+
+
+# ---------------------------------------------------------------------------
 # Real Ollama extractor (used when no extractor is injected).
 # ---------------------------------------------------------------------------
 
@@ -368,6 +484,63 @@ def _owner_entity_id(conn: sqlite3.Connection) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Bounded-concurrent LLM fan-out (mirrors GoalExtractionJob's semaphore pattern)
+# ---------------------------------------------------------------------------
+
+
+def _run_coro_blocking(coro: "asyncio.Future") -> Any:
+    """Drive an async coroutine to completion from SYNCHRONOUS code.
+
+    extract_owner_facts_llm is sync (called inside extract_facts_from_batch,
+    which the async FactExtractionJob.enrich awaits directly on the event loop
+    thread). We therefore cannot assume asyncio.run() is safe:
+      - no running loop (unit tests, CLI re-enrich)  -> asyncio.run().
+      - a running loop (live ingest via enrich)       -> run the coroutine on a
+        dedicated worker thread with its own loop, so we never re-enter the
+        outer loop. The ollama calls inside still fan out concurrently there.
+    Either way this blocks until the fan-out is done; the caller then applies
+    the collected results serially on THIS thread (sqlite write-safety).
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    # A loop is already running on this thread: offload to a fresh thread+loop.
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(lambda: asyncio.run(coro)).result()
+
+
+async def _gather_extractions(
+    extractor: Callable[[str, Dict[str, Any]], List[Dict[str, Any]]],
+    tasks: List[Tuple[int, str, Dict[str, Any]]],
+    concurrency: int,
+) -> List[Tuple[int, Optional[List[Dict[str, Any]]], Optional[Exception]]]:
+    """Run ``extractor(prompt, row)`` for each eligible task under a semaphore.
+
+    The extractor is (potentially) a blocking ollama call, so it runs on a
+    thread via asyncio.to_thread — that is what makes the calls CONCURRENT while
+    the semaphore bounds how many hit ollama at once (mirrors GoalExtractionJob).
+    Returns ``(index, triples, error)`` per task; NEVER raises — a per-row error
+    is captured so the caller can decide (log / stop on unreachable). Results are
+    returned in input order so the serial write phase is deterministic.
+    """
+    sem = asyncio.Semaphore(concurrency)
+
+    async def _one(
+        index: int, prompt: str, row: Dict[str, Any]
+    ) -> Tuple[int, Optional[List[Dict[str, Any]]], Optional[Exception]]:
+        async with sem:
+            try:
+                triples = await asyncio.to_thread(extractor, prompt, row)
+                return (index, triples or [], None)
+            except Exception as exc:  # noqa: BLE001 — captured, handled by caller
+                return (index, None, exc)
+
+    results = await asyncio.gather(*[_one(i, p, r) for (i, p, r) in tasks])
+    return list(results)
+
+
+# ---------------------------------------------------------------------------
 # Main entry
 # ---------------------------------------------------------------------------
 
@@ -427,11 +600,12 @@ def extract_owner_facts_llm(
 
     from ..signal.embed_context import is_derivable_content
 
-    written = 0
-    transport_dead = False
+    # ----- Phase 1: eligibility (SYNC, no LLM). Compute role/attribution and the
+    # pre-filter for every row FIRST, so we only fan out LLM calls for rows that
+    # (a) pass the role gate and (b) plausibly carry a durable owner self-fact.
+    # The role gate stays strictly upstream of every extractor call. --------------
+    eligible: List[Dict[str, Any]] = []  # one dict per row we will LLM-extract
     for row in rows:
-        if transport_dead:
-            break  # server is down; stop hammering it (graceful degradation)
         record_id = row.get("record_id") or row.get("message_id") or row.get("id")
         if str(record_id or "") in excluded_records:
             continue
@@ -448,19 +622,62 @@ def extract_owner_facts_llm(
         else:
             continue  # observed / participated / ambient => not eligible
 
-        prompt = build_extraction_prompt(content)
-        try:
-            triples = active_extractor(prompt, row) or []
-        except Exception as exc:  # noqa: BLE001
-            # Transport failure (Ollama down) or a bad row: log, degrade, keep
-            # the rules floor. If it looks like the server is unreachable, stop
-            # the whole pass to avoid a timeout per row.
-            logger.warning("LLM fact extraction failed for row %s (%s)", record_id, exc)
-            if _looks_unreachable(exc):
-                transport_dead = True
+        # Pre-filter: skip rows that cannot carry a durable owner self-fact
+        # (greeting/ack, bare logistics question, link-only, too-short) BEFORE
+        # spending an LLM call. Conservative — see _likely_has_owner_fact. Does
+        # NOT touch role/attribution: it only decides whether to call the LLM.
+        if not _likely_has_owner_fact(content):
             continue
 
-        for triple in triples:
+        eligible.append(
+            {
+                "record_id": record_id,
+                "row": row,
+                "table": table,
+                "asserted_by": asserted_by,
+                "prompt": build_extraction_prompt(content),
+            }
+        )
+
+    if not eligible:
+        return 0
+
+    # ----- Phase 2: LLM fan-out (CONCURRENT, bounded). Only the extractor calls
+    # run concurrently (on threads via asyncio.to_thread); the sqlite writes are
+    # deferred to phase 3 on THIS thread. Results come back in input order. -------
+    tasks = [(i, item["prompt"], item["row"]) for i, item in enumerate(eligible)]
+    concurrency = max(1, min(FACTS_LLM_CONCURRENCY, len(tasks)))
+    try:
+        gathered = _run_coro_blocking(
+            _gather_extractions(active_extractor, tasks, concurrency)
+        )
+    except Exception as exc:  # noqa: BLE001 — the fan-out harness must never crash ingest
+        logger.warning("LLM fact pass: concurrent extraction failed (%s); skipping", exc)
+        return 0
+
+    # ----- Phase 3: DB writes (SERIAL, in row order). One thread, one sqlite
+    # connection — exact original write semantics (asserted_by, object_key dedup,
+    # supersession). Stop on the first transport-unreachable error to avoid
+    # re-attempting a dead server for the rest of the batch. ----------------------
+    written = 0
+    for index, triples, error in gathered:
+        item = eligible[index]
+        record_id = item["record_id"]
+        table = item["table"]
+        asserted_by = item["asserted_by"]
+        row = item["row"]
+
+        if error is not None:
+            logger.warning(
+                "LLM fact extraction failed for row %s (%s)", record_id, error
+            )
+            if _looks_unreachable(error):
+                # Server is down: the remaining rows would just time out too.
+                # Everything already gathered before this point is still written.
+                break
+            continue
+
+        for triple in triples or []:
             if not _is_owner_subject(triple):
                 continue  # a fact about someone else — never an owner fact
             predicate = normalize_predicate(triple.get("predicate") or "")
