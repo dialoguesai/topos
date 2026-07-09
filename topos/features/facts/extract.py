@@ -485,4 +485,22 @@ def extract_facts_from_batch(
             )
             if asserted is not None:  # None = owner-excluded, never re-asserted
                 written += 1
+
+    # B4 (PLAN_PROVENANCE_SPLIT P4.3): the rules pass above is the FLOOR. When
+    # the role-gated LLM pass is enabled, run it ADDITIVELY over the same batch
+    # — assert_fact de-dupes on object_key, so rules+LLM never double-count. The
+    # LLM pass is fully self-contained (its own role gate, its own try/except)
+    # and NEVER raises into ingestion; a belt-and-braces guard here keeps the
+    # rules floor's return value intact even if the module import itself fails.
+    try:
+        from .llm_extract import extract_owner_facts_llm, facts_llm_enabled
+
+        if facts_llm_enabled():
+            written += extract_owner_facts_llm(conn, rows)
+    except Exception as exc:  # noqa: BLE001 — ingestion must never crash on the LLM pass
+        import logging
+
+        logging.getLogger("topos.features.facts.extract").warning(
+            "LLM fact pass skipped (%s); rules-only facts retained", exc
+        )
     return written
