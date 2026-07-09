@@ -21,6 +21,7 @@ source-scrub silently and permanently dropped every sender→entity edge.
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 from typing import Callable, Dict, Optional
@@ -74,6 +75,77 @@ def _load_senders(conn: sqlite3.Connection, tables: set[str]) -> Dict[str, str]:
     return senders
 
 
+def _record_role_map(conn: sqlite3.Connection, by_record: Dict[str, Dict]) -> Dict[str, str]:
+    """record_id -> provenance role (authored>addressed>participated>observed>ambient).
+
+    Uses the record's materialized actor_role column when present, else computes
+    record_role() from the canonical row + effective source posture — the same
+    plan-§3.1 rules the extraction gates use. Unresolvable records fall back to
+    the role computed from the table name alone.
+    """
+    from ..provenance.roles import record_role
+
+    try:
+        from ...sources.registry import effective_posture
+    except Exception:  # pragma: no cover - registry optional in stripped builds
+        effective_posture = None  # type: ignore[assignment]
+
+    posture_cache: Dict[str, Optional[str]] = {}
+
+    def _posture(source_id: str) -> Optional[str]:
+        if source_id not in posture_cache:
+            posture = None
+            if effective_posture is not None and source_id:
+                try:
+                    posture = effective_posture(source_id, "", conn)
+                except Exception:
+                    posture = None
+            posture_cache[source_id] = posture
+        return posture_cache[source_id]
+
+    roles: Dict[str, str] = {}
+    for record_id, rec in by_record.items():
+        table = str(rec.get("table") or "")
+        source_id = str(rec.get("source_id") or "")
+        row: Dict[str, object] = {}
+        if table and table.replace("_", "").isalnum():
+            try:
+                cols = [str(c[1]) for c in conn.execute(f"PRAGMA table_info({table})")]
+                id_col = next(
+                    (c for c in ("record_id", "message_id", "entry_id", "event_id", "id") if c in cols),
+                    None,
+                )
+                if id_col:
+                    raw = conn.execute(
+                        f"SELECT * FROM {table} WHERE {id_col}=? LIMIT 1", (record_id,)
+                    ).fetchone()
+                    if raw is not None:
+                        row = dict(zip(cols, raw))
+            except sqlite3.Error:
+                row = {}
+        materialized = str(row.get("actor_role") or "").strip()
+        if materialized:
+            roles[record_id] = materialized
+            continue
+        try:
+            roles[record_id] = record_role(row, table=table, posture=_posture(source_id))
+        except Exception:
+            roles[record_id] = "ambient"
+    return roles
+
+
+def _dominant_role(mix: Dict[str, int]) -> str:
+    """Majority role; ties resolve to the more attributing role (ROLES order)."""
+    from ..provenance.roles import ROLES
+
+    best, best_count = "ambient", -1
+    for role in ROLES:  # precedence order: authored first
+        count = mix.get(role, 0)
+        if count > best_count:
+            best, best_count = role, count
+    return best
+
+
 def rebuild_evidence_edges(
     conn: sqlite3.Connection,
     *,
@@ -82,9 +154,11 @@ def rebuild_evidence_edges(
     """Recompute co_occurrence + communicates_with edges from surviving mentions.
 
     Deletes only the ACTIVE (valid_to IS NULL) evidence edges and rebuilds them;
-    part_of and closed history are preserved. Returns counts of edges written.
+    part_of and closed history are preserved. Each rebuilt edge is stamped with
+    its evidence's provenance (metadata.actor_role + role_mix) so the graph can
+    render the personal→ambient attribution spectrum. Returns counts written.
     """
-    from .edges import EDGE_CO_OCCURRENCE, EDGE_COMMUNICATES, update_edge
+    from .edges import EDGE_CO_OCCURRENCE, EDGE_COMMUNICATES, _canonical_order, update_edge
     from .resolver import EntityResolver
 
     resolver = EntityResolver(conn)
@@ -97,7 +171,7 @@ def rebuild_evidence_edges(
 
     rows = conn.execute(
         """
-        SELECT record_id, entity_id, canonical_table, event_at
+        SELECT record_id, entity_id, canonical_table, event_at, source_id
         FROM entity_mentions
         WHERE record_id IS NOT NULL
         ORDER BY COALESCE(event_at, created_at)
@@ -105,23 +179,33 @@ def rebuild_evidence_edges(
     ).fetchall()
 
     by_record: Dict[str, Dict] = {}
-    for record_id, entity_id, canonical_table, event_at in rows:
+    for record_id, entity_id, canonical_table, event_at, source_id in rows:
         rec = by_record.setdefault(
             str(record_id),
-            {"table": canonical_table, "event_at": event_at, "ents": []},
+            {"table": canonical_table, "event_at": event_at, "source_id": source_id, "ents": []},
         )
         rec["ents"].append(str(entity_id))
 
     tables = {r["table"] for r in by_record.values() if r["table"]}
     lookup = sender_lookup or _load_senders
     sender_by_record = lookup(conn, tables)
+    role_by_record = _record_role_map(conn, by_record)
 
     co = comm = 0
+    # (src, dst, type) -> {role: evidence_count}; stamped onto edges afterwards.
+    edge_roles: Dict[tuple, Dict[str, int]] = {}
+
+    def _tally(src: str, dst: str, edge_type: str, role: str) -> None:
+        key = _canonical_order(src, dst, edge_type) + (edge_type,)
+        mix = edge_roles.setdefault(key, {})
+        mix[role] = mix.get(role, 0) + 1
+
     for record_id, rec in by_record.items():
         # Cap per-record fan-out (mirrors the ingest path) so a giant record
         # doesn't create O(n^2) edges.
         unique = list(dict.fromkeys(rec["ents"]))[:8]
         event_at = rec["event_at"]
+        role = role_by_record.get(record_id, "ambient")
         for i in range(len(unique)):
             for j in range(i + 1, len(unique)):
                 update_edge(
@@ -131,6 +215,7 @@ def rebuild_evidence_edges(
                     edge_type=EDGE_CO_OCCURRENCE,
                     event_at=event_at,
                 )
+                _tally(unique[i], unique[j], EDGE_CO_OCCURRENCE, role)
                 co += 1
         sender_raw = sender_by_record.get(record_id)
         if sender_raw:
@@ -149,7 +234,19 @@ def rebuild_evidence_edges(
                         edge_type=EDGE_COMMUNICATES,
                         event_at=event_at,
                     )
+                    _tally(sender_id, ent, EDGE_COMMUNICATES, role)
                     comm += 1
+
+    # Stamp the aggregated provenance onto each active edge's metadata.
+    for (src, dst, edge_type), mix in edge_roles.items():
+        conn.execute(
+            """
+            UPDATE entity_edges
+            SET metadata_json = json_patch(COALESCE(metadata_json, '{}'), ?)
+            WHERE src_entity_id=? AND dst_entity_id=? AND edge_type=? AND valid_to IS NULL
+            """,
+            (json.dumps({"actor_role": _dominant_role(mix), "role_mix": mix}), src, dst, edge_type),
+        )
 
     conn.commit()
     return {"co_occurrence": co, "communicates_with": comm}

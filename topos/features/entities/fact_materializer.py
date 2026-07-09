@@ -49,6 +49,24 @@ def _now_iso() -> str:
     return edges_now()
 
 
+def _asserted_by_role(asserted_by: Optional[str]) -> str:
+    """Map a fact's asserted_by onto the record-role spectrum.
+
+    owner-stated facts are expression (authored); a contact's claim about the
+    owner is participated (they were in the exchange, the owner didn't say it);
+    assistant-derived facts are observed (inferred, not stated); anything else
+    (page-author, unknown) is ambient exposure.
+    """
+    v = str(asserted_by or "owner").strip().lower()
+    if v in ("owner", "self", "me"):
+        return "authored"
+    if v.startswith("contact"):
+        return "participated"
+    if v in ("assistant", "ai"):
+        return "observed"
+    return "ambient"
+
+
 def _entity_exists(conn: sqlite3.Connection, entity_id: str) -> bool:
     return conn.execute(
         "SELECT 1 FROM entities WHERE entity_id=?", (entity_id,)
@@ -91,6 +109,9 @@ def _upsert_materialized_edge(
             "statement": statement,
             "source_object_id": source_object_id,
             **({"asserted_by": asserted_by} if asserted_by else {}),
+            # Provenance tier for the attribution overlay: who asserted the
+            # fact maps onto the personal→ambient spectrum.
+            "actor_role": _asserted_by_role(asserted_by),
         }
     )
     row = conn.execute(
