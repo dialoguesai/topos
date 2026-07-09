@@ -2278,6 +2278,16 @@ def _build_summary_items(
         recency_intent = any(t in (query_text or "").lower() for t in _RECENCY_TERMS)
         canonical_weight = 2.0 if work_scope else 1.0
         vector_weight = 0.6 if work_scope else 1.0
+        # Interest/identity asks ("what are my interests/values/beliefs") want the
+        # lanes that SUMMARIZE the owner — dimension briefs, topic clusters, facts —
+        # to outrank raw recent chatter: a fresh logistics message ("Williamsburg!
+        # Brooklyn") is recency, not identity signal. Down-weight recency + lift the
+        # summarizing lanes, but ONLY for a belief/identity ask with no explicit
+        # recency intent ("lately" keeps recency strong; general recall is untouched).
+        identity_ask = belief_intent and not recency_intent
+        recent_weight = 0.4 if identity_ask else 1.0
+        brief_weight = 1.6 if identity_ask else 0.8
+        cluster_weight = 1.2 if identity_ask else 0.8
         # NOTE: cosine similarity must NOT waive the zero-df gate — a strong hit
         # on the generic half of a query ("compiler rewrite") cannot evidence a
         # name the corpus does not contain ("Threnody-7"). The N-lane found
@@ -2290,12 +2300,12 @@ def _build_summary_items(
                 ("goals", 1.0, goal_items),
                 ("canonical", canonical_weight, canonical_items),
                 ("contacts", 1.2, interaction_items),
-                ("briefs", 0.8, brief_items),
-                ("clusters", 0.8, cluster_items),
+                ("briefs", brief_weight, brief_items),
+                ("clusters", cluster_weight, cluster_items),
                 ("vector", vector_weight, vector_items),
                 ("vector_context", vector_weight * 0.8, vector_context_items),
                 ("signal_facts", 1.0, fact_items),
-                ("recent", 1.0, recent_items),
+                ("recent", recent_weight, recent_items),
             ],
             context_sources=frozenset(
                 {"briefs", "signal_facts", "vector_context"}
