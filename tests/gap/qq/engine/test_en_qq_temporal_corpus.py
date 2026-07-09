@@ -161,8 +161,12 @@ def test_t7_edge_and_t8_stat_seeded(seeded_db):
 
     from topos.features.entities.edges import top_edges
 
-    connected = top_edges(seeded_db, T7_SRC_ENTITY_ID)
+    # B2.2: the seeded collaboration is CLOSED (supersede_edge) — invisible to
+    # the default active-only read, surfaced with validity via include_closed.
+    assert top_edges(seeded_db, T7_SRC_ENTITY_ID) == []
+    connected = top_edges(seeded_db, T7_SRC_ENTITY_ID, include_closed=True)
     assert [e["entity_name"] for e in connected] == [NEEDLES["edge_former_collaborator"]]
+    assert connected[0]["valid_to"] is not None
 
     import json
 

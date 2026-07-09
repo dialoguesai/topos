@@ -90,6 +90,22 @@ from .signal_objects_updated_by_v1 import (
     MIGRATION_ID as SIGNAL_OBJECTS_UPDATED_BY_ID,
     apply_signal_objects_updated_by_v1_up,
 )
+from .signal_objects_period_v1 import (
+    MIGRATION_ID as SIGNAL_OBJECTS_PERIOD_V1_ID,
+    apply_signal_objects_period_v1_up,
+)
+from .entity_edges_validity_v1 import (
+    MIGRATION_ID as ENTITY_EDGES_VALIDITY_V1_ID,
+    apply_entity_edges_validity_v1_up,
+)
+from .episodes_v1 import (
+    MIGRATION_ID as EPISODES_V1_ID,
+    apply_episodes_v1_up,
+)
+from .actor_role_v1 import (
+    MIGRATION_ID as ACTOR_ROLE_V1_ID,  # noqa: F401 — exported for tests/tools
+    apply_actor_role_v1_up,
+)
 
 __all__ = ["apply_all_migrations", "ensure_migrations_applied"]
 
@@ -149,6 +165,12 @@ def apply_all_migrations(conn: sqlite3.Connection) -> None:
     apply_journal_entries_starts_at_v1_up(conn)
     apply_signal_objects_updated_by_v1_up(conn)
     apply_signal_dimension_backfill_v1_up(conn)
+    # B2 temporal-graph storage (period columns / edge validity / episodes).
+    apply_signal_objects_period_v1_up(conn)
+    apply_entity_edges_validity_v1_up(conn)
+    apply_episodes_v1_up(conn)
+    # P4.1 provenance: actor_role column + record_role backfill.
+    apply_actor_role_v1_up(conn)
 
 
 def ensure_migrations_applied(conn: sqlite3.Connection) -> None:
@@ -209,3 +231,12 @@ def ensure_migrations_applied(conn: sqlite3.Connection) -> None:
     apply_signal_objects_updated_by_v1_up(conn)
     if not _migration_applied(conn, SIGNAL_DIMENSION_BACKFILL_V1_ID):
         apply_signal_dimension_backfill_v1_up(conn)
+    # Period column adds re-run cheaply after legacy DDL (backfill scan is
+    # ledger-guarded inside); edge validity keys on the valid_to column check.
+    apply_signal_objects_period_v1_up(conn)
+    apply_entity_edges_validity_v1_up(conn)
+    if not _migration_applied(conn, EPISODES_V1_ID):
+        apply_episodes_v1_up(conn)
+    # P4.1 actor_role column adds re-run cheaply after legacy DDL; the
+    # record_role backfill is ledger-guarded inside.
+    apply_actor_role_v1_up(conn)

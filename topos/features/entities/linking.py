@@ -110,19 +110,42 @@ def link_query_entities(conn: sqlite3.Connection, query_text: str) -> List[Dict[
     return scored[:_MAX_LINKED]
 
 
+def _closed_edge_label(edge: Dict[str, Any]) -> str:
+    """Render an ended edge with the staleness marker (T7 contract).
+
+    The literal "no longer current" is load-bearing — the T7 oracle greps it —
+    and the form mirrors the fact lane's marker
+    ("… (no longer current — superseded YYYY-MM-DD)")."""
+    return (
+        f"{edge['entity_name']} "
+        f"(no longer current — superseded {str(edge.get('valid_to') or '')[:10]})"
+    )
+
+
 def entity_context_items(
     conn: sqlite3.Connection,
     linked: List[Dict[str, Any]],
     *,
     max_per_entity: int = 4,
+    temporal_shift: str | None = None,
 ) -> List[Dict[str, Any]]:
-    """Ordered summary items for linked entities: dossier line, then recent mentions."""
+    """Ordered summary items for linked entities: dossier line, then recent mentions.
+
+    temporal_shift='past' (planner belief-revision signal) widens the edge
+    read to CLOSED revisions: ended relationships render with the
+    "no longer current" marker instead of being invisible (B2.2/T7).
+    """
     from .dossier import load_dossier_for_entity
     from .edges import top_edges
 
+    include_closed = temporal_shift == "past"
     items: List[Dict[str, Any]] = []
     for entity in linked:
         entity_id = entity["entity_id"]
+        closed_edges: List[Dict[str, Any]] = []
+        if include_closed:
+            widened = top_edges(conn, entity_id, limit=6, include_closed=True)
+            closed_edges = [e for e in widened if e.get("valid_to")]
         dossier = load_dossier_for_entity(conn, entity_id)
         if dossier:
             text = dossier.get("summary_text") or ""
@@ -131,6 +154,10 @@ def entity_context_items(
                 text += " Top connections: " + "; ".join(connections[:3])
             for stat_line in dossier.get("stat_lines") or []:
                 text += f" {stat_line}"
+            if closed_edges:
+                text += " Formerly connected to: " + ", ".join(
+                    _closed_edge_label(e) for e in closed_edges[:3]
+                ) + "."
             items.append(
                 {
                     "topic": dossier.get("canonical_name"),
@@ -142,11 +169,11 @@ def entity_context_items(
                 }
             )
         else:
-            edges = top_edges(conn, entity_id, limit=3)
-            if edges:
-                text = f"{entity['canonical_name']}: connected to " + ", ".join(
-                    e["entity_name"] for e in edges
-                )
+            active_edges = top_edges(conn, entity_id, limit=3)
+            names = [e["entity_name"] for e in active_edges]
+            names += [_closed_edge_label(e) for e in closed_edges[:3]]
+            if names:
+                text = f"{entity['canonical_name']}: connected to " + ", ".join(names)
                 items.append(
                     {
                         "topic": entity["canonical_name"],

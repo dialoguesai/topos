@@ -35,6 +35,11 @@ class RetrievalRequest:
     # data never participates (PermLLM access-advantage=0), and the shape is identical to a
     # query about a nonexistent entity (CQE indistinguishability).
     suppress_selectors: bool = False
+    # Reference instant for temporal planning (as-of derivation, relative time
+    # ranges). datetime or ISO string; None → wall clock. Eval harnesses inject
+    # a fixed now (pipeline.execute(now=...) or TOPOS_QUERY_NOW) so month
+    # arithmetic is reproducible.
+    now: Optional[Any] = None
 
 
 @dataclass

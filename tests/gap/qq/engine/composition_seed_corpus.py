@@ -299,11 +299,11 @@ def build_seeded_corpus(db_path: Path) -> Path:
         )
 
         # Layer: entity edges (T7). A collaboration that ENDED in the past,
-        # written through the production update_edge path. entity_edges has
-        # UNIQUE(src,dst,type) and no validity columns (plan B2.2): no closed
-        # revision or staleness marker can exist yet — exactly what T7
-        # instruments. Maren gets mentions (so she links) but NO dossier, so
-        # entity_context_items takes the top_edges branch.
+        # written through the production update_edge + supersede_edge paths
+        # (B2.2 edge validity: the edge is CLOSED with valid_to stamped, so a
+        # past-shift query can surface it with the staleness marker). Maren
+        # gets mentions (so she links) but NO dossier, so entity_context_items
+        # takes the top_edges branch.
         conn.execute(
             """INSERT INTO entities
                (entity_id, entity_type, canonical_name, normalized_name, mention_count,
@@ -325,7 +325,7 @@ def build_seeded_corpus(db_path: Path) -> Path:
                        'Maren Oxbow signed the sublease ledger', ?, 'demo_messenger_file')""",
             (T7_SRC_ENTITY_ID, _iso(70)),
         )
-        from topos.features.entities.edges import update_edge
+        from topos.features.entities.edges import supersede_edge, update_edge
 
         update_edge(
             conn,
@@ -333,6 +333,15 @@ def build_seeded_corpus(db_path: Path) -> Path:
             dst_entity_id=T7_DST_ENTITY_ID,
             edge_type=T7_EDGE_TYPE,
             event_at=_iso(75),
+        )
+        # The collaboration ended: close the edge (valid_to stamped) so the
+        # T7 'no longer current — superseded YYYY-MM-DD' marker can render.
+        supersede_edge(
+            conn,
+            src_entity_id=T7_SRC_ENTITY_ID,
+            dst_entity_id=T7_DST_ENTITY_ID,
+            edge_type=T7_EDGE_TYPE,
+            valid_to=_iso(70),
         )
 
         # Layer: dated stat insight (T8). Unlike the kayak stat above, this one
@@ -713,15 +722,13 @@ SEEDED_COMPOSITION_CASES: List[CompositionCase] = [
         expected_sources=("entity_graph",),
         topic_terms=("maren", "oxbow", "brindle"),
         layer="edges:validity", query_class="known_item",
-        description="B1.4 edge validity — RED BY CONSTRUCTION until B2.2 (SEL-lane "
-                    "precedent: instruments a mechanism that does not exist yet): "
-                    "entity_edges has UNIQUE(src,dst,type) and no valid_from/valid_to "
-                    "(storage/db/migrations/wiki_entities_v1.py), so an ended "
-                    "relationship cannot be closed or carry a staleness marker. The "
-                    "edge itself surfaces via the top_edges branch of "
-                    "entity_context_items (Maren has no dossier); the 'no longer "
-                    "current' group stays red. Query avoids 'studio'/'space' tokens "
-                    "so the studio-space fact chain's marker cannot false-match."),
+        description="B1.4 edge validity (greened by B2.2): the seeded collaboration "
+                    "is CLOSED via supersede_edge (valid_to stamped); the planner's "
+                    "past-shift ('before') widens entity_context_items to closed "
+                    "edges, which render the 'no longer current — superseded "
+                    "YYYY-MM-DD' marker via the top_edges branch (Maren has no "
+                    "dossier). Query avoids 'studio'/'space' tokens so the "
+                    "studio-space fact chain's marker cannot false-match."),
     CompositionCase(
         "T8", "seeded", "How much did I spend on kiln firing?", "resources:read", "summary",
         oracle_t8_staleness_honesty,

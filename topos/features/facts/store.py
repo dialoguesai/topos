@@ -111,6 +111,7 @@ class FactStore:
         disclosure: str = "scoped",
         period_start: Optional[str] = None,
         period_end: Optional[str] = None,
+        asserted_by: str = "owner",
     ) -> Dict[str, Any]:
         pred = normalize_predicate(predicate)
         if not subject_entity_id or not pred or not str(object_value or "").strip():
@@ -138,33 +139,58 @@ class FactStore:
             "object_entity_id": object_entity_id,
             "confidence": round(float(confidence), 3),
             "disclosure": disclosure,
+            # P4.4: who holds the fact to be true (owner | contact:<id> |
+            # assistant | page-author). Non-owner assertions render with
+            # attribution — see render().
+            "asserted_by": str(asserted_by or "owner"),
         }
         if period_start:
             payload["period_start"] = str(period_start)
         if period_end:
             payload["period_end"] = str(period_end)
         now = _now_iso()
-        self._conn.execute(
-            """
-            INSERT INTO signal_objects (
-                object_id, signal_dimension, object_type, object_key,
-                payload_json, confidence, source_refs_json,
-                valid_from, valid_to, extractor_version,
-                created_at, updated_at, created_by
-            ) VALUES (?, ?, 'fact', ?, ?, ?, ?, ?, NULL, 'fact_store_v1', ?, ?, 'system')
-            """,
-            (
-                object_id,
-                str(dimension).strip().lower(),
-                object_key,
-                json.dumps(payload),
-                float(confidence),
-                json.dumps(source_refs or []),
-                valid_from,
-                now,
-                now,
-            ),
-        )
+        insert_params = [
+            object_id,
+            str(dimension).strip().lower(),
+            object_key,
+            json.dumps(payload),
+            float(confidence),
+            json.dumps(source_refs or []),
+            valid_from,
+            now,
+            now,
+        ]
+        try:
+            # B2.1: real-world period stamped into the indexed event-time
+            # columns alongside the payload keys.
+            self._conn.execute(
+                """
+                INSERT INTO signal_objects (
+                    object_id, signal_dimension, object_type, object_key,
+                    payload_json, confidence, source_refs_json,
+                    valid_from, valid_to, extractor_version,
+                    created_at, updated_at, created_by, period_start, period_end
+                ) VALUES (?, ?, 'fact', ?, ?, ?, ?, ?, NULL, 'fact_store_v1', ?, ?, 'system', ?, ?)
+                """,
+                (
+                    *insert_params,
+                    str(period_start) if period_start else None,
+                    str(period_end) if period_end else None,
+                ),
+            )
+        except sqlite3.OperationalError:
+            # Pre-B2.1 schema (migration not run): legacy column set.
+            self._conn.execute(
+                """
+                INSERT INTO signal_objects (
+                    object_id, signal_dimension, object_type, object_key,
+                    payload_json, confidence, source_refs_json,
+                    valid_from, valid_to, extractor_version,
+                    created_at, updated_at, created_by
+                ) VALUES (?, ?, 'fact', ?, ?, ?, ?, ?, NULL, 'fact_store_v1', ?, ?, 'system')
+                """,
+                insert_params,
+            )
         self._conn.commit()
         return self._row_to_fact(self._get_row(object_id))
 
@@ -358,4 +384,9 @@ class FactStore:
             text += f" ({period_start}–{period_end})"
         elif period_start:
             text += f" (since {period_start})"
+        # P4.4: non-owner assertions carry attribution — "who holds this fact
+        # to be true" must be visible wherever the claim is rendered.
+        asserted_by = str(payload.get("asserted_by") or "owner")
+        if asserted_by != "owner":
+            text += f" — per {asserted_by}"
         return text

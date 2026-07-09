@@ -7,6 +7,12 @@ from .definitions import DataSourceDefinition
 from shared.filtering import FilterInstance, FilterManifest
 
 
+# Posture defaults (PLAN_PROVENANCE_SPLIT §3.1): journal/resume/profile-grade
+# sources are 'personal' (owner-authored by construction); chat sources are
+# 'mixed' (role decided per-row); browser_visits/feeds are 'ambient' (exposure,
+# not expression); browser_events is 'personal'-grade engagement (highlights/
+# stars are deliberate owner actions). Every bundled source sets it explicitly;
+# runtime-installed payloads without the key default to 'mixed'.
 def _source(**kwargs) -> DataSourceDefinition:
     return DataSourceDefinition(**apply_bundled_canonical_defaults(kwargs))
 
@@ -17,6 +23,7 @@ def _manifest(*filters: FilterInstance) -> dict:
 
 CHATGPT_FILE = _source(
     source_id="chatgpt_file_ingestion",
+    posture="mixed",
     display_name="ChatGPT File Ingestion",
     source_type="file",
     delivery="owner_upload",
@@ -52,6 +59,7 @@ CHATGPT_FILE = _source(
 
 CHATGPT_UI = _source(
     source_id="chatgpt_ui_conversation",
+    posture="mixed",
     display_name="ChatGPT UI Conversation",
     source_type="ui_stream",
     delivery="client_push",
@@ -87,6 +95,7 @@ CHATGPT_UI = _source(
 # Sprint 3: Browser plugin source
 BROWSER_VISITS = _source(
     source_id="browser_visits",
+    posture="ambient",
     display_name="Browser Visits",
     source_type="ui_stream",
     delivery="client_push",
@@ -125,6 +134,7 @@ BROWSER_VISITS = _source(
 # Browser plugin events: clicks, highlights, star_page, VIDEO_PLAY
 BROWSER_EVENTS = _source(
     source_id="browser_events",
+    posture="personal",
     display_name="Browser Events",
     source_type="ui_stream",
     delivery="client_push",
@@ -163,6 +173,7 @@ BROWSER_EVENTS = _source(
 # Remote connectors: GitHub user events fetched via remote MCP tools, saved via app_ingest
 GITHUB_ACTIVITY = _source(
     source_id="github_activity",
+    posture="personal",
     display_name="GitHub Activity",
     source_type="ui_stream",
     delivery="client_push",
@@ -195,6 +206,7 @@ GITHUB_ACTIVITY = _source(
 # Sprint 02: Messenger ingestion (local_sync -> conversation_messages)
 IMESSAGE = _source(
     source_id="imessage",
+    posture="mixed",
     display_name="iMessage",
     source_type="local_sync",
     delivery="local_sync",
@@ -232,6 +244,7 @@ IMESSAGE = _source(
 
 SIGNAL = _source(
     source_id="signal",
+    posture="mixed",
     display_name="Signal Desktop",
     source_type="local_sync",
     delivery="local_sync",
@@ -269,6 +282,7 @@ SIGNAL = _source(
 
 CALENDAR_STUB = _source(
     source_id="calendar_stub",
+    posture="personal",
     display_name="Calendar (stub)",
     source_type="stub",
     schema_id="calendar.stub.v1",
@@ -283,6 +297,7 @@ CALENDAR_STUB = _source(
 
 CONTACTS_ENRICHMENT_STUB = _source(
     source_id="contacts_enrichment_stub",
+    posture="personal",
     display_name="Contacts enrichment (stub)",
     source_type="stub",
     schema_id="contacts.stub.v1",
@@ -299,6 +314,7 @@ _DEMO_FILE_SHAPE = {"format": "csv", "has_header": True}
 
 DEMO_MESSENGER_FILE = _source(
     source_id="demo_messenger_file",
+    posture="mixed",
     display_name="Demo Messenger (private)",
     source_type="file",
     delivery="owner_upload",
@@ -312,6 +328,7 @@ DEMO_MESSENGER_FILE = _source(
 
 DEMO_EMAIL_FILE = _source(
     source_id="demo_email_file",
+    posture="mixed",
     display_name="Demo Email Threads (private)",
     source_type="file",
     delivery="owner_upload",
@@ -329,6 +346,7 @@ DEMO_EMAIL_FILE = _source(
 
 DEMO_CALENDAR_FILE = _source(
     source_id="demo_calendar_file",
+    posture="personal",
     display_name="Demo Calendar (private)",
     source_type="file",
     delivery="owner_upload",
@@ -345,6 +363,7 @@ DEMO_CALENDAR_FILE = _source(
 
 DEMO_JOURNAL_FILE = _source(
     source_id="demo_journal_file",
+    posture="personal",
     display_name="Demo Journal (private)",
     source_type="file",
     delivery="owner_upload",
@@ -362,6 +381,7 @@ DEMO_JOURNAL_FILE = _source(
 
 DEMO_RESUME_FILE = _source(
     source_id="demo_resume_file",
+    posture="personal",
     display_name="Demo Resume (private)",
     source_type="file",
     delivery="owner_upload",
@@ -378,6 +398,7 @@ DEMO_RESUME_FILE = _source(
 
 DEMO_FINANCIAL_FILE = _source(
     source_id="demo_financial_file",
+    posture="personal",
     display_name="Demo Bank Accounts (private)",
     source_type="file",
     delivery="owner_upload",
@@ -393,6 +414,7 @@ DEMO_FINANCIAL_FILE = _source(
 
 DEMO_BROWSER_FILE = _source(
     source_id="demo_browser_file",
+    posture="ambient",
     display_name="Demo Browser Activity (private)",
     source_type="file",
     delivery="owner_upload",
@@ -410,6 +432,7 @@ DEMO_BROWSER_FILE = _source(
 
 DEMO_PLACES_FILE = _source(
     source_id="demo_places_file",
+    posture="personal",
     display_name="Demo Places / Travel (private)",
     source_type="file",
     delivery="owner_upload",
@@ -425,6 +448,7 @@ DEMO_PLACES_FILE = _source(
 
 DEMO_CONTACTS_FILE = _source(
     source_id="demo_contacts_file",
+    posture="personal",
     display_name="Demo Contacts (private)",
     source_type="file",
     delivery="owner_upload",
@@ -441,6 +465,7 @@ DEMO_CONTACTS_FILE = _source(
 # VoxTerm voice transcript segments (ui_stream / app_ingest)
 VOXTERM_TRANSCRIPTS = _source(
     source_id="voxterm_transcripts",
+    posture="mixed",
     display_name="VoxTerm Transcripts",
     source_type="ui_stream",
     delivery="client_push",

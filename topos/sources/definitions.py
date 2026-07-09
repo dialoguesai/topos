@@ -14,6 +14,14 @@ DELIVERY_VALUES = frozenset(
     {DELIVERY_OWNER_UPLOAD, DELIVERY_OWNER_UI, DELIVERY_LOCAL_SYNC, DELIVERY_CLIENT_PUSH}
 )
 
+# Source posture (PLAN_PROVENANCE_SPLIT §3.1, axis 1): source-level default for
+# whose words the content is. Per-row record role refines it downstream
+# (features.provenance.roles.record_role).
+POSTURE_PERSONAL = "personal"  # owner-authored by construction (journal, resume)
+POSTURE_MIXED = "mixed"  # role decided per-row (chats: owner + others + assistant)
+POSTURE_AMBIENT = "ambient"  # exposure, not expression (browser visits, feeds)
+POSTURE_VALUES = frozenset({POSTURE_PERSONAL, POSTURE_MIXED, POSTURE_AMBIENT})
+
 # ui_stream splits by who carries the bytes (CONNECTOR_SPEC.md §3). Every bundled
 # ui_stream source today is pushed by external software; owner_ui is reserved for
 # future in-UI entry (journal, home chat) and gets sources listed here explicitly.
@@ -101,6 +109,10 @@ class DataSourceDefinition:
     parser_id: str
     # How data arrives (CONNECTOR_SPEC.md §3); derived from source_type when unset.
     delivery: Optional[str] = None
+    # Whose words the content is by default (PLAN_PROVENANCE_SPLIT §3.1):
+    # personal | mixed | ambient. 'mixed' is the safe default — role is then
+    # decided per-row. Registry sources set this explicitly.
+    posture: str = POSTURE_MIXED
     canonical_mapper_id: Optional[str] = None
     canonical_group_id: Optional[str] = None
     raw_enrichment_jobs: List[str] = field(default_factory=list)
@@ -139,6 +151,10 @@ class DataSourceDefinition:
             )
         if self.delivery is None:
             object.__setattr__(self, "delivery", derive_delivery(self.source_type, self.source_id))
+        if self.posture not in POSTURE_VALUES:
+            raise ValueError(
+                f"posture must be one of {sorted(POSTURE_VALUES)}, got {self.posture!r}"
+            )
         if self.filter_tier_kind is not None and self.filter_tier_kind not in {"sensitivity", "inferability"}:
             raise ValueError("filter_tier_kind must be 'sensitivity' or 'inferability'")
         if self.default_filter_tiers is not None:
@@ -156,6 +172,9 @@ class DataSourceDefinition:
             # definitions stay readable across the delivery rollout (spec §3).
             "source_type": self.source_type,
             "delivery": self.delivery,
+            # Always emitted: readers that predate posture ignore unknown keys
+            # (definition_from_payload filters to known dataclass fields).
+            "posture": self.posture,
             "schema_id": self.schema_id,
             "parser_id": self.parser_id,
             "canonical_mapper_id": self.canonical_mapper_id,

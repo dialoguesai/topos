@@ -15,7 +15,7 @@ import json
 import logging
 import math
 import sqlite3
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from . import definitions as defs
@@ -256,6 +256,34 @@ class StatsEngine:
 
     # ---------------------------------------------------------- promotion
 
+    def _promotion_period(self, insight: Dict[str, Any]) -> Tuple[Optional[str], str, str]:
+        """(period_start, period_end, as_of) for a promoted stat insight (B2.3).
+
+        Staleness honesty (T8): every stat artifact must carry its OWN event
+        period, not just a value. Windowed insights ('dN') are bounded by the
+        promotion clock (the read window is relative to now); all-time
+        insights are bounded by the folded evidence itself (stat_state
+        watermark = latest event folded, earliest daily bucket when present).
+        All values are ISO dates (YYYY-MM-DD).
+        """
+        today = datetime.now(timezone.utc).date()
+        as_of = today.isoformat()
+        window = str(insight.get("window") or "")
+        if window.startswith("d") and window[1:].isdigit():
+            days = int(window[1:])
+            return (today - timedelta(days=days)).isoformat(), as_of, as_of
+        try:
+            row = self._conn.execute(
+                """SELECT MIN(NULLIF(bucket_date, '')), MAX(watermark)
+                   FROM stat_state WHERE stat_id=? AND group_key=?""",
+                (insight["stat_id"], insight.get("group_key") or ""),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            row = None
+        period_start = str(row[0])[:10] if row and row[0] else None
+        period_end = str(row[1])[:10] if row and row[1] else as_of
+        return period_start, period_end, as_of
+
     def promote_insights(self, adapters) -> int:
         """Render insight facts into signal_facts (stable ids; owner-only)."""
         from .insights import render_insights
@@ -282,23 +310,34 @@ class StatsEngine:
             if insight_key in excluded_keys:
                 continue  # owner-excluded: never re-promote
             fact_id = f"stat:{insight_key}"
-            adapters.signal.put_fact(
-                {
-                    "fact_id": fact_id,
-                    "dimension": insight.get("dimension") or "memory",
-                    "source_id": "stats_engine",
-                    "record_id": insight["stat_id"],
-                    "object_type": "stat_insight",
-                    "tag": insight["text"],
-                    "summary_text": insight["text"],
-                    "stat_summary": insight.get("summary"),
-                    "group_key": insight.get("group_key"),
-                    "window": insight.get("window"),
-                    "confidence": insight.get("confidence"),
-                    "disclosure": "owner_only",
-                    "provider": "topos",
-                    "model": "stats_engine_v1",
-                }
-            )
+            # B2.3 date-stamping (data side of T8): the artifact carries its
+            # own period in the payload AND the summary text carries the
+            # window's end date in ISO form, so a rendered stat can never
+            # masquerade as current.
+            period_start, period_end, as_of = self._promotion_period(insight)
+            fact = {
+                "fact_id": fact_id,
+                "dimension": insight.get("dimension") or "memory",
+                "source_id": "stats_engine",
+                "record_id": insight["stat_id"],
+                "object_type": "stat_insight",
+                "tag": insight["text"],
+                "summary_text": f"{insight['text']} (as of {period_end})",
+                "stat_summary": insight.get("summary"),
+                "group_key": insight.get("group_key"),
+                "window": insight.get("window"),
+                "period_start": period_start,
+                "period_end": period_end,
+                "as_of": as_of,
+                "confidence": insight.get("confidence"),
+                "disclosure": "owner_only",
+                "provider": "topos",
+                "model": "stats_engine_v1",
+            }
+            # Exposure-profile ledger marker (plan contract: query-side stat
+            # selection separates behavioral ledgers from authored ones).
+            if insight.get("ledger"):
+                fact["ledger"] = str(insight["ledger"])
+            adapters.signal.put_fact(fact)
             written += 1
         return written

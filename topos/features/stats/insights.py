@@ -18,6 +18,18 @@ _WINDOW_LABELS = {"d7": "last 7 days", "d30": "last 30 days", "d90": "last 90 da
 _WINDOWED_GROUP_CAP = 20  # windowed variants only for the most active groups
 
 
+def _summary_with_payload(defn: Dict[str, Any], summary: Dict[str, Any]) -> Dict[str, Any]:
+    """Merge the definition's code-side payload markers (defs.STAT_PAYLOADS,
+    e.g. {"ledger": "exposure"}) into the insight summary. promote_insights
+    forwards the summary as the fact's stat_summary, which is the only
+    payload channel the engine exposes — query-side stat selection reads the
+    marker from there (PLAN_PROVENANCE_SPLIT P1.3 / contract 5)."""
+    payload = defn.get("payload")
+    if payload:
+        return {**summary, **payload}
+    return summary
+
+
 def _recent_window(defn: Dict[str, Any]) -> str:
     """The window used for the 'recent' insight variant (prefers d30)."""
     windows = [str(w) for w in (defn.get("windows") or []) if str(w) != "all"]
@@ -40,7 +52,7 @@ def _windowed_insight(
     n = int(state.get("n") or 0)
     if n < _MIN_N:
         return None
-    summary = summarize(defn["stat_kind"], state)
+    summary = _summary_with_payload(defn, summarize(defn["stat_kind"], state))
     text = _render_text(defn["stat_id"], defn["stat_kind"], group_key, summary, defn, label_map or {})
     if not text:
         return None
@@ -103,7 +115,7 @@ def render_insights(engine) -> List[Dict[str, Any]]:
             n = int(state.get("n") or 0)
             if n < _MIN_N:
                 continue
-            summary = summarize(kind, state)
+            summary = _summary_with_payload(defn, summarize(kind, state))
             text = _render_text(stat_id, kind, "", summary, defn)
             if text:
                 out.append(
@@ -127,7 +139,7 @@ def render_insights(engine) -> List[Dict[str, Any]]:
             n = int(state.get("n") or 0)
             if n < _MIN_N or not group_key:
                 continue
-            summary = summarize(kind, state)
+            summary = _summary_with_payload(defn, summarize(kind, state))
             text = _render_text(stat_id, kind, group_key, summary, defn, label_map)
             if text:
                 out.append(
@@ -172,7 +184,12 @@ def _render_text(
         top = summary.get("top") or []
         if not top:
             return ""
-        if str(defn.get("value_expr")) in ("hour_of_week", "hour_of_day", "weekday"):
+        if str(defn.get("value_expr")) in (
+            "hour_of_week",
+            "hour_of_week_authored",
+            "hour_of_day",
+            "weekday",
+        ):
             bands = ", ".join(f"{t['bucket']}" for t in top[:3])
             subject = "web activity" if stat_id.startswith("activity") else "AI chat activity"
             return f"Most {subject} happens around: {bands} (n={summary.get('n')})."
@@ -197,6 +214,13 @@ def _render_text(
             return f"Typical calendar commitment: {_fmt_minutes(mean)} ± {_fmt_minutes(sd)} (n={summary.get('n')})."
         return f"{stat_id} [{group_key}]: mean {mean:.1f} ± {sd:.1f} (n={summary.get('n')})."
     if kind == "count":
+        # Sent family (PLAN_PROVENANCE_SPLIT P1.3): authored-gated counts must
+        # read as the owner's OWN sending ("You sent N messages…") so
+        # first-person volume asks select them over thread/exposure volume.
+        if stat_id == "messages.volume.sent.total":
+            return f"You sent {summary.get('n')} messages overall."
+        if stat_id == "messages.volume.sent.by_thread":
+            return f"You sent {summary.get('n')} messages in {group_key}."
         if stat_id == "places.visits.by_city":
             return f"Cities visited: {group_key} — {summary.get('n')} visits."
         if stat_id == "places.visits.by_place":

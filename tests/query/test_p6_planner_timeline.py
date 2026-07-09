@@ -71,6 +71,114 @@ class TestQueryPlanner:
         plan = build_query_plan(conn, "", now=_NOW)
         assert plan == QueryPlan(query_text="")
 
+    def test_injected_now_drives_month_arithmetic(self, conn) -> None:
+        """now= threading (B1.1): the same bare-month query resolves against
+        the injected instant, not the wall clock."""
+        july = build_query_plan(conn, "what was my setup in January?", now=_NOW)
+        assert july.as_of == "2026-01-31"
+        jan = build_query_plan(
+            conn, "what was my setup in January?",
+            now=datetime(2026, 1, 15, tzinfo=timezone.utc),
+        )
+        assert jan.as_of == "2025-01-31"
+
+
+class TestAsOfDerivation:
+    """B1.1: 'in <Month> [year]' → last day of that (past) month, ISO date."""
+
+    def test_explicit_month_and_year(self, conn) -> None:
+        plan = build_query_plan(conn, "What was my studio space in May 2026?", now=_NOW)
+        assert plan.as_of == "2026-05-31"
+        assert plan.to_meta()["as_of"] == "2026-05-31"
+
+    def test_bare_past_month_resolves_this_year(self, conn) -> None:
+        plan = build_query_plan(conn, "What was my studio space in March?", now=_NOW)
+        assert plan.as_of == "2026-03-31"
+
+    def test_bare_future_month_resolves_last_year(self, conn) -> None:
+        # now is July 2026; November hasn't happened yet → November 2025.
+        plan = build_query_plan(conn, "where did I stay in November?", now=_NOW)
+        assert plan.as_of == "2025-11-30"
+
+    def test_february_leap_year(self, conn) -> None:
+        plan = build_query_plan(conn, "what happened in February 2024?", now=_NOW)
+        assert plan.as_of == "2024-02-29"
+
+    def test_bare_current_month_is_last_years(self, conn) -> None:
+        # "in July" asked during July: the most recent PAST July is last year's.
+        assert build_query_plan(conn, "what happened in July?", now=_NOW).as_of == "2025-07-31"
+
+    def test_explicit_current_month_is_present_tense(self, conn) -> None:
+        assert build_query_plan(conn, "what happened in July 2026?", now=_NOW).as_of is None
+
+    def test_explicit_future_month_never_anchors(self, conn) -> None:
+        assert build_query_plan(conn, "my calendar in March 2027", now=_NOW).as_of is None
+
+    def test_month_with_day_is_a_date_not_an_as_of(self, conn) -> None:
+        plan = build_query_plan(conn, "what happened in March 13?", now=_NOW)
+        assert plan.as_of is None  # explicit-date path owns this phrase
+
+    def test_no_month_no_as_of(self, conn) -> None:
+        assert build_query_plan(conn, "what is my studio space?", now=_NOW).as_of is None
+
+
+class TestFirstPersonIntent:
+    """P3.3 conservative v1: identity/belief phrasings trip; artifact
+    possessives must not."""
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "What do I actually think about cryptocurrency?",
+            "How do I feel about remote work?",
+            "What is my opinion on urban beekeeping?",
+            "What are my hobbies and interests?",
+            "Am I interested in cold plunges?",
+            "What's my style preference?",
+            "Have I said anything about the merger?",
+            "How many messages have I sent in the Harbor Collective group?",
+            "Who are the people I talk to and interact with?",
+            "What are my current goals and what am I working toward?",
+        ],
+    )
+    def test_positive(self, conn, query) -> None:
+        assert build_query_plan(conn, query, now=_NOW).first_person_intent
+
+    @pytest.mark.parametrize(
+        "query",
+        [
+            "my meeting notes from Tuesday",
+            "Show me my most recent messages",
+            "What is on my calendar, what meetings do I have?",
+            "How many messages have I exchanged with my most frequent contact?",
+            "What do I know about my contact Alex?",
+            "What moods do I record most often in my journal?",
+            "How often do I message people — what is my messaging cadence?",
+            "What was I doing last week?",
+            "What is my current studio space?",
+            "Where was my studio space before?",
+            "when am I free next week",
+            "Tell me about Luc and how often we talk",
+        ],
+    )
+    def test_negative(self, conn, query) -> None:
+        assert not build_query_plan(conn, query, now=_NOW).first_person_intent
+
+    def test_belief_subclass(self, conn) -> None:
+        plan = build_query_plan(conn, "What do I think about glazes?", now=_NOW)
+        assert plan.first_person_belief
+        # goals possessive is first-person but NOT belief (goal store answers it;
+        # no message-row hard filter).
+        goals = build_query_plan(conn, "What are my current goals?", now=_NOW)
+        assert goals.first_person_intent and not goals.first_person_belief
+
+    def test_interaction_browse(self, conn) -> None:
+        plan = build_query_plan(conn, "Who do I talk to the most?", now=_NOW)
+        assert plan.interaction_browse and plan.first_person_intent
+        assert not build_query_plan(
+            conn, "Tell me about Luc and how often we talk", now=_NOW
+        ).interaction_browse
+
 
 class TestTimelineJob:
     def test_batch_writes_timeline_rows(self, conn, monkeypatch) -> None:

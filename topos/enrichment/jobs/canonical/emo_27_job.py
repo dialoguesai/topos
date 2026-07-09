@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ..base import BaseEnrichmentJob
 from ._batch_limits import MAX_JOB_MESSAGES
+from ....features.provenance.roles import record_role
 from ._engine_runner import run_engine_task
 from .brief_fallback import prepare_signal_record
 from ...progress_bar import ProgressBar
@@ -52,6 +53,15 @@ class Emo27Job(BaseEnrichmentJob):
                         "message_id": message_id,
                         "text": content,
                         "source_id": source_id,
+                        # P1.3 (PLAN_PROVENANCE_SPLIT): message_emotions is
+                        # per-message data, so EVERY row is still classified —
+                        # but each emitted record carries whose words it
+                        # classified, so owner-wellbeing aggregation can filter
+                        # to authored(+addressed) downstream. Stripped from the
+                        # engine payload in _classify_batch (payload contract
+                        # unchanged); persisted via message_emotions
+                        # payload_json (wiki schema stores the whole record).
+                        "role": record_role(msg, table=str(msg.get("_table") or "")),
                     }
                 )
 
@@ -76,6 +86,9 @@ class Emo27Job(BaseEnrichmentJob):
             return []
         record_ids = [str(i["message_id"]) for i in items]
         source_id = items[0].get("source_id")
+        # role is job-side metadata; the engine's classification payload keeps
+        # its exact pre-P1.3 shape (id/message_id/text/source_id only).
+        payload_items = [{k: v for k, v in item.items() if k != "role"} for item in items]
         try:
             result = await run_engine_task(
                 self._engine,
@@ -83,7 +96,7 @@ class Emo27Job(BaseEnrichmentJob):
                 subtype="emotion_classification_batch",
                 source_id=source_id,
                 record_ids=record_ids,
-                input_payload={"items": items},
+                input_payload={"items": payload_items},
             )
             if result.status != "completed":
                 logger.warning(
@@ -103,6 +116,8 @@ class Emo27Job(BaseEnrichmentJob):
                         "confidence": out.get("confidence"),
                         "all_emotions": out.get("all_emotions", []),
                         "model": out.get("model", ""),
+                        # Whose words this emotion belongs to (record_role).
+                        "role": item.get("role"),
                     }
                 )
             return rows
