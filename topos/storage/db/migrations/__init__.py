@@ -106,6 +106,10 @@ from .actor_role_v1 import (
     MIGRATION_ID as ACTOR_ROLE_V1_ID,  # noqa: F401 — exported for tests/tools
     apply_actor_role_v1_up,
 )
+from .activity_events_content_v1 import (
+    MIGRATION_ID as ACTIVITY_EVENTS_CONTENT_V1_ID,  # noqa: F401 — exported for tests/tools
+    apply_activity_events_content_v1_up,
+)
 
 __all__ = ["apply_all_migrations", "ensure_migrations_applied"]
 
@@ -171,6 +175,8 @@ def apply_all_migrations(conn: sqlite3.Connection) -> None:
     apply_episodes_v1_up(conn)
     # P4.1 provenance: actor_role column + record_role backfill.
     apply_actor_role_v1_up(conn)
+    # P2.1 browser exposure: activity_events hostname + content columns.
+    apply_activity_events_content_v1_up(conn)
 
 
 def ensure_migrations_applied(conn: sqlite3.Connection) -> None:
@@ -240,3 +246,6 @@ def ensure_migrations_applied(conn: sqlite3.Connection) -> None:
     # P4.1 actor_role column adds re-run cheaply after legacy DDL; the
     # record_role backfill is ledger-guarded inside.
     apply_actor_role_v1_up(conn)
+    # P2.1 activity_events hostname + content column adds re-run cheaply after
+    # legacy DDL (activity_events uses CREATE TABLE IF NOT EXISTS).
+    apply_activity_events_content_v1_up(conn)

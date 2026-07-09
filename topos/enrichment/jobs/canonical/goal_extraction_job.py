@@ -9,6 +9,7 @@ from ..base import BaseEnrichmentJob
 from ._batch_limits import MAX_JOB_MESSAGES, TOPIC_BATCH_CONCURRENCY
 from ....config.signal_extraction import get_signal_extraction_model_request
 from ....features.provenance.roles import ROLE_AUTHORED, record_role
+from ....features.provenance.posture import make_posture_resolver
 from ._engine_runner import run_engine_task
 from ....engine import Engine
 
@@ -44,6 +45,7 @@ class GoalExtractionJob(BaseEnrichmentJob):
                 MAX_JOB_MESSAGES,
             )
 
+        posture_for = make_posture_resolver()
         work: List[Dict[str, Any]] = []
         skipped_role = 0
         for msg in messages:
@@ -51,11 +53,19 @@ class GoalExtractionJob(BaseEnrichmentJob):
             content = msg.get("content", "")
             if not (message_id and content):
                 continue
-            # P1.3 (PLAN_PROVENANCE_SPLIT): goals are BELIEF-grade artifacts —
-            # only owner-authored rows are eligible. Assistant replies, other
-            # people's messages, and ambient content must never mint goals
-            # (the measured ~50% goal-emptiness was partly assistant text).
-            if record_role(msg, table=str(msg.get("_table") or "")) != ROLE_AUTHORED:
+            # P1.3 + P1.4 (PLAN_PROVENANCE_SPLIT): goals are BELIEF-grade
+            # artifacts — only owner-authored rows are eligible. Assistant
+            # replies, other people's messages, and ambient content must never
+            # mint goals (the measured ~50% goal-emptiness was partly assistant
+            # text). The effective posture is threaded in so a connector the
+            # owner flagged 'ambient' can never mint goals from ANY of its rows
+            # (record_role caps its role below authored).
+            role = record_role(
+                msg,
+                table=str(msg.get("_table") or ""),
+                posture=posture_for(msg),
+            )
+            if role != ROLE_AUTHORED:
                 skipped_role += 1
                 continue
             work.append(

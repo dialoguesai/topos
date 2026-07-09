@@ -173,6 +173,16 @@ class Settings(BaseSettings):
     topos_sync_url: str = Field("wss://cp.logu3s.com/ws/sync", env="TOPOS_SYNC_URL")
     enable_sync: bool = Field(True, env="ENABLE_SYNC")
 
+    # P1.5 (PLAN_PROVENANCE_SPLIT): exposure-profile visibility. When True
+    # (default), exposure-ledger stats ("you've been reading a lot about X") and
+    # exposure-only interest items are surfaced but always attribution-labeled;
+    # when False the owner has opted OUT and retrieval/composition must suppress
+    # them. This env value is the node default; the per-node engine_config key
+    # "exposure_profile_visible" (a bool the owner toggles from the UI) overrides
+    # it — read both through exposure_profile_visible() below, never this field
+    # directly, so the DB toggle is always honored.
+    exposure_profile_visible: bool = Field(True, env="EXPOSURE_PROFILE_VISIBLE")
+
     @property
     def allowed_origins(self) -> List[str]:
         raw = self.allowed_origins_raw
@@ -354,3 +364,78 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+# --- P1.5 exposure-profile visibility (PLAN_PROVENANCE_SPLIT) -------------------------
+# Frozen engine_config key the UI toggle writes; a per-node bool the owner sets.
+ENGINE_CONFIG_KEY_EXPOSURE_PROFILE_VISIBLE = "exposure_profile_visible"
+
+_TRUE_STRINGS = frozenset({"1", "true", "t", "yes", "y", "on"})
+_FALSE_STRINGS = frozenset({"0", "false", "f", "no", "n", "off"})
+
+
+def _coerce_bool(raw: object, default: bool) -> bool:
+    if isinstance(raw, bool):
+        return raw
+    if raw is None:
+        return default
+    if isinstance(raw, (int, float)):
+        return bool(raw)
+    text = str(raw).strip().lower()
+    if not text:
+        return default
+    # engine_config values are JSON-ish strings; unwrap a JSON-quoted/boolean form.
+    if text in _TRUE_STRINGS:
+        return True
+    if text in _FALSE_STRINGS:
+        return False
+    try:
+        parsed = json.loads(text)
+    except (json.JSONDecodeError, ValueError):
+        return default
+    return _coerce_bool(parsed, default)
+
+
+def _read_engine_config_value(conn, key: str) -> Optional[str]:
+    """Read engine_config without importing topos.core.state (avoids circular
+    imports); mirrors config/signal_extraction._read_engine_config_value."""
+    if conn is None:
+        return None
+    try:
+        row = conn.execute("SELECT value FROM engine_config WHERE key = ?", (key,)).fetchone()
+        if not row:
+            return None
+        try:
+            return str(row["value"])  # sqlite3.Row
+        except (TypeError, IndexError, KeyError):
+            return str(row[0])
+    except Exception:  # noqa: BLE001 — missing table/row on fresh DB is not fatal
+        return None
+
+
+def resolve_exposure_profile_visible(settings_obj: "Settings", conn=None) -> bool:
+    """Effective exposure-profile visibility: the per-node engine_config toggle
+    ("exposure_profile_visible") when set, else the env/settings default (True).
+
+    Callers in retrieval/composition read this before surfacing exposure-ledger
+    stats or exposure-only interest items; False means the owner opted out and
+    those artifacts must be suppressed (P1.5)."""
+    default = bool(getattr(settings_obj, "exposure_profile_visible", True))
+    raw = _read_engine_config_value(conn, ENGINE_CONFIG_KEY_EXPOSURE_PROFILE_VISIBLE)
+    if raw is None:
+        return default
+    return _coerce_bool(raw, default)
+
+
+def exposure_profile_visible(conn=None) -> bool:
+    """Module-level convenience: resolve against the global settings singleton
+    and (when not passed) the process DB connection. Retrieval passes its own
+    query connection so multi-db verification runs read the right node."""
+    if conn is None:
+        try:
+            from ..core.state import get_db_connection
+
+            conn = get_db_connection()
+        except Exception:  # noqa: BLE001
+            conn = None
+    return resolve_exposure_profile_visible(settings, conn)

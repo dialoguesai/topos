@@ -8,6 +8,7 @@ from collections import Counter
 from typing import Any, Dict, List, Optional, Set
 
 from topos.features.provenance.roles import ROLE_AUTHORED, record_role
+from topos.features.provenance.posture import make_posture_resolver
 from topos.features.signal.brief_ontology import llm_merge_section_ids
 
 _STRUCTURED_JOURNAL_FIELD_PREFIXES = (
@@ -129,22 +130,39 @@ def _record_fallback_summary(record: Dict[str, Any]) -> str:
 # is what makes a row *someone's speech* and therefore label-eligible.
 _SENDER_MARKER_KEYS = ("sender_type", "sender_id", "is_from_self")
 
+# Lazily-built posture resolver (P1.4) shared across brief records so the
+# per-connector override read is cached per source_id, not repeated per row.
+_POSTURE_RESOLVER = None
+
+
+def _posture_for(record: Dict[str, Any]) -> str:
+    global _POSTURE_RESOLVER
+    if _POSTURE_RESOLVER is None:
+        _POSTURE_RESOLVER = make_posture_resolver()
+    try:
+        return _POSTURE_RESOLVER(record)
+    except Exception:  # noqa: BLE001
+        return "mixed"
+
 
 def _speaker_prefix(record: Dict[str, Any]) -> str:
-    """Speaker/role label for non-authored message rows (P1.3, plan §3.2:
+    """Speaker/role label for non-authored message rows (P1.3/P1.4, plan §3.2:
     briefs consume non-authored text only as LABELED context).
 
     Owner-authored rows stay unprefixed; assistant replies get "[assistant]",
     system rows "[system]", everyone else's messages "[contact]" — so the
     brief LLM summarizes WITH attribution instead of absorbing other people's
     words as the owner's. Non-message rows (journal, activity, …) carry no
-    sender keys and are never prefixed.
+    sender keys and are never prefixed. P1.4: an 'ambient'-flagged connector
+    caps its rows below authored, so even an owner-typed row from a
+    background-noise source is labeled context, never unprefixed.
     """
     if not any(key in record for key in _SENDER_MARKER_KEYS):
         return ""
     role = record_role(
         record,
         table=str(record.get("canonical_table") or record.get("_table") or ""),
+        posture=_posture_for(record),
     )
     if role == ROLE_AUTHORED:
         return ""

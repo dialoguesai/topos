@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, List, Optional
 from ..base import BaseEnrichmentJob
 from ._batch_limits import MAX_JOB_MESSAGES
 from ....features.provenance.roles import record_role
+from ....features.provenance.posture import make_posture_resolver
 from ._engine_runner import run_engine_task
 from .brief_fallback import prepare_signal_record
 from ...progress_bar import ProgressBar
@@ -40,6 +41,7 @@ class Emo27Job(BaseEnrichmentJob):
         """Enrich messages with emotion classifications via Engine.run(task)."""
         messages = canonical_messages[:MAX_JOB_MESSAGES]
         logger.debug("[PIPELINE:ENRICHMENT] %s: processing %d messages", self, len(messages))
+        posture_for = make_posture_resolver()
         work: List[Dict[str, Any]] = []
         for msg in messages:
             prepared = prepare_signal_record(msg)
@@ -53,15 +55,22 @@ class Emo27Job(BaseEnrichmentJob):
                         "message_id": message_id,
                         "text": content,
                         "source_id": source_id,
-                        # P1.3 (PLAN_PROVENANCE_SPLIT): message_emotions is
-                        # per-message data, so EVERY row is still classified —
-                        # but each emitted record carries whose words it
+                        # P1.3 + P1.4 (PLAN_PROVENANCE_SPLIT): message_emotions
+                        # is per-message data, so EVERY row is still classified
+                        # — but each emitted record carries whose words it
                         # classified, so owner-wellbeing aggregation can filter
-                        # to authored(+addressed) downstream. Stripped from the
-                        # engine payload in _classify_batch (payload contract
-                        # unchanged); persisted via message_emotions
-                        # payload_json (wiki schema stores the whole record).
-                        "role": record_role(msg, table=str(msg.get("_table") or "")),
+                        # to authored(+addressed) downstream. The effective
+                        # posture is threaded so an 'ambient'-flagged connector's
+                        # rows stamp 'observed', never authored/addressed —
+                        # keeping other people's emotions out of the owner's
+                        # wellbeing. Stripped from the engine payload in
+                        # _classify_batch (payload contract unchanged); persisted
+                        # via message_emotions payload_json.
+                        "role": record_role(
+                            msg,
+                            table=str(msg.get("_table") or ""),
+                            posture=posture_for(msg),
+                        ),
                     }
                 )
 

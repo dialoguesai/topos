@@ -193,18 +193,43 @@ async def handle_put_source_settings(message: Dict[str, Any]) -> Optional[Dict[s
     source_id = (payload.get("source_id") or "").strip()
     dataset_id = (payload.get("dataset_id") or "").strip()
     enabled = payload.get("enabled")
+    # P1.4: posture is the per-connector OVERRIDE (personal|mixed|ambient) or
+    # null to inherit the registry default. Only applied when the key is
+    # present in the body — absent means "leave unchanged".
+    posture_provided = "posture" in payload
+    posture = payload.get("posture")
     if not source_id or not dataset_id:
         return {"id": req_id, "status": "error", "error": "source_id and dataset_id required"}
     source = REGISTRY.get(source_id)
-    if not source or getattr(source, "source_type", None) != "local_sync":
-        return {"id": req_id, "status": "error", "error": "settings only apply to local_sync sources"}
-    if enabled is None:
-        return {"id": req_id, "status": "error", "error": "enabled required in body"}
+    if not source:
+        return {"id": req_id, "status": "error", "error": "unknown source_id"}
+    # enabled/sync settings are local_sync-only; posture applies to ANY
+    # connector (browser/chat/etc.). Require the local_sync gate only when an
+    # enabled toggle is being set.
+    if enabled is not None and getattr(source, "source_type", None) != "local_sync":
+        return {"id": req_id, "status": "error", "error": "enabled only applies to local_sync sources"}
+    if enabled is None and not posture_provided:
+        return {"id": req_id, "status": "error", "error": "enabled or posture required in body"}
     conn = hub.get_db_connection()
     if not conn:
         return {"id": req_id, "status": "error", "error": "Database not available"}
-    put_source_settings(conn, dataset_id, source_id, enabled=enabled)
-    return {"id": req_id, "status": "ok", "payload": {"status": "ok", "dataset_id": dataset_id, "source_id": source_id, "enabled": bool(enabled)}}
+    try:
+        if posture_provided:
+            put_source_settings(conn, dataset_id, source_id, enabled=enabled, posture=posture)
+        else:
+            put_source_settings(conn, dataset_id, source_id, enabled=enabled)
+    except ValueError as exc:
+        return {"id": req_id, "status": "error", "error": str(exc)}
+    # Echo the effective settings back (posture reflects what was persisted /
+    # inherited) so the caller and UI see the resolved state.
+    settings_data = get_source_settings(conn, dataset_id, source_id) or {}
+    result_payload = {"status": "ok", "dataset_id": dataset_id, "source_id": source_id}
+    if enabled is not None:
+        result_payload["enabled"] = bool(enabled)
+    else:
+        result_payload["enabled"] = bool(settings_data.get("enabled", True))
+    result_payload["posture"] = settings_data.get("posture")
+    return {"id": req_id, "status": "ok", "payload": result_payload}
 
 @handles("get_source_contacts")
 async def handle_get_source_contacts(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:

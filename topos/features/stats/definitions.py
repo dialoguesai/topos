@@ -11,9 +11,38 @@ from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
 from ..provenance.roles import owner_authored
+from ..provenance.posture import make_posture_resolver
 from .fold import parse_ts
 
 _WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+# Lazily-built posture resolver (P1.4): the sent-family / authored-rhythm gates
+# must honour the owner's per-connector posture override so an 'ambient'-flagged
+# connector's rows never count toward "how many messages have I sent" — even if
+# a row is is_from_self. Cached per source_id inside the resolver.
+_POSTURE_RESOLVER = None
+
+
+def _row_posture(row: Dict[str, Any]) -> str:
+    stamped = row.get("_posture")
+    if stamped:
+        return str(stamped).strip().lower()
+    global _POSTURE_RESOLVER
+    if _POSTURE_RESOLVER is None:
+        _POSTURE_RESOLVER = make_posture_resolver()
+    try:
+        return _POSTURE_RESOLVER(row)
+    except Exception:  # noqa: BLE001
+        return "mixed"
+
+
+def _row_owner_authored(row: Dict[str, Any], default_table: str) -> bool:
+    """Owner-authored gate with the P1.4 posture override applied."""
+    return owner_authored(
+        row,
+        table=_row_table(row, default_table),
+        posture=_row_posture(row),
+    )
 
 
 def _row_table(row: Dict[str, Any], default: str = "") -> str:
@@ -111,19 +140,21 @@ def group_key_for(row: Dict[str, Any], group_by: str) -> Optional[str]:
     if group_by == "authored_total":
         # Single-group family ("self", non-empty so insights render it):
         # counts ONLY rows the owner sent — the honest denominator for
-        # "how many messages have I sent" (IMB6's needle).
-        if owner_authored(row, table=_row_table(row, "conversation_messages")):
+        # "how many messages have I sent" (IMB6's needle). P1.4: an
+        # ambient-flagged connector's rows are capped below authored and
+        # excluded here.
+        if _row_owner_authored(row, "conversation_messages"):
             return "self"
         return None
     if group_by == "authored_conversation":
-        if not owner_authored(row, table=_row_table(row, "conversation_messages")):
+        if not _row_owner_authored(row, "conversation_messages"):
             return None
         value = row.get("conversation_id") or row.get("thread_id")
         return str(value).strip() if value else None
     if group_by == "hour_of_week_authored":
         # Owner rhythm from owner rows: assistant/system rows must not shape
         # "when is this person active".
-        if not owner_authored(row, table=_row_table(row, "ai_chat_messages")):
+        if not _row_owner_authored(row, "ai_chat_messages"):
             return None
         return f"{_WEEKDAYS[ts.weekday()]} {ts.hour:02d}:00" if ts else None
     return None
