@@ -257,6 +257,28 @@ async def get_entity_graph(
     )
 
 
+@router.post("/entities/graph/rebuild")
+async def rebuild_graph(
+    reextract: bool = Query(default=False),
+    _api_key: str = Depends(require_api_key),
+):
+    """Rebuild the entity graph's evidence edges from existing mentions.
+
+    Cheap and safe: recomputes co_occurrence + communicates_with edges from the
+    resolved ``entity_mentions`` set (no NER re-run), recounts mentions, prunes
+    mention-orphaned entities, and refreshes dossiers. Returns a before/after
+    edge-count report.
+
+    This is bounded by the current mention set; to grow it (pick up entities
+    from records never processed), re-run the ``entities`` enrichment job via
+    ``POST /enrichment/process`` with ``force_reprocess=true``. ``reextract`` is
+    accepted for forward-compatibility and currently performs the cheap rebuild.
+    """
+    from ..features.entities.maintenance import rebuild_entity_graph
+
+    return rebuild_entity_graph(_entities_conn())
+
+
 @router.get("/entities/{entity_id}")
 async def get_entity(
     entity_id: str,
