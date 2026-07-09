@@ -805,6 +805,11 @@ async def _find_unprocessed_messages(
                 "metadata_json": row[7],
                 "sequence": row[8],
                 "source_id": row[9],
+                # Table stamp: canonical sender_type here is 'human' (owner),
+                # which shape-based classifiers cannot distinguish from
+                # conversation_messages rows (messenger 'human' = other
+                # people). Loaded from ai_chat_messages, so say so.
+                "_table": "ai_chat_messages",
             })
         
         logger.debug(

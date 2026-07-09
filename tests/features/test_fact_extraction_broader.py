@@ -15,6 +15,7 @@ import pytest
 
 from topos.features.facts.extract import (
     _clean_object,
+    _is_owner_authored,
     derive_location_facts,
     extract_facts_from_batch,
     extract_journal_facts,
@@ -119,6 +120,120 @@ class TestMessagePatterns:
             )._MSG_FACT_PATTERNS
         ]:
             assert confidence + CONFLICT_CONFIDENCE_MARGIN < 0.9
+
+
+class TestOwnerAuthoredAttribution:
+    """P0.1 (PLAN_PROVENANCE_SPLIT): _is_owner_authored must be table-aware.
+
+    Canonical ai_chat_messages stores sender_type='human' for the owner
+    (chatgpt_parser maps role 'user' -> 'human'; legacy rows say 'user'),
+    while the messenger mapper ALSO writes sender_type='human' for OTHER
+    people's rows in conversation_messages — there, owner identity lives in
+    is_from_self / sender_id=='self', never in sender_type.
+    """
+
+    def _ai_chat_row(self, sender_type: str) -> dict:
+        # Exact shape of canonical ai_chat batches (mapper to_dict / the
+        # api.enrichment backfill loader): is_from_self never present.
+        return {
+            "message_id": "a1",
+            "conversation_id": "chatgpt:conv-1",
+            "sender_type": sender_type,
+            "sender_id": None,
+            "content": "I live in Austin now",
+            "event_at": "2026-06-01T10:00:00+00:00",
+        }
+
+    def _messenger_row(self, **kw) -> dict:
+        row = {
+            "message_id": "m1",
+            "conversation_id": "c1",
+            "sender_type": "human",  # messenger_mapper default for everyone
+            "sender_id": "+15551234567",
+            "content": "I live in Paris",
+            "event_at": "2026-06-01T10:00:00+00:00",
+            "is_from_self": 0,
+        }
+        row.update(kw)
+        return row
+
+    def test_ai_chat_human_is_owner(self):
+        assert _is_owner_authored(self._ai_chat_row("human"), "ai_chat_messages")
+
+    def test_ai_chat_legacy_user_is_owner(self):
+        assert _is_owner_authored(self._ai_chat_row("user"), "ai_chat_messages")
+
+    def test_ai_chat_assistant_is_not_owner(self):
+        assert not _is_owner_authored(self._ai_chat_row("assistant"), "ai_chat_messages")
+
+    def test_ai_chat_system_is_not_owner(self):
+        assert not _is_owner_authored(self._ai_chat_row("system"), "ai_chat_messages")
+
+    def test_messenger_human_other_person_is_not_owner(self):
+        # sender_type='human' on conversation_messages means "a person",
+        # not "the owner" — other people's words must not become self-facts.
+        assert not _is_owner_authored(self._messenger_row(), "conversation_messages")
+
+    def test_messenger_is_from_self_is_owner(self):
+        assert _is_owner_authored(
+            self._messenger_row(is_from_self=1), "conversation_messages"
+        )
+
+    def test_messenger_sender_id_self_is_owner(self):
+        assert _is_owner_authored(
+            self._messenger_row(sender_id="self", is_from_self=0),
+            "conversation_messages",
+        )
+
+    def test_ambiguous_human_without_owner_markers_fails_closed(self):
+        # No table context + 'human' + no is_from_self/sender_id markers:
+        # could be either family — belief extraction must not guess.
+        row = {"message_id": "x", "sender_type": "human", "content": "I live in Oslo"}
+        assert not _is_owner_authored(row)
+
+    def test_stamped_table_key_used_when_no_explicit_table_arg(self):
+        row = self._ai_chat_row("human")
+        row["_table"] = "ai_chat_messages"
+        assert _is_owner_authored(row)
+
+    def test_ai_chat_human_extracts_self_facts(self):
+        facts = extract_message_facts(self._ai_chat_row("human"), table="ai_chat_messages")
+        assert [(f["predicate"], f["object_value"]) for f in facts] == [
+            ("lives_in", "Austin")
+        ]
+
+    def test_messenger_human_other_person_extracts_nothing(self):
+        assert (
+            extract_message_facts(self._messenger_row(), table="conversation_messages")
+            == []
+        )
+
+    def test_batch_routes_ai_chat_human_rows(self, conn):
+        rows = [
+            {
+                "message_id": "a-owner",
+                "conversation_id": "chatgpt:conv-1",
+                "sender_type": "human",
+                "sender_id": None,
+                "content": "I work at Dialogues these days",
+                "event_at": "2026-06-01T00:00:00+00:00",
+                "_table": "ai_chat_messages",
+            },
+            {
+                "message_id": "a-model",
+                "conversation_id": "chatgpt:conv-1",
+                "sender_type": "assistant",
+                "sender_id": None,
+                "content": "I work at Initech",
+                "event_at": "2026-06-01T00:00:01+00:00",
+                "_table": "ai_chat_messages",
+            },
+        ]
+        written = extract_facts_from_batch(conn, rows)
+        conn.commit()
+        assert written == 1
+        facts = _facts_by_predicate(conn, "works_at")
+        assert [f["object_value"] for f in facts] == ["Dialogues"]
 
 
 class TestCleanObject:

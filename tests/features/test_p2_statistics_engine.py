@@ -10,7 +10,7 @@ import statistics as pystats
 import pytest
 
 from topos.features.stats.fold import fold, init_state, merge, summarize, window_state
-from topos.features.stats.engine import StatsEngine
+from topos.features.stats.engine import StatsEngine, _table_for_row
 from topos.storage.db.migrations import apply_all_migrations
 
 
@@ -103,6 +103,105 @@ class TestFoldAlgebra:
         for v in ["a", "a", "b", "b"]:
             s = fold("histogram", s, v)
         assert summarize("histogram", s)["entropy_bits"] == pytest.approx(1.0)
+
+
+def _ai_chat_loader_row(sender_type: str = "human", **kw) -> dict:
+    # Exact shape the enrichment batch loader passes (api/enrichment.py):
+    # canonical ai_chat rows never carry is_from_self, and canonical
+    # sender_type is 'human'|'assistant'|'system' ('user' only in legacy rows).
+    row = {
+        "message_id": "a1",
+        "conversation_id": "chatgpt:conv-1",
+        "sender_type": sender_type,
+        "sender_id": None,
+        "event_at": "2026-06-01T10:00:00+00:00",
+        "content": "hello",
+        "content_rendered": None,
+        "metadata_json": None,
+        "sequence": 3,
+        "source_id": "chatgpt_file_ingestion",
+    }
+    row.update(kw)
+    return row
+
+
+class TestTableForRow:
+    """P0.2 (PLAN_PROVENANCE_SPLIT): canonical ai_chat rows say sender_type=
+    'human', so the old ('user','assistant') check mis-tabled real ai_chat rows
+    as conversation_messages. Conversation rows are recognized by their own
+    marker keys (is_from_self / event_type / message_type / reply_to_message_id),
+    never by sender_type — the messenger mapper also writes 'human' there."""
+
+    def test_ai_chat_human_row_classifies_as_ai_chat(self) -> None:
+        assert _table_for_row(_ai_chat_loader_row("human")) == "ai_chat_messages"
+
+    def test_ai_chat_assistant_row_classifies_as_ai_chat(self) -> None:
+        assert _table_for_row(_ai_chat_loader_row("assistant")) == "ai_chat_messages"
+
+    def test_ai_chat_system_row_classifies_as_ai_chat(self) -> None:
+        assert _table_for_row(_ai_chat_loader_row("system")) == "ai_chat_messages"
+
+    def test_legacy_user_row_still_classifies_as_ai_chat(self) -> None:
+        assert _table_for_row(_ai_chat_loader_row("user")) == "ai_chat_messages"
+
+    def test_messenger_human_row_classifies_as_conversation(self) -> None:
+        row = {
+            "message_id": "m1",
+            "conversation_id": "c1",
+            "sender_type": "human",  # other person's message, mapper default
+            "sender_id": "+15551234567",
+            "is_from_self": 0,
+            "content": "hey",
+            "ts": "2026-06-01T10:00:00+00:00",
+        }
+        assert _table_for_row(row) == "conversation_messages"
+
+    def test_messenger_null_is_from_self_still_conversation(self) -> None:
+        # dict(sqlite3.Row) keeps NULL columns as None — key presence decides.
+        row = {
+            "message_id": "m2",
+            "conversation_id": "c1",
+            "sender_type": "human",
+            "sender_id": None,
+            "is_from_self": None,
+            "content": "x",
+            "ts": "2026-06-01T10:00:00+00:00",
+        }
+        assert _table_for_row(row) == "conversation_messages"
+
+    def test_messenger_mapper_payload_shape_classifies_as_conversation(self) -> None:
+        # messenger_mapper payload: no is_from_self yet, but carries
+        # event_type/message_type/reply_to_message_id keys.
+        row = {
+            "message_id": "m3",
+            "conversation_id": "c1",
+            "sender_type": "human",
+            "sender_id": "+15551234567",
+            "reply_to_message_id": None,
+            "message_type": None,
+            "event_type": None,
+            "content": "x",
+            "ts": "2026-06-01T10:00:00+00:00",
+        }
+        assert _table_for_row(row) == "conversation_messages"
+
+    def test_explicit_table_always_wins(self) -> None:
+        row = {"_table": "conversation_messages", "sender_type": "human",
+               "conversation_id": "c1"}
+        assert _table_for_row(row) == "conversation_messages"
+
+    def test_ai_chat_human_rows_fold_into_ai_chat_stats(self, conn) -> None:
+        engine = StatsEngine(conn)
+        result = engine.fold_batch(
+            [
+                _ai_chat_loader_row("human", message_id="a1"),
+                _ai_chat_loader_row("human", message_id="a2",
+                                    event_at="2026-06-01T11:00:00+00:00"),
+            ]
+        )
+        assert result["rows_folded"] > 0
+        state = engine.read_state("ai_chat.hour_of_week")
+        assert state["n"] == 2
 
 
 def _persona_rows():

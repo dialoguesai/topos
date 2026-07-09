@@ -35,7 +35,11 @@ EvalFn = Callable[[Dict[str, Any]], Tuple[bool, str]]
 # browse case as direct answers (closes the oracle-human gap on browse queries). +NH1-NH3
 # common-word negatives (own negative_hard lane, red-first — the zero-df gate's blind
 # flank). Composite comparable to qq-catalog-5 via the iteration gauge's shared case_ids.
-QUERY_CATALOG_VERSION = "qq-catalog-6"
+# qq-catalog-7: +IMB1-IMB10 imbalance/attribution lane (own scratch corpus qq-imb-1,
+# poison_groups+authored_only fields, red-first non-gating); +T4-T8 temporal cases
+# (qq-seeded-4). Composite comparable to qq-catalog-6 via the iteration gauge's
+# shared case_ids.
+QUERY_CATALOG_VERSION = "qq-catalog-7"
 
 _DEFAULT_LATENCY_MS = {
     "summary": int(os.environ.get("TOPOS_QQ_LATENCY_SUMMARY_MS", "10000")),

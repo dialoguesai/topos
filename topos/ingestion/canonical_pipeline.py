@@ -158,6 +158,12 @@ def canonicalize_normalized_batch(
                         "metadata_json": metadata_json,
                         "seq": 0,
                         "source_id": source_id,
+                        # Table stamp: without it these records are
+                        # key-for-key identical to ai_chat records (both say
+                        # sender_type='human'), so downstream attribution
+                        # (stats tabling, fact-extraction owner gate) cannot
+                        # tell the families apart.
+                        "_table": "conversation_messages",
                     }
                 )
         except Exception as exc:
@@ -214,7 +220,14 @@ def canonicalize_normalized_batch(
             result.conversations_created = int(canonical_result.get("conversations_created", 0))
             mapped = canonical_result.get("canonical_messages")
             if isinstance(mapped, list):
-                result.canonical_records.extend(msg for msg in mapped if isinstance(msg, dict))
+                for msg in mapped:
+                    if not isinstance(msg, dict):
+                        continue
+                    # Table stamp (see conversations branch): canonical
+                    # ai_chat rows say sender_type='human' for the owner and
+                    # are shape-identical to conversation records otherwise.
+                    msg.setdefault("_table", "ai_chat_messages")
+                    result.canonical_records.append(msg)
             errors = canonical_result.get("errors")
             if isinstance(errors, list):
                 result.errors.extend(errors)
