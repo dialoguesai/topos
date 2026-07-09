@@ -296,6 +296,76 @@ class TestStatsEngine:
         assert count_after == count_before
 
 
+class TestLowCountSumStatsSurviveRefold:
+    """Regression: refold_statistics + repromote_stat_insights must not silently
+    drop the financial.spend.by_category family. Each spend category naturally
+    holds few rows (n=1-2); the count-based _MIN_N noise floor previously excluded
+    them from render_insights, so repromote's prune deleted every promoted spend
+    stat (the D2 "dining spend" case broke after re-enrichment). A SUM is a total,
+    meaningful from a single transaction, so it is exempt from the count floor.
+    """
+
+    def _seed_financial(self, conn) -> None:
+        rows = [
+            ("t1", "checking", "2025-01-05T12:00:00Z", 42.5, "dining", "demo_financial_file"),
+            ("t2", "checking", "2025-01-19T12:00:00Z", 17.5, "dining", "demo_financial_file"),
+            ("t3", "checking", "2025-01-10T12:00:00Z", 900.0, "salary", "demo_financial_file"),
+            ("t4", "checking", "2025-01-22T12:00:00Z", 60.0, "groceries", "demo_financial_file"),
+        ]
+        conn.executemany(
+            "INSERT INTO financial_transactions "
+            "(transaction_id, account_type, posted_at, amount, category, source_id) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            rows,
+        )
+        conn.commit()
+
+    def test_refold_repromote_keeps_low_count_spend_stats(self, conn) -> None:
+        from topos.features.lifecycle.derived_scrub import (
+            refold_statistics,
+            repromote_stat_insights,
+        )
+
+        self._seed_financial(conn)
+        # The exact reported path: wipe + refold from the table, then repromote
+        # (which includes the prune that used to delete the spend stats).
+        refold_statistics(conn)
+        repromote_stat_insights(conn)
+
+        rows = conn.execute(
+            "SELECT fact_id FROM signal_facts WHERE fact_id LIKE 'stat:financial.spend.by_category:%'"
+        ).fetchall()
+        cats = {str(f).rsplit(":", 1)[-1] for (f,) in rows}
+        # every category survives, including the two-row 'dining' family (D2)
+        assert {"dining", "salary", "groceries"} <= cats, cats
+
+    def test_sum_kind_emitted_below_floor_but_count_kind_still_suppressed(self, conn) -> None:
+        from topos.features.stats.insights import render_insights, _MIN_N
+
+        engine = StatsEngine(conn)
+        # one spend row (sum, n=1) + two messages from one contact (count, n<_MIN_N)
+        engine.fold_batch(
+            [
+                {"record_id": "f1", "_table": "financial_transactions",
+                 "occurred_at": "2025-02-01T12:00:00Z", "category": "dining", "amount": 30.0},
+                {"record_id": "m1", "_table": "conversation_messages",
+                 "ts": "2025-02-02T10:00:00Z", "sender_id": "sol", "conversation_id": "c1"},
+                {"record_id": "m2", "_table": "conversation_messages",
+                 "ts": "2025-02-03T10:00:00Z", "sender_id": "sol", "conversation_id": "c1"},
+            ]
+        )
+        insights = render_insights(engine)
+        stat_ids = {i["stat_id"] for i in insights}
+        assert "financial.spend.by_category" in stat_ids  # sum emitted at n=1
+        # a count-family group with n < _MIN_N stays suppressed (floor intact)
+        vol = engine.read_state("messages.volume.by_contact", group_key="sol")
+        assert int(vol.get("n") or 0) < _MIN_N
+        assert not any(
+            i["stat_id"] == "messages.volume.by_contact" and i.get("group_key") == "sol"
+            for i in insights
+        )
+
+
 class TestDisclosureGate:
     def _manifest(self, signal_objects):
         from topos.query.manifest import ScopeResolutionManifest
