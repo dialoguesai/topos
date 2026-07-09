@@ -344,3 +344,58 @@ async def handle_delete_signal_extraction_config(message: Dict[str, Any]) -> Opt
         return {"id": req_id, "status": "ok", "payload": {"status": "ok", **data}}
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+# ---- Exposure-profile visibility (P1.5): the owner's toggle for whether the
+# labeled "what you've been exposed to" profile surfaces on interest/identity
+# answers. Default ON; the engine read path is config.settings.exposure_profile_visible.
+@handles("get_exposure_profile_config")
+async def handle_get_exposure_profile_config(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    from ...config.settings import resolve_exposure_profile_visible
+
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    try:
+        visible = resolve_exposure_profile_visible(settings, conn)
+        return {
+            "id": req_id,
+            "status": "ok",
+            "payload": {"status": "ok", "exposure_profile_visible": bool(visible)},
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("put_exposure_profile_config")
+async def handle_put_exposure_profile_config(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    from ...config.settings import (
+        ENGINE_CONFIG_KEY_EXPOSURE_PROFILE_VISIBLE,
+        resolve_exposure_profile_visible,
+    )
+
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    payload = message.get("payload") or {}
+    if "exposure_profile_visible" not in payload:
+        return {"id": req_id, "status": "error", "error": "exposure_profile_visible (bool) required"}
+    raw = payload.get("exposure_profile_visible")
+    if isinstance(raw, str):
+        visible = raw.strip().lower() in ("1", "true", "on", "yes")
+    else:
+        visible = bool(raw)
+    try:
+        set_engine_config_value(
+            conn, ENGINE_CONFIG_KEY_EXPOSURE_PROFILE_VISIBLE, "true" if visible else "false"
+        )
+        effective = resolve_exposure_profile_visible(settings, conn)
+        return {
+            "id": req_id,
+            "status": "ok",
+            "payload": {"status": "ok", "exposure_profile_visible": bool(effective)},
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}

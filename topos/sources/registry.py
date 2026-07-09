@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from typing import List, Sequence, Tuple
+from typing import List, Optional, Sequence, Tuple
 
 from .bundled_canonical_triples import apply_bundled_canonical_defaults
 from .definitions import DataSourceDefinition
@@ -142,9 +142,18 @@ BROWSER_EVENTS = _source(
     parser_id="browser.events.v1",
     canonical_group_id="activity",
     raw_enrichment_jobs=[],
-    canonical_enrichment_jobs=[],
+    # P2.2 (PLAN_PROVENANCE_SPLIT): browser highlights are Annotate-grade
+    # engagement (expression of INTEREST) — they must reach the vector index and
+    # the entity spine like browser_visits, not sit unenriched (was []/manual).
+    # Mirror browser_visits (url_classification + embeddings) and add entities so
+    # a highlighted span is retrievable and its entities join the spine. Posture
+    # stays 'personal'-grade engagement; the row role is still ambient+engaged
+    # (record_role treats the activity/browser family as ambient regardless, so
+    # enabling enrichment never upgrades belief — only interest reachability).
+    canonical_enrichment_jobs=["url_classification", "embeddings", "entities"],
+    signal_derivation_jobs=["url_classification", "entities"],
     analytics_profile_id=None,
-    enrichment_trigger="manual",
+    enrichment_trigger="automatic",
     ingestion_trigger="automatic",
     default_scope_id="activity",
     allowed_scope_ids=["activity:read", "activity:write"],
@@ -582,6 +591,87 @@ def _runtime_installed_sources_by_scope(scope_id: str, scope_base: str) -> List[
             if sid and sid not in out:
                 out.append(sid)
     return out
+
+
+def _registry_posture_default(source_id: str) -> Optional[str]:
+    """Registry DataSourceDefinition.posture default for a source_id.
+
+    Covers the static REGISTRY first, then active runtime-installed
+    definitions (source_runtime_installs snapshots — same rows
+    _runtime_installed_sources_by_scope reads). Returns None when the source
+    is unknown so effective_posture can fall through to the safe 'mixed'
+    default."""
+    defn = REGISTRY.get((source_id or "").strip())
+    if defn is not None:
+        return getattr(defn, "posture", None)
+    sid = (source_id or "").strip()
+    if not sid:
+        return None
+    try:
+        from ..core.state import get_db_connection
+
+        conn = get_db_connection()
+        if conn is None:
+            return None
+        row = conn.execute(
+            """SELECT source_definition_json FROM source_runtime_installs
+               WHERE source_id=? AND is_active=1
+                 AND status IN ('installed', 'active', 'ready')
+               ORDER BY rowid DESC LIMIT 1""",
+            (sid,),
+        ).fetchone()
+    except Exception:
+        return None
+    if not row or not row[0]:
+        return None
+    import json as _json
+
+    try:
+        source_def = _json.loads(row[0]) if isinstance(row[0], str) else (row[0] or {})
+    except _json.JSONDecodeError:
+        return None
+    posture = source_def.get("posture") if isinstance(source_def, dict) else None
+    return str(posture) if posture else None
+
+
+def effective_posture(source_id: str, dataset_id: str = "", conn=None) -> str:
+    """Resolve the EFFECTIVE posture for a source (PLAN_PROVENANCE_SPLIT P1.4).
+
+    Precedence (highest first):
+      1. the owner's per-connector override in user_ingestion_sources
+         (storage.source_settings; NULL there = no override);
+      2. the registry DataSourceDefinition.posture default (static REGISTRY,
+         then active runtime-installed definition);
+      3. 'mixed' — the safe default that decides role per-row.
+
+    ``conn``/``dataset_id`` are optional: without them (or on any read error)
+    the override step is skipped and resolution falls through to the registry
+    default. This is the single helper every posture consumer must call so the
+    override is honoured everywhere posture matters (record_role wiring, role
+    gates)."""
+    sid = (source_id or "").strip()
+    if not sid:
+        return "mixed"
+
+    override: Optional[str] = None
+    if conn is not None and (dataset_id or "").strip():
+        try:
+            from ..storage.source_settings import get_source_settings
+
+            settings = get_source_settings(conn, dataset_id, sid) or {}
+            candidate = settings.get("posture")
+            if candidate:
+                override = str(candidate).strip().lower()
+        except Exception:  # noqa: BLE001
+            override = None
+    if override in ("personal", "mixed", "ambient"):
+        return override
+
+    registry_default = _registry_posture_default(sid)
+    if registry_default in ("personal", "mixed", "ambient"):
+        return registry_default
+
+    return "mixed"
 
 
 def get_sources_by_scope(scope_id: str) -> List[str]:

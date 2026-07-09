@@ -272,6 +272,70 @@ def _record_owner_authored(
     return verdict
 
 
+def _activity_highlight_text(
+    conn: Any,
+    event_id: str,
+    row: Dict[str, Any],
+    cache: Optional[Dict[str, str]] = None,
+) -> str:
+    """The engaged (Annotate-grade) highlight span for an activity_events row.
+
+    IMB9 / P2.1: a browser_highlight row's needle lives in
+    ``metadata_json.highlight`` (mirrored onto the ``content`` column by the
+    mapper), but the canonical list adapter selects only title/url — so the row
+    handed to retrieval has neither. Look them up by event_id and, ONLY when the
+    row is engaged (roles.is_engaged), return the span. The page-author text
+    (``page_excerpt``) is deliberately never read here — that is exposure poison
+    ("cast-iron cookware is strictly superior"), not the owner's takeaway.
+
+    Returns "" for non-engaged rows, missing rows, or rows with no span."""
+    if not event_id or conn is None:
+        return ""
+    if cache is not None and event_id in cache:
+        return cache[event_id]
+    span = ""
+    try:
+        db_row = conn.execute(
+            "SELECT activity_type, content, metadata_json FROM activity_events WHERE event_id = ?",
+            (event_id,),
+        ).fetchone()
+    except Exception:
+        db_row = None
+    if db_row is not None:
+        activity_type, content_col, metadata_json = db_row[0], db_row[1], db_row[2]
+        probe = {
+            "activity_type": activity_type,
+            "metadata_json": metadata_json,
+        }
+        try:
+            from ..features.provenance.roles import is_engaged
+
+            engaged = is_engaged(probe)
+        except Exception:
+            engaged = str(activity_type or "").strip().lower() in (
+                "browser_highlight",
+                "highlight",
+                "star",
+                "star_page",
+            )
+        if engaged:
+            meta = metadata_json
+            if isinstance(meta, str):
+                try:
+                    import json as _json
+
+                    meta = _json.loads(meta)
+                except (ValueError, TypeError):
+                    meta = {}
+            if isinstance(meta, dict):
+                span = str(meta.get("highlight") or "").strip()
+            if not span:
+                span = str(content_col or "").strip()
+    if cache is not None:
+        cache[event_id] = span
+    return span
+
+
 def _owner_rank(verdict: Optional[bool]) -> int:
     """Stable-sort key for owner-first re-ranking: authored → exempt → other."""
     if verdict is True:
@@ -330,6 +394,35 @@ def _stat_like(entry: Dict[str, Any]) -> bool:
     )
 
 
+def _entry_ledger(entry: Dict[str, Any]) -> str:
+    """The stat entry's ledger tag. The exposure marker rides on two channels: a
+    top-level payload key ({"ledger": "exposure"}) and — for facts minted by the
+    live StatsEngine.promote_insights path, where the definition payload is
+    merged into the insight summary (stats/insights.py _summary_with_payload) —
+    nested under stat_summary. Both must be read."""
+    ledger = entry.get("ledger")
+    if not ledger:
+        summary = entry.get("stat_summary")
+        if isinstance(summary, dict):
+            ledger = summary.get("ledger")
+    return str(ledger or "").strip().lower()
+
+
+def _suppress_exposure_ledger_entries(
+    entries: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """P1.5: drop exposure-ledger stats (ledger=='exposure', e.g.
+    'activity.visits.by_title') from ANY query when the owner has turned the
+    exposure profile off (exposure_profile_visible=False). Unlike the
+    first-person preference, this is intent-independent — the owner opted out of
+    the whole exposure surface. Non-stat entries pass through untouched."""
+    return [
+        entry
+        for entry in entries
+        if not (_stat_like(entry) and _entry_ledger(entry) == "exposure")
+    ]
+
+
 def _apply_first_person_stat_preference(
     entries: List[Dict[str, Any]],
 ) -> List[Dict[str, Any]]:
@@ -337,21 +430,7 @@ def _apply_first_person_stat_preference(
     I sent"): drop exposure-ledger stats ({"ledger": "exposure"}) and drop a
     volume family shadowed by its authored '.sent' twin for the same group
     ('messages.volume.by_thread' loses to 'messages.volume.sent.by_thread').
-    Non-stat entries pass through untouched.
-
-    The exposure marker rides on two channels: a top-level payload key
-    ({"ledger": "exposure"}) and — for facts minted by the live
-    StatsEngine.promote_insights path, where the definition payload is merged
-    into the insight summary (stats/insights.py _summary_with_payload) —
-    nested under stat_summary. Both must gate."""
-
-    def _entry_ledger(entry: Dict[str, Any]) -> str:
-        ledger = entry.get("ledger")
-        if not ledger:
-            summary = entry.get("stat_summary")
-            if isinstance(summary, dict):
-                ledger = summary.get("ledger")
-        return str(ledger or "").strip().lower()
+    Non-stat entries pass through untouched."""
 
     shadowed = set()
     for entry in entries:
@@ -362,7 +441,7 @@ def _apply_first_person_stat_preference(
     for entry in entries:
         if _stat_like(entry):
             if _entry_ledger(entry) == "exposure":
-                continue
+                continue  # exposure ledger never answers a first-person "I" ask
             family = str(entry.get("record_id") or "")
             if ".sent" not in family and (
                 family,
@@ -814,6 +893,7 @@ def _load_canonical_summary_items(
     browse_fallback: bool = False,
     plan=None,
     conn: Optional[Any] = None,
+    exposure_visible: bool = True,
 ) -> List[Dict[str, Any]]:
     # First-person asks (P3.3): message rows get owner-authorship treatment —
     # belief/identity asks hard-filter to owner-authored rows (another person's
@@ -825,6 +905,7 @@ def _load_canonical_summary_items(
     belief_intent = bool(getattr(plan, "first_person_belief", False)) if plan else False
     role_cache: Dict[str, Optional[bool]] = {}
     display_cache: Dict[str, str] = {}
+    highlight_cache: Dict[str, str] = {}
 
     items: List[Dict[str, Any]] = []
     for table in manifest.canonical_tables or []:
@@ -847,6 +928,22 @@ def _load_canonical_summary_items(
                     continue  # belief/identity composition: owner-authored only
             clean = _redact_row_for_scope(manifest.scope_id, table, row)
             text = _row_summary_text(table, clean, scope_id=manifest.scope_id)
+            # IMB9 / P2.1: an engaged browser row (highlight/star) carries the
+            # owner's Annotate-grade span in metadata_json.highlight, which the
+            # canonical list adapter never selects — pull it in so the needle
+            # ("copper still method") is retrievable. page_excerpt (the page
+            # author's words) is deliberately never surfaced by the lookup.
+            if table == "activity_events":
+                event_id = str(clean.get("record_id") or clean.get("event_id") or "")
+                span = _activity_highlight_text(conn, event_id, clean, highlight_cache)
+                if span:
+                    text = f"{span} — {text}".strip(" —") if text else span
+                elif not exposure_visible:
+                    # P1.5: exposure profile off — a non-engaged browse row is
+                    # exposure-only (never the owner's expression); it must not
+                    # answer an interest/identity ask. Engaged rows (span set)
+                    # are Annotate-grade expression and always survive.
+                    continue
             if not text:
                 continue
             if first_person and owner is False:
@@ -1027,6 +1124,23 @@ def _query_tokens(query_text: str) -> List[str]:
             "trends",
             "average",
             "typical",
+            # "what did I TAKE AWAY / my TAKEAWAY from my READING" — the framing
+            # of a recall ask, never row content. A highlight span ("copper still
+            # method") never contains these words, so as rare tokens (df ≤ 2)
+            # they vetoed an answerable browser-highlight ask (IMB9). Stoplisting
+            # them here removes them from residual/rare entirely; the real
+            # content tokens ("fermentation", "methods") still match rows.
+            "take",
+            "takes",
+            "took",
+            "taken",
+            "taking",
+            "away",
+            "takeaway",
+            "takeaways",
+            "reading",
+            "read",
+            "reads",
         }
     )
     return [
@@ -1458,6 +1572,7 @@ def _load_stat_insight_items(
     manifest: Optional[ScopeResolutionManifest] = None,
     limit: int = 8,
     first_person: bool = False,
+    exposure_visible: bool = True,
 ) -> List[Dict[str, Any]]:
     """Aggregate-intent queries answer best from stat insights, not chunks."""
     import json as _json
@@ -1497,6 +1612,13 @@ def _load_stat_insight_items(
         if overlap <= 0:
             continue
         candidates.append((fact, created_at))
+    if not exposure_visible:
+        # P1.5: exposure profile off — the exposure ledger
+        # ("activity.visits.by_title") is suppressed for every stat query, not
+        # just first-person ones.
+        kept = _suppress_exposure_ledger_entries([fact for fact, _ in candidates])
+        kept_ids = {id(fact) for fact in kept}
+        candidates = [(fact, ca) for fact, ca in candidates if id(fact) in kept_ids]
     if first_person:
         # Contract 5: a first-person ask reads the authored ledger — the
         # exposure ledger and a '.sent'-shadowed volume twin must not answer
@@ -1812,6 +1934,20 @@ def _build_summary_items(
     # multi-db verification runs and seeded evals).
     bundle_conn = getattr(adapters.signal, "_conn", None)
 
+    # P1.5: the owner's exposure-profile visibility toggle (per-node
+    # engine_config, default ON). When OFF, exposure-ledger stats
+    # ("activity.visits.by_title") and exposure-only interest items are
+    # suppressed for EVERY query (the owner opted out of the surface), not just
+    # labeled. Read against the query's own connection so verification runs hit
+    # the right node.
+    try:
+        from ..config.settings import exposure_profile_visible as _exposure_visible
+
+        exposure_visible = _exposure_visible(bundle_conn)
+    except Exception as exc:  # noqa: BLE001 — a read failure must not break retrieval
+        logger.debug("exposure-profile visibility read skipped: %s", exc)
+        exposure_visible = True
+
     # Specific-ask detection: the discriminative (rare-in-corpus) content tokens
     # of the query. If the query carries these and nothing matches them, the
     # honest result is empty — see the rare gate in _rrf_fuse_summary_lists.
@@ -1851,6 +1987,7 @@ def _build_summary_items(
         rare_query_tokens=rare_query_tokens,
         plan=plan,
         conn=bundle_conn,
+        exposure_visible=exposure_visible,
     )
 
     # Interaction browse ("who do I talk to"): the contact registry is the
@@ -2015,6 +2152,11 @@ def _build_summary_items(
         # authored-ledger preference must hold or the exposure/volume twin
         # leaks around the stat lane's selection (IMB6).
         fact_items = _apply_first_person_stat_preference(fact_items)
+    if not exposure_visible:
+        # P1.5: exposure profile off — drop exposure-ledger stats from the
+        # dimension-dump lane too (intent-independent), never just from the
+        # first-person path.
+        fact_items = _suppress_exposure_ledger_entries(fact_items)
 
     # Entity spine: link query entities, contribute dossier/mention items.
     # Entity/fact/stat contributors need a raw sqlite handle; reuse the bundle
@@ -2072,6 +2214,7 @@ def _build_summary_items(
                 disclosure_tier=disclosure_tier,
                 manifest=manifest,
                 first_person=first_person,
+                exposure_visible=exposure_visible,
             )
         except Exception as exc:
             logger.debug("stat insight load skipped: %s", exc)
@@ -2400,6 +2543,12 @@ class DefaultSignalRetrievalAdapter:
                     )
                 except Exception:
                     inference_rare = []
+            try:
+                from ..config.settings import exposure_profile_visible as _exposure_visible
+
+                _exp_visible = _exposure_visible(getattr(self._adapters.signal, "_conn", None))
+            except Exception:
+                _exp_visible = True
             canon_items = _load_canonical_summary_items(
                 manifest=manifest,
                 adapters=self._adapters,
@@ -2408,6 +2557,8 @@ class DefaultSignalRetrievalAdapter:
                 disclosure_tier=request.disclosure_tier,
                 rare_query_tokens=inference_rare,
                 browse_fallback=True,
+                conn=getattr(self._adapters.signal, "_conn", None),
+                exposure_visible=_exp_visible,
             )
             for item in canon_items:
                 scores.append({k: v for k, v in item.items() if k not in _INFERENCE_CANONICAL_EXCLUDED_KEYS})

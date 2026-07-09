@@ -82,6 +82,18 @@ _MESSAGE_MARKER_KEYS = ("sender_type", "sender_id", "is_from_self", "conversatio
 _ENGAGED_ACTIVITY_TYPES = frozenset({"browser_highlight", "highlight", "star", "star_page"})
 _ENGAGED_METADATA_KEYS = ("highlight", "selected_text", "selectedText")
 
+# Posture values (mirror sources.definitions.POSTURE_VALUES; duplicated so this
+# stays a pure stdlib module with no engine imports).
+POSTURE_PERSONAL = "personal"
+POSTURE_MIXED = "mixed"
+POSTURE_AMBIENT = "ambient"
+
+# When a source is flagged ambient posture (background-noise the owner marked as
+# not-theirs), its rows can never be belief-grade: any more-attributing role is
+# capped down. 'authored'/'addressed'/'participated' collapse to 'observed'
+# (still recallable, never identity-eligible); 'observed'/'ambient' stay put.
+_AMBIENT_POSTURE_CAP = ROLE_OBSERVED
+
 
 def _norm(value: Any) -> str:
     return str(value or "").strip().lower()
@@ -144,18 +156,14 @@ def is_engaged(row: Dict[str, Any]) -> bool:
     return any(str(meta.get(key) or "").strip() for key in _ENGAGED_METADATA_KEYS)
 
 
-def record_role(
-    row: Dict[str, Any],
-    *,
-    table: str,
-    posture: Optional[str] = None,
-) -> str:
-    """Compute the record role for a canonical row. v1 rules (plan §3.1).
+def _base_role(row: Dict[str, Any], *, table: str, posture: str) -> str:
+    """Per-row role from table rules, sender fields, and the posture tiebreaker.
 
-    ``table`` is the canonical table the row belongs to; pass "" when unknown
-    (the row's own ``_table``/``canonical_table`` stamp, then shape inference,
-    take over). ``posture`` is the source-level default (personal|mixed|
-    ambient) used only as a tiebreaker when the table rules cannot decide.
+    This is the pre-P1.4 computation: ``posture`` here is used ONLY to break
+    ties for rows the table/sender rules cannot resolve (a personal-posture
+    note has no sender fields but is owner-authored by construction; an
+    ambient-posture feed row is exposure). The P1.4 posture CAP is applied on
+    top of this in :func:`record_role`.
     """
     table = (
         _norm(table)
@@ -194,16 +202,59 @@ def record_role(
     if _is_self_row(row):
         return ROLE_AUTHORED
 
-    posture = _norm(posture)
-    if posture == "personal":
+    if posture == POSTURE_PERSONAL:
         return ROLE_AUTHORED  # journal/resume-grade source: owner by construction
-    if posture == "ambient":
+    if posture == POSTURE_AMBIENT:
         return ROLE_AMBIENT
 
     # Unknown/ambiguous: fail toward the less-attributing role, never authored.
     if any(key in row for key in _MESSAGE_MARKER_KEYS):
         return ROLE_OBSERVED  # someone's speech, not provably the owner's
     return ROLE_AMBIENT
+
+
+def _apply_posture_cap(role: str, posture: str) -> str:
+    """P1.4 posture OVERRIDE: cap a computed role by the source posture.
+
+    - ``ambient``  — the load-bearing rule: an ambient-posture source is
+      background-noise the owner marked as NOT-theirs, so NO row from it may be
+      belief-grade. Any role above ``observed`` (authored/addressed/
+      participated) is capped to ``observed``; ``observed``/``ambient`` are
+      unchanged. This is what makes a per-connector 'background-noise' toggle
+      actually strip belief eligibility (goals, self-facts, sent-stats).
+    - ``personal`` — keep the computed role (a personal source's owner rows
+      stay authored; a stray assistant/other row keeps its lesser role).
+    - ``mixed`` (and anything else) — current per-row behaviour, no cap.
+    """
+    if posture == POSTURE_AMBIENT:
+        if role in (ROLE_AUTHORED, ROLE_ADDRESSED, ROLE_PARTICIPATED):
+            return _AMBIENT_POSTURE_CAP  # observed
+        return role  # observed / ambient stay put
+    return role
+
+
+def record_role(
+    row: Dict[str, Any],
+    *,
+    table: str,
+    posture: Optional[str] = None,
+) -> str:
+    """Compute the record role for a canonical row. v1 rules (plan §3.1) + the
+    P1.4 posture override.
+
+    ``table`` is the canonical table the row belongs to; pass "" when unknown
+    (the row's own ``_table``/``canonical_table`` stamp, then shape inference,
+    take over). ``posture`` is the EFFECTIVE source posture (personal|mixed|
+    ambient) — resolve it with ``sources.registry.effective_posture`` so the
+    owner's per-connector override is honoured. It plays two roles:
+      1. a tiebreaker for rows the table/sender rules cannot resolve, and
+      2. (P1.4) an ``ambient`` posture caps EVERY row's role at ``observed`` —
+         an ambient source can never mint beliefs, even for an ``is_from_self``
+         row — while ``personal``/``mixed`` keep the computed role.
+    """
+    posture = _norm(posture)
+    role = _base_role(row, table=table, posture=posture)
+    return _apply_posture_cap(role, posture)
 
 
 def owner_authored(row: Dict[str, Any], *, table: str = "", posture: Optional[str] = None) -> bool:
