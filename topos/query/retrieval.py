@@ -202,6 +202,38 @@ def _roles_owner_authored(table: str, row: Dict[str, Any]) -> Optional[bool]:
         return None
 
 
+# Subject attribution for belief/interest asks: an owner-AUTHORED message can be
+# ABOUT a third party ("Her interests are…", "my friend is vegan"). record_role
+# captures WHO WROTE it (P4), not WHO IT'S ABOUT (P2); a first-person "what do I
+# like/think" must not answer from the owner's description of someone else.
+_BELIEF_STRONG_SELF = re.compile(r"\b(i|i'm|im|i've|ive|i'd|id|i'll|ill|me|myself|mine)\b")
+_BELIEF_OTHER_PRONOUN = re.compile(r"\b(she|he|they|her|hers|his|him|them|their|theirs)\b")
+_BELIEF_MY_RELATION = re.compile(
+    r"\bmy (friend|friends|sister|brother|mom|mother|dad|father|wife|husband|"
+    r"partner|spouse|colleague|colleagues|coworker|coworkers|boss|roommate|"
+    r"neighbor|neighbour|cousin|aunt|uncle|kid|kids|son|daughter|buddy|pal|"
+    r"mate|girlfriend|boyfriend|gf|bf|team|manager|client|teacher|professor)\b"
+)
+_BELIEF_MY = re.compile(r"\bmy\b")
+
+
+def _belief_about_other(text: str) -> bool:
+    """True when an owner-authored message is ABOUT a third party (so it must not
+    answer a first-person belief/interest ask). Conservative: only True when a
+    third-party subject is present AND there is NO first-person self-reference —
+    'my sister and I both love hiking' and 'talked to her about my climbing' stay
+    (they carry self-reference); 'Her interests are…' and 'my friend is vegan' go."""
+    t = (text or "").lower()
+    if not t.strip():
+        return False
+    my_relations = len(_BELIEF_MY_RELATION.findall(t))
+    my_total = len(_BELIEF_MY.findall(t))
+    has_my_topic = my_total > my_relations  # a 'my <topic>' not consumed by a relation
+    self_ref = bool(_BELIEF_STRONG_SELF.search(t)) or has_my_topic
+    other_ref = bool(_BELIEF_OTHER_PRONOUN.search(t)) or my_relations > 0
+    return other_ref and not self_ref
+
+
 def _message_row_owner(
     table: str,
     row: Dict[str, Any],
@@ -946,6 +978,8 @@ def _load_canonical_summary_items(
                     continue
             if not text:
                 continue
+            if belief_intent and owner is True and table in _MESSAGE_TABLES and _belief_about_other(text):
+                continue  # owner-authored but about a third party — not the owner's belief
             if first_person and owner is False:
                 if table == "ai_chat_messages":
                     speaker = str(row.get("sender_type") or "assistant").strip() or "assistant"
@@ -2098,10 +2132,16 @@ def _build_summary_items(
             )
 
         if belief_intent:
-            vector_items = [i for i in vector_items if _vec_owner(i) is not False]
-            vector_context_items = [
-                i for i in vector_context_items if _vec_owner(i) is not False
-            ]
+            # Drop other people's words (author) AND the owner's descriptions of
+            # someone else (subject) — both misattribute a belief/interest.
+            def _vec_belief_ok(i: Dict[str, Any]) -> bool:
+                if _vec_owner(i) is False:
+                    return False
+                blob = f"{i.get('topic') or ''} {i.get('summary_text') or ''}"
+                return not _belief_about_other(blob)
+
+            vector_items = [i for i in vector_items if _vec_belief_ok(i)]
+            vector_context_items = [i for i in vector_context_items if _vec_belief_ok(i)]
         vector_items.sort(key=lambda i: _owner_rank(_vec_owner(i)))
         vector_context_items.sort(key=lambda i: _owner_rank(_vec_owner(i)))
 
