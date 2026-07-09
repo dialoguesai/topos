@@ -126,6 +126,13 @@ def test_edge_metadata_carries_provenance_role_mix(conn):
     assert meta.get("actor_role") == "observed"
     assert meta.get("role_mix") == {"observed": 1}
 
+    # And the API read path must EXPOSE it — graph_snapshot historically
+    # synthesized metadata_json and dropped the stored column entirely.
+    snap = graph_snapshot(conn, min_weight=0.0)
+    api_meta = _json.loads(snap["edges"][0]["metadata_json"] or "{}")
+    assert api_meta.get("actor_role") == "observed"
+    assert api_meta.get("evidence_count") is not None  # synthesized fields kept
+
 
 def test_journal_evidence_is_authored(conn):
     """Journal records are owner-authored by construction → edge role authored."""

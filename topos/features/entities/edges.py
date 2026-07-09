@@ -349,11 +349,24 @@ def graph_snapshot(
     edge_rows = conn.execute(
         f"""
         SELECT edge_id, src_entity_id, dst_entity_id, edge_type, weight, evidence_count,
-               last_event_at, valid_from, valid_to
+               last_event_at, valid_from, valid_to, metadata_json
         FROM entity_edges WHERE weight >= ?{clause} ORDER BY weight DESC LIMIT ?
         """,
         tuple(params),
     ).fetchall()
+    def _edge_metadata(evidence, last_at, stored_json) -> str:
+        """Stored edge metadata (provenance role_mix, fact statement, mz tag)
+        merged with the synthesized evidence fields the UI has always read."""
+        try:
+            merged = json.loads(stored_json or "{}")
+            if not isinstance(merged, dict):
+                merged = {}
+        except (TypeError, ValueError):
+            merged = {}
+        merged["evidence_count"] = evidence
+        merged["last_event_at"] = last_at
+        return json.dumps(merged)
+
     node_ids: List[str] = []
     for _eid, src, dst, *_ in edge_rows:
         for node in (src, dst):
@@ -390,11 +403,9 @@ def graph_snapshot(
             "last_event_at": last_at,
             "valid_from": valid_from,
             "valid_to": valid_to,
-            "metadata_json": json.dumps(
-                {"evidence_count": evidence, "last_event_at": last_at}
-            ),
+            "metadata_json": _edge_metadata(evidence, last_at, stored_json),
         }
-        for eid, src, dst, etype, weight, evidence, last_at, valid_from, valid_to in edge_rows
+        for eid, src, dst, etype, weight, evidence, last_at, valid_from, valid_to, stored_json in edge_rows
         if src in node_id_set and dst in node_id_set
     ]
     return {"nodes": nodes, "edges": edges}
