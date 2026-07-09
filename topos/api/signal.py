@@ -235,9 +235,16 @@ async def get_entity_graph(
     limit_nodes: int = Query(default=100, ge=1, le=500),
     limit_edges: int = Query(default=300, ge=1, le=1500),
     min_weight: float = Query(default=0.0, ge=0.0),
+    include_closed: bool = Query(default=False),
+    as_of: Optional[str] = Query(default=None),
     _api_key: str = Depends(require_api_key),
 ):
-    """Entity-spine graph (decayed typed edges) in list_graph node/edge shape."""
+    """Entity-spine graph (decayed typed edges) in list_graph node/edge shape.
+
+    Each edge carries valid_from/valid_to/last_event_at. ``as_of`` (ISO date)
+    returns the graph as it stood at that instant (temporal scrubber);
+    ``include_closed`` adds ended edges to the present view.
+    """
     from ..features.entities.reads import entity_graph
 
     return entity_graph(
@@ -245,6 +252,8 @@ async def get_entity_graph(
         limit_nodes=limit_nodes,
         limit_edges=limit_edges,
         min_weight=min_weight,
+        include_closed=include_closed,
+        as_of=as_of,
     )
 
 

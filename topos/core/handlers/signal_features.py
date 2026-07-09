@@ -478,6 +478,8 @@ async def handle_signal_entity_graph(message: Dict[str, Any]) -> Optional[Dict[s
             limit_nodes=min(int(payload.get("limit_nodes") or 100), 500),
             limit_edges=min(int(payload.get("limit_edges") or 300), 1500),
             min_weight=float(payload.get("min_weight") or 0.0),
+            include_closed=bool(payload.get("include_closed")),
+            as_of=payload.get("as_of") or None,
         )
         return {"id": req_id, "status": "ok", "payload": result}
     except Exception as exc:  # noqa: BLE001
