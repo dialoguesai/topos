@@ -262,17 +262,18 @@ async def rebuild_graph(
     reextract: bool = Query(default=False),
     _api_key: str = Depends(require_api_key),
 ):
-    """Rebuild the entity graph's evidence edges from existing mentions.
+    """Rebuild the entity graph from existing derived data (no NER re-run).
 
     Cheap and safe: recomputes co_occurrence + communicates_with edges from the
-    resolved ``entity_mentions`` set (no NER re-run), recounts mentions, prunes
-    mention-orphaned entities, and refreshes dossiers. Returns a before/after
-    edge-count report.
+    resolved ``entity_mentions`` set, materializes facts + topic clusters from
+    ``signal_objects`` into labeled temporal edges, recounts mentions, prunes
+    orphans, and refreshes dossiers. Returns a before/after edge-count report
+    (co_occurrence / communicates_with / topic_edges / fact_edges).
 
-    This is bounded by the current mention set; to grow it (pick up entities
-    from records never processed), re-run the ``entities`` enrichment job via
-    ``POST /enrichment/process`` with ``force_reprocess=true``. ``reextract`` is
-    accepted for forward-compatibility and currently performs the cheap rebuild.
+    Bounded by the current mentions + signal_objects; to grow the mention set
+    (pick up entities from records never processed), re-run the ``entities``
+    enrichment job via ``POST /enrichment/process`` with ``force_reprocess=true``.
+    ``reextract`` is accepted for forward-compatibility.
     """
     from ..features.entities.maintenance import rebuild_entity_graph
 
