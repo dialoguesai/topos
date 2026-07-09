@@ -114,6 +114,66 @@ async def test_browser_direct_ingest_runs_signal_derive_from_canonical(migrated_
     assert "technology" in (fact["payload_json"] or "")
 
 
+def test_conversations_canonicalize_stamps_table(migrated_conn) -> None:
+    """Live-ingest conversation records must carry _table: without the stamp
+    they are key-for-key identical to ai_chat records (sender_type='human',
+    sender_id=None, ts/seq) and downstream classifiers cannot tell the
+    families apart (PLAN_PROVENANCE_SPLIT P0.2)."""
+    from topos.features.stats.engine import _table_for_row
+    from topos.sources.registry import IMESSAGE
+
+    normalized = NormalizedRecord(
+        record_id="im-1",
+        payload={
+            "message_id": "im-1",
+            "thread_id": "t1",
+            "ts": "2026-06-01T10:00:00+00:00",
+            "sender_type": "human",
+            "sender_id": "+15551234567",
+            "content": "hey there",
+        },
+    )
+    result = canonicalize_normalized_batch(
+        migrated_conn,
+        IMESSAGE,
+        [normalized],
+        dataset_id="user-1:default:device1",
+        sync_batch_id="batch-conv-1",
+    )
+    assert result.messages_created == 1
+    assert len(result.canonical_records) == 1
+    record = result.canonical_records[0]
+    assert record["_table"] == "conversation_messages"
+    assert _table_for_row(record) == "conversation_messages"
+
+
+def test_ai_messages_canonicalize_stamps_table(migrated_conn) -> None:
+    from topos.features.stats.engine import _table_for_row
+
+    normalized = NormalizedRecord(
+        record_id="cg-1",
+        payload={
+            "message_id": "cg-1",
+            "thread_id": "conv-1",
+            "ts": "2026-06-01T10:00:00+00:00",
+            "sender_type": "human",
+            "content": "I live in Austin now",
+        },
+    )
+    result = canonicalize_normalized_batch(
+        migrated_conn,
+        CHATGPT_FILE,
+        [normalized],
+        dataset_id="user-1:default:device1",
+        sync_batch_id="batch-ai-1",
+    )
+    assert result.messages_created == 1
+    assert len(result.canonical_records) == 1
+    record = result.canonical_records[0]
+    assert record["_table"] == "ai_chat_messages"
+    assert _table_for_row(record) == "ai_chat_messages"
+
+
 def test_chatgpt_sources_declare_automatic_enrichment_for_ui_and_file() -> None:
     from topos.sources.canonical_signal_defaults import resolved_signal_derivation_jobs
 

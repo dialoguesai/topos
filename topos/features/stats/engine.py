@@ -26,6 +26,21 @@ logger = logging.getLogger("topos.features.stats.engine")
 _SEEN_RETENTION_DAYS = 45
 
 
+# Canonical ai_chat_messages sender_type values ('human' = owner, per
+# chatgpt_parser / ai_chat model); 'user' survives in legacy rows.
+_AI_CHAT_SENDER_TYPES = frozenset({"human", "user", "assistant", "system"})
+
+# Keys that only conversation_messages rows carry. sender_type CANNOT tell the
+# families apart: the messenger mapper writes 'human' for other people's
+# messages too. Checked by presence (dict(sqlite3.Row) keeps NULLs as None).
+_CONVERSATION_MARKER_KEYS = (
+    "is_from_self",
+    "event_type",
+    "message_type",
+    "reply_to_message_id",
+)
+
+
 def _table_for_row(row: Dict[str, Any]) -> str:
     explicit = row.get("_table") or row.get("canonical_table")
     if explicit:
@@ -38,11 +53,14 @@ def _table_for_row(row: Dict[str, Any]) -> str:
         return "activity_events"
     if row.get("amount") is not None:
         return "financial_transactions"
+    sender_type = str(row.get("sender_type") or "").strip().lower()
     if row.get("sender_id") is not None or row.get("conversation_id") is not None:
-        if str(row.get("sender_type") or "") in ("user", "assistant"):
+        if any(key in row for key in _CONVERSATION_MARKER_KEYS):
+            return "conversation_messages"
+        if sender_type in _AI_CHAT_SENDER_TYPES:
             return "ai_chat_messages"
         return "conversation_messages"
-    if str(row.get("sender_type") or "") in ("user", "assistant"):
+    if sender_type in _AI_CHAT_SENDER_TYPES:
         return "ai_chat_messages"
     return ""
 

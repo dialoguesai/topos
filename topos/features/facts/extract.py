@@ -329,23 +329,52 @@ def _clean_object(raw: str) -> Optional[str]:
     return value
 
 
-def _is_owner_authored(row: Dict[str, Any]) -> bool:
-    sender_type = str(row.get("sender_type") or "").lower()
-    if sender_type:
-        # ai_chat rows: only what the owner typed, never model output.
-        if sender_type == "user":
-            return True
-        if sender_type == "assistant":
-            return False
-    is_self = row.get("is_from_self")
-    return is_self in (1, True, "1")
+# Canonical ai_chat_messages stores 'human' for the owner (chatgpt_parser maps
+# role 'user' -> 'human'); 'user' survives in legacy rows and tests.
+_AI_CHAT_OWNER_SENDERS = frozenset({"human", "user"})
+
+
+def _is_self_row(row: Dict[str, Any]) -> bool:
+    """conversation_messages owner check: is_from_self / sender_id=='self'."""
+    if row.get("is_from_self") in (1, True, "1"):
+        return True
+    return str(row.get("sender_id") or "").strip().lower() == "self"
+
+
+def _is_owner_authored(row: Dict[str, Any], table: str = "") -> bool:
+    """Did the owner type this row? Table-aware — the two message families
+    encode owner identity differently:
+
+    - ai_chat_messages: sender_type is authoritative ('human'/'user' = owner;
+      'assistant'/'system' = model output, never the owner).
+    - conversation_messages: sender_type is NOT reliable — the messenger
+      mapper writes 'human' for OTHER people's messages too. Owner identity
+      lives in is_from_self / sender_id=='self' only.
+
+    Without table context (legacy/direct callers) 'human' is ambiguous, so it
+    fails closed to the conversation-side markers: belief extraction must not
+    guess.
+    """
+    table = str(table or row.get("_table") or row.get("canonical_table") or "").strip().lower()
+    sender_type = str(row.get("sender_type") or "").strip().lower()
+    if table == "ai_chat_messages":
+        return sender_type in _AI_CHAT_OWNER_SENDERS
+    if table == "conversation_messages":
+        return _is_self_row(row)
+    if sender_type in ("assistant", "system"):
+        return False  # model/system output is never the owner, in any family
+    if sender_type == "user":
+        return True  # 'user' only ever meant the owner (legacy ai_chat)
+    return _is_self_row(row)
 
 
 def extract_message_facts(
     row: Dict[str, Any],
     conn: Optional[sqlite3.Connection] = None,
+    *,
+    table: str = "",
 ) -> List[Dict[str, Any]]:
-    if not _is_owner_authored(row):
+    if not _is_owner_authored(row, table):
         return []
     content = str(row.get("content") or "")
     from ..signal.embed_context import is_derivable_content
@@ -412,11 +441,17 @@ def derive_location_facts(conn: sqlite3.Connection) -> int:
     return 1 if asserted else 0
 
 
+# Message extractors are bound per-table so the owner gate knows which
+# sender-identity convention applies (see _is_owner_authored).
 _EXTRACTORS = {
     "profile_records": lambda row, conn=None: extract_profile_facts(row),
     "journal_entries": extract_journal_facts,
-    "conversation_messages": extract_message_facts,
-    "ai_chat_messages": extract_message_facts,
+    "conversation_messages": lambda row, conn=None: extract_message_facts(
+        row, conn, table="conversation_messages"
+    ),
+    "ai_chat_messages": lambda row, conn=None: extract_message_facts(
+        row, conn, table="ai_chat_messages"
+    ),
 }
 
 

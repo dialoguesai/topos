@@ -74,6 +74,15 @@ class CompositionCase:
     #   aggregate   — coverage of expected aspects; needle recall approximates it for now
     # Default known_item keeps every existing case's grading byte-identical.
     query_class: str = "known_item"
+    # Imbalance/attribution lane (PLAN_PROVENANCE_SPLIT.md §5, IMB-series):
+    #   poison_groups — needle groups that must NOT appear in the response blob
+    #                   (score_imbalance's misattribution sub-score); a group counts
+    #                   as matched if ANY alternative appears.
+    #   authored_only — the case's message evidence must be owner-authored
+    #                   (score_imbalance's attribution_precision sub-score).
+    # Defaults keep every existing case byte-identical (the query_class precedent).
+    poison_groups: Tuple[Tuple[str, ...], ...] = ()
+    authored_only: bool = False
 
     def __post_init__(self) -> None:
         if self.max_latency_ms <= 0:
