@@ -104,6 +104,14 @@ class Settings(BaseSettings):
     # llama3.2-3b drops ~49% of goal extractions to malformed JSON; a 9B model parses cleanly.
     # Empty string ⇒ fall back to ollama_query_model (the floor tier keeps the small model).
     ollama_extraction_model: str = Field("qwen3.5:9b-mlx", env="TOPOS_OLLAMA_EXTRACTION_MODEL")
+    # B4 (PLAN_NODE_UPGRADE §B4 / PLAN_PROVENANCE_SPLIT P4.3): role-gated LLM fact
+    # extraction — an ADDITIVE pass on top of the rules-only floor. Tri-state:
+    # unset ⇒ auto (ON when ollama_extraction_model resolves to a non-empty model),
+    # "0"/"off"/"false"/"no" ⇒ force off, anything else ⇒ force on. The extraction
+    # JOB degrades to rules-only if Ollama is unreachable; it never crashes ingest.
+    # Resolve with features.facts.llm_extract.facts_llm_enabled(), not by reading
+    # this field directly (the auto default lives there).
+    topos_facts_llm: Optional[str] = Field(None, env="TOPOS_FACTS_LLM")
     engine_default_provider: str = Field("huggingface", env="ENGINE_DEFAULT_PROVIDER")
     # §D minimizer runs on EVERY grantee query, so it uses a small/fast local model. The judge
     # only runs in nightly privacy evals (F.4/CER semantic scoring), so it can be larger/slower.
