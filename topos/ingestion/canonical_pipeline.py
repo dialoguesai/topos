@@ -502,12 +502,17 @@ def load_canonical_records_for_signal(
         return out
 
     if group == "conversations":
+        # Live schema stores event time as event_at (not ts). Carry the
+        # owner-identity fields (is_from_self/sender_id/actor_role) so the
+        # provenance role gates classify reloaded rows correctly instead of
+        # failing closed to OBSERVED (record_role contract, P1.3).
         rows = db_conn.execute(
             """
-            SELECT message_id, conversation_id, sender_type, content, ts, source_id
+            SELECT message_id, conversation_id, sender_type, sender_id,
+                   is_from_self, actor_role, content, event_at, source_id
             FROM conversation_messages
             WHERE source_id=?
-            ORDER BY ts DESC
+            ORDER BY event_at DESC
             LIMIT ?
             """,
             (source_id, limit),
@@ -517,9 +522,13 @@ def load_canonical_records_for_signal(
                 "message_id": row[0],
                 "conversation_id": row[1],
                 "sender_type": row[2],
-                "content": row[3],
-                "ts": row[4],
-                "source_id": row[5] or source_id,
+                "sender_id": row[3],
+                "is_from_self": row[4],
+                "actor_role": row[5],
+                "content": row[6],
+                "ts": row[7],
+                "event_at": row[7],
+                "source_id": row[8] or source_id,
             }
             for row in rows
         ]

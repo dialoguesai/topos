@@ -39,7 +39,10 @@ EvalFn = Callable[[Dict[str, Any]], Tuple[bool, str]]
 # poison_groups+authored_only fields, red-first non-gating); +T4-T8 temporal cases
 # (qq-seeded-4). Composite comparable to qq-catalog-6 via the iteration gauge's
 # shared case_ids.
-QUERY_CATALOG_VERSION = "qq-catalog-7"
+# qq-catalog-8: +PRV-A1..PRV-M1 provenance-taxonomy lane (qq-prv-1, taxonomy-mapped,
+# red-first non-gating). Existing lanes untouched — composite comparable to
+# qq-catalog-7 via the iteration gauge's shared case_ids.
+QUERY_CATALOG_VERSION = "qq-catalog-8"
 
 _DEFAULT_LATENCY_MS = {
     "summary": int(os.environ.get("TOPOS_QQ_LATENCY_SUMMARY_MS", "10000")),
