@@ -187,6 +187,12 @@ def rebuild_entity_graph(
     orphaned = _delete_orphan_entities(conn) if prune_orphans else []
     edge_counts = rebuild_evidence_edges(conn)
 
+    # Close facts whose provenance is entirely gone BEFORE materializing, so a
+    # dead fact can't re-enter the graph as an edge (the AWS-cert leak).
+    from ..lifecycle.derived_scrub import close_dangling_facts
+
+    facts_closed = close_dangling_facts(conn)
+
     mz = {"topic_edges": 0, "fact_edges": 0}
     if materialize_facts:
         try:
@@ -215,5 +221,6 @@ def rebuild_entity_graph(
         "topic_edges": mz["topic_edges"],
         "fact_edges": mz["fact_edges"],
         "orphans_pruned": len(orphaned),
+        "facts_closed_dangling": facts_closed,
         "dossiers_refreshed": dossiers,
     }
