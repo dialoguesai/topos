@@ -1652,6 +1652,7 @@ def _rrf_fuse_summary_lists(
     now: Optional[datetime] = None,
     context_sources: frozenset = frozenset(),
     rare_tokens: Optional[List[str]] = None,
+    min_per_source: Optional[Dict[str, int]] = None,
 ) -> List[Dict[str, Any]]:
     """Fuse ordered contributor lists with weighted reciprocal rank fusion.
 
@@ -1740,10 +1741,43 @@ def _rrf_fuse_summary_lists(
     if not scores:
         return []
     max_score = max(scores.values()) or 1.0
+    ranked = sorted(scores.items(), key=lambda pair: pair[1], reverse=True)
+    selected = [key for key, _ in ranked[:cap]]
+
+    # Per-lane diversity floor: weighted RRF buries a lane whose evidence is
+    # genuinely relevant but appears in ONLY that lane (authored goals for "what
+    # have I been working on") under high-volume overlapping lanes (vector +
+    # recent). For the named lanes, guarantee a minimum representation by
+    # promoting their top-scored items over the lowest-scored non-pinned items.
+    # Gated by the caller (only goal-intent queries pin "goals"), so ordinary
+    # queries fuse exactly as before.
+    if min_per_source:
+        pinned = set(min_per_source)
+        selected_set = set(selected)
+        for lane, minimum in min_per_source.items():
+            have = sum(1 for key in selected if lane in contributors.get(key, []))
+            if have >= minimum:
+                continue
+            candidates = [
+                key for key, _ in ranked
+                if lane in contributors.get(key, []) and key not in selected_set
+            ]
+            evictable = [
+                key for key in reversed(selected)
+                if not (set(contributors.get(key, [])) & pinned)
+            ]
+            for promote in candidates[: minimum - have]:
+                if not evictable:
+                    break
+                drop = evictable.pop(0)
+                selected_set.discard(drop)
+                selected_set.add(promote)
+        selected = [key for key, _ in ranked if key in selected_set][:cap]
+
     fused: List[Dict[str, Any]] = []
-    for key, score in sorted(scores.items(), key=lambda pair: pair[1], reverse=True)[:cap]:
+    for key in selected:
         item = best_item[key]
-        item["relevance_score"] = round(score / max_score, 4)
+        item["relevance_score"] = round(scores[key] / max_score, 4)
         item["fusion_sources"] = sorted(set(contributors.get(key) or []))
         fused.append(item)
     return fused
@@ -1796,8 +1830,16 @@ def _build_summary_items(
 
     goal_items: List[Dict[str, Any]] = []
     if prefer_goals or work_scope:
+        # Goals are owner-authored artifacts; the scope's authorization list
+        # (default_source_ids) is the right boundary, NOT the runtime-install
+        # subset. A bundled source can hold authored goals (chatgpt_file_
+        # ingestion) while only a sibling variant (chatgpt_ui_conversation) has
+        # an install row — install-gating would then hide the owner's own goals.
+        goal_source_ids = [
+            str(s).strip() for s in (manifest.default_source_ids or []) if str(s).strip()
+        ] or (source_ids or None)
         goal_items = _load_user_goal_summaries(
-            query_text, source_ids=source_ids or None, conn=bundle_conn
+            query_text, source_ids=goal_source_ids or None, conn=bundle_conn
         )
 
     canonical_items = _load_canonical_summary_items(
@@ -2078,6 +2120,16 @@ def _build_summary_items(
             ),
             rare_tokens=rare_query_tokens,
             now=now,
+            # A goal-intent query ("what have I been working on", "my goals")
+            # must surface the owner's authored goals even when high-volume
+            # lanes would otherwise crowd them out — but only if goals loaded
+            # (an empty lane guarantees nothing).
+            min_per_source=(
+                {"goals": 2}
+                if goal_items
+                and any(t in (query_text or "").lower() for t in _EXTRA_SURFACE_TERMS)
+                else None
+            ),
         )
 
     # Legacy path (TOPOS_FUSION_RRF=off): incomparable absolute scores.
