@@ -7,7 +7,14 @@ from typing import Any, Dict, List
 
 from .fold import summarize
 
-_MIN_N = 3  # below this, an "insight" is noise
+_MIN_N = 3  # below this, a frequency/count "insight" is noise
+
+# The count floor guards frequency/count/distribution stats, where a handful of
+# observations cannot establish a pattern. A SUM aggregate ("you spent $X on
+# dining") is a running total, meaningful from a single transaction — the floor
+# would silently drop legitimate spend stats whose categories naturally hold few
+# rows (financial.spend.by_category). Kinds exempt from the count floor:
+_LOW_N_KINDS = frozenset({"sum"})
 
 
 def _confidence(n: int, *, saturation: int = 20) -> float:
@@ -110,10 +117,12 @@ def render_insights(engine) -> List[Dict[str, Any]]:
         dimension = defn["dimension"]
         window = _recent_window(defn)
 
+        low_n_ok = kind in _LOW_N_KINDS
+
         if defn["group_by"] == "none":
             state = engine.read_state(stat_id)
             n = int(state.get("n") or 0)
-            if n < _MIN_N:
+            if n < _MIN_N and not low_n_ok:
                 continue
             summary = _summary_with_payload(defn, summarize(kind, state))
             text = _render_text(stat_id, kind, "", summary, defn)
@@ -137,7 +146,7 @@ def render_insights(engine) -> List[Dict[str, Any]]:
         emitted_groups: List[tuple[int, str]] = []
         for group_key, state in engine.group_states(stat_id):
             n = int(state.get("n") or 0)
-            if n < _MIN_N or not group_key:
+            if not group_key or (n < _MIN_N and not low_n_ok):
                 continue
             summary = _summary_with_payload(defn, summarize(kind, state))
             text = _render_text(stat_id, kind, group_key, summary, defn, label_map)
