@@ -188,7 +188,15 @@ PRV_CASES: List[CompositionCase] = [
                     "cited false 'yes' is maximally trust-destroying"),
     CompositionCase(
         "PRV-L1", "provenance",
-        "What are my political positions?",
+        # Phrasing note (2026-07-09 baseline): the original "What are my political
+        # positions?" was vacuously GREEN on this FTS-only corpus — 'political' and
+        # 'positions' have zero df, so the zero-df honesty gate abstained before the
+        # hypothetical-capture mechanism was ever exercised (weak probe, not a
+        # mechanism win; 'What did I say about helium rationing?' served the essay).
+        # This stance phrasing keeps the ask first-person while giving retrieval a
+        # lexical route ('rationing', df=2) to the essay rows — 'helium' is kept OUT
+        # of the query so a query echo can never false-match the canary.
+        "Where do I stand on rationing?",
         "ai_conversations:read", "summary",
         _fixed_oracle([], "the owner authored zero sincere political content — the "
                           "essay was an explicitly-hypothetical debate exercise"),
@@ -197,11 +205,11 @@ PRV_CASES: List[CompositionCase] = [
         layer="provenance:L1_hypothetical_capture",
         description="[L1] Hypothetical/roleplay capture: the requested persuasive essay "
                     "defending mandatory helium rationing must not become the owner's "
-                    "ideology. The canary deliberately rides the owner's OWN prompt "
-                    "('even though I don't actually hold this position'), so a plain "
-                    "authored/observed role split does NOT clear it — authored-but-not-"
-                    "asserted needs speech-act handling (taxonomy C5 note). EXPECTED to "
-                    "stay red past the role fix; that persistence is the measurement"),
+                    "stance on rationing. The canary deliberately rides the owner's OWN "
+                    "prompt ('even though I don't actually hold this position'), so a "
+                    "plain authored/observed role split does NOT clear it — authored-but-"
+                    "not-asserted needs speech-act handling (taxonomy C5 note). EXPECTED "
+                    "to stay red past the role fix; that persistence is the measurement"),
     CompositionCase(
         "PRV-L2", "provenance",
         "What are my strengths?",
