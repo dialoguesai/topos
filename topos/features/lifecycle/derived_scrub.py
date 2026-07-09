@@ -78,37 +78,16 @@ def _rebuild_entity_edges(conn: sqlite3.Connection) -> int:
     communicates_with are rebuilt from surviving mentions. part_of edges are
     structural (derived from names, not scrubbed evidence) and are kept for
     surviving entities.
-    """
-    from ..entities.edges import EDGE_CO_OCCURRENCE, update_edge
 
-    conn.execute(
-        "DELETE FROM entity_edges WHERE edge_type IN ('co_occurrence', 'communicates_with')"
-    )
-    rows = conn.execute(
-        """
-        SELECT record_id, entity_id, event_at FROM entity_mentions
-        WHERE record_id IS NOT NULL
-        ORDER BY COALESCE(event_at, created_at)
-        """
-    ).fetchall()
-    by_record: Dict[str, List[tuple]] = {}
-    for record_id, entity_id, event_at in rows:
-        by_record.setdefault(str(record_id), []).append((str(entity_id), event_at))
-    edges = 0
-    for record_id, members in by_record.items():
-        unique = list(dict.fromkeys(m[0] for m in members))[:8]
-        event_at = members[0][1]
-        for i in range(len(unique)):
-            for j in range(i + 1, len(unique)):
-                update_edge(
-                    conn,
-                    src_entity_id=unique[i],
-                    dst_entity_id=unique[j],
-                    edge_type=EDGE_CO_OCCURRENCE,
-                    event_at=event_at,
-                )
-                edges += 1
-    return edges
+    Delegates to the shared entity-graph rebuild so co_occurrence AND
+    communicates_with are recreated — previously this deleted communicates_with
+    but only rebuilt co_occurrence, silently dropping every sender→entity edge
+    on each scrub.
+    """
+    from ..entities.maintenance import rebuild_evidence_edges
+
+    counts = rebuild_evidence_edges(conn)
+    return int(counts.get("co_occurrence", 0) + counts.get("communicates_with", 0))
 
 
 # ------------------------------------------------------------------ stats
