@@ -322,20 +322,37 @@ def graph_snapshot(
     limit_edges: int = 300,
     min_weight: float = 0.0,
     include_closed: bool = False,
+    as_of: Optional[str] = None,
 ) -> Dict[str, List[Dict[str, Any]]]:
     """Entity graph in the legacy list_graph shape (nodes/edges dicts).
 
     Validity fields ride first-class on each edge (graph-UI audit): active
     edges carry valid_to=None; include_closed=True adds ended revisions.
+
+    ``as_of`` (ISO date/timestamp) returns the graph AS IT STOOD at that instant
+    — edges whose validity window covers it (valid_from <= as_of < valid_to) —
+    driving a temporal scrubber. It supersedes include_closed (a point-in-time
+    view is neither "active now" nor "all history").
     """
-    closed_clause = "" if include_closed else " AND valid_to IS NULL"
+    params: List[Any] = [min_weight]
+    if as_of:
+        clause = (
+            " AND (valid_from IS NULL OR valid_from <= ?)"
+            " AND (valid_to IS NULL OR valid_to > ?)"
+        )
+        params.extend([as_of, as_of])
+    elif include_closed:
+        clause = ""
+    else:
+        clause = " AND valid_to IS NULL"
+    params.append(limit_edges)
     edge_rows = conn.execute(
         f"""
         SELECT edge_id, src_entity_id, dst_entity_id, edge_type, weight, evidence_count,
                last_event_at, valid_from, valid_to
-        FROM entity_edges WHERE weight >= ?{closed_clause} ORDER BY weight DESC LIMIT ?
+        FROM entity_edges WHERE weight >= ?{clause} ORDER BY weight DESC LIMIT ?
         """,
-        (min_weight, limit_edges),
+        tuple(params),
     ).fetchall()
     node_ids: List[str] = []
     for _eid, src, dst, *_ in edge_rows:
