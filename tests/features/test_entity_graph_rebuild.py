@@ -88,6 +88,70 @@ def test_rebuild_is_idempotent(conn):
     assert active_after_first == active_after_second
 
 
+def test_edge_metadata_carries_provenance_role_mix(conn):
+    """Evidence edges are stamped with their records' provenance roles.
+
+    A conversation_messages record with actor_role='observed' (witnessed
+    speech) must yield an edge whose metadata says observed — the graph's
+    personal→ambient attribution overlay reads this.
+    """
+    import json as _json
+
+    r = EntityResolver(conn)
+    a = r._create_entity("Ada", "person")
+    b = r._create_entity("Bram", "person")
+    conn.commit()
+    # canonical message tables are created by ingestion, not migrations —
+    # the minimal shape the role lookup reads is enough here.
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS conversation_messages ("
+        "message_id TEXT PRIMARY KEY, conversation_id TEXT, sender_type TEXT, "
+        "sender_id TEXT, is_from_self INTEGER, actor_role TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO conversation_messages (message_id, conversation_id, sender_type, actor_role) "
+        "VALUES ('m1', 'c1', 'human', 'observed')"
+    )
+    _mention(conn, entity_id=a, record_id="m1", table="conversation_messages")
+    _mention(conn, entity_id=b, record_id="m1", table="conversation_messages")
+    conn.commit()
+
+    rebuild_evidence_edges(conn)
+    meta = _json.loads(
+        conn.execute(
+            "SELECT metadata_json FROM entity_edges WHERE edge_type='co_occurrence' AND valid_to IS NULL"
+        ).fetchone()[0]
+        or "{}"
+    )
+    assert meta.get("actor_role") == "observed"
+    assert meta.get("role_mix") == {"observed": 1}
+
+
+def test_journal_evidence_is_authored(conn):
+    """Journal records are owner-authored by construction → edge role authored."""
+    import json as _json
+
+    r = EntityResolver(conn)
+    a = r._create_entity("Ada", "person")
+    b = r._create_entity("Yoga", "topic")
+    conn.commit()
+    conn.execute(
+        "INSERT INTO journal_entries (entry_id, source_id, content) VALUES ('j1', 'grow_journal', 'did yoga with Ada')"
+    )
+    _mention(conn, entity_id=a, record_id="j1", table="journal_entries")
+    _mention(conn, entity_id=b, record_id="j1", table="journal_entries")
+    conn.commit()
+
+    rebuild_evidence_edges(conn)
+    meta = _json.loads(
+        conn.execute(
+            "SELECT metadata_json FROM entity_edges WHERE edge_type='co_occurrence' AND valid_to IS NULL"
+        ).fetchone()[0]
+        or "{}"
+    )
+    assert meta.get("actor_role") == "authored"
+
+
 def test_rebuild_entity_graph_reports_before_after(conn):
     _seed_two_entities_one_record(conn)
     conn.execute("DELETE FROM entity_edges")
