@@ -45,17 +45,31 @@ def _recount_entity_mentions(conn: sqlite3.Connection) -> int:
 
 
 def _delete_orphan_entities(conn: sqlite3.Connection) -> List[str]:
-    """Entities with no remaining mentions and no contact anchor are removed.
+    """Entities with no remaining mentions and no LIVE contact anchor are removed.
 
     Contact-seeded entities stay even at zero mentions — the contact row is
     their provenance, and the canonical contacts table has its own scrub path.
+    But the anchor must still RESOLVE: when the contact row itself was deleted
+    (source scrub, manual cleanup), the anchored entity would otherwise persist
+    forever with a dangling contact_id (2026-07-09 demo-purge leak).
     """
-    rows = conn.execute(
-        """
-        SELECT entity_id FROM entities
-        WHERE mention_count = 0 AND contact_id IS NULL AND is_self = 0
-        """
-    ).fetchall()
+    try:
+        rows = conn.execute(
+            """
+            SELECT entity_id FROM entities e
+            WHERE mention_count = 0 AND is_self = 0
+              AND (contact_id IS NULL
+                   OR NOT EXISTS (SELECT 1 FROM contacts c WHERE c.contact_id = e.contact_id))
+            """
+        ).fetchall()
+    except sqlite3.OperationalError:
+        # No contacts table in this database — fall back to the anchor-blind rule.
+        rows = conn.execute(
+            """
+            SELECT entity_id FROM entities
+            WHERE mention_count = 0 AND contact_id IS NULL AND is_self = 0
+            """
+        ).fetchall()
     orphan_ids = [str(r[0]) for r in rows]
     for entity_id in orphan_ids:
         conn.execute("DELETE FROM entities WHERE entity_id=?", (entity_id,))
@@ -247,6 +261,95 @@ def purge_facts_for_source(
     return {"facts_deleted": deleted, "facts_trimmed": trimmed}
 
 
+_REF_ID_COLUMNS = ("record_id", "message_id", "entry_id", "event_id", "transaction_id", "id")
+
+
+def _ref_record_exists(conn: sqlite3.Connection, table: str, record_id: str) -> Optional[bool]:
+    """Does the referenced record still exist? None = unverifiable (be conservative)."""
+    if not table.replace("_", "").isalnum():
+        return None  # suspicious table name — never interpolate it
+    try:
+        cols = [str(c[1]) for c in conn.execute(f"PRAGMA table_info({table})")]
+    except sqlite3.Error:
+        return None
+    if not cols:
+        return False  # the whole table was dropped (raw retention scrub)
+    id_col = next((c for c in _REF_ID_COLUMNS if c in cols), None)
+    if id_col is None:
+        return None  # no recognisable id column — can't verify
+    row = conn.execute(
+        f"SELECT 1 FROM {table} WHERE {id_col}=? LIMIT 1", (record_id,)
+    ).fetchone()
+    return row is not None
+
+
+def close_dangling_facts(conn: sqlite3.Connection) -> int:
+    """Close active facts whose every source_ref points at a deleted record.
+
+    purge_facts_for_source only removes refs attributable to the scrubbed
+    source; legacy refs without a source_id can keep a fact alive after its
+    evidence is gone (the "certified_in AWS Solutions Architect" leak). This
+    sweep CLOSES such facts (valid_to stamped, row kept) rather than deleting —
+    provenance may return, and history stays auditable. Refs that cannot be
+    verified (no table/record_id, unknown schema) count as alive: closing a
+    real fact is worse than keeping a stale one an extra sweep.
+    """
+    rows = conn.execute(
+        """
+        SELECT object_id, source_refs_json FROM signal_objects
+        WHERE object_type='fact' AND valid_to IS NULL
+        """
+    ).fetchall()
+    closed = 0
+    for object_id, refs_json in rows:
+        try:
+            refs = [r for r in json.loads(refs_json or "[]") if isinstance(r, dict)]
+        except json.JSONDecodeError:
+            continue
+        if not refs:
+            continue
+        any_alive = False
+        for ref in refs:
+            # Source-attributed refs are the attribution sweep's jurisdiction:
+            # purge_facts_for_source trims them when THEIR source scrubs, so a
+            # still-present attributed ref counts as live evidence. This sweep
+            # only judges legacy refs without a source_id — the kind that kept
+            # the AWS-cert fact alive after its record was deleted.
+            if ref.get("source_id"):
+                any_alive = True
+                break
+            table = str(ref.get("table") or "")
+            record_id = str(ref.get("record_id") or "")
+            if not table or not record_id:
+                any_alive = True  # unverifiable → conservative
+                break
+            # timeline is the record registry (the attribution sweep deletes its
+            # rows with the source) — presence there means the record lives even
+            # if the canonical row isn't materialized (test corpora, lean nodes).
+            try:
+                in_timeline = conn.execute(
+                    "SELECT 1 FROM timeline WHERE record_id=? LIMIT 1", (record_id,)
+                ).fetchone() is not None
+            except sqlite3.OperationalError:
+                in_timeline = False
+            if in_timeline:
+                any_alive = True
+                break
+            exists = _ref_record_exists(conn, table, record_id)
+            if exists is None or exists:
+                any_alive = True
+                break
+        if not any_alive:
+            conn.execute(
+                "UPDATE signal_objects SET valid_to=datetime('now'), updated_at=datetime('now') "
+                "WHERE object_id=?",
+                (object_id,),
+            )
+            closed += 1
+    conn.commit()
+    return closed
+
+
 # ----------------------------------------------------------------- orphans
 
 
@@ -301,6 +404,9 @@ def purge_derived_for_source(
     report.update(refold_statistics(conn))
     report.update(repromote_stat_insights(conn))
     report.update(purge_facts_for_source(conn, source_id, scrubbed_record_ids=scrubbed_record_ids))
+    # Catch facts the source-attribution purge couldn't attribute (legacy refs
+    # without source_id): anything whose evidence is now entirely gone closes.
+    report["facts_closed_dangling"] = close_dangling_facts(conn)
 
     try:
         from ..entities.dossier import refresh_dossiers
