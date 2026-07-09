@@ -365,31 +365,42 @@ class TestGracefulDegradation:
         assert written == 1
         assert _facts_by_predicate(conn, "works_at")[0]["object_value"] == "Dialogues"
 
-    def test_unreachable_stops_the_pass_early(self, conn, monkeypatch):
+    def test_unreachable_writes_nothing_and_never_crashes(self, conn, monkeypatch):
+        # With the bounded-concurrent fan-out the eligible rows are dispatched
+        # together, so we no longer count exactly one call — the load-bearing
+        # invariant is that an unreachable server writes ZERO facts and never
+        # raises into ingestion (the rules floor already ran). The serial write
+        # phase also stops writing at the first unreachable error, so no partial
+        # facts land from a dead server.
         import topos.features.facts.llm_extract as llm
 
-        calls = {"n": 0}
-
         def _dead(prompt, row):
-            calls["n"] += 1
             raise RuntimeError("urlopen error [Errno 61] Connection refused")
 
         monkeypatch.setattr(llm, "_make_ollama_extractor", lambda model: _dead)
-        rows = [_ai_chat_owner("a", "1"), _ai_chat_owner("b", "2"), _ai_chat_owner("c", "3")]
+        # Fact-bearing content so the pre-filter passes and the LLM is actually
+        # attempted (short "a"/"b"/"c" rows would be pre-filtered before any call).
+        rows = [
+            _ai_chat_owner("I just moved to Berlin this spring", "1"),
+            _ai_chat_owner("been vegetarian since college honestly", "2"),
+            _ai_chat_owner("switched from tea to cold brew this year", "3"),
+        ]
         written = extract_owner_facts_llm(conn, rows, model="fake-model")
         assert written == 0
-        assert calls["n"] == 1  # stopped after the first unreachable error
+        assert _active_facts(conn) == []  # nothing written from the dead server
 
     def test_per_row_error_is_non_fatal(self, conn):
-        # A non-transport error on one row is logged and skipped; other rows still process.
+        # A non-transport error on one row is logged and skipped; other rows still
+        # process. Both rows carry >15 chars of fact-bearing content so the
+        # pre-filter passes and the extractor is actually invoked for each.
         def _flaky(prompt, row):
             if "boom" in str(row.get("content")):
                 raise ValueError("garbled model output")
             return [{"predicate": "lives_in", "object": "Berlin"}]
 
         rows = [
-            _ai_chat_owner("boom bad row", "1"),
-            _ai_chat_owner("I live in Berlin now", "2"),
+            _ai_chat_owner("boom this row makes the model choke badly", "1"),
+            _ai_chat_owner("I live in Berlin now, moved here recently", "2"),
         ]
         written = extract_owner_facts_llm(conn, rows, extractor=_flaky)
         assert written == 1
@@ -452,3 +463,189 @@ class TestAssertIntegration:
         refs = json.loads(refs)
         assert refs[0]["table"] == "ai_chat_messages"
         assert refs[0]["record_id"] == "rec-42"
+
+
+# --------------------------------------------------------------------------
+# Pre-filter: skip rows that cannot carry a durable owner self-fact BEFORE
+# spending an LLM call. Conservative — a false negative only wastes a call, a
+# false positive would drop a real fact.
+# --------------------------------------------------------------------------
+
+
+def _recording_extractor(mapping):
+    """Like _stub_by_content but records the content of every row it is CALLED
+    with, so a test can assert the pre-filter skipped a row (no call spent)."""
+    seen: list = []
+
+    def _extract(prompt, row):
+        content = str(row.get("content") or "")
+        seen.append(content)
+        for needle, triples in mapping.items():
+            if needle in content:
+                return [dict(t) for t in triples]
+        return []
+
+    return _extract, seen
+
+
+class TestPrefilter:
+    def test_greeting_row_skips_the_llm_call(self, conn):
+        # A whole-message greeting is skipped: the extractor is NEVER called for
+        # it (the call is saved), while the fact-bearing row is processed.
+        stub, seen = _recording_extractor(
+            {"cold brew": [{"predicate": "prefers", "object": "cold brew"}]}
+        )
+        rows = [
+            _ai_chat_owner("hey!", "greet"),
+            _ai_chat_owner("these days I mostly drink cold brew coffee", "fact"),
+        ]
+        written = extract_owner_facts_llm(conn, rows, extractor=stub)
+        assert written == 1
+        # The extractor was invoked for the fact row ONLY — the greeting was
+        # pre-filtered out (no LLM call spent).
+        assert seen == ["these days I mostly drink cold brew coffee"]
+        assert _facts_by_predicate(conn, "prefers")[0]["object_value"] == "cold brew"
+
+    def test_url_only_row_skips_the_llm_call(self, conn):
+        stub, seen = _recording_extractor(
+            {"vegetarian": [{"predicate": "prefers", "object": "vegetarian"}]}
+        )
+        rows = [
+            _ai_chat_owner("https://example.com/some/really/long/path?q=1", "url"),
+            _ai_chat_owner("I have been vegetarian for over a decade now", "fact"),
+        ]
+        written = extract_owner_facts_llm(conn, rows, extractor=stub)
+        assert written == 1
+        assert seen == ["I have been vegetarian for over a decade now"]
+
+    def test_short_and_logistics_rows_skip_the_llm_call(self, conn):
+        stub, seen = _recording_extractor(
+            {"Berlin": [{"predicate": "lives_in", "object": "Berlin"}]}
+        )
+        rows = [
+            _ai_chat_owner("ok", "short"),
+            _ai_chat_owner("what time?", "logistics"),
+            _ai_chat_owner("on my way", "omw"),
+            _ai_chat_owner("I just moved to Berlin for a new job", "fact"),
+        ]
+        written = extract_owner_facts_llm(conn, rows, extractor=stub)
+        assert written == 1
+        assert seen == ["I just moved to Berlin for a new job"]
+
+    def test_prefilter_never_drops_a_fact_bearing_short_of_greeting(self, conn):
+        # A message that merely STARTS with an ack word but carries a real fact
+        # must NOT be skipped (conservative pre-filter: whole-message match only).
+        stub, seen = _recording_extractor(
+            {"Lisbon": [{"predicate": "lives_in", "object": "Lisbon"}]}
+        )
+        rows = [_ai_chat_owner("ok so I actually moved to Lisbon last month", "f")]
+        written = extract_owner_facts_llm(conn, rows, extractor=stub)
+        assert written == 1
+        assert len(seen) == 1  # the LLM WAS called — not mistaken for a bare "ok"
+
+
+# --------------------------------------------------------------------------
+# Concurrency: the bounded-concurrent fan-out must produce the SAME facts as a
+# serial pass, and must not lose or duplicate DB writes.
+# --------------------------------------------------------------------------
+
+
+class TestConcurrency:
+    def _multi_row_batch(self):
+        # Ten distinct fact-bearing owner rows (all survive the pre-filter).
+        return [
+            _ai_chat_owner(f"I have been practicing yoga habit number {i} for years", f"r{i}")
+            for i in range(10)
+        ]
+
+    def test_concurrent_matches_serial_facts(self, conn, tmp_path, monkeypatch):
+        # Same stub, same rows: the concurrent path (default bound) must write the
+        # same set of facts a bound of 1 (serial) writes.
+        import topos.features.facts.llm_extract as llm
+
+        def _stub(prompt, row):
+            mid = str(row.get("message_id"))
+            return [{"predicate": "practices", "object": f"yoga-{mid}"}]
+
+        rows = self._multi_row_batch()
+
+        # Serial baseline on a fresh DB (bound forced to 1).
+        serial_db = sqlite3.connect(str(tmp_path / "serial.db"))
+        serial_db.row_factory = sqlite3.Row
+        apply_all_migrations(serial_db)
+        serial_db.execute(
+            "INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name, is_self)"
+            " VALUES ('ent-owner', 'person', 'Owner', 'owner', 1)"
+        )
+        serial_db.commit()
+        monkeypatch.setattr(llm, "FACTS_LLM_CONCURRENCY", 1)
+        serial_written = extract_owner_facts_llm(serial_db, rows, extractor=_stub)
+        serial_facts = sorted(
+            f["object_value"]
+            for f in _facts_by_predicate(serial_db, "practices")
+        )
+        serial_db.close()
+
+        # Concurrent path (bound 6) on the fixture DB.
+        monkeypatch.setattr(llm, "FACTS_LLM_CONCURRENCY", 6)
+        conc_written = extract_owner_facts_llm(conn, rows, extractor=_stub)
+        conc_facts = sorted(
+            f["object_value"] for f in _facts_by_predicate(conn, "practices")
+        )
+
+        assert conc_written == serial_written == 10
+        assert conc_facts == serial_facts
+        assert len(conc_facts) == len(set(conc_facts)) == 10  # no dup / no loss
+
+    def test_concurrent_writes_are_not_lost_or_duplicated(self, conn, monkeypatch):
+        # Under concurrency every eligible row's fact lands exactly once; the DB
+        # write phase is serialized on the calling thread.
+        import topos.features.facts.llm_extract as llm
+
+        monkeypatch.setattr(llm, "FACTS_LLM_CONCURRENCY", 6)
+
+        # 'worked_at' is multi-valued, so 12 distinct objects coexist as 12 active
+        # rows — a clean probe that no write is lost or duplicated under fan-out.
+        def _stub(prompt, row):
+            mid = str(row.get("message_id"))
+            return [{"predicate": "worked_at", "object": f"org-{mid}"}]
+
+        rows = [
+            _ai_chat_owner(f"I worked at a company named place {i} for a while", f"c{i}")
+            for i in range(12)
+        ]
+        written = extract_owner_facts_llm(conn, rows, extractor=_stub)
+        facts = _facts_by_predicate(conn, "worked_at")
+        objects = sorted(f["object_value"] for f in facts)
+        assert written == 12
+        assert objects == sorted(f"org-c{i}" for i in range(12))
+        assert len(objects) == len(set(objects))  # exactly once each, none lost
+
+    def test_concurrent_preserves_role_gate_and_attribution(self, conn, monkeypatch):
+        # The role gate stays upstream even under concurrency: an owner row mints
+        # an owner belief, an assistant row an attributed claim, and a witnessed
+        # contact row nothing — all in one concurrent batch.
+        import topos.features.facts.llm_extract as llm
+
+        monkeypatch.setattr(llm, "FACTS_LLM_CONCURRENCY", 4)
+        stub = _stub_by_content(
+            {
+                "vegetarian": [{"predicate": "prefers", "object": "vegetarian"}],
+                "Berlin": [{"predicate": "lives_in", "object": "Berlin"}],
+                "shellfish": [{"predicate": "allergic_to", "object": "shellfish"}],
+            }
+        )
+        rows = [
+            _ai_chat_owner("I have been vegetarian since my college years", "own"),
+            _ai_chat_assistant("You told me earlier you live in Berlin now", "asst"),
+            _messenger_contact(
+                "I'm deathly allergic to shellfish, be careful", sender_id="bob", mid="wit"
+            ),
+        ]
+        extract_owner_facts_llm(conn, rows, extractor=stub)
+        prefers = _facts_by_predicate(conn, "prefers")
+        lives = _facts_by_predicate(conn, "lives_in")
+        allergic = _facts_by_predicate(conn, "allergic_to")
+        assert prefers and prefers[0]["asserted_by"] == "owner"
+        assert lives and lives[0]["asserted_by"] == "assistant"  # attributed, never owner
+        assert allergic == []  # witnessed row: ZERO owner facts (role gate upstream)
