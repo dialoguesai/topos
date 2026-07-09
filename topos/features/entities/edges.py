@@ -101,6 +101,108 @@ def update_edge(
     )
 
 
+def _fold_weights(
+    keep_weight: Any,
+    keep_last: Optional[str],
+    absorb_weight: Any,
+    absorb_last: Optional[str],
+):
+    """Combine two edge weights under the half-life model.
+
+    Decays the earlier-dated weight forward to the later timestamp, then sums —
+    the same decay-then-add rule as ``update_edge``, so a merge and a fresh
+    re-observation converge on the same weight. Returns (weight, last_event_at).
+    """
+    wk = float(keep_weight or 0.0)
+    wa = float(absorb_weight or 0.0)
+    tk, ta = parse_ts(keep_last), parse_ts(absorb_last)
+    if tk is not None and ta is not None:
+        if ta > tk:
+            wk *= math.pow(0.5, (ta - tk).total_seconds() / 86400.0 / DEFAULT_HALF_LIFE_DAYS)
+            return wk + wa, absorb_last
+        if tk > ta:
+            wa *= math.pow(0.5, (tk - ta).total_seconds() / 86400.0 / DEFAULT_HALF_LIFE_DAYS)
+            return wk + wa, keep_last
+    return wk + wa, max(filter(None, [keep_last, absorb_last]), default=None)
+
+
+def merge_entity_edges(
+    conn: sqlite3.Connection,
+    *,
+    keep_id: str,
+    absorb_id: str,
+) -> None:
+    """Rewrite ``absorb_id`` -> ``keep_id`` across entity_edges on a merge.
+
+    A blanket ``UPDATE ... SET src_entity_id=keep WHERE src_entity_id=absorb``
+    raises IntegrityError when both entities hold an ACTIVE edge of the same
+    type to the same third entity — the active-row partial unique index
+    (idx_entity_edges_active) forbids two active rows for one (src, dst, type).
+    So per edge: canonicalise the rewritten endpoints, drop edges that collapse
+    to a self-loop, and — for an active edge that now collides with an existing
+    active twin — fold weight/evidence_count/last_event_at into the survivor and
+    delete the duplicate. Closed rows (valid_to set) are unconstrained and
+    rewrite in place.
+    """
+    if not keep_id or not absorb_id or keep_id == absorb_id:
+        return
+    rows = conn.execute(
+        """
+        SELECT edge_id, src_entity_id, dst_entity_id, edge_type,
+               weight, evidence_count, last_event_at, valid_to
+        FROM entity_edges
+        WHERE src_entity_id=? OR dst_entity_id=?
+        """,
+        (absorb_id, absorb_id),
+    ).fetchall()
+    for edge_id, src, dst, edge_type, weight, evidence, last_at, valid_to in rows:
+        new_src = keep_id if src == absorb_id else src
+        new_dst = keep_id if dst == absorb_id else dst
+        new_src, new_dst = _canonical_order(new_src, new_dst, edge_type)
+        if new_src == new_dst:
+            # merged endpoints collapsed to a self-loop — meaningless, drop it.
+            conn.execute("DELETE FROM entity_edges WHERE edge_id=?", (edge_id,))
+            continue
+        if valid_to is None:
+            twin = conn.execute(
+                """
+                SELECT edge_id, weight, evidence_count, last_event_at
+                FROM entity_edges
+                WHERE src_entity_id=? AND dst_entity_id=? AND edge_type=?
+                  AND valid_to IS NULL AND edge_id<>?
+                """,
+                (new_src, new_dst, edge_type, edge_id),
+            ).fetchone()
+            if twin is not None:
+                twin_id, twin_weight, twin_evidence, twin_last = twin
+                folded_weight, folded_last = _fold_weights(
+                    twin_weight, twin_last, weight, last_at
+                )
+                conn.execute(
+                    """
+                    UPDATE entity_edges
+                    SET weight=?, evidence_count=?, last_event_at=?, updated_at=datetime('now')
+                    WHERE edge_id=?
+                    """,
+                    (
+                        folded_weight,
+                        int(twin_evidence or 0) + int(evidence or 0),
+                        folded_last,
+                        twin_id,
+                    ),
+                )
+                conn.execute("DELETE FROM entity_edges WHERE edge_id=?", (edge_id,))
+                continue
+        conn.execute(
+            """
+            UPDATE entity_edges
+            SET src_entity_id=?, dst_entity_id=?, updated_at=datetime('now')
+            WHERE edge_id=?
+            """,
+            (new_src, new_dst, edge_id),
+        )
+
+
 def supersede_edge(
     conn: sqlite3.Connection,
     *,

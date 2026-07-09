@@ -502,12 +502,13 @@ class EntityResolver:
         self._conn.execute(
             "UPDATE entity_mentions SET entity_id=? WHERE entity_id=?", (keep_id, absorb_id)
         )
-        self._conn.execute(
-            "UPDATE entity_edges SET src_entity_id=? WHERE src_entity_id=?", (keep_id, absorb_id)
-        )
-        self._conn.execute(
-            "UPDATE entity_edges SET dst_entity_id=? WHERE dst_entity_id=?", (keep_id, absorb_id)
-        )
+        # Fold-and-rewrite edges: a blanket UPDATE of src/dst would violate the
+        # active-row partial unique index when both entities hold an active edge
+        # of the same type to the same third entity (edges.merge_entity_edges
+        # folds those collisions into the surviving row).
+        from .edges import merge_entity_edges
+
+        merge_entity_edges(self._conn, keep_id=keep_id, absorb_id=absorb_id)
         self._conn.execute(
             "UPDATE entities SET mention_count = (SELECT COUNT(*) FROM entity_mentions WHERE entity_id=?) WHERE entity_id=?",
             (keep_id, keep_id),

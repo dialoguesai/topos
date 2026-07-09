@@ -11,7 +11,9 @@ from topos.features.entities.dossier import build_dossier, refresh_dossiers, sig
 from topos.features.entities.edges import (
     EDGE_CO_OCCURRENCE,
     EDGE_COMMUNICATES,
+    EDGE_PART_OF,
     graph_snapshot,
+    supersede_edge,
     top_edges,
     update_edge,
 )
@@ -192,6 +194,110 @@ class TestMergeReversibility:
             conn.execute("SELECT aliases_json FROM entities WHERE entity_id=?", (keep,)).fetchone()[0]
         )
         assert "M. Chen" in aliases
+
+
+class TestMergeEdgeCollisions:
+    """merge_entities must not raise on the active-row partial unique index
+    (idx_entity_edges_active) when both entities hold an active edge of the same
+    type to the same third entity — it folds the duplicate into the survivor."""
+
+    @staticmethod
+    def _active(conn, a, b, edge_type):
+        """Return (weight, evidence_count, count) for active edges between a and b."""
+        rows = conn.execute(
+            """
+            SELECT weight, evidence_count FROM entity_edges
+            WHERE edge_type=? AND valid_to IS NULL
+              AND ((src_entity_id=? AND dst_entity_id=?)
+                   OR (src_entity_id=? AND dst_entity_id=?))
+            """,
+            (edge_type, a, b, b, a),
+        ).fetchall()
+        return rows
+
+    def test_undirected_active_collision_folds(self, conn) -> None:
+        resolver = EntityResolver(conn)
+        keep = resolver._create_entity("Maya Chen", "person")
+        absorb = resolver._create_entity("M. Chen", "person")
+        third = resolver._create_entity("Ada Voss", "person")
+        conn.commit()
+
+        # Both keep and absorb have an ACTIVE communicates_with edge to `third`.
+        update_edge(conn, src_entity_id=keep, dst_entity_id=third,
+                    edge_type=EDGE_COMMUNICATES, event_at="2026-01-01T00:00:00Z")
+        update_edge(conn, src_entity_id=absorb, dst_entity_id=third,
+                    edge_type=EDGE_COMMUNICATES, event_at="2026-01-02T00:00:00Z")
+        conn.commit()
+        assert len(self._active(conn, keep, third, EDGE_COMMUNICATES)) == 1
+        assert len(self._active(conn, absorb, third, EDGE_COMMUNICATES)) == 1
+
+        # The blanket UPDATE would raise IntegrityError here; the fold must not.
+        resolver.merge_entities(keep, absorb)
+
+        surviving = self._active(conn, keep, third, EDGE_COMMUNICATES)
+        assert len(surviving) == 1  # exactly one active edge remains
+        weight, evidence = surviving[0]
+        assert evidence == 2  # both edges' evidence folded in
+        assert weight > 0
+        # absorb has no edges left at all
+        assert conn.execute(
+            "SELECT COUNT(*) FROM entity_edges WHERE src_entity_id=? OR dst_entity_id=?",
+            (absorb, absorb),
+        ).fetchone()[0] == 0
+
+    def test_directed_non_colliding_edges_rewrite(self, conn) -> None:
+        # part_of is directed: (absorb -> parent) and (keep -> parent) both
+        # active canonicalise to the SAME (src, dst, type) -> fold; but
+        # (absorb -> parent) with keep having none simply rewrites.
+        resolver = EntityResolver(conn)
+        keep = resolver._create_entity("Widget", "org")
+        absorb = resolver._create_entity("Widget Inc", "org")
+        parent = resolver._create_entity("Holdco", "org")
+        conn.commit()
+        update_edge(conn, src_entity_id=absorb, dst_entity_id=parent,
+                    edge_type=EDGE_PART_OF, event_at="2026-01-01T00:00:00Z")
+        conn.commit()
+        resolver.merge_entities(keep, absorb)
+        row = conn.execute(
+            "SELECT src_entity_id, dst_entity_id FROM entity_edges "
+            "WHERE edge_type=? AND valid_to IS NULL",
+            (EDGE_PART_OF,),
+        ).fetchone()
+        assert row == (keep, parent)  # rewritten, single active edge
+
+    def test_edge_between_merged_entities_becomes_self_loop_and_drops(self, conn) -> None:
+        resolver = EntityResolver(conn)
+        keep = resolver._create_entity("Maya Chen", "person")
+        absorb = resolver._create_entity("M. Chen", "person")
+        conn.commit()
+        update_edge(conn, src_entity_id=keep, dst_entity_id=absorb,
+                    edge_type=EDGE_COMMUNICATES, event_at="2026-01-01T00:00:00Z")
+        conn.commit()
+        resolver.merge_entities(keep, absorb)
+        # the keep<->absorb edge collapses to a self-loop and is dropped
+        assert conn.execute("SELECT COUNT(*) FROM entity_edges").fetchone()[0] == 0
+
+    def test_closed_edge_history_survives_merge(self, conn) -> None:
+        resolver = EntityResolver(conn)
+        keep = resolver._create_entity("Maya Chen", "person")
+        absorb = resolver._create_entity("M. Chen", "person")
+        third = resolver._create_entity("Ada Voss", "person")
+        conn.commit()
+        # absorb had a relationship to `third` that was later closed (history).
+        update_edge(conn, src_entity_id=absorb, dst_entity_id=third,
+                    edge_type=EDGE_COMMUNICATES, event_at="2025-06-01T00:00:00Z")
+        supersede_edge(conn, src_entity_id=absorb, dst_entity_id=third,
+                       edge_type=EDGE_COMMUNICATES, valid_to="2025-09-01T00:00:00Z")
+        conn.commit()
+        resolver.merge_entities(keep, absorb)
+        # the closed row is rewritten to keep and preserved (not a collision:
+        # the partial unique index ignores closed rows).
+        closed = conn.execute(
+            "SELECT src_entity_id, dst_entity_id, valid_to FROM entity_edges "
+            "WHERE valid_to IS NOT NULL",
+        ).fetchall()
+        assert len(closed) == 1
+        assert keep in closed[0][:2] and third in closed[0][:2]
 
 
 class TestDossiers:
