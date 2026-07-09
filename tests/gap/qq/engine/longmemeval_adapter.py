@@ -821,10 +821,10 @@ async def query_bench(
     topic-cluster lanes apply (cross-db guard `_bundle_is_global_db`); check
     ``stores_touched`` in the result to confirm.
 
-    ``now`` is accepted for the temporal lane's sake but the engine's retrieval path
-    never forwards a reference time into build_query_plan (verified: query/retrieval.py
-    plans with wall-clock now) — a KNOWN defect recorded in ``threats`` rather than
-    patched here.
+    ``now`` is forwarded into the pipeline (execute(now=...) → RetrievalRequest.now →
+    build_query_plan), so month/as-of arithmetic runs against the bench's reference
+    time. Runs without a ``now`` fall back to wall clock — still recorded in
+    ``threats`` so temporal grading can discount them.
     """
     from topos.query.manifest_validation import resolve_scope_manifest
     from topos.query.pipeline import QueryPipelineOrchestrator
@@ -842,6 +842,7 @@ async def query_bench(
             access_mode=access_mode,
             manifest=manifest,
             query_session_id=f"lme-{bench.question.question_id}-{uuid.uuid4().hex[:8]}",
+            now=now,
         )
         latency_ms = round((time.perf_counter() - t0) * 1000, 1)
 
@@ -863,6 +864,6 @@ async def query_bench(
         "latency_ms": latency_ms,
         "access_mode": access_mode,
         "now_requested": iso_utc(now) if now is not None else None,
-        "threats": ["planner_now=wall-clock"],
+        "threats": [] if now is not None else ["planner_now=wall-clock"],
         "raw": raw,
     }

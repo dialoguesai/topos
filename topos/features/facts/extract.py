@@ -7,11 +7,23 @@ the store's belief revision makes that safe to add.
 
 from __future__ import annotations
 
+import inspect
 import re
 import sqlite3
 from typing import Any, Dict, List, Optional
 
+from ..provenance.roles import owner_authored
 from .store import FactStore
+
+# Contract 4 (PLAN_PROVENANCE_SPLIT P4.4): assert_fact grows asserted_by in the
+# same build wave; feature-detect so this module works on either side of that
+# landing. Rule extraction is owner-gated, so everything here asserts as owner.
+_ASSERT_FACT_SUPPORTS_ASSERTED_BY = (
+    "asserted_by" in inspect.signature(FactStore.assert_fact).parameters
+)
+_OWNER_ASSERT_KWARGS: Dict[str, Any] = (
+    {"asserted_by": "owner"} if _ASSERT_FACT_SUPPORTS_ASSERTED_BY else {}
+)
 
 
 def _owner_entity_id(conn: sqlite3.Connection) -> str:
@@ -329,43 +341,14 @@ def _clean_object(raw: str) -> Optional[str]:
     return value
 
 
-# Canonical ai_chat_messages stores 'human' for the owner (chatgpt_parser maps
-# role 'user' -> 'human'); 'user' survives in legacy rows and tests.
-_AI_CHAT_OWNER_SENDERS = frozenset({"human", "user"})
-
-
-def _is_self_row(row: Dict[str, Any]) -> bool:
-    """conversation_messages owner check: is_from_self / sender_id=='self'."""
-    if row.get("is_from_self") in (1, True, "1"):
-        return True
-    return str(row.get("sender_id") or "").strip().lower() == "self"
-
-
 def _is_owner_authored(row: Dict[str, Any], table: str = "") -> bool:
-    """Did the owner type this row? Table-aware — the two message families
-    encode owner identity differently:
-
-    - ai_chat_messages: sender_type is authoritative ('human'/'user' = owner;
-      'assistant'/'system' = model output, never the owner).
-    - conversation_messages: sender_type is NOT reliable — the messenger
-      mapper writes 'human' for OTHER people's messages too. Owner identity
-      lives in is_from_self / sender_id=='self' only.
-
-    Without table context (legacy/direct callers) 'human' is ambiguous, so it
-    fails closed to the conversation-side markers: belief extraction must not
-    guess.
+    """Did the owner type this row? Thin shim kept for existing callers/tests;
+    the table-aware semantics (ai_chat sender_type vs conversation
+    is_from_self/sender_id, ambiguous-'human' fails closed) now live in
+    features.provenance.roles.record_role — THE single source of truth for
+    role (PLAN_PROVENANCE_SPLIT P1.2).
     """
-    table = str(table or row.get("_table") or row.get("canonical_table") or "").strip().lower()
-    sender_type = str(row.get("sender_type") or "").strip().lower()
-    if table == "ai_chat_messages":
-        return sender_type in _AI_CHAT_OWNER_SENDERS
-    if table == "conversation_messages":
-        return _is_self_row(row)
-    if sender_type in ("assistant", "system"):
-        return False  # model/system output is never the owner, in any family
-    if sender_type == "user":
-        return True  # 'user' only ever meant the owner (legacy ai_chat)
-    return _is_self_row(row)
+    return owner_authored(row, table=table)
 
 
 def extract_message_facts(
@@ -437,6 +420,7 @@ def derive_location_facts(conn: sqlite3.Connection) -> int:
         confidence=0.55,
         source_refs=[_source_ref("location_events", f"aggregate:{top_city}")],
         disclosure="owner_only",
+        **_OWNER_ASSERT_KWARGS,
     )
     return 1 if asserted else 0
 
@@ -484,6 +468,8 @@ def extract_facts_from_batch(
             continue
         record_id = row.get("record_id") or row.get("message_id") or row.get("id")
         for spec in extractor(row, conn):
+            # All rule extractors are owner-gated (message extractors via the
+            # authored role; journal/profile by construction) — assert as owner.
             asserted = store.assert_fact(
                 subject_entity_id=owner,
                 predicate=spec["predicate"],
@@ -495,6 +481,7 @@ def extract_facts_from_batch(
                 disclosure=spec.get("disclosure", "scoped"),
                 period_start=spec.get("period_start"),
                 period_end=spec.get("period_end"),
+                **_OWNER_ASSERT_KWARGS,
             )
             if asserted is not None:  # None = owner-excluded, never re-asserted
                 written += 1

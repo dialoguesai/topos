@@ -42,6 +42,16 @@ _TABLE_TEXT_COLUMNS: Dict[str, Tuple[str, str]] = {
 }
 
 
+# P1.3 (PLAN_PROVENANCE_SPLIT): brief inputs must know WHO said each row so
+# brief_input_text can label non-authored speech ("[contact] …"/"[assistant] …")
+# instead of letting anyone's words read as the owner's. These are the sender
+# truth columns per message family (Appendix A).
+_TABLE_SENDER_COLUMNS: Dict[str, Tuple[str, ...]] = {
+    "ai_chat_messages": ("sender_type",),
+    "conversation_messages": ("sender_type", "sender_id", "is_from_self"),
+}
+
+
 def _text_columns_for_table(table: str, dimension: str) -> Tuple[str, str]:
     if table == "journal_entries" and dimension == "places":
         return ("entry_id", "place_name")
@@ -73,11 +83,13 @@ def load_canonical_messages_for_dimension(
         if table not in _TABLE_TEXT_COLUMNS:
             continue
         id_col, text_col = cols
+        sender_cols = _TABLE_SENDER_COLUMNS.get(table, ())
+        select_cols = ", ".join((id_col, text_col, "source_id", *sender_cols))
         try:
             if sid_filter:
                 rows = conn.execute(
                     f"""
-                    SELECT {id_col}, {text_col}, source_id
+                    SELECT {select_cols}
                     FROM {table}
                     WHERE source_id = ?
                       AND {text_col} IS NOT NULL AND TRIM({text_col}) != ''
@@ -89,7 +101,7 @@ def load_canonical_messages_for_dimension(
             else:
                 rows = conn.execute(
                     f"""
-                    SELECT {id_col}, {text_col}, source_id
+                    SELECT {select_cols}
                     FROM {table}
                     WHERE {text_col} IS NOT NULL AND TRIM({text_col}) != ''
                     ORDER BY rowid DESC
@@ -110,6 +122,8 @@ def load_canonical_messages_for_dimension(
                 "source_id": row[2],
                 "canonical_table": table,
             }
+            for offset, sender_col in enumerate(sender_cols):
+                record[sender_col] = row[3 + offset]
             if table == "journal_entries" and dim == "places":
                 record["place_name"] = content
             messages.append(record)

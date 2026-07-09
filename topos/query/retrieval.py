@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -150,6 +151,226 @@ def _item_text_blob(item: Dict[str, Any]) -> str:
         str(item.get(f) or "")
         for f in ("topic", "summary_text", "content", "text_preview", "content_preview")
     ).lower()
+
+
+def _resolve_plan_now(request: RetrievalRequest) -> Optional[datetime]:
+    """Reference instant for temporal planning: request.now, then the
+    TOPOS_QUERY_NOW env (eval harness injection), else None → wall clock."""
+    for raw in (getattr(request, "now", None), os.environ.get("TOPOS_QUERY_NOW")):
+        if raw is None or (isinstance(raw, str) and not raw.strip()):
+            continue
+        if isinstance(raw, datetime):
+            return raw if raw.tzinfo else raw.replace(tzinfo=timezone.utc)
+        try:
+            parsed = datetime.fromisoformat(str(raw).strip().replace("Z", "+00:00"))
+            return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+        except ValueError:
+            logger.debug("unparseable query now=%r ignored", raw)
+    return None
+
+
+# --- Record roles (P3.3 / PLAN_PROVENANCE_SPLIT) ---------------------------------------
+# Query-side authorship checks mirror contract 1 (features/provenance/roles):
+# conversation_messages — is_from_self / sender_id=='self'; ai_chat_messages —
+# sender_type in ('human','user'). The roles module is preferred when
+# importable; the local rules keep this half working standalone.
+_MESSAGE_TABLES = frozenset({"conversation_messages", "ai_chat_messages"})
+
+# Head-nouns / framing verbs of a first-person ask ("my hobbies", "who do I
+# talk to") describe the KIND of answer wanted, never row content — like the
+# answer-shape words in the token stoplist, they must not trip the rare-token
+# abstention gate when first_person_intent is set. They still participate in
+# matching (fact search, canonical contains).
+_FIRST_PERSON_SHAPE_TOKENS = frozenset(
+    {
+        "opinion", "opinions", "belief", "beliefs", "stance", "stances",
+        "view", "views", "interest", "interests", "interested",
+        "hobby", "hobbies", "preference", "preferences", "style",
+        "goal", "goals", "think", "feel", "believe",
+        "people", "talk", "talked", "talking", "interact", "interacted",
+        "interaction", "interactions",
+    }
+)
+
+
+def _roles_owner_authored(table: str, row: Dict[str, Any]) -> Optional[bool]:
+    try:
+        from ..features.provenance.roles import owner_authored
+
+        return bool(owner_authored(row, table=table))
+    except Exception:
+        return None
+
+
+def _message_row_owner(
+    table: str,
+    row: Dict[str, Any],
+    conn: Optional[Any] = None,
+    cache: Optional[Dict[str, Optional[bool]]] = None,
+) -> Optional[bool]:
+    """True/False for message-table rows, None for non-message rows.
+
+    Canonical list specs alias away is_from_self, so conversation rows whose
+    sender_id is a raw identifier (not 'self') fall back to a record_id lookup
+    before failing toward NOT-authored (contract 1: never guess authored)."""
+    if table == "ai_chat_messages":
+        sender_type = str(row.get("sender_type") or "").strip().lower()
+        if sender_type in ("human", "user"):
+            return True
+        if sender_type:
+            return False
+        verdict = _roles_owner_authored(table, row)
+        return verdict if verdict is not None else None
+    if table == "conversation_messages":
+        if row.get("is_from_self") is not None:
+            return row.get("is_from_self") in (1, True, "1")
+        sender_id = str(row.get("sender_id") or "").strip().lower()
+        if sender_id == "self":
+            return True
+        record_id = str(row.get("record_id") or row.get("message_id") or "")
+        if conn is not None and record_id:
+            looked_up = _record_owner_authored(conn, record_id, cache)
+            if looked_up is not None:
+                return looked_up
+        verdict = _roles_owner_authored(table, row)
+        if verdict is not None:
+            return verdict
+        return False if sender_id else None
+    return None
+
+
+def _record_owner_authored(
+    conn: Any,
+    record_id: str,
+    cache: Optional[Dict[str, Optional[bool]]] = None,
+) -> Optional[bool]:
+    """Authorship by record_id for message-backed items (vector/recent lanes).
+    None = not a message row (stat/fact/dossier/journal items are exempt)."""
+    if not record_id or conn is None:
+        return None
+    if cache is not None and record_id in cache:
+        return cache[record_id]
+    verdict: Optional[bool] = None
+    try:
+        row = conn.execute(
+            "SELECT is_from_self, sender_id FROM conversation_messages WHERE message_id = ?",
+            (record_id,),
+        ).fetchone()
+        if row is not None:
+            verdict = row[0] in (1, True, "1") or str(row[1] or "").lower() == "self"
+        else:
+            row = conn.execute(
+                "SELECT sender_type FROM ai_chat_messages WHERE message_id = ?",
+                (record_id,),
+            ).fetchone()
+            if row is not None:
+                verdict = str(row[0] or "").lower() in ("human", "user")
+    except Exception:
+        verdict = None
+    if cache is not None:
+        cache[record_id] = verdict
+    return verdict
+
+
+def _owner_rank(verdict: Optional[bool]) -> int:
+    """Stable-sort key for owner-first re-ranking: authored → exempt → other."""
+    if verdict is True:
+        return 0
+    if verdict is None:
+        return 1
+    return 2
+
+
+def _sender_display(
+    conn: Optional[Any],
+    sender_id: str,
+    cache: Dict[str, str],
+) -> str:
+    """Display name for a conversation sender_id via contact_identifiers, or
+    the sender_id itself when unresolvable (contract: '[Bram Holloway] …' or
+    sender_id fallback)."""
+    if sender_id in cache:
+        return cache[sender_id]
+    name = ""
+    if conn is not None:
+        try:
+            row = conn.execute(
+                """SELECT c.display_name FROM contact_identifiers ci
+                   JOIN contacts c ON c.contact_id = ci.contact_id
+                   WHERE ci.identifier = ? AND c.display_name IS NOT NULL LIMIT 1""",
+                (sender_id,),
+            ).fetchone()
+            name = str(row[0]).strip() if row and row[0] else ""
+        except Exception:
+            name = ""
+    cache[sender_id] = name or sender_id
+    return cache[sender_id]
+
+
+def _plural_token_variants(tokens: List[str]) -> List[str]:
+    """Tokens plus naive singular variants ('hobbies'→'hobby', 'interests'→
+    'interest') so terse fact predicates meet plural query nouns."""
+    out = list(tokens)
+    for token in tokens:
+        if token.endswith("ies") and len(token) > 4:
+            variant = token[:-3] + "y"
+        elif token.endswith("s") and not token.endswith("ss") and len(token) > 3:
+            variant = token[:-1]
+        else:
+            continue
+        if variant not in out:
+            out.append(variant)
+    return out
+
+
+def _stat_like(entry: Dict[str, Any]) -> bool:
+    return (
+        str(entry.get("object_type") or "") == "stat_insight"
+        or str(entry.get("fact_id") or "").startswith("stat:")
+    )
+
+
+def _apply_first_person_stat_preference(
+    entries: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Contract 5 stat selection for first-person asks ("how many messages have
+    I sent"): drop exposure-ledger stats ({"ledger": "exposure"}) and drop a
+    volume family shadowed by its authored '.sent' twin for the same group
+    ('messages.volume.by_thread' loses to 'messages.volume.sent.by_thread').
+    Non-stat entries pass through untouched.
+
+    The exposure marker rides on two channels: a top-level payload key
+    ({"ledger": "exposure"}) and — for facts minted by the live
+    StatsEngine.promote_insights path, where the definition payload is merged
+    into the insight summary (stats/insights.py _summary_with_payload) —
+    nested under stat_summary. Both must gate."""
+
+    def _entry_ledger(entry: Dict[str, Any]) -> str:
+        ledger = entry.get("ledger")
+        if not ledger:
+            summary = entry.get("stat_summary")
+            if isinstance(summary, dict):
+                ledger = summary.get("ledger")
+        return str(ledger or "").strip().lower()
+
+    shadowed = set()
+    for entry in entries:
+        family = str(entry.get("record_id") or "")
+        if _stat_like(entry) and ".sent" in family:
+            shadowed.add((family.replace(".sent", ""), str(entry.get("group_key") or "")))
+    out: List[Dict[str, Any]] = []
+    for entry in entries:
+        if _stat_like(entry):
+            if _entry_ledger(entry) == "exposure":
+                continue
+            family = str(entry.get("record_id") or "")
+            if ".sent" not in family and (
+                family,
+                str(entry.get("group_key") or ""),
+            ) in shadowed:
+                continue
+        out.append(entry)
+    return out
 
 
 def _sqlite_main_path(conn) -> str:
@@ -591,7 +812,20 @@ def _load_canonical_summary_items(
     disclosure_tier: str = "owner_raw",
     rare_query_tokens: Optional[List[str]] = None,
     browse_fallback: bool = False,
+    plan=None,
+    conn: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
+    # First-person asks (P3.3): message rows get owner-authorship treatment —
+    # belief/identity asks hard-filter to owner-authored rows (another person's
+    # stance must not enter the answer at all); the broader first-person flag
+    # re-ranks owner rows first and prefixes non-owner rows with their speaker
+    # so nothing they say can read as the owner's words. General recall
+    # queries (plan absent / flags off) are byte-identical to before.
+    first_person = bool(getattr(plan, "first_person_intent", False)) if plan else False
+    belief_intent = bool(getattr(plan, "first_person_belief", False)) if plan else False
+    role_cache: Dict[str, Optional[bool]] = {}
+    display_cache: Dict[str, str] = {}
+
     items: List[Dict[str, Any]] = []
     for table in manifest.canonical_tables or []:
         rows = _route_canonical_rows(
@@ -606,24 +840,43 @@ def _load_canonical_summary_items(
             browse_fallback=browse_fallback,
         )
         for row in rows:
+            owner: Optional[bool] = None
+            if first_person and table in _MESSAGE_TABLES:
+                owner = _message_row_owner(table, row, conn, role_cache)
+                if belief_intent and owner is not True:
+                    continue  # belief/identity composition: owner-authored only
             clean = _redact_row_for_scope(manifest.scope_id, table, row)
             text = _row_summary_text(table, clean, scope_id=manifest.scope_id)
             if not text:
                 continue
-            items.append(
-                {
-                    "topic": text[:120],
-                    "summary_text": text,
-                    "record_id": clean.get("record_id")
-                    or clean.get("event_id")
-                    or clean.get("contact_id")
-                    or clean.get("message_id"),
-                    "source_id": clean.get("source_id"),
-                    "relevance_score": round(_canonical_relevance(text, query_text), 4),
-                    "retrieval_source": f"canonical:{table}",
-                }
-            )
+            if first_person and owner is False:
+                if table == "ai_chat_messages":
+                    speaker = str(row.get("sender_type") or "assistant").strip() or "assistant"
+                else:
+                    speaker = _sender_display(
+                        conn, str(row.get("sender_id") or ""), display_cache
+                    )
+                if speaker:
+                    text = f"[{speaker}] {text}"
+            item = {
+                "topic": text[:120],
+                "summary_text": text,
+                "record_id": clean.get("record_id")
+                or clean.get("event_id")
+                or clean.get("contact_id")
+                or clean.get("message_id"),
+                "source_id": clean.get("source_id"),
+                "relevance_score": round(_canonical_relevance(text, query_text), 4),
+                "retrieval_source": f"canonical:{table}",
+            }
+            if owner is not None:
+                item["owner_authored"] = owner
+            items.append(item)
     items.sort(key=lambda item: float(item.get("relevance_score") or 0.0), reverse=True)
+    if first_person:
+        # Strong downweight, not a drop: owner-authored rows first, exempt
+        # (non-message) rows keep relative order, other-authored rows last.
+        items.sort(key=lambda item: _owner_rank(item.get("owner_authored")))
     return items[:_SUMMARY_ITEM_CAP]
 
 
@@ -731,6 +984,11 @@ def _query_tokens(query_text: str) -> List[str]:
             "find",
             "tell",
             "know",
+            # framing adverbs ("what do I actually think") — emphasis, never
+            # content; as rare tokens they vetoed answerable first-person asks
+            "actually",
+            "really",
+            "truly",
             "most",
             "often",
             "usually",
@@ -1070,6 +1328,20 @@ def _fact_disclosure_allowed(
     return grant in (manifest.signal_objects or [])
 
 
+def _fact_valid_at(fact: Dict[str, Any], as_of: str) -> bool:
+    """Did this fact's belief-validity window cover `as_of` (ISO date)?
+
+    String comparison over ISO timestamps — same convention as
+    FactStore.facts_for_subject(as_of=...). A bare date sorts before any
+    same-day timestamp; the seeded chains keep a one-day buffer, so boundary
+    days never decide a case."""
+    valid_from = str(fact.get("valid_from") or "")
+    valid_to = fact.get("valid_to")
+    if valid_from and valid_from > as_of:
+        return False
+    return not valid_to or str(valid_to) > as_of
+
+
 def _load_fact_store_items(
     conn,
     query_text: str,
@@ -1078,6 +1350,7 @@ def _load_fact_store_items(
     disclosure_tier: str,
     manifest: ScopeResolutionManifest,
     temporal_shift: Optional[str] = None,
+    as_of: Optional[str] = None,
 ) -> List[Dict[str, Any]]:
     """Atomic facts: subject-first for linked entities, then token search.
 
@@ -1085,29 +1358,39 @@ def _load_fact_store_items(
     read to superseded revisions — the bi-temporal store keeps closed facts and
     a past-tense question is exactly what they answer. Superseded facts are
     rendered with an explicit no-longer-current marker so they can never read
-    as present-tense truth."""
+    as present-tense truth.
+
+    as_of (the planner's "in <Month>" point-in-time anchor, B1.1/T4) switches
+    both reads to point-in-time: only facts whose validity covers as_of answer,
+    and they answer WITHOUT the stale marker — they were current at the asked
+    instant, marking them stale would misdescribe the point-in-time truth."""
     try:
         from ..features.facts.store import FactStore
     except Exception:
         return []
     store = FactStore(conn)
-    include_closed = temporal_shift == "past"
+    include_closed = temporal_shift == "past" or bool(as_of)
     facts: List[Dict[str, Any]] = []
     subject_linked: set = set()
     seen_ids: set = set()
+    # Plural folding ("hobbies"→"hobby") so terse fact predicates meet plural
+    # query nouns; used for both the search and the overlap grade below.
+    search_tokens = _plural_token_variants(_query_tokens(query_text))
     try:
         # Subject-first ONLY for entities the query actually names. The old
         # behavior also dumped every self-entity fact into every query — the
         # "owner lives in San Francisco" padding on all results.
         for entity in linked_entities:
             for fact in store.facts_for_subject(
-                entity["entity_id"], include_closed=include_closed
+                entity["entity_id"], as_of=as_of, include_closed=include_closed
             ):
                 if fact["object_id"] not in seen_ids:
                     facts.append(fact)
                     seen_ids.add(fact["object_id"])
                     subject_linked.add(fact["object_id"])
-        for fact in store.search(_query_tokens(query_text), include_closed=include_closed):
+        for fact in store.search(search_tokens, include_closed=include_closed):
+            if as_of and not _fact_valid_at(fact, as_of):
+                continue  # point-in-time read: only facts valid AT as_of answer
             if fact["object_id"] not in seen_ids:
                 facts.append(fact)
                 seen_ids.add(fact["object_id"])
@@ -1115,7 +1398,7 @@ def _load_fact_store_items(
         logger.debug("fact store load skipped: %s", exc)
         return []
 
-    tokens = set(_query_tokens(query_text))
+    tokens = set(search_tokens)
     items: List[Dict[str, Any]] = []
     for fact in facts:
         payload = fact.get("payload") or {}
@@ -1124,7 +1407,7 @@ def _load_fact_store_items(
             continue
         text = FactStore.render(fact)
         valid_to = fact.get("valid_to")
-        if valid_to:
+        if valid_to and not as_of:
             text += f" (no longer current — superseded {str(valid_to)[:10]})"
         # Overlap graded on the fact's own content — the rendered "owner …"
         # subject prefix guaranteed fake overlap on owner-phrased queries.
@@ -1152,6 +1435,20 @@ def _load_fact_store_items(
     return items[:10]
 
 
+_ISO_DATE_PREFIX_RE = re.compile(r"^\d{4}-\d{2}-\d{2}")
+
+
+def _stat_artifact_date(fact: Dict[str, Any], created_at: Any) -> str:
+    """The artifact's OWN date (ISO YYYY-MM-DD): payload period_end, then
+    period_start, then the row's created_at. Staleness honesty (B1.5/T8): a
+    served stat must carry when its numbers are from, not just the value."""
+    for candidate in (fact.get("period_end"), fact.get("period_start"), created_at):
+        date_iso = str(candidate or "")[:10]
+        if _ISO_DATE_PREFIX_RE.match(date_iso):
+            return date_iso
+    return ""
+
+
 def _load_stat_insight_items(
     conn,
     query_text: str,
@@ -1160,6 +1457,7 @@ def _load_stat_insight_items(
     disclosure_tier: str = "owner_raw",
     manifest: Optional[ScopeResolutionManifest] = None,
     limit: int = 8,
+    first_person: bool = False,
 ) -> List[Dict[str, Any]]:
     """Aggregate-intent queries answer best from stat insights, not chunks."""
     import json as _json
@@ -1171,14 +1469,14 @@ def _load_stat_insight_items(
         # LIMIT-by-created_at made older stat families permanently unreachable
         # (calendar.commitment sat at rank 558/558). The safety cap is generous.
         rows = conn.execute(
-            "SELECT payload_json FROM signal_facts WHERE fact_id LIKE 'stat:%' ORDER BY created_at DESC LIMIT 5000"
+            "SELECT payload_json, created_at FROM signal_facts WHERE fact_id LIKE 'stat:%' ORDER BY created_at DESC LIMIT 5000"
         ).fetchall()
     except Exception:
         return []
     tokens = set(_query_tokens(query_text))
     wanted_dims = {d.lower() for d in (dimensions or [])}
-    scored: List[Tuple[float, Dict[str, Any]]] = []
-    for (payload_json,) in rows:
+    candidates: List[Tuple[Dict[str, Any], Any]] = []
+    for payload_json, created_at in rows:
         try:
             fact = _json.loads(payload_json)
         except _json.JSONDecodeError:
@@ -1193,13 +1491,29 @@ def _load_stat_insight_items(
         # "journaling"→"journal") — stat tags are terse, exact-token overlap
         # missed them.
         overlap = sum(1 for t in tokens if (t[:5] if len(t) >= 5 else t) in blob)
-        dim_bonus = 1.0 if str(fact.get("dimension") or "").lower() in wanted_dims else 0.0
         # Token evidence is required; the dimension bonus only reorders. A
         # dimension match alone must not qualify stats for a query about a
         # topic that does not exist.
         if overlap <= 0:
             continue
+        candidates.append((fact, created_at))
+    if first_person:
+        # Contract 5: a first-person ask reads the authored ledger — the
+        # exposure ledger and a '.sent'-shadowed volume twin must not answer
+        # "how many messages have I sent" with total thread volume (IMB6).
+        kept = _apply_first_person_stat_preference([fact for fact, _ in candidates])
+        kept_ids = {id(fact) for fact in kept}
+        candidates = [(fact, ca) for fact, ca in candidates if id(fact) in kept_ids]
+
+    scored: List[Tuple[Tuple[float, float], Dict[str, Any]]] = []
+    for fact, created_at in candidates:
+        text = str(fact.get("tag") or fact.get("summary_text") or "").strip()
+        blob = f"{text} {fact.get('group_key') or ''} {fact.get('record_id') or ''}".lower()
+        overlap = sum(1 for t in tokens if (t[:5] if len(t) >= 5 else t) in blob)
+        dim_bonus = 1.0 if str(fact.get("dimension") or "").lower() in wanted_dims else 0.0
         score = overlap + dim_bonus
+        if first_person and ".sent" in str(fact.get("record_id") or ""):
+            score += 0.5  # authored-ledger preference (contract 5)
         # Tie-break equal lexical scores by the stat's own sample size: for
         # per-group count families ("Most visited: …") hundreds of groups
         # match the same query words, and the high-n groups ARE the answer.
@@ -1207,12 +1521,16 @@ def _load_stat_insight_items(
             n_weight = float((fact.get("stat_summary") or {}).get("n") or 0.0)
         except (TypeError, ValueError):
             n_weight = 0.0
+        # Staleness honesty (B1.5/T8): render the artifact's own date next to
+        # the value. Substring needles over tags stay intact (suffix-only).
+        date_iso = _stat_artifact_date(fact, created_at)
+        summary_text = f"{text} (as of {date_iso})" if date_iso else text
         scored.append(
             (
                 (score, n_weight),
                 {
                     "topic": text[:120],
-                    "summary_text": text,
+                    "summary_text": summary_text,
                     "record_id": fact.get("fact_id"),
                     "dimension": fact.get("dimension"),
                     "retrieval_source": "stat_insight",
@@ -1441,6 +1759,7 @@ def _build_summary_items(
     installed_source_ids: Optional[List[str]] = None,
     disclosure_tier: str = "owner_raw",
     plan=None,
+    now: Optional[datetime] = None,
 ) -> List[Dict[str, Any]]:
     from ..features.signal.vector_settings import fusion_rrf_enabled, vector_evidence_min
 
@@ -1448,6 +1767,11 @@ def _build_summary_items(
     prefer_goals = "user_goals" in (manifest.signal_objects or [])
     work_scope = manifest.scope_id == "work_context:read"
     source_ids = _resolve_source_ids(manifest, installed_source_ids)
+
+    first_person = bool(getattr(plan, "first_person_intent", False)) if plan else False
+    belief_intent = bool(getattr(plan, "first_person_belief", False)) if plan else False
+    interaction_browse = bool(getattr(plan, "interaction_browse", False)) if plan else False
+    owner_cache: Dict[str, Optional[bool]] = {}
 
     # The query's own connection — goal/brief contributors must read the same
     # database the query targets (the global singleton may point elsewhere in
@@ -1460,6 +1784,15 @@ def _build_summary_items(
     query_tokens = _query_tokens(query_text)
     residual_tokens = _residual_content_tokens(query_tokens)
     rare_query_tokens = _rare_tokens(bundle_conn, residual_tokens)
+    if first_person and rare_query_tokens:
+        # The head-nouns of a first-person ask ("hobbies", "opinion", "people
+        # I talk to") are answer-shape, not row content — they must not veto
+        # an answer the derived layers hold without containing the word.
+        rare_query_tokens = {
+            t: df
+            for t, df in rare_query_tokens.items()
+            if t not in _FIRST_PERSON_SHAPE_TOKENS
+        }
 
     goal_items: List[Dict[str, Any]] = []
     if prefer_goals or work_scope:
@@ -1474,7 +1807,40 @@ def _build_summary_items(
         source_ids=source_ids,
         disclosure_tier=disclosure_tier,
         rare_query_tokens=rare_query_tokens,
+        plan=plan,
+        conn=bundle_conn,
     )
+
+    # Interaction browse ("who do I talk to"): the contact registry is the
+    # ground truth of interaction partners — mention-only names (someone the
+    # senders gossip about) have no contact row and cannot pollute it (IMB7).
+    interaction_items: List[Dict[str, Any]] = []
+    if first_person and interaction_browse:
+        try:
+            contact_rows = _list_canonical_rows(
+                adapters, "contacts", source_ids=source_ids, limit=30,
+                disclosure_tier=disclosure_tier,
+            )
+        except Exception as exc:
+            logger.debug("interaction contact browse skipped: %s", exc)
+            contact_rows = []
+        for row in contact_rows:
+            if row.get("is_self") in (1, True, "1"):
+                continue
+            name = str(row.get("display_name") or "").strip()
+            if not name:
+                continue
+            interaction_items.append(
+                {
+                    "topic": name,
+                    "summary_text": f"Contact: {name}",
+                    "record_id": row.get("record_id"),
+                    "source_id": row.get("source_id"),
+                    "relevance_score": 0.75,
+                    "retrieval_source": "canonical:contacts",
+                }
+            )
+        interaction_items = interaction_items[:15]
 
     brief_dims = list(manifest.primary_dimensions)
     if manifest.scope_id == "activity:read":
@@ -1542,6 +1908,24 @@ def _build_summary_items(
         else:
             vector_context_items.append(item)
 
+    if first_person and bundle_conn is not None:
+        # Owner-authored preference in the vector lane (P3.3): belief/identity
+        # asks drop other people's message-backed hits (their words must not
+        # become the owner's beliefs); the broader flag re-ranks owner rows
+        # first. Non-message-backed hits (journal, activity, …) are exempt.
+        def _vec_owner(item: Dict[str, Any]) -> Optional[bool]:
+            return _record_owner_authored(
+                bundle_conn, str(item.get("record_id") or ""), owner_cache
+            )
+
+        if belief_intent:
+            vector_items = [i for i in vector_items if _vec_owner(i) is not False]
+            vector_context_items = [
+                i for i in vector_context_items if _vec_owner(i) is not False
+            ]
+        vector_items.sort(key=lambda i: _owner_rank(_vec_owner(i)))
+        vector_context_items.sort(key=lambda i: _owner_rank(_vec_owner(i)))
+
     # Minimal-disclosure gate: owner-only facts (e.g. stat_insight aggregates —
     # work rhythms, spend patterns, contact cadence) are dense fingerprints of
     # the person. They are computed unconditionally but only *packaged* for the
@@ -1584,6 +1968,11 @@ def _build_summary_items(
                 }
             )
     fact_items.sort(key=lambda item: float(item.get("relevance_score") or 0.0), reverse=True)
+    if first_person:
+        # The dimension-dump lane carries raw stat payloads too — the same
+        # authored-ledger preference must hold or the exposure/volume twin
+        # leaks around the stat lane's selection (IMB6).
+        fact_items = _apply_first_person_stat_preference(fact_items)
 
     # Entity spine: link query entities, contribute dossier/mention items.
     # Entity/fact/stat contributors need a raw sqlite handle; reuse the bundle
@@ -1600,15 +1989,26 @@ def _build_summary_items(
             conn = raw_conn if raw_conn is not None else get_db_connection()
             if conn is not None:
                 linked = link_query_entities(conn, query_text)
+                temporal_shift = getattr(plan, "temporal_shift", None) if plan else None
+                try:
+                    # T7 pass-through (B2.2): past-tense asks widen the edge
+                    # read to closed revisions ("no longer current" marker).
+                    raw_entity_items = entity_context_items(
+                        conn, linked, temporal_shift=temporal_shift
+                    )
+                except TypeError:
+                    # Pre-M1 linking without the kwarg — current-edges only.
+                    raw_entity_items = entity_context_items(conn, linked)
                 entity_items = [
                     item
-                    for item in entity_context_items(conn, linked)
+                    for item in raw_entity_items
                     if _fact_disclosure_allowed(item, disclosure_tier, manifest)
                 ]
                 fact_store_items = _load_fact_store_items(
                     conn, query_text, linked, disclosure_tier=disclosure_tier,
                     manifest=manifest,
-                    temporal_shift=getattr(plan, "temporal_shift", None) if plan else None,
+                    temporal_shift=temporal_shift,
+                    as_of=getattr(plan, "as_of", None) if plan else None,
                 )
         except Exception as exc:
             logger.debug("entity linking skipped: %s", exc)
@@ -1629,6 +2029,7 @@ def _build_summary_items(
                 dimensions=getattr(plan, "dimensions", None) if plan else None,
                 disclosure_tier=disclosure_tier,
                 manifest=manifest,
+                first_person=first_person,
             )
         except Exception as exc:
             logger.debug("stat insight load skipped: %s", exc)
@@ -1638,6 +2039,17 @@ def _build_summary_items(
             raw_conn if raw_conn is not None else _default_conn(),
             source_ids=source_ids or None,
         )
+        if belief_intent and bundle_conn is not None:
+            # Recency filler must not smuggle other people's message rows into
+            # a belief/identity answer either.
+            recent_items = [
+                i
+                for i in recent_items
+                if _record_owner_authored(
+                    bundle_conn, str(i.get("record_id") or ""), owner_cache
+                )
+                is not False
+            ]
         recency_intent = any(t in (query_text or "").lower() for t in _RECENCY_TERMS)
         canonical_weight = 2.0 if work_scope else 1.0
         vector_weight = 0.6 if work_scope else 1.0
@@ -1652,6 +2064,7 @@ def _build_summary_items(
                 ("entities", 1.5, entity_items),
                 ("goals", 1.0, goal_items),
                 ("canonical", canonical_weight, canonical_items),
+                ("contacts", 1.2, interaction_items),
                 ("briefs", 0.8, brief_items),
                 ("clusters", 0.8, cluster_items),
                 ("vector", vector_weight, vector_items),
@@ -1664,12 +2077,13 @@ def _build_summary_items(
                 | (set() if recency_intent else {"recent"})
             ),
             rare_tokens=rare_query_tokens,
+            now=now,
         )
 
     # Legacy path (TOPOS_FUSION_RRF=off): incomparable absolute scores.
     for item in entity_items + fact_store_items + stat_items:
         item.setdefault("relevance_score", 0.9)
-    items = stat_items + fact_store_items + entity_items + goal_items + canonical_items + brief_items + cluster_items + vector_items + vector_context_items + fact_items
+    items = stat_items + fact_store_items + entity_items + goal_items + canonical_items + interaction_items + brief_items + cluster_items + vector_items + vector_context_items + fact_items
     if work_scope:
         for item in items:
             if str(item.get("retrieval_source") or "").startswith("canonical:profile_records"):
@@ -1740,14 +2154,19 @@ class DefaultSignalRetrievalAdapter:
         source_ids = _resolve_source_ids(manifest, request.installed_source_ids)
 
         # One structured parse ahead of retrieval (entities/time/aggregate).
+        # The reference instant is threaded, not read from the wall clock here:
+        # request.now / TOPOS_QUERY_NOW (eval injection) → None → wall clock
+        # inside the planner. Month arithmetic (as-of, "last week") must be
+        # reproducible under a pinned now.
         plan = None
+        plan_now = _resolve_plan_now(request)
         if query_text:
             try:
                 from ..core.state import get_db_connection
                 from .planner import build_query_plan, query_planner_enabled
 
                 if query_planner_enabled():
-                    plan = build_query_plan(get_db_connection(), query_text)
+                    plan = build_query_plan(get_db_connection(), query_text, now=plan_now)
                     retrieval_meta["query_plan"] = plan.to_meta()
             except Exception as exc:
                 logger.debug("query planner skipped: %s", exc)
@@ -1885,6 +2304,7 @@ class DefaultSignalRetrievalAdapter:
                     installed_source_ids=request.installed_source_ids,
                     disclosure_tier=request.disclosure_tier,
                     plan=plan,
+                    now=plan_now,
                 )
                 if summaries:
                     touched.append("signal")

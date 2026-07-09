@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import logging
+import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Union
@@ -39,6 +40,87 @@ def _prepare_signal_record(record: Dict[str, Any]) -> Dict[str, Any]:
     from ..enrichment.jobs.canonical.brief_fallback import prepare_signal_record
 
     return prepare_signal_record(record)
+
+
+def _episode_role_mix(canonical_records: List[Dict[str, Any]]) -> Optional[str]:
+    """Best-effort provenance-role histogram for the batch (P4.2).
+
+    Uses the shared record_role contract (features/provenance/roles). The
+    roles module lands in a parallel workstream — until it exists (or on any
+    classification error) the mix stays NULL rather than guessing."""
+    try:
+        from ..features.provenance.roles import record_role
+    except Exception:
+        return None
+    counts: Dict[str, int] = {}
+    try:
+        for rec in canonical_records:
+            if not isinstance(rec, dict):
+                continue
+            table = str(rec.get("_table") or rec.get("canonical_table") or "")
+            role = str(record_role(rec, table=table))
+            counts[role] = counts.get(role, 0) + 1
+    except Exception as exc:
+        logger.debug("[PIPELINE:EPISODE] role mix skipped: %s", exc)
+        return None
+    return json.dumps(counts) if counts else None
+
+
+def _record_episode(
+    *,
+    source_def,
+    canonical_records: List[Dict[str, Any]],
+    sync_batch_id: str,
+    started_at: str,
+    conn=None,
+) -> Optional[str]:
+    """B2.4 minimal episode object: one provenance row per canonical batch.
+
+    Records how the system came to hold this batch (source, batch id, timing,
+    record count; posture/role-mix best-effort and nullable — sibling
+    workstreams fill them in). Never raises: episode bookkeeping must not be
+    able to fail an ingest."""
+    try:
+        if conn is None:
+            from ..core.state import get_db_connection
+
+            conn = get_db_connection()
+        if conn is None:
+            return None
+        posture = getattr(source_def, "posture", None)
+        dataset_id = next(
+            (
+                str(rec["dataset_id"])
+                for rec in canonical_records
+                if isinstance(rec, dict) and rec.get("dataset_id")
+            ),
+            None,
+        )
+        episode_id = f"ep_{uuid.uuid4().hex[:16]}"
+        conn.execute(
+            """
+            INSERT INTO episodes (
+                episode_id, source_id, sync_batch_id, dataset_id,
+                started_at, finished_at, n_records, posture, role_mix_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                episode_id,
+                str(getattr(source_def, "source_id", "") or "") or None,
+                str(sync_batch_id or "") or None,
+                dataset_id,
+                started_at,
+                datetime.now(timezone.utc).isoformat(),
+                len(canonical_records),
+                str(posture) if posture else None,
+                _episode_role_mix(canonical_records),
+            ),
+        )
+        conn.commit()
+        return episode_id
+    except Exception as exc:
+        logger.debug("[PIPELINE:EPISODE] episode record skipped: %s", exc)
+        return None
 
 
 @dataclass
@@ -607,6 +689,7 @@ async def run_post_canonical_pipeline(
     if not canonical_records or not source_def:
         return outcome
 
+    episode_started_at = datetime.now(timezone.utc).isoformat()
     source_id = source_def.source_id
     from ..enrichment.source_overrides import effective_canonical_enrichment_jobs
     from ..sources.canonical_signal_defaults import resolved_signal_derivation_jobs
@@ -738,6 +821,14 @@ async def run_post_canonical_pipeline(
         except Exception as exc:
             logger.error("[PIPELINE:SIGNAL_DERIVE] post-canonical failed: %s", exc, exc_info=True)
             outcome["signal_derivation"] = {"errors": [str(exc)]}
+
+    # B2.4: one episode per canonical batch (best-effort provenance record).
+    outcome["episode_id"] = _record_episode(
+        source_def=source_def,
+        canonical_records=canonical_records,
+        sync_batch_id=sync_batch_id,
+        started_at=episode_started_at,
+    )
 
     from ..engine.pipeline_memory import flush_engine_model_cache_after_pipeline
 

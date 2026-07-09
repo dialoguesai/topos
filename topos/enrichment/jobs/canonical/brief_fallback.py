@@ -7,6 +7,7 @@ import re
 from collections import Counter
 from typing import Any, Dict, List, Optional, Set
 
+from topos.features.provenance.roles import ROLE_AUTHORED, record_role
 from topos.features.signal.brief_ontology import llm_merge_section_ids
 
 _STRUCTURED_JOURNAL_FIELD_PREFIXES = (
@@ -124,8 +125,51 @@ def _record_fallback_summary(record: Dict[str, Any]) -> str:
     return " — ".join(parts)
 
 
+# Sender-identity keys: only message-family rows carry these; their presence
+# is what makes a row *someone's speech* and therefore label-eligible.
+_SENDER_MARKER_KEYS = ("sender_type", "sender_id", "is_from_self")
+
+
+def _speaker_prefix(record: Dict[str, Any]) -> str:
+    """Speaker/role label for non-authored message rows (P1.3, plan §3.2:
+    briefs consume non-authored text only as LABELED context).
+
+    Owner-authored rows stay unprefixed; assistant replies get "[assistant]",
+    system rows "[system]", everyone else's messages "[contact]" — so the
+    brief LLM summarizes WITH attribution instead of absorbing other people's
+    words as the owner's. Non-message rows (journal, activity, …) carry no
+    sender keys and are never prefixed.
+    """
+    if not any(key in record for key in _SENDER_MARKER_KEYS):
+        return ""
+    role = record_role(
+        record,
+        table=str(record.get("canonical_table") or record.get("_table") or ""),
+    )
+    if role == ROLE_AUTHORED:
+        return ""
+    sender_type = str(record.get("sender_type") or "").strip().lower()
+    if sender_type == "assistant":
+        return "[assistant] "
+    if sender_type == "system":
+        return "[system] "
+    return "[contact] "
+
+
 def brief_input_text(record: Dict[str, Any]) -> str:
-    """Dense, summary-safe digest for brief LLM input and rules fallback."""
+    """Dense, summary-safe digest for brief LLM input and rules fallback.
+
+    Non-authored message rows come back prefixed with a speaker label
+    (see _speaker_prefix) so downstream summaries attribute them.
+    """
+    digest = _brief_input_text_unattributed(record)
+    if not digest:
+        return digest
+    prefix = _speaker_prefix(record)
+    return f"{prefix}{digest}" if prefix else digest
+
+
+def _brief_input_text_unattributed(record: Dict[str, Any]) -> str:
     content = str(record.get("content") or "").strip()
     category = str(record.get("category") or "").strip()
     meta = _parse_metadata_json(record)

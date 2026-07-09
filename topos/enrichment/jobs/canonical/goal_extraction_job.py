@@ -8,6 +8,7 @@ from typing import Any, Callable, Dict, List, Optional
 from ..base import BaseEnrichmentJob
 from ._batch_limits import MAX_JOB_MESSAGES, TOPIC_BATCH_CONCURRENCY
 from ....config.signal_extraction import get_signal_extraction_model_request
+from ....features.provenance.roles import ROLE_AUTHORED, record_role
 from ._engine_runner import run_engine_task
 from ....engine import Engine
 
@@ -44,17 +45,31 @@ class GoalExtractionJob(BaseEnrichmentJob):
             )
 
         work: List[Dict[str, Any]] = []
+        skipped_role = 0
         for msg in messages:
             message_id = msg.get("message_id") or msg.get("id")
             content = msg.get("content", "")
-            if message_id and content:
-                work.append(
-                    {
-                        "message_id": message_id,
-                        "content": str(content),
-                        "source_id": msg.get("source_id"),
-                    }
-                )
+            if not (message_id and content):
+                continue
+            # P1.3 (PLAN_PROVENANCE_SPLIT): goals are BELIEF-grade artifacts —
+            # only owner-authored rows are eligible. Assistant replies, other
+            # people's messages, and ambient content must never mint goals
+            # (the measured ~50% goal-emptiness was partly assistant text).
+            if record_role(msg, table=str(msg.get("_table") or "")) != ROLE_AUTHORED:
+                skipped_role += 1
+                continue
+            work.append(
+                {
+                    "message_id": message_id,
+                    "content": str(content),
+                    "source_id": msg.get("source_id"),
+                }
+            )
+        if skipped_role:
+            logger.debug(
+                "GoalExtractionJob skipped %d non-authored rows (role gate)",
+                skipped_role,
+            )
 
         total = len(work)
         results: List[Dict[str, Any]] = []

@@ -10,9 +10,17 @@ import json
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
+from ..provenance.roles import owner_authored
 from .fold import parse_ts
 
 _WEEKDAYS = ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")
+
+
+def _row_table(row: Dict[str, Any], default: str = "") -> str:
+    """Table context for the authored gate; producers stamp _table (P0.1),
+    and each gated group_by/value_expr is bound to exactly one canonical
+    table, so its table is a safe fallback for unstamped rows."""
+    return str(row.get("_table") or row.get("canonical_table") or default)
 
 
 def _row_meta(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -96,6 +104,28 @@ def group_key_for(row: Dict[str, Any], group_by: str) -> Optional[str]:
     if group_by == "cluster_id":
         value = row.get("cluster_id")
         return str(value).strip() if value else None
+    # ---- authored-gated group keys (PLAN_PROVENANCE_SPLIT P1.3) ----------
+    # Returning None makes the engine skip the row entirely: the fold gate
+    # lives HERE because stat_definitions has no filter column and the fold
+    # loop consults group_key_for/histogram_value for every row.
+    if group_by == "authored_total":
+        # Single-group family ("self", non-empty so insights render it):
+        # counts ONLY rows the owner sent — the honest denominator for
+        # "how many messages have I sent" (IMB6's needle).
+        if owner_authored(row, table=_row_table(row, "conversation_messages")):
+            return "self"
+        return None
+    if group_by == "authored_conversation":
+        if not owner_authored(row, table=_row_table(row, "conversation_messages")):
+            return None
+        value = row.get("conversation_id") or row.get("thread_id")
+        return str(value).strip() if value else None
+    if group_by == "hour_of_week_authored":
+        # Owner rhythm from owner rows: assistant/system rows must not shape
+        # "when is this person active".
+        if not owner_authored(row, table=_row_table(row, "ai_chat_messages")):
+            return None
+        return f"{_WEEKDAYS[ts.weekday()]} {ts.hour:02d}:00" if ts else None
     return None
 
 
@@ -112,11 +142,15 @@ SEED_DEFINITIONS: List[Dict[str, Any]] = [
         "windows_json": '["all", "d30", "d90"]',
     },
     {
+        # P1.3: authored-only fold gate — the owner's chat rhythm comes from
+        # rows the owner typed; assistant replies land seconds later and were
+        # doubling every band. (Historical stat_state is not re-minted here;
+        # backfill is the plan's deferred re-mint item.)
         "stat_id": "ai_chat.hour_of_week",
         "canonical_table": "ai_chat_messages",
         "group_by": "none",
         "stat_kind": "histogram",
-        "value_expr": "hour_of_week",
+        "value_expr": "hour_of_week_authored",
         "dimension": "work",
         "windows_json": '["all", "d30", "d90"]',
     },
@@ -138,6 +172,29 @@ SEED_DEFINITIONS: List[Dict[str, Any]] = [
         "value_expr": "category",
         "dimension": "wellbeing",
         "windows_json": '["all", "d30", "d90"]',
+    },
+    # Relationships: OWNER-SENT message volume (PLAN_PROVENANCE_SPLIT P1.3).
+    # The 'messages.volume.sent.*' family id prefix is the query-side selection
+    # contract for first-person volume asks ("how many messages have I sent"):
+    # sent-counts answer them; thread/contact volume is exposure, not the
+    # owner's expression (IMB6's 23-vs-2000 poison pair).
+    {
+        "stat_id": "messages.volume.sent.total",
+        "canonical_table": "conversation_messages",
+        "group_by": "authored_total",
+        "stat_kind": "count",
+        "value_expr": "one",
+        "dimension": "relationships",
+        "windows_json": '["all", "d7", "d30", "d90"]',
+    },
+    {
+        "stat_id": "messages.volume.sent.by_thread",
+        "canonical_table": "conversation_messages",
+        "group_by": "authored_conversation",
+        "stat_kind": "count",
+        "value_expr": "one",
+        "dimension": "relationships",
+        "windows_json": '["all", "d7", "d30", "d90"]',
     },
     # Relationships: message volume and cadence per contact
     {
@@ -220,8 +277,27 @@ SEED_DEFINITIONS: List[Dict[str, Any]] = [
     },
 ]
 
+# Code-side stat payload markers (no stat_definitions column needed; attached
+# by load_enabled_definitions and carried into the promoted insight's
+# stat_summary — see insights.render_insights). Contract (PLAN_PROVENANCE_SPLIT
+# P1.3 / contract 5): exposure-profile stats carry {"ledger": "exposure"} so
+# query-side stat selection can prefer expression over exposure for
+# first-person asks.
+STAT_PAYLOADS: Dict[str, Dict[str, Any]] = {
+    # Browsing titles are what the owner was EXPOSED to, not what they said —
+    # demoted from evidence-of-interest to a labeled exposure profile.
+    "activity.visits.by_title": {"ledger": "exposure"},
+}
+
 # Histogram value extractors keyed off value_expr when kind == histogram
-HISTOGRAM_VALUE_KEYS = {"hour_of_week", "hour_of_day", "weekday", "category", "mood_tag"}
+HISTOGRAM_VALUE_KEYS = {
+    "hour_of_week",
+    "hour_of_week_authored",
+    "hour_of_day",
+    "weekday",
+    "category",
+    "mood_tag",
+}
 
 
 def histogram_value(row: Dict[str, Any], value_expr: str) -> Optional[str]:
@@ -272,16 +348,18 @@ def load_enabled_definitions(conn) -> List[Dict[str, Any]]:
     ).fetchall()
     out = []
     for row in rows:
-        out.append(
-            {
-                "stat_id": row[0],
-                "canonical_table": row[1],
-                "group_by": row[2],
-                "stat_kind": row[3],
-                "value_expr": row[4],
-                "dimension": row[5],
-                "decay_half_life_days": row[6],
-                "windows": json.loads(row[7] or '["all"]'),
-            }
-        )
+        defn = {
+            "stat_id": row[0],
+            "canonical_table": row[1],
+            "group_by": row[2],
+            "stat_kind": row[3],
+            "value_expr": row[4],
+            "dimension": row[5],
+            "decay_half_life_days": row[6],
+            "windows": json.loads(row[7] or '["all"]'),
+        }
+        payload = STAT_PAYLOADS.get(str(row[0]))
+        if payload:
+            defn["payload"] = dict(payload)
+        out.append(defn)
     return out

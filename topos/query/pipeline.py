@@ -172,6 +172,7 @@ class QueryPipelineOrchestrator:
         is_grantee_request: bool = False,
         disclosure_ceiling: Optional[str] = None,
         explicit_disclosure_tier: Optional[str] = None,
+        now: Optional[datetime] = None,
     ) -> Dict[str, Any]:
         session_id = query_session_id or f"qs_{uuid.uuid4()}"
         turn_start_ms = now_ms()
@@ -411,6 +412,9 @@ class QueryPipelineOrchestrator:
                     disclosure_tier=disclosure_tier,
                     requester_id=requester_id,
                     suppress_selectors=suppress_selectors,
+                    # Wall clock by default; eval harnesses inject a fixed now so
+                    # the planner's month/as-of arithmetic is reproducible.
+                    now=now,
                 )
             )
         except RetrievalError as exc:
