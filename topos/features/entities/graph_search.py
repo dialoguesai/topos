@@ -43,10 +43,23 @@ def _item_score(item: Dict[str, Any]) -> float:
     return 0.0
 
 
+# Function words that would make label matching promiscuous ("and" matched
+# every "X and Y" label). Content words only.
+_STOPWORDS = frozenset({
+    "and", "the", "for", "with", "from", "about", "into", "over", "that",
+    "this", "these", "those", "what", "when", "where", "how", "who", "why",
+    "are", "was", "were", "will", "would", "could", "should", "have", "has",
+    "had", "not", "but", "all", "any", "our", "your", "their", "its",
+})
+
+
 def _query_tokens(query: str) -> List[str]:
     from .resolver import normalize_name
 
-    return [t for t in normalize_name(query).split() if len(t) > 2]
+    return [
+        t for t in normalize_name(query).split()
+        if len(t) > 2 and t not in _STOPWORDS
+    ]
 
 
 def graph_search(
@@ -82,6 +95,13 @@ def graph_search(
         if prev is None or score > prev["score"]:
             scored_records[record_id] = {"score": score, "item": item}
 
+    # Normalize record scores so the top record = 1.0 — hybrid RRF scores live
+    # on a tiny scale (~1/60) that the fixed label bonus would otherwise dwarf.
+    max_score = max((r["score"] for r in scored_records.values()), default=0.0)
+    if max_score > 0:
+        for rec in scored_records.values():
+            rec["score"] = rec["score"] / max_score
+
     entity_scores: Dict[str, float] = {}
     entity_evidence: Dict[str, List[Dict[str, Any]]] = {}
 
@@ -107,7 +127,9 @@ def graph_search(
                     "snippet": str(item.get("text_preview") or "")[:200],
                     "source_id": item.get("source_id"),
                     "event_at": item.get("event_at"),
-                    "similarity": rec["score"],
+                    # Display the raw cosine when the item has one; the
+                    # normalized contribution is what feeds the entity score.
+                    "similarity": float(item.get("similarity") or rec["score"]),
                 }
             )
 

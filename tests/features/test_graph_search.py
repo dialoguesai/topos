@@ -61,15 +61,18 @@ def test_entities_ranked_by_summed_record_similarity(conn):
     out = graph_search(conn, query="edtech pilots", search_fn=fn)
 
     ids = [e["entity_id"] for e in out["entities"]]
-    assert ids[0] == a  # 0.9 beats 0.8
+    assert ids[0] == a  # 0.9 beats 0.5 + 0.3
     assert ids[1] == b
     assert out["records_considered"] == 3
     top = out["entities"][0]
     assert top["label"] == "Alpha School"
     assert top["evidence"][0]["snippet"] == "edtech pilot at Alpha"
-    assert top["evidence"][0]["similarity"] == 0.9
-    # summed evidence: b = 0.5 + 0.3
-    assert abs(out["entities"][1]["score"] - 0.8) < 1e-6
+    assert top["evidence"][0]["similarity"] == 0.9  # raw cosine for display
+    # Scores are normalized so the top record = 1.0 (hybrid RRF scores live on
+    # a tiny scale that fixed label bonuses would otherwise dwarf):
+    # a = 0.9/0.9 = 1.0; b = (0.5 + 0.3)/0.9 ≈ 0.889.
+    assert abs(top["score"] - 1.0) < 1e-6
+    assert abs(out["entities"][1]["score"] - 0.8 / 0.9) < 1e-4
 
 
 def test_event_window_passes_through_to_search_fn(conn):
@@ -109,6 +112,18 @@ def test_record_and_label_evidence_sum_for_same_entity(conn):
     assert tc["score"] > 0.6  # record evidence + label bonus
     kinds = {ev.get("kind", "record") for ev in tc["evidence"]}
     assert {"record", "label"} <= kinds
+
+
+def test_label_matching_ignores_stopwords(conn):
+    """'X and Y' labels must not match every query containing 'and'."""
+    conn.execute(
+        "INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name, is_self, mention_count, metadata_json) "
+        "VALUES ('tc_war', 'topic', 'Man and Woman, Peace and War', "
+        "'man and woman peace and war', 0, 0, '{\"mz\":1}')"
+    )
+    conn.commit()
+    out = graph_search(conn, query="provenance and privacy architecture", search_fn=_fake_search([]))
+    assert all(e["entity_id"] != "tc_war" for e in out["entities"])
 
 
 def test_no_matches_returns_empty_shape(conn):
