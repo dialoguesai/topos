@@ -43,6 +43,7 @@ def _normalize_ui_config(value: Any) -> dict[str, Any]:
     # Graph view prefs: the temporal window is personal (data volume/velocity
     # dependent — 2 days for some owners, 2 months for others). timeWindowDays
     # is a whole-day count; explicit null = all time; absent = unset.
+    # trackLookbackDays caps how far left the scrubber track extends.
     graph = value.get("graph")
     if isinstance(graph, dict) and "timeWindowDays" in graph:
         window = graph.get("timeWindowDays")
@@ -52,6 +53,14 @@ def _normalize_ui_config(value: Any) -> dict[str, Any]:
             days = int(window)
             if 1 <= days <= GRAPH_WINDOW_MAX_DAYS:
                 out["graph"]["timeWindowDays"] = days
+    if isinstance(graph, dict) and "trackLookbackDays" in graph:
+        lookback = graph.get("trackLookbackDays")
+        if lookback is None:
+            out["graph"]["trackLookbackDays"] = None
+        elif isinstance(lookback, (int, float)) and not isinstance(lookback, bool):
+            days = int(lookback)
+            if 1 <= days <= GRAPH_WINDOW_MAX_DAYS:
+                out["graph"]["trackLookbackDays"] = days
     if isinstance(graph, dict):
         mode = graph.get("nodeColorMode")
         if mode in ("type", "community"):
