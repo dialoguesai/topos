@@ -198,3 +198,49 @@ async def test_entity_exclude_api(api_app) -> None:
 
     with pytest.raises(ValueError, match="excluded by owner"):
         EntityResolver(conn).resolve("LL", entity_type="topic")
+
+
+class TestResolutionReviewApproval:
+    """Resolver-queued reviews (kind='resolution', surface-only, NO subject id)
+    filled half the live queue and 400'd on approve — 'Same — merge' silently
+    did nothing in the UI."""
+
+    def _queue_resolution(self, conn, surface, candidate_id):
+        review_id = f"rev_test_{surface.lower()}"
+        conn.execute(
+            "INSERT INTO entity_review (review_id, surface_text, candidate_entity_id, score, status, kind) "
+            "VALUES (?, ?, ?, 0.85, 'pending', 'resolution')",
+            (review_id, surface, candidate_id),
+        )
+        conn.commit()
+        return review_id
+
+    def test_approve_resolution_merges_surface_entity(self, conn) -> None:
+        matteo = _mk_entity(conn, "Matteo Iraggi", mentions=10)
+        matt = _mk_entity(conn, "Matt", mentions=3)  # the surface got its own entity
+        review_id = self._queue_resolution(conn, "Matt", matteo)
+
+        result = resolve_review(conn, review_id, action="approve")
+        assert result["status"] == "approved"
+        assert result["kept"] == matteo
+        # the surface's entity was absorbed
+        assert conn.execute(
+            "SELECT 1 FROM entities WHERE entity_id=?", (matt,)
+        ).fetchone() is None
+
+    def test_approve_resolution_without_surface_entity_adds_alias(self, conn) -> None:
+        samer = _mk_entity(conn, "Samer Salem", mentions=8)
+        review_id = self._queue_resolution(conn, "Same", samer)
+
+        result = resolve_review(conn, review_id, action="approve")
+        assert result["status"] == "approved"
+        aliases = conn.execute(
+            "SELECT aliases_json FROM entities WHERE entity_id=?", (samer,)
+        ).fetchone()[0]
+        assert "same" in str(aliases).lower()
+
+    def test_dismiss_resolution_still_works(self, conn) -> None:
+        yanan = _mk_entity(conn, "Yanan", mentions=4)
+        review_id = self._queue_resolution(conn, "Yan", yanan)
+        result = resolve_review(conn, review_id, action="dismiss")
+        assert result["status"] == "dismissed"
