@@ -280,6 +280,55 @@ async def rebuild_graph(
     return rebuild_entity_graph(_entities_conn())
 
 
+@router.get("/entities/graph/search")
+async def search_entity_graph(
+    q: str = Query(..., min_length=1, max_length=500),
+    limit_records: int = Query(default=40, ge=1, le=100),
+    limit_entities: int = Query(default=30, ge=1, le=100),
+    event_after: Optional[str] = Query(default=None),
+    event_before: Optional[str] = Query(default=None),
+    _api_key: str = Depends(require_api_key),
+):
+    """Semantic graph search: rank entities by hybrid vector+FTS evidence.
+
+    Reuses the vectors search pipeline (query embed → ANN + FTS RRF over
+    signal_embeddings) then joins the scored records onto graph entities via
+    entity_mentions; materialized goal/topic/conversation nodes also match by
+    label. ``event_after/before`` pair with the graph's time window. Returns
+    {entities: [{entity_id, label, entity_type, score, evidence[]}], …}.
+    """
+    import asyncio
+
+    from ..features.entities.graph_search import graph_search
+    from ..features.signal.service import get_signal_service
+
+    _check_tier_vector()
+    service = get_signal_service()
+    conn = _entities_conn()
+
+    def _run():
+        def search_fn(*, query, limit, event_after=None, event_before=None):
+            return service.search_vectors(
+                query=query,
+                limit=limit,
+                mode="hybrid",
+                event_after=event_after,
+                event_before=event_before,
+            )
+
+        return graph_search(
+            conn,
+            query=q,
+            search_fn=search_fn,
+            limit_records=limit_records,
+            limit_entities=limit_entities,
+            event_after=event_after,
+            event_before=event_before,
+        )
+
+    return await asyncio.to_thread(_run)
+
+
 @router.get("/entities/{entity_id}")
 async def get_entity(
     entity_id: str,
