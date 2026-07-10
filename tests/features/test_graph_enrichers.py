@@ -78,6 +78,56 @@ def test_goal_becomes_node_linked_to_owner_and_record_entities(conn):
     assert len(_edges(conn, "relates_to")) == 1
 
 
+def test_goal_edges_carry_source_event_time_not_extraction_time(conn):
+    """The temporal graph must date goals by WHEN THEY HAPPENED (the source
+    record's event time via timeline), not when extraction ran — re-extraction
+    stamped every goal 'today' and collapsed weeks of goals into the scrubber's
+    last 2 days."""
+    _owner(conn)
+    conn.execute(
+        "INSERT INTO user_goals (goal_id, record_id, source_id, goal_text, payload_json, created_at) "
+        "VALUES ('g2', 'msg-7', 'chatgpt_file_ingestion', 'Ship the pilot', '{}', '2026-07-10T00:00:00Z')"
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO timeline (event_at, record_id, source_id, canonical_table) "
+        "VALUES ('2025-03-14T09:00:00Z', 'msg-7', 'chatgpt_file_ingestion', 'ai_chat_messages')"
+    )
+    conn.commit()
+
+    materialize_graph_enrichments(conn)
+    pursues = _edges(conn, "pursues")
+    assert len(pursues) == 1
+    assert str(pursues[0]["valid_from"]).startswith("2025-03-14")
+    assert str(pursues[0]["last_event_at"]).startswith("2025-03-14")
+
+
+def test_duplicate_goal_texts_collapse_to_one_node(conn):
+    """Re-extraction mints new goal_ids for the same goal text — the graph
+    must key goal nodes by text so duplicates merge, with the edge window
+    spanning earliest→latest occurrence."""
+    owner = _owner(conn)
+    for i, (rid, day) in enumerate([("r1", "2025-03-01"), ("r2", "2025-04-01"), ("r3", "2025-05-01")]):
+        conn.execute(
+            "INSERT INTO user_goals (goal_id, record_id, source_id, goal_text, payload_json) "
+            f"VALUES ('dup{i}', '{rid}', 'chatgpt_file_ingestion', 'Deepen UMA coverage', '{{}}')"
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO timeline (event_at, record_id, source_id, canonical_table) "
+            f"VALUES ('{day}T09:00:00Z', '{rid}', 'chatgpt_file_ingestion', 'ai_chat_messages')"
+        )
+    conn.commit()
+
+    materialize_graph_enrichments(conn)
+    labels = _labels(conn)
+    goal_nodes = [n for n in labels.values() if n["node_type"] == "goal"]
+    assert len(goal_nodes) == 1  # three extractions, one goal
+    pursues = _edges(conn, "pursues")
+    assert len(pursues) == 1
+    assert pursues[0]["src_node_id"] == owner
+    assert str(pursues[0]["valid_from"]).startswith("2025-03-01")   # earliest
+    assert str(pursues[0]["last_event_at"]).startswith("2025-05-01")  # latest
+
+
 # ------------------------------------------------------------------ places
 
 

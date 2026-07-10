@@ -100,11 +100,14 @@ def _upsert_materialized_edge(
     source_object_id: str,
     asserted_by: Optional[str] = None,
     actor_role: Optional[str] = None,
+    last_event_at: Optional[str] = None,
 ) -> None:
     """Idempotent directed edge with a materialized marker + carried validity.
 
     ``actor_role`` overrides the asserted_by-derived tier — used by enrichers
     whose provenance isn't an assertion (presence, participation, witnessing).
+    ``last_event_at`` defaults to valid_from — pass explicitly when the edge's
+    evidence spans a window (e.g. a goal recurring across months).
     """
     if not src or not dst or src == dst:
         return
@@ -126,6 +129,7 @@ def _upsert_materialized_edge(
         """,
         (src, dst, edge_type),
     ).fetchone()
+    effective_last = last_event_at or valid_from
     if row is None:
         conn.execute(
             """
@@ -137,17 +141,18 @@ def _upsert_materialized_edge(
             (
                 f"fmz_{uuid.uuid4().hex[:16]}",
                 src, dst, edge_type, float(weight),
-                valid_from, valid_from or _now_iso(), valid_to, meta,
+                effective_last, valid_from or _now_iso(), valid_to, meta,
             ),
         )
     else:
         conn.execute(
             """
             UPDATE entity_edges
-            SET weight=?, valid_from=?, valid_to=?, metadata_json=?, updated_at=datetime('now')
+            SET weight=?, valid_from=?, valid_to=?, last_event_at=?, metadata_json=?,
+                updated_at=datetime('now')
             WHERE edge_id=?
             """,
-            (float(weight), valid_from, valid_to, meta, row[0]),
+            (float(weight), valid_from, valid_to, effective_last, meta, row[0]),
         )
 
 
