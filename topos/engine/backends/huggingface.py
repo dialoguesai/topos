@@ -112,6 +112,66 @@ def _match_slot(model_name: str) -> Optional[ModelSlot]:
     return None
 
 
+def _stitch_wordpiece_entities(
+    text: str, raw: List[Dict[str, Any]]
+) -> List[Dict[str, Any]]:
+    """Repair wordpiece-split NER output against the ORIGINAL text.
+
+    Even with word-level aggregation, defensive: (1) merge contiguous
+    "##fragment" detections into their anchor, (2) snap every span to word
+    boundaries in the source text and rebuild the surface from it (fixes both
+    "##ny" junk AND the sneakier "Jon"-for-"Jonny" silent truncation),
+    (3) dedupe overlapping detections of the same word keeping the best score.
+    Entities without char offsets pass through untouched.
+    """
+    if not text or not raw:
+        return raw
+    if any(not isinstance(e.get("start"), int) or not isinstance(e.get("end"), int) for e in raw):
+        return raw
+
+    ordered = sorted(raw, key=lambda e: (int(e["start"]), int(e["end"])))
+
+    # 1) merge contiguous ## fragments into the previous entity
+    merged: List[Dict[str, Any]] = []
+    for ent in ordered:
+        word = str(ent.get("word") or "")
+        prev = merged[-1] if merged else None
+        if (
+            word.startswith("##")
+            and prev is not None
+            and int(ent["start"]) <= int(prev["end"])
+        ):
+            prev["end"] = max(int(prev["end"]), int(ent["end"]))
+            prev["score"] = max(float(prev.get("score") or 0.0), float(ent.get("score") or 0.0))
+            continue  # anchor keeps its entity_group
+        merged.append(dict(ent))
+
+    # 2) snap spans to word boundaries; rebuild surfaces from the source text
+    n = len(text)
+    for ent in merged:
+        start, end = int(ent["start"]), int(ent["end"])
+        start = max(0, min(start, n))
+        end = max(start, min(end, n))
+        while start > 0 and text[start - 1].isalnum():
+            start -= 1
+        while end < n and text[end].isalnum():
+            end += 1
+        ent["start"], ent["end"] = start, end
+        ent["word"] = text[start:end]
+
+    # 3) dedupe identical spans (overlapping detections snap together); drop empties
+    best: Dict[tuple, Dict[str, Any]] = {}
+    for ent in merged:
+        surface = str(ent.get("word") or "").strip()
+        if not surface or surface.startswith("##"):
+            continue
+        key = (ent["start"], ent["end"])
+        incumbent = best.get(key)
+        if incumbent is None or float(ent.get("score") or 0.0) > float(incumbent.get("score") or 0.0):
+            best[key] = ent
+    return [best[k] for k in sorted(best)]
+
+
 class HuggingFaceAdapter:
     """BackendAdapter for HuggingFace: text-classification pipeline and go_emotions model."""
 
@@ -332,7 +392,13 @@ class HuggingFaceAdapter:
         def _load():
             from transformers import pipeline
 
-            return pipeline("ner", model=model, aggregation_strategy="simple")
+            # "first": WORD-level aggregation — every subword takes the tag of
+            # its word's first piece, so entities align to whole words and
+            # "##fragment" outputs become structurally impossible. ("simple"
+            # only merged adjacent same-tag TOKENS: any mid-word tag flip split
+            # the word — 5.2% of live raw hits were ## junk, and the kept
+            # halves were silently truncated surfaces like "Jon" for "Jonny".)
+            return pipeline("ner", model=model, aggregation_strategy="first")
 
         handle, _ = get_model_cache().acquire(ModelSlot.NER, model, _load)
         return handle
@@ -380,7 +446,7 @@ class HuggingFaceAdapter:
             return {"entities": [], "model": model_name or DEFAULT_NER_MODEL, "provider": "huggingface"}
         model = model_name or DEFAULT_NER_MODEL
         ner = self._get_ner_pipeline(model)
-        raw = ner(text)
+        raw = _stitch_wordpiece_entities(text, list(ner(text) or []))
         entities: List[Dict[str, Any]] = []
         for ent in raw or []:
             entities.append(
@@ -418,6 +484,7 @@ class HuggingFaceAdapter:
                 continue
             raw = raw_batches[batch_ptr] if batch_ptr < len(raw_batches) else []
             batch_ptr += 1
+            raw = _stitch_wordpiece_entities(texts[idx], list(raw or []))
             entities: List[Dict[str, Any]] = []
             for ent in raw or []:
                 entities.append(
