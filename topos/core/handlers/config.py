@@ -349,6 +349,20 @@ async def handle_delete_signal_extraction_config(message: Dict[str, Any]) -> Opt
 # ---- Exposure-profile visibility (P1.5): the owner's toggle for whether the
 # labeled "what you've been exposed to" profile surfaces on interest/identity
 # answers. Default ON; the engine read path is config.settings.exposure_profile_visible.
+@handles("get_upgrade_status")
+async def handle_get_upgrade_status(message):
+    """Upgrade runner + graph-refresh status (read-only; UI progress banner)."""
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    try:
+        from ...api.upgrades import _status_payload
+
+        return {"id": req_id, "status": "ok", "payload": _status_payload()}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
 @handles("get_exposure_profile_config")
 async def handle_get_exposure_profile_config(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")

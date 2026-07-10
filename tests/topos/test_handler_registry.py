@@ -76,6 +76,7 @@ SUPPORTED_MESSAGE_TYPES = [
     "get_table_rows",
     "get_table_schema",
     "get_ui_config",
+    "get_upgrade_status",
     "get_user_identity",
     "healthcheck",
     "import_apple_contacts",
