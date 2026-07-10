@@ -159,6 +159,48 @@ def test_journal_evidence_is_authored(conn):
     assert meta.get("actor_role") == "authored"
 
 
+def test_communities_detected_and_exposed(conn):
+    """Louvain neighborhoods (the witcher-network recipe): two disconnected
+    cliques must land in different communities, exposed via node metadata."""
+    import json as _json
+
+    from topos.features.entities.maintenance import compute_communities
+
+    r = EntityResolver(conn)
+    clique_a = [r._create_entity(n, "person") for n in ("Ada", "Bram", "Cass")]
+    clique_b = [r._create_entity(n, "org") for n in ("Xen", "Yara", "Zed")]
+    conn.commit()
+    from topos.features.entities.edges import update_edge
+
+    for group in (clique_a, clique_b):
+        for i in range(len(group)):
+            for j in range(i + 1, len(group)):
+                update_edge(conn, src_entity_id=group[i], dst_entity_id=group[j],
+                            edge_type="co_occurrence", event_at="2026-07-01T00:00:00Z")
+    conn.commit()
+
+    out = compute_communities(conn)
+    assert out["communities"] >= 2
+    assert out["nodes_labeled"] == 6
+
+    def _community(eid):
+        meta = _json.loads(conn.execute(
+            "SELECT metadata_json FROM entities WHERE entity_id=?", (eid,)
+        ).fetchone()[0] or "{}")
+        return meta.get("community_id")
+
+    a_comms = {_community(e) for e in clique_a}
+    b_comms = {_community(e) for e in clique_b}
+    assert len(a_comms) == 1 and len(b_comms) == 1  # cliques are cohesive
+    assert a_comms != b_comms  # and separated
+
+    # The API read path exposes community_id on node metadata.
+    snap = graph_snapshot(conn, min_weight=0.0)
+    node_meta = _json.loads(snap["nodes"][0]["metadata_json"] or "{}")
+    assert "community_id" in node_meta
+    assert "mention_count" in node_meta  # synthesized field kept
+
+
 def test_rebuild_entity_graph_reports_before_after(conn):
     _seed_two_entities_one_record(conn)
     conn.execute("DELETE FROM entity_edges")
