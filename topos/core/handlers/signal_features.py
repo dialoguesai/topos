@@ -486,6 +486,47 @@ async def handle_signal_entity_graph(message: Dict[str, Any]) -> Optional[Dict[s
         return {"id": req_id, "status": "error", "error": str(exc)}
 
 
+@handles("signal_entity_graph_search")
+async def handle_signal_entity_graph_search(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    try:
+        import asyncio
+
+        from ...features.entities.graph_search import graph_search
+        from ...features.signal.service import get_signal_service
+
+        conn = hub.get_db_connection()
+        service = get_signal_service()
+
+        def _run():
+            def search_fn(*, query, limit, event_after=None, event_before=None):
+                return service.search_vectors(
+                    query=query,
+                    limit=limit,
+                    mode="hybrid",
+                    event_after=event_after,
+                    event_before=event_before,
+                )
+
+            return graph_search(
+                conn,
+                query=str(payload.get("q") or ""),
+                search_fn=search_fn,
+                limit_records=min(int(payload.get("limit_records") or 40), 100),
+                limit_entities=min(int(payload.get("limit_entities") or 30), 100),
+                event_after=payload.get("event_after") or None,
+                event_before=payload.get("event_before") or None,
+            )
+
+        result = await asyncio.to_thread(_run)
+        return {"id": req_id, "status": "ok", "payload": result}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
 @handles("signal_list_facts")
 async def handle_signal_list_facts(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
