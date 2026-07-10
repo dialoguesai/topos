@@ -101,6 +101,67 @@ def test_goal_edges_carry_source_event_time_not_extraction_time(conn):
     assert str(pursues[0]["last_event_at"]).startswith("2025-03-14")
 
 
+def test_similar_goal_texts_cluster_into_one_node(conn):
+    """Near-duplicate natural-language goals (never string-identical) cluster
+    by embedding cosine; the surviving node lists every bundled variant and
+    its weight reflects the combined occurrences."""
+    owner = _owner(conn)
+    texts = [
+        "Deepen UMA scope coverage",
+        "Deepen the UMA scope coverage work this week",
+        "Plan a trip to Yosemite",  # unrelated — must stay its own node
+    ]
+    for i, t in enumerate(texts):
+        conn.execute(
+            "INSERT INTO user_goals (goal_id, record_id, source_id, goal_text, payload_json) "
+            "VALUES (?, ?, 'chatgpt_file_ingestion', ?, '{}')",
+            (f"sg{i}", f"sr{i}", t),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO timeline (event_at, record_id, source_id, canonical_table) "
+            f"VALUES ('2026-06-0{i + 1}T09:00:00Z', 'sr{i}', 'chatgpt_file_ingestion', 'ai_chat_messages')"
+        )
+    conn.commit()
+
+    # Injectable embedder: first two texts share a vector; the third is orthogonal.
+    def fake_embed(batch):
+        return [[1.0, 0.0] if "UMA" in t else [0.0, 1.0] for t in batch]
+
+    import json as _json
+
+    materialize_graph_enrichments(conn, goal_embed_fn=fake_embed)
+    labels = _labels(conn)
+    goal_nodes = [n for n in labels.values() if n["node_type"] == "goal"]
+    assert len(goal_nodes) == 2  # UMA pair clustered; Yosemite separate
+
+    uma = next(n for n in goal_nodes if "UMA" in str(n["label"]))
+    meta = _json.loads(uma.get("metadata_json") or "{}")
+    variants = meta.get("goal_variants") or []
+    assert len(variants) == 2 and any("this week" in v for v in variants)
+
+    pursues = _edges(conn, "pursues")
+    uma_edge = next(e for e in pursues if e["dst_node_id"] == uma["node_id"])
+    assert uma_edge["weight"] > _edges(conn, "pursues")[0]["weight"] * 0 + 2.0  # bumped past floor
+    assert str(uma_edge["valid_from"]).startswith("2026-06-01")
+    assert str(uma_edge["last_event_at"]).startswith("2026-06-02")
+
+
+def test_goal_clustering_falls_back_to_token_similarity(conn):
+    """No embedder available → high token-overlap still clusters."""
+    _owner(conn)
+    for i, t in enumerate(["review the topos one pager", "review topos one pager again"]):
+        conn.execute(
+            "INSERT INTO user_goals (goal_id, record_id, source_id, goal_text, payload_json) "
+            "VALUES (?, ?, 'src', ?, '{}')",
+            (f"tk{i}", f"tr{i}", t),
+        )
+    conn.commit()
+    materialize_graph_enrichments(conn, goal_embed_fn=lambda batch: None)
+    labels = _labels(conn)
+    goal_nodes = [n for n in labels.values() if n["node_type"] == "goal"]
+    assert len(goal_nodes) == 1
+
+
 def test_duplicate_goal_texts_collapse_to_one_node(conn):
     """Re-extraction mints new goal_ids for the same goal text — the graph
     must key goal nodes by text so duplicates merge, with the edge window
