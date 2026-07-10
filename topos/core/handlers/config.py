@@ -21,45 +21,15 @@ from .registry import handles
 
 UI_CONFIG_KEY = "ui_config"
 
-ALLOWED_PINNED_WIDGETS = {
-    "umaAllTime",
-    "uma24h",
-    "mcpRows",
-    "mcp24h",
-    "topConnector",
-    "umaStatusMix",
-    "topConnectors",
-    "mcpSources",
-}
-
-MAX_PINNED_WIDGETS = 3
-
-def _default_ui_config() -> Dict[str, Any]:
-    return {"version": 1, "topbar": {"pinnedAnalytics": []}}
-
-def _normalize_ui_config(value: Any) -> Dict[str, Any]:
-    if not isinstance(value, dict):
-        return _default_ui_config()
-    out: Dict[str, Any] = {
-        "version": int(value.get("version", 1)) if str(value.get("version", "")).isdigit() else 1,
-        "topbar": {"pinnedAnalytics": []},
-    }
-    topbar = value.get("topbar")
-    pinned = topbar.get("pinnedAnalytics") if isinstance(topbar, dict) else []
-    if not isinstance(pinned, list):
-        return out
-    seen: set[str] = set()
-    final: List[str] = []
-    for item in pinned:
-        wid = str(item or "").strip()
-        if not wid or wid in seen or wid not in ALLOWED_PINNED_WIDGETS:
-            continue
-        seen.add(wid)
-        final.append(wid)
-        if len(final) >= MAX_PINNED_WIDGETS:
-            break
-    out["topbar"]["pinnedAnalytics"] = final
-    return out
+# SINGLE SOURCE: this module used to keep its own copy of the ui-config
+# normalizer, which silently drifted — the HTTP endpoint accepted new fields
+# (graph.timeWindowDays) that this WS path (the CP proxy route) stripped.
+from ...api.ui_config import (  # noqa: E402
+    ALLOWED_WIDGETS as ALLOWED_PINNED_WIDGETS,
+    MAX_PINNED as MAX_PINNED_WIDGETS,
+    _default_ui_config,
+    _normalize_ui_config,
+)
 
 @handles("migrate_browser_plugin_app_id")
 async def handle_migrate_browser_plugin_app_id(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:

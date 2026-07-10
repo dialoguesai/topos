@@ -52,6 +52,10 @@ def _normalize_ui_config(value: Any) -> dict[str, Any]:
             days = int(window)
             if 1 <= days <= GRAPH_WINDOW_MAX_DAYS:
                 out["graph"]["timeWindowDays"] = days
+    if isinstance(graph, dict):
+        mode = graph.get("nodeColorMode")
+        if mode in ("type", "community"):
+            out["graph"]["nodeColorMode"] = mode
     topbar = value.get("topbar")
     pinned = topbar.get("pinnedAnalytics") if isinstance(topbar, dict) else []
     if not isinstance(pinned, list):

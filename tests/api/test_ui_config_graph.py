@@ -31,3 +31,24 @@ def test_garbage_window_dropped():
 def test_topbar_behavior_unchanged():
     out = _normalize_ui_config({"topbar": {"pinnedAnalytics": ["umaAllTime", "nope"]}})
     assert out["topbar"]["pinnedAnalytics"] == ["umaAllTime"]
+
+
+def test_graph_node_color_mode_roundtrips():
+    for mode in ("type", "community"):
+        out = _normalize_ui_config({"graph": {"nodeColorMode": mode}})
+        assert out["graph"]["nodeColorMode"] == mode
+
+
+def test_graph_node_color_mode_garbage_dropped():
+    out = _normalize_ui_config({"graph": {"nodeColorMode": "rainbow"}})
+    assert "nodeColorMode" not in out["graph"]
+
+
+def test_ws_handler_uses_shared_normalizer():
+    """The WS path (CP proxy) must share the HTTP normalizer — a drifted copy
+    silently stripped graph prefs saved through the deployed app."""
+    from topos.api.ui_config import _normalize_ui_config as http_norm
+    from topos.core.handlers.config import _normalize_ui_config as ws_norm
+
+    assert ws_norm is http_norm
+
