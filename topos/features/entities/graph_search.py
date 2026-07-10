@@ -21,10 +21,12 @@ from __future__ import annotations
 import sqlite3
 from typing import Any, Callable, Dict, List, Optional
 
-# Modest per-token bonus for label matches on materialized nodes; capped so a
-# wordy label can't outrank strong record evidence.
-_LABEL_TOKEN_SCORE = 0.3
-_LABEL_SCORE_CAP = 0.6
+# Per-token bonus for label matches on materialized nodes. Record scores are
+# normalized to top=1.0, so a two-token label match (1.0) competes with the
+# single best record — a goal literally titled with the query belongs at the
+# top — while the cap keeps wordy labels from dwarfing everything.
+_LABEL_TOKEN_SCORE = 0.5
+_LABEL_SCORE_CAP = 1.5
 _EVIDENCE_PER_ENTITY = 3
 # Node kinds that exist as derived labels rather than record mentions.
 _LABEL_MATCH_TYPES = ("goal", "topic", "conversation")
