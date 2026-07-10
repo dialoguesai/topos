@@ -353,6 +353,7 @@ def rebuild_entity_graph(
     facts_closed = close_dangling_facts(conn)
 
     mz = {"topic_edges": 0, "fact_edges": 0}
+    enrich = {"goal_edges": 0, "place_edges": 0, "conversation_edges": 0}
     if materialize_facts:
         try:
             from .fact_materializer import materialize_signal_objects_to_graph
@@ -360,6 +361,14 @@ def rebuild_entity_graph(
             mz = materialize_signal_objects_to_graph(conn)
         except Exception as exc:  # materialization is best-effort
             logger.warning("fact materialization during rebuild failed: %s", exc)
+        try:
+            from .graph_enrichers import materialize_graph_enrichments
+
+            # After the facts refresh (which drops ALL mz edges) so enricher
+            # edges live in the same lifecycle.
+            enrich = materialize_graph_enrichments(conn)
+        except Exception as exc:
+            logger.warning("graph enrichment during rebuild failed: %s", exc)
 
     # Neighborhoods over the final edge set (evidence + materialized).
     communities = compute_communities(conn)
@@ -382,6 +391,9 @@ def rebuild_entity_graph(
         "communicates_with": edge_counts["communicates_with"],
         "topic_edges": mz["topic_edges"],
         "fact_edges": mz["fact_edges"],
+        "goal_edges": enrich["goal_edges"],
+        "place_edges": enrich["place_edges"],
+        "conversation_edges": enrich["conversation_edges"],
         "orphans_pruned": len(orphaned),
         "facts_closed_dangling": facts_closed,
         "communities": communities["communities"],
