@@ -48,7 +48,12 @@ class Settings(BaseSettings):
         "https://api.nodes.griptape.ai", env="GRIPTAPE_NODES_API_BASE_URL"
     )
 
-    allowed_origins_raw: str = Field("http://localhost:3000", env="ALLOWED_ORIGINS")
+    allowed_origins_raw: str = Field(
+        "http://localhost:3000",
+        # pydantic v2 ignores Field(env=); without the alias this field only
+        # read ALLOWED_ORIGINS_RAW and the documented ALLOWED_ORIGINS was dead.
+        validation_alias=AliasChoices("ALLOWED_ORIGINS", "ALLOWED_ORIGINS_RAW"),
+    )
     allowed_origin_regex: Optional[str] = Field(None, env="ALLOWED_ORIGIN_REGEX")
     enable_health_auth: bool = Field(False, env="ENABLE_HEALTH_AUTH")
 
