@@ -842,4 +842,14 @@ async def run_post_canonical_pipeline(
     from ..engine.pipeline_memory import flush_engine_model_cache_after_pipeline
 
     flush_engine_model_cache_after_pipeline()
+
+    # Derived-graph freshness: enrichment just changed mentions/facts/objects,
+    # so the materialized graph layers are stale. Debounced — a multi-source
+    # sync coalesces into one rebuild after the walk quiets down.
+    try:
+        from ..features.entities.graph_refresh import mark_graph_dirty
+
+        mark_graph_dirty()
+    except Exception as exc:  # noqa: BLE001 — refresh must never break ingest
+        logger.debug("graph refresh mark skipped: %s", exc)
     return outcome

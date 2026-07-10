@@ -1056,6 +1056,15 @@ async def _process_enrichment_core(
         progress_callback=progress_callback,
     )
 
+    # Canonical jobs changed the derived layers even when the signal lane is
+    # skipped below — mark the graph for a debounced rebuild either way.
+    try:
+        from ..features.entities.graph_refresh import mark_graph_dirty
+
+        mark_graph_dirty()
+    except Exception:  # noqa: BLE001 — refresh must never break enrichment
+        pass
+
     # Manual processing is the deliberate counterpart of the automatic ingest
     # path, so it must also run the signal-derivation lane (embeddings,
     # clusters, facts, ...) that the ingest path skips for manual sources.
