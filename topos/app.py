@@ -157,6 +157,19 @@ async def startup_event() -> None:
                 logger.info("Stage 9 migrations applied at startup: %d renames", len(result["applied"]))
     except Exception as e:
         logger.debug("Stage 9 migrations at startup (non-fatal): %s", e)
+    # Upgrade runner: compare the stamped derivation baseline against the
+    # shipped version and re-derive what this release invalidated (manifest in
+    # topos/upgrades). Heavy steps run in a daemon thread; the node serves
+    # stale derived data meanwhile. Fresh installs stamp-and-skip.
+    try:
+        from .core.state import get_db_connection as _get_conn_for_upgrades
+        from .upgrades.runner import start_background as _start_upgrades
+
+        _upgrade_conn = state.db_conn if state.db_conn is not None else _get_conn_for_upgrades()
+        if _upgrade_conn is not None:
+            _start_upgrades(_upgrade_conn)
+    except Exception as e:
+        logger.warning("Upgrade runner at startup failed (non-fatal): %s", e)
     try:
         from .sources import install_service
 

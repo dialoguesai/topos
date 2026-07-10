@@ -110,6 +110,10 @@ from .activity_events_content_v1 import (
     MIGRATION_ID as ACTIVITY_EVENTS_CONTENT_V1_ID,  # noqa: F401 — exported for tests/tools
     apply_activity_events_content_v1_up,
 )
+from .derivation_ledger_v1 import (
+    MIGRATION_ID as DERIVATION_LEDGER_V1_ID,  # noqa: F401 — exported for tests/tools
+    apply_derivation_ledger_v1_up,
+)
 
 __all__ = ["apply_all_migrations", "ensure_migrations_applied"]
 
@@ -177,6 +181,8 @@ def apply_all_migrations(conn: sqlite3.Connection) -> None:
     apply_actor_role_v1_up(conn)
     # P2.1 browser exposure: activity_events hostname + content columns.
     apply_activity_events_content_v1_up(conn)
+    # Upgrade runner: per-step re-derivation state (topos/upgrades).
+    apply_derivation_ledger_v1_up(conn)
 
 
 def ensure_migrations_applied(conn: sqlite3.Connection) -> None:
