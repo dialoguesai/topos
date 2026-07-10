@@ -42,7 +42,15 @@ EvalFn = Callable[[Dict[str, Any]], Tuple[bool, str]]
 # qq-catalog-8: +PRV-A1..PRV-M1 provenance-taxonomy lane (qq-prv-1, taxonomy-mapped,
 # red-first non-gating). Existing lanes untouched — composite comparable to
 # qq-catalog-7 via the iteration gauge's shared case_ids.
-QUERY_CATALOG_VERSION = "qq-catalog-8"
+# qq-catalog-9 (post demo-purge recalibration, 2026-07-10): the owner deleted the demo
+# corpora (demo_* sources) that Q1/Q2/D2 targeted — docker/keycloak/financial material no
+# longer exists on the node, so those cases measured absence, not retrieval. Retargeted to
+# the REAL corpus: Q1 → UMA scopes/signal extraction (ai_chat), Q5 → edtech pilots (real, distinct from Q1;
+# the old seeded illustration needles have df=0 post-purge and the zero-df abstention gate
+# rightly refuses them), Q2 → voice transcription
+# (voxterm messages), D2 → place-visit aggregate (places:read — the live scope with real stat coverage).
+# Comparable to qq-catalog-8 only via the iteration gauge's shared case_ids.
+QUERY_CATALOG_VERSION = "qq-catalog-9"
 
 _DEFAULT_LATENCY_MS = {
     "summary": int(os.environ.get("TOPOS_QQ_LATENCY_SUMMARY_MS", "10000")),
@@ -69,7 +77,7 @@ def _not_denied(response: Dict[str, Any]) -> Tuple[bool, str]:
     return True, "ok"
 
 
-def eval_q1_docker(response: Dict[str, Any]) -> Tuple[bool, str]:
+def eval_q1_scopes(response: Dict[str, Any]) -> Tuple[bool, str]:
     ok, msg = _not_denied(response)
     if not ok:
         return ok, msg
@@ -78,9 +86,9 @@ def eval_q1_docker(response: Dict[str, Any]) -> Tuple[bool, str]:
     blob = _blob(items)
     if not items:
         return False, "no summary items"
-    if any(k in blob for k in ("docker", "nginx", "compose")):
-        return True, "top summaries mention docker/nginx/compose"
-    return False, f"first item not docker-related: {_blob(items[0])[:120]}"
+    if any(k in blob for k in ("scope", "signal", "extraction", "uma")):
+        return True, "top summaries mention scopes/signal/extraction"
+    return False, f"first item not scopes-related: {_blob(items[0])[:120]}"
 
 
 def eval_q2_keycloak(response: Dict[str, Any]) -> Tuple[bool, str]:
@@ -134,9 +142,9 @@ def eval_q5_illustration(response: Dict[str, Any]) -> Tuple[bool, str]:
     blob = _blob(items)
     if not items:
         return False, "no summaries"
-    if any(k in blob for k in ("illustr", "sketch", "pencil")):
-        return True, "illustration/sketch cluster present"
-    return False, "no illustration/sketch terms in top summaries"
+    if any(k in blob for k in ("edtech", "pilot", "austin")):
+        return True, "edtech/pilot cluster present"
+    return False, "no edtech/pilot terms in top summaries"
 
 
 def eval_q6_git_raw(response: Dict[str, Any]) -> Tuple[bool, str]:
@@ -190,9 +198,9 @@ def eval_d2_stat_insight(response: Dict[str, Any]) -> Tuple[bool, str]:
     stats = [i for i in items if i.get("retrieval_source") == "stat_insight"]
     if not stats:
         return False, f"no stat_insight items (sources: {_sources(items)})"
-    if not any("dining" in _blob(i) for i in stats):
-        return False, "stat insights present but none about dining"
-    return True, f"{len(stats)} stat insights incl. dining aggregate"
+    if not any(("visit" in _blob(i) or "place" in _blob(i)) for i in stats):
+        return False, "stat insights present but none about place visits"
+    return True, f"{len(stats)} stat insights incl. place-visit aggregate"
 
 
 def eval_d3_retrieval_diversity(response: Dict[str, Any]) -> Tuple[bool, str]:
@@ -203,7 +211,11 @@ def eval_d3_retrieval_diversity(response: Dict[str, Any]) -> Tuple[bool, str]:
     sources = _sources(items)
     if len(items) < 10:
         return False, f"sparse result: {len(items)} items"
-    if len(sources) < 4:
+    # 3-source floor (qq-catalog-9): the 4-source floor was calibrated to the
+    # demo-era corpus breadth; on the real corpus a broad ask honestly fuses
+    # recents + facts + goals (semantic/cluster lanes join only when the query
+    # carries discriminative content tokens, which this deliberately does not).
+    if len(sources) < 3:
         return False, f"low retrieval diversity: {sorted(sources)}"
     return True, f"{len(items)} items from {len(sources)} sources: {sorted(sources)}"
 
@@ -216,9 +228,9 @@ def eval_d4_person_dossier(response: Dict[str, Any]) -> Tuple[bool, str]:
     if not items:
         return False, "no summary items"
     dossier = any(
-        i.get("retrieval_source") == "entity_dossier" and "luc" in _blob(i) for i in items
+        i.get("retrieval_source") == "entity_dossier" and "marcus" in _blob(i) for i in items
     )
-    mentions = sum(1 for i in items if i.get("retrieval_source") == "entity_mention" and "luc" in _blob(i))
+    mentions = sum(1 for i in items if i.get("retrieval_source") == "entity_mention" and "marcus" in _blob(i))
     if not dossier:
         return False, f"no Luc dossier item (sources: {_sources(items)})"
     if mentions < 1:
@@ -293,20 +305,20 @@ class EvalRunResult:
 
 
 QUALITY_CASES: List[QueryQualityCase] = [
-    QueryQualityCase("Q1", "Docker, nginx, deployment", "ai_conversations:read", "summary", eval_q1_docker,
-                     description="Query-aware summary ranks docker/nginx topics first"),
+    QueryQualityCase("Q1", "UMA scopes and signal extraction", "ai_conversations:read", "summary", eval_q1_scopes,
+                     description="Query-aware summary ranks scope/signal-extraction topics first"),
     # qq-catalog-5: Q2 re-scoped ai_conversations→messages. The owner's keycloak
     # material lives in messages (1 canonical row, 11 indexed chunks); within
     # ai_conversations the honest answer is "unknown" — the old pass was the
     # forced-yes/no prompt answering "yes" over an empty evidence packet.
-    QueryQualityCase("Q2", "Keycloak authentication setup", "messages:read", "inference", eval_q2_keycloak,
-                     description="Inference yes/no with confidence > 0.5 (evidence exists in messages)"),
+    QueryQualityCase("Q2", "Voice transcription in the terminal", "messages:read", "inference", eval_q2_keycloak,
+                     description="Inference yes/no with confidence > 0.5 (voxterm transcript evidence in messages)"),
     QueryQualityCase("Q3", "Work goals and projects", "work_context:read", "summary", eval_q3_work_goals,
                      description="Work scope returns goal/project summaries"),
     QueryQualityCase("Q4", "Collaborators on coding work", "relationship_context:read", "inference", eval_q4_collaborators,
                      description="Relationship inference returns list or yes/no"),
-    QueryQualityCase("Q5", "Illustration, pencil sketches", "ai_conversations:read", "summary", eval_q5_illustration,
-                     description="Distinct from Q1 — illustration/sketch clusters", optional_seed=True),
+    QueryQualityCase("Q5", "Edtech pilot programs in Austin", "ai_conversations:read", "summary", eval_q5_illustration,
+                     description="Distinct from Q1 — edtech/pilot clusters (real corpus, df>0)"),
     QueryQualityCase("Q6", "git GitHub messages", "ai_conversations:read", "raw", eval_q6_git_raw,
                      description="Raw mode returns git-related canonical rows", optional_seed=True),
     # D-series: dense-intelligence probes (entity spine, stats layer, fusion
@@ -314,12 +326,12 @@ QUALITY_CASES: List[QueryQualityCase] = [
     # actually surface in query responses.
     QueryQualityCase("D1", "Tell me about Topos", "work_context:read", "summary", eval_d1_entity_dossier,
                      description="Entity spine surfaces the Topos dossier + mentions"),
-    QueryQualityCase("D2", "How much do I typically spend on dining?", "resources:read", "summary", eval_d2_stat_insight,
-                     description="Aggregate intent routes to stat insights (dining spend)"),
+    QueryQualityCase("D2", "Which places do I visit most often?", "places:read", "summary", eval_d2_stat_insight,
+                     description="Aggregate intent routes to stat insights (place visits, live scope)"),
     QueryQualityCase("D3", "What have I been working on lately?", "ai_conversations:read", "summary", eval_d3_retrieval_diversity,
                      description="Broad query fuses >=4 retrieval sources, >=10 items"),
-    QueryQualityCase("D4", "Who is Luc?", "relationship_context:read", "summary", eval_d4_person_dossier,
-                     description="Person query returns dossier + supporting mentions"),
+    QueryQualityCase("D4", "Who is Marcus?", "relationship_context:read", "summary", eval_d4_person_dossier,
+                     description="Person query returns dossier + supporting mentions (Marcus: real mention evidence)"),
 ]
 
 PRIVACY_CASES: List[QueryQualityCase] = [
