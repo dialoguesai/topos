@@ -376,7 +376,7 @@ def graph_snapshot(
     nodes = []
     for entity_id in node_ids:
         row = conn.execute(
-            "SELECT canonical_name, entity_type, mention_count, metadata_json "
+            "SELECT canonical_name, entity_type, mention_count, metadata_json, is_self "
             "FROM entities WHERE entity_id=?",
             (entity_id,),
         ).fetchone()
@@ -390,6 +390,9 @@ def graph_snapshot(
             except (TypeError, ValueError):
                 meta = {}
             meta["mention_count"] = row[2]
+            # Owner marker so graph UIs can pin/label the self node.
+            if row[4]:
+                meta["is_self"] = True
             nodes.append(
                 {
                     "node_id": entity_id,
