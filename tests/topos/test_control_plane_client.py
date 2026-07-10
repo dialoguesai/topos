@@ -114,6 +114,94 @@ async def test_control_plane_client_queues_presence_until_connected(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_wait_for_stop_or_timeout_does_not_propagate_timeout():
+    """Backoff wait must swallow wait_for timeouts so the reconnect loop stays alive.
+
+    On Python 3.10, asyncio.TimeoutError is not builtins.TimeoutError; catching only
+    the builtin lets the exception kill ControlPlaneClient._run.
+    """
+
+    async def handler(_message):
+        return None
+
+    client = ControlPlaneClient(
+        control_plane_url="ws://example/ws/engine",
+        api_key="test-key",
+        handler=handler,
+        verify_ssl=False,
+    )
+    await client._wait_for_stop_or_timeout(0.01)
+    assert not client._stop.is_set()
+
+
+@pytest.mark.asyncio
+async def test_reconnect_loop_survives_backoff_timeout(monkeypatch):
+    """After a clean disconnect, _run must keep looping instead of dying on backoff."""
+    connect_calls = {"n": 0}
+
+    class HangForeverWebSocket(FakeWebSocket):
+        def __init__(self):
+            super().__init__([])
+            self._gate = asyncio.Event()
+
+        async def __anext__(self):
+            await self._gate.wait()
+            raise StopAsyncIteration
+
+    class FlappingConnect:
+        def __init__(self):
+            self.last_headers = None
+            self.last_ssl = None
+
+        def __call__(self, url, additional_headers=None, ssl=None, **kwargs):
+            _ = (url, kwargs)
+            self.last_headers = additional_headers
+            self.last_ssl = ssl
+            return self
+
+        async def __aenter__(self):
+            connect_calls["n"] += 1
+            if connect_calls["n"] == 1:
+                return FakeWebSocket([])
+            return HangForeverWebSocket()
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+    monkeypatch.setattr(control_plane_client, "connect", FlappingConnect())
+
+    async def handler(_message):
+        return None
+
+    client = ControlPlaneClient(
+        control_plane_url="ws://example/ws/engine",
+        api_key="test-key",
+        handler=handler,
+        verify_ssl=False,
+    )
+    client._backoff = control_plane_client.ExponentialBackoff(
+        control_plane_client.ResilienceConfig(initial_backoff_s=0.01, max_backoff_s=0.01, jitter_ratio=0.0)
+    )
+
+    client.start()
+    for _ in range(50):
+        if connect_calls["n"] >= 2 and client._task and not client._task.done():
+            break
+        await asyncio.sleep(0.02)
+    else:
+        status = {
+            "connect_calls": connect_calls["n"],
+            "task_done": client._task.done() if client._task else None,
+            "task_exc": repr(client._task.exception()) if client._task and client._task.done() else None,
+        }
+        await client.stop()
+        raise AssertionError(f"reconnect loop did not survive backoff: {status}")
+
+    assert not client._task.done()
+    await client.stop()
+
+
+@pytest.mark.asyncio
 async def test_send_message_restarts_background_task_if_stopped(monkeypatch):
     ws = FakeWebSocket([])
     connect = FakeConnect(ws)
