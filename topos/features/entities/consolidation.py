@@ -18,6 +18,7 @@ Dismissed pairs are never re-proposed.
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import uuid
@@ -386,3 +387,100 @@ def resolve_review(
     conn.commit()
     refresh_dossiers(conn)
     return {"review_id": review_id, "status": "approved", "kept": str(candidate_id), "absorbed": str(subject_id)}
+
+
+def split_surface(conn: sqlite3.Connection, entity_id: str, surface: str) -> Dict[str, Any]:
+    """Owner unbind: split a surface's mentions OUT of an entity, permanently.
+
+    The reverse of an accidental merge/bind (e.g. the resolver's unique-contact
+    tier binding "Claire" to the contact "Claire Duncombe"):
+
+      * mentions whose surface_text normalizes to ``surface`` move to a fresh
+        entity named after the surface (created only when mentions exist);
+      * a matching alias is removed from the source entity;
+      * a permanent ``no_bind`` guard row is written — the resolver consults it
+        so this surface can never resolve back to the source entity (token-
+        subset names score 1.0, so every tier would otherwise re-merge them);
+      * both mention counts recount. Edges/dossiers correct on the next graph
+        rebuild.
+    """
+    from .resolver import EntityResolver, normalize_name
+
+    row = conn.execute(
+        "SELECT canonical_name, normalized_name, entity_type, aliases_json "
+        "FROM entities WHERE entity_id=?",
+        (str(entity_id),),
+    ).fetchone()
+    if row is None:
+        raise LookupError(f"entity not found: {entity_id}")
+    canonical_name, normalized_name, entity_type, aliases_json = row
+
+    normalized = normalize_name(surface)
+    if not normalized:
+        raise ValueError(f"unresolvable surface: {surface!r}")
+    if normalized == str(normalized_name):
+        raise ValueError(
+            "surface is the entity's own name — use exclude to stop tracking it entirely"
+        )
+
+    # Move matching mentions to a fresh entity.
+    mention_rows = conn.execute(
+        "SELECT mention_id, surface_text FROM entity_mentions WHERE entity_id=?",
+        (str(entity_id),),
+    ).fetchall()
+    moved_ids = [
+        str(mid) for mid, stext in mention_rows if normalize_name(str(stext or "")) == normalized
+    ]
+
+    new_entity_id: Optional[str] = None
+    if moved_ids:
+        resolver = EntityResolver(conn)
+        new_entity_id = resolver._create_entity(str(surface).strip(), str(entity_type))
+        placeholders = ",".join("?" for _ in moved_ids)
+        conn.execute(
+            f"UPDATE entity_mentions SET entity_id=? WHERE mention_id IN ({placeholders})",
+            (new_entity_id, *moved_ids),
+        )
+
+    # Remove a matching alias from the source entity.
+    alias_removed = False
+    try:
+        aliases = [a for a in (json.loads(aliases_json or "[]")) if isinstance(a, str)]
+    except json.JSONDecodeError:
+        aliases = []
+    kept_aliases = [a for a in aliases if normalize_name(a) != normalized]
+    if len(kept_aliases) != len(aliases):
+        alias_removed = True
+        conn.execute(
+            "UPDATE entities SET aliases_json=?, updated_at=datetime('now') WHERE entity_id=?",
+            (json.dumps(kept_aliases), str(entity_id)),
+        )
+
+    # Permanent guard: this surface never binds to the source entity again.
+    conn.execute(
+        """
+        INSERT INTO entity_review
+            (review_id, surface_text, candidate_entity_id, score, record_id,
+             status, created_at, kind, subject_entity_id, reason)
+        VALUES (?, ?, ?, 1.0, NULL, 'approved', datetime('now'), 'no_bind', ?, 'owner split')
+        """,
+        (f"rev_{uuid.uuid4().hex[:16]}", normalized, str(entity_id), new_entity_id),
+    )
+
+    # Recount both sides.
+    for eid in filter(None, [str(entity_id), new_entity_id]):
+        conn.execute(
+            "UPDATE entities SET mention_count = ("
+            " SELECT COUNT(*) FROM entity_mentions m WHERE m.entity_id = entities.entity_id"
+            "), updated_at=datetime('now') WHERE entity_id=?",
+            (eid,),
+        )
+    conn.commit()
+
+    return {
+        "entity_id": str(entity_id),
+        "surface": str(surface).strip(),
+        "new_entity_id": new_entity_id,
+        "mentions_moved": len(moved_ids),
+        "alias_removed": alias_removed,
+    }

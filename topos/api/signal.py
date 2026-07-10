@@ -388,6 +388,29 @@ async def dismiss_entity_review(review_id: str, _api_key: str = Depends(require_
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+class EntitySplitBody(BaseModel):
+    surface: str = Field(..., min_length=1, max_length=200)
+
+
+@router.post("/entities/{entity_id}/split")
+async def split_entity_surface(
+    entity_id: str,
+    body: EntitySplitBody,
+    _api_key: str = Depends(require_api_key),
+):
+    """Owner unbind: split a surface's mentions out of this entity into a
+    fresh one, with a permanent no-bind guard so the resolver never re-merges
+    the pair (accidental-merge reversal; see consolidation.split_surface)."""
+    from ..features.entities.consolidation import split_surface
+
+    try:
+        return split_surface(_entities_conn(), entity_id, body.surface)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @router.post("/entities/{entity_id}/exclude")
 async def exclude_entity_from_intelligence(
     entity_id: str,
