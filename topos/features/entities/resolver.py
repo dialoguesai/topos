@@ -199,10 +199,16 @@ class EntityResolver:
         if self._is_excluded_name(normalized):
             raise ValueError(f"entity excluded by owner: {surface_text!r}")
 
+        # Owner unbinds: entities this surface must NEVER resolve to again
+        # (split_surface guards). "Claire" is a token-subset of "Claire
+        # Duncombe" (similarity 1.0), so without this every tier below would
+        # happily re-merge an owner-corrected mislink.
+        blocked = self._no_bind_targets(normalized)
+
         # Tier 1: identifier (emails/handles/phones)
         if "@" in surface or surface.startswith("+") or "." in normalized.replace(" ", ""):
             hit = self._match_identifier(normalized.replace(" ", ""))
-            if hit:
+            if hit and hit not in blocked:
                 return hit, "identifier"
 
         # Tier 1.5: contact-seeded people outrank NER typing. NER labels
@@ -210,18 +216,20 @@ class EntityResolver:
         # Austin — the contact registry is ground truth about people the owner
         # knows, so a unique contact match wins regardless of the NER label.
         contact_hit = self._match_contact_person(normalized)
-        if contact_hit:
+        if contact_hit and contact_hit not in blocked:
             return contact_hit, "contact"
 
         # Tier 2: exact normalized alias
         hit = self._match_alias(normalized, etype)
-        if hit:
+        if hit and hit not in blocked:
             return hit, "alias"
 
         # Tier 3: fuzzy within type. Ambiguity (two candidates at threshold)
         # must never auto-merge — a wrong person-merge is the spine's one
         # near-irreversible failure, so ties go to review instead.
         best_id, best_score, at_threshold = self._best_fuzzy(normalized, etype)
+        if best_id in blocked:
+            best_id, best_score = None, 0.0
         if best_id and best_score >= AUTO_MERGE_SCORE and at_threshold == 1:
             self._add_alias(best_id, surface)
             return best_id, "fuzzy"
@@ -242,6 +250,18 @@ class EntityResolver:
             if needle in (str(i).lower() for i in identifiers):
                 return str(entity_id)
         return None
+
+    def _no_bind_targets(self, normalized: str) -> frozenset:
+        """Entities the owner UNBOUND from this surface (split_surface guards)."""
+        try:
+            rows = self._conn.execute(
+                "SELECT candidate_entity_id FROM entity_review "
+                "WHERE kind='no_bind' AND status='approved' AND surface_text=?",
+                (normalized,),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return frozenset()
+        return frozenset(str(r[0]) for r in rows if r[0])
 
     def _is_excluded_name(self, normalized: str) -> bool:
         """Owner tombstone: never track this entity again (see lifecycle.exclusions)."""

@@ -651,6 +651,29 @@ async def handle_signal_entity_review_action(message: Dict[str, Any]) -> Optiona
         return {"id": req_id, "status": "error", "error": str(exc)}
 
 
+@handles("signal_entity_split")
+async def handle_signal_entity_split(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    entity_id = str(payload.get("entity_id") or "").strip()
+    surface = str(payload.get("surface") or "").strip()
+    if not entity_id or not surface:
+        return {"id": req_id, "status": "error", "error": "entity_id and surface required", "code": 400}
+    try:
+        from ...features.entities.consolidation import split_surface
+
+        conn = hub.get_db_connection()
+        return {"id": req_id, "status": "ok", "payload": split_surface(conn, entity_id, surface)}
+    except LookupError as exc:
+        return {"id": req_id, "status": "error", "error": str(exc), "code": 404}
+    except ValueError as exc:
+        return {"id": req_id, "status": "error", "error": str(exc), "code": 400}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
 @handles("signal_exclude_entity")
 async def handle_signal_exclude_entity(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
