@@ -50,7 +50,14 @@ EvalFn = Callable[[Dict[str, Any]], Tuple[bool, str]]
 # rightly refuses them), Q2 → voice transcription
 # (voxterm messages), D2 → place-visit aggregate (places:read — the live scope with real stat coverage).
 # Comparable to qq-catalog-8 only via the iteration gauge's shared case_ids.
-QUERY_CATALOG_VERSION = "qq-catalog-9"
+# qq-catalog-10 (C-series post-purge recalibration + rare-gate morphology): C1 excludes
+# Speaker-N diarization artifacts (voxterm labels are not contacts; vacuous when no real
+# contact volume exists), C8 → PostHog analytics (real niche cluster; demo art needle df 0),
+# C12 → Marcus (Luc was a demo persona). Engine-side, the rare-token gate gained light
+# morphology (journaling→journal, active→activity) and stat-insight tags entered the
+# evidence blob — C11/C23-class self-vetoes on aggregate asks are fixed, not recalibrated.
+# Comparable to qq-catalog-9 via the iteration gauge's shared case_ids.
+QUERY_CATALOG_VERSION = "qq-catalog-10"
 
 _DEFAULT_LATENCY_MS = {
     "summary": int(os.environ.get("TOPOS_QQ_LATENCY_SUMMARY_MS", "10000")),

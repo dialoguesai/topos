@@ -112,6 +112,32 @@ def _residual_content_tokens(tokens: List[str], tables: Optional[List[str]] = No
     return out
 
 
+def _token_variants(token: str) -> List[str]:
+    """Light suffix-stripped variants for df lookup and evidence matching.
+
+    'journaling' must inherit the corpus frequency of 'journal' — an -ing/-ed/-s
+    ask about an abundant concept is not a fabricated topic. Deliberately NOT a
+    full stemmer: fabricated words produce fabricated stems (zorblatt → df 0
+    either way), so the NH abstention guarantee is unaffected.
+    """
+    clean = re.sub(r"[^a-z0-9]", "", str(token).lower())
+    variants = [clean]
+    if len(clean) > 5 and clean.endswith("ing"):
+        variants.append(clean[:-3])          # journaling → journal
+        variants.append(clean[:-3] + "e")    # messaging → message
+    if len(clean) > 4 and clean.endswith("ed"):
+        variants.append(clean[:-2])
+        variants.append(clean[:-1])          # committed-ish → keep simple
+    if len(clean) > 3 and clean.endswith("es"):
+        variants.append(clean[:-2])
+        variants.append(clean[:-1])
+    elif len(clean) > 3 and clean.endswith("s"):
+        variants.append(clean[:-1])
+    if len(clean) >= 5 and clean.endswith("e"):
+        variants.append(clean[:-1])          # active → activ (matches 'activity')
+    return [v for v in dict.fromkeys(variants) if len(v) >= 3]
+
+
 def _rare_tokens(conn, tokens: List[str]) -> Dict[str, int]:
     """Tokens with low document frequency in the FTS index, mapped to their df —
     the discriminative part of a specific ask. df==0 means the term appears
@@ -134,26 +160,34 @@ def _rare_tokens(conn, tokens: List[str]) -> Dict[str, int]:
         return {}
     rare: Dict[str, int] = {}
     for token in tokens:
-        clean = re.sub(r"[^a-z0-9]", "", token.lower())
-        if len(clean) < 3:
+        variants = _token_variants(token)
+        if not variants:
             continue
-        try:
-            row = conn.execute(
-                "SELECT count(*) FROM signal_embeddings_fts WHERE signal_embeddings_fts MATCH ?",
-                (f'"{clean}"',),
-            ).fetchone()
-        except Exception:
-            return {}  # no FTS index (fresh DB) — treat nothing as rare
-        df = int(row[0]) if row else 0
+        # df = max over light morphological variants: 'journaling' inherits
+        # the frequency of 'journal' (the docstring long promised stemming;
+        # the implementation matched the exact token only).
+        df = 0
+        for clean in variants:
+            try:
+                row = conn.execute(
+                    "SELECT count(*) FROM signal_embeddings_fts WHERE signal_embeddings_fts MATCH ?",
+                    (f'"{clean}"',),
+                ).fetchone()
+            except Exception:
+                return {}  # no FTS index (fresh DB) — treat nothing as rare
+            df = max(df, int(row[0]) if row else 0)
         if df < df_max:
             rare[token] = df
     return rare
 
 
 def _item_text_blob(item: Dict[str, Any]) -> str:
+    # `tag` carries a stat insight's entire content; omitting it meant NO stat
+    # item could ever evidence a rare token, so aggregate asks with a low-df
+    # content word were vetoed wholesale (C11, 1.2.0 release battery).
     return " ".join(
         str(item.get(f) or "")
-        for f in ("topic", "summary_text", "content", "text_preview", "content_preview")
+        for f in ("topic", "summary_text", "content", "text_preview", "content_preview", "tag", "label")
     ).lower()
 
 
@@ -1869,8 +1903,8 @@ def _rrf_fuse_summary_lists(
         blobs = [_item_text_blob(item) for item in evidence_items]
 
         def _evidenced(token: str) -> bool:
-            t = token.lower()
-            return any(t in blob for blob in blobs)
+            # Variant-aware: items saying 'journal' evidence a 'journaling' ask.
+            return any(v in blob for v in _token_variants(token) for blob in blobs)
 
         # Every effectively-absent token (df ≤ 2: zero, or a porter-stem
         # collision like 'falconer'→'falcon' df 1) must be evidenced by the
