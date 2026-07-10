@@ -784,6 +784,10 @@ _PATCHABLE_DEFINITION_KEYS = frozenset(
         "enrichment_trigger",
         "raw_enrichment_jobs",
         "canonical_enrichment_jobs",
+        # Signal-lane jobs (goal_extraction, embeddings, topic_clusters, …)
+        # are user configuration the same as the canonical lane — omitting
+        # them made PATCH silently drop the field (2026-07-10, grow_journal).
+        "signal_derivation_jobs",
     }
 )
 _IMMUTABLE_DEFINITION_KEYS = frozenset(
