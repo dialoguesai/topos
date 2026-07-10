@@ -17,6 +17,22 @@ def test_graph_time_window_null_means_all_time():
     assert out["graph"]["timeWindowDays"] is None
 
 
+def test_graph_track_lookback_roundtrips():
+    out = _normalize_ui_config({"graph": {"trackLookbackDays": 120}})
+    assert out["graph"]["trackLookbackDays"] == 120
+
+
+def test_graph_track_lookback_null_means_full_extent():
+    out = _normalize_ui_config({"graph": {"trackLookbackDays": None}})
+    assert out["graph"]["trackLookbackDays"] is None
+
+
+def test_garbage_track_lookback_dropped():
+    for bad in ("soon", -3, 0, 99999, {"x": 1}):
+        out = _normalize_ui_config({"graph": {"trackLookbackDays": bad}})
+        assert "trackLookbackDays" not in out["graph"]
+
+
 def test_graph_section_absent_stays_absent():
     out = _normalize_ui_config({"topbar": {"pinnedAnalytics": []}})
     assert out.get("graph") == {}
