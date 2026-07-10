@@ -67,6 +67,12 @@ def _ensure_node(conn: sqlite3.Connection, node_id: str, label: str, entity_type
     )
 
 
+def _plausible_event_at(value: object) -> Optional[str]:
+    """Reject epoch-zero/garbage timestamps (a 1970 edge pins the scrubber)."""
+    s = str(value or "").strip()
+    return s if len(s) >= 4 and s[:4].isdigit() and int(s[:4]) >= 2000 else None
+
+
 def _record_event_at(conn: sqlite3.Connection, record_id: str) -> Optional[str]:
     """EVENT time of a canonical record (timeline registry, mentions fallback)."""
     try:
@@ -74,15 +80,17 @@ def _record_event_at(conn: sqlite3.Connection, record_id: str) -> Optional[str]:
             "SELECT event_at FROM timeline WHERE record_id=? AND event_at IS NOT NULL LIMIT 1",
             (record_id,),
         ).fetchone()
-        if row and row[0]:
-            return str(row[0])
+        if row:
+            plausible = _plausible_event_at(row[0])
+            if plausible:
+                return plausible
     except sqlite3.OperationalError:
         pass
     row = conn.execute(
         "SELECT event_at FROM entity_mentions WHERE record_id=? AND event_at IS NOT NULL LIMIT 1",
         (record_id,),
     ).fetchone()
-    return str(row[0]) if row and row[0] else None
+    return _plausible_event_at(row[0]) if row else None
 
 
 def _materialize_goals(conn: sqlite3.Connection, owner: Optional[str]) -> int:
