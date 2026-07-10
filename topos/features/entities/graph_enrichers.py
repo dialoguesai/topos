@@ -23,6 +23,7 @@ toggles can hide.
 
 from __future__ import annotations
 
+import hashlib
 import logging
 import sqlite3
 import uuid
@@ -66,42 +67,87 @@ def _ensure_node(conn: sqlite3.Connection, node_id: str, label: str, entity_type
     )
 
 
+def _record_event_at(conn: sqlite3.Connection, record_id: str) -> Optional[str]:
+    """EVENT time of a canonical record (timeline registry, mentions fallback)."""
+    try:
+        row = conn.execute(
+            "SELECT event_at FROM timeline WHERE record_id=? AND event_at IS NOT NULL LIMIT 1",
+            (record_id,),
+        ).fetchone()
+        if row and row[0]:
+            return str(row[0])
+    except sqlite3.OperationalError:
+        pass
+    row = conn.execute(
+        "SELECT event_at FROM entity_mentions WHERE record_id=? AND event_at IS NOT NULL LIMIT 1",
+        (record_id,),
+    ).fetchone()
+    return str(row[0]) if row and row[0] else None
+
+
 def _materialize_goals(conn: sqlite3.Connection, owner: Optional[str]) -> int:
     if not _table_exists(conn, "user_goals"):
         return 0
-    edges = 0
-    rows = conn.execute(
+    from .resolver import normalize_name
+
+    # Group by normalized goal TEXT: re-extraction mints a fresh goal_id for
+    # the same goal every run, which minted duplicate nodes. One goal = one
+    # node; its edge window spans earliest→latest occurrence.
+    grouped: Dict[str, Dict] = {}
+    for goal_id, record_id, goal_text, created_at in conn.execute(
         "SELECT goal_id, record_id, goal_text, created_at FROM user_goals"
-    ).fetchall()
-    for goal_id, record_id, goal_text, created_at in rows:
+    ).fetchall():
         text = str(goal_text or "").strip()
         if not text:
             continue
-        node_id = f"goal_{goal_id}"
-        _ensure_node(conn, node_id, text, "goal")
+        key = normalize_name(text)
+        g = grouped.setdefault(key, {"text": text, "goal_id": str(goal_id), "events": [], "records": []})
+        # Date by WHEN IT HAPPENED (source record's event time), not when
+        # extraction ran — created_at is only the last-resort fallback.
+        event_at = (_record_event_at(conn, str(record_id)) if record_id else None) or created_at
+        if event_at:
+            g["events"].append(str(event_at))
+        if record_id:
+            g["records"].append((str(record_id), str(event_at) if event_at else None))
+
+    edges = 0
+    for key, g in grouped.items():
+        node_id = f"goal_{hashlib.sha1(key.encode('utf-8')).hexdigest()[:16]}"
+        _ensure_node(conn, node_id, g["text"], "goal")
+        first_at = min(g["events"]) if g["events"] else None
+        last_at = max(g["events"]) if g["events"] else None
+        occurrences = max(len(g["records"]), 1)
         if owner:
             _upsert_materialized_edge(
                 conn, src=owner, dst=node_id, edge_type=EDGE_PURSUES,
-                weight=_MZ_WEIGHT_FLOOR, valid_from=created_at, valid_to=None,
-                statement=f"pursues: {text[:80]}", source_object_id=str(goal_id),
-                actor_role="authored",
+                weight=min(_MZ_WEIGHT_FLOOR + 0.25 * (occurrences - 1), 6.0),
+                valid_from=first_at, valid_to=None, last_event_at=last_at,
+                statement=f"pursues: {g['text'][:80]}" + (f" (×{occurrences})" if occurrences > 1 else ""),
+                source_object_id=g["goal_id"], actor_role="authored",
             )
             edges += 1
-        # Entities mentioned on the goal's provenance record relate to the goal.
-        if record_id:
+        # Entities mentioned on the goal's provenance records relate to the goal.
+        seen_entities: Dict[str, str] = {}
+        for record_id, event_at in g["records"]:
             for (ent_id,) in conn.execute(
                 "SELECT DISTINCT entity_id FROM entity_mentions WHERE record_id=?",
-                (str(record_id),),
+                (record_id,),
             ):
-                if str(ent_id) == owner:
+                if str(ent_id) == owner or str(ent_id) == node_id:
                     continue
-                _upsert_materialized_edge(
-                    conn, src=node_id, dst=str(ent_id), edge_type=EDGE_RELATES_TO,
-                    weight=_MZ_WEIGHT_FLOOR, valid_from=created_at, valid_to=None,
-                    statement=f"goal relates to (from its source record)",
-                    source_object_id=str(goal_id), actor_role="authored",
-                )
-                edges += 1
+                prev = seen_entities.get(str(ent_id))
+                if event_at and (prev is None or event_at > prev):
+                    seen_entities[str(ent_id)] = event_at
+                elif prev is None:
+                    seen_entities.setdefault(str(ent_id), "")
+        for ent_id, ev in seen_entities.items():
+            _upsert_materialized_edge(
+                conn, src=node_id, dst=ent_id, edge_type=EDGE_RELATES_TO,
+                weight=_MZ_WEIGHT_FLOOR, valid_from=ev or first_at, valid_to=None,
+                statement="goal relates to (from its source record)",
+                source_object_id=g["goal_id"], actor_role="authored",
+            )
+            edges += 1
     return edges
 
 
