@@ -629,21 +629,72 @@ def _get_enriched_message_ids(table_name: str, conn) -> set[str]:
         return set()
 
 
+def _load_canonical_messages_for_enrichment(
+    db_conn,
+    source_def,
+    *,
+    dataset_id: Optional[str] = None,
+) -> List[Dict[str, Any]]:
+    """Load ALL canonical messages for a source, whatever its canonical group.
+
+    The historical reprocess paths read only ai_chat_messages, silently
+    no-oping for browser/journal/transcript sources (2026-07-09). This routes
+    through load_canonical_records_for_signal (group-aware; carries the
+    is_from_self/actor_role identity fields the provenance gates need) and
+    stamps ``_table`` from the group mapping so role classification and
+    mention provenance see the right canonical table.
+    """
+    from ..ingestion.canonical_pipeline import load_canonical_records_for_signal
+
+    try:
+        records = load_canonical_records_for_signal(db_conn, source_def)
+    except Exception as exc:  # pragma: no cover - defensive
+        logger.error(
+            "Canonical load failed for source=%s: %s",
+            getattr(source_def, "source_id", "?"),
+            exc,
+        )
+        return []
+    table_info = _canonical_table_for_source(source_def)
+    table = table_info[0] if table_info else None
+    for rec in records:
+        if table:
+            rec.setdefault("_table", table)
+        # Normalize to the shape the canonical jobs consume: EntitiesJob (and
+        # friends) key on message_id + content + event_at, but journal/activity
+        # loader dicts carry entry_id/event_id and title instead.
+        if not rec.get("message_id"):
+            rid = _record_identifier(rec)
+            if rid:
+                rec["message_id"] = rid
+        if not rec.get("content"):
+            title = rec.get("title")
+            if title:
+                rec["content"] = str(title)
+        if not rec.get("event_at"):
+            for key in ("occurred_at", "entry_at", "starts_at", "posted_at", "visited_at"):
+                if rec.get(key):
+                    rec["event_at"] = rec[key]
+                    break
+    return records
+
+
 async def _find_unprocessed_messages(
     source_id: str,
     dataset_id: Optional[str] = None,
     job_names: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     """Find canonical messages that haven't been enriched yet.
-    
-    This function reads directly from the ai_chat_messages table (canonical table)
-    as the source of truth, per the architecture design.
-    
+
+    Reads the source's OWN canonical table (group-aware) as the source of
+    truth; the legacy ai_chat_messages read remains as a fallback for chat
+    sources whose loader group yields nothing.
+
     Args:
         source_id: Source identifier
         dataset_id: Optional dataset ID to filter by (extracts user_id for filtering)
         job_names: List of enrichment job names to check
-        
+
     Returns:
         List of canonical messages that need enrichment
     """
@@ -666,7 +717,38 @@ async def _find_unprocessed_messages(
     if not db_conn:
         logger.warning("No database connection available for enrichment")
         return []
-    
+
+    # Group-aware canonical load — works for EVERY source (browser, journal,
+    # transcripts, chat), not just ai_chat ones. The legacy ai_chat_messages
+    # read below remains only as a fallback when this yields nothing.
+    generic_messages = _load_canonical_messages_for_enrichment(
+        db_conn, source_def, dataset_id=dataset_id
+    )
+    if generic_messages:
+        enriched: Optional[set[str]] = None
+        job_table_map = {job.get_job_name(): job.get_derived_table() for job in CANONICAL_JOBS}
+        for job_name in jobs_to_check:
+            table_name = job_table_map.get(job_name)
+            if table_name:
+                job_ids = _get_enriched_message_ids(table_name, db_conn)
+                enriched = job_ids if enriched is None else (enriched & job_ids)
+            else:
+                logger.warning("Unknown enrichment job: %s (skipping check)", job_name)
+        if enriched is None:
+            enriched = set()
+        unprocessed_generic = [
+            msg
+            for msg in generic_messages
+            if (_record_identifier(msg) or msg.get("message_id")) not in enriched
+        ]
+        logger.debug(
+            "Group-aware loader: %d/%d unprocessed for source_id=%s",
+            len(unprocessed_generic),
+            len(generic_messages),
+            source_id,
+        )
+        return unprocessed_generic
+
     # Read canonical messages directly from ai_chat_messages table
     # This is the source of truth per architecture design
     try:
@@ -909,75 +991,14 @@ async def _process_enrichment_core(
     
     # Find unprocessed messages
     if force_reprocess:
-        # For force reprocess, load all canonical messages regardless of enrichment status
-        # Read directly from canonical table (source of truth)
-        try:
-            # Check if ai_chat_messages table exists
-            cursor = db_conn.execute("""
-                SELECT name FROM sqlite_master 
-                WHERE type='table' AND name='ai_chat_messages'
-            """)
-            if not cursor.fetchone():
-                return {
-                    "status": "ok",
-                    "message": "No canonical messages found",
-                    "messages_processed": 0,
-                    "records_created": {},
-                }
-            
-            # Check if ai_chat_conversations table exists for dataset_id filtering
-            cursor = db_conn.execute("""
-                SELECT name FROM sqlite_master 
-                WHERE type='table' AND name='ai_chat_conversations'
-            """)
-            has_conversations_table = cursor.fetchone() is not None
-            
-            # Build query to read all canonical messages
-            if has_conversations_table and dataset_id:
-                user_id = dataset_id.split(":")[0] if ":" in dataset_id else dataset_id
-                # Use INNER JOIN to ensure we only get messages with matching conversations
-                query = """
-                    SELECT m.message_id, m.conversation_id, m.sender_type, m.sender_id,
-                           m.event_at, m.content, m.content_rendered, m.metadata_json, m.sequence, m.source_id
-                    FROM ai_chat_messages m
-                    INNER JOIN ai_chat_conversations c ON m.conversation_id = c.conversation_id
-                    WHERE m.source_id = ? AND c.owner_user_id = ?
-                    ORDER BY m.event_at ASC
-                """
-                cursor = db_conn.execute(query, (source_id, user_id))
-            else:
-                query = """
-                    SELECT message_id, conversation_id, sender_type, sender_id,
-                           event_at, content, content_rendered, metadata_json, sequence, source_id
-                    FROM ai_chat_messages
-                    WHERE source_id = ?
-                    ORDER BY event_at ASC
-                """
-                cursor = db_conn.execute(query, (source_id,))
-            
-            # Convert rows to dictionaries
-            unprocessed_messages = []
-            for row in cursor.fetchall():
-                unprocessed_messages.append({
-                    "message_id": row[0],
-                    "conversation_id": row[1],
-                    "sender_type": row[2],
-                    "sender_id": row[3],
-                    "event_at": row[4],
-                    "content": row[5],
-                    "content_rendered": row[6],
-                    "metadata_json": row[7],
-                    "sequence": row[8],
-                    "source_id": row[9],
-                })
-        except Exception as e:
-            logger.error("Failed to read canonical messages for force_reprocess: %s", e)
-            return {
-                "status": "error",
-                "message": f"Failed to read canonical messages: {e}",
-                "messages_processed": 0,
-                "records_created": {},
-            }
+        # Load ALL canonical messages regardless of enrichment status, from the
+        # source's OWN canonical table. (2026-07-09 fix: this branch previously
+        # read only ai_chat_messages, silently returning "No unprocessed
+        # messages found" for browser/journal/transcript sources. The
+        # group-aware loader also covers ai_messages, so no fallback needed.)
+        unprocessed_messages = _load_canonical_messages_for_enrichment(
+            db_conn, source_def, dataset_id=dataset_id
+        )
     else:
         unprocessed_messages = await _find_unprocessed_messages(source_id, dataset_id, jobs_to_run)
     
