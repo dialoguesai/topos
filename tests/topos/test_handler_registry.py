@@ -143,6 +143,7 @@ SUPPORTED_MESSAGE_TYPES = [
     "signal_entity_graph_search",
     "signal_entity_review_action",
     "signal_entity_review_sweep",
+    "signal_entity_split",
     "signal_evaluate_fit",
     "signal_exclude_entity",
     "signal_get_brief",
