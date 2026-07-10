@@ -1413,6 +1413,20 @@ def _semantic_hits(
         return [], str(exc)
 
 
+def _strip_vector_keys(item: Dict[str, Any]) -> Dict[str, Any]:
+    """Drop embedding-shaped keys before an item can enter a context packet.
+
+    Even a null centroid_vector is a contract violation on the cross-user
+    surface — the no-raw-vectors gate scans for vector-shaped keys, not just
+    populated arrays.
+    """
+    return {
+        k: v
+        for k, v in item.items()
+        if not (k.endswith("_vector") or k in ("embedding", "vector", "embedding_blob"))
+    }
+
+
 def _load_ranked_clusters(
     query_text: str,
     *,
@@ -1439,14 +1453,15 @@ def _load_ranked_clusters(
             from ..features.signal.topic_clustering import embed_query_text_for_ranking
 
             query_vector = embed_query_text_for_ranking(query_text)
-            return rank_topic_clusters_for_query(
+            ranked_by_query = rank_topic_clusters_for_query(
                 clusters,
                 query_text,
                 limit=limit,
                 query_vector=query_vector,
             )
+            return [_strip_vector_keys(c) for c in ranked_by_query]
         ranked = sorted(clusters, key=lambda c: int(c.get("member_count") or 0), reverse=True)
-        return [{**c, "relevance_score": 0.0} for c in ranked[:limit]]
+        return [_strip_vector_keys({**c, "relevance_score": 0.0}) for c in ranked[:limit]]
     except Exception as exc:
         logger.debug("topic cluster load skipped: %s", exc)
         return []
@@ -2539,7 +2554,12 @@ class DefaultSignalRetrievalAdapter:
                     rows.append({"_table": table, **row})
             packet["rows"] = _strip_forbidden(rows, manifest.must_not_retrieve)
         elif mode == "summary":
-            if query_text or semantic_hits or ranked_clusters:
+            # Query-aware building only applies to actual queries. Ranked
+            # clusters load even for browse requests (no query_text), and
+            # rerouting those through the query builder starved the dimension
+            # summaries lane entirely (p3 regression: summaries=[] and the
+            # signal store never touched on browse-mode summary reads).
+            if query_text:
                 summaries = _build_summary_items(
                     manifest=manifest,
                     adapters=self._adapters,

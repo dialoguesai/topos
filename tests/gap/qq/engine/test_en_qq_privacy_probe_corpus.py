@@ -48,6 +48,9 @@ def test_version_is_pinned():
 
 def test_exporter_drops_the_design_note():
     """leak_intent is a coverage aid, not a label — it must not reach the annotator's file."""
+    import pytest as _pytest
+
+    _pytest.importorskip("topos_eval", reason="topos-eval (sibling repo) not installed in this env")
     from topos_eval.validity.judge_validation import export_privacy_pool  # noqa: PLC0415
     import json
     import tempfile
