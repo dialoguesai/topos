@@ -102,7 +102,8 @@ class SyncClient:
         try:
             await asyncio.wait_for(self._ready.wait(), timeout=max(0.1, timeout))
             return True
-        except TimeoutError:
+        except (TimeoutError, asyncio.TimeoutError):
+            # Py3.10: asyncio.TimeoutError is not builtins.TimeoutError.
             return False
 
     async def stop(self) -> None:
@@ -204,7 +205,10 @@ class SyncClient:
     async def _wait_for_stop_or_timeout(self, timeout_s: float) -> None:
         try:
             await asyncio.wait_for(self._stop.wait(), timeout=timeout_s)
-        except TimeoutError:
+        except (TimeoutError, asyncio.TimeoutError):
+            # Expected path: backoff elapsed. Must not escape — on Py3.10
+            # asyncio.TimeoutError is distinct from builtins.TimeoutError and
+            # would otherwise kill the reconnect loop task.
             return
 
     async def _send_connect(self) -> None:
