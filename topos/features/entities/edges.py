@@ -376,16 +376,26 @@ def graph_snapshot(
     nodes = []
     for entity_id in node_ids:
         row = conn.execute(
-            "SELECT canonical_name, entity_type, mention_count FROM entities WHERE entity_id=?",
+            "SELECT canonical_name, entity_type, mention_count, metadata_json "
+            "FROM entities WHERE entity_id=?",
             (entity_id,),
         ).fetchone()
         if row:
+            # Stored entity metadata (community_id, mz tag) merged with the
+            # synthesized mention_count — same passthrough rule as edges.
+            try:
+                meta = json.loads(row[3] or "{}")
+                if not isinstance(meta, dict):
+                    meta = {}
+            except (TypeError, ValueError):
+                meta = {}
+            meta["mention_count"] = row[2]
             nodes.append(
                 {
                     "node_id": entity_id,
                     "node_type": row[1],
                     "label": row[0],
-                    "metadata_json": json.dumps({"mention_count": row[2]}),
+                    "metadata_json": json.dumps(meta),
                 }
             )
     node_id_set = set(node_ids)

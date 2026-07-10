@@ -252,6 +252,68 @@ def rebuild_evidence_edges(
     return {"co_occurrence": co, "communicates_with": comm}
 
 
+def compute_communities(conn: sqlite3.Connection) -> Dict[str, int]:
+    """Louvain neighborhoods over the active entity graph (the witcher-network
+    recipe: community_louvain.best_partition on the weighted co-occurrence
+    graph).
+
+    Community ids are re-ranked by size (0 = largest neighborhood) so colors
+    stay reasonably stable across rebuilds, and stamped into
+    entities.metadata_json.community_id; entities no longer in the graph get
+    the stale label removed. random_state pins the partition for determinism.
+    """
+    try:
+        import networkx as nx
+    except ImportError:  # pragma: no cover - optional in stripped builds
+        logger.warning("networkx unavailable; skipping communities")
+        return {"communities": 0, "nodes_labeled": 0}
+
+    G = nx.Graph()
+    for src, dst, weight in conn.execute(
+        "SELECT src_entity_id, dst_entity_id, weight FROM entity_edges WHERE valid_to IS NULL"
+    ):
+        if src == dst:
+            continue
+        w = float(weight or 1.0)
+        if G.has_edge(src, dst):
+            G[src][dst]["weight"] += w  # parallel edge types accumulate
+        else:
+            G.add_edge(src, dst, weight=w)
+
+    if G.number_of_nodes() == 0:
+        return {"communities": 0, "nodes_labeled": 0}
+
+    community_sets = nx.community.louvain_communities(G, weight="weight", seed=42)
+    partition: Dict[str, int] = {}
+    sizes: Dict[int, int] = {}
+    for comm, members in enumerate(community_sets):
+        sizes[comm] = len(members)
+        for entity_id in members:
+            partition[str(entity_id)] = comm
+    rank = {
+        comm: i
+        for i, (comm, _n) in enumerate(sorted(sizes.items(), key=lambda kv: (-kv[1], kv[0])))
+    }
+
+    for entity_id, comm in partition.items():
+        conn.execute(
+            "UPDATE entities SET metadata_json=json_patch(COALESCE(metadata_json,'{}'), ?) "
+            "WHERE entity_id=?",
+            (json.dumps({"community_id": rank[comm]}), entity_id),
+        )
+    # Drop stale labels from entities that left the graph.
+    placeholders = ",".join("?" for _ in partition) or "''"
+    conn.execute(
+        f"UPDATE entities SET metadata_json=json_remove(metadata_json, '$.community_id') "
+        f"WHERE metadata_json IS NOT NULL "
+        f"AND json_extract(metadata_json, '$.community_id') IS NOT NULL "
+        f"AND entity_id NOT IN ({placeholders})",
+        tuple(partition.keys()),
+    )
+    conn.commit()
+    return {"communities": len(sizes), "nodes_labeled": len(partition)}
+
+
 def _count_active_edges(conn: sqlite3.Connection) -> int:
     return int(
         conn.execute("SELECT COUNT(*) FROM entity_edges WHERE valid_to IS NULL").fetchone()[0]
@@ -299,6 +361,9 @@ def rebuild_entity_graph(
         except Exception as exc:  # materialization is best-effort
             logger.warning("fact materialization during rebuild failed: %s", exc)
 
+    # Neighborhoods over the final edge set (evidence + materialized).
+    communities = compute_communities(conn)
+
     dossiers = 0
     if refresh:
         try:
@@ -319,5 +384,6 @@ def rebuild_entity_graph(
         "fact_edges": mz["fact_edges"],
         "orphans_pruned": len(orphaned),
         "facts_closed_dangling": facts_closed,
+        "communities": communities["communities"],
         "dossiers_refreshed": dossiers,
     }
