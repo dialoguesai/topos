@@ -13,28 +13,25 @@ def apply_query_eval_seed(conn: sqlite3.Connection) -> None:
     apply_all_migrations(conn)
     CanonicalTablesManager(conn)
 
-    existing = conn.execute(
-        "SELECT COUNT(*) FROM ai_chat_messages WHERE message_id IN ('eval-q5-ill', 'eval-q6-git')"
-    ).fetchone()[0]
-    if existing >= 2:
-        return
-
+    # No presence short-circuit: INSERT OR REPLACE below is idempotent AND
+    # self-healing — stale seed rows from the pre-install-gate era carried an
+    # uninstalled source_id (chatgpt_ingestion) that retrieval rightly filters.
     conn.execute(
         """
-        INSERT OR IGNORE INTO ai_chat_messages (
+        INSERT OR REPLACE INTO ai_chat_messages (
             message_id, conversation_id, sender_type, source_id, content, event_at
         ) VALUES (
-            'eval-q5-ill', 'eval-conv', 'user', 'chatgpt_ingestion',
+            'eval-q5-ill', 'eval-conv', 'user', 'chatgpt_ui_conversation',
             'pencil sketch illustration of a mountain landscape', '2026-01-02'
         )
         """
     )
     conn.execute(
         """
-        INSERT OR IGNORE INTO ai_chat_messages (
+        INSERT OR REPLACE INTO ai_chat_messages (
             message_id, conversation_id, sender_type, source_id, content, event_at
         ) VALUES (
-            'eval-q6-git', 'eval-conv', 'user', 'chatgpt_ingestion',
+            'eval-q6-git', 'eval-conv', 'user', 'chatgpt_ui_conversation',
             'git push to GitHub repository main branch', '2026-01-03'
         )
         """

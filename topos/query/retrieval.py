@@ -78,7 +78,11 @@ _SURFACE_INTENT_TERMS: Dict[str, Tuple[str, ...]] = {
 _EXTRA_SURFACE_TERMS: Tuple[str, ...] = ("goal", "objective", "priorit", "working on")
 _RECENCY_TERMS = frozenset(
     {"recent", "recently", "latest", "newest", "last", "today", "yesterday",
-     "now", "current", "currently"}
+     "now", "current", "currently",
+     # Aspect/temporal function words: "what have I BEEN working on LATELY"
+     # frames recency — these must never act as discriminative content needles
+     # (rare-token veto zeroed that everyday phrasing; 1.2.0 release battery).
+     "been", "being", "lately", "nowadays", "these", "days"}
 )
 
 
