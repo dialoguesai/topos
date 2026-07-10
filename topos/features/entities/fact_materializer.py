@@ -99,8 +99,13 @@ def _upsert_materialized_edge(
     statement: str,
     source_object_id: str,
     asserted_by: Optional[str] = None,
+    actor_role: Optional[str] = None,
 ) -> None:
-    """Idempotent directed edge with a materialized marker + carried validity."""
+    """Idempotent directed edge with a materialized marker + carried validity.
+
+    ``actor_role`` overrides the asserted_by-derived tier — used by enrichers
+    whose provenance isn't an assertion (presence, participation, witnessing).
+    """
     if not src or not dst or src == dst:
         return
     meta = json.dumps(
@@ -111,7 +116,7 @@ def _upsert_materialized_edge(
             **({"asserted_by": asserted_by} if asserted_by else {}),
             # Provenance tier for the attribution overlay: who asserted the
             # fact maps onto the personal→ambient spectrum.
-            "actor_role": _asserted_by_role(asserted_by),
+            "actor_role": actor_role or _asserted_by_role(asserted_by),
         }
     )
     row = conn.execute(
