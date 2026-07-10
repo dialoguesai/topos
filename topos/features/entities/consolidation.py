@@ -305,14 +305,23 @@ def list_review(
 def resolve_review(
     conn: sqlite3.Connection, review_id: str, *, action: str
 ) -> Dict[str, Any]:
-    """approve -> merge subject into candidate; dismiss -> never re-propose."""
+    """approve -> merge subject into candidate; dismiss -> never re-propose.
+
+    Two review kinds are approvable:
+      * merge      — consolidation-sweep pair (subject + candidate ids);
+      * resolution — resolver-queued surface match (surface_text + candidate
+        only). Approving confirms "this surface IS that entity": the surface's
+        own entity (created at ingest) merges into the candidate, or — when no
+        separate entity exists — the surface becomes an alias.
+    """
     row = conn.execute(
-        "SELECT kind, subject_entity_id, candidate_entity_id, status FROM entity_review WHERE review_id=?",
+        "SELECT kind, subject_entity_id, candidate_entity_id, status, surface_text "
+        "FROM entity_review WHERE review_id=?",
         (review_id,),
     ).fetchone()
     if row is None:
         raise LookupError(f"review not found: {review_id}")
-    kind, subject_id, candidate_id, status = row
+    kind, subject_id, candidate_id, status, surface_text = row
     if status != "pending":
         raise ValueError(f"review already {status}")
 
@@ -325,13 +334,43 @@ def resolve_review(
 
     if action != "approve":
         raise ValueError(f"unknown action: {action}")
-    if kind != "merge" or not subject_id or not candidate_id:
-        raise ValueError("only merge reviews can be approved")
+    if not candidate_id:
+        raise ValueError("review has no candidate entity to merge into")
 
     from .dossier import refresh_dossiers
-    from .resolver import EntityResolver
+    from .resolver import EntityResolver, normalize_name
 
-    EntityResolver(conn).merge_entities(str(candidate_id), str(subject_id))
+    resolver = EntityResolver(conn)
+
+    if kind == "resolution" or (kind != "merge" and not subject_id):
+        surface = str(surface_text or "").strip()
+        if not surface:
+            raise ValueError("resolution review has no surface text")
+        # The resolver created a separate entity for this surface at ingest —
+        # find it by normalized name (never the candidate itself).
+        hit = conn.execute(
+            "SELECT entity_id FROM entities WHERE normalized_name=? AND entity_id != ? LIMIT 1",
+            (normalize_name(surface), str(candidate_id)),
+        ).fetchone()
+        subject_id = hit[0] if hit else None
+        if subject_id is None:
+            # No separate entity — the confirmation is just an alias.
+            resolver._add_alias(str(candidate_id), surface)
+            conn.execute(
+                "UPDATE entity_review SET status='approved' WHERE review_id=?", (review_id,)
+            )
+            conn.commit()
+            refresh_dossiers(conn)
+            return {
+                "review_id": review_id,
+                "status": "approved",
+                "kept": str(candidate_id),
+                "alias_added": surface,
+            }
+    elif kind != "merge" or not subject_id:
+        raise ValueError("only merge/resolution reviews can be approved")
+
+    resolver.merge_entities(str(candidate_id), str(subject_id))
     conn.execute(
         "UPDATE entity_review SET status='approved' WHERE review_id=?", (review_id,)
     )
