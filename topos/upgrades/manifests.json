@@ -1,0 +1,61 @@
+{
+  "$comment": "Per-release derived-data upgrade manifests. Schema migrations handle table SHAPE; entries here declare which DERIVED layers a release invalidates and how to recompute them. Consumed by steps_between(installed, shipped) — see topos/upgrades/__init__.py. Steps MUST be idempotent and safe to re-run after interruption.",
+  "releases": [
+    {
+      "version": "1.1.0",
+      "summary": "Dense intelligence upgrade (stats engine, entity spine, fact store, incremental clustering, query planner). Shipped before manifests existed; entry anchors the version ladder.",
+      "steps": []
+    },
+    {
+      "version": "1.2.0",
+      "summary": "Temporal entity graph (facts/goals/places/conversations materialized, provenance roles on edges, Louvain neighborhoods, semantic graph search), NER wordpiece stitcher, derived-data GC hardening, provenance split completion.",
+      "steps": [
+        {
+          "id": "reextract-entities",
+          "kind": "enrichment_reprocess",
+          "title": "Re-extract entities with the wordpiece stitcher",
+          "why": "5f687e9 changed NER post-processing (word-level aggregation + wordpiece stitching): 1.1.0-era extractions contain ##-fragment junk and silently truncated surfaces ('Jon' for 'Jonny'). Message rows are untouched; message_entities/entity_mentions produced by the old extractor are stale.",
+          "params": {
+            "job_names": ["entities"],
+            "force_reprocess": true,
+            "per_source": true,
+            "source_filter": "sources with canonical message/journal/activity records"
+          },
+          "progress": "GET /v1/enrichment/progress/{job_id}",
+          "idempotent": "record_mention is INSERT OR IGNORE; re-running converges",
+          "estimated_duration": "~10–20 min per 1.5k records (CPU-bound NER); node stays usable, serves stale graph meanwhile",
+          "order": 1
+        },
+        {
+          "id": "rebuild-entity-graph",
+          "kind": "engine_endpoint",
+          "title": "Rebuild the entity graph (evidence + materialized layers)",
+          "why": "1.2.0 adds layers the 1.1.0 graph never had: fact/topic/goal/place/conversation materialization, provenance role stamping on edges (attribution overlay), Louvain community ids, and GC for dangling contact anchors / orphaned facts. One rebuild derives all of it from existing data.",
+          "params": {
+            "method": "POST",
+            "path": "/v1/signal/entities/graph/rebuild"
+          },
+          "progress": "synchronous (seconds at personal scale); response is the before/after report",
+          "idempotent": "full-refresh semantics (mz-tagged edges rebuilt, evidence edges recomputed from mentions)",
+          "estimated_duration": "<10s",
+          "depends_on": ["reextract-entities"],
+          "order": 2,
+          "$comment": "Must run AFTER re-extraction completes: rebuilding from a partially restored mention set guts evidence edges (observed live 2026-07-10)."
+        },
+        {
+          "id": "actor-role-backfill",
+          "kind": "none",
+          "title": "actor_role column backfill",
+          "why": "Handled by the ledger-guarded schema migration actor_role_v1 at first boot; listed so release notes and the fleet dashboard show it without a manifest step.",
+          "order": 0
+        }
+      ],
+      "notes": [
+        "No re-embedding: the embedding model is unchanged in 1.2.0 (signal_embeddings remain valid).",
+        "No canonical re-ingest: raw and canonical rows are untouched by every 1.2.0 change.",
+        "Extraction default model moved to the quality tier (qwen3.5:9b-mlx) — affects FUTURE extractions only; small-RAM devices surface tier=stress in model recommendations and should downsize via settings.",
+        "Fleet skew: 1.1.0 nodes lack the signal_entity_graph_search handler — CPs must treat it as optional until the fleet is on 1.2.0."
+      ]
+    }
+  ]
+}
