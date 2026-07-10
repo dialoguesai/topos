@@ -45,6 +45,7 @@ from .api import (
     home_chat as home_chat_routes,
     privacy_disclose as privacy_disclose_routes,
     signal as signal_routes,
+    upgrades as upgrades_routes,
 )
 from .config.settings import settings
 from .core.logging import align_uvicorn_loggers, configure_logging
@@ -93,6 +94,7 @@ app.add_middleware(
 )
 
 app.include_router(health_routes.router)
+app.include_router(upgrades_routes.router)
 app.include_router(local_mcp_routes.router)
 app.include_router(llm_routes.router)
 app.include_router(db_routes.router)
