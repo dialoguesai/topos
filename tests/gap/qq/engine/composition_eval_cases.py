@@ -259,6 +259,7 @@ def oracle_c1_top_contact_volume(conn: sqlite3.Connection) -> Oracle:
         """SELECT payload_json FROM signal_facts
            WHERE fact_id LIKE 'stat:messages.volume.by_contact:%'
              AND json_extract(payload_json, '$.group_key') NOT IN ('self', '')
+             AND json_extract(payload_json, '$.group_key') NOT LIKE 'Speaker %'
            ORDER BY json_extract(payload_json, '$.stat_summary.n') DESC LIMIT 1""",
     )
     if not row:
@@ -392,7 +393,9 @@ def oracle_c7_contact(conn: sqlite3.Connection) -> Oracle:
 
 
 def oracle_c8_cluster_specificity(conn: sqlite3.Connection) -> Oracle:
-    return Oracle([["sketch", "illustr", "pencil", "draw"]], "niche art topic (specificity-focused)")
+    # qq-catalog-10: the demo-era art needle died with the purge (df 0);
+    # PostHog analytics is a real niche browsing cluster (df ~21).
+    return Oracle([["posthog", "analytic", "session replay"]], "niche analytics topic (specificity-focused)")
 
 
 def oracle_c9_temporal(conn: sqlite3.Connection) -> Oracle:
@@ -423,7 +426,8 @@ def oracle_c11_active_hours(conn: sqlite3.Connection) -> Oracle:
 
 
 def oracle_c12_fusion(conn: sqlite3.Connection) -> Oracle:
-    return Oracle([["luc"]], "entity + volume fusion for Luc")
+    # qq-catalog-10: Luc was a demo persona; Marcus has real mention evidence.
+    return Oracle([["marcus"]], "entity + volume fusion for Marcus")
 
 
 LIVE_COMPOSITION_CASES: List[CompositionCase] = [
@@ -466,9 +470,9 @@ LIVE_COMPOSITION_CASES: List[CompositionCase] = [
         layer="canonical:contacts",
         description="Contact resolution returns the identifier, not just the queried name"),
     CompositionCase(
-        "C8", "live", "pencil sketch illustration techniques", "ai_conversations:read", "summary",
+        "C8", "live", "PostHog analytics and session replay setup", "activity:read", "summary",
         oracle_c8_cluster_specificity,
-        topic_terms=("sketch", "illustr", "pencil", "draw", "art"),
+        topic_terms=("posthog", "analytic", "replay", "install"),
         layer="clusters+vector",
         description="Niche query must rank niche items — giant generic clusters fail precision@5"),
     CompositionCase(
@@ -487,9 +491,9 @@ LIVE_COMPOSITION_CASES: List[CompositionCase] = [
         layer="stats:hour_of_week",
         description="Hour-of-week stats answer a rhythm question"),
     CompositionCase(
-        "C12", "live", "Tell me about Luc and how often we talk", "relationship_context:read", "summary",
+        "C12", "live", "Tell me about Marcus and how often we talk", "relationship_context:read", "summary",
         oracle_c12_fusion, expected_sources=("entity_dossier", "stat_insight"),
-        topic_terms=("luc",), layer="fusion:entities+stats",
+        topic_terms=("marcus",), layer="fusion:entities+stats",
         description="Cross-layer fusion: entity spine AND stats must both contribute"),
 ]
 
