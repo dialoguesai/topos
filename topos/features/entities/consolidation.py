@@ -484,3 +484,90 @@ def split_surface(conn: sqlite3.Connection, entity_id: str, surface: str) -> Dic
         "mentions_moved": len(moved_ids),
         "alias_removed": alias_removed,
     }
+
+
+def merge_entity_pair(
+    conn: sqlite3.Connection, keep_id: str, absorb_id: str
+) -> Dict[str, Any]:
+    """Owner link: merge absorb_id into keep_id (drawer-driven inverse of split).
+
+    Reuses EntityResolver.merge_entities for mentions/aliases/edges, then clears
+    any no_bind guards between the pair so an explicit re-link after Unlink
+    works. Pending reviews that touched the absorbed entity are marked stale.
+    """
+    from .dossier import refresh_dossiers
+    from .resolver import EntityResolver
+
+    keep_id = str(keep_id).strip()
+    absorb_id = str(absorb_id).strip()
+    if not keep_id or not absorb_id:
+        raise ValueError("keep_id and absorb_id are required")
+    if keep_id == absorb_id:
+        raise ValueError("cannot merge an entity into itself")
+
+    keep_row = conn.execute(
+        "SELECT entity_type, canonical_name FROM entities WHERE entity_id=?",
+        (keep_id,),
+    ).fetchone()
+    absorb_row = conn.execute(
+        "SELECT entity_type, canonical_name FROM entities WHERE entity_id=?",
+        (absorb_id,),
+    ).fetchone()
+    if keep_row is None:
+        raise LookupError(f"entity not found: {keep_id}")
+    if absorb_row is None:
+        raise LookupError(f"entity not found: {absorb_id}")
+    if str(keep_row[0]) != str(absorb_row[0]):
+        raise ValueError(
+            f"entity types must match (keep={keep_row[0]!r}, absorb={absorb_row[0]!r})"
+        )
+
+    mentions_moved = int(
+        conn.execute(
+            "SELECT COUNT(*) FROM entity_mentions WHERE entity_id=?",
+            (absorb_id,),
+        ).fetchone()[0]
+    )
+    absorb_name = str(absorb_row[1] or "")
+
+    # Clear no_bind guards between this pair (either direction) so the owner
+    # can reverse a prior Unlink by explicitly linking again.
+    conn.execute(
+        """
+        DELETE FROM entity_review
+        WHERE kind='no_bind'
+          AND (
+            (candidate_entity_id=? AND subject_entity_id=?)
+            OR (candidate_entity_id=? AND subject_entity_id=?)
+          )
+        """,
+        (keep_id, absorb_id, absorb_id, keep_id),
+    )
+    # Pending reviews that referenced the absorbed entity are now stale.
+    conn.execute(
+        """
+        UPDATE entity_review SET status='stale'
+        WHERE status='pending'
+          AND (subject_entity_id=? OR candidate_entity_id=?)
+        """,
+        (absorb_id, absorb_id),
+    )
+
+    resolver = EntityResolver(conn)
+    resolver.merge_entities(keep_id, absorb_id)
+
+    # Also drop any leftover no_bind rows that still point at the deleted
+    # absorb id as the blocked candidate (surface → absorb).
+    conn.execute(
+        "DELETE FROM entity_review WHERE kind='no_bind' AND candidate_entity_id=?",
+        (absorb_id,),
+    )
+    conn.commit()
+    refresh_dossiers(conn)
+
+    return {
+        "kept": keep_id,
+        "absorbed": absorb_id,
+        "absorbed_name": absorb_name,
+        "mentions_moved": mentions_moved,
+    }

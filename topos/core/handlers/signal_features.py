@@ -674,6 +674,38 @@ async def handle_signal_entity_split(message: Dict[str, Any]) -> Optional[Dict[s
         return {"id": req_id, "status": "error", "error": str(exc)}
 
 
+@handles("signal_entity_merge")
+async def handle_signal_entity_merge(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    entity_id = str(payload.get("entity_id") or "").strip()
+    absorb_entity_id = str(payload.get("absorb_entity_id") or "").strip()
+    if not entity_id or not absorb_entity_id:
+        return {
+            "id": req_id,
+            "status": "error",
+            "error": "entity_id and absorb_entity_id required",
+            "code": 400,
+        }
+    try:
+        from ...features.entities.consolidation import merge_entity_pair
+
+        conn = hub.get_db_connection()
+        return {
+            "id": req_id,
+            "status": "ok",
+            "payload": merge_entity_pair(conn, entity_id, absorb_entity_id),
+        }
+    except LookupError as exc:
+        return {"id": req_id, "status": "error", "error": str(exc), "code": 404}
+    except ValueError as exc:
+        return {"id": req_id, "status": "error", "error": str(exc), "code": 400}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
 @handles("signal_exclude_entity")
 async def handle_signal_exclude_entity(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
