@@ -411,6 +411,28 @@ async def split_entity_surface(
         raise HTTPException(status_code=400, detail=str(exc))
 
 
+class EntityMergeBody(BaseModel):
+    absorb_entity_id: str = Field(..., min_length=1, max_length=80)
+
+
+@router.post("/entities/{entity_id}/merge")
+async def merge_entity_into(
+    entity_id: str,
+    body: EntityMergeBody,
+    _api_key: str = Depends(require_api_key),
+):
+    """Owner link: merge another entity into this one (drawer-driven inverse
+    of split; see consolidation.merge_entity_pair)."""
+    from ..features.entities.consolidation import merge_entity_pair
+
+    try:
+        return merge_entity_pair(_entities_conn(), entity_id, body.absorb_entity_id)
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @router.post("/entities/{entity_id}/exclude")
 async def exclude_entity_from_intelligence(
     entity_id: str,

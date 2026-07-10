@@ -141,6 +141,7 @@ SUPPORTED_MESSAGE_TYPES = [
     "signal_data_health",
     "signal_entity_graph",
     "signal_entity_graph_search",
+    "signal_entity_merge",
     "signal_entity_review_action",
     "signal_entity_review_sweep",
     "signal_entity_split",
