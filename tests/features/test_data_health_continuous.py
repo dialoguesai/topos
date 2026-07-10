@@ -148,12 +148,15 @@ class TestModelRecommendations:
         assert estimate_params_b("llama3.2:latest") == 3.0
         assert estimate_params_b("") == 3.0
 
-    def test_small_device_default_model_recommended(self, monkeypatch):
+    def test_small_device_default_model_is_flagged_as_stress(self, monkeypatch):
+        """C1 moved the default extraction model to qwen3.5:9b — a 9B model on
+        a 4GB device exceeds the runnable cap, and the recommender must SAY so
+        (tier=stress + a downsize suggestion), not bless the default."""
         import topos.features.signal.model_recommendations as mr
 
         monkeypatch.setattr(mr, "device_ram_gb", lambda: 4.0)
         rec = signal_model_recommendation(None)
-        assert rec["tier"] == "recommended"
+        assert rec["tier"] == "stress"
         assert rec["minimum_model"] == "llama3.2:1b"
         assert rec["ollama_query_model"] == "llama3.2:3b"
 

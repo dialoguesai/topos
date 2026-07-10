@@ -41,7 +41,12 @@ def _memory_conn() -> sqlite3.Connection:
 
 def test_resolve_signal_extraction_query_model_uses_env_default(memory_settings: Settings) -> None:
     conn = _memory_conn()
-    assert resolve_signal_extraction_query_model(memory_settings, conn) == "llama3.2:latest"
+    # C1 (5407bf5): ingest extraction prefers the QUALITY model — the resolver
+    # reads settings.ollama_extraction_model first, falling back to the query model.
+    assert (
+        resolve_signal_extraction_query_model(memory_settings, conn)
+        == memory_settings.ollama_extraction_model
+    )
 
 
 def test_resolve_signal_extraction_query_model_device_override(memory_settings: Settings) -> None:
@@ -91,9 +96,9 @@ def test_effective_config_for_api_shape(memory_settings: Settings) -> None:
     conn = _memory_conn()
     payload = effective_config_for_api(memory_settings, conn)
     assert payload["defaults_from_settings"]["provider"] == "ollama"
-    assert payload["defaults_from_settings"]["query_model"] == "llama3.2:latest"
+    assert payload["defaults_from_settings"]["query_model"] == memory_settings.ollama_query_model
     assert payload["effective"]["provider"] == "ollama"
-    assert payload["effective"]["query_model"] == "llama3.2:latest"
+    assert payload["effective"]["query_model"] == memory_settings.ollama_extraction_model
 
 
 def test_normalize_put_device_overrides_platform_without_model(memory_settings: Settings) -> None:

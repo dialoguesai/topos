@@ -38,6 +38,7 @@ def live_orchestrator() -> QueryPipelineOrchestrator:
     return QueryPipelineOrchestrator(adapters=adapters)
 
 
+@pytest.mark.live
 @pytest.mark.skipif(not LIVE_DB.exists(), reason=f"live db missing: {LIVE_DB}")
 def test_ground_truth_has_scope_backing_tables() -> None:
     assert _sqlite_count("conversation_messages") > 100
