@@ -672,7 +672,7 @@ def _load_canonical_messages_for_enrichment(
             if title:
                 rec["content"] = str(title)
         if not rec.get("event_at"):
-            for key in ("occurred_at", "entry_at", "starts_at", "posted_at", "visited_at"):
+            for key in ("occurred_at", "starts_at", "entry_at", "posted_at", "visited_at"):
                 if rec.get(key):
                     rec["event_at"] = rec[key]
                     break
