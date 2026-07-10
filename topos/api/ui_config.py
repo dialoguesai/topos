@@ -24,8 +24,11 @@ ALLOWED_WIDGETS = {
 MAX_PINNED = 3
 
 
+GRAPH_WINDOW_MAX_DAYS = 3650
+
+
 def _default_ui_config() -> dict[str, Any]:
-    return {"version": 1, "topbar": {"pinnedAnalytics": []}}
+    return {"version": 1, "topbar": {"pinnedAnalytics": []}, "graph": {}}
 
 
 def _normalize_ui_config(value: Any) -> dict[str, Any]:
@@ -35,7 +38,20 @@ def _normalize_ui_config(value: Any) -> dict[str, Any]:
     out = {
         "version": int(value.get("version", 1)) if str(value.get("version", "")).isdigit() else 1,
         "topbar": {"pinnedAnalytics": []},
+        "graph": {},
     }
+    # Graph view prefs: the temporal window is personal (data volume/velocity
+    # dependent — 2 days for some owners, 2 months for others). timeWindowDays
+    # is a whole-day count; explicit null = all time; absent = unset.
+    graph = value.get("graph")
+    if isinstance(graph, dict) and "timeWindowDays" in graph:
+        window = graph.get("timeWindowDays")
+        if window is None:
+            out["graph"]["timeWindowDays"] = None
+        elif isinstance(window, (int, float)) and not isinstance(window, bool):
+            days = int(window)
+            if 1 <= days <= GRAPH_WINDOW_MAX_DAYS:
+                out["graph"]["timeWindowDays"] = days
     topbar = value.get("topbar")
     pinned = topbar.get("pinnedAnalytics") if isinstance(topbar, dict) else []
     if not isinstance(pinned, list):
