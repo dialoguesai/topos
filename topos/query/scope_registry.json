@@ -5,6 +5,11 @@
   "scopes": [
     {
       "scope_id": "activity:read",
+      "description": "Web-browsing and app activity: pages visited, activity events, and the interest topics derived from them.",
+      "example_questions": [
+        "What did I browse about kayaks this week?",
+        "What websites do I spend the most time on?"
+      ],
       "primary_dimensions": [
         "Profile",
         "Interests"
@@ -32,6 +37,11 @@
     },
     {
       "scope_id": "ai_conversations:read",
+      "description": "AI chat history (ChatGPT and Topos chats): conversations, discussion topics, and goals extracted from them.",
+      "example_questions": [
+        "What have I been asking ChatGPT about lately?",
+        "What goals have I mentioned in my AI chats?"
+      ],
       "primary_dimensions": [
         "Memory",
         "Work"
@@ -59,6 +69,10 @@
     },
     {
       "scope_id": "availability:read",
+      "description": "Free/busy availability windows derived from the schedule \u2014 never event titles or message content.",
+      "example_questions": [
+        "When am I free on Thursday afternoon?"
+      ],
       "primary_dimensions": [
         "Time"
       ],
@@ -80,13 +94,13 @@
         "content"
       ],
       "implementation_status": "live",
-      "required_health": {
-        "time.depth_score": 0.3
-      },
       "fit_facets_exposed": [
         "timing_feasibility",
         "commitment_conflict"
       ],
+      "required_health": {
+        "time.depth_score": 0.3
+      },
       "default_source_ids": [
         "demo_calendar_file",
         "calendar_stub"
@@ -94,6 +108,10 @@
     },
     {
       "scope_id": "contacts:resolve",
+      "description": "Contact and identifier resolution used to link names, numbers, and handles to people. Enrichment-only scope.",
+      "example_questions": [
+        "Which contact does this phone number belong to?"
+      ],
       "primary_dimensions": [
         "Relationships"
       ],
@@ -110,6 +128,10 @@
     },
     {
       "scope_id": "health:read",
+      "description": "Wellbeing signals from journal entries: moods, wellness summaries, and wellness scores.",
+      "example_questions": [
+        "How has my mood trended this month?"
+      ],
       "primary_dimensions": [
         "Wellbeing"
       ],
@@ -131,6 +153,11 @@
     },
     {
       "scope_id": "messages:read",
+      "description": "Person-to-person messages (iMessage, Signal, messenger imports): message text, excerpts, entities, and emotion signals.",
+      "example_questions": [
+        "Find the messages where we planned the trip.",
+        "Who do I message most?"
+      ],
       "primary_dimensions": [
         "Relationships",
         "Memory"
@@ -158,6 +185,10 @@
     },
     {
       "scope_id": "places:read",
+      "description": "Location events and place visits.",
+      "example_questions": [
+        "What cities have I visited most?"
+      ],
       "primary_dimensions": [
         "Places"
       ],
@@ -177,6 +208,10 @@
     },
     {
       "scope_id": "public_bio:read",
+      "description": "The public profile summary \u2014 the bio shared with anyone.",
+      "example_questions": [
+        "What does my public bio say?"
+      ],
       "primary_dimensions": [
         "Profile"
       ],
@@ -194,6 +229,10 @@
     },
     {
       "scope_id": "relationship_context:read",
+      "description": "Relationship signals derived from communications: who you interact with and how those connections evolve. No raw message text.",
+      "example_questions": [
+        "Who have I been closest to lately?"
+      ],
       "primary_dimensions": [
         "Relationships"
       ],
@@ -221,6 +260,10 @@
     },
     {
       "scope_id": "resources:read",
+      "description": "Financial transactions and spending summaries.",
+      "example_questions": [
+        "What did I spend on dining last month?"
+      ],
       "primary_dimensions": [
         "Resources"
       ],
@@ -240,6 +283,10 @@
     },
     {
       "scope_id": "schedule:read",
+      "description": "Calendar events and schedule summaries.",
+      "example_questions": [
+        "What is on my calendar this week?"
+      ],
       "primary_dimensions": [
         "Time"
       ],
@@ -262,6 +309,10 @@
     },
     {
       "scope_id": "work_context:read",
+      "description": "Work goals and context extracted from AI conversations.",
+      "example_questions": [
+        "What am I working on right now?"
+      ],
       "primary_dimensions": [
         "Work"
       ],

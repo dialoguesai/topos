@@ -98,3 +98,16 @@ def test_missing_hostname_leaves_key_absent() -> None:
     out = _map({"id": "n1", "event_type": "visit", "url": "https://x/y"})
     assert out["hostname"] is None
     assert "hostname" not in out["metadata_json"]
+
+
+def test_map_many_defaults_to_single_record() -> None:
+    """Single-lane mappers keep working through the base map_many() default
+    (dual-lane hook added for github_activity): one record, no table override."""
+    mapper = BrowserActivityCanonicalMapper()
+    norm = NormalizedRecord(
+        record_id="v9", payload={"id": "v9", "event_type": "visit", "url": "https://x/y"}
+    )
+    records = mapper.map_many(norm)
+    assert len(records) == 1
+    assert records[0].table is None
+    assert records[0].payload == mapper.map(norm).payload

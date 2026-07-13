@@ -260,14 +260,22 @@ def canonicalize_normalized_batch(
 
             mapper_cls = MAPPER_REGISTRY.get(source_def.canonical_mapper_id or "browser_activity")
             mapper = mapper_cls() if mapper_cls else None
-            mapped_payloads: List[Dict[str, Any]] = []
+            # Dual-lane sources (github_activity) emit rows for more than one
+            # canonical table from a single event via map_many(); each record
+            # carries an explicit target table (None → the group's default,
+            # activity_events). Group by table and route each group through
+            # the right upsert path.
+            payloads_by_table: Dict[str, List[Dict[str, Any]]] = {}
             for payload in payloads:
                 norm = NormalizedRecord(
                     record_id=str(payload.get("id") or payload.get("record_id") or payload.get("message_id")),
                     payload=payload,
                 )
                 if mapper:
-                    mapped_payloads.append(mapper.map(norm).payload)
+                    for mapped in mapper.map_many(norm):
+                        table = mapped.table or "activity_events"
+                        payloads_by_table.setdefault(table, []).append(mapped.payload)
+            mapped_payloads = payloads_by_table.get("activity_events", [])
             if mapped_payloads:
                 batch_result = ActivityEventsManager(db_conn).upsert_batch(
                     mapped_payloads,
@@ -276,11 +284,28 @@ def canonicalize_normalized_batch(
                 )
                 result.events_created = int(batch_result.get("events_created", 0))
                 for canonical_payload in mapped_payloads:
-                    result.canonical_records.append(
-                        _prepare_signal_record(
-                            activity_payload_to_signal_record(canonical_payload, source_id=source_id)
-                        )
+                    signal_record = _prepare_signal_record(
+                        activity_payload_to_signal_record(canonical_payload, source_id=source_id)
                     )
+                    # Table stamp: a dual-lane batch mixes canonical families,
+                    # so downstream attribution cannot rely on the group-level
+                    # default stamp alone.
+                    signal_record["_table"] = "activity_events"
+                    result.canonical_records.append(signal_record)
+            for extra_table, extra_payloads in payloads_by_table.items():
+                if extra_table == "activity_events" or not extra_payloads:
+                    continue
+                from ..storage.canonical.canonical_store import SQLiteCanonicalStore
+
+                store = SQLiteCanonicalStore(db_conn)
+                stamped = [{**p, "source_id": source_id} for p in extra_payloads]
+                refs = store.upsert_batch(extra_table, stamped, sync_batch_id=sync_batch_id)
+                result.messages_created += sum(1 for ref in refs if ref.created)
+                for canonical_payload in stamped:
+                    signal_record = _prepare_signal_record(dict(canonical_payload))
+                    signal_record["source_id"] = source_id
+                    signal_record["_table"] = extra_table
+                    result.canonical_records.append(signal_record)
         except Exception as exc:
             logger.error("[PIPELINE:CANONICAL] activity upsert failed: %s", exc, exc_info=True)
             result.errors.append({"step": "activity", "error": str(exc)})
