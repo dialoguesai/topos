@@ -1,9 +1,16 @@
-"""GitHub activity events → wiki activity_events canonical mapper."""
+"""GitHub activity events → dual-lane canonical mapper.
+
+Every event maps to one ``activity_events`` row (single-lane behavior kept).
+Additionally, each commit inside a PushEvent ``payload.commits[]`` maps to one
+``journal_entries`` row — a commit reads like a work-journal entry (category
+'code', content = commit message). Only PushEvent commits fan out; PRs/issues
+stay activity-only.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from ...ingestion.parsers.base import NormalizedRecord
 from .base import CanonicalMapper, CanonicalRecord, MappingMetadata
@@ -82,9 +89,28 @@ def _title(repo_name: Optional[str], event_type: str, activity_type: str, event_
     return f"{prefix}: {activity_type.replace('_', ' ')}"
 
 
+def _commit_timestamp(commit: Dict[str, Any]) -> Optional[str]:
+    """Commit timestamp if the payload carries one (REST events API usually
+    omits it — webhook-shaped payloads have ``timestamp``, some mirrors nest an
+    author date). None → caller falls back to the event created_at."""
+    for candidate in (commit.get("timestamp"), commit.get("date")):
+        if str(candidate or "").strip():
+            return str(candidate)
+    author = commit.get("author")
+    if isinstance(author, dict) and str(author.get("date") or "").strip():
+        return str(author["date"])
+    return None
+
+
+def _branch_from_ref(ref: Optional[str]) -> Optional[str]:
+    if ref and ref.startswith("refs/heads/"):
+        return ref[len("refs/heads/") :]
+    return None
+
+
 @dataclass
 class GithubActivityCanonicalMapper(CanonicalMapper):
-    version: str = "v1"
+    version: str = "v2"
 
     def map(self, normalized: NormalizedRecord) -> CanonicalRecord:
         payload = normalized.payload
@@ -107,6 +133,61 @@ class GithubActivityCanonicalMapper(CanonicalMapper):
             "metadata_json": {k: v for k, v in metadata.items() if v is not None},
         }
         return CanonicalRecord(record_id=canonical["event_id"], payload=canonical)
+
+    def map_many(self, normalized: NormalizedRecord) -> List[CanonicalRecord]:
+        """Dual lane: the activity_events row (always) + one journal_entries
+        row per PushEvent commit. Deterministic ids keep re-ingest idempotent:
+        entry_id 'github:{repo}:{sha}', source_record_id '{event_id}:{sha}'."""
+        records = [self.map(normalized)]
+        payload = normalized.payload
+        if str(payload.get("type") or "") != "PushEvent":
+            return records
+
+        event_record_id = str(payload.get("id") or normalized.record_id)
+        created_at = payload.get("created_at") or payload.get("occurred_at")
+        repo = payload.get("repo")
+        repo_name = str(repo.get("name")) if isinstance(repo, dict) and repo.get("name") else None
+        event_payload = payload.get("payload") if isinstance(payload.get("payload"), dict) else {}
+        ref = str(event_payload.get("ref") or "").strip() or None
+        branch = _branch_from_ref(ref)
+        commits = event_payload.get("commits")
+        if not isinstance(commits, list):
+            return records
+
+        for commit in commits:
+            if not isinstance(commit, dict):
+                continue
+            sha = str(commit.get("sha") or "").strip()
+            if not sha:
+                continue  # no deterministic identity without a sha
+            entry_id = f"github:{repo_name}:{sha}" if repo_name else f"github:{sha}"
+            entry_at = _commit_timestamp(commit) or created_at
+            metadata: Dict[str, Any] = {
+                "repo": repo_name,
+                "sha": sha,
+                "ref": ref,
+                "branch": branch,
+                "event_id": f"github:{event_record_id}",
+            }
+            journal = {
+                "entry_id": entry_id,
+                "entry_at": entry_at,
+                # A commit is a point-in-time entry: no invented duration/start.
+                "starts_at": None,
+                "ends_at": entry_at,
+                "duration": None,
+                "mood_tag": None,
+                "category": "code",
+                "content": str(commit.get("message") or ""),
+                "people": None,
+                "place_name": None,
+                "source_record_id": f"{event_record_id}:{sha}",
+                "metadata_json": {k: v for k, v in metadata.items() if v is not None},
+            }
+            records.append(
+                CanonicalRecord(record_id=entry_id, payload=journal, table="journal_entries")
+            )
+        return records
 
     def mapping_metadata(self, normalized: NormalizedRecord) -> MappingMetadata:
         return MappingMetadata(source_id="github_activity", mapping_version=self.version)

@@ -165,6 +165,103 @@ def test_mapper_humanized_titles() -> None:
         assert mapped.payload["title"] == expected, overrides["type"]
 
 
+def test_map_many_push_event_emits_activity_plus_journal_per_commit() -> None:
+    """Dual lane: 1 activity_events record + 1 journal_entries record per commit."""
+    event = _github_event(
+        payload={
+            "push_id": 21980276450,
+            "size": 2,
+            "ref": "refs/heads/main",
+            "commits": [
+                {
+                    "sha": "a" * 40,
+                    "message": "fix: tighten retry loop",
+                    "timestamp": "2026-07-01T12:30:00Z",
+                },
+                {"sha": "b" * 40, "message": "docs: add sync notes"},
+            ],
+        }
+    )
+    records = GithubActivityCanonicalMapper().map_many(
+        NormalizedRecord(record_id="44851245900", payload=event)
+    )
+    assert len(records) == 3
+
+    activity = records[0]
+    assert activity.table is None  # default lane → group table (activity_events)
+    assert activity.payload["event_id"] == "github:44851245900"
+    assert activity.payload["activity_type"] == "push"
+
+    first, second = records[1], records[2]
+    assert first.table == "journal_entries"
+    assert first.record_id == f"github:dialogues/topos:{'a' * 40}"
+    assert first.payload["entry_id"] == f"github:dialogues/topos:{'a' * 40}"
+    # Commit timestamp wins over event created_at; ends_at mirrors entry_at.
+    assert first.payload["entry_at"] == "2026-07-01T12:30:00Z"
+    assert first.payload["ends_at"] == "2026-07-01T12:30:00Z"
+    assert first.payload["starts_at"] is None  # never invent durations
+    assert first.payload["duration"] is None
+    assert first.payload["mood_tag"] is None
+    assert first.payload["category"] == "code"
+    assert first.payload["content"] == "fix: tighten retry loop"
+    assert first.payload["people"] is None
+    assert first.payload["place_name"] is None
+    assert first.payload["source_record_id"] == f"44851245900:{'a' * 40}"
+    assert first.payload["metadata_json"] == {
+        "repo": "dialogues/topos",
+        "sha": "a" * 40,
+        "ref": "refs/heads/main",
+        "branch": "main",
+        "event_id": "github:44851245900",
+    }
+
+    # Commit without timestamp falls back to the event created_at.
+    assert second.payload["entry_at"] == "2026-07-01T12:34:56Z"
+    assert second.payload["ends_at"] == "2026-07-01T12:34:56Z"
+    assert second.payload["content"] == "docs: add sync notes"
+    assert second.payload["source_record_id"] == f"44851245900:{'b' * 40}"
+
+
+def test_map_many_non_push_event_is_activity_only() -> None:
+    event = _github_event(
+        type="PullRequestEvent",
+        payload={
+            "action": "opened",
+            "number": 42,
+            "pull_request": {"number": 42, "html_url": "https://github.com/dialogues/topos/pull/42"},
+        },
+    )
+    records = GithubActivityCanonicalMapper().map_many(
+        NormalizedRecord(record_id="44851245901", payload=event)
+    )
+    assert len(records) == 1
+    assert records[0].table is None
+    assert records[0].payload["activity_type"] == "pull_request"
+
+
+def test_map_many_push_without_commits_or_sha_is_activity_only() -> None:
+    mapper = GithubActivityCanonicalMapper()
+    no_commits = _github_event(payload={"push_id": 1, "size": 0, "ref": "refs/heads/main"})
+    assert len(mapper.map_many(NormalizedRecord(record_id="e1", payload=no_commits))) == 1
+    # A commit without a sha has no deterministic identity → skipped.
+    sha_less = _github_event(
+        payload={"push_id": 2, "size": 1, "commits": [{"message": "no sha here"}]}
+    )
+    assert len(mapper.map_many(NormalizedRecord(record_id="e2", payload=sha_less))) == 1
+
+
+def test_map_many_is_deterministic_across_remaps() -> None:
+    event = _github_event(
+        payload={"push_id": 3, "size": 1, "ref": "refs/heads/main", "commits": [{"sha": "c" * 40, "message": "m"}]}
+    )
+    normalized = NormalizedRecord(record_id="44851245900", payload=event)
+    mapper = GithubActivityCanonicalMapper()
+    first = mapper.map_many(normalized)
+    second = mapper.map_many(normalized)
+    assert [r.record_id for r in first] == [r.record_id for r in second]
+    assert [r.payload for r in first] == [r.payload for r in second]
+
+
 def test_github_event_maps_to_activity_events_table() -> None:
     conn = sqlite3.connect(":memory:")
     apply_all_migrations(conn)

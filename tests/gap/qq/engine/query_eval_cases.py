@@ -57,7 +57,13 @@ EvalFn = Callable[[Dict[str, Any]], Tuple[bool, str]]
 # morphology (journaling→journal, active→activity) and stat-insight tags entered the
 # evidence blob — C11/C23-class self-vetoes on aggregate asks are fixed, not recalibrated.
 # Comparable to qq-catalog-9 via the iteration gauge's shared case_ids.
-QUERY_CATALOG_VERSION = "qq-catalog-10"
+# qq-catalog-11 (MCP introspection I-series, PLAN_MCP_INTROSPECTION.md): +I-S/I-K/I-C/
+# I-A/I-G/I-B/I-R cases (introspection_eval_cases.py, qq-introspect-1) — MCP-lane ONLY
+# (they exercise CP gateway card composition + the query_scope meta-intercept, not engine
+# retrieval; skipped under --no-mcp). Own non-gating lanes (present/absent/guard/boundary),
+# red-first; promote I-C1 + the absent lane to gates once the intercept is deployed.
+# Existing lanes untouched — composite comparable to qq-catalog-10 via shared case_ids.
+QUERY_CATALOG_VERSION = "qq-catalog-11"
 
 _DEFAULT_LATENCY_MS = {
     "summary": int(os.environ.get("TOPOS_QQ_LATENCY_SUMMARY_MS", "10000")),
