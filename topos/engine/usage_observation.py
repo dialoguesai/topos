@@ -373,6 +373,14 @@ def emit_engine_llm_usage_observation(
         idempotency_key=str(envelope.get("idempotency_key") or ""),
         metadata=metadata,
     )
+    logger.info(
+        "recorded llm usage purpose=%s provider=%s model=%s tokens=%s task=%s",
+        purpose,
+        provider_key,
+        model_key,
+        total_tokens,
+        str(task_id or "")[:48],
+    )
     # Also notify CP (hosted metering / Supabase / plan ledger).
     try:
         from ..core import state as engine_state
