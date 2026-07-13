@@ -63,10 +63,12 @@ def log(step: str, message: str) -> None:
 
 
 def dict_rows(conn: sqlite3.Connection, query: str, params=()) -> List[Dict[str, Any]]:
+    previous_factory = conn.row_factory
     conn.row_factory = sqlite3.Row
-    rows = [dict(r) for r in conn.execute(query, params).fetchall()]
-    conn.row_factory = None
-    return rows
+    try:
+        return [dict(r) for r in conn.execute(query, params).fetchall()]
+    finally:
+        conn.row_factory = previous_factory if previous_factory is not None else sqlite3.Row
 
 
 # ---------------------------------------------------------------- steps
@@ -444,18 +446,21 @@ def _reenrich_candidates(conn: sqlite3.Connection, table: str, id_column: str, *
         if missing_from == "embeddings"
         else "SELECT DISTINCT record_id FROM message_entities"
     )
+    previous_factory = conn.row_factory
     conn.row_factory = sqlite3.Row
-    rows = [
-        dict(r)
-        for r in conn.execute(
-            f"""
-            SELECT * FROM {table}
-            WHERE content IS NOT NULL AND LENGTH(content) > {_REENRICH_MIN_CONTENT}
-              AND {id_column} NOT IN ({other})
-            """
-        ).fetchall()
-    ]
-    conn.row_factory = None
+    try:
+        rows = [
+            dict(r)
+            for r in conn.execute(
+                f"""
+                SELECT * FROM {table}
+                WHERE content IS NOT NULL AND LENGTH(content) > {_REENRICH_MIN_CONTENT}
+                  AND {id_column} NOT IN ({other})
+                """
+            ).fetchall()
+        ]
+    finally:
+        conn.row_factory = previous_factory if previous_factory is not None else sqlite3.Row
     from topos.features.signal.embed_context import is_derivable_content
 
     rows = [r for r in rows if is_derivable_content(str(r.get("content") or ""))]

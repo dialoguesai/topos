@@ -131,18 +131,21 @@ def refold_statistics(conn: sqlite3.Connection) -> Dict[str, int]:
         "financial_transactions",
         "location_events",
     )
-    for table in tables:
-        try:
-            conn.row_factory = sqlite3.Row
-            rows = [dict(r) for r in conn.execute(f"SELECT * FROM {table}").fetchall()]
-            conn.row_factory = None
-        except sqlite3.OperationalError:
-            conn.row_factory = None
-            continue
-        for row in rows:
-            row["_table"] = table
-        for start in range(0, len(rows), 500):
-            folded += engine.fold_batch(rows[start : start + 500])["rows_folded"]
+    previous_factory = conn.row_factory
+    try:
+        for table in tables:
+            try:
+                conn.row_factory = sqlite3.Row
+                rows = [dict(r) for r in conn.execute(f"SELECT * FROM {table}").fetchall()]
+            except sqlite3.OperationalError:
+                continue
+            for row in rows:
+                row["_table"] = table
+            for start in range(0, len(rows), 500):
+                folded += engine.fold_batch(rows[start : start + 500])["rows_folded"]
+    finally:
+        # Never leave the shared engine connection without Row factory.
+        conn.row_factory = previous_factory if previous_factory is not None else sqlite3.Row
     return {"rows_refolded": folded}
 
 

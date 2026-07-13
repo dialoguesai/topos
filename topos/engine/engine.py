@@ -150,6 +150,40 @@ class Engine:
             duration_ms=duration_ms,
             cache_hit=bool(cache_hit),
         )
+        usage = raw_output.get("usage") if isinstance(raw_output.get("usage"), dict) else None
+        if usage:
+            prompt_tokens = int(usage.get("prompt_tokens") or 0)
+            completion_tokens = int(usage.get("completion_tokens") or 0)
+            total_tokens = int(usage.get("total_tokens") or 0)
+            if total_tokens <= 0 and (prompt_tokens > 0 or completion_tokens > 0):
+                total_tokens = prompt_tokens + completion_tokens
+            execution_meta.prompt_tokens = prompt_tokens
+            execution_meta.completion_tokens = completion_tokens
+            execution_meta.total_tokens = total_tokens
+            try:
+                from .usage_observation import emit_engine_llm_usage_observation
+
+                origin = None
+                if normalized.requested_by is not None:
+                    origin = normalized.requested_by.origin
+                emit_engine_llm_usage_observation(
+                    task_id=normalized.id,
+                    task_type=normalized.type,
+                    subtype=normalized.subtype or subtype,
+                    provider=execution_meta.provider,
+                    model=execution_meta.model,
+                    usage={
+                        "prompt_tokens": prompt_tokens,
+                        "completion_tokens": completion_tokens,
+                        "total_tokens": total_tokens,
+                    },
+                    origin=origin,
+                    source_id=normalized.source_id,
+                    duration_ms=duration_ms,
+                    ttfb_ms=duration_ms,
+                )
+            except Exception:
+                logger.debug("Failed to emit engine llm usage observation", exc_info=True)
         try:
             from ..observability.metrics import record_metric
             record_metric("engine.task_completed", 1.0)

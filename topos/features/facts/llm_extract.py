@@ -422,12 +422,40 @@ def _make_ollama_extractor(model: str) -> Callable[[str, Dict[str, Any]], List[D
     def _extract(prompt: str, row: Dict[str, Any]) -> List[Dict[str, Any]]:
         # temp 0 => deterministic; bounded output; keep_alive default so the
         # model stays warm across the batch.
-        response = adapter._generate(  # noqa: SLF001 (intentional low-level reuse)
+        generated = adapter._generate(  # noqa: SLF001 (intentional low-level reuse)
             model,
             prompt,
             num_predict=_NUM_PREDICT,
             temperature=0.0,
         )
+        response = str(generated.get("text") or "") if isinstance(generated, dict) else str(generated or "")
+        usage = generated.get("usage") if isinstance(generated, dict) else None
+        if isinstance(usage, dict) and int(usage.get("total_tokens") or 0) > 0:
+            try:
+                from ...engine.usage_observation import emit_engine_llm_usage_observation
+
+                record_id = str(row.get("id") or row.get("record_id") or "")
+                task_id = (
+                    f"fact_llm:{record_id}"
+                    if record_id
+                    else f"fact_llm:{hash(prompt) & 0xFFFFFFFF:x}"
+                )
+                emit_engine_llm_usage_observation(
+                    task_id=task_id,
+                    task_type="enrichment",
+                    subtype="fact_llm_extract",
+                    provider="ollama",
+                    model=model,
+                    usage={
+                        "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+                        "completion_tokens": int(usage.get("completion_tokens") or 0),
+                        "total_tokens": int(usage.get("total_tokens") or 0),
+                    },
+                    origin="ingestion_pipeline",
+                    source_id=str(row.get("source_id") or ""),
+                )
+            except Exception:
+                pass
         return parse_triples(response)
 
     return _extract

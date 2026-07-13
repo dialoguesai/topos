@@ -6,6 +6,7 @@ from collections import deque
 import json
 import logging
 import ssl
+import threading
 from typing import Any, Awaitable, Callable, Dict
 
 import certifi
@@ -81,6 +82,9 @@ class ControlPlaneClient:
         self._presence_outbox_size = max(1, int(settings.control_plane_presence_outbox_size))
         self._presence_outbox: deque[dict[str, Any]] = deque(maxlen=self._presence_outbox_size)
         self._outbox_lock = asyncio.Lock()
+        # Thread-safe outbox for sync callers (Engine.run in worker threads via to_thread).
+        self._sync_outbox: deque[dict[str, Any]] = deque(maxlen=self._presence_outbox_size)
+        self._sync_outbox_lock = threading.Lock()
 
         self._backoff = ExponentialBackoff(
             ResilienceConfig(
@@ -290,6 +294,7 @@ class ControlPlaneClient:
             await self._handle_message(ws, data)
 
     async def _flush_presence_outbox(self) -> None:
+        await self._drain_sync_outbox_into_presence()
         async with self._outbox_lock:
             pending = list(self._presence_outbox)
             self._presence_outbox.clear()
@@ -301,6 +306,13 @@ class ControlPlaneClient:
                 await self._enqueue_presence_message(message)
                 break
 
+    async def _drain_sync_outbox_into_presence(self) -> None:
+        with self._sync_outbox_lock:
+            pending = list(self._sync_outbox)
+            self._sync_outbox.clear()
+        for message in pending:
+            await self._enqueue_presence_message(message)
+
     async def _enqueue_presence_message(self, message: Dict[str, Any]) -> None:
         async with self._outbox_lock:
             at_capacity = len(self._presence_outbox) >= self._presence_outbox_size
@@ -311,6 +323,36 @@ class ControlPlaneClient:
                     dropped.get("type"),
                 )
             self._presence_outbox.append(dict(message))
+
+    def enqueue_unsolicited_message_threadsafe(self, message: Dict[str, Any]) -> None:
+        """Queue an unsolicited WS message from a sync/worker thread.
+
+        Enrichment runs Engine.run via asyncio.to_thread; those threads cannot safely
+        touch the websockets connection. Queue here and flush on the client's loop.
+        """
+        with self._sync_outbox_lock:
+            at_capacity = len(self._sync_outbox) >= self._presence_outbox_size
+            if at_capacity:
+                dropped = self._sync_outbox.popleft()
+                logger.warning(
+                    "Sync outbox full; dropping oldest message type=%s",
+                    dropped.get("type"),
+                )
+            self._sync_outbox.append(dict(message))
+
+        client_task = self._task
+        if client_task is None:
+            return
+        try:
+            loop = client_task.get_loop()
+        except Exception:
+            return
+        if not loop.is_running():
+            return
+        try:
+            asyncio.run_coroutine_threadsafe(self._flush_presence_outbox(), loop)
+        except Exception:
+            logger.debug("Failed to schedule sync outbox flush", exc_info=True)
 
     async def _send_ws_json(self, ws, payload: Dict[str, Any]) -> bool:
         if not ws:

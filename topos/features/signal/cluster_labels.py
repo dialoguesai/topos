@@ -93,17 +93,18 @@ class LabelerUnavailable(Exception):
 
 def _complete_via_engine(prompt: str) -> str:
     from ...engine.client import get_engine_client_or_local
-    from ...engine.tasks import ModelRequest, ProcessingTask
+    from ...engine.tasks import ModelRequest, ProcessingTask, RequestedBy
 
     client = get_engine_client_or_local(None)
     task = ProcessingTask(
         id="cluster_label",
-        type="query_inference",
+        type="enrichment",
         subtype="query_inference",
         source_id="cluster_labeler",
         record_ids=[],
         input={"query": prompt, "context": ""},
         model_request=ModelRequest(provider="ollama", model=cluster_label_model()),
+        requested_by=RequestedBy(origin="ingestion_pipeline"),
     )
     result = client.run(task)
     if getattr(result, "status", None) != "completed":

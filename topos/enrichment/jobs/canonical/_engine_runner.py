@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from typing import Any, Dict, Optional, Protocol
 
-from ....engine.tasks import ModelRequest, ProcessingTask
+from ....engine.tasks import ModelRequest, ProcessingTask, RequestedBy
 
 
 class _EngineRunner(Protocol):
@@ -43,5 +43,6 @@ async def run_engine_task(
         record_ids=record_ids,
         input=input_payload,
         model_request=ModelRequest(provider=provider, model=model),
+        requested_by=RequestedBy(origin="ingestion_pipeline"),
     )
     return await asyncio.to_thread(engine.run, task)

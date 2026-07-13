@@ -38,9 +38,13 @@ class OpenAICompatibleAdapter:
             return {"status": "deferred", "error": self._unavailable_error, "model": model}
         prompt = build_generative_prompt(subtype, payload)
         try:
-            response_text = self._chat_completion(model=model, prompt=prompt)
+            completed = self._chat_completion(model=model, prompt=prompt)
+            response_text = str(completed.get("text") or "")
             out = parse_generative_response(response_text, subtype, model, payload=payload)
             out["model"] = model
+            usage = completed.get("usage")
+            if isinstance(usage, dict):
+                out["usage"] = usage
             return out
         except urllib.error.URLError:
             return {"status": "deferred", "error": self._unavailable_error, "model": model}
@@ -52,7 +56,7 @@ class OpenAICompatibleAdapter:
             logger.warning("OpenAI-compatible inference failed: %s", exc)
             return {"error": str(exc), "model": model}
 
-    def _chat_completion(self, *, model: str, prompt: str) -> str:
+    def _chat_completion(self, *, model: str, prompt: str) -> Dict[str, Any]:
         url = f"{self._base_url}/chat/completions"
         body: Dict[str, Any] = {
             "model": model,
@@ -79,7 +83,21 @@ class OpenAICompatibleAdapter:
         except urllib.error.URLError as exc:
             raise RuntimeError(f"OpenAI-compatible request failed: {exc}") from exc
         choices = data.get("choices") or []
-        if not choices:
-            return ""
-        message = (choices[0] or {}).get("message") or {}
-        return str(message.get("content") or "").strip()
+        text = ""
+        if choices:
+            message = (choices[0] or {}).get("message") or {}
+            text = str(message.get("content") or "").strip()
+        raw_usage = data.get("usage") if isinstance(data.get("usage"), dict) else {}
+        prompt_tokens = int(raw_usage.get("prompt_tokens") or 0)
+        completion_tokens = int(raw_usage.get("completion_tokens") or 0)
+        total_tokens = int(raw_usage.get("total_tokens") or 0)
+        if total_tokens <= 0 and (prompt_tokens > 0 or completion_tokens > 0):
+            total_tokens = prompt_tokens + completion_tokens
+        return {
+            "text": text,
+            "usage": {
+                "prompt_tokens": max(0, prompt_tokens),
+                "completion_tokens": max(0, completion_tokens),
+                "total_tokens": max(0, total_tokens),
+            },
+        }

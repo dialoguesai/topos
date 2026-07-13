@@ -164,7 +164,7 @@ class OllamaAdapter:
         model = config.get("model") or "llama3.2:3b"
         try:
             prompt = build_generative_prompt(subtype, payload)
-            response_text = self._generate(
+            generated = self._generate(
                 model,
                 prompt,
                 num_predict=_num_predict_for_subtype(subtype),
@@ -172,8 +172,12 @@ class OllamaAdapter:
                 think=_think_for_subtype(subtype),
                 temperature=_temperature_for_subtype(subtype),
             )
+            response_text = str(generated.get("text") or "")
             out = parse_generative_response(response_text, subtype, model, payload=payload)
             out["model"] = model
+            usage = generated.get("usage")
+            if isinstance(usage, dict):
+                out["usage"] = usage
             return out
         except urllib.error.URLError:
             return {
@@ -197,7 +201,7 @@ class OllamaAdapter:
         keep_alive: Optional[str] = None,
         think: Optional[bool] = None,
         temperature: Optional[float] = None,
-    ) -> str:
+    ) -> Dict[str, Any]:
         body: Dict[str, Any] = {"model": model, "prompt": prompt, "stream": False}
         if keep_alive is not None:
             body["keep_alive"] = keep_alive
@@ -219,7 +223,17 @@ class OllamaAdapter:
         try:
             with urllib.request.urlopen(req, timeout=300) as resp:
                 data = json.loads(resp.read().decode())
-                return data.get("response", "")
+                prompt_tokens = int(data.get("prompt_eval_count") or 0)
+                completion_tokens = int(data.get("eval_count") or 0)
+                total_tokens = prompt_tokens + completion_tokens
+                return {
+                    "text": data.get("response", ""),
+                    "usage": {
+                        "prompt_tokens": max(0, prompt_tokens),
+                        "completion_tokens": max(0, completion_tokens),
+                        "total_tokens": max(0, total_tokens),
+                    },
+                }
         except urllib.error.URLError as e:
             raise RuntimeError(f"Ollama request failed: {e}") from e
 
