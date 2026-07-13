@@ -124,7 +124,7 @@
       "inference_objects": [],
       "default_mode_ceiling": "raw",
       "enrichment_only": true,
-      "implementation_status": "stub"
+      "implementation_status": "live"
     },
     {
       "scope_id": "health:read",
@@ -146,7 +146,7 @@
         "wellness_scores"
       ],
       "default_mode_ceiling": "summary",
-      "implementation_status": "stub",
+      "implementation_status": "live",
       "default_source_ids": [
         "demo_journal_file"
       ]
@@ -222,7 +222,7 @@
       ],
       "inference_objects": [],
       "default_mode_ceiling": "summary",
-      "implementation_status": "stub",
+      "implementation_status": "live",
       "default_source_ids": [
         "demo_resume_file"
       ]
@@ -301,7 +301,7 @@
       ],
       "inference_objects": [],
       "default_mode_ceiling": "summary",
-      "implementation_status": "stub",
+      "implementation_status": "live",
       "default_source_ids": [
         "demo_calendar_file",
         "calendar_stub"
