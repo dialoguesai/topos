@@ -42,15 +42,34 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _ensure_row_factory(conn: sqlite3.Connection) -> None:
+    """Shared engine conn can temporarily lose Row factory during scrub/adapters."""
+    if getattr(conn, "row_factory", None) is not sqlite3.Row:
+        conn.row_factory = sqlite3.Row
+
+
 def _row_to_dict(row: Any) -> Dict[str, Any]:
     if row is None:
         return {}
     if isinstance(row, dict):
         return dict(row)
-    return {key: row[key] for key in row.keys()}
+    keys_fn = getattr(row, "keys", None)
+    if callable(keys_fn):
+        try:
+            return {key: row[key] for key in keys_fn()}
+        except Exception:
+            pass
+    # Fallback for plain tuples/lists when row_factory was cleared.
+    if isinstance(row, (tuple, list)):
+        return {str(i): value for i, value in enumerate(row)}
+    try:
+        return dict(row)
+    except Exception:
+        return {}
 
 
 def ensure_llm_integrations_tables(conn: sqlite3.Connection) -> None:
+    _ensure_row_factory(conn)
     conn.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {CREDENTIALS_TABLE} (
@@ -405,8 +424,9 @@ def list_usage_events(
     period_start: str,
     period_end: str,
 ) -> List[Dict[str, Any]]:
+    _ensure_row_factory(conn)
     ensure_llm_integrations_tables(conn)
-    rows = conn.execute(
+    cur = conn.execute(
         f"""
         SELECT event_id, topos_id, provider, model, prompt_tokens, completion_tokens, total_tokens,
                cost_usd, billing_source, source, idempotency_key, metadata_json, event_at, created_at
@@ -416,10 +436,18 @@ def list_usage_events(
         LIMIT 5000
         """,
         (str(topos_id or "").strip(), period_start, period_end),
-    ).fetchall()
+    )
+    columns = [desc[0] for desc in (cur.description or [])]
     out: List[Dict[str, Any]] = []
-    for row in rows:
-        item = _row_to_dict(row)
+    for row in cur.fetchall():
+        if isinstance(row, dict):
+            item = dict(row)
+        elif callable(getattr(row, "keys", None)):
+            item = {key: row[key] for key in row.keys()}
+        elif isinstance(row, (tuple, list)) and columns:
+            item = {columns[i]: row[i] for i in range(min(len(columns), len(row)))}
+        else:
+            item = _row_to_dict(row)
         metadata_raw = item.pop("metadata_json", None)
         if metadata_raw:
             try:
@@ -428,6 +456,91 @@ def list_usage_events(
                 item["metadata"] = {}
         out.append(item)
     return out
+
+
+def resolve_local_usage_topos_id(conn: sqlite3.Connection) -> str:
+    """Best-effort topos_id for engine-local usage writes (match CP-written home_chat rows)."""
+    ensure_llm_integrations_tables(conn)
+    row = conn.execute(
+        f"""
+        SELECT topos_id FROM {USAGE_EVENTS_TABLE}
+        WHERE topos_id IS NOT NULL AND TRIM(topos_id) != ''
+        ORDER BY event_at DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if row:
+        tid = str(_row_to_dict(row).get("topos_id") or "").strip()
+        if tid:
+            return tid
+    pref = conn.execute(
+        f"""
+        SELECT topos_id FROM {PREFERENCES_TABLE}
+        WHERE topos_id IS NOT NULL AND TRIM(topos_id) != ''
+        ORDER BY updated_at DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if pref:
+        tid = str(_row_to_dict(pref).get("topos_id") or "").strip()
+        if tid:
+            return tid
+    cred = conn.execute(
+        f"""
+        SELECT topos_id FROM {CREDENTIALS_TABLE}
+        WHERE topos_id IS NOT NULL AND TRIM(topos_id) != ''
+        LIMIT 1
+        """
+    ).fetchone()
+    if cred:
+        tid = str(_row_to_dict(cred).get("topos_id") or "").strip()
+        if tid:
+            return tid
+    return "local"
+
+
+def record_local_llm_usage_event(
+    conn: sqlite3.Connection,
+    *,
+    provider: str,
+    model: str,
+    usage: Dict[str, Any],
+    billing_source: str,
+    source: str,
+    idempotency_key: Optional[str] = None,
+    metadata: Optional[Dict[str, Any]] = None,
+    topos_id: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Persist an llm_usage_events row locally so billing UI can show ingestion usage."""
+    import uuid
+
+    _ensure_row_factory(conn)
+    prompt_tokens = int(usage.get("prompt_tokens") or 0)
+    completion_tokens = int(usage.get("completion_tokens") or 0)
+    total_tokens = int(usage.get("total_tokens") or 0)
+    if total_tokens <= 0 and (prompt_tokens > 0 or completion_tokens > 0):
+        total_tokens = prompt_tokens + completion_tokens
+    if total_tokens <= 0:
+        return {"skipped": True}
+    tid = str(topos_id or "").strip() or resolve_local_usage_topos_id(conn)
+    return insert_usage_event(
+        conn,
+        {
+            "event_id": f"llm_usage_{uuid.uuid4().hex}",
+            "topos_id": tid,
+            "provider": str(provider or "unknown").strip().lower() or "unknown",
+            "model": str(model or "unknown").strip() or "unknown",
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+            "billing_source": str(billing_source or "ollama").strip().lower() or "ollama",
+            "source": source,
+            "idempotency_key": idempotency_key,
+            "metadata": metadata or {},
+            "event_at": _now_iso(),
+            "created_at": _now_iso(),
+        },
+    )
 
 
 def maybe_migrate_legacy_llm_config(conn: sqlite3.Connection) -> None:
@@ -445,6 +558,7 @@ def maybe_migrate_legacy_llm_config(conn: sqlite3.Connection) -> None:
 
 
 def handle_storage_op(conn: sqlite3.Connection, *, op: str, args: Dict[str, Any]) -> Any:
+    _ensure_row_factory(conn)
     operation = str(op or "").strip()
     if operation == "list_credentials":
         return list_credentials(conn, topos_id=str(args.get("topos_id") or ""))

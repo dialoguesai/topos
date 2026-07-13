@@ -84,6 +84,9 @@ class ExecutionMeta(BaseModel):
     model: Optional[str] = None
     duration_ms: Optional[int] = None
     cache_hit: bool = False
+    prompt_tokens: Optional[int] = None
+    completion_tokens: Optional[int] = None
+    total_tokens: Optional[int] = None
 
 
 class ProcessingResult(BaseModel):

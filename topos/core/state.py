@@ -257,6 +257,9 @@ def get_db_connection() -> Optional[sqlite3.Connection]:
     if db_conn is not None:
         try:
             db_conn.execute("SELECT 1")
+            # Scrub/adapters may have cleared Row factory on the shared conn.
+            if getattr(db_conn, "row_factory", None) is not sqlite3.Row:
+                db_conn.row_factory = sqlite3.Row
             return db_conn
         except (sqlite3.ProgrammingError, sqlite3.OperationalError):
             db_conn = None
@@ -299,12 +302,19 @@ def get_db_connection() -> Optional[sqlite3.Connection]:
         return None
 
 
+def _ensure_row_factory(conn: sqlite3.Connection) -> None:
+    """Shared engine conn can lose Row factory (e.g. scrub paths); restore it."""
+    if getattr(conn, "row_factory", None) is not sqlite3.Row:
+        conn.row_factory = sqlite3.Row
+
+
 def get_or_create_user_id(conn: sqlite3.Connection) -> str:
     """Get existing user_id or create a new one.
     
     Ensures engine_config table exists before accessing it.
     """
     try:
+        _ensure_row_factory(conn)
         _ensure_engine_config_table(conn)
         cursor = conn.execute("SELECT value FROM engine_config WHERE key = 'user_id'")
         row = cursor.fetchone()
@@ -346,6 +356,7 @@ def get_user_id(conn: sqlite3.Connection) -> str | None:
     Returns None if user_id doesn't exist or on error.
     """
     try:
+        _ensure_row_factory(conn)
         _ensure_engine_config_table(conn)
         cursor = conn.execute("SELECT value FROM engine_config WHERE key = 'user_id'")
         row = cursor.fetchone()
@@ -387,6 +398,7 @@ def get_engine_config_value(conn: sqlite3.Connection, key: str) -> Optional[str]
     Returns None if the key doesn't exist or on error.
     """
     try:
+        _ensure_row_factory(conn)
         _ensure_engine_config_table(conn)
         cursor = conn.execute("SELECT value FROM engine_config WHERE key = ?", (key,))
         row = cursor.fetchone()
