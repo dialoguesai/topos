@@ -11,6 +11,7 @@ from ..ingestion.ingest_helpers import ingest_file_payload, ingest_ui_payload
 from ..api.enrichment import _process_enrichment_core
 from ..engine.usage_observation import emit_usage_observation
 from ..sources import install_service
+from ..sources.definitions import with_source_capabilities
 
 router = APIRouter()
 logger = logging.getLogger("topos.api.source_install")
@@ -140,7 +141,7 @@ async def _list_sources_core(payload: Dict[str, Any]) -> Dict[str, Any]:
         source_def = rec.source_definition_json if isinstance(rec.source_definition_json, dict) else {}
         if not sid or sid in active_by_source or not source_def:
             continue
-        active_by_source[sid] = source_def
+        active_by_source[sid] = with_source_capabilities(source_def)
     sources = list(active_by_source.values())
     return {"status": "ok", "sources": sources}
 

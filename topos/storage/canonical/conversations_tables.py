@@ -12,6 +12,8 @@ import hashlib
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from ...sources.definitions import CANONICAL_ADDRESS_BOOK_SOURCE_ID
+
 logger = logging.getLogger("topos.storage.canonical.conversations_tables")
 
 CONVERSATIONS_TABLE = "conversations"
@@ -449,14 +451,21 @@ class ConversationsTablesManager:
                 f"""
                 INSERT INTO {CONTACTS_TABLE}
                 (contact_id, dataset_id, source_id, display_name, known_usernames_json, is_self, last_import_source, last_import_run_id, last_imported_at, created_at, updated_at)
-                VALUES (?, ?, 'global', ?, ?, ?, NULL, NULL, NULL, datetime('now'), datetime('now'))
+                VALUES (?, ?, ?, ?, ?, ?, NULL, NULL, NULL, datetime('now'), datetime('now'))
                 ON CONFLICT(contact_id) DO UPDATE SET
                     display_name = COALESCE(excluded.display_name, {CONTACTS_TABLE}.display_name),
                     known_usernames_json = COALESCE(excluded.known_usernames_json, {CONTACTS_TABLE}.known_usernames_json),
                     is_self = CASE WHEN excluded.is_self = 1 THEN 1 ELSE {CONTACTS_TABLE}.is_self END,
                     updated_at = datetime('now')
                 """,
-                (contact_id, dataset_id, display_name, usernames_json, is_self),
+                (
+                    contact_id,
+                    dataset_id,
+                    CANONICAL_ADDRESS_BOOK_SOURCE_ID,
+                    display_name,
+                    usernames_json,
+                    is_self,
+                ),
             )
             self.conn.execute(
                 f"""
@@ -1010,7 +1019,7 @@ class ConversationsTablesManager:
                     created_at,
                     updated_at
                 )
-                VALUES (?, ?, 'global', ?, ?, 0, ?, ?, CASE WHEN ? IS NOT NULL THEN datetime('now') ELSE NULL END, datetime('now'), datetime('now'))
+                VALUES (?, ?, ?, ?, ?, 0, ?, ?, CASE WHEN ? IS NOT NULL THEN datetime('now') ELSE NULL END, datetime('now'), datetime('now'))
                 ON CONFLICT(contact_id) DO UPDATE SET
                     display_name = COALESCE({CONTACTS_TABLE}.display_name, excluded.display_name),
                     known_usernames_json = COALESCE(excluded.known_usernames_json, {CONTACTS_TABLE}.known_usernames_json),
@@ -1025,6 +1034,7 @@ class ConversationsTablesManager:
                 (
                     contact_id,
                     dataset_id,
+                    CANONICAL_ADDRESS_BOOK_SOURCE_ID,
                     display_name,
                     usernames_json,
                     import_source_value,

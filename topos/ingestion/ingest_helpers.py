@@ -479,6 +479,7 @@ async def _ingest_ui_payload_direct(
             "errors_count": len(canonical_result.errors),
             "canonical_events_created": canonical_result.events_created,
             "canonical_messages_created": canonical_result.messages_created,
+            "timeline_rows_written": canonical_result.timeline_rows_written,
             "enrichment_pending": True,
             "_enrichment_ctx": {
                 "source_id": source_id,
@@ -503,6 +504,7 @@ async def _ingest_ui_payload_direct(
         "errors_count": len(canonical_result.errors),
         "canonical_events_created": canonical_result.events_created,
         "canonical_messages_created": canonical_result.messages_created,
+        "timeline_rows_written": canonical_result.timeline_rows_written,
         "signal_jobs_run": (signal_out.get("jobs_run") if isinstance(signal_out, dict) else 0) or 0,
         "enrichment_jobs_run": (enrich_out.get("jobs_run") if isinstance(enrich_out, dict) else 0) or 0,
     }

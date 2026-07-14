@@ -70,6 +70,8 @@ def _record_id(row: Dict[str, Any]) -> str:
         row.get("record_id")
         or row.get("message_id")
         or row.get("event_id")
+        or row.get("entry_id")
+        or row.get("transaction_id")
         or row.get("id")
         or ""
     )

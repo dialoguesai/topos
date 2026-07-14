@@ -8,6 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Sequence, Set, Union
 
 from ..config.settings import settings
+from .definitions import CANONICAL_ADDRESS_BOOK_SOURCE_ID
 from ..storage.db.postgres import execute_query, fetch_all, fetch_one
 
 INSTALL_TABLE = "source_runtime_installs"
@@ -18,6 +19,65 @@ _KNOWN_FLAT_TABLES_BY_SOURCE: Dict[str, List[str]] = {
     "browser_events": ["browser_events"],
     "starred_websites": ["starred_websites"],
 }
+
+
+def _assert_not_canonical_address_book(source_id: str) -> None:
+    if source_id == CANONICAL_ADDRESS_BOOK_SOURCE_ID:
+        raise ValueError(
+            "The canonical address book cannot be removed through generic source scrub"
+        )
+
+
+def _garbage_collect_orphan_contacts(conn: Any) -> int:
+    row = fetch_one(
+        conn,
+        """
+        SELECT COUNT(*) AS count
+        FROM contacts c
+        WHERE c.source_id = %s
+          AND NOT EXISTS (
+              SELECT 1 FROM contact_identifiers ci
+              WHERE ci.contact_id = c.contact_id
+                AND ci.dataset_id = c.dataset_id
+          )
+        """,
+        (CANONICAL_ADDRESS_BOOK_SOURCE_ID,),
+    )
+    count = int((row["count"] if isinstance(row, dict) else row[0]) or 0) if row else 0
+    if count:
+        execute_query(
+            conn,
+            """
+            DELETE FROM contacts
+            WHERE source_id = %s
+              AND NOT EXISTS (
+                  SELECT 1 FROM contact_identifiers ci
+                  WHERE ci.contact_id = contacts.contact_id
+                    AND ci.dataset_id = contacts.dataset_id
+              )
+            """,
+            (CANONICAL_ADDRESS_BOOK_SOURCE_ID,),
+        )
+    return count
+
+
+def _plan_orphan_contacts_after_source_scrub(conn: Any, source_id: str) -> int:
+    row = fetch_one(
+        conn,
+        """
+        SELECT COUNT(*) AS count
+        FROM contacts c
+        WHERE c.source_id = %s
+          AND NOT EXISTS (
+              SELECT 1 FROM contact_identifiers ci
+              WHERE ci.contact_id = c.contact_id
+                AND ci.dataset_id = c.dataset_id
+                AND ci.source_id <> %s
+          )
+        """,
+        (CANONICAL_ADDRESS_BOOK_SOURCE_ID, source_id),
+    )
+    return int((row["count"] if isinstance(row, dict) else row[0]) or 0) if row else 0
 
 
 @dataclass(frozen=True)
@@ -244,12 +304,14 @@ def scrub_attributed_rows(conn: Any, source_id: str) -> AttributionScrubResult:
     result = AttributionScrubResult()
     if not sid:
         return result
+    _assert_not_canonical_address_book(sid)
 
     rows_deleted = 0
     tables_dropped: List[str] = []
     normalized_sid = re.sub(r"[^a-z0-9]+", "", sid.lower())
     table_names = [name for name in _list_user_tables(conn) if name and _safe_sql_identifier(name)]
     embedding_ids: List[str] = []
+    contact_identifiers_deleted = False
 
     for table_name in table_names:
         if table_name in {INSTALL_TABLE, "sqlite_sequence"}:
@@ -267,6 +329,8 @@ def scrub_attributed_rows(conn: Any, source_id: str) -> AttributionScrubResult:
             execute_query(conn, f'DELETE FROM "{table_name}" WHERE "{source_column}" = %s', (sid,))
             rows_deleted += match_count
             deleted_from_table = True
+            if table_name == "contact_identifiers" and source_column == "source_id":
+                contact_identifiers_deleted = True
             result.tables.append(
                 TableAction(table=table_name, action="rows_deleted", count=match_count)
             )
@@ -282,6 +346,18 @@ def scrub_attributed_rows(conn: Any, source_id: str) -> AttributionScrubResult:
             _drop_table(conn, table_name)
             tables_dropped.append(table_name)
             result.tables.append(TableAction(table=table_name, action="table_dropped", count=0))
+
+    if contact_identifiers_deleted:
+        orphan_contacts_deleted = _garbage_collect_orphan_contacts(conn)
+        if orphan_contacts_deleted:
+            rows_deleted += orphan_contacts_deleted
+            result.tables.append(
+                TableAction(
+                    table="contacts",
+                    action="rows_deleted",
+                    count=orphan_contacts_deleted,
+                )
+            )
 
     vec_deleted = _delete_vec_rows_batched(conn, embedding_ids)
     if vec_deleted > 0:
@@ -300,10 +376,12 @@ def plan_attributed_rows(conn: Any, source_id: str) -> AttributionScrubResult:
     result = AttributionScrubResult()
     if not sid:
         return result
+    _assert_not_canonical_address_book(sid)
 
     rows_deleted = 0
     table_names = [name for name in _list_user_tables(conn) if name and _safe_sql_identifier(name)]
     embedding_ids: List[str] = []
+    contact_identifiers_matched = False
 
     for table_name in table_names:
         if table_name in {INSTALL_TABLE, "sqlite_sequence"}:
@@ -318,8 +396,18 @@ def plan_attributed_rows(conn: Any, source_id: str) -> AttributionScrubResult:
             if table_name == "signal_embeddings":
                 embedding_ids.extend(_select_embedding_ids(conn, table_name, source_column, sid))
             rows_deleted += match_count
+            if table_name == "contact_identifiers" and source_column == "source_id":
+                contact_identifiers_matched = True
             result.tables.append(
                 TableAction(table=table_name, action="rows_deleted", count=match_count)
+            )
+
+    if contact_identifiers_matched:
+        orphan_contacts = _plan_orphan_contacts_after_source_scrub(conn, sid)
+        if orphan_contacts:
+            rows_deleted += orphan_contacts
+            result.tables.append(
+                TableAction(table="contacts", action="rows_deleted", count=orphan_contacts)
             )
 
     vec_count = len(dict.fromkeys(str(item) for item in embedding_ids if str(item).strip()))

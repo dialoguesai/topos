@@ -2,13 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
 from ..base import BaseEnrichmentJob
 from ....core.state import get_db_connection
-from ....features.stats.engine import _record_id, _table_for_row
+from ....features.timeline_projection import project_timeline_rows
 
 logger = logging.getLogger("topos.enrichment.jobs.timeline")
 
@@ -31,37 +30,15 @@ class TimelineJob(BaseEnrichmentJob):
         conn = get_db_connection()
         if conn is None:
             return [{"_deferred": True, "error": "database_unavailable"}]
-        from ....features.lifecycle.exclusions import excluded_record_ids
-        from ....features.stats.definitions import row_event_ts
-
-        excluded = excluded_record_ids(conn)
-        written = 0
-        for row in canonical_messages:
-            ts = row_event_ts(row)
-            record_id = _record_id(row)
-            if ts is None or not record_id or record_id in excluded:
-                continue
-            table = _table_for_row(row)
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO timeline (
-                    event_at, record_id, source_id, canonical_table,
-                    record_type, entity_ids_json, signal_dimension
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    ts.isoformat(),
-                    record_id,
-                    row.get("source_id"),
-                    table or None,
-                    row.get("record_type"),
-                    json.dumps(row.get("entity_ids") or []),
-                    row.get("signal_dimension"),
-                ),
-            )
-            written += 1
-        conn.commit()
+        result = project_timeline_rows(conn, canonical_messages)
         if progress_callback:
             progress_callback(len(canonical_messages), len(canonical_messages))
-        logger.debug("[PIPELINE:TIMELINE] wrote %d rows", written)
+        logger.debug(
+            "[PIPELINE:TIMELINE] candidates=%d written=%d existing=%d excluded=%d skipped_timestamp=%d",
+            result.candidates,
+            result.written,
+            result.existing,
+            result.excluded,
+            result.missing_timestamp,
+        )
         return []

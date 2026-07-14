@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Union
 
 from ..ingestion.parsers.base import NormalizedRecord
+from ..sources.definitions import CANONICAL_ADDRESS_BOOK_SOURCE_ID
 
 logger = logging.getLogger("topos.ingestion.canonical_pipeline")
 
@@ -129,6 +130,7 @@ class CanonicalizeResult:
     conversations_created: int = 0
     messages_created: int = 0
     events_created: int = 0
+    timeline_rows_written: int = 0
     errors: List[Dict[str, Any]] = field(default_factory=list)
 
 
@@ -193,6 +195,11 @@ def canonicalize_normalized_batch(
     result = CanonicalizeResult()
 
     def _finish() -> CanonicalizeResult:
+        if result.canonical_records:
+            from ..features.timeline_projection import project_timeline_rows
+
+            projection = project_timeline_rows(db_conn, result.canonical_records)
+            result.timeline_rows_written = projection.written
         _bump_generation_after_canonicalize(db_conn, source_id, result)
         return result
 
@@ -428,7 +435,7 @@ def canonicalize_normalized_batch(
                     (
                         contact_id,
                         dataset_id,
-                        source_id,
+                        CANONICAL_ADDRESS_BOOK_SOURCE_ID,
                         display_name,
                         1 if contact_id == "contact-self" else 0,
                         source_record_id,

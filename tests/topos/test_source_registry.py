@@ -28,7 +28,7 @@ def test_registry_delivery_matches_connector_spec():
         "imessage": "local_sync",
         "signal": "local_sync",
         "calendar_stub": None,
-        "contacts_enrichment_stub": None,
+        "canonical_address_book": None,
         "demo_messenger_file": "owner_upload",
         "demo_email_file": "owner_upload",
         "demo_calendar_file": "owner_upload",

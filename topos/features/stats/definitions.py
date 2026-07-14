@@ -67,7 +67,16 @@ def row_event_ts(row: Dict[str, Any]) -> Optional[datetime]:
     # (occurred_at/starts_at), then the entry stamp. entry_at-before-starts_at
     # collapsed grow sessions onto their INGEST day (entry_at = file load
     # moment for that connector) — starts_at is when it actually happened.
-    for field in ("event_at", "ts", "occurred_at", "starts_at", "entry_at", "created_at"):
+    for field in (
+        "event_at",
+        "ts",
+        "occurred_at",
+        "starts_at",
+        "entry_at",
+        "posted_at",
+        "start_date",
+        "created_at",
+    ):
         ts = parse_ts(row.get(field))
         if ts is not None:
             return ts

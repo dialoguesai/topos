@@ -10,6 +10,7 @@ from topos.sources.scrub_attribution import (
     remove_raw_and_flat_tables,
     scrub_attributed_rows,
 )
+from topos.sources.definitions import CANONICAL_ADDRESS_BOOK_SOURCE_ID
 from topos.storage.db.migrations import apply_all_migrations
 
 
@@ -178,3 +179,56 @@ def test_purge_legacy_summary_shape(conn: sqlite3.Connection) -> None:
     assert "rows_deleted" in summary
     assert summary["rows_deleted"] == 1
     assert isinstance(summary["table_actions"], list)
+
+
+def test_source_scrub_preserves_shared_contacts_and_collects_orphans(
+    conn: sqlite3.Connection,
+) -> None:
+    conn.executemany(
+        """
+        INSERT INTO contacts (
+            contact_id, dataset_id, source_id, display_name, is_self, created_at, updated_at
+        ) VALUES (?, 'dataset-1', ?, ?, 0, datetime('now'), datetime('now'))
+        """,
+        [
+            ("shared", CANONICAL_ADDRESS_BOOK_SOURCE_ID, "Shared Person"),
+            ("orphan", CANONICAL_ADDRESS_BOOK_SOURCE_ID, "Channel-only Person"),
+        ],
+    )
+    conn.executemany(
+        """
+        INSERT INTO contact_identifiers (
+            dataset_id, source_id, identifier, identifier_type, contact_id, created_at, updated_at
+        ) VALUES ('dataset-1', ?, ?, 'phone', ?, datetime('now'), datetime('now'))
+        """,
+        [
+            ("imessage", "+15550001", "shared"),
+            ("signal", "+15550001", "shared"),
+            ("imessage", "+15550002", "orphan"),
+        ],
+    )
+    conn.commit()
+
+    result = scrub_attributed_rows(conn, "imessage")
+
+    assert conn.execute(
+        "SELECT COUNT(*) FROM contacts WHERE contact_id='shared'"
+    ).fetchone()[0] == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM contacts WHERE contact_id='orphan'"
+    ).fetchone()[0] == 0
+    assert [
+        row[0]
+        for row in conn.execute(
+            "SELECT source_id FROM contact_identifiers WHERE contact_id='shared'"
+        ).fetchall()
+    ] == ["signal"]
+    assert any(
+        item.table == "contacts" and item.action == "rows_deleted" and item.count == 1
+        for item in result.tables
+    )
+
+
+def test_generic_scrub_rejects_canonical_address_book(conn: sqlite3.Connection) -> None:
+    with pytest.raises(ValueError, match="canonical address book"):
+        scrub_attributed_rows(conn, CANONICAL_ADDRESS_BOOK_SOURCE_ID)
