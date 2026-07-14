@@ -100,3 +100,35 @@ def test_status_reports_dirty_and_last_run(monkeypatch):
     graph_refresh.mark_graph_dirty()
     assert _wait_for(lambda: graph_refresh.status()["last_run_at"] is not None)
     assert graph_refresh.status()["dirty"] is False
+
+
+def test_graph_rebuilds_on_startup_after_debounce_interrupt(tmp_path, monkeypatch):
+    import sqlite3
+
+    from topos.storage.db.migrations.pipeline_jobs_v1 import apply_pipeline_jobs_v1_up
+
+    db = sqlite3.connect(str(tmp_path / "graph.db"))
+    apply_pipeline_jobs_v1_up(db)
+    db.execute("UPDATE graph_materialization_state SET dirty_generation=2, materialized_generation=0 WHERE id=1")
+    db.commit()
+
+    calls = []
+
+    def _rebuild():
+        calls.append(1)
+        db.execute(
+            "UPDATE graph_materialization_state SET materialized_generation=dirty_generation WHERE id=1"
+        )
+        db.commit()
+
+    monkeypatch.setenv("TOPOS_GRAPH_REFRESH_DEBOUNCE_S", "60")
+    monkeypatch.setattr("topos.core.state.get_db_connection", lambda: db)
+    graph_refresh.reset_for_tests(rebuild_fn=_rebuild)
+    graph_refresh.reconcile_graph_on_startup(db)
+    assert _wait_for(lambda: len(calls) == 1)
+    row = db.execute(
+        "SELECT dirty_generation, materialized_generation FROM graph_materialization_state WHERE id=1"
+    ).fetchone()
+    assert row[0] == row[1]
+    db.close()
+

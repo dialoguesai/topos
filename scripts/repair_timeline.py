@@ -53,6 +53,11 @@ def _parser() -> argparse.ArgumentParser:
     parser.add_argument("--backup", help="Copy the database to this path before applying")
     parser.add_argument("--batch-size", type=int, default=500)
     parser.add_argument("--report", help="Write the JSON report to this path")
+    parser.add_argument(
+        "--report-orphans",
+        action="store_true",
+        help="Print orphaned timeline rows (timeline rows with no canonical match)",
+    )
     return parser
 
 
@@ -69,6 +74,21 @@ def main() -> int:
     uri = f"file:{db_path}?mode={'rw' if args.apply else 'ro'}"
     conn = sqlite3.connect(uri, uri=True)
     try:
+        if args.report_orphans:
+            orphan_report = project_canonical_timeline(
+                conn,
+                source_id=args.source_id if not args.all_sources else None,
+                dry_run=True,
+                missing_only=True,
+                commit=False,
+            )
+            rendered = json.dumps(orphan_report.get("orphaned", {}), indent=2, sort_keys=True)
+            print(rendered)
+            if args.report:
+                report_path = Path(args.report).expanduser().resolve()
+                report_path.parent.mkdir(parents=True, exist_ok=True)
+                report_path.write_text(rendered + "\n")
+            return 0
         if args.apply:
             backup_path = Path(args.backup).expanduser().resolve()
             backup_path.parent.mkdir(parents=True, exist_ok=True)

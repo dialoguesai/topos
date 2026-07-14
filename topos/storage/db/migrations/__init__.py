@@ -114,6 +114,10 @@ from .derivation_ledger_v1 import (
     MIGRATION_ID as DERIVATION_LEDGER_V1_ID,  # noqa: F401 — exported for tests/tools
     apply_derivation_ledger_v1_up,
 )
+from .pipeline_jobs_v1 import (
+    MIGRATION_ID as PIPELINE_JOBS_V1_ID,  # noqa: F401 — exported for tests/tools
+    apply_pipeline_jobs_v1_up,
+)
 from .canonical_address_book_v1 import (
     MIGRATION_ID as CANONICAL_ADDRESS_BOOK_V1_ID,  # noqa: F401 — exported for tests/tools
     apply_canonical_address_book_v1_up,
@@ -187,6 +191,7 @@ def apply_all_migrations(conn: sqlite3.Connection) -> None:
     apply_activity_events_content_v1_up(conn)
     # Upgrade runner: per-step re-derivation state (topos/upgrades).
     apply_derivation_ledger_v1_up(conn)
+    apply_pipeline_jobs_v1_up(conn)
     apply_canonical_address_book_v1_up(conn)
 
 
@@ -260,4 +265,6 @@ def ensure_migrations_applied(conn: sqlite3.Connection) -> None:
     # P2.1 activity_events hostname + content column adds re-run cheaply after
     # legacy DDL (activity_events uses CREATE TABLE IF NOT EXISTS).
     apply_activity_events_content_v1_up(conn)
+    apply_derivation_ledger_v1_up(conn)
+    apply_pipeline_jobs_v1_up(conn)
     apply_canonical_address_book_v1_up(conn)

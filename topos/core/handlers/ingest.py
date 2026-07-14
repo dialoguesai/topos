@@ -69,10 +69,23 @@ async def handle_app_ingest(message: Dict[str, Any]) -> Optional[Dict[str, Any]]
         write_id = str(payload.get("write_id") or "").strip() or None
 
         if write_id:
-            from ...ingestion.usage_inbox_dedupe import get_prior_delivery, record_delivery
+            from ...ingestion.usage_inbox_dedupe import (
+                ensure_derivation_enqueued,
+                get_prior_delivery,
+                is_derivation_complete,
+                record_delivery,
+            )
 
             prior = get_prior_delivery(write_id)
             if prior is not None:
+                if not is_derivation_complete(write_id):
+                    ensure_derivation_enqueued(
+                        write_id,
+                        source_id=source_id,
+                    )
+                    from ...pipeline.job_runner import start_pipeline_worker
+
+                    start_pipeline_worker(hub.get_db_connection)
                 response_payload = {
                     "write_id": write_id,
                     "records_processed": prior["records_processed"],
@@ -140,7 +153,9 @@ async def handle_app_ingest(message: Dict[str, Any]) -> Optional[Dict[str, Any]]
                 "error_code": "schema_validation",
                 "error": "records required and must be non-empty",
             }
-        from ...ingestion.ingest_helpers import ingest_ui_payload, run_inbox_deferred_enrichment
+        from ...ingestion.ingest_helpers import ingest_ui_payload
+        from ...pipeline.job_store import enqueue_job
+        from ...pipeline.job_runner import start_pipeline_worker
         processed = 0
         errors = []
         records_total = len(records)
@@ -218,23 +233,30 @@ async def handle_app_ingest(message: Dict[str, Any]) -> Optional[Dict[str, Any]]
             "errors": errors,
         }
         if processed > 0 and enrichment_contexts:
-
-            def _log_enrichment_task(task: asyncio.Task) -> None:
-                if task.cancelled():
-                    return
-                exc = task.exception()
-                if exc is not None:
-                    logger.warning(
-                        "[PIPELINE:APP_INGEST] Background enrichment failed source_id=%s write_id=%s: %s",
-                        source_id,
-                        write_id or "",
-                        exc,
-                        exc_info=exc,
-                    )
-
-            for ctx in enrichment_contexts:
-                task = asyncio.create_task(run_inbox_deferred_enrichment(ctx))
-                task.add_done_callback(_log_enrichment_task)
+            db_conn = hub.get_db_connection()
+            if db_conn:
+                merged_records: list = []
+                sync_batch_id = None
+                for ctx in enrichment_contexts:
+                    merged_records.extend(ctx.get("canonical_records") or [])
+                    sync_batch_id = sync_batch_id or ctx.get("sync_batch_id")
+                job_payload = {
+                    "source_id": source_id,
+                    "sync_batch_id": sync_batch_id,
+                    "canonical_records": merged_records,
+                    "write_id": write_id,
+                }
+                idempotency = f"inbox_derivation:{write_id}" if write_id else f"inbox:{source_id}:{sync_batch_id}"
+                enqueue_job(
+                    db_conn,
+                    kind="inbox_deferred_enrichment",
+                    payload=job_payload,
+                    source_id=source_id,
+                    write_id=write_id,
+                    sync_batch_id=str(sync_batch_id) if sync_batch_id else None,
+                    idempotency_key=idempotency,
+                )
+                start_pipeline_worker(hub.get_db_connection)
         if write_id and processed > 0:
             from ...ingestion.usage_inbox_dedupe import record_delivery
 
@@ -327,130 +349,61 @@ async def handle_start_ingestion(message: Dict[str, Any]) -> Optional[Dict[str, 
         return {"id": req_id, "status": "error", "error": "job_id required"}
     
     try:
-        print(f"\033[93m[CRITICAL TOPOS HANDLER] start_ingestion: Starting background task\033[0m", file=sys.stderr, flush=True)
-        
-        # Determine control plane base URL for progress updates
-        # Use module-level settings (already imported at top of file, line 15)
+        from ...pipeline.job_store import enqueue_job, get_job
+        from ...pipeline.job_runner import start_pipeline_worker
+
         progress_api_url = None
         progress_api_key = str(payload.get("progress_api_key") or settings.topos_key or "")
-        
+
         control_plane_url = settings.topos_control_plane_url
         if control_plane_url:
-            # Extract base URL from WebSocket URL (wss://host/ws/engine -> https://host)
             if control_plane_url.startswith("wss://"):
                 progress_api_url = control_plane_url.replace("wss://", "https://").split("/ws/")[0]
             elif control_plane_url.startswith("ws://"):
                 progress_api_url = control_plane_url.replace("ws://", "http://").split("/ws/")[0]
             else:
                 progress_api_url = control_plane_url
-        
-        print(f"\033[93m[CRITICAL TOPOS HANDLER] start_ingestion: progress_api_url={progress_api_url}\033[0m", file=sys.stderr, flush=True)
-        
-        # Background processing function
-        async def _process_ingestion_in_background():
-            try:
-                print(f"\033[93m[CRITICAL TOPOS BACKGROUND] Ingestion background task started: job_id={job_id}\033[0m", file=sys.stderr, flush=True)
-                
-                if isinstance(file_base64, str) and file_base64:
-                    payload_bytes = base64.b64decode(file_base64)
-                    result = await ingest_file_payload(
-                        dataset_id=dataset_id or "",
-                        schema_id=schema_id,
-                        file_bytes=payload_bytes,
-                        file_format=file_format,
-                        job_id=job_id,
-                        source_id=source_id,
-                        source_definition=source_definition,
-                        progress_api_url=progress_api_url,
-                        progress_api_key=progress_api_key,
-                    )
-                elif file_url:
-                    payload_bytes = await _download_ingestion_payload(str(file_url))
-                    result = await ingest_file_payload(
-                        dataset_id=dataset_id or "",
-                        schema_id=schema_id,
-                        file_bytes=payload_bytes,
-                        file_format=file_format,
-                        job_id=job_id,
-                        source_id=source_id,
-                        source_definition=source_definition,
-                        progress_api_url=progress_api_url,
-                        progress_api_key=progress_api_key,
-                    )
-                else:
-                    result = await ingest_file_payload(
-                        dataset_id=dataset_id or "",
-                        schema_id=schema_id,
-                        file_path=file_path,
-                        file_format=file_format,
-                        job_id=job_id,
-                        source_id=source_id,
-                        source_definition=source_definition,
-                        progress_api_url=progress_api_url,
-                        progress_api_key=progress_api_key,
-                    )
-                
-                print(f"\033[93m[CRITICAL TOPOS BACKGROUND] Ingestion complete: job_id={job_id}, result={result}\033[0m", file=sys.stderr, flush=True)
-                
-                # Send final progress update
-                if progress_api_url and progress_api_key:
-                    try:
-                        import httpx
-                        async with httpx.AsyncClient(timeout=10.0) as client:
-                            await client.post(
-                                f"{progress_api_url}/v1/ingestion/progress",
-                                json={
-                                    "job_id": job_id,
-                                    "user_id": owner_user_id,
-                                    "dataset_id": dataset_id,
-                                    "status": "completed",
-                                    "progress_percent": 100.0,
-                                    "records_processed": result.get("records_processed", 0),
-                                    "records_total": result.get("records_total"),
-                                },
-                                headers={"Authorization": f"Bearer {progress_api_key}"},
-                            )
-                    except Exception as exc:
-                        print(f"\033[91m[CRITICAL TOPOS BACKGROUND] Failed to send final progress: {exc}\033[0m", file=sys.stderr, flush=True)
-            except Exception as e:
-                print(f"\033[91m[CRITICAL TOPOS BACKGROUND] Ingestion error: {e}\033[0m", file=sys.stderr, flush=True)
-                import traceback
-                print(f"\033[91m[CRITICAL TOPOS BACKGROUND] Traceback:\n{traceback.format_exc()}\033[0m", file=sys.stderr, flush=True)
-                
-                # Send error progress update
-                if progress_api_url and progress_api_key:
-                    try:
-                        import httpx
-                        error_message = f"Ingestion failed while parsing uploaded file: {str(e)}"
-                        async with httpx.AsyncClient(timeout=10.0) as client:
-                            await client.post(
-                                f"{progress_api_url}/v1/ingestion/progress",
-                                json={
-                                    "job_id": job_id,
-                                    "user_id": owner_user_id,
-                                    "dataset_id": dataset_id,
-                                    "status": "failed",
-                                    "current_step": "parsing",
-                                    "progress_percent": 0.0,
-                                    "records_processed": 0,
-                                    "error_message": error_message,
-                                    "errors": [
-                                        {
-                                            "error_type": "parse_error",
-                                            "error": error_message,
-                                            "record_index": 0,
-                                        }
-                                    ],
-                                },
-                                headers={"Authorization": f"Bearer {progress_api_key}"},
-                            )
-                    except Exception:
-                        pass
-        
-        # Start background task (non-blocking)
-        asyncio.create_task(_process_ingestion_in_background())
-        
-        print(f"\033[93m[CRITICAL TOPOS HANDLER] start_ingestion: Returning immediately\033[0m", file=sys.stderr, flush=True)
+
+        db_conn = hub.get_db_connection()
+        if not db_conn:
+            return {"id": req_id, "status": "error", "error": "Database connection not available"}
+
+        existing = get_job(db_conn, str(job_id))
+        if existing and existing.get("status") == "done":
+            return {
+                "id": req_id,
+                "status": "ok",
+                "payload": {"job_id": job_id, "status": "completed", "deduplicated": True},
+            }
+
+        job_payload: Dict[str, Any] = {
+            "dataset_id": dataset_id or "",
+            "schema_id": schema_id,
+            "file_format": file_format,
+            "job_id": job_id,
+            "source_id": source_id,
+            "source_definition": source_definition,
+            "progress_api_url": progress_api_url,
+            "progress_api_key": progress_api_key,
+            "owner_user_id": owner_user_id,
+        }
+        if isinstance(file_base64, str) and file_base64:
+            job_payload["file_base64"] = file_base64
+        elif file_url:
+            job_payload["file_url"] = str(file_url)
+        else:
+            job_payload["file_path"] = file_path
+
+        enqueue_job(
+            db_conn,
+            kind="file_ingestion",
+            payload=job_payload,
+            job_id=str(job_id),
+            source_id=source_id,
+            idempotency_key=f"file_ingestion:{job_id}",
+        )
+        start_pipeline_worker(hub.get_db_connection)
+
         return {"id": req_id, "status": "ok", "payload": {"job_id": job_id, "status": "processing"}}
     except Exception as exc:  # noqa: BLE001
         print(f"\033[91m[CRITICAL TOPOS HANDLER] start_ingestion exception: {exc}\033[0m", file=sys.stderr, flush=True)

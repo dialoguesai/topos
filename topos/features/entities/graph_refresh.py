@@ -57,6 +57,10 @@ def _default_rebuild() -> None:
         logger.debug("graph refresh skipped: no database connection")
         return
     report = rebuild_entity_graph(conn)
+    try:
+        _mark_materialized(conn)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("graph materialization stamp failed: %s", exc)
     logger.info("graph refresh: %s", report)
 
 
@@ -132,7 +136,58 @@ _refresher = _Refresher()
 
 def mark_graph_dirty() -> None:
     """Enrichment completed for a source — schedule a debounced graph rebuild."""
+    try:
+        from ...core.state import get_db_connection
+
+        conn = get_db_connection()
+        if conn is not None:
+            _persist_dirty_generation(conn)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("graph dirty persistence skipped: %s", exc)
     _refresher.mark()
+
+
+def _persist_dirty_generation(conn) -> None:
+    from ...storage.db.migrations.pipeline_jobs_v1 import apply_pipeline_jobs_v1_up
+
+    apply_pipeline_jobs_v1_up(conn)
+    conn.execute(
+        """
+        UPDATE graph_materialization_state
+        SET dirty_generation = dirty_generation + 1
+        WHERE id = 1
+        """
+    )
+    conn.commit()
+
+
+def reconcile_graph_on_startup(conn) -> None:
+    """Rebuild immediately when persisted dirty generation trails materialized."""
+    from ...storage.db.migrations.pipeline_jobs_v1 import apply_pipeline_jobs_v1_up
+
+    apply_pipeline_jobs_v1_up(conn)
+    row = conn.execute(
+        "SELECT dirty_generation, materialized_generation FROM graph_materialization_state WHERE id=1"
+    ).fetchone()
+    if not row:
+        return
+    dirty, materialized = int(row[0]), int(row[1])
+    if dirty > materialized:
+        _refresher._rebuild_fn()
+
+
+def _mark_materialized(conn) -> None:
+    conn.execute(
+        """
+        UPDATE graph_materialization_state
+        SET materialized_generation = dirty_generation,
+            last_run_at = ?,
+            last_error = NULL
+        WHERE id = 1
+        """,
+        (datetime.now(timezone.utc).isoformat(),),
+    )
+    conn.commit()
 
 
 def status() -> Dict[str, Any]:

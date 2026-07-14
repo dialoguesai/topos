@@ -240,3 +240,56 @@ def test_local_sync_projects_timeline_even_without_enrichment_source(conn) -> No
         "SELECT canonical_table, source_id FROM timeline WHERE record_id='local-message-1'"
     ).fetchone()
     assert tuple(stored) == ("conversation_messages", "imessage")
+
+
+def test_coverage_api_detects_deleted_timeline_row(conn, monkeypatch) -> None:
+    from topos.api.enrichment import _enrichment_coverage_core
+
+    monkeypatch.setattr("topos.api.enrichment.get_db_connection", lambda: conn)
+
+    conn.execute(
+        """
+        INSERT INTO activity_events (event_id, source_id, occurred_at, url, title)
+        VALUES ('cov-event-1', 'browser_visits', '2026-07-13T12:00:00Z', 'https://example.com', 'Example')
+        """
+    )
+    project_canonical_timeline(conn, source_id="browser_visits", missing_only=True)
+    conn.execute("DELETE FROM timeline WHERE record_id='cov-event-1'")
+
+    coverage = _enrichment_coverage_core("browser_visits")
+    timeline_job = next(job for job in coverage["jobs"] if job["job_id"] == "timeline")
+    assert timeline_job["enriched_records"] == 0
+    assert timeline_job["coverage_percent"] == 0.0
+
+
+def test_only_missing_backfill_restores_timeline(conn, monkeypatch) -> None:
+    import asyncio
+
+    from topos.api.enrichment import _generic_backfill_core
+    from topos.sources.registry import REGISTRY
+
+    monkeypatch.setattr("topos.api.enrichment.get_db_connection", lambda: conn)
+
+    conn.execute(
+        """
+        INSERT INTO activity_events (event_id, source_id, occurred_at, url, title)
+        VALUES ('backfill-event-1', 'browser_visits', '2026-07-13T12:00:00Z', 'https://example.com', 'Example')
+        """
+    )
+    project_canonical_timeline(conn, source_id="browser_visits", missing_only=True)
+    conn.execute("DELETE FROM timeline WHERE record_id='backfill-event-1'")
+
+    source_def = REGISTRY.get("browser_visits")
+    result = asyncio.run(
+        _generic_backfill_core(source_def=source_def, job_name="timeline", only_missing=True)
+    )
+    assert result["rows_processed"] >= 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM timeline WHERE record_id='backfill-event-1'"
+    ).fetchone()[0] == 1
+
+    repeated = asyncio.run(
+        _generic_backfill_core(source_def=source_def, job_name="timeline", only_missing=True)
+    )
+    assert repeated["rows_processed"] == 0
+
