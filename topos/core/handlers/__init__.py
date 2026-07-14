@@ -160,6 +160,7 @@ from . import (  # noqa: F401  (imported for handler registration side effects)
     query,
     database_explorer,
     enrichment,
+    tool_index,
     uma,
     messenger_analytics,
     contacts_import,
