@@ -13,7 +13,7 @@ logger = logging.getLogger("topos.engine.huggingface")
 # Default models (same as current website_classifier and emo_27_job)
 DEFAULT_URL_CLASSIFICATION_MODEL = "KnutJaegersberg/website-classifier"
 DEFAULT_EMOTION_MODEL = "SamLowe/roberta-base-go_emotions"
-DEFAULT_NER_MODEL = "dslim/bert-base-NER"
+DEFAULT_NER_MODEL = "djagatiya/ner-roberta-base-ontonotesv5-englishv4"
 DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
 DEFAULT_SENTIMENT_MODEL = "cardiffnlp/twitter-roberta-base-sentiment-latest"
 DEFAULT_RERANK_MODEL = "cross-encoder/ms-marco-MiniLM-L-6-v2"
@@ -112,6 +112,10 @@ def _match_slot(model_name: str) -> Optional[ModelSlot]:
     return None
 
 
+# Sentence/bracket punctuation trimmed off span edges after word snapping.
+_EDGE_TRIM_CHARS = ".,;:!?…\"'()[]{}"
+
+
 def _stitch_wordpiece_entities(
     text: str, raw: List[Dict[str, Any]]
 ) -> List[Dict[str, Any]]:
@@ -156,6 +160,14 @@ def _stitch_wordpiece_entities(
             start -= 1
         while end < n and text[end].isalnum():
             end += 1
+        # Byte-level tokenizers (roberta) merge adjacent punctuation into the
+        # word token, so sentence-final spans arrive as "Austin." — trim edge
+        # punctuation AFTER snapping. Conservative set: sentence/bracket marks
+        # only, so identifier-ish surfaces (@handle, C++) keep their symbols.
+        while end > start and text[end - 1] in _EDGE_TRIM_CHARS:
+            end -= 1
+        while start < end and text[start] in _EDGE_TRIM_CHARS:
+            start += 1
         ent["start"], ent["end"] = start, end
         ent["word"] = text[start:end]
 

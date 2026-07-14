@@ -29,14 +29,31 @@ logger = logging.getLogger("topos.features.entities.resolver")
 AUTO_MERGE_SCORE = 0.92
 REVIEW_SCORE = 0.80
 
+# Model labels → spine entity_type. Covers CoNLL-2003 (PER/ORG/LOC/MISC) and
+# OntoNotes 5 (18 types): identity-bearing labels get first-class or folded
+# types; everything else falls through to "topic".
 _NER_TYPE_MAP = {
     "PER": "person",
     "PERSON": "person",
     "ORG": "org",
     "LOC": "place",
     "GPE": "place",
+    "FAC": "place",  # buildings, airports, venues
+    "NORP": "org",  # nationality/religious/political groups
     "MISC": "topic",
+    "WORK_OF_ART": "work_of_art",
+    "EVENT": "event",
+    "PRODUCT": "product",
+    "LAW": "topic",
+    "LANGUAGE": "topic",
 }
+
+# Value labels are quantities, not identities — dropping them here (instead of
+# letting the unknown-label fallback bucket them into "topic") is what keeps an
+# OntoNotes model from flooding the spine with dates and dollar amounts.
+_NER_DROP_LABELS = frozenset(
+    {"DATE", "TIME", "PERCENT", "MONEY", "QUANTITY", "ORDINAL", "CARDINAL"}
+)
 
 _HONORIFICS = ("dr", "mr", "mrs", "ms", "prof", "dr.")
 
@@ -70,8 +87,12 @@ def token_set_similarity(a: str, b: str) -> float:
     return max(scores)
 
 
-def map_ner_type(ner_label: Optional[str]) -> str:
-    return _NER_TYPE_MAP.get(str(ner_label or "").upper(), "topic")
+def map_ner_type(ner_label: Optional[str]) -> Optional[str]:
+    """Spine entity_type for a model label; None = drop the mention entirely."""
+    label = str(ner_label or "").upper()
+    if label in _NER_DROP_LABELS:
+        return None
+    return _NER_TYPE_MAP.get(label, "topic")
 
 
 # Function/common words that NER routinely mislabels as MISC/topic entities.

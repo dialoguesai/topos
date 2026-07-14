@@ -87,3 +87,25 @@ def test_defensive_on_missing_offsets():
     raw = [{"word": "thing", "entity_group": "MISC", "score": 0.9}]
     out = _stitch_wordpiece_entities(text, raw)
     assert out == raw  # no offsets → untouched
+
+
+def test_bytelevel_edge_punctuation_trimmed():
+    # roberta byte-level spans absorb adjacent punctuation ("Austin." at
+    # sentence end, quoted titles) — edges are trimmed after word snapping.
+    text = 'We watched "Dune" then flew to Austin.'
+    raw = [
+        _ent('Dune"', "WORK_OF_ART", 0.99, 12, 17),  # span includes quote
+        _ent(" Austin.", "GPE", 0.98, 31, 38),        # span includes period
+    ]
+    out = _stitch_wordpiece_entities(text, raw)
+    assert [e["word"] for e in out] == ["Dune", "Austin"]
+
+
+def test_interior_symbols_survive_edge_trim():
+    text = "Ping @maya-dev about C++ tonight"
+    raw = [
+        _ent("@maya-dev", "PERSON", 0.9, 5, 14),
+        _ent("C++", "PRODUCT", 0.8, 21, 24),
+    ]
+    out = _stitch_wordpiece_entities(text, raw)
+    assert [e["word"] for e in out] == ["@maya-dev", "C++"]
