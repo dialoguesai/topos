@@ -323,7 +323,9 @@ def graph_snapshot(
     min_weight: float = 0.0,
     include_closed: bool = False,
     as_of: Optional[str] = None,
-) -> Dict[str, List[Dict[str, Any]]]:
+    selection: str = "weight",
+    offset: int = 0,
+) -> Dict[str, Any]:
     """Entity graph in the legacy list_graph shape (nodes/edges dicts).
 
     Validity fields ride first-class on each edge (graph-UI audit): active
@@ -333,27 +335,55 @@ def graph_snapshot(
     — edges whose validity window covers it (valid_from <= as_of < valid_to) —
     driving a temporal scrubber. It supersedes include_closed (a point-in-time
     view is neither "active now" nor "all history").
+
+    ``selection``:
+      - ``weight`` (default): ORDER BY weight DESC — MCP / firewall-safe slice.
+      - ``all``: ORDER BY recency (last_event_at/valid_from) — owner UI full graph.
+
+    ``offset`` pages the ordered edge list for Load more. Response includes
+    ``meta`` with truncation flags and ``next_offset`` when more edges remain.
     """
-    params: List[Any] = [min_weight]
+    sel = str(selection or "weight").strip().lower()
+    if sel not in ("weight", "all"):
+        sel = "weight"
+    off = max(0, int(offset or 0))
+    lim_e = max(1, int(limit_edges))
+    lim_n = max(1, int(limit_nodes))
+
+    where_params: List[Any] = [min_weight]
     if as_of:
         clause = (
             " AND (valid_from IS NULL OR valid_from <= ?)"
             " AND (valid_to IS NULL OR valid_to > ?)"
         )
-        params.extend([as_of, as_of])
+        where_params.extend([as_of, as_of])
     elif include_closed:
         clause = ""
     else:
         clause = " AND valid_to IS NULL"
-    params.append(limit_edges)
+
+    where_sql = f"FROM entity_edges WHERE weight >= ?{clause}"
+    total_edges_matching = int(
+        conn.execute(f"SELECT COUNT(*) {where_sql}", tuple(where_params)).fetchone()[0]
+    )
+
+    if sel == "all":
+        order_sql = (
+            "ORDER BY COALESCE(last_event_at, valid_from) DESC, edge_id DESC"
+        )
+    else:
+        order_sql = "ORDER BY weight DESC, edge_id DESC"
+
+    edge_params = list(where_params) + [lim_e, off]
     edge_rows = conn.execute(
         f"""
         SELECT edge_id, src_entity_id, dst_entity_id, edge_type, weight, evidence_count,
                last_event_at, valid_from, valid_to, metadata_json
-        FROM entity_edges WHERE weight >= ?{clause} ORDER BY weight DESC LIMIT ?
+        {where_sql} {order_sql} LIMIT ? OFFSET ?
         """,
-        tuple(params),
+        tuple(edge_params),
     ).fetchall()
+
     def _edge_metadata(evidence, last_at, stored_json) -> str:
         """Stored edge metadata (provenance role_mix, fact statement, mz tag)
         merged with the synthesized evidence fields the UI has always read."""
@@ -372,7 +402,8 @@ def graph_snapshot(
         for node in (src, dst):
             if node not in node_ids:
                 node_ids.append(node)
-    node_ids = node_ids[:limit_nodes]
+    nodes_before_cap = len(node_ids)
+    node_ids = node_ids[:lim_n]
     nodes = []
     for entity_id in node_ids:
         row = conn.execute(
@@ -421,4 +452,25 @@ def graph_snapshot(
         for eid, src, dst, etype, weight, evidence, last_at, valid_from, valid_to, stored_json in edge_rows
         if src in node_id_set and dst in node_id_set
     ]
-    return {"nodes": nodes, "edges": edges}
+
+    sql_page_len = len(edge_rows)
+    truncated_edges = (off + sql_page_len) < total_edges_matching
+    truncated_nodes = nodes_before_cap > lim_n
+    next_offset = (off + sql_page_len) if truncated_edges else None
+
+    return {
+        "nodes": nodes,
+        "edges": edges,
+        "meta": {
+            "selection": sel,
+            "limit_nodes": lim_n,
+            "limit_edges": lim_e,
+            "offset": off,
+            "total_edges_matching": total_edges_matching,
+            "returned_edges": len(edges),
+            "returned_nodes": len(nodes),
+            "truncated_edges": truncated_edges,
+            "truncated_nodes": truncated_nodes,
+            "next_offset": next_offset,
+        },
+    }

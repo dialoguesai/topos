@@ -232,11 +232,13 @@ async def list_entities(
 # as an entity id.
 @router.get("/entities/graph")
 async def get_entity_graph(
-    limit_nodes: int = Query(default=100, ge=1, le=500),
-    limit_edges: int = Query(default=300, ge=1, le=1500),
+    limit_nodes: int = Query(default=100, ge=1, le=5000),
+    limit_edges: int = Query(default=300, ge=1, le=20000),
     min_weight: float = Query(default=0.0, ge=0.0),
     include_closed: bool = Query(default=False),
     as_of: Optional[str] = Query(default=None),
+    selection: str = Query(default="weight"),
+    offset: int = Query(default=0, ge=0),
     _api_key: str = Depends(require_api_key),
 ):
     """Entity-spine graph (decayed typed edges) in list_graph node/edge shape.
@@ -244,6 +246,9 @@ async def get_entity_graph(
     Each edge carries valid_from/valid_to/last_event_at. ``as_of`` (ISO date)
     returns the graph as it stood at that instant (temporal scrubber);
     ``include_closed`` adds ended edges to the present view.
+
+    ``selection=weight`` (default) ranks by weight for MCP/minimal slices;
+    ``selection=all`` ranks by recency for the owner knowledge-graph UI.
     """
     from ..features.entities.reads import entity_graph
 
@@ -254,6 +259,8 @@ async def get_entity_graph(
         min_weight=min_weight,
         include_closed=include_closed,
         as_of=as_of,
+        selection=selection,
+        offset=offset,
     )
 
 
