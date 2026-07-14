@@ -132,6 +132,10 @@ app.include_router(data_commit_routes.router)
 
 @app.on_event("startup")
 async def startup_event() -> None:
+    from .runtime_shutdown import clear_shutdown, install_shutdown_signal_hooks
+
+    clear_shutdown()
+    install_shutdown_signal_hooks()
     align_uvicorn_loggers()
     _log_runtime_banner()
     logger.info("CORS allowed origins: %s", settings.allowed_origins)
@@ -296,6 +300,11 @@ async def startup_event() -> None:
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
+    from .runtime_shutdown import request_shutdown
+
+    # Wake cooperative workers (fact_llm / Ollama threads) before awaiting
+    # network teardown so Ctrl+C does not wait out a full enrichment batch.
+    request_shutdown("app_shutdown")
     await stop_runtime_update_monitor()
     if state.engine_presence_task:
         state.engine_presence_task.cancel()
