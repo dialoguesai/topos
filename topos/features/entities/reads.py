@@ -135,12 +135,16 @@ def entity_graph(
     min_weight: float = 0.0,
     include_closed: bool = False,
     as_of: Optional[str] = None,
+    selection: str = "weight",
+    offset: int = 0,
 ) -> Dict[str, Any]:
     return graph_snapshot(
         conn,
-        limit_nodes=max(1, min(int(limit_nodes), 500)),
-        limit_edges=max(1, min(int(limit_edges), 1500)),
+        limit_nodes=max(1, min(int(limit_nodes), 5000)),
+        limit_edges=max(1, min(int(limit_edges), 20000)),
         min_weight=max(0.0, float(min_weight)),
         include_closed=bool(include_closed),
         as_of=(str(as_of).strip() or None) if as_of else None,
+        selection=str(selection or "weight"),
+        offset=max(0, int(offset or 0)),
     )
