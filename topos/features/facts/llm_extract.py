@@ -104,6 +104,11 @@ _NUM_PREDICT = 512  # bounded output tokens for the JSON array.
 # re-enrichment can be tuned to the box; kept modest so we never starve the
 # concurrent LongMemEval / query traffic on the same ollama.
 FACTS_LLM_CONCURRENCY = max(1, int(os.environ.get("TOPOS_FACTS_LLM_CONCURRENCY", "4")))
+# Bound in-flight Ollama waits so Ctrl+C / shutdown cannot stall for the adapter
+# default (300s) once cooperative cancel has stopped scheduling new rows.
+FACTS_LLM_HTTP_TIMEOUT = max(
+    5.0, float(os.environ.get("TOPOS_FACTS_LLM_HTTP_TIMEOUT", "60"))
+)
 
 # Subject tokens that mean "the owner" (first person). Anything else is a
 # third party and its triple is dropped — we never mint an owner fact about
@@ -420,6 +425,10 @@ def _make_ollama_extractor(model: str) -> Callable[[str, Dict[str, Any]], List[D
     adapter = OllamaAdapter()
 
     def _extract(prompt: str, row: Dict[str, Any]) -> List[Dict[str, Any]]:
+        from ...runtime_shutdown import is_shutdown_requested
+
+        if is_shutdown_requested():
+            raise InterruptedError("engine shutting down")
         # temp 0 => deterministic; bounded output; keep_alive default so the
         # model stays warm across the batch.
         generated = adapter._generate(  # noqa: SLF001 (intentional low-level reuse)
@@ -427,6 +436,7 @@ def _make_ollama_extractor(model: str) -> Callable[[str, Dict[str, Any]], List[D
             prompt,
             num_predict=_NUM_PREDICT,
             temperature=0.0,
+            timeout=FACTS_LLM_HTTP_TIMEOUT,
         )
         response = str(generated.get("text") or "") if isinstance(generated, dict) else str(generated or "")
         usage = generated.get("usage") if isinstance(generated, dict) else None
@@ -519,23 +529,43 @@ def _owner_entity_id(conn: sqlite3.Connection) -> str:
 def _run_coro_blocking(coro: "asyncio.Future") -> Any:
     """Drive an async coroutine to completion from SYNCHRONOUS code.
 
-    extract_owner_facts_llm is sync (called inside extract_facts_from_batch,
-    which the async FactExtractionJob.enrich awaits directly on the event loop
-    thread). We therefore cannot assume asyncio.run() is safe:
-      - no running loop (unit tests, CLI re-enrich)  -> asyncio.run().
-      - a running loop (live ingest via enrich)       -> run the coroutine on a
-        dedicated worker thread with its own loop, so we never re-enter the
-        outer loop. The ollama calls inside still fan out concurrently there.
-    Either way this blocks until the fan-out is done; the caller then applies
-    the collected results serially on THIS thread (sqlite write-safety).
+    extract_owner_facts_llm is sync (called inside extract_facts_from_batch).
+    Live ingest offloads that sync path via asyncio.to_thread from
+    FactExtractionJob.enrich, so this usually runs on a worker thread with no
+    event loop. We still handle both cases:
+      - no running loop (to_thread worker, unit tests, CLI) -> asyncio.run().
+      - a running loop (mis-call from async context)        -> run the coroutine
+        on a dedicated worker thread with its own loop, so we never re-enter
+        the outer loop. The ollama calls inside still fan out concurrently there.
+    Either way this blocks until the fan-out is done (or shutdown is requested);
+    the caller then applies the collected results serially on THIS thread
+    (sqlite write-safety).
     """
+    from concurrent.futures import TimeoutError as FuturesTimeoutError
+
+    from ...runtime_shutdown import is_shutdown_requested
+
     try:
         asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(coro)
     # A loop is already running on this thread: offload to a fresh thread+loop.
+    # Poll with a short timeout so Ctrl+C / shutdown can interrupt the wait
+    # instead of parking forever on Future.result().
     with ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(lambda: asyncio.run(coro)).result()
+        fut = pool.submit(lambda: asyncio.run(coro))
+        while True:
+            try:
+                return fut.result(timeout=0.25)
+            except FuturesTimeoutError:
+                if is_shutdown_requested():
+                    # Cooperative gather should finish shortly; don't wait forever.
+                    try:
+                        return fut.result(timeout=min(5.0, FACTS_LLM_HTTP_TIMEOUT))
+                    except FuturesTimeoutError as exc:
+                        raise InterruptedError(
+                            "engine shutting down during fact_llm fan-out"
+                        ) from exc
 
 
 async def _gather_extractions(
@@ -552,15 +582,23 @@ async def _gather_extractions(
     is captured so the caller can decide (log / stop on unreachable). Results are
     returned in input order so the serial write phase is deterministic.
     """
+    from ...runtime_shutdown import is_shutdown_requested
+
     sem = asyncio.Semaphore(concurrency)
 
     async def _one(
         index: int, prompt: str, row: Dict[str, Any]
     ) -> Tuple[int, Optional[List[Dict[str, Any]]], Optional[Exception]]:
+        if is_shutdown_requested():
+            return (index, [], None)
         async with sem:
+            if is_shutdown_requested():
+                return (index, [], None)
             try:
                 triples = await asyncio.to_thread(extractor, prompt, row)
                 return (index, triples or [], None)
+            except InterruptedError as exc:
+                return (index, None, exc)
             except Exception as exc:  # noqa: BLE001 — captured, handled by caller
                 return (index, None, exc)
 
@@ -591,7 +629,12 @@ def extract_owner_facts_llm(
     offline (NO network). When None, the real Ollama model is used (built
     lazily so importing this module never touches the network).
     """
+    from ...runtime_shutdown import is_shutdown_requested
+
     if not rows:
+        return 0
+    if is_shutdown_requested():
+        logger.info("LLM fact pass skipped; engine shutting down")
         return 0
     if settings is None:
         from ...config.settings import settings as _settings
@@ -689,6 +732,12 @@ def extract_owner_facts_llm(
     # re-attempting a dead server for the rest of the batch. ----------------------
     written = 0
     for index, triples, error in gathered:
+        if is_shutdown_requested():
+            logger.info(
+                "LLM fact pass stopping early on shutdown; wrote %d facts so far",
+                written,
+            )
+            break
         item = eligible[index]
         record_id = item["record_id"]
         table = item["table"]
@@ -696,6 +745,8 @@ def extract_owner_facts_llm(
         row = item["row"]
 
         if error is not None:
+            if isinstance(error, InterruptedError):
+                break
             logger.warning(
                 "LLM fact extraction failed for row %s (%s)", record_id, error
             )

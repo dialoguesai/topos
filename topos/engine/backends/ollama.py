@@ -201,6 +201,7 @@ class OllamaAdapter:
         keep_alive: Optional[str] = None,
         think: Optional[bool] = None,
         temperature: Optional[float] = None,
+        timeout: float = 300,
     ) -> Dict[str, Any]:
         body: Dict[str, Any] = {"model": model, "prompt": prompt, "stream": False}
         if keep_alive is not None:
@@ -221,7 +222,7 @@ class OllamaAdapter:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(req, timeout=300) as resp:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode())
                 prompt_tokens = int(data.get("prompt_eval_count") or 0)
                 completion_tokens = int(data.get("eval_count") or 0)
