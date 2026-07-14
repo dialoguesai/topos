@@ -7,7 +7,7 @@ year"). This module layers an LLM extraction pass ON TOP of the rules floor —
 purely additive, because ``FactStore.assert_fact`` de-dupes on
 ``object_key`` (same predicate+object refreshes rather than duplicating).
 
-Two things make this safe to run at ingest:
+Three things make this safe to run at ingest:
 
   1. ROLE GATE (the load-bearing invariant). We only ask the LLM about rows the
      owner is entitled to speak *for*:
@@ -28,6 +28,10 @@ Two things make this safe to run at ingest:
      unreachable (or any single row errors) we log and continue. The pass
      returns the count it managed to write and NEVER raises into ingestion —
      the rules floor already ran.
+
+  3. INCREMENTAL PERSISTENCE. Each completed row is written (and progress-marked)
+     immediately — not held until the whole batch finishes — so a multi-hour
+     pass survives Ctrl+C and resumes without re-paying Ollama for finished rows.
 
 Injecting ``extractor`` bypasses Ollama entirely (unit tests, offline CI):
 it is a callable ``(prompt: str, row: dict) -> list[dict]`` returning parsed
@@ -99,16 +103,22 @@ _NUM_PREDICT = 512  # bounded output tokens for the JSON array.
 
 # Bounded concurrency for the (slow, ~25s each) ollama calls. Mirrors
 # GoalExtractionJob.GOAL_BATCH_CONCURRENCY's semaphore approach — the LLM calls
-# fan out under a semaphore, but the sqlite writes stay serialized on the
-# calling thread (one connection is not threadsafe). Env-overridable so a big
-# re-enrichment can be tuned to the box; kept modest so we never starve the
-# concurrent LongMemEval / query traffic on the same ollama.
+# fan out under a semaphore, and each completed row is written to sqlite
+# immediately on the event-loop thread (one connection is not threadsafe).
+# Env-overridable so a big re-enrichment can be tuned to the box; kept modest
+# so we never starve concurrent LongMemEval / query traffic on the same ollama.
 FACTS_LLM_CONCURRENCY = max(1, int(os.environ.get("TOPOS_FACTS_LLM_CONCURRENCY", "4")))
 # Bound in-flight Ollama waits so Ctrl+C / shutdown cannot stall for the adapter
 # default (300s) once cooperative cancel has stopped scheduling new rows.
 FACTS_LLM_HTTP_TIMEOUT = max(
     5.0, float(os.environ.get("TOPOS_FACTS_LLM_HTTP_TIMEOUT", "60"))
 )
+
+# Per-record progress markers in extraction_artifacts so a multi-hour fact_llm
+# pass can resume after Ctrl+C without re-paying Ollama for finished rows
+# (including successful empty extractions).
+_FACT_LLM_PROGRESS_TYPE = "fact_llm_pass"
+_FACT_LLM_PROGRESS_VERSION = "fact_llm_v1"
 
 # Subject tokens that mean "the owner" (first person). Anything else is a
 # third party and its triple is dropped — we never mint an owner fact about
@@ -522,8 +532,77 @@ def _owner_entity_id(conn: sqlite3.Connection) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Bounded-concurrent LLM fan-out (mirrors GoalExtractionJob's semaphore pattern)
+# Progress markers (resume after interrupt) + bounded-concurrent fan-out
 # ---------------------------------------------------------------------------
+
+
+def _progress_source_ref(table: str, record_id: Any, source_id: Any = None) -> Dict[str, str]:
+    return _source_ref(table, record_id, source_id)
+
+
+def _already_processed_record_ids(
+    conn: sqlite3.Connection, eligible: List[Dict[str, Any]]
+) -> set:
+    """Record ids that already finished a fact_llm pass (including empty)."""
+    if not eligible:
+        return set()
+    try:
+        from ..signal.extraction.artifact_store import source_ref_hash
+    except Exception:  # noqa: BLE001
+        return set()
+
+    id_by_hash: Dict[str, str] = {}
+    for item in eligible:
+        ref = _progress_source_ref(
+            item["table"], item["record_id"], item["row"].get("source_id")
+        )
+        id_by_hash[source_ref_hash(_FACT_LLM_PROGRESS_TYPE, [ref])] = str(item["record_id"])
+
+    processed: set = set()
+    hashes = list(id_by_hash.keys())
+    # Stay under typical SQLite bind-variable limits.
+    chunk_size = 400
+    for offset in range(0, len(hashes), chunk_size):
+        chunk = hashes[offset : offset + chunk_size]
+        placeholders = ",".join("?" * len(chunk))
+        try:
+            rows = conn.execute(
+                f"""
+                SELECT source_ref_hash FROM extraction_artifacts
+                WHERE artifact_type=? AND source_ref_hash IN ({placeholders})
+                """,
+                (_FACT_LLM_PROGRESS_TYPE, *chunk),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            return set()
+        for row in rows:
+            rid = id_by_hash.get(str(row[0]))
+            if rid is not None:
+                processed.add(rid)
+    return processed
+
+
+def _mark_record_processed(
+    conn: sqlite3.Connection,
+    *,
+    table: str,
+    record_id: Any,
+    source_id: Any,
+    facts_written: int,
+) -> None:
+    """Persist that this record's LLM pass finished so a restart can skip it."""
+    try:
+        from ..signal.extraction.artifact_store import ExtractionArtifactStore
+
+        ExtractionArtifactStore(conn).upsert_artifact(
+            _FACT_LLM_PROGRESS_TYPE,
+            {"facts_written": int(facts_written), "status": "ok"},
+            source_refs=[_progress_source_ref(table, record_id, source_id)],
+            confidence=1.0,
+            extractor_version=_FACT_LLM_PROGRESS_VERSION,
+        )
+    except Exception as exc:  # noqa: BLE001 — progress is best-effort; facts already committed
+        logger.debug("fact_llm progress mark failed for %s (%s)", record_id, exc)
 
 
 def _run_coro_blocking(coro: "asyncio.Future") -> Any:
@@ -537,9 +616,8 @@ def _run_coro_blocking(coro: "asyncio.Future") -> Any:
       - a running loop (mis-call from async context)        -> run the coroutine
         on a dedicated worker thread with its own loop, so we never re-enter
         the outer loop. The ollama calls inside still fan out concurrently there.
-    Either way this blocks until the fan-out is done (or shutdown is requested);
-    the caller then applies the collected results serially on THIS thread
-    (sqlite write-safety).
+    Writes happen inside the coroutine on the event-loop thread as each row
+    finishes (sqlite write-safety: one thread owns the connection).
     """
     from concurrent.futures import TimeoutError as FuturesTimeoutError
 
@@ -559,7 +637,7 @@ def _run_coro_blocking(coro: "asyncio.Future") -> Any:
                 return fut.result(timeout=0.25)
             except FuturesTimeoutError:
                 if is_shutdown_requested():
-                    # Cooperative gather should finish shortly; don't wait forever.
+                    # Cooperative fan-out should finish shortly; don't wait forever.
                     try:
                         return fut.result(timeout=min(5.0, FACTS_LLM_HTTP_TIMEOUT))
                     except FuturesTimeoutError as exc:
@@ -568,42 +646,114 @@ def _run_coro_blocking(coro: "asyncio.Future") -> Any:
                         ) from exc
 
 
-async def _gather_extractions(
+async def _extract_and_apply(
     extractor: Callable[[str, Dict[str, Any]], List[Dict[str, Any]]],
     tasks: List[Tuple[int, str, Dict[str, Any]]],
     concurrency: int,
-) -> List[Tuple[int, Optional[List[Dict[str, Any]]], Optional[Exception]]]:
-    """Run ``extractor(prompt, row)`` for each eligible task under a semaphore.
+    apply_row: Callable[
+        [int, Optional[List[Dict[str, Any]]], Optional[Exception], bool],
+        Tuple[int, bool],
+    ],
+) -> int:
+    """Fan out LLM calls; apply each completed row immediately.
 
-    The extractor is (potentially) a blocking ollama call, so it runs on a
-    thread via asyncio.to_thread — that is what makes the calls CONCURRENT while
-    the semaphore bounds how many hit ollama at once (mirrors GoalExtractionJob).
-    Returns ``(index, triples, error)`` per task; NEVER raises — a per-row error
-    is captured so the caller can decide (log / stop on unreachable). Results are
-    returned in input order so the serial write phase is deterministic.
+    ``apply_row(index, triples, error, ran) -> (facts_written, halt)`` runs on
+    the event-loop thread (sqlite-safe). ``ran=False`` means the extractor was
+    never invoked (shutdown / cancel) — those rows are left unmarked so a
+    restart retries them. Completed LLM work is always applied even after
+    shutdown is requested (cost already paid).
     """
     from ...runtime_shutdown import is_shutdown_requested
 
     sem = asyncio.Semaphore(concurrency)
+    written = 0
+    stop_scheduling = False
 
     async def _one(
         index: int, prompt: str, row: Dict[str, Any]
-    ) -> Tuple[int, Optional[List[Dict[str, Any]]], Optional[Exception]]:
-        if is_shutdown_requested():
-            return (index, [], None)
+    ) -> Tuple[int, Optional[List[Dict[str, Any]]], Optional[Exception], bool]:
+        nonlocal stop_scheduling
+        if stop_scheduling or is_shutdown_requested():
+            return (index, None, None, False)
         async with sem:
-            if is_shutdown_requested():
-                return (index, [], None)
+            if stop_scheduling or is_shutdown_requested():
+                return (index, None, None, False)
             try:
                 triples = await asyncio.to_thread(extractor, prompt, row)
-                return (index, triples or [], None)
+                return (index, triples or [], None, True)
             except InterruptedError as exc:
-                return (index, None, exc)
-            except Exception as exc:  # noqa: BLE001 — captured, handled by caller
-                return (index, None, exc)
+                stop_scheduling = True
+                return (index, None, exc, False)
+            except Exception as exc:  # noqa: BLE001 — captured, handled by apply_row
+                return (index, None, exc, True)
 
-    results = await asyncio.gather(*[_one(i, p, r) for (i, p, r) in tasks])
-    return list(results)
+    pending = [asyncio.create_task(_one(i, p, r)) for (i, p, r) in tasks]
+    try:
+        for fut in asyncio.as_completed(pending):
+            try:
+                index, triples, error, ran = await fut
+            except asyncio.CancelledError:
+                continue
+            row_written, stop = apply_row(index, triples, error, ran)
+            written += int(row_written or 0)
+            if stop:
+                # Stop scheduling further extractor calls, but do NOT cancel
+                # in-flight to_thread work — those Ollama costs are already paid
+                # and must still be applied (and progress-marked).
+                stop_scheduling = True
+    finally:
+        # Ensure tasks are awaited so they don't leak warnings.
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+    return written
+
+
+def _write_triples_for_row(
+    store: FactStore,
+    *,
+    owner: str,
+    item: Dict[str, Any],
+    triples: List[Dict[str, Any]],
+) -> int:
+    """Assert owner-subject triples for one row. Returns facts written."""
+    record_id = item["record_id"]
+    table = item["table"]
+    asserted_by = item["asserted_by"]
+    row = item["row"]
+    written = 0
+    for triple in triples or []:
+        if not _is_owner_subject(triple):
+            continue  # a fact about someone else — never an owner fact
+        predicate = normalize_predicate(triple.get("predicate") or "")
+        value = str(triple.get("object") or "").strip()
+        if not predicate or not value:
+            continue
+        confidence = triple.get("confidence")
+        try:
+            confidence = float(confidence) if confidence is not None else DEFAULT_CONFIDENCE
+        except (TypeError, ValueError):
+            confidence = DEFAULT_CONFIDENCE
+        try:
+            asserted = store.assert_fact(
+                subject_entity_id=owner,
+                predicate=predicate,
+                object_value=value,
+                dimension=_dimension_for(predicate),
+                confidence=confidence,
+                source_refs=[_source_ref(table, record_id, row.get("source_id"))],
+                period_start=triple.get("period_start"),
+                period_end=triple.get("period_end"),
+                disclosure="owner_only" if asserted_by == "owner" else "scoped",
+                asserted_by=asserted_by,
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "assert_fact failed (%s %s=%s): %s", asserted_by, predicate, value, exc
+            )
+            continue
+        if asserted is not None:  # None => owner-excluded, never re-asserted
+            written += 1
+    return written
 
 
 # ---------------------------------------------------------------------------
@@ -624,6 +774,9 @@ def extract_owner_facts_llm(
     Only ``authored`` (owner belief) and ``addressed`` (attributed claim) rows
     are processed; observed/participated/ambient are skipped. Never raises into
     ingestion — transport/parse failures are logged and skipped.
+
+    Progress is saved per completed row (facts + a resume marker), so Ctrl+C
+    mid-batch keeps finished work and a restart skips those records.
 
     ``extractor``: injectable ``(prompt, row) -> list[triple]`` for tests /
     offline (NO network). When None, the real Ollama model is used (built
@@ -713,82 +866,84 @@ def extract_owner_facts_llm(
     if not eligible:
         return 0
 
-    # ----- Phase 2: LLM fan-out (CONCURRENT, bounded). Only the extractor calls
-    # run concurrently (on threads via asyncio.to_thread); the sqlite writes are
-    # deferred to phase 3 on THIS thread. Results come back in input order. -------
-    tasks = [(i, item["prompt"], item["row"]) for i, item in enumerate(eligible)]
-    concurrency = max(1, min(FACTS_LLM_CONCURRENCY, len(tasks)))
-    try:
-        gathered = _run_coro_blocking(
-            _gather_extractions(active_extractor, tasks, concurrency)
-        )
-    except Exception as exc:  # noqa: BLE001 — the fan-out harness must never crash ingest
-        logger.warning("LLM fact pass: concurrent extraction failed (%s); skipping", exc)
+    # Resume: skip records whose LLM pass already finished (incl. empty).
+    already = _already_processed_record_ids(conn, eligible)
+    if already:
+        before = len(eligible)
+        eligible = [item for item in eligible if str(item["record_id"]) not in already]
+        skipped = before - len(eligible)
+        if skipped:
+            logger.info(
+                "LLM fact pass resuming: skipped %d already-processed record(s), %d remaining",
+                skipped,
+                len(eligible),
+            )
+    if not eligible:
         return 0
 
-    # ----- Phase 3: DB writes (SERIAL, in row order). One thread, one sqlite
-    # connection — exact original write semantics (asserted_by, object_key dedup,
-    # supersession). Stop on the first transport-unreachable error to avoid
-    # re-attempting a dead server for the rest of the batch. ----------------------
-    written = 0
-    for index, triples, error in gathered:
-        if is_shutdown_requested():
-            logger.info(
-                "LLM fact pass stopping early on shutdown; wrote %d facts so far",
-                written,
-            )
-            break
+    # ----- Phase 2: LLM fan-out + incremental writes. Each completed row is
+    # asserted and progress-marked immediately so Ctrl+C keeps finished work.
+    # Stop scheduling on shutdown / unreachable; still apply in-flight results
+    # that already returned. ------------------------------------------------------
+    tasks = [(i, item["prompt"], item["row"]) for i, item in enumerate(eligible)]
+    concurrency = max(1, min(FACTS_LLM_CONCURRENCY, len(tasks)))
+
+    def _apply_row(
+        index: int,
+        triples: Optional[List[Dict[str, Any]]],
+        error: Optional[Exception],
+        ran: bool,
+    ) -> Tuple[int, bool]:
         item = eligible[index]
         record_id = item["record_id"]
-        table = item["table"]
-        asserted_by = item["asserted_by"]
-        row = item["row"]
+
+        if not ran:
+            # Extractor never ran (shutdown / cancel) — leave unmarked for retry.
+            # Signal stop-scheduling only; in-flight paid work must still apply.
+            return 0, True
 
         if error is not None:
             if isinstance(error, InterruptedError):
-                break
+                return 0, True
             logger.warning(
                 "LLM fact extraction failed for row %s (%s)", record_id, error
             )
             if _looks_unreachable(error):
-                # Server is down: the remaining rows would just time out too.
-                # Everything already gathered before this point is still written.
-                break
-            continue
+                # Server is down: don't burn the rest of the batch on timeouts.
+                return 0, True
+            # Transient/parse-ish failure: leave unmarked so a later pass retries.
+            return 0, False
 
-        for triple in triples or []:
-            if not _is_owner_subject(triple):
-                continue  # a fact about someone else — never an owner fact
-            predicate = normalize_predicate(triple.get("predicate") or "")
-            value = str(triple.get("object") or "").strip()
-            if not predicate or not value:
-                continue
-            confidence = triple.get("confidence")
-            try:
-                confidence = float(confidence) if confidence is not None else DEFAULT_CONFIDENCE
-            except (TypeError, ValueError):
-                confidence = DEFAULT_CONFIDENCE
-            try:
-                asserted = store.assert_fact(
-                    subject_entity_id=owner,
-                    predicate=predicate,
-                    object_value=value,
-                    dimension=_dimension_for(predicate),
-                    confidence=confidence,
-                    source_refs=[_source_ref(table, record_id, row.get("source_id"))],
-                    period_start=triple.get("period_start"),
-                    period_end=triple.get("period_end"),
-                    disclosure="owner_only" if asserted_by == "owner" else "scoped",
-                    asserted_by=asserted_by,
-                )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "assert_fact failed (%s %s=%s): %s", asserted_by, predicate, value, exc
-                )
-                continue
-            if asserted is not None:  # None => owner-excluded, never re-asserted
-                written += 1
-    return written
+        row_written = _write_triples_for_row(
+            store, owner=owner, item=item, triples=triples or []
+        )
+        _mark_record_processed(
+            conn,
+            table=item["table"],
+            record_id=record_id,
+            source_id=item["row"].get("source_id"),
+            facts_written=row_written,
+        )
+        # Keep draining in-flight results after shutdown; just stop new starts.
+        return row_written, is_shutdown_requested()
+
+    try:
+        written = _run_coro_blocking(
+            _extract_and_apply(active_extractor, tasks, concurrency, _apply_row)
+        )
+    except InterruptedError:
+        logger.info("LLM fact pass interrupted during shutdown")
+        return 0
+    except Exception as exc:  # noqa: BLE001 — the fan-out harness must never crash ingest
+        logger.warning("LLM fact pass: concurrent extraction failed (%s); skipping", exc)
+        return 0
+
+    if is_shutdown_requested():
+        logger.info(
+            "LLM fact pass stopping early on shutdown; wrote %d facts so far",
+            written,
+        )
+    return int(written or 0)
 
 
 # Predicates that describe intimate wellbeing/place facts default to a tighter
