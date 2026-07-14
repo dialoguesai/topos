@@ -1065,6 +1065,8 @@ def write_top_topics_signal_facts(
     active_cluster_ids = [str(row[0]) for row in rows]
     _prune_stale_top_topics_facts(conn, active_cluster_ids)
 
+    from ..entities.fact_materializer import _cluster_activity_window
+
     written = 0
     for row in rows:
         cluster_id = str(row[0])
@@ -1078,23 +1080,29 @@ def write_top_topics_signal_facts(
                     metadata = parsed
             except json.JSONDecodeError:
                 pass
-        adapters.signal.put_fact(
-            {
-                "fact_id": _top_topics_fact_id(cluster_id),
-                "dimension": row[2] or "memory",
-                "source_id": primary_source,
-                "record_id": cluster_id,
-                "tag": row[1],
-                "confidence": min(1.0, float(row[3] or 1) / 10.0),
-                "object_type": "top_topics",
-                "member_count": row[3],
-                "label_terms": json.loads(row[5] or "[]"),
-                "source_mix": source_mix,
-                "opportunity_type": metadata.get("opportunity_type"),
-                "related_entities": metadata.get("related_entities") or [],
-                "related_goals": metadata.get("related_goals") or [],
-            }
-        )
+        # Member activity window (same clock as discusses edges / goals) so
+        # signal_objects period columns stay retrieval-aligned with the graph.
+        period_start, period_end = _cluster_activity_window(conn, cluster_id)
+        fact: Dict[str, Any] = {
+            "fact_id": _top_topics_fact_id(cluster_id),
+            "dimension": row[2] or "memory",
+            "source_id": primary_source,
+            "record_id": cluster_id,
+            "tag": row[1],
+            "confidence": min(1.0, float(row[3] or 1) / 10.0),
+            "object_type": "top_topics",
+            "member_count": row[3],
+            "label_terms": json.loads(row[5] or "[]"),
+            "source_mix": source_mix,
+            "opportunity_type": metadata.get("opportunity_type"),
+            "related_entities": metadata.get("related_entities") or [],
+            "related_goals": metadata.get("related_goals") or [],
+        }
+        if period_start:
+            fact["period_start"] = period_start
+        if period_end:
+            fact["period_end"] = period_end
+        adapters.signal.put_fact(fact)
         written += 1
     return written
 

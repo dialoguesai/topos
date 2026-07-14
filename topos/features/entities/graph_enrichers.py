@@ -29,7 +29,12 @@ import sqlite3
 import uuid
 from typing import Dict, Optional
 
-from .fact_materializer import _MZ_WEIGHT_FLOOR, _upsert_materialized_edge
+from .fact_materializer import (
+    _MZ_WEIGHT_FLOOR,
+    _plausible_event_at,
+    _record_event_at,
+    _upsert_materialized_edge,
+)
 
 logger = logging.getLogger("topos.features.entities.graph_enrichers")
 
@@ -80,32 +85,6 @@ def _ensure_node(
         "updated_at=datetime('now') WHERE entity_id=?",
         (label, normalize_name(label), json.dumps(meta), node_id),
     )
-
-
-def _plausible_event_at(value: object) -> Optional[str]:
-    """Reject epoch-zero/garbage timestamps (a 1970 edge pins the scrubber)."""
-    s = str(value or "").strip()
-    return s if len(s) >= 4 and s[:4].isdigit() and int(s[:4]) >= 2000 else None
-
-
-def _record_event_at(conn: sqlite3.Connection, record_id: str) -> Optional[str]:
-    """EVENT time of a canonical record (timeline registry, mentions fallback)."""
-    try:
-        row = conn.execute(
-            "SELECT event_at FROM timeline WHERE record_id=? AND event_at IS NOT NULL LIMIT 1",
-            (record_id,),
-        ).fetchone()
-        if row:
-            plausible = _plausible_event_at(row[0])
-            if plausible:
-                return plausible
-    except sqlite3.OperationalError:
-        pass
-    row = conn.execute(
-        "SELECT event_at FROM entity_mentions WHERE record_id=? AND event_at IS NOT NULL LIMIT 1",
-        (record_id,),
-    ).fetchone()
-    return _plausible_event_at(row[0]) if row else None
 
 
 # Similar-goal clustering: natural-language goals are almost never string-

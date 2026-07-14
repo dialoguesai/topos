@@ -116,3 +116,76 @@ def test_junk_related_entities_are_skipped(conn):
     out = materialize_signal_objects_to_graph(conn)
     # all related entities are NER fragments → no edges
     assert out["topic_edges"] == 0
+
+
+def test_discusses_edges_use_member_activity_not_object_insert_time(conn):
+    """Active-in must date topics by member event time (like goals), not the
+    signal_objects.valid_from stamp from first insert — otherwise a live
+    cluster looks dead (or vice versa) and the graph flips topic-only/goal-only.
+    """
+    from datetime import datetime, timedelta, timezone
+
+    r = EntityResolver(conn)
+    r._create_entity("Google", "org")
+    conn.commit()
+
+    now = datetime.now(timezone.utc)
+    stale_from = (now - timedelta(days=90)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    recent_at = (now - timedelta(days=3)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    older_at = (now - timedelta(days=40)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+    _put_object(
+        conn,
+        object_id="o_stale",
+        object_type="top_topics",
+        object_key="tc_live",
+        payload={"tag": "search analytics", "related_entities": ["Google"]},
+        valid_from=stale_from,
+    )
+    conn.execute(
+        "INSERT INTO topic_clusters (cluster_id, label, dimension, member_count) "
+        "VALUES ('tc_live', 'search analytics', 'memory', 2)"
+    )
+    conn.execute(
+        "INSERT INTO topic_cluster_members "
+        "(member_id, cluster_id, record_id, source_id, record_type, weight) "
+        "VALUES ('m1', 'tc_live', 'rec-recent', 'chatgpt_file_ingestion', 'message', 1.0)"
+    )
+    conn.execute(
+        "INSERT INTO topic_cluster_members "
+        "(member_id, cluster_id, record_id, source_id, record_type, weight) "
+        "VALUES ('m2', 'tc_live', 'rec-old', 'chatgpt_file_ingestion', 'message', 1.0)"
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO timeline (event_at, record_id, source_id, canonical_table) "
+        "VALUES (?, 'rec-recent', 'chatgpt_file_ingestion', 'ai_chat_messages')",
+        (recent_at,),
+    )
+    conn.execute(
+        "INSERT OR REPLACE INTO timeline (event_at, record_id, source_id, canonical_table) "
+        "VALUES (?, 'rec-old', 'chatgpt_file_ingestion', 'ai_chat_messages')",
+        (older_at,),
+    )
+    conn.commit()
+
+    out = materialize_signal_objects_to_graph(conn)
+    assert out["topic_edges"] >= 1
+
+    discusses = [
+        e for e in graph_snapshot(conn, min_weight=0.0)["edges"]
+        if e["edge_type"] == "discusses"
+    ]
+    assert discusses, "expected discusses edges"
+    # Window spans earliest→latest member activity, not the stale object insert.
+    assert str(discusses[0]["valid_from"]).startswith(older_at[:10])
+    assert str(discusses[0]["last_event_at"]).startswith(recent_at[:10])
+
+    # 14-day Active-in style filter (UI: last_event_at || valid_from).
+    window_start = now - timedelta(days=14)
+    kept = []
+    for edge in discusses:
+        stamp = edge.get("last_event_at") or edge.get("valid_from") or ""
+        t = datetime.fromisoformat(str(stamp).replace("Z", "+00:00"))
+        if window_start <= t <= now + timedelta(days=1):
+            kept.append(edge)
+    assert kept, "recent member activity should keep discusses inside a 14d Active-in window"
