@@ -306,3 +306,48 @@ def project_canonical_timeline(
             "samples": orphaned_samples,
         },
     }
+
+
+def timeline_coverage_for_source(conn: sqlite3.Connection, source_id: str) -> Dict[str, Any]:
+    """Return timeline parity counts for coverage and only_missing backfill."""
+    report = project_canonical_timeline(
+        conn,
+        source_id=source_id,
+        dry_run=True,
+        missing_only=True,
+        commit=False,
+    )
+    totals = report["totals"]
+    invalid = (
+        int(totals.get("excluded", 0))
+        + int(totals.get("missing_timestamp", 0))
+        + int(totals.get("missing_record_id", 0))
+    )
+    total = max(0, int(totals.get("candidates", 0)) - invalid)
+    missing = int(totals.get("written", 0)) + int(totals.get("identity_mismatch", 0))
+    enriched = max(0, total - missing)
+    coverage_percent = round(min(100.0, enriched / total * 100.0), 1) if total else 0.0
+    return {
+        "total_records": total,
+        "enriched_records": enriched,
+        "missing_records": missing,
+        "coverage_percent": coverage_percent,
+        "report": report,
+    }
+
+
+def repair_timeline_for_source(
+    conn: sqlite3.Connection,
+    source_id: str,
+    *,
+    missing_only: bool = True,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Repair missing timeline rows for one source using the shared projector."""
+    return project_canonical_timeline(
+        conn,
+        source_id=source_id,
+        missing_only=missing_only,
+        dry_run=dry_run,
+        commit=not dry_run,
+    )

@@ -173,6 +173,20 @@ async def startup_event() -> None:
     except Exception as e:
         logger.warning("Upgrade runner at startup failed (non-fatal): %s", e)
     try:
+        from .core.state import get_db_connection as _get_conn_for_pipeline
+        from .pipeline.job_runner import recover_pipeline_jobs, start_pipeline_worker
+        from .features.entities.graph_refresh import reconcile_graph_on_startup
+
+        _pipeline_conn = state.db_conn if state.db_conn is not None else _get_conn_for_pipeline()
+        if _pipeline_conn is not None:
+            recovered = recover_pipeline_jobs(_pipeline_conn)
+            if recovered:
+                logger.info("Recovered stale pipeline jobs on startup: count=%s", recovered)
+            reconcile_graph_on_startup(_pipeline_conn)
+            start_pipeline_worker(_get_conn_for_pipeline)
+    except Exception as e:
+        logger.warning("Pipeline worker at startup failed (non-fatal): %s", e)
+    try:
         from .sources import install_service
 
         summary = install_service.rehydrate_active_installs_runtime()

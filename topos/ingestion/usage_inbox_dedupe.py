@@ -34,6 +34,54 @@ def _ensure_schema(conn: sqlite3.Connection) -> None:
     )
 
 
+def is_derivation_complete(write_id: str) -> bool:
+    wid = str(write_id or "").strip()
+    if not wid:
+        return False
+    conn = get_db_connection()
+    if not conn:
+        return False
+    try:
+        from ..pipeline.job_store import is_derivation_complete as _is_complete
+
+        return _is_complete(conn, wid)
+    except Exception as exc:
+        logger.debug("derivation completion lookup failed: %s", exc)
+        return False
+
+
+def ensure_derivation_enqueued(
+    write_id: str,
+    *,
+    source_id: str,
+    payload: Optional[Dict[str, Any]] = None,
+) -> None:
+    """Re-enqueue derivation when ingest was delivered but derivation did not finish."""
+    wid = str(write_id or "").strip()
+    if not wid or is_derivation_complete(wid):
+        return
+    conn = get_db_connection()
+    if not conn:
+        return
+    try:
+        from ..pipeline.job_store import enqueue_job
+
+        job_payload = dict(payload or {})
+        job_payload.setdefault("source_id", source_id)
+        job_payload.setdefault("write_id", wid)
+        job_payload.setdefault("recover", True)
+        enqueue_job(
+            conn,
+            kind="inbox_deferred_enrichment",
+            payload=job_payload,
+            source_id=source_id,
+            write_id=wid,
+            idempotency_key=f"inbox_derivation:{wid}",
+        )
+    except Exception as exc:
+        logger.debug("ensure_derivation_enqueued failed: %s", exc)
+
+
 def _purge_old(conn: sqlite3.Connection) -> None:
     cutoff = (datetime.now(timezone.utc) - timedelta(days=_RETENTION_DAYS)).isoformat()
     conn.execute(f"DELETE FROM {DEDUPE_TABLE} WHERE delivered_at < ?", (cutoff,))

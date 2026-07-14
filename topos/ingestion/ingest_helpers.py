@@ -241,6 +241,13 @@ async def run_ui_payload_enrichment(enrichment_ctx: dict) -> dict:
     if not source:
         return {"status": "error", "error": f"Unknown source_id: {source_id}"}
     canonical_records = enrichment_ctx.get("canonical_records") or []
+    if not canonical_records and enrichment_ctx.get("recover"):
+        from ..core.state import get_db_connection
+        from ..ingestion.canonical_pipeline import load_canonical_records_for_signal
+
+        db_conn = get_db_connection()
+        if db_conn:
+            canonical_records = load_canonical_records_for_signal(db_conn, source)
     if not canonical_records:
         return {"status": "ok", "enrichment_jobs_run": 0}
 

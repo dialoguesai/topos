@@ -21,13 +21,38 @@ pytestmark = pytest.mark.asyncio
 def sqlite_conn(tmp_path, monkeypatch):
     db_path = tmp_path / "test.db"
     conn = sqlite3.connect(str(db_path))
+    from topos.storage.db.migrations.pipeline_jobs_v1 import apply_pipeline_jobs_v1_up
+
+    apply_pipeline_jobs_v1_up(conn)
+
+    def _conn():
+        return conn
+
     monkeypatch.setattr(
         "topos.ingestion.usage_inbox_dedupe.get_db_connection",
-        lambda: conn,
+        _conn,
     )
     monkeypatch.setattr(
         "topos.core.handlers.get_db_connection",
-        lambda: conn,
+        _conn,
+    )
+    monkeypatch.setattr(
+        "topos.core.handlers.ingest.hub.get_db_connection",
+        _conn,
+    )
+    monkeypatch.setattr(
+        "topos.core.state.get_db_connection",
+        _conn,
+    )
+
+    async def _kick_worker(_factory):
+        from topos.pipeline.job_runner import process_pending_jobs_once
+
+        await process_pending_jobs_once(_factory, limit=10)
+
+    monkeypatch.setattr(
+        "topos.pipeline.job_runner.start_pipeline_worker",
+        lambda factory: asyncio.create_task(_kick_worker(factory)),
     )
     yield conn
     conn.close()
@@ -50,7 +75,9 @@ async def test_fast_ack_before_slow_enrichment(sqlite_conn, monkeypatch) -> None
         }
 
     monkeypatch.setattr("topos.ingestion.ingest_helpers.ingest_ui_payload", AsyncMock(side_effect=_fast_durable))
-    monkeypatch.setattr("topos.ingestion.ingest_helpers.run_ui_payload_enrichment", _slow_enrichment)
+    import topos.pipeline.job_runner as runner
+
+    monkeypatch.setitem(runner.EXECUTORS, "inbox_deferred_enrichment", _slow_enrichment)
     monkeypatch.setattr(handlers, "record_uma_request", lambda *args, **kwargs: None)
 
     message = {
@@ -92,7 +119,9 @@ async def test_dedupe_before_enrichment_completes(sqlite_conn, monkeypatch) -> N
         }
     )
     monkeypatch.setattr("topos.ingestion.ingest_helpers.ingest_ui_payload", ingest_mock)
-    monkeypatch.setattr("topos.ingestion.ingest_helpers.run_ui_payload_enrichment", _slow_enrichment)
+    import topos.pipeline.job_runner as runner
+
+    monkeypatch.setitem(runner.EXECUTORS, "inbox_deferred_enrichment", _slow_enrichment)
     monkeypatch.setattr(handlers, "record_uma_request", lambda *args, **kwargs: None)
 
     base_message = {
@@ -119,6 +148,57 @@ async def test_dedupe_before_enrichment_completes(sqlite_conn, monkeypatch) -> N
     assert ingest_mock.await_count == 1
 
     enrichment_release.set()
+    await asyncio.sleep(0.05)
+
+
+async def test_dedupe_hit_reenqueues_incomplete_derivation(sqlite_conn, monkeypatch) -> None:
+    ingest_mock = AsyncMock(
+        return_value={
+            "status": "ok",
+            "_enrichment_ctx": {
+                "source_id": "chatgpt_ui_conversation",
+                "sync_batch_id": "b1",
+                "canonical_records": [{"message_id": "m1", "source_id": "chatgpt_ui_conversation"}],
+            },
+        }
+    )
+    completed = asyncio.Event()
+
+    async def _slow_enrichment(_ctx: dict) -> dict:
+        await asyncio.sleep(0.2)
+        completed.set()
+        return {"status": "ok"}
+
+    monkeypatch.setattr("topos.ingestion.ingest_helpers.ingest_ui_payload", ingest_mock)
+    import topos.pipeline.job_runner as runner
+
+    monkeypatch.setitem(runner.EXECUTORS, "inbox_deferred_enrichment", _slow_enrichment)
+    monkeypatch.setattr(handlers, "record_uma_request", lambda *args, **kwargs: None)
+
+    base_message = {
+        "type": "app_ingest",
+        "payload": {
+            "write_id": "write-recover",
+            "user_id": "owner-1",
+            "dataset_id": "owner-1:default",
+            "source_id": "chatgpt_ui_conversation",
+            "schema_id": "chatgpt.conversation.v1",
+            "records": [{"content": "entry"}],
+            "resource_id": "dataset:owner-1:owner-1:default:dev",
+        },
+    }
+
+    first = await handlers.handle_control_plane_request({**base_message, "id": "req-1"})
+    assert first["status"] == "ok"
+
+    second = await handlers.handle_control_plane_request({**base_message, "id": "req-2"})
+    assert second["payload"]["deduplicated"] is True
+    assert ingest_mock.await_count == 1
+
+    await asyncio.wait_for(completed.wait(), timeout=3.0)
+    from topos.pipeline.job_store import is_derivation_complete
+
+    assert is_derivation_complete(sqlite_conn, "write-recover") is True
 
 
 async def test_check_inbox_write_rpc(sqlite_conn) -> None:

@@ -319,7 +319,14 @@ def _enrichment_coverage_core(source_id: str) -> Dict[str, Any]:
             "output_rows": {},
         }
         coverage_table = coverage_table_for_job(job_id)
-        if coverage_table and _table_exists(conn, coverage_table):
+        if job_id == "timeline":
+            from ..features.timeline_projection import timeline_coverage_for_source
+
+            timeline_stats = timeline_coverage_for_source(conn, source_id)
+            job_info["enriched_records"] = timeline_stats["enriched_records"]
+            job_info["coverage_percent"] = timeline_stats["coverage_percent"]
+            job_info["output_rows"]["timeline"] = timeline_stats["enriched_records"]
+        elif coverage_table and _table_exists(conn, coverage_table):
             cols = _table_columns(conn, coverage_table)
             id_col = "message_id" if "message_id" in cols else "record_id"
             if "source_id" in cols and id_col in cols:
@@ -552,23 +559,49 @@ async def _generic_backfill_core(
     scanned = len(records)
 
     if only_missing:
-        coverage_table = coverage_table_for_job(job_name)
-        if coverage_table and _table_exists(db_conn, coverage_table):
-            cols = _table_columns(db_conn, coverage_table)
-            id_col = "message_id" if "message_id" in cols else "record_id"
-            if "source_id" in cols and id_col in cols:
-                done = {
-                    str(row[0])
-                    for row in db_conn.execute(
-                        f"SELECT DISTINCT {id_col} FROM {coverage_table} WHERE source_id=?",
-                        (source_id,),
-                    ).fetchall()
-                    if row[0]
+        if job_name == "timeline":
+            from ..features.timeline_projection import timeline_coverage_for_source
+
+            stats = timeline_coverage_for_source(db_conn, source_id)
+            if stats["missing_records"] == 0:
+                return {
+                    "rows_scanned": scanned,
+                    "rows_processed": 0,
+                    "rows_skipped": scanned,
+                    "rows_failed": 0,
+                    "errors": [],
                 }
-                records = [r for r in records if _record_identifier(r) not in done]
+        else:
+            coverage_table = coverage_table_for_job(job_name)
+            if coverage_table and _table_exists(db_conn, coverage_table):
+                cols = _table_columns(db_conn, coverage_table)
+                id_col = "message_id" if "message_id" in cols else "record_id"
+                if "source_id" in cols and id_col in cols:
+                    done = {
+                        str(row[0])
+                        for row in db_conn.execute(
+                            f"SELECT DISTINCT {id_col} FROM {coverage_table} WHERE source_id=?",
+                            (source_id,),
+                        ).fetchall()
+                        if row[0]
+                    }
+                    records = [r for r in records if _record_identifier(r) not in done]
 
     if isinstance(limit, int) and limit > 0:
         records = records[:limit]
+
+    if job_name == "timeline":
+        from ..features.timeline_projection import repair_timeline_for_source
+
+        report = repair_timeline_for_source(db_conn, source_id, missing_only=True, dry_run=False)
+        processed = int(report.get("totals", {}).get("written", 0))
+        return {
+            "rows_scanned": scanned,
+            "rows_processed": processed,
+            "rows_skipped": max(scanned - processed, 0),
+            "rows_failed": 0,
+            "errors": [],
+        }
 
     if not records:
         return {
@@ -950,6 +983,7 @@ async def _process_enrichment_core(
     job_names: Optional[List[str]] = None,
     force_reprocess: bool = False,
     include_signal: bool = True,
+    progress_updater: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Core logic for processing enrichment (reusable from HTTP and WebSocket).
     
@@ -1024,32 +1058,64 @@ async def _process_enrichment_core(
     
     # Define progress callback to update progress during execution
     progress_callback = None
-    try:
-        from ..enrichment.progress import get_progress
-        # Try to get progress object if it exists (created by handler)
-        progress_obj = get_progress(source_id)  # Use source_id as fallback lookup
-        if progress_obj:
-            def progress_callback(
-                processed_count: int, 
-                total_count: int, 
-                job_name: str, 
-                job_percent: float,
-                current_job_progress: float,
-            ):
-                """Update progress as jobs execute."""
-                estimated_messages_processed = int((job_percent / 100) * total_count)
-                jobs_complete = int((job_percent / 100) * len(jobs_to_run))
-                progress_obj.update(
-                    messages_processed=estimated_messages_processed,
-                    messages_skipped=0,
-                    current_job_name=job_name,
-                    current_job_progress_percent=current_job_progress,
-                    jobs_complete=jobs_complete,
-                    jobs_total=len(jobs_to_run),
-                )
-    except Exception:
-        pass  # Progress callback is optional
+    if progress_updater is not None:
+        def progress_callback(
+            processed_count: int,
+            total_count: int,
+            job_name: str,
+            job_percent: float,
+            current_job_progress: float,
+        ):
+            estimated_messages_processed = int((job_percent / 100) * total_count) if total_count else 0
+            jobs_complete = int((job_percent / 100) * len(jobs_to_run)) if jobs_to_run else 0
+            progress_updater(
+                {
+                    "status": "processing",
+                    "progress_percent": min(100.0, job_percent),
+                    "messages_processed": estimated_messages_processed,
+                    "messages_skipped": 0,
+                    "messages_total": total_count,
+                    "current_job_name": job_name,
+                    "current_job_progress_percent": current_job_progress,
+                    "jobs_complete": jobs_complete,
+                    "jobs_total": len(jobs_to_run),
+                    "jobs_progress_percent": (jobs_complete / len(jobs_to_run) * 100) if jobs_to_run else 0.0,
+                }
+            )
+    else:
+        try:
+            from ..enrichment.progress import get_progress
+            progress_obj = get_progress(source_id)
+            if progress_obj:
+                def progress_callback(
+                    processed_count: int,
+                    total_count: int,
+                    job_name: str,
+                    job_percent: float,
+                    current_job_progress: float,
+                ):
+                    estimated_messages_processed = int((job_percent / 100) * total_count)
+                    jobs_complete = int((job_percent / 100) * len(jobs_to_run))
+                    progress_obj.update(
+                        messages_processed=estimated_messages_processed,
+                        messages_skipped=0,
+                        current_job_name=job_name,
+                        current_job_progress_percent=current_job_progress,
+                        jobs_complete=jobs_complete,
+                        jobs_total=len(jobs_to_run),
+                    )
+        except Exception:
+            pass
     
+    if progress_updater is not None:
+        progress_updater(
+            {
+                "status": "processing",
+                "messages_total": len(unprocessed_messages),
+                "jobs_total": len(jobs_to_run),
+            }
+        )
+
     enrichment_result = await orchestrator.run_canonical(
         unprocessed_messages,
         job_names=jobs_to_run,

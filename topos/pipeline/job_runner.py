@@ -1,0 +1,242 @@
+"""Background worker for durable pipeline jobs."""
+
+from __future__ import annotations
+
+import asyncio
+import logging
+import os
+import socket
+import threading
+import uuid
+from typing import Any, Awaitable, Callable, Dict, Optional
+
+from .job_store import (
+    claim_next_job,
+    complete_job,
+    fail_job,
+    recover_stale_jobs,
+    record_derivation_completion,
+    update_job_progress,
+)
+
+logger = logging.getLogger("topos.pipeline.job_runner")
+
+_worker_task: Optional[asyncio.Task] = None
+_worker_lock = threading.Lock()
+_lease_owner = f"{socket.gethostname()}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
+
+ExecutorFn = Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]
+
+
+def _enabled() -> bool:
+    return os.environ.get("TOPOS_PIPELINE_WORKER", "on").strip().lower() not in (
+        "0",
+        "false",
+        "off",
+        "no",
+    )
+
+
+async def _execute_inbox_deferred_enrichment(payload: Dict[str, Any]) -> Dict[str, Any]:
+    from ..ingestion.ingest_helpers import run_inbox_deferred_enrichment
+
+    return await run_inbox_deferred_enrichment(payload)
+
+
+async def _execute_file_ingestion(payload: Dict[str, Any]) -> Dict[str, Any]:
+    import base64
+
+    from ..ingestion.ingest_helpers import ingest_file_payload
+
+    progress_api_url = payload.get("progress_api_url")
+    progress_api_key = payload.get("progress_api_key")
+    job_id = payload.get("job_id")
+    dataset_id = str(payload.get("dataset_id") or "")
+    owner_user_id = payload.get("owner_user_id")
+
+    file_bytes = payload.get("file_bytes")
+    if not file_bytes and payload.get("file_base64"):
+        file_bytes = base64.b64decode(str(payload["file_base64"]))
+    if not file_bytes and payload.get("file_url"):
+        from ..core.handlers.ingest import _download_ingestion_payload
+
+        file_bytes = await _download_ingestion_payload(str(payload["file_url"]))
+
+    if file_bytes is not None:
+        result = await ingest_file_payload(
+            dataset_id=dataset_id,
+            schema_id=str(payload.get("schema_id") or ""),
+            file_bytes=file_bytes,
+            file_format=str(payload.get("file_format") or "jsonl"),
+            job_id=job_id,
+            source_id=payload.get("source_id"),
+            source_definition=payload.get("source_definition"),
+            progress_api_url=progress_api_url,
+            progress_api_key=progress_api_key,
+        )
+    else:
+        result = await ingest_file_payload(
+            dataset_id=dataset_id,
+            schema_id=str(payload.get("schema_id") or ""),
+            file_path=payload.get("file_path"),
+            file_format=str(payload.get("file_format") or "jsonl"),
+            job_id=job_id,
+            source_id=payload.get("source_id"),
+            source_definition=payload.get("source_definition"),
+            progress_api_url=progress_api_url,
+            progress_api_key=progress_api_key,
+        )
+
+    if progress_api_url and progress_api_key:
+        try:
+            import httpx
+
+            status = "completed" if str(result.get("status") or "ok") == "ok" else "failed"
+            async with httpx.AsyncClient(timeout=10.0) as client:
+                await client.post(
+                    f"{progress_api_url}/v1/ingestion/progress",
+                    json={
+                        "job_id": job_id,
+                        "user_id": owner_user_id,
+                        "dataset_id": dataset_id,
+                        "status": status,
+                        "progress_percent": 100.0 if status == "completed" else 0.0,
+                        "records_processed": result.get("records_processed", 0),
+                        "records_total": result.get("records_total"),
+                        "error_message": result.get("error"),
+                    },
+                    headers={"Authorization": f"Bearer {progress_api_key}"},
+                )
+        except Exception as exc:
+            logger.debug("file ingestion progress post failed: %s", exc)
+    return result
+
+
+async def _execute_enrichment_process_source(payload: Dict[str, Any]) -> Dict[str, Any]:
+    from ..api.enrichment import _process_enrichment_core
+
+    return await _process_enrichment_core(
+        source_id=str(payload.get("source_id") or ""),
+        dataset_id=payload.get("dataset_id"),
+        job_names=payload.get("job_names"),
+        force_reprocess=bool(payload.get("force_reprocess")),
+        include_signal=True,
+        progress_updater=payload.get("_progress_updater"),
+    )
+
+
+EXECUTORS: Dict[str, ExecutorFn] = {
+    "inbox_deferred_enrichment": _execute_inbox_deferred_enrichment,
+    "file_ingestion": _execute_file_ingestion,
+    "enrichment_process_source": _execute_enrichment_process_source,
+}
+
+
+async def process_job(conn, job: Dict[str, Any]) -> None:
+    """Run one claimed job to completion."""
+    job_id = str(job["job_id"])
+    kind = str(job["kind"])
+    write_id = job.get("write_id")
+    source_id = job.get("source_id")
+    sync_batch_id = job.get("sync_batch_id")
+
+    executor = EXECUTORS.get(kind)
+    if executor is None:
+        fail_job(conn, job_id, error=f"Unknown job kind: {kind}")
+        return
+
+    def _progress_updater(progress: Dict[str, Any]) -> None:
+        update_job_progress(conn, job_id, progress)
+
+    payload = dict(job.get("payload") or {})
+    if kind == "enrichment_process_source":
+        payload["_progress_updater"] = _progress_updater
+
+    try:
+        result = await executor(payload)
+        if str(result.get("status") or "ok") == "error":
+            fail_job(conn, job_id, error=str(result.get("error") or result.get("message") or "failed"))
+            update_job_progress(conn, job_id, {"status": "failed", "result": result})
+            return
+        complete_job(conn, job_id, detail=result)
+        update_job_progress(
+            conn,
+            job_id,
+            {
+                "status": "completed",
+                "messages_processed": result.get("messages_processed", 0),
+                "records_created": result.get("records_created", {}),
+                "errors": result.get("errors", []),
+            },
+        )
+        if kind == "inbox_deferred_enrichment" and write_id:
+            record_derivation_completion(
+                conn,
+                write_id=str(write_id),
+                job_id=job_id,
+                source_id=source_id,
+                sync_batch_id=sync_batch_id,
+            )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("pipeline job failed job_id=%s kind=%s: %s", job_id, kind, exc, exc_info=exc)
+        fail_job(conn, job_id, error=str(exc))
+        update_job_progress(conn, job_id, {"status": "failed", "error": str(exc)})
+
+
+async def _worker_loop(conn_factory: Callable[[], Any]) -> None:
+    while True:
+        if not _enabled():
+            await asyncio.sleep(1.0)
+            continue
+        conn = conn_factory()
+        if conn is None:
+            await asyncio.sleep(1.0)
+            continue
+        job = claim_next_job(conn, lease_owner=_lease_owner)
+        if job is None:
+            await asyncio.sleep(0.25)
+            continue
+        try:
+            await process_job(conn, job)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("pipeline worker loop error: %s", exc, exc_info=exc)
+            try:
+                fail_job(conn, str(job["job_id"]), error=str(exc))
+            except Exception:
+                pass
+
+
+def start_pipeline_worker(conn_factory: Callable[[], Any]) -> None:
+    """Start the async pipeline worker loop once per process."""
+    global _worker_task
+    if not _enabled():
+        return
+    with _worker_lock:
+        if _worker_task is not None and not _worker_task.done():
+            return
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        _worker_task = loop.create_task(_worker_loop(conn_factory))
+
+
+def recover_pipeline_jobs(conn) -> int:
+    if conn is None:
+        return 0
+    return recover_stale_jobs(conn)
+
+
+async def process_pending_jobs_once(conn_factory: Callable[[], Any], *, limit: int = 10) -> int:
+    """Process up to ``limit`` queued jobs synchronously (for tests and repair tools)."""
+    processed = 0
+    conn = conn_factory()
+    if conn is None:
+        return 0
+    for _ in range(max(1, int(limit))):
+        job = claim_next_job(conn, lease_owner=_lease_owner)
+        if job is None:
+            break
+        await process_job(conn, job)
+        processed += 1
+    return processed
