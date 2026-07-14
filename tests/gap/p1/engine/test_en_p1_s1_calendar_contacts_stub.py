@@ -9,7 +9,7 @@ import sqlite3
 
 import pytest
 
-from topos.sources.registry import CALENDAR_STUB, CONTACTS_ENRICHMENT_STUB, REGISTRY
+from topos.sources.registry import CALENDAR_STUB, CANONICAL_ADDRESS_BOOK, REGISTRY
 from topos.storage.canonical.calendar_contacts_tables import ensure_stub_tables
 from topos.storage.db.migrations import apply_all_migrations
 
@@ -34,5 +34,6 @@ def test_stub_tables_and_registry_entries() -> None:
     assert REGISTRY["calendar_stub"].source_id == CALENDAR_STUB.source_id
     assert CALENDAR_STUB.source_type == "stub"
     assert CALENDAR_STUB.ingestion_trigger == "manual"
-    assert REGISTRY["contacts_enrichment_stub"].source_id == CONTACTS_ENRICHMENT_STUB.source_id
-    assert CONTACTS_ENRICHMENT_STUB.canonical_group_id == "contacts"
+    assert REGISTRY["canonical_address_book"].source_id == CANONICAL_ADDRESS_BOOK.source_id
+    assert CANONICAL_ADDRESS_BOOK.canonical_group_id == "contacts"
+    assert CANONICAL_ADDRESS_BOOK.source_kind == "derived"

@@ -114,6 +114,38 @@ async def test_browser_direct_ingest_runs_signal_derive_from_canonical(migrated_
     assert "technology" in (fact["payload_json"] or "")
 
 
+@pytest.mark.asyncio
+async def test_browser_deferred_ingest_projects_timeline_before_background_work(
+    migrated_conn,
+) -> None:
+    result = await ingest_ui_payload(
+        dataset_id="user-1:default:device1",
+        schema_id="browser.visits.v1",
+        payload={
+            "url": "https://example.com/restart-safe",
+            "visited_at": "2026-07-13T23:16:05.509Z",
+            "title": "Restart Safe",
+        },
+        source_id="browser_visits",
+        defer_enrichment=True,
+    )
+
+    assert result["status"] == "ok"
+    assert result["enrichment_pending"] is True
+    assert result["timeline_rows_written"] == 1
+    canonical = migrated_conn.execute(
+        "SELECT event_id, occurred_at FROM activity_events WHERE source_id='browser_visits'"
+    ).fetchone()
+    assert canonical is not None
+    timeline = migrated_conn.execute(
+        "SELECT event_at, canonical_table FROM timeline WHERE record_id=?",
+        (canonical["event_id"],),
+    ).fetchone()
+    assert timeline is not None
+    assert timeline["canonical_table"] == "activity_events"
+    assert timeline["event_at"] == "2026-07-13T23:16:05.509000+00:00"
+
+
 def test_conversations_canonicalize_stamps_table(migrated_conn) -> None:
     """Live-ingest conversation records must carry _table: without the stamp
     they are key-for-key identical to ai_chat records (sender_type='human',

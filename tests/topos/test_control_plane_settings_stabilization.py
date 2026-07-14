@@ -5,6 +5,24 @@ import pytest
 from topos.config.settings import Settings
 
 
+def test_log_level_defaults_to_info(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.delenv("LOG_LEVEL", raising=False)
+    monkeypatch.setenv("TOPOS_KEY", "test-key")
+
+    cfg = Settings(_env_file=None)
+
+    assert cfg.log_level == "INFO"
+
+
+def test_log_level_can_be_overridden(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("LOG_LEVEL", "DEBUG")
+    monkeypatch.setenv("TOPOS_KEY", "test-key")
+
+    cfg = Settings(_env_file=None)
+
+    assert cfg.log_level == "DEBUG"
+
+
 def test_cloud_runtime_defaults_to_lease_mode_without_explicit_flag(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("K_SERVICE", "topos-database")
     monkeypatch.setenv("TOPOS_CONTROL_PLANE_URL", "wss://cp.example/ws/engine")

@@ -281,6 +281,7 @@ def _normalize_enrichment_bindings(source_def: Dict[str, Any]) -> Dict[str, Any]
 
 def _validate_source_contract(source_def: Dict[str, Any]) -> Dict[str, Any]:
     from .bundled_canonical_triples import normalize_canonical_source_payload
+    from .definitions import SOURCE_KIND_INGESTION
 
     source_def = normalize_canonical_source_payload(dict(source_def))
     source_id = str(source_def.get("source_id") or "").strip()
@@ -293,6 +294,10 @@ def _validate_source_contract(source_def: Dict[str, Any]) -> Dict[str, Any]:
         raise ValueError("source_definition_json.schema_id and parser_id are required")
     if source_type not in {"file", "ui_stream", "local_sync"}:
         raise ValueError("source_definition_json.source_type must be one of: file, ui_stream, local_sync")
+    source_kind = str(source_def.get("source_kind") or SOURCE_KIND_INGESTION).strip()
+    if source_kind != SOURCE_KIND_INGESTION:
+        raise ValueError("runtime source installs must use source_kind='ingestion'")
+    source_def["source_kind"] = SOURCE_KIND_INGESTION
     _validate_parser_extract_map(source_def)
     _validate_mapper_contract(source_def)
     return source_def
@@ -313,6 +318,8 @@ class InstallRecord:
     updated_at: str
 
     def to_dict(self) -> Dict[str, Any]:
+        from .definitions import with_source_capabilities
+
         return {
             "install_id": self.install_id,
             "scope": self.scope,
@@ -320,7 +327,7 @@ class InstallRecord:
             "version_id": self.version_id,
             "status": self.status,
             "is_active": self.is_active,
-            "source_definition_json": self.source_definition_json,
+            "source_definition_json": with_source_capabilities(self.source_definition_json),
             "source_version_row_json": self.source_version_row_json,
             "failure_reason": self.failure_reason,
             "created_at": self.created_at,
@@ -891,10 +898,9 @@ def _is_rehydratable_source_definition(source_def: Dict[str, Any]) -> bool:
     """Active installs must carry a full source contract before runtime install."""
     if not isinstance(source_def, dict) or not source_def:
         return False
-    for key in ("source_id", "source_type", "schema_id", "parser_id"):
-        if not str(source_def.get(key) or "").strip():
-            return False
-    return True
+    from .definitions import SOURCE_KIND_INGESTION, source_kind_from_payload
+
+    return source_kind_from_payload(source_def) == SOURCE_KIND_INGESTION
 
 
 def rehydrate_active_installs_runtime(*, source_id: Optional[str] = None) -> Dict[str, int]:

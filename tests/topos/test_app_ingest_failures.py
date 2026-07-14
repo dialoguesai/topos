@@ -5,6 +5,7 @@ import sqlite3
 import pytest
 
 from topos.core.handlers import handle_control_plane_request
+from topos.storage.db.migrations import apply_all_migrations
 
 
 @pytest.mark.asyncio
@@ -94,6 +95,62 @@ async def test_app_ingest_returns_ok_with_errors_on_partial_success(monkeypatch,
     assert result["payload"]["records_processed"] == 1
     assert result["payload"]["records_total"] == 2
     assert len(result["payload"]["errors"]) == 1
+    conn.close()
+
+
+@pytest.mark.asyncio
+async def test_app_ingest_timeline_survives_cancelled_background_enrichment(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    db_path = tmp_path / "restart-safe.db"
+    conn = sqlite3.connect(str(db_path))
+    conn.row_factory = sqlite3.Row
+    apply_all_migrations(conn)
+    monkeypatch.setattr("topos.core.state.get_db_connection", lambda: conn)
+
+    class _CancelledTask:
+        def cancelled(self) -> bool:
+            return True
+
+        def add_done_callback(self, callback) -> None:  # noqa: ANN001
+            callback(self)
+
+    def _cancel_immediately(coro):  # noqa: ANN001
+        coro.close()
+        return _CancelledTask()
+
+    monkeypatch.setattr("topos.core.handlers.ingest.asyncio.create_task", _cancel_immediately)
+
+    result = await handle_control_plane_request(
+        {
+            "id": "req-app-ingest-restart",
+            "type": "app_ingest",
+            "payload": {
+                "user_id": "user-1",
+                "dataset_id": "user-1:default:device1",
+                "source_id": "browser_visits",
+                "schema_id": "browser.visits.v1",
+                "records": [
+                    {
+                        "url": "https://example.com/restart",
+                        "visited_at": "2026-07-13T23:20:00.000Z",
+                        "title": "Restart",
+                    }
+                ],
+            },
+        }
+    )
+
+    assert result["status"] == "ok"
+    canonical = conn.execute(
+        "SELECT event_id FROM activity_events WHERE source_id='browser_visits'"
+    ).fetchone()
+    assert canonical is not None
+    assert (
+        conn.execute("SELECT COUNT(*) FROM timeline WHERE record_id=?", (canonical["event_id"],)).fetchone()[0]
+        == 1
+    )
     conn.close()
 
 

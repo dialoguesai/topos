@@ -348,7 +348,11 @@ def jobs_configured_for_source(source_def: Any) -> Dict[str, List[str]]:
     lane through ``resolved_signal_derivation_jobs``, which applies them too.
     """
     from ..sources.canonical_signal_defaults import resolved_signal_derivation_jobs
+    from ..sources.definitions import SOURCE_KIND_INGESTION
     from .source_overrides import effective_canonical_enrichment_jobs
+
+    if str(getattr(source_def, "source_kind", SOURCE_KIND_INGESTION)) != SOURCE_KIND_INGESTION:
+        return {LANE_RAW: [], LANE_CANONICAL: [], LANE_SIGNAL: []}
 
     return {
         LANE_RAW: list(getattr(source_def, "raw_enrichment_jobs", []) or []),

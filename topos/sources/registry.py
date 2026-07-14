@@ -3,7 +3,11 @@ from __future__ import annotations
 from typing import List, Optional, Sequence, Tuple
 
 from .bundled_canonical_triples import apply_bundled_canonical_defaults
-from .definitions import DataSourceDefinition
+from .definitions import (
+    CANONICAL_ADDRESS_BOOK_SOURCE_ID,
+    SOURCE_KIND_DERIVED,
+    DataSourceDefinition,
+)
 from shared.filtering import FilterInstance, FilterManifest
 
 
@@ -304,19 +308,20 @@ CALENDAR_STUB = _source(
     allowed_scope_ids=["schedule:read"],
 )
 
-CONTACTS_ENRICHMENT_STUB = _source(
-    source_id="contacts_enrichment_stub",
+CANONICAL_ADDRESS_BOOK = _source(
+    source_id=CANONICAL_ADDRESS_BOOK_SOURCE_ID,
     posture="personal",
-    display_name="Contacts enrichment (stub)",
-    source_type="stub",
-    schema_id="contacts.stub.v1",
-    parser_id="contacts.stub.v1",
+    display_name="Canonical Address Book",
+    source_type="derived",
+    source_kind=SOURCE_KIND_DERIVED,
+    schema_id="canonical.contacts.v1",
+    parser_id="canonical.contacts.v1",
     canonical_mapper_id=None,
     canonical_group_id="contacts",
     ingestion_trigger="manual",
     enrichment_trigger="manual",
     default_scope_id="contacts",
-    allowed_scope_ids=["contacts:resolve"],
+    allowed_scope_ids=["contacts:resolve", "relationship_context:read"],
 )
 
 _DEMO_FILE_SHAPE = {"format": "csv", "has_header": True}
@@ -519,7 +524,7 @@ REGISTRY = {
     IMESSAGE.source_id: IMESSAGE,
     SIGNAL.source_id: SIGNAL,
     CALENDAR_STUB.source_id: CALENDAR_STUB,
-    CONTACTS_ENRICHMENT_STUB.source_id: CONTACTS_ENRICHMENT_STUB,
+    CANONICAL_ADDRESS_BOOK.source_id: CANONICAL_ADDRESS_BOOK,
     DEMO_MESSENGER_FILE.source_id: DEMO_MESSENGER_FILE,
     DEMO_EMAIL_FILE.source_id: DEMO_EMAIL_FILE,
     DEMO_CALENDAR_FILE.source_id: DEMO_CALENDAR_FILE,

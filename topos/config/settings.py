@@ -30,7 +30,7 @@ class Settings(BaseSettings):
 
     environment: str = Field("development", env="ENVIRONMENT")
     log_format: Optional[str] = Field(None, env="LOG_FORMAT")
-    log_level: str = Field("DEBUG", env="LOG_LEVEL")
+    log_level: str = Field("INFO", env="LOG_LEVEL")
 
     openai_base_url: str = Field("https://api.openai.com/v1", env="OPENAI_BASE_URL")
     openai_model: str = Field("gpt-4o-mini", env="OPENAI_MODEL")

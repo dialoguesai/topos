@@ -311,28 +311,21 @@ def step_facts(conn: sqlite3.Connection) -> Dict[str, Any]:
 
 
 def step_timeline(conn: sqlite3.Connection) -> Dict[str, Any]:
-    from topos.features.stats.definitions import row_event_ts
+    from topos.features.timeline_projection import project_canonical_timeline
 
-    written = 0
-    for table, batch in _canonical_batches(conn, batch_size=2000):
-        for row in batch:
-            ts = row_event_ts(row)
-            record_id = str(
-                row.get("record_id") or row.get("message_id") or row.get("event_id") or ""
-            )
-            if ts is None or not record_id:
-                continue
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO timeline (
-                    event_at, record_id, source_id, canonical_table, record_type
-                ) VALUES (?, ?, ?, ?, ?)
-                """,
-                (ts.isoformat(), record_id, row.get("source_id"), table, row.get("record_type")),
-            )
-            written += 1
-    conn.commit()
-    return {"rows": written}
+    report = project_canonical_timeline(
+        conn,
+        missing_only=True,
+        commit=True,
+        batch_size=2000,
+    )
+    return {
+        "rows": report["totals"]["written"],
+        "existing": report["totals"]["existing"],
+        "excluded": report["totals"]["excluded"],
+        "missing_timestamp": report["totals"]["missing_timestamp"],
+        "by_table": report["by_table"],
+    }
 
 
 def step_clusters(conn: sqlite3.Connection) -> Dict[str, Any]:

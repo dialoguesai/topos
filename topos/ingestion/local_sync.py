@@ -27,6 +27,17 @@ def _run_local_sync_enrichment_if_enabled(
     """Run canonical enrichment for local_sync sources when trigger is automatic."""
     if not canonical_messages:
         return
+    from ..features.timeline_projection import project_timeline_rows
+
+    timeline_rows = []
+    for message in canonical_messages:
+        row = dict(message)
+        row.setdefault("_table", "conversation_messages")
+        timeline_rows.append(row)
+    # Timeline is a lightweight canonical projection, not optional enrichment.
+    # Let failures propagate so the sync checkpoint is not advanced past a gap.
+    project_timeline_rows(db_conn, timeline_rows)
+
     try:
         from ..sources.registry import REGISTRY
         source_def = REGISTRY.get(source_id)

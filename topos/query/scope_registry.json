@@ -124,7 +124,10 @@
       "inference_objects": [],
       "default_mode_ceiling": "raw",
       "enrichment_only": true,
-      "implementation_status": "live"
+      "implementation_status": "live",
+      "default_source_ids": [
+        "canonical_address_book"
+      ]
     },
     {
       "scope_id": "health:read",

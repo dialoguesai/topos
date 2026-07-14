@@ -22,6 +22,15 @@ POSTURE_MIXED = "mixed"  # role decided per-row (chats: owner + others + assista
 POSTURE_AMBIENT = "ambient"  # exposure, not expression (browser visits, feeds)
 POSTURE_VALUES = frozenset({POSTURE_PERSONAL, POSTURE_MIXED, POSTURE_AMBIENT})
 
+SOURCE_KIND_INGESTION = "ingestion"
+SOURCE_KIND_DERIVED = "derived"
+SOURCE_KIND_SCOPE_MANIFEST = "scope_manifest"
+SOURCE_KIND_VALUES = frozenset(
+    {SOURCE_KIND_INGESTION, SOURCE_KIND_DERIVED, SOURCE_KIND_SCOPE_MANIFEST}
+)
+RUNTIME_SOURCE_TYPES = frozenset({"file", "ui_stream", "local_sync"})
+CANONICAL_ADDRESS_BOOK_SOURCE_ID = "canonical_address_book"
+
 # ui_stream splits by who carries the bytes (CONNECTOR_SPEC.md §3). Every bundled
 # ui_stream source today is pushed by external software; owner_ui is reserved for
 # future in-UI entry (journal, home chat) and gets sources listed here explicitly.
@@ -62,6 +71,36 @@ def is_file_delivery(defn: "DataSourceDefinition") -> bool:
 def accepts_app_ingest(defn: "DataSourceDefinition") -> bool:
     """Streamed records may target this source (legacy source_type == 'ui_stream')."""
     return defn.delivery in (DELIVERY_CLIENT_PUSH, DELIVERY_OWNER_UI)
+
+
+def source_kind_from_payload(payload: Dict[str, Any]) -> str:
+    explicit = str(payload.get("source_kind") or "").strip()
+    if explicit in SOURCE_KIND_VALUES:
+        return explicit
+    if str(payload.get("source_type") or "").strip() in RUNTIME_SOURCE_TYPES and all(
+        str(payload.get(field) or "").strip()
+        for field in ("source_id", "schema_id", "parser_id")
+    ):
+        return SOURCE_KIND_INGESTION
+    return SOURCE_KIND_SCOPE_MANIFEST
+
+
+def source_capabilities_from_payload(payload: Dict[str, Any]) -> Dict[str, bool]:
+    kind = source_kind_from_payload(payload)
+    is_ingestion = kind == SOURCE_KIND_INGESTION
+    return {
+        "supports_ingestion": is_ingestion,
+        "supports_enrichment_metadata": is_ingestion,
+        "supports_generic_scrub": is_ingestion,
+        "supports_uninstall": is_ingestion,
+    }
+
+
+def with_source_capabilities(payload: Dict[str, Any]) -> Dict[str, Any]:
+    out = dict(payload)
+    out["source_kind"] = source_kind_from_payload(out)
+    out["source_capabilities"] = source_capabilities_from_payload(out)
+    return out
 
 
 def definition_from_payload(payload: Dict[str, Any]) -> "DataSourceDefinition":
@@ -107,6 +146,7 @@ class DataSourceDefinition:
     source_type: str
     schema_id: str
     parser_id: str
+    source_kind: Literal["ingestion", "derived", "scope_manifest"] = SOURCE_KIND_INGESTION
     # How data arrives (CONNECTOR_SPEC.md §3); derived from source_type when unset.
     delivery: Optional[str] = None
     # Whose words the content is by default (PLAN_PROVENANCE_SPLIT §3.1):
@@ -145,6 +185,10 @@ class DataSourceDefinition:
     pipeline_data_table_match_parser_output: Optional[bool] = None
 
     def __post_init__(self) -> None:
+        if self.source_kind not in SOURCE_KIND_VALUES:
+            raise ValueError(
+                f"source_kind must be one of {sorted(SOURCE_KIND_VALUES)}, got {self.source_kind!r}"
+            )
         if self.delivery is not None and self.delivery not in DELIVERY_VALUES:
             raise ValueError(
                 f"delivery must be one of {sorted(DELIVERY_VALUES)}, got {self.delivery!r}"
@@ -171,6 +215,10 @@ class DataSourceDefinition:
             # Both source_type and delivery are always emitted so serialized
             # definitions stay readable across the delivery rollout (spec §3).
             "source_type": self.source_type,
+            "source_kind": self.source_kind,
+            "source_capabilities": source_capabilities_from_payload(
+                {"source_kind": self.source_kind, "source_type": self.source_type}
+            ),
             "delivery": self.delivery,
             # Always emitted: readers that predate posture ignore unknown keys
             # (definition_from_payload filters to known dataclass fields).

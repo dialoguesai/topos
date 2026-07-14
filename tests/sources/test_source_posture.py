@@ -34,7 +34,7 @@ EXPECTED_POSTURES = {
     "github_activity": "personal",  # owner-performed deeds, not consumption
     "voxterm_transcripts": "mixed",  # transcripts can carry other speakers
     "calendar_stub": "personal",
-    "contacts_enrichment_stub": "personal",
+    "canonical_address_book": "personal",
     "demo_email_file": "mixed",
     "demo_calendar_file": "personal",
     "demo_financial_file": "personal",
