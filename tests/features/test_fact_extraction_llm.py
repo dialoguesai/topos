@@ -649,3 +649,97 @@ class TestConcurrency:
         assert prefers and prefers[0]["asserted_by"] == "owner"
         assert lives and lives[0]["asserted_by"] == "assistant"  # attributed, never owner
         assert allergic == []  # witnessed row: ZERO owner facts (role gate upstream)
+
+
+# --------------------------------------------------------------------------
+# Incremental persistence + resume: multi-hour fact_llm must survive Ctrl+C.
+# --------------------------------------------------------------------------
+
+
+class TestIncrementalProgress:
+    def test_shutdown_keeps_facts_already_extracted(self, conn, monkeypatch):
+        """Completed LLM rows must be written even when shutdown flips mid-batch.
+
+        Regression: the old gather-all-then-write path discarded in-memory
+        triples when Phase 3 saw is_shutdown_requested() with written=0.
+        """
+        import time
+
+        import topos.features.facts.llm_extract as llm
+        from topos.runtime_shutdown import clear_shutdown, request_shutdown
+
+        clear_shutdown()
+        monkeypatch.setattr(llm, "FACTS_LLM_CONCURRENCY", 2)
+        calls: list[str] = []
+
+        def _stub(prompt, row):
+            mid = str(row.get("message_id"))
+            calls.append(mid)
+            if len(calls) == 1:
+                request_shutdown("test_shutdown_keeps_facts")
+            time.sleep(0.05)
+            return [{"predicate": "practices", "object": f"yoga-{mid}"}]
+
+        rows = [
+            _ai_chat_owner(f"I have been practicing yoga for years number {i}", f"m{i}")
+            for i in range(8)
+        ]
+        try:
+            written = extract_owner_facts_llm(conn, rows, extractor=_stub)
+            facts = _facts_by_predicate(conn, "practices")
+            # At least the first completed call(s) must land; we must not discard
+            # paid LLM work because shutdown flipped before a deferred write phase.
+            assert written >= 1
+            assert len(facts) >= 1
+            assert len(calls) <= 4
+        finally:
+            clear_shutdown()
+
+    def test_rerun_skips_already_processed_records(self, conn, monkeypatch):
+        """Restart must not re-call the LLM for records marked complete."""
+        import topos.features.facts.llm_extract as llm
+
+        monkeypatch.setattr(llm, "FACTS_LLM_CONCURRENCY", 4)
+        calls: list[str] = []
+
+        def _stub(prompt, row):
+            mid = str(row.get("message_id"))
+            calls.append(mid)
+            return [{"predicate": "practices", "object": f"yoga-{mid}"}]
+
+        rows = [
+            _ai_chat_owner(f"I have been practicing yoga habit number {i} for years", f"r{i}")
+            for i in range(6)
+        ]
+        first = extract_owner_facts_llm(conn, rows, extractor=_stub)
+        assert first == 6
+        assert sorted(calls) == [f"r{i}" for i in range(6)]
+
+        calls.clear()
+        second = extract_owner_facts_llm(conn, rows, extractor=_stub)
+        assert second == 0
+        assert calls == []  # every record already progress-marked
+        # Facts remain; no duplicates.
+        facts = _facts_by_predicate(conn, "practices")
+        assert len(facts) == 6
+
+    def test_empty_extraction_still_marks_progress(self, conn, monkeypatch):
+        """Successful empty LLM results must not be re-paid on the next pass."""
+        import topos.features.facts.llm_extract as llm
+
+        monkeypatch.setattr(llm, "FACTS_LLM_CONCURRENCY", 2)
+        calls = {"n": 0}
+
+        def _stub(prompt, row):
+            calls["n"] += 1
+            return []  # model found nothing
+
+        rows = [
+            _ai_chat_owner("I have been thinking about my long-term career path", "e1"),
+            _ai_chat_owner("I have been reflecting on how I spend weekends lately", "e2"),
+        ]
+        assert extract_owner_facts_llm(conn, rows, extractor=_stub) == 0
+        assert calls["n"] == 2
+        calls["n"] = 0
+        assert extract_owner_facts_llm(conn, rows, extractor=_stub) == 0
+        assert calls["n"] == 0
