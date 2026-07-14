@@ -222,6 +222,48 @@ def test_map_many_push_event_emits_activity_plus_journal_per_commit() -> None:
     assert second.payload["source_record_id"] == f"44851245900:{'b' * 40}"
 
 
+def test_map_many_journal_lane_is_authored_only_when_authorship_stamped() -> None:
+    """Strict policy: commits stamped ai_assisted/participated/bot stay
+    activity-only; only `authored` fans out to journal_entries. Absent field
+    keeps the legacy all-commits behavior (previous test covers it)."""
+    event = _github_event(
+        payload={
+            "size": 4,
+            "ref": "refs/heads/main",
+            "commits": [
+                {"sha": "a" * 40, "message": "my own work", "authorship": "authored"},
+                {"sha": "b" * 40, "message": "co-authored with claude", "authorship": "ai_assisted"},
+                {"sha": "c" * 40, "message": "someone else's PR", "authorship": "participated"},
+                {"sha": "d" * 40, "message": "chore(deps): bump", "authorship": "bot"},
+            ],
+        }
+    )
+    records = GithubActivityCanonicalMapper().map_many(
+        NormalizedRecord(record_id="e-lane", payload=event)
+    )
+    # 1 activity event + ONLY the authored commit's journal entry.
+    assert len(records) == 2
+    journal = records[1]
+    assert journal.table == "journal_entries"
+    assert journal.payload["content"] == "my own work"
+    # Authorship is recorded on the journal row's metadata for later filtering.
+    assert journal.payload["metadata_json"]["authorship"] == "authored"
+
+
+def test_map_many_authorship_matching_is_case_insensitive() -> None:
+    event = _github_event(
+        payload={
+            "size": 1,
+            "commits": [{"sha": "e" * 40, "message": "shouting", "authorship": "AUTHORED"}],
+        }
+    )
+    records = GithubActivityCanonicalMapper().map_many(
+        NormalizedRecord(record_id="e-case", payload=event)
+    )
+    assert len(records) == 2
+    assert records[1].payload["metadata_json"]["authorship"] == "authored"
+
+
 def test_map_many_non_push_event_is_activity_only() -> None:
     event = _github_event(
         type="PullRequestEvent",

@@ -5,6 +5,15 @@ Additionally, each commit inside a PushEvent ``payload.commits[]`` maps to one
 ``journal_entries`` row — a commit reads like a work-journal entry (category
 'code', content = commit message). Only PushEvent commits fan out; PRs/issues
 stay activity-only.
+
+Journal-lane policy (strict): when a commit carries an ``authorship`` field
+(authored | ai_assisted | participated | bot — stamped by callers that know the
+owner's login and can detect AI co-author trailers / bot authors), only
+``authored`` commits become journal entries; the rest stay activity-only.
+External contributions and AI-generated commits are how the owner's time was
+spent (activity), not the owner's personal words (journal). Commits without the
+field (legacy webhook/UI-stream payloads) keep the historical all-commits
+behavior.
 """
 
 from __future__ import annotations
@@ -160,6 +169,17 @@ class GithubActivityCanonicalMapper(CanonicalMapper):
             sha = str(commit.get("sha") or "").strip()
             if not sha:
                 continue  # no deterministic identity without a sha
+            # Journal-lane policy (strict): only commits the owner personally
+            # authored read as journal entries. Callers that can classify (they
+            # know the owner's login + can detect AI co-author trailers / bots)
+            # stamp `authorship` on each commit: authored | ai_assisted |
+            # participated | bot. Anything non-authored stays activity-only —
+            # external contributions and AI-generated commits are how time was
+            # spent, not the owner's personal journal. Absent field (legacy
+            # webhook/UI-stream payloads) keeps the historical behavior.
+            authorship = str(commit.get("authorship") or "").strip().lower() or None
+            if authorship is not None and authorship != "authored":
+                continue
             entry_id = f"github:{repo_name}:{sha}" if repo_name else f"github:{sha}"
             entry_at = _commit_timestamp(commit) or created_at
             metadata: Dict[str, Any] = {
@@ -168,6 +188,7 @@ class GithubActivityCanonicalMapper(CanonicalMapper):
                 "ref": ref,
                 "branch": branch,
                 "event_id": f"github:{event_record_id}",
+                "authorship": authorship,
             }
             journal = {
                 "entry_id": entry_id,

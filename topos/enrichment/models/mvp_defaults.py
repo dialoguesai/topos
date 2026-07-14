@@ -6,7 +6,11 @@ from .registry import ModelRegistry
 
 MVP_JOB_SPECS = [
     ("emo_27", "emotion_classification", "huggingface", "SamLowe/roberta-base-go_emotions", True),
-    ("entities", "entity_extraction", "huggingface", "dslim/bert-base-NER", True),
+    # OntoNotes-18 NER (was CoNLL-4 dslim/bert-base-NER): unlocks
+    # work_of_art/event/product spine types; value labels dropped in
+    # map_ner_type. Plain token-classification head — no CRF, so the vanilla
+    # transformers pipeline decodes it correctly.
+    ("entities", "entity_extraction", "huggingface", "djagatiya/ner-roberta-base-ontonotesv5-englishv4", True),
     ("embeddings", "embedding", "huggingface", "sentence-transformers/all-MiniLM-L6-v2", True),
     ("sentiment", "sentiment_classification", "huggingface", "cardiffnlp/twitter-roberta-base-sentiment-latest", True),
     ("url_classification", "url_classification", "huggingface", "facebook/bart-large-mnli", True),

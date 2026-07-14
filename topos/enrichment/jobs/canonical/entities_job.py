@@ -152,12 +152,16 @@ class EntitiesJob(BaseEnrichmentJob):
             surface = str(rec.get("entity_text") or "").strip()
             if not surface or confidence < _MIN_RESOLVE_CONFIDENCE:
                 continue
+            entity_type = map_ner_type(rec.get("entity_type"))
+            if entity_type is None:
+                # Value labels (dates, money, cardinals) — not spine entities.
+                continue
             record_id = str(rec.get("record_id") or "")
             msg = msg_by_id.get(record_id, {})
             try:
                 entity_id, _tier = resolver.resolve(
                     surface,
-                    entity_type=map_ner_type(rec.get("entity_type")),
+                    entity_type=entity_type,
                     record_id=record_id,
                 )
             except ValueError:
