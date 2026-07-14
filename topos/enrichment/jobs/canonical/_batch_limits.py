@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 
-MAX_JOB_MESSAGES = 500
+MAX_JOB_MESSAGES = 1000
 TOPIC_BATCH_CONCURRENCY = max(
     1,
     int(os.environ.get("TOPOS_TOPIC_BATCH_CONCURRENCY", "4")),

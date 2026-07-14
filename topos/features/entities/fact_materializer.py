@@ -19,6 +19,12 @@ tagged edges first, so re-running is idempotent. String-valued fact objects are
 resolved to entity nodes (the resolve-to-nodes choice) so the graph stays maximally
 connected. Bounded by the current signal_objects; grows as extraction produces
 more facts.
+
+``discusses`` edges are dated from topic-cluster *member* activity (timeline /
+embeddings), not ``signal_objects.valid_from``, so Active-in matches goal dating.
+Existing nodes pick up the new stamps on the next ``rebuild_entity_graph`` /
+``materialize_signal_objects_to_graph`` (debounced via ``graph_refresh`` after
+enrichment, or call rebuild manually).
 """
 
 from __future__ import annotations
@@ -27,7 +33,7 @@ import json
 import logging
 import sqlite3
 import uuid
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 logger = logging.getLogger("topos.features.entities.fact_materializer")
 
@@ -47,6 +53,78 @@ def _now_iso() -> str:
     from .edges import _now_iso as edges_now
 
     return edges_now()
+
+
+def _plausible_event_at(value: object) -> Optional[str]:
+    """Reject epoch-zero/garbage timestamps (a 1970 edge pins the scrubber)."""
+    s = str(value or "").strip()
+    return s if len(s) >= 4 and s[:4].isdigit() and int(s[:4]) >= 2000 else None
+
+
+def _record_event_at(conn: sqlite3.Connection, record_id: str) -> Optional[str]:
+    """EVENT time of a canonical record (timeline registry, mentions fallback)."""
+    try:
+        row = conn.execute(
+            "SELECT event_at FROM timeline WHERE record_id=? AND event_at IS NOT NULL LIMIT 1",
+            (record_id,),
+        ).fetchone()
+        if row:
+            plausible = _plausible_event_at(row[0])
+            if plausible:
+                return plausible
+    except sqlite3.OperationalError:
+        pass
+    try:
+        row = conn.execute(
+            "SELECT event_at FROM entity_mentions WHERE record_id=? AND event_at IS NOT NULL LIMIT 1",
+            (record_id,),
+        ).fetchone()
+        return _plausible_event_at(row[0]) if row else None
+    except sqlite3.OperationalError:
+        return None
+
+
+def _member_event_at(conn: sqlite3.Connection, record_id: str) -> Optional[str]:
+    """Member activity time: timeline/mentions, then embedding event_at."""
+    ts = _record_event_at(conn, record_id)
+    if ts:
+        return ts
+    try:
+        row = conn.execute(
+            "SELECT MAX(event_at) FROM signal_embeddings "
+            "WHERE record_id=? AND event_at IS NOT NULL",
+            (record_id,),
+        ).fetchone()
+        return _plausible_event_at(row[0]) if row else None
+    except sqlite3.OperationalError:
+        return None
+
+
+def _cluster_activity_window(
+    conn: sqlite3.Connection, cluster_id: str
+) -> Tuple[Optional[str], Optional[str]]:
+    """Earliest/latest member activity for a topic cluster (mirrors goal dating).
+
+    Resolution per member record_id: timeline → entity_mentions →
+    signal_embeddings.event_at → topic_cluster_members.created_at.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT record_id, created_at FROM topic_cluster_members WHERE cluster_id=?",
+            (cluster_id,),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return None, None
+    events: list[str] = []
+    for record_id, created_at in rows:
+        ts = _member_event_at(conn, str(record_id)) if record_id else None
+        if not ts:
+            ts = _plausible_event_at(created_at)
+        if ts:
+            events.append(ts)
+    if not events:
+        return None, None
+    return min(events), max(events)
 
 
 def _asserted_by_role(asserted_by: Optional[str]) -> str:
@@ -196,6 +274,12 @@ def materialize_signal_objects_to_graph(
             continue
         topic_id = f"topic_{object_key}"
         _ensure_topic_node(conn, topic_id, tag)
+        # Date by WHEN members were active, not when the signal_object row was
+        # first inserted — otherwise Active-in drops live topics (or keeps
+        # stale ones) while goals (event-dated) flip the other way.
+        first_at, last_at = _cluster_activity_window(conn, str(object_key))
+        edge_from = first_at or valid_from
+        edge_last = last_at or first_at
         linked = 0
         for name in related:
             if not is_valid_entity_surface(str(name)):
@@ -208,7 +292,8 @@ def materialize_signal_objects_to_graph(
                 continue
             _upsert_materialized_edge(
                 conn, src=topic_id, dst=ent_id, edge_type=EDGE_DISCUSSES,
-                weight=_MZ_WEIGHT_FLOOR, valid_from=valid_from, valid_to=valid_to,
+                weight=_MZ_WEIGHT_FLOOR, valid_from=edge_from, valid_to=None,
+                last_event_at=edge_last,
                 statement=f"topic: {tag}", source_object_id=object_id,
             )
             topic_edges += 1
