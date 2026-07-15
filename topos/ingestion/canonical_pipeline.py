@@ -356,6 +356,7 @@ def canonicalize_normalized_batch(
         "profile": "profile_records",
         "financial": "financial_transactions",
         "places": "location_events",
+        "documents": "documents",
     }
     if group in demo_table_by_group and source_def.canonical_mapper_id:
         table_name = demo_table_by_group[group]
@@ -567,12 +568,28 @@ def load_canonical_records_for_signal(
 
     demo_load_sql = {
         "schedule": (
-            "SELECT event_id, title, starts_at, ends_at, source_id FROM calendar_events WHERE source_id=? ORDER BY starts_at DESC LIMIT ?",
+            # is_busy/status are carried through so a reprocess/backfill of
+            # availability_scores (which reads them, not a row-count guess)
+            # gets real data instead of silently falling back to "assume busy".
+            "SELECT event_id, title, starts_at, ends_at, is_busy, status, source_id FROM calendar_events WHERE source_id=? ORDER BY starts_at DESC LIMIT ?",
             lambda row: {
                 "event_id": row[0],
                 "title": row[1],
                 "starts_at": row[2],
                 "ends_at": row[3],
+                "is_busy": row[4],
+                "status": row[5],
+                "source_id": row[6] or source_id,
+            },
+        ),
+        "documents": (
+            "SELECT doc_id, title, content, url, source_id FROM documents WHERE source_id=? ORDER BY modified_at DESC LIMIT ?",
+            lambda row: {
+                "doc_id": row[0],
+                "record_id": row[0],
+                "title": row[1],
+                "content": row[2],
+                "url": row[3],
                 "source_id": row[4] or source_id,
             },
         ),
