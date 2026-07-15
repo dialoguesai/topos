@@ -33,7 +33,7 @@ _TABLE_TEXT_COLUMNS: Dict[str, Tuple[str, str]] = {
     "place": ("place_id", "label"),
     "project": ("project_id", "name"),
     "task": ("task_id", "title"),
-    "document": ("document_id", "title"),
+    "documents": ("doc_id", "title"),
     "note": ("note_id", "content"),
     "public_bio": ("bio_id", "bio_text"),
     "personal_profile": ("profile_id", "summary"),

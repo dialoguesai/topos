@@ -18,6 +18,7 @@ CANONICAL_SCHEMA_TABLES: frozenset[str] = frozenset(
         "profile_records",
         "financial_transactions",
         "location_events",
+        "documents",
     }
 )
 
