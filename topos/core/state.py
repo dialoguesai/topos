@@ -158,6 +158,16 @@ control_plane_client: ControlPlaneClient | None = None
 
 db_conn: sqlite3.Connection | None = None
 _db_conn_path: str | None = None  # resolved path for current db_conn; invalidate if settings path changes
+
+# Re-export write gate so callers can `from topos.core.state import with_db_write`.
+from ..storage.db.write_gate import (  # noqa: E402
+    batched_writes,
+    commit_connection,
+    db_write_lock,
+    sqlite_retry_busy,
+    with_db_write,
+)
+
 oplog_manager: Any = None
 projection_manager: Any = None
 encryption_manager: Any = None

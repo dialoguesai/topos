@@ -13,7 +13,9 @@ from .demo_mappers import (
     DemoPlacesMapper,
     DemoProfileMapper,
 )
+from .documents_mapper import DocumentsCanonicalMapper
 from .github_activity_mapper import GithubActivityCanonicalMapper
+from .google_calendar_mapper import GoogleCalendarMapper
 from .grok_mapper import GrokCanonicalMapper
 from .messenger_mapper import ImessageCanonicalMapper, SignalCanonicalMapper, VoxtermTranscriptCanonicalMapper
 
@@ -33,13 +35,17 @@ MAPPER_REGISTRY = {
     "demo_places": DemoPlacesMapper,
     "demo_contacts": DemoContactsMapper,
     "journal_time_log": JournalTimeLogMapper,
+    "documents": DocumentsCanonicalMapper,
+    "google_calendar": GoogleCalendarMapper,
 }
 
 __all__ = [
     "BrowserActivityCanonicalMapper",
     "CanonicalMapper",
     "ChatGPTCanonicalMapper",
+    "DocumentsCanonicalMapper",
     "GithubActivityCanonicalMapper",
+    "GoogleCalendarMapper",
     "GrokCanonicalMapper",
     "ImessageCanonicalMapper",
     "SignalCanonicalMapper",

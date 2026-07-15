@@ -88,7 +88,31 @@ class EntitiesJob(BaseEnrichmentJob):
         results: List[Dict[str, Any]] = []
         total = len(canonical_messages)
 
-        eligible = eligible_ner_records(canonical_messages)
+        # Declared mappings first (§5a cap 4): structured sources mint their
+        # entities from record fields; NER is suppressed for them — it guesses
+        # (and misclassified repos as people) where the record already knows.
+        from ....features.entities.declared_mappings import (
+            extract_declared_entities,
+            ner_suppressed_source_ids,
+        )
+
+        suppressed = ner_suppressed_source_ids()
+        for msg in canonical_messages:
+            results.extend(
+                extract_declared_entities(
+                    msg,
+                    record_id=record_key(msg),
+                    event_at=next(
+                        (msg.get(f) for f in _EVENT_AT_FIELDS if msg.get(f)), None
+                    ),
+                )
+            )
+
+        eligible = [
+            r
+            for r in eligible_ner_records(canonical_messages)
+            if str(r.get("source_id") or "") not in suppressed
+        ]
 
         processed = total - len(eligible)
         if progress_callback and processed:
@@ -173,15 +197,30 @@ class EntitiesJob(BaseEnrichmentJob):
         resolver = EntityResolver(conn)
         resolver.seed_from_contacts()
 
+        def self_entity_id() -> Optional[str]:
+            try:
+                row = conn.execute(
+                    "SELECT entity_id FROM entities WHERE is_self=1 LIMIT 1"
+                ).fetchone()
+            except Exception:
+                return None
+            return str(row[0]) if row else None
+
         msg_by_id = {record_key(m): m for m in canonical_messages if record_key(m)}
         entities_by_record: Dict[str, List[str]] = {}
 
         for rec in ner_records:
+            declared = rec.get("provider") == "declared"
             confidence = float(rec.get("confidence") or 0.0)
             surface = str(rec.get("entity_text") or "").strip()
             if not surface or confidence < _MIN_RESOLVE_CONFIDENCE:
                 continue
-            entity_type = map_ner_type(rec.get("entity_type"))
+            if declared:
+                # Declared types are already spine types (project/organization);
+                # map_ner_type only understands NER label vocabularies.
+                entity_type = str(rec.get("entity_type") or "").strip() or None
+            else:
+                entity_type = map_ner_type(rec.get("entity_type"))
             if entity_type is None:
                 # Value labels (dates, money, cardinals) — not spine entities.
                 continue
@@ -205,6 +244,20 @@ class EntitiesJob(BaseEnrichmentJob):
                 event_at=rec.get("event_at"),
             )
             entities_by_record.setdefault(record_id, []).append(entity_id)
+
+            # Declared owner edge: self -> worked_on -> entity, positioned at
+            # the record's event time so temporal views place it correctly.
+            edge_type = str(rec.get("self_edge") or "").strip()
+            if declared and edge_type:
+                owner = self_entity_id()
+                if owner:
+                    update_edge(
+                        conn,
+                        src_entity_id=owner,
+                        dst_entity_id=entity_id,
+                        edge_type=edge_type,
+                        event_at=rec.get("event_at"),
+                    )
 
             # Sender speaks about the mentioned entity -> communicates/discusses signal
             sender = str(msg.get("sender_id") or "").strip()

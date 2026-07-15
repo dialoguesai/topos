@@ -8,6 +8,8 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from ..db.write_gate import commit_connection
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -63,6 +65,8 @@ class SQLiteCanonicalStore(CanonicalStore):
             ref = self._upsert_financial_transaction(record, sync_batch_id=sync_batch_id)
         elif table == "location_events":
             ref = self._upsert_location_event(record, sync_batch_id=sync_batch_id)
+        elif table == "documents":
+            ref = self._upsert_document(record, sync_batch_id=sync_batch_id)
         else:
             raise ValueError(f"Unsupported canonical table: {table}")
         self._maybe_commit()
@@ -82,11 +86,11 @@ class SQLiteCanonicalStore(CanonicalStore):
             return [self.upsert(table, record, sync_batch_id=sync_batch_id) for record in records]
         finally:
             self._defer_commit = False
-            self._conn.commit()
+            commit_connection(self._conn)
 
     def _maybe_commit(self) -> None:
         if not self._defer_commit:
-            self._conn.commit()
+            commit_connection(self._conn)
 
     def _upsert_ai_chat_message(self, record: Dict[str, Any], *, sync_batch_id: Optional[str]) -> CanonicalRef:
         message_id = str(record.get("message_id") or record.get("record_id") or "")
@@ -258,13 +262,38 @@ class SQLiteCanonicalStore(CanonicalStore):
         self._conn.execute(
             """
             INSERT INTO calendar_events (
-                event_id, title, starts_at, ends_at, source_id,
-                source_record_id, ingested_at, sync_batch_id, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                event_id, title, starts_at, ends_at,
+                is_busy, status, is_all_day, self_response_status, is_organizer,
+                is_recurring, event_type, timezone, location, description, url,
+                attendee_count, accepted_count, created_at, updated_at,
+                attendance_priority, movability_score, value_score, value_reason,
+                priority_confidence,
+                source_id, source_record_id, ingested_at, sync_batch_id, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(event_id) DO UPDATE SET
                 title=excluded.title,
                 starts_at=excluded.starts_at,
                 ends_at=excluded.ends_at,
+                is_busy=excluded.is_busy,
+                status=excluded.status,
+                is_all_day=excluded.is_all_day,
+                self_response_status=excluded.self_response_status,
+                is_organizer=excluded.is_organizer,
+                is_recurring=excluded.is_recurring,
+                event_type=excluded.event_type,
+                timezone=excluded.timezone,
+                location=excluded.location,
+                description=excluded.description,
+                url=excluded.url,
+                attendee_count=excluded.attendee_count,
+                accepted_count=excluded.accepted_count,
+                created_at=excluded.created_at,
+                updated_at=excluded.updated_at,
+                attendance_priority=excluded.attendance_priority,
+                movability_score=excluded.movability_score,
+                value_score=excluded.value_score,
+                value_reason=excluded.value_reason,
+                priority_confidence=excluded.priority_confidence,
                 sync_batch_id=excluded.sync_batch_id,
                 ingested_at=excluded.ingested_at,
                 metadata_json=excluded.metadata_json
@@ -274,6 +303,26 @@ class SQLiteCanonicalStore(CanonicalStore):
                 record.get("title"),
                 record.get("starts_at"),
                 record.get("ends_at"),
+                record.get("is_busy"),
+                record.get("status"),
+                record.get("is_all_day"),
+                record.get("self_response_status"),
+                record.get("is_organizer"),
+                record.get("is_recurring"),
+                record.get("event_type"),
+                record.get("timezone"),
+                record.get("location"),
+                record.get("description"),
+                record.get("url"),
+                record.get("attendee_count"),
+                record.get("accepted_count"),
+                record.get("created_at"),
+                record.get("updated_at"),
+                record.get("attendance_priority"),
+                record.get("movability_score"),
+                record.get("value_score"),
+                record.get("value_reason"),
+                record.get("priority_confidence"),
                 record.get("source_id"),
                 record.get("source_record_id") or event_id,
                 record.get("ingested_at") or _utc_now(),
@@ -440,6 +489,50 @@ class SQLiteCanonicalStore(CanonicalStore):
         )
         return CanonicalRef(record_id=event_id, created=existing is None)
 
+    def _upsert_document(self, record: Dict[str, Any], *, sync_batch_id: Optional[str]) -> CanonicalRef:
+        doc_id = str(record.get("doc_id") or record.get("source_record_id") or "")
+        if not doc_id:
+            raise ValueError("documents upsert requires doc_id")
+        existing = self._conn.execute(
+            "SELECT doc_id FROM documents WHERE doc_id=?",
+            (doc_id,),
+        ).fetchone()
+        self._conn.execute(
+            """
+            INSERT INTO documents (
+                doc_id, title, content, url, mime_type, author, created_at, modified_at,
+                source_id, source_record_id, ingested_at, sync_batch_id, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(doc_id) DO UPDATE SET
+                title=excluded.title,
+                content=excluded.content,
+                url=excluded.url,
+                mime_type=excluded.mime_type,
+                author=excluded.author,
+                created_at=excluded.created_at,
+                modified_at=excluded.modified_at,
+                sync_batch_id=excluded.sync_batch_id,
+                ingested_at=excluded.ingested_at,
+                metadata_json=excluded.metadata_json
+            """,
+            (
+                doc_id,
+                record.get("title"),
+                record.get("content"),
+                record.get("url"),
+                record.get("mime_type"),
+                record.get("author"),
+                record.get("created_at"),
+                record.get("modified_at"),
+                record.get("source_id"),
+                record.get("source_record_id") or doc_id,
+                record.get("ingested_at") or _utc_now(),
+                sync_batch_id or record.get("sync_batch_id"),
+                _json_metadata(record.get("metadata_json")),
+            ),
+        )
+        return CanonicalRef(record_id=doc_id, created=existing is None)
+
 
 class InMemoryCanonicalStore(CanonicalStore):
     def __init__(self) -> None:
@@ -448,7 +541,12 @@ class InMemoryCanonicalStore(CanonicalStore):
 
     def upsert(self, table: str, record: Dict[str, Any], *, sync_batch_id: Optional[str] = None) -> CanonicalRef:
         self.upsert_calls.append((table, dict(record)))
-        record_id = str(record.get("message_id") or record.get("event_id") or record.get("conversation_id"))
+        record_id = str(
+            record.get("message_id")
+            or record.get("event_id")
+            or record.get("doc_id")
+            or record.get("conversation_id")
+        )
         bucket = self._records.setdefault(table, {})
         created = record_id not in bucket
         bucket[record_id] = {**record, "sync_batch_id": sync_batch_id}

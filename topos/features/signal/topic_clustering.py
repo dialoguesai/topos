@@ -1208,29 +1208,32 @@ def recompute_topic_clusters(
     )
 
     _strip_member_vectors(clusters)
-    try:
-        conn.execute("BEGIN IMMEDIATE")
-        _clear_all_topic_clusters(conn)
-        persist_result = persist_topic_clusters(
-            conn,
-            clusters,
-            sync_batch_id=sync_batch_id,
-            commit=False,
-        )
-        clear_candidate_pool(conn)
-        log_recompute(
-            conn,
-            kind="full",
-            records_processed=len(records),
-            clusters_written=int(persist_result.get("clusters_written") or 0),
-            ids_preserved=ids_preserved,
-            metrics=metrics,
-        )
-        sync_member_cluster_ids(conn)
-        conn.commit()
-    except Exception:
-        conn.rollback()
-        raise
+    from ...storage.db.write_gate import sqlite_retry_busy, with_db_write
+
+    with with_db_write():
+        try:
+            sqlite_retry_busy(lambda: conn.execute("BEGIN IMMEDIATE"))
+            _clear_all_topic_clusters(conn)
+            persist_result = persist_topic_clusters(
+                conn,
+                clusters,
+                sync_batch_id=sync_batch_id,
+                commit=False,
+            )
+            clear_candidate_pool(conn)
+            log_recompute(
+                conn,
+                kind="full",
+                records_processed=len(records),
+                clusters_written=int(persist_result.get("clusters_written") or 0),
+                ids_preserved=ids_preserved,
+                metrics=metrics,
+            )
+            sync_member_cluster_ids(conn)
+            sqlite_retry_busy(conn.commit)
+        except Exception:
+            conn.rollback()
+            raise
     return {
         "status": "completed",
         "records_loaded": len(records),

@@ -34,6 +34,15 @@ pytest tests -m "public and not e2e" -q
 - Operational maintenance scripts that expose internal deployment details live in:
   - `topos-control-plane/scripts/topos-node-maintenance/`
 
+## Optional extensions
+
+Plugin authoring uses the **`topos.extensions`** entry-point contract documented in
+[README.md — Plugins](README.md#plugins). Use
+[topos-plugin-template](https://github.com/dialoguesai/topos-plugin-template) as a
+starting point.
+
+Keep proprietary or hosted-only plugins in separate packages — not in this repo.
+
 ## Scope guidance
 
 Good fit for this repo:

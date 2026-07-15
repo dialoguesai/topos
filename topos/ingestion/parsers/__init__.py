@@ -15,7 +15,9 @@ from .demo_file_parsers import (
     DemoPlacesParser,
     DemoProfileParser,
 )
+from .documents_parser import GDriveFileParser, NotionPageParser
 from .github_activity_parser import GithubActivityParser
+from .google_calendar_parser import GoogleCalendarParser
 from .grok_parser import GrokParser
 from .messenger_parser import ImessageParser, SignalParser
 from .voxterm_parser import VoxtermTranscriptParser
@@ -42,6 +44,9 @@ PARSER_REGISTRY = {
     "journal.time_log.v1": JournalTimeLogFileParser,
     "grow.time_log.v1": JournalTimeLogFileParser,
     "voxterm.transcript.v1": VoxtermTranscriptParser,
+    "notion.page.v1": NotionPageParser,  # Remote connectors: Notion saved pages -> documents
+    "gdrive.file.v1": GDriveFileParser,  # Remote connectors: Drive saved files -> documents
+    "gcal.events.v1": GoogleCalendarParser,  # Remote connectors: Google Calendar events -> schedule
 }
 
 __all__ = [
@@ -49,10 +54,13 @@ __all__ = [
     "BrowserParser",
     "BrowserEventsParser",
     "ChatGPTParser",
+    "GDriveFileParser",
     "GithubActivityParser",
+    "GoogleCalendarParser",
     "GrokParser",
     "CalendarParser",
     "ImessageParser",
+    "NotionPageParser",
     "SignalParser",
     "DemoBrowserFileParser",
     "DemoCalendarParser",

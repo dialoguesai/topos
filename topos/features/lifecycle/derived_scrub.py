@@ -52,22 +52,37 @@ def _delete_orphan_entities(conn: sqlite3.Connection) -> List[str]:
     But the anchor must still RESOLVE: when the contact row itself was deleted
     (source scrub, manual cleanup), the anchored entity would otherwise persist
     forever with a dangling contact_id (2026-07-09 demo-purge leak).
+
+    Materialized graph hubs (goals / topic_* / conversations) also stay: they
+    are derived from ``user_goals`` / ``signal_objects`` / conversation rows,
+    never from ``entity_mentions``, so mention_count is always 0. Pruning them
+    here used to wipe the goal layer on every rebuild until enrichers ran —
+    and permanently if enrich failed after the mz-edge wipe.
     """
+    # Synthetic / enrichment-only nodes — never mention-backed.
+    keep_clause = (
+        "AND entity_type NOT IN ('goal', 'conversation') "
+        "AND entity_id NOT LIKE 'goal_%' "
+        "AND entity_id NOT LIKE 'topic_%' "
+        "AND entity_id NOT LIKE 'conv_%'"
+    )
     try:
         rows = conn.execute(
-            """
+            f"""
             SELECT entity_id FROM entities e
             WHERE mention_count = 0 AND is_self = 0
               AND (contact_id IS NULL
                    OR NOT EXISTS (SELECT 1 FROM contacts c WHERE c.contact_id = e.contact_id))
+              {keep_clause}
             """
         ).fetchall()
     except sqlite3.OperationalError:
         # No contacts table in this database — fall back to the anchor-blind rule.
         rows = conn.execute(
-            """
+            f"""
             SELECT entity_id FROM entities
             WHERE mention_count = 0 AND contact_id IS NULL AND is_self = 0
+              {keep_clause}
             """
         ).fetchall()
     orphan_ids = [str(r[0]) for r in rows]

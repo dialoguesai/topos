@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import logging
 
 from fastapi import APIRouter, Depends
 
@@ -9,6 +10,8 @@ from ..core.api_models import GenerationRequest, GenerationResponse, OllamaModel
 from ..engine.usage_observation import emit_usage_observation
 from ..rate_limit import rate_limit
 from ..services.container import Services, get_services
+
+logger = logging.getLogger("topos.api.llm")
 
 router = APIRouter()
 
@@ -19,6 +22,12 @@ router = APIRouter()
     dependencies=[Depends(require_api_key), Depends(rate_limit)],
 )
 async def llm_generation(body: GenerationRequest):
+    logger.info(
+        "llm_generation request: provider=%r model=%r prompt_chars=%d",
+        body.provider,
+        body.model,
+        len(body.prompt or ""),
+    )
     services: Services = get_services()
     result = await services.llm.generate(body.model_dump())
     usage = result.get("usage") if isinstance(result, dict) else {}
@@ -45,6 +54,12 @@ async def llm_generation(body: GenerationRequest):
     dependencies=[Depends(require_api_key), Depends(rate_limit)],
 )
 async def llm_generation_alias(body: GenerationRequest):
+    logger.info(
+        "llm_generation request (alias): provider=%r model=%r prompt_chars=%d",
+        body.provider,
+        body.model,
+        len(body.prompt or ""),
+    )
     services: Services = get_services()
     result = await services.llm.generate(body.model_dump())
     usage = result.get("usage") if isinstance(result, dict) else {}

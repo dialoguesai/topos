@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from ..protocols import ListPage
 from ...canonical.canonical_store import SQLiteCanonicalStore as TypedSQLiteCanonicalStore
+from ...db.write_gate import commit_connection
 
 _NATIVE_TABLES = frozenset(
     {
@@ -475,7 +476,7 @@ class SQLiteCanonicalStore:
             """,
             (record_id, table, record.get("source_id"), payload),
         )
-        self._conn.commit()
+        commit_connection(self._conn)
         return record_id
 
     def get(self, table: str, record_id: str) -> Optional[Dict[str, Any]]:
@@ -538,7 +539,7 @@ class SQLiteCanonicalStore:
                 "DELETE FROM wiki_canonical_records WHERE record_id=? AND table_name=?",
                 (record_id, table),
             )
-        self._conn.commit()
+        commit_connection(self._conn)
         return cur.rowcount > 0
 
     def count(self, table: str, *, source_id: Optional[str] = None) -> int:
@@ -565,7 +566,7 @@ class SQLiteSignalFeatureStore:
                 json.dumps({**fact, "fact_id": fact_id}),
             ),
         )
-        self._conn.commit()
+        commit_connection(self._conn)
         return fact_id
 
     def put_score(self, score: Dict[str, Any]) -> str:
@@ -584,7 +585,7 @@ class SQLiteSignalFeatureStore:
                 json.dumps({**score, "score_id": score_id}),
             ),
         )
-        self._conn.commit()
+        commit_connection(self._conn)
         return score_id
 
     def put_summary(self, summary: Dict[str, Any]) -> str:
@@ -602,7 +603,7 @@ class SQLiteSignalFeatureStore:
                 json.dumps({**summary, "summary_id": summary_id}),
             ),
         )
-        self._conn.commit()
+        commit_connection(self._conn)
         return summary_id
 
     def _list_rows(self, table: str, *, dimension: Optional[str], limit: int, offset: int) -> ListPage:
@@ -708,7 +709,7 @@ class SQLiteVectorIndex:
                 (record_id, model),
             )
         delete_vec_rows(self._conn, ids)
-        self._conn.commit()
+        commit_connection(self._conn)
         return cur.rowcount
 
     def upsert(self, metadata: Dict[str, Any], *, vector: Optional[List[float]] = None) -> str:
@@ -771,7 +772,7 @@ class SQLiteVectorIndex:
         )
         if vector is not None:
             sync_vec_row(self._conn, embedding_id=embedding_id, vector=[float(x) for x in vector])
-        self._conn.commit()
+        commit_connection(self._conn)
         return embedding_id
 
     def get_metadata(self, embedding_id: str) -> Optional[Dict[str, Any]]:
@@ -848,7 +849,7 @@ class SQLiteVectorIndex:
         ]
         cur = self._conn.execute("DELETE FROM signal_embeddings WHERE record_id=?", (record_id,))
         delete_vec_rows(self._conn, ids)
-        self._conn.commit()
+        commit_connection(self._conn)
         return cur.rowcount
 
 
@@ -872,7 +873,7 @@ class SQLiteGraphEdgeStore:
                 node.get("source_id"),
             ),
         )
-        self._conn.commit()
+        commit_connection(self._conn)
         return node_id
 
     def upsert_edge(self, edge: Dict[str, Any]) -> str:
@@ -894,7 +895,7 @@ class SQLiteGraphEdgeStore:
                 edge.get("source_id"),
             ),
         )
-        self._conn.commit()
+        commit_connection(self._conn)
         return edge_id
 
     def list_graph(
@@ -946,7 +947,7 @@ class SQLiteAuditLogStore:
             """,
             (event_id, event.get("session_id"), event.get("event_type"), json.dumps({**event, "event_id": event_id})),
         )
-        self._conn.commit()
+        commit_connection(self._conn)
         return event_id
 
     def query(
@@ -1040,7 +1041,7 @@ class SQLiteQuerySessionStore:
                 session.get("ttl_expires_at") or session.get("expires_at"),
             ),
         )
-        self._conn.commit()
+        commit_connection(self._conn)
         return session_id
 
     def append_artifact(self, session_id: str, artifact: Dict[str, Any]) -> str:
@@ -1069,7 +1070,7 @@ class SQLiteQuerySessionStore:
                 artifact.get("game_layer_strategy"),
             ),
         )
-        self._conn.commit()
+        commit_connection(self._conn)
         return artifact_id
 
     def invalidate(self, session_id: str, *, cache_key: Optional[str] = None) -> int:
@@ -1080,7 +1081,7 @@ class SQLiteQuerySessionStore:
                 "DELETE FROM query_artifacts WHERE session_id=? AND cache_key=?",
                 (session_id, cache_key),
             )
-        self._conn.commit()
+        commit_connection(self._conn)
         return cur.rowcount
 
     def purge_expired(self) -> int:
@@ -1094,5 +1095,5 @@ class SQLiteQuerySessionStore:
         cur = self._conn.execute(
             "DELETE FROM query_sessions WHERE ttl_expires_at IS NOT NULL AND ttl_expires_at < datetime('now')"
         )
-        self._conn.commit()
+        commit_connection(self._conn)
         return count + cur.rowcount

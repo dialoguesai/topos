@@ -250,10 +250,14 @@ async def get_entity_graph(
     ``selection=weight`` (default) ranks by weight for MCP/minimal slices;
     ``selection=all`` ranks by recency for the owner knowledge-graph UI.
     """
+    import asyncio
+
     from ..features.entities.reads import entity_graph
 
-    return entity_graph(
-        _entities_conn(),
+    conn = _entities_conn()
+    return await asyncio.to_thread(
+        entity_graph,
+        conn,
         limit_nodes=limit_nodes,
         limit_edges=limit_edges,
         min_weight=min_weight,

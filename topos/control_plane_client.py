@@ -28,6 +28,7 @@ from .core.connection_resilience import (
 logger = logging.getLogger("topos.control_plane_client")
 
 # Lightweight CP RPCs that must stay responsive while ingest/enrichment runs.
+# UI-critical reads and scheduler ops only — no ingest/enrichment writes.
 _FAST_INBOUND_MESSAGE_TYPES = frozenset(
     {
         "healthcheck",
@@ -39,6 +40,15 @@ _FAST_INBOUND_MESSAGE_TYPES = frozenset(
         "update_routine_run",
         "get_routine",
         "advance_routine_next_run_at",
+        # UI reads (routines, home chat, temporal graph)
+        "list_routines",
+        "list_routine_runs",
+        "get_routine_run",
+        "list_home_chat_sessions",
+        "get_home_chat_session",
+        "signal_entity_graph",
+        "signal_list_entities",
+        "signal_get_entity",
     }
 )
 

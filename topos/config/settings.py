@@ -159,6 +159,7 @@ class Settings(BaseSettings):
     )
     nsfw_classifier_threshold: float = Field(0.5, env="NSFW_CLASSIFIER_THRESHOLD")
     nsfw_classifier_max_input_chars: int = Field(512, env="NSFW_CLASSIFIER_MAX_INPUT_CHARS")
+    sanitization_prewarm_on_startup: bool = Field(True, env="SANITIZATION_PREWARM_ON_STARTUP")
     platform_privacy_via_engine: bool = Field(True, env="PLATFORM_PRIVACY_VIA_ENGINE")
     topos_engine_service_url: Optional[str] = Field(None, env="TOPOS_ENGINE_SERVICE_URL")
 

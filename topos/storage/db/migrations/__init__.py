@@ -122,6 +122,14 @@ from .canonical_address_book_v1 import (
     MIGRATION_ID as CANONICAL_ADDRESS_BOOK_V1_ID,  # noqa: F401 — exported for tests/tools
     apply_canonical_address_book_v1_up,
 )
+from .documents_v1 import (
+    MIGRATION_ID as DOCUMENTS_V1_ID,  # noqa: F401 — exported for tests/tools
+    apply_documents_v1_up,
+)
+from .calendar_events_scheduling_v1 import (
+    MIGRATION_ID as CALENDAR_EVENTS_SCHEDULING_V1_ID,  # noqa: F401 — exported for tests/tools
+    apply_calendar_events_scheduling_v1_up,
+)
 
 __all__ = ["apply_all_migrations", "ensure_migrations_applied"]
 
@@ -193,6 +201,10 @@ def apply_all_migrations(conn: sqlite3.Connection) -> None:
     apply_derivation_ledger_v1_up(conn)
     apply_pipeline_jobs_v1_up(conn)
     apply_canonical_address_book_v1_up(conn)
+    # Documents canonical lane (new table — safe to run unconditionally).
+    apply_documents_v1_up(conn)
+    # B1 calendar scheduling: availability + value/movability columns.
+    apply_calendar_events_scheduling_v1_up(conn)
 
 
 def ensure_migrations_applied(conn: sqlite3.Connection) -> None:
@@ -268,3 +280,8 @@ def ensure_migrations_applied(conn: sqlite3.Connection) -> None:
     apply_derivation_ledger_v1_up(conn)
     apply_pipeline_jobs_v1_up(conn)
     apply_canonical_address_book_v1_up(conn)
+    if not _migration_applied(conn, DOCUMENTS_V1_ID):
+        apply_documents_v1_up(conn)
+    # Calendar scheduling column adds re-run cheaply after legacy DDL
+    # (calendar_events uses CREATE TABLE IF NOT EXISTS).
+    apply_calendar_events_scheduling_v1_up(conn)

@@ -7,6 +7,7 @@ from .common import (
     Any,
     Dict,
     Optional,
+    logger,
 )
 from .registry import handles
 
@@ -17,12 +18,20 @@ async def handle_query(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     if not req_id:
         return None
     payload = message.get("payload") or {}
+    raw_manifest = payload.get("manifest") or {}
+    scope_id = str(payload.get("scope_id") or raw_manifest.get("scope_id") or "")
+    intent = str(payload.get("intent") or payload.get("query") or "")
+    logger.info(
+        "query request: scope=%r mode=%r intent_chars=%d requester=%r",
+        scope_id,
+        str(payload.get("access_mode") or "summary"),
+        len(intent),
+        str(payload.get("requester_id") or "mcp"),
+    )
     try:
         from ...query.manifest_validation import ManifestValidationError, resolve_scope_manifest
         from ...query.runtime import get_query_orchestrator
 
-        raw_manifest = payload.get("manifest") or {}
-        scope_id = str(payload.get("scope_id") or raw_manifest.get("scope_id") or "")
         filter_manifest = payload.get("filter_manifest") if isinstance(payload.get("filter_manifest"), dict) else None
         try:
             manifest = resolve_scope_manifest(
@@ -42,7 +51,7 @@ async def handle_query(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 },
             }
         result = await get_query_orchestrator(conn=hub.get_db_connection()).execute(
-            query_text=str(payload.get("intent") or payload.get("query") or ""),
+            query_text=intent,
             scope_id=scope_id,
             access_mode=str(payload.get("access_mode") or "summary"),
             manifest=manifest,

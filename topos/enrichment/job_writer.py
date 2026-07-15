@@ -9,6 +9,7 @@ import uuid
 from typing import Any, Dict, List, Optional
 
 from ..storage.adapters.factory import AdapterBundle
+from ..storage.db.write_gate import batched_writes, commit_connection
 from .derived_tables import DerivedTablesManager
 
 logger = logging.getLogger(__name__)
@@ -76,6 +77,20 @@ def _write_wiki_table(
     )
 
 
+def _resolve_write_conn(
+    adapters: AdapterBundle,
+    conn: Optional[sqlite3.Connection],
+) -> Optional[sqlite3.Connection]:
+    if conn is not None:
+        return conn
+    for attr in ("signal", "vector", "graph", "canonical"):
+        store = getattr(adapters, attr, None)
+        store_conn = getattr(store, "_conn", None)
+        if store_conn is not None:
+            return store_conn
+    return None
+
+
 def write_signal_records(
     job_name: str,
     records: List[Dict[str, Any]],
@@ -88,6 +103,33 @@ def write_signal_records(
     """Write derivation output to signal adapters and optional legacy tables."""
     if not records:
         return 0
+    write_conn = _resolve_write_conn(adapters, conn)
+
+    def _write() -> int:
+        return _write_signal_records_unlocked(
+            job_name,
+            records,
+            adapters=adapters,
+            tables_manager=tables_manager,
+            provenance=provenance,
+            conn=conn,
+        )
+
+    if write_conn is not None:
+        with batched_writes(write_conn):
+            return _write()
+    return _write()
+
+
+def _write_signal_records_unlocked(
+    job_name: str,
+    records: List[Dict[str, Any]],
+    *,
+    adapters: AdapterBundle,
+    tables_manager: Optional[DerivedTablesManager] = None,
+    provenance: Optional[Dict[str, Any]] = None,
+    conn: Optional[sqlite3.Connection] = None,
+) -> int:
     prov = dict(provenance or {})
     prov.setdefault("job_id", job_name)
     written = 0
@@ -112,7 +154,7 @@ def write_signal_records(
             table, id_field = wiki_table
             for rec in records:
                 _write_wiki_table(conn, table, rec, id_field=id_field, provenance=prov)
-            conn.commit()
+            commit_connection(conn)
 
     if job_name == "embeddings":
         vector_index = adapters.vector

@@ -68,7 +68,7 @@ def file_conn(tmp_path):
 def test_tune_connection_sets_wal_on_file_db(file_conn):
     status = tune_connection(file_conn)
     assert status["journal_mode"] == "wal"
-    assert status["busy_timeout_ms"] == 5000
+    assert status["busy_timeout_ms"] == 30000
 
 
 def test_tune_connection_loads_sqlite_vec(file_conn):

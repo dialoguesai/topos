@@ -10,7 +10,7 @@ import os
 import time as time_module
 import uuid
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, TypeVar
 from topos.contacts.identity import normalize_contact_key as _normalize_contact_key
 from topos.core.table_layers import layer_for_category, layer_kind_labels
 from ...analytics.raw_queries import (
@@ -71,6 +71,14 @@ from ...engine.registration import RUNTIME_PROFILE_OPERATIONS, resolve_runtime_p
 
 
 logger = logging.getLogger("topos.core.handlers")
+
+_T = TypeVar("_T")
+
+
+async def run_db_read(fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
+    """Run a sync SQLite read off the engine event loop (UI/CP RPC responsiveness)."""
+    return await asyncio.to_thread(fn, *args, **kwargs)
+
 
 def _resource_owner_for_mcp_log(conn: Any) -> Optional[str]:
     if conn is None:

@@ -47,6 +47,18 @@ def _get_pipeline(model_id: str):
     return handle
 
 
+def prewarm_nsfw_classifier() -> None:
+    """Load the NSFW classifier pipeline (startup background prewarm)."""
+    if not nsfw_classifier_enabled() or not nsfw_classifier_available():
+        return
+    from topos.config.settings import settings
+
+    model_id = str(
+        getattr(settings, "nsfw_classifier_model", None) or DEFAULT_NSFW_CLASSIFIER_MODEL
+    )
+    _get_pipeline(model_id)
+
+
 def _heuristic_nsfw(text: str) -> Tuple[bool, float]:
     lower = text.lower()
     for tok in _HEURISTIC_NSFW_TOKENS:
