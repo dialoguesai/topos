@@ -99,6 +99,7 @@ def _table_for_group(group: str, row: Dict[str, Any]) -> str:
         "financial": "financial_transactions",
         "places": "location_events",
         "activity": "activity_events",
+        "documents": "documents",
     }
     if group in mapping:
         return mapping[group]

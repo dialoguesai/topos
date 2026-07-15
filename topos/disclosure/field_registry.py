@@ -8,6 +8,7 @@ CANONICAL_ID_COLUMN: Dict[str, str] = {
     "ai_chat_messages": "message_id",
     "conversation_messages": "message_id",
     "journal_entries": "entry_id",
+    "documents": "doc_id",
 }
 
 # canonical_table -> raw fields redacted at ingest
@@ -15,12 +16,14 @@ PII_DISCLOSURE_FIELDS: Dict[str, Tuple[str, ...]] = {
     "ai_chat_messages": ("content", "content_rendered"),
     "conversation_messages": ("content",),
     "journal_entries": ("content",),
+    "documents": ("content",),
 }
 
 _GROUP_TO_TABLE = {
     "ai_messages": "ai_chat_messages",
     "conversations": "conversation_messages",
     "journal": "journal_entries",
+    "documents": "documents",
 }
 
 
