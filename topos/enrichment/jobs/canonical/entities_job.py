@@ -13,6 +13,52 @@ logger = logging.getLogger("topos.enrichment.jobs.entities")
 _BATCH_SIZE = 32
 _MIN_RESOLVE_CONFIDENCE = 0.60
 
+# Canonical groups disagree on the id/time column (messages: message_id/event_at,
+# activity events: event_id/occurred_at, journal entries: entry_id/entry_at, …).
+# One key contract here, or whole sources silently skip extraction — the
+# 2026-07-14 backfill lost browser_visits/grow_* exactly this way.
+_RECORD_ID_FIELDS = ("message_id", "id", "record_id", "event_id", "entry_id", "transaction_id")
+_EVENT_AT_FIELDS = ("event_at", "ts", "occurred_at", "entry_at", "starts_at", "created_at")
+
+
+def record_key(msg: Dict[str, Any]) -> str:
+    for field in _RECORD_ID_FIELDS:
+        value = msg.get(field)
+        if value:
+            return str(value)
+    return ""
+
+
+def eligible_ner_records(canonical_messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Rows with extractable text for NER.
+
+    Same content contract as the embeddings job (embeddable_content): `content`
+    when derivable, else the descriptive-field fallback (title/organization/
+    description/url/place_name/…) — activity and profile records have no
+    content column at all.
+    """
+    from ....features.signal.embed_context import embeddable_content
+
+    out: List[Dict[str, Any]] = []
+    for msg in canonical_messages:
+        rid = record_key(msg)
+        if not rid:
+            continue
+        text = embeddable_content(msg)
+        if not text:
+            continue
+        event_at = next((msg.get(f) for f in _EVENT_AT_FIELDS if msg.get(f)), None)
+        out.append(
+            {
+                "id": rid,
+                "text": text,
+                "source_id": msg.get("source_id"),
+                "event_at": event_at,
+                "canonical_table": msg.get("_table") or msg.get("canonical_table"),
+            }
+        )
+    return out
+
 
 def entity_spine_enabled() -> bool:
     return os.environ.get("TOPOS_ENTITY_SPINE", "on").strip().lower() not in (
@@ -42,22 +88,7 @@ class EntitiesJob(BaseEnrichmentJob):
         results: List[Dict[str, Any]] = []
         total = len(canonical_messages)
 
-        from ....features.signal.embed_context import is_derivable_content
-
-        eligible: List[Dict[str, Any]] = []
-        for msg in canonical_messages:
-            message_id = msg.get("message_id") or msg.get("id")
-            content = msg.get("content", "")
-            if message_id and content and is_derivable_content(str(content)):
-                eligible.append(
-                    {
-                        "id": str(message_id),
-                        "text": str(content),
-                        "source_id": msg.get("source_id"),
-                        "event_at": msg.get("event_at") or msg.get("ts") or msg.get("created_at"),
-                        "canonical_table": msg.get("_table") or msg.get("canonical_table"),
-                    }
-                )
+        eligible = eligible_ner_records(canonical_messages)
 
         processed = total - len(eligible)
         if progress_callback and processed:
@@ -142,9 +173,7 @@ class EntitiesJob(BaseEnrichmentJob):
         resolver = EntityResolver(conn)
         resolver.seed_from_contacts()
 
-        msg_by_id = {
-            str(m.get("message_id") or m.get("id") or ""): m for m in canonical_messages
-        }
+        msg_by_id = {record_key(m): m for m in canonical_messages if record_key(m)}
         entities_by_record: Dict[str, List[str]] = {}
 
         for rec in ner_records:
