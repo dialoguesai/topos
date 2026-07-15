@@ -8,6 +8,8 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
+from ..storage.db.write_gate import commit_connection, sqlite_retry_busy, with_db_write
+
 JOB_STATUSES = frozenset({"queued", "running", "done", "failed"})
 DEFAULT_LEASE_SECONDS = 300
 
@@ -38,39 +40,62 @@ def enqueue_job(
     jid = str(job_id or uuid.uuid4())
     key = str(idempotency_key or "").strip() or None
 
-    if key:
-        existing = conn.execute(
-            "SELECT job_id, status FROM pipeline_jobs WHERE idempotency_key=?",
-            (key,),
-        ).fetchone()
-        if existing:
-            existing_id, status = str(existing[0]), str(existing[1])
-            if status in ("queued", "running", "failed"):
-                return existing_id
-            if status == "done":
-                return existing_id
+    with with_db_write():
+        if key:
+            existing = conn.execute(
+                "SELECT job_id, status FROM pipeline_jobs WHERE idempotency_key=?",
+                (key,),
+            ).fetchone()
+            if existing:
+                existing_id, status = str(existing[0]), str(existing[1])
+                if status in ("queued", "running"):
+                    return existing_id
+                if status == "done":
+                    return existing_id
+                if status == "failed":
+                    # Re-queue failed jobs so derivation can retry after lock errors.
+                    conn.execute(
+                        """
+                        UPDATE pipeline_jobs
+                        SET status='queued', payload_json=?, source_id=COALESCE(?, source_id),
+                            write_id=COALESCE(?, write_id), sync_batch_id=COALESCE(?, sync_batch_id),
+                            lease_owner=NULL, lease_expires_at=NULL,
+                            started_at=NULL, finished_at=NULL,
+                            updated_at=datetime('now')
+                        WHERE job_id=?
+                        """,
+                        (
+                            json.dumps(payload),
+                            source_id,
+                            write_id,
+                            sync_batch_id,
+                            existing_id,
+                        ),
+                    )
+                    commit_connection(conn)
+                    return existing_id
 
-    conn.execute(
-        """
-        INSERT INTO pipeline_jobs (
-            job_id, kind, status, payload_json, source_id, write_id,
-            sync_batch_id, idempotency_key, created_at, updated_at
-        ) VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
-        ON CONFLICT(job_id) DO UPDATE SET
-            payload_json=excluded.payload_json,
-            updated_at=datetime('now')
-        """,
-        (
-            jid,
-            kind,
-            json.dumps(payload),
-            source_id,
-            write_id,
-            sync_batch_id,
-            key,
-        ),
-    )
-    conn.commit()
+        conn.execute(
+            """
+            INSERT INTO pipeline_jobs (
+                job_id, kind, status, payload_json, source_id, write_id,
+                sync_batch_id, idempotency_key, created_at, updated_at
+            ) VALUES (?, ?, 'queued', ?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+            ON CONFLICT(job_id) DO UPDATE SET
+                payload_json=excluded.payload_json,
+                updated_at=datetime('now')
+            """,
+            (
+                jid,
+                kind,
+                json.dumps(payload),
+                source_id,
+                write_id,
+                sync_batch_id,
+                key,
+            ),
+        )
+        commit_connection(conn)
     return jid
 
 
@@ -96,15 +121,16 @@ def update_job_progress(
     progress: Dict[str, Any],
 ) -> None:
     ensure_pipeline_jobs_schema(conn)
-    conn.execute(
-        """
-        UPDATE pipeline_jobs
-        SET progress_json=?, updated_at=datetime('now')
-        WHERE job_id=?
-        """,
-        (json.dumps(progress), job_id),
-    )
-    conn.commit()
+    with with_db_write():
+        conn.execute(
+            """
+            UPDATE pipeline_jobs
+            SET progress_json=?, updated_at=datetime('now')
+            WHERE job_id=?
+            """,
+            (json.dumps(progress), job_id),
+        )
+        commit_connection(conn)
 
 
 def claim_next_job(
@@ -118,37 +144,38 @@ def claim_next_job(
     ensure_pipeline_jobs_schema(conn)
     expires = (datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)).isoformat()
 
-    conn.execute("BEGIN IMMEDIATE")
-    try:
-        query = "SELECT job_id FROM pipeline_jobs WHERE status='queued'"
-        params: list[Any] = []
-        if kinds:
-            placeholders = ",".join("?" for _ in kinds)
-            query += f" AND kind IN ({placeholders})"
-            params.extend(kinds)
-        query += " ORDER BY created_at ASC LIMIT 1"
-        row = conn.execute(query, tuple(params)).fetchone()
-        if not row:
+    with with_db_write():
+        sqlite_retry_busy(lambda: conn.execute("BEGIN IMMEDIATE"))
+        try:
+            query = "SELECT job_id FROM pipeline_jobs WHERE status='queued'"
+            params: list[Any] = []
+            if kinds:
+                placeholders = ",".join("?" for _ in kinds)
+                query += f" AND kind IN ({placeholders})"
+                params.extend(kinds)
+            query += " ORDER BY created_at ASC LIMIT 1"
+            row = conn.execute(query, tuple(params)).fetchone()
+            if not row:
+                conn.execute("ROLLBACK")
+                return None
+            job_id = str(row[0])
+            updated = conn.execute(
+                """
+                UPDATE pipeline_jobs
+                SET status='running', lease_owner=?, lease_expires_at=?,
+                    started_at=COALESCE(started_at, datetime('now')),
+                    updated_at=datetime('now')
+                WHERE job_id=? AND status='queued'
+                """,
+                (lease_owner, expires, job_id),
+            )
+            if int(updated.rowcount or 0) == 0:
+                conn.execute("ROLLBACK")
+                return None
+            sqlite_retry_busy(conn.commit)
+        except Exception:
             conn.execute("ROLLBACK")
-            return None
-        job_id = str(row[0])
-        updated = conn.execute(
-            """
-            UPDATE pipeline_jobs
-            SET status='running', lease_owner=?, lease_expires_at=?,
-                started_at=COALESCE(started_at, datetime('now')),
-                updated_at=datetime('now')
-            WHERE job_id=? AND status='queued'
-            """,
-            (lease_owner, expires, job_id),
-        )
-        if int(updated.rowcount or 0) == 0:
-            conn.execute("ROLLBACK")
-            return None
-        conn.commit()
-    except Exception:
-        conn.execute("ROLLBACK")
-        raise
+            raise
     return get_job(conn, job_id)
 
 
@@ -159,16 +186,17 @@ def complete_job(
     detail: Optional[Dict[str, Any]] = None,
 ) -> None:
     ensure_pipeline_jobs_schema(conn)
-    conn.execute(
-        """
-        UPDATE pipeline_jobs
-        SET status='done', finished_at=datetime('now'), updated_at=datetime('now'),
-            detail_json=?, lease_owner=NULL, lease_expires_at=NULL
-        WHERE job_id=?
-        """,
-        (json.dumps(detail) if detail else None, job_id),
-    )
-    conn.commit()
+    with with_db_write():
+        conn.execute(
+            """
+            UPDATE pipeline_jobs
+            SET status='done', finished_at=datetime('now'), updated_at=datetime('now'),
+                detail_json=?, lease_owner=NULL, lease_expires_at=NULL
+            WHERE job_id=?
+            """,
+            (json.dumps(detail) if detail else None, job_id),
+        )
+        commit_connection(conn)
 
 
 def fail_job(
@@ -180,33 +208,35 @@ def fail_job(
 ) -> None:
     ensure_pipeline_jobs_schema(conn)
     payload = {"error": error, **(detail or {})}
-    conn.execute(
-        """
-        UPDATE pipeline_jobs
-        SET status='failed', finished_at=datetime('now'), updated_at=datetime('now'),
-            detail_json=?, lease_owner=NULL, lease_expires_at=NULL
-        WHERE job_id=?
-        """,
-        (json.dumps(payload), job_id),
-    )
-    conn.commit()
+    with with_db_write():
+        conn.execute(
+            """
+            UPDATE pipeline_jobs
+            SET status='failed', finished_at=datetime('now'), updated_at=datetime('now'),
+                detail_json=?, lease_owner=NULL, lease_expires_at=NULL
+            WHERE job_id=?
+            """,
+            (json.dumps(payload), job_id),
+        )
+        commit_connection(conn)
 
 
 def recover_stale_jobs(conn: sqlite3.Connection) -> int:
     """Reset expired or orphaned running jobs to queued."""
     ensure_pipeline_jobs_schema(conn)
     now = _now()
-    cursor = conn.execute(
-        """
-        UPDATE pipeline_jobs
-        SET status='queued', lease_owner=NULL, lease_expires_at=NULL,
-            updated_at=datetime('now')
-        WHERE status='running'
-          AND (lease_expires_at IS NULL OR lease_expires_at < ?)
-        """,
-        (now,),
-    )
-    conn.commit()
+    with with_db_write():
+        cursor = conn.execute(
+            """
+            UPDATE pipeline_jobs
+            SET status='queued', lease_owner=NULL, lease_expires_at=NULL,
+                updated_at=datetime('now')
+            WHERE status='running'
+              AND (lease_expires_at IS NULL OR lease_expires_at < ?)
+            """,
+            (now,),
+        )
+        commit_connection(conn)
     return int(cursor.rowcount or 0)
 
 
@@ -222,20 +252,21 @@ def record_derivation_completion(
     wid = str(write_id or "").strip()
     if not wid:
         return
-    conn.execute(
-        """
-        INSERT INTO pipeline_derivation_completion
-            (write_id, job_id, sync_batch_id, source_id, completed_at)
-        VALUES (?, ?, ?, ?, datetime('now'))
-        ON CONFLICT(write_id) DO UPDATE SET
-            job_id=excluded.job_id,
-            sync_batch_id=excluded.sync_batch_id,
-            source_id=excluded.source_id,
-            completed_at=excluded.completed_at
-        """,
-        (wid, job_id, sync_batch_id, source_id),
-    )
-    conn.commit()
+    with with_db_write():
+        conn.execute(
+            """
+            INSERT INTO pipeline_derivation_completion (
+                write_id, job_id, sync_batch_id, source_id, completed_at
+            ) VALUES (?, ?, ?, ?, datetime('now'))
+            ON CONFLICT(write_id) DO UPDATE SET
+                job_id=excluded.job_id,
+                sync_batch_id=excluded.sync_batch_id,
+                source_id=excluded.source_id,
+                completed_at=excluded.completed_at
+            """,
+            (wid, job_id, sync_batch_id, source_id),
+        )
+        commit_connection(conn)
 
 
 def is_derivation_complete(conn: sqlite3.Connection, write_id: str) -> bool:

@@ -97,6 +97,16 @@ def _get_pipeline(model_id: str):
     return handle
 
 
+def prewarm_privacy_filter() -> None:
+    """Load the privacy-filter pipeline (startup background prewarm)."""
+    if not privacy_filter_enabled():
+        return
+    from topos.config.settings import settings
+
+    model_id = str(getattr(settings, "privacy_filter_model", None) or PRIVACY_FILTER_MODEL_ID)
+    _get_pipeline(model_id)
+
+
 def _detect_entities(text: str, *, model_id: str) -> List[Dict[str, Any]]:
     pipe = _get_pipeline(model_id)
     result = pipe(text, aggregation_strategy="simple")

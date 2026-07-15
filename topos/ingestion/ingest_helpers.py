@@ -264,11 +264,20 @@ async def run_ui_payload_enrichment(enrichment_ctx: dict) -> dict:
     )
     enrich_out = pipeline_outcome.get("canonical_enrichment") or {}
     signal_out = pipeline_outcome.get("signal_derivation") or {}
-    return {
-        "status": "ok",
+    signal_errors = list(signal_out.get("errors") or []) if isinstance(signal_out, dict) else []
+    enrich_errors = list(enrich_out.get("errors") or []) if isinstance(enrich_out, dict) else []
+    status = "error" if (signal_errors or enrich_errors) else "ok"
+    result = {
+        "status": status,
         "signal_jobs_run": (signal_out.get("jobs_run") if isinstance(signal_out, dict) else 0) or 0,
         "enrichment_jobs_run": (enrich_out.get("jobs_run") if isinstance(enrich_out, dict) else 0) or 0,
+        "errors": signal_errors + enrich_errors,
     }
+    if status == "error":
+        result["error"] = "; ".join(
+            str(e.get("error") if isinstance(e, dict) else e) for e in (signal_errors + enrich_errors)[:5]
+        ) or "signal_derivation_failed"
+    return result
 
 
 _inbox_enrichment_sems: dict[int, asyncio.Semaphore] = {}

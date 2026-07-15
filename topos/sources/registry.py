@@ -293,6 +293,107 @@ SIGNAL = _source(
     ],
 )
 
+# Remote connectors: Notion pages / Google Drive files, saved via app_ingest
+# into the documents canonical lane (PLAN_CANONICAL_CALENDAR_DOCUMENTS Part A).
+NOTION_PAGES = _source(
+    source_id="notion_pages",
+    posture="personal",
+    display_name="Notion Pages",
+    source_type="ui_stream",
+    delivery="client_push",
+    schema_id="notion.page.v1",
+    parser_id="notion.page.v1",
+    canonical_group_id="documents",
+    raw_enrichment_jobs=[],
+    canonical_enrichment_jobs=[],
+    analytics_profile_id=None,
+    enrichment_trigger="automatic",
+    ingestion_trigger="automatic",
+    default_scope_id="documents",
+    allowed_scope_ids=["documents:read", "documents:write"],
+    default_filter_hints=["rolling_window_days", "timestamp_to_date"],
+    filter_tier_kind="inferability",
+    default_filter_tiers={
+        "low": _manifest(FilterInstance(filter_id="rolling_window_days", params={"days": 30})),
+        "medium": _manifest(
+            FilterInstance(filter_id="rolling_window_days", params={"days": 14}),
+            FilterInstance(filter_id="timestamp_to_date", params={}),
+        ),
+        "high": _manifest(
+            FilterInstance(filter_id="rolling_window_days", params={"days": 7}),
+            FilterInstance(filter_id="timestamp_to_date", params={}),
+            FilterInstance(filter_id="max_rows", params={"count": 250}),
+        ),
+    },
+)
+
+GDRIVE_FILES = _source(
+    source_id="gdrive_files",
+    posture="personal",
+    display_name="Google Drive Files",
+    source_type="ui_stream",
+    delivery="client_push",
+    schema_id="gdrive.file.v1",
+    parser_id="gdrive.file.v1",
+    canonical_group_id="documents",
+    raw_enrichment_jobs=[],
+    canonical_enrichment_jobs=[],
+    analytics_profile_id=None,
+    enrichment_trigger="automatic",
+    ingestion_trigger="automatic",
+    default_scope_id="documents",
+    allowed_scope_ids=["documents:read", "documents:write"],
+    default_filter_hints=["rolling_window_days", "timestamp_to_date"],
+    filter_tier_kind="inferability",
+    default_filter_tiers={
+        "low": _manifest(FilterInstance(filter_id="rolling_window_days", params={"days": 30})),
+        "medium": _manifest(
+            FilterInstance(filter_id="rolling_window_days", params={"days": 14}),
+            FilterInstance(filter_id="timestamp_to_date", params={}),
+        ),
+        "high": _manifest(
+            FilterInstance(filter_id="rolling_window_days", params={"days": 7}),
+            FilterInstance(filter_id="timestamp_to_date", params={}),
+            FilterInstance(filter_id="max_rows", params={"count": 250}),
+        ),
+    },
+)
+
+# Remote connectors: Google Calendar events, saved via app_ingest into the
+# beefed-up schedule lane (PLAN_CANONICAL_CALENDAR_DOCUMENTS Part B).
+GCAL_EVENTS = _source(
+    source_id="gcal_events",
+    posture="personal",
+    display_name="Google Calendar Events",
+    source_type="ui_stream",
+    delivery="client_push",
+    schema_id="gcal.events.v1",
+    parser_id="gcal.events.v1",
+    canonical_group_id="schedule",
+    raw_enrichment_jobs=[],
+    canonical_enrichment_jobs=[],
+    signal_derivation_jobs=['availability_scores'],
+    analytics_profile_id=None,
+    enrichment_trigger="automatic",
+    ingestion_trigger="automatic",
+    default_scope_id="schedule",
+    allowed_scope_ids=["schedule:read", "availability:read"],
+    default_filter_hints=["rolling_window_days", "timestamp_to_date"],
+    filter_tier_kind="inferability",
+    default_filter_tiers={
+        "low": _manifest(FilterInstance(filter_id="rolling_window_days", params={"days": 30})),
+        "medium": _manifest(
+            FilterInstance(filter_id="rolling_window_days", params={"days": 14}),
+            FilterInstance(filter_id="timestamp_to_date", params={}),
+        ),
+        "high": _manifest(
+            FilterInstance(filter_id="rolling_window_days", params={"days": 7}),
+            FilterInstance(filter_id="timestamp_to_date", params={}),
+            FilterInstance(filter_id="max_rows", params={"count": 250}),
+        ),
+    },
+)
+
 CALENDAR_STUB = _source(
     source_id="calendar_stub",
     posture="personal",
@@ -520,6 +621,9 @@ REGISTRY = {
     BROWSER_VISITS.source_id: BROWSER_VISITS,
     BROWSER_EVENTS.source_id: BROWSER_EVENTS,
     GITHUB_ACTIVITY.source_id: GITHUB_ACTIVITY,
+    NOTION_PAGES.source_id: NOTION_PAGES,
+    GDRIVE_FILES.source_id: GDRIVE_FILES,
+    GCAL_EVENTS.source_id: GCAL_EVENTS,
     VOXTERM_TRANSCRIPTS.source_id: VOXTERM_TRANSCRIPTS,
     IMESSAGE.source_id: IMESSAGE,
     SIGNAL.source_id: SIGNAL,

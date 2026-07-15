@@ -363,57 +363,60 @@ def update_credential_default_model(
 
 
 def insert_usage_event(conn: sqlite3.Connection, row: Dict[str, Any]) -> Dict[str, Any]:
+    from .storage.db.write_gate import commit_connection, with_db_write
+
     ensure_llm_integrations_tables(conn)
     idem = str(row.get("idempotency_key") or "").strip()
-    if idem:
-        existing = conn.execute(
-            f"SELECT event_id FROM {USAGE_EVENTS_TABLE} WHERE idempotency_key = ? LIMIT 1",
-            (idem,),
-        ).fetchone()
-        if existing:
-            return {"deduped": True}
-    event_id = str(row.get("event_id") or "").strip() or f"evt_{_now_iso()}"
-    metadata = row.get("metadata")
-    conn.execute(
-        f"""
-        INSERT OR IGNORE INTO {USAGE_EVENTS_TABLE}
-        (event_id, topos_id, provider, model, prompt_tokens, completion_tokens, total_tokens,
-         cost_usd, billing_source, source, idempotency_key, metadata_json, event_at, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            event_id,
-            str(row.get("topos_id") or ""),
-            str(row.get("provider") or "unknown"),
-            str(row.get("model") or "unknown"),
-            int(row.get("prompt_tokens") or 0),
-            int(row.get("completion_tokens") or 0),
-            int(row.get("total_tokens") or 0),
-            row.get("cost_usd"),
-            str(row.get("billing_source") or "byok"),
-            row.get("source"),
-            row.get("idempotency_key"),
-            json.dumps(metadata if isinstance(metadata, dict) else {}),
-            str(row.get("event_at") or _now_iso()),
-            str(row.get("created_at") or _now_iso()),
-        ),
-    )
-    conn.commit()
-    count_row = conn.execute(f"SELECT COUNT(*) AS count FROM {USAGE_EVENTS_TABLE}").fetchone()
-    total = int(_row_to_dict(count_row).get("count") or 0)
-    if total > MAX_USAGE_EVENTS:
+    with with_db_write():
+        if idem:
+            existing = conn.execute(
+                f"SELECT event_id FROM {USAGE_EVENTS_TABLE} WHERE idempotency_key = ? LIMIT 1",
+                (idem,),
+            ).fetchone()
+            if existing:
+                return {"deduped": True}
+        event_id = str(row.get("event_id") or "").strip() or f"evt_{_now_iso()}"
+        metadata = row.get("metadata")
         conn.execute(
             f"""
-            DELETE FROM {USAGE_EVENTS_TABLE}
-            WHERE event_id IN (
-                SELECT event_id FROM {USAGE_EVENTS_TABLE}
-                ORDER BY event_at ASC
-                LIMIT ?
-            )
+            INSERT OR IGNORE INTO {USAGE_EVENTS_TABLE}
+            (event_id, topos_id, provider, model, prompt_tokens, completion_tokens, total_tokens,
+             cost_usd, billing_source, source, idempotency_key, metadata_json, event_at, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (total - MAX_USAGE_EVENTS,),
+            (
+                event_id,
+                str(row.get("topos_id") or ""),
+                str(row.get("provider") or "unknown"),
+                str(row.get("model") or "unknown"),
+                int(row.get("prompt_tokens") or 0),
+                int(row.get("completion_tokens") or 0),
+                int(row.get("total_tokens") or 0),
+                row.get("cost_usd"),
+                str(row.get("billing_source") or "byok"),
+                row.get("source"),
+                row.get("idempotency_key"),
+                json.dumps(metadata if isinstance(metadata, dict) else {}),
+                str(row.get("event_at") or _now_iso()),
+                str(row.get("created_at") or _now_iso()),
+            ),
         )
-        conn.commit()
+        commit_connection(conn)
+        count_row = conn.execute(f"SELECT COUNT(*) AS count FROM {USAGE_EVENTS_TABLE}").fetchone()
+        total = int(_row_to_dict(count_row).get("count") or 0)
+        if total > MAX_USAGE_EVENTS:
+            conn.execute(
+                f"""
+                DELETE FROM {USAGE_EVENTS_TABLE}
+                WHERE event_id IN (
+                    SELECT event_id FROM {USAGE_EVENTS_TABLE}
+                    ORDER BY event_at ASC
+                    LIMIT ?
+                )
+                """,
+                (total - MAX_USAGE_EVENTS,),
+            )
+            commit_connection(conn)
     return row
 
 

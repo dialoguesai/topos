@@ -8,6 +8,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
+from ..storage.db.write_gate import commit_connection
 from ..utils.base_object import BaseObject
 
 logger = logging.getLogger("topos.enrichment.derived_tables")
@@ -57,16 +58,14 @@ class DerivedTablesManager(BaseObject):
             except Exception:
                 pass
         
-        # If still no connection, try to create one
+        # If still no connection, reuse the process singleton (tuned + write-gated).
         if self.conn is None:
             try:
-                from ..storage.db.paths import get_database_path
-                from ..config.settings import settings
-                
-                db_path = get_database_path(settings.topos_database_path)
-                if db_path.exists() or db_path.parent.exists():
-                    self.conn = sqlite3.connect(str(db_path))
-                    logger.debug("%s: Created database connection: %s", self, db_path)
+                from ..core.state import get_db_connection
+
+                self.conn = get_db_connection()
+                if self.conn is not None:
+                    logger.debug("%s: Using shared database connection", self)
             except Exception as e:
                 logger.warning("%s: Could not create database connection: %s", self, e)
                 self.conn = None
@@ -130,7 +129,7 @@ class DerivedTablesManager(BaseObject):
                 ON message_emotions(source_id)
             """)
             
-            self.conn.commit()
+            commit_connection(self.conn)
             logger.debug("%s: Ensured message_emotions table exists", self)
         except Exception as e:
             logger.error("%s: Failed to ensure enrichment tables: %s", self, e)
@@ -258,7 +257,7 @@ class DerivedTablesManager(BaseObject):
                     logger.warning("%s: message_emotions schema not recognized", self)
                     return 0
 
-                self.conn.commit()
+                commit_connection(self.conn)
                 written += len(batch)
         except Exception as e:
             if self.conn:
@@ -318,7 +317,7 @@ class DerivedTablesManager(BaseObject):
                     except sqlite3.OperationalError:
                         pass
                 written += 1
-            self.conn.commit()
+            commit_connection(self.conn)
         return written
 
     def _write_goals_batch(
@@ -359,7 +358,7 @@ class DerivedTablesManager(BaseObject):
                     ),
                 )
                 written += 1
-            self.conn.commit()
+            commit_connection(self.conn)
         return written
 
     def _write_batch_by_columns(
@@ -383,7 +382,7 @@ class DerivedTablesManager(BaseObject):
                     continue
                 _insert_matching_columns(self.conn, table, cols, values)
                 written += 1
-            self.conn.commit()
+            commit_connection(self.conn)
         return written
 
     def _write_topics_batch(
@@ -514,7 +513,7 @@ class DerivedTablesManager(BaseObject):
                     """,
                     values,
                 )
-                self.conn.commit()
+                commit_connection(self.conn)
                 written += len(values)
         except Exception as exc:
             logger.error("%s: Failed to write browser_url_classification batch: %s", self, exc)

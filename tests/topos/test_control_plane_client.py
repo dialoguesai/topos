@@ -263,6 +263,42 @@ async def test_control_plane_client_sends_busy_error_when_saturated(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_control_plane_client_fast_lane_bypasses_saturation_gate(monkeypatch):
+    """UI-critical reads must not be dropped when the inbound queue is saturated."""
+    request_slow = {"id": "req-slow", "type": "alpha", "payload": {}}
+    request_fast = {"id": "req-fast", "type": "list_routine_runs", "payload": {}}
+    ws = FakeWebSocket([json.dumps(request_slow), json.dumps(request_fast)])
+    connect = FakeConnect(ws)
+    monkeypatch.setattr(control_plane_client, "connect", connect)
+
+    gate = asyncio.Event()
+
+    async def handler(message):
+        if message["id"] == "req-slow":
+            await gate.wait()
+        return {"id": message["id"], "status": "ok", "payload": {"runs": []}}
+
+    client = ControlPlaneClient(
+        control_plane_url="ws://example/ws/engine",
+        api_key="test-key",
+        handler=handler,
+        verify_ssl=False,
+    )
+    client._inbound_max_pending = 1
+    client._inbound_semaphore = asyncio.Semaphore(1)
+    task = asyncio.create_task(client._run())
+    await asyncio.sleep(0.05)
+    gate.set()
+    client._stop.set()
+    await asyncio.wait_for(task, timeout=1)
+    sent = [json.loads(msg) for msg in ws.sent]
+    assert any(msg.get("id") == "req-fast" and msg.get("status") == "ok" for msg in sent)
+    assert not any(
+        msg.get("id") == "req-fast" and msg.get("status") == "error" for msg in sent
+    )
+
+
+@pytest.mark.asyncio
 async def test_control_plane_client_replies_pong_to_ping_without_handler():
     ws = FakeWebSocket([])
     handler_called = False

@@ -50,17 +50,19 @@ def _enabled() -> bool:
 
 def _default_rebuild() -> None:
     from ...core.state import get_db_connection
+    from ...storage.db.write_gate import with_db_write
     from .maintenance import rebuild_entity_graph
 
     conn = get_db_connection()
     if conn is None:
         logger.debug("graph refresh skipped: no database connection")
         return
-    report = rebuild_entity_graph(conn)
-    try:
-        _mark_materialized(conn)
-    except Exception as exc:  # noqa: BLE001
-        logger.debug("graph materialization stamp failed: %s", exc)
+    with with_db_write():
+        report = rebuild_entity_graph(conn)
+        try:
+            _mark_materialized(conn)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("graph materialization stamp failed: %s", exc)
     logger.info("graph refresh: %s", report)
 
 
@@ -98,6 +100,7 @@ class _Refresher:
                 return
             self._running = True
             self._dirty = False
+        logger.info("graph refresh: started")
         try:
             self._rebuild_fn()
             self._last_error = None
@@ -149,16 +152,18 @@ def mark_graph_dirty() -> None:
 
 def _persist_dirty_generation(conn) -> None:
     from ...storage.db.migrations.pipeline_jobs_v1 import apply_pipeline_jobs_v1_up
+    from ...storage.db.write_gate import commit_connection, with_db_write
 
     apply_pipeline_jobs_v1_up(conn)
-    conn.execute(
-        """
-        UPDATE graph_materialization_state
-        SET dirty_generation = dirty_generation + 1
-        WHERE id = 1
-        """
-    )
-    conn.commit()
+    with with_db_write():
+        conn.execute(
+            """
+            UPDATE graph_materialization_state
+            SET dirty_generation = dirty_generation + 1
+            WHERE id = 1
+            """
+        )
+        commit_connection(conn)
 
 
 def reconcile_graph_on_startup(conn) -> None:
@@ -177,6 +182,8 @@ def reconcile_graph_on_startup(conn) -> None:
 
 
 def _mark_materialized(conn) -> None:
+    from ...storage.db.write_gate import commit_connection
+
     conn.execute(
         """
         UPDATE graph_materialization_state
@@ -187,7 +194,7 @@ def _mark_materialized(conn) -> None:
         """,
         (datetime.now(timezone.utc).isoformat(),),
     )
-    conn.commit()
+    commit_connection(conn)
 
 
 def status() -> Dict[str, Any]:

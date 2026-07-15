@@ -23,7 +23,10 @@ from topos.runtime_update import (
     should_skip_update_check,
 )
 from topos.storage.db.paths import discover_databases
+from topos.extensions import load_extensions
 from topos.startup_banner import emit_startup_banner
+
+load_extensions()
 
 USER_ENV_PATH = Path.home() / ".topos" / ".env"
 LEGACY_ENV_PATH = Path(__file__).resolve().parent.parent / ".env"

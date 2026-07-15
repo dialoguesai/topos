@@ -1069,8 +1069,13 @@ class IngestionManager(BaseObject):
                 try:
                     db_conn = get_db_connection()
                     if db_conn and derive_result:
-                        status = "completed" if derive_result.get("jobs_run") else "deferred"
-                        if derive_result.get("deferred_jobs"):
+                        if derive_result.get("errors"):
+                            status = "failed"
+                        elif derive_result.get("deferred_jobs"):
+                            status = "deferred"
+                        elif derive_result.get("jobs_run"):
+                            status = "completed"
+                        else:
                             status = "deferred"
                         SQLiteIngestAuditStore(db_conn).append_stage(
                             StageAuditRow(

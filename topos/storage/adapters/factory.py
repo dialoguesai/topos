@@ -108,8 +108,25 @@ class AdapterFactory:
         if conn is None:
             if db_path is None:
                 raise ValueError("db_path or conn required for local_database backend")
-            conn = sqlite3.connect(str(db_path))
-            conn.row_factory = sqlite3.Row
+            # Prefer the process singleton when the path matches, so we do not
+            # open a second untuned writer against the same SQLite file.
+            try:
+                from ...core.state import get_db_connection
+
+                shared = get_db_connection()
+                if shared is not None:
+                    try:
+                        row = shared.execute("PRAGMA database_list").fetchone()
+                        shared_file = str(row[2] or "").strip() if row else ""
+                        if shared_file and str(Path(shared_file).resolve()) == str(Path(db_path).resolve()):
+                            conn = shared
+                    except (sqlite3.Error, OSError, RuntimeError):
+                        pass
+            except Exception:
+                pass
+            if conn is None:
+                conn = sqlite3.connect(str(db_path), check_same_thread=False)
+                conn.row_factory = sqlite3.Row
 
         # Tune before migrations so vector_storage_v4 sees the vec extension
         # and can create/backfill the ANN table.

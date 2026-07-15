@@ -50,6 +50,7 @@ from .api import (
 )
 from .config.settings import settings
 from .core.logging import align_uvicorn_loggers, configure_logging
+from .extensions import load_extensions
 from .core import state
 from .core.handlers import handle_control_plane_request
 from .control_plane_client import ControlPlaneClient
@@ -66,6 +67,7 @@ from .sync import SyncClient
 from .sync_handlers import handle_sync_op
 
 configure_logging()
+load_extensions()
 logger = logging.getLogger("topos.app")
 
 app = FastAPI(
@@ -205,6 +207,16 @@ async def startup_event() -> None:
             )
     except Exception as e:
         logger.warning("Active source install rehydration at startup failed (non-fatal): %s", e)
+    if getattr(settings, "sanitization_prewarm_on_startup", True):
+        async def _prewarm_sanitization() -> None:
+            try:
+                from .sanitization.prewarm import prewarm_sanitization_models
+
+                await asyncio.to_thread(prewarm_sanitization_models)
+            except Exception as prewarm_exc:  # noqa: BLE001
+                logger.warning("Sanitization prewarm at startup failed (non-fatal): %s", prewarm_exc)
+
+        asyncio.create_task(_prewarm_sanitization())
     if settings.topos_control_plane_url:
         if settings.hosted_pool_lease_enabled:
             try:

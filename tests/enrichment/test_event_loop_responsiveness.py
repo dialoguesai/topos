@@ -241,3 +241,95 @@ def test_fact_llm_stops_scheduling_after_shutdown(monkeypatch):
     finally:
         clear_shutdown()
         conn.close()
+
+
+@pytest.mark.asyncio
+async def test_signal_entity_graph_handler_keeps_event_loop_responsive(monkeypatch):
+    """UI graph reads must not block concurrent CP/UI tasks on the shared loop."""
+    import time
+
+    from topos.core.handlers.signal_features import handle_signal_entity_graph
+
+    work_seconds = 0.25
+
+    def _slow_entity_graph(*_args, **_kwargs):
+        time.sleep(work_seconds)
+        return {"nodes": [], "edges": []}
+
+    monkeypatch.setattr(
+        "topos.features.entities.reads.entity_graph",
+        _slow_entity_graph,
+    )
+    monkeypatch.setattr("topos.core.handlers.get_db_connection", lambda: object())
+
+    ticks = 0
+    stop = asyncio.Event()
+
+    async def ui_servicing_heartbeat() -> None:
+        nonlocal ticks
+        while not stop.is_set():
+            ticks += 1
+            await asyncio.sleep(0.04)
+
+    heartbeat = asyncio.create_task(ui_servicing_heartbeat())
+    try:
+        resp = await handle_signal_entity_graph(
+            {"id": "req-graph", "type": "signal_entity_graph", "payload": {}}
+        )
+    finally:
+        stop.set()
+        await heartbeat
+
+    assert resp is not None and resp.get("status") == "ok"
+    assert ticks >= 4, (
+        f"Event loop blocked during signal_entity_graph handler "
+        f"(only {ticks} heartbeats during {work_seconds:.2f}s sync work)"
+    )
+
+
+@pytest.mark.asyncio
+async def test_list_routine_runs_handler_keeps_event_loop_responsive(monkeypatch):
+    """Run-history reads must not block concurrent CP/UI tasks on the shared loop."""
+    import time
+
+    from topos.core.handlers.routines import handle_list_routine_runs
+
+    work_seconds = 0.25
+
+    def _slow_list_runs(*_args, **_kwargs):
+        time.sleep(work_seconds)
+        return []
+
+    monkeypatch.setattr("topos.routines.store.list_runs", _slow_list_runs)
+    monkeypatch.setattr("topos.core.handlers.get_db_connection", lambda: object())
+
+    ticks = 0
+    stop = asyncio.Event()
+
+    async def ui_servicing_heartbeat() -> None:
+        nonlocal ticks
+        while not stop.is_set():
+            ticks += 1
+            await asyncio.sleep(0.04)
+
+    heartbeat = asyncio.create_task(ui_servicing_heartbeat())
+    try:
+        resp = await handle_list_routine_runs(
+            {
+                "id": "req-runs",
+                "type": "list_routine_runs",
+                "payload": {
+                    "user_id": "user-1",
+                    "routine_id": "routine-1",
+                },
+            }
+        )
+    finally:
+        stop.set()
+        await heartbeat
+
+    assert resp is not None and resp.get("status") == "ok"
+    assert ticks >= 4, (
+        f"Event loop blocked during list_routine_runs handler "
+        f"(only {ticks} heartbeats during {work_seconds:.2f}s sync work)"
+    )

@@ -7,6 +7,7 @@ from .common import (
     Any,
     Dict,
     Optional,
+    run_db_read,
 )
 from .registry import handles
 
@@ -429,7 +430,8 @@ async def handle_signal_list_entities(message: Dict[str, Any]) -> Optional[Dict[
         from ...features.entities.reads import list_entities
 
         conn = hub.get_db_connection()
-        result = list_entities(
+        result = await run_db_read(
+            list_entities,
             conn,
             q=payload.get("q"),
             entity_type=payload.get("entity_type"),
@@ -455,7 +457,7 @@ async def handle_signal_get_entity(message: Dict[str, Any]) -> Optional[Dict[str
         from ...features.entities.reads import get_entity_detail
 
         conn = hub.get_db_connection()
-        detail = get_entity_detail(conn, entity_id)
+        detail = await run_db_read(get_entity_detail, conn, entity_id)
         if detail is None:
             return {"id": req_id, "status": "error", "error": "entity not found", "code": 404}
         return {"id": req_id, "status": "ok", "payload": detail}
@@ -473,7 +475,8 @@ async def handle_signal_entity_graph(message: Dict[str, Any]) -> Optional[Dict[s
         from ...features.entities.reads import entity_graph
 
         conn = hub.get_db_connection()
-        result = entity_graph(
+        result = await run_db_read(
+            entity_graph,
             conn,
             limit_nodes=min(int(payload.get("limit_nodes") or 100), 5000),
             limit_edges=min(int(payload.get("limit_edges") or 300), 20000),

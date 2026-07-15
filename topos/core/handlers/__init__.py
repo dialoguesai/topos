@@ -177,4 +177,15 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
             "status": "error",
             "error": f"unhandled message type: {msg_type}",
         }
+    # User-facing / home-chat paths: log receipt so WS-forwarded work is visible in engine logs
+    # (uvicorn.access only covers local HTTP, not control-plane WebSocket RPCs).
+    if msg_type in {
+        "llm_generation",
+        "query",
+        "query_live",
+        "tools_retrieve",
+        "upsert_home_chat_session",
+        "delete_home_chat_session",
+    }:
+        logger.info("control plane request received type=%s id=%s", msg_type, message.get("id"))
     return await handler(message)

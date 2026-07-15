@@ -18,7 +18,7 @@ from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
 
-_BUSY_TIMEOUT_MS = 5000
+_BUSY_TIMEOUT_MS = 30000
 
 # Status of the most recent tune_connection call, for banner/doctor/telemetry.
 _last_tuning_status: Dict[str, Any] = {}

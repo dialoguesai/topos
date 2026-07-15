@@ -7,6 +7,7 @@ from .common import (
     Any,
     Dict,
     Optional,
+    run_db_read,
 )
 from .registry import handles
 
@@ -24,7 +25,9 @@ async def handle_list_routines(message: Dict[str, Any]) -> Optional[Dict[str, An
     engine_id = str(pl.get("engine_id") or "").strip()
     if not user_id or not engine_id:
         return {"id": req_id, "status": "error", "error": "user_id and engine_id required"}
-    rows = routines_store.list_routines(conn, owner_user_id=user_id, engine_id=engine_id)
+    rows = await run_db_read(
+        routines_store.list_routines, conn, owner_user_id=user_id, engine_id=engine_id
+    )
     return {"id": req_id, "status": "ok", "payload": {"routines": rows}}
 
 @handles("get_routine")
@@ -40,7 +43,9 @@ async def handle_get_routine(message: Dict[str, Any]) -> Optional[Dict[str, Any]
     routine_id = str(pl.get("routine_id") or "").strip()
     if not user_id or not routine_id:
         return {"id": req_id, "status": "error", "error": "user_id and routine_id required"}
-    row = routines_store.get_routine(conn, owner_user_id=user_id, routine_id=routine_id)
+    row = await run_db_read(
+        routines_store.get_routine, conn, owner_user_id=user_id, routine_id=routine_id
+    )
     if not row:
         return {"id": req_id, "status": "error", "error": "Routine not found"}
     return {"id": req_id, "status": "ok", "payload": {"routine": row}}
@@ -57,7 +62,7 @@ async def handle_get_routine_by_id(message: Dict[str, Any]) -> Optional[Dict[str
     routine_id = str(pl.get("routine_id") or "").strip()
     if not routine_id:
         return {"id": req_id, "status": "error", "error": "routine_id required"}
-    row = routines_store.get_routine_for_execution(conn, routine_id)
+    row = await run_db_read(routines_store.get_routine_for_execution, conn, routine_id)
     if not row:
         return {"id": req_id, "status": "error", "error": "Routine not found"}
     return {"id": req_id, "status": "ok", "payload": {"routine": row}}
@@ -146,7 +151,9 @@ async def handle_list_routine_runs(message: Dict[str, Any]) -> Optional[Dict[str
     routine_id = str(pl.get("routine_id") or "").strip()
     if not user_id or not routine_id:
         return {"id": req_id, "status": "error", "error": "user_id and routine_id required"}
-    rows = routines_store.list_runs(conn, owner_user_id=user_id, routine_id=routine_id)
+    rows = await run_db_read(
+        routines_store.list_runs, conn, owner_user_id=user_id, routine_id=routine_id
+    )
     return {"id": req_id, "status": "ok", "payload": {"runs": rows}}
 
 @handles("get_routine_run")
@@ -163,7 +170,13 @@ async def handle_get_routine_run(message: Dict[str, Any]) -> Optional[Dict[str, 
     run_id = str(pl.get("run_id") or "").strip()
     if not user_id or not routine_id or not run_id:
         return {"id": req_id, "status": "error", "error": "user_id, routine_id, and run_id required"}
-    row = routines_store.get_run(conn, owner_user_id=user_id, routine_id=routine_id, run_id=run_id)
+    row = await run_db_read(
+        routines_store.get_run,
+        conn,
+        owner_user_id=user_id,
+        routine_id=routine_id,
+        run_id=run_id,
+    )
     if not row:
         return {"id": req_id, "status": "error", "error": "Run not found"}
     return {"id": req_id, "status": "ok", "payload": {"run": row}}
@@ -180,7 +193,7 @@ async def handle_get_routine_run_by_id(message: Dict[str, Any]) -> Optional[Dict
     run_id = str(pl.get("run_id") or "").strip()
     if not run_id:
         return {"id": req_id, "status": "error", "error": "run_id required"}
-    row = routines_store.get_run_for_execution(conn, run_id)
+    row = await run_db_read(routines_store.get_run_for_execution, conn, run_id)
     if not row:
         return {"id": req_id, "status": "error", "error": "Run not found"}
     return {"id": req_id, "status": "ok", "payload": {"run": row}}
@@ -243,8 +256,11 @@ async def handle_list_waiting_routine_runs(message: Dict[str, Any]) -> Optional[
     engine_id = str(pl.get("engine_id") or "").strip()
     if not user_id or not engine_id:
         return {"id": req_id, "status": "error", "error": "user_id and engine_id required"}
-    rows = routines_store.list_waiting_runs_for_owner(
-        conn, owner_user_id=user_id, engine_id=engine_id
+    rows = await run_db_read(
+        routines_store.list_waiting_runs_for_owner,
+        conn,
+        owner_user_id=user_id,
+        engine_id=engine_id,
     )
     return {"id": req_id, "status": "ok", "payload": {"runs": rows}}
 
@@ -260,7 +276,7 @@ async def handle_list_due_routines(message: Dict[str, Any]) -> Optional[Dict[str
     engine_id = str(pl.get("engine_id") or "").strip()
     if not engine_id:
         return {"id": req_id, "status": "error", "error": "engine_id required"}
-    rows = routines_store.list_due_scheduled_routines(conn, engine_id=engine_id)
+    rows = await run_db_read(routines_store.list_due_scheduled_routines, conn, engine_id=engine_id)
     return {"id": req_id, "status": "ok", "payload": {"routines": rows}}
 
 @handles("routine_has_active_run")
@@ -275,10 +291,11 @@ async def handle_routine_has_active_run(message: Dict[str, Any]) -> Optional[Dic
     routine_id = str(pl.get("routine_id") or "").strip()
     if not routine_id:
         return {"id": req_id, "status": "error", "error": "routine_id required"}
+    active = await run_db_read(routines_store.has_active_run, conn, routine_id)
     return {
         "id": req_id,
         "status": "ok",
-        "payload": {"active": routines_store.has_active_run(conn, routine_id)},
+        "payload": {"active": active},
     }
 
 @handles("advance_routine_next_run_at")
