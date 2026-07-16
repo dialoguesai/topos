@@ -41,6 +41,9 @@ EXPECTED_POSTURES = {
     "demo_browser_file": "ambient",
     "demo_places_file": "personal",
     "demo_contacts_file": "personal",
+    "notion_pages": "personal",  # deliberate one-click Save, owner-curated
+    "gdrive_files": "personal",  # deliberate one-click Save, owner-curated
+    "gcal_events": "personal",  # owner's own calendar, mirrors calendar_stub
 }
 
 

@@ -763,14 +763,11 @@ def _row_summary_text(table: str, row: Dict[str, Any], *, scope_id: str = "") ->
         return " — ".join(str(p).strip() for p in parts if p)
     if table == "calendar_events":
         if scope_id == "availability:read":
-            meta = row.get("metadata_json") or {}
-            if isinstance(meta, str):
-                try:
-                    meta = _json.loads(meta)
-                except _json.JSONDecodeError:
-                    meta = {}
-            busy = meta.get("is_busy", True)
-            label = "open window" if busy is False else "busy block"
+            # Read the real is_busy column (B6) — not metadata_json, which the
+            # Google Calendar lane doesn't even populate with is_busy.
+            is_busy = row.get("is_busy")
+            busy = True if is_busy is None else bool(is_busy)
+            label = "open window" if not busy else "busy block"
             return f"{label} {row.get('starts_at')} — {row.get('ends_at')}"
         title = str(row.get("title") or "").strip()
         human_date = _human_date_from_iso(str(row.get("starts_at") or ""))

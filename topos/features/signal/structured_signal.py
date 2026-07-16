@@ -99,7 +99,8 @@ def _table_for_group(group: str, row: Dict[str, Any]) -> str:
         "financial": "financial_transactions",
         "places": "location_events",
         "activity": "activity_events",
-        "documents": "documents",
+        # documents is deliberately NOT mapped here: it is an owner-only leaf
+        # lane (store-and-view only) that must never feed derived/shared signals.
     }
     if group in mapping:
         return mapping[group]

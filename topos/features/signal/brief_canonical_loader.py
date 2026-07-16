@@ -33,7 +33,8 @@ _TABLE_TEXT_COLUMNS: Dict[str, Tuple[str, str]] = {
     "place": ("place_id", "label"),
     "project": ("project_id", "name"),
     "task": ("task_id", "title"),
-    "documents": ("doc_id", "title"),
+    # documents intentionally omitted: owner-only leaf lane, never loaded into
+    # briefs/summaries (which can be surfaced to others).
     "note": ("note_id", "content"),
     "public_bio": ("bio_id", "bio_text"),
     "personal_profile": ("profile_id", "summary"),
