@@ -223,6 +223,7 @@ _NATIVE_LIST_SPECS: Dict[str, tuple[str, List[str]]] = {
     "calendar_events": (
         """
         SELECT event_id AS record_id, title, starts_at, ends_at, source_id, metadata_json,
+               is_busy,
                substr(coalesce(title, ''), 1, 500) AS content_preview,
                coalesce(title, '') AS content
         FROM calendar_events
@@ -234,6 +235,7 @@ _NATIVE_LIST_SPECS: Dict[str, tuple[str, List[str]]] = {
             "ends_at",
             "source_id",
             "metadata_json",
+            "is_busy",
             "content_preview",
             "content",
         ],

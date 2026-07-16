@@ -27,6 +27,8 @@ SCOPE_TO_TABLES: dict[str, list[str]] = {
 }
 
 # All canonical table names (for "all" resolution). Order doesn't matter.
+# DO NOT add "documents" here: it is an owner-only leaf lane and must stay
+# unreachable even by a guardian's all:read grant (owner-only, no sharing).
 ALL_CANONICAL_TABLES: set[str] = {
     "messages",
     "ai_messages",

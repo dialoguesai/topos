@@ -4,11 +4,13 @@ from __future__ import annotations
 
 from typing import Any, Dict, Optional, Tuple
 
+# NOTE: the `documents` lane is intentionally absent from every map in this
+# module. It is an owner-only leaf (store-and-view only) that is never disclosed
+# or shared, so it does not participate in the disclosure/redaction pipeline.
 CANONICAL_ID_COLUMN: Dict[str, str] = {
     "ai_chat_messages": "message_id",
     "conversation_messages": "message_id",
     "journal_entries": "entry_id",
-    "documents": "doc_id",
 }
 
 # canonical_table -> raw fields redacted at ingest
@@ -16,14 +18,12 @@ PII_DISCLOSURE_FIELDS: Dict[str, Tuple[str, ...]] = {
     "ai_chat_messages": ("content", "content_rendered"),
     "conversation_messages": ("content",),
     "journal_entries": ("content",),
-    "documents": ("content",),
 }
 
 _GROUP_TO_TABLE = {
     "ai_messages": "ai_chat_messages",
     "conversations": "conversation_messages",
     "journal": "journal_entries",
-    "documents": "documents",
 }
 
 

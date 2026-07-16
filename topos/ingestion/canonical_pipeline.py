@@ -582,17 +582,9 @@ def load_canonical_records_for_signal(
                 "source_id": row[6] or source_id,
             },
         ),
-        "documents": (
-            "SELECT doc_id, title, content, url, source_id FROM documents WHERE source_id=? ORDER BY modified_at DESC LIMIT ?",
-            lambda row: {
-                "doc_id": row[0],
-                "record_id": row[0],
-                "title": row[1],
-                "content": row[2],
-                "url": row[3],
-                "source_id": row[4] or source_id,
-            },
-        ),
+        # documents has NO signal-reload entry on purpose: it is an owner-only
+        # leaf lane (store-and-view only) that must never be loaded to derive
+        # signals. Its write path (demo_table_by_group above) is the only route.
         "journal": (
             "SELECT entry_id, entry_at, starts_at, ends_at, mood_tag, category, content, people, place_name, duration, source_id FROM journal_entries WHERE source_id=? ORDER BY entry_at DESC LIMIT ?",
             lambda row: {
