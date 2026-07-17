@@ -65,6 +65,51 @@ async def test_tools_index_then_retrieve_over_ws_bridge(wired):
 
 
 @pytest.mark.asyncio
+async def test_tools_retrieve_scoped_injects_identity_over_ws_bridge(wired):
+    # PLAN_HELP_NUDGE A2: the ws handler threads connector_scope and the
+    # identity_tools override through to the ride-along logic.
+    from topos.core.handlers import handle_control_plane_request
+
+    indexed = await handle_control_plane_request(
+        {
+            "id": "a1",
+            "type": "tools_index",
+            "payload": {
+                "tools": [
+                    {"name": "remote__topos-github__list_commits", "description": "List commits"},
+                    {"name": "remote__topos-github__get_me", "description": "My user profile"},
+                    {"name": "remote__topos-github__viewer", "description": "GraphQL viewer"},
+                ]
+            },
+        }
+    )
+    assert indexed["status"] == "ok"
+
+    retrieved = await handle_control_plane_request(
+        {
+            "id": "a2",
+            "type": "tools_retrieve",
+            "payload": {
+                "query": "recent commits",
+                "k": 1,
+                "connector_scope": "topos-github",
+                "identity_tools": ["viewer"],
+            },
+        }
+    )
+    assert retrieved["status"] == "ok"
+    payload = retrieved["payload"]
+    names = [t["name"] for t in payload["tools"]]
+    assert names[0] == "remote__topos-github__list_commits"
+    assert "remote__topos-github__get_me" in names
+    assert "remote__topos-github__viewer" in names
+    assert set(payload["identity"]) == {
+        "remote__topos-github__get_me",
+        "remote__topos-github__viewer",
+    }
+
+
+@pytest.mark.asyncio
 async def test_tools_handlers_validate_input(wired):
     from topos.core.handlers import handle_control_plane_request
 

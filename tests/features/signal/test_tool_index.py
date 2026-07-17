@@ -146,6 +146,124 @@ def test_stale_dims_rows_fall_back_to_keyword(conn):
     assert out["tools"][0]["name"] == "remote__topos-github__list_commits"
 
 
+def test_scoped_retrieval_injects_low_ranked_identity_tool(conn):
+    # get_me is profile-themed (axis 2), the query is commit-themed (axis 0) —
+    # cosine 0, so it never makes a k=2 cut on its own. Scoped retrieval must
+    # ride it along anyway (PLAN_HELP_NUDGE A2).
+    index_tools(conn, TOOLS, embed_fn=fake_embed)
+    out = retrieve_tools(
+        conn,
+        "what were my most recent commits",
+        connector_scope="topos-github",
+        k=2,
+        embed_fn=fake_embed,
+    )
+    names = [t["name"] for t in out["tools"]]
+    assert set(names[:2]) == {
+        "remote__topos-github__list_commits",
+        "remote__topos-github__get_commit",
+    }
+    assert "remote__topos-github__get_me" in names
+    entry = next(t for t in out["tools"] if t["name"] == "remote__topos-github__get_me")
+    assert entry["injected"] is True
+    # It got a real (low) cosine score from the scan — kept, not invented.
+    assert entry["similarity"] is not None
+    assert out["identity"] == ["remote__topos-github__get_me"]
+
+
+def test_unscoped_retrieval_does_not_inject_identity(conn):
+    index_tools(conn, TOOLS, embed_fn=fake_embed)
+    out = retrieve_tools(conn, "what were my most recent commits", k=2, embed_fn=fake_embed)
+    assert "remote__topos-github__get_me" not in [t["name"] for t in out["tools"]]
+    assert out["identity"] == []
+
+
+def test_cross_connector_scope_never_injects_foreign_identity(conn):
+    index_tools(conn, TOOLS, embed_fn=fake_embed)
+    # Another connector's scope must never pick up github's get_me — the scope
+    # filter runs before the ride-along match.
+    out = retrieve_tools(
+        conn, "search my notion pages", connector_scope="topos-notion", k=5, embed_fn=fake_embed
+    )
+    assert [t["name"] for t in out["tools"]] == ["remote__topos-notion__search"]
+    assert out["identity"] == []
+    # A scope with no indexed rows at all injects nothing either.
+    out_gcal = retrieve_tools(
+        conn, "what were my commits", connector_scope="topos-gcal", k=5, embed_fn=fake_embed
+    )
+    assert out_gcal["tools"] == []
+    assert out_gcal["identity"] == []
+
+
+def test_extra_identity_names_force_include_nonstandard_tool(conn):
+    # A connector whose identity tool has a nonstandard bare name (GraphQL
+    # `viewer`) rides along via the per-connector override.
+    tools = TOOLS + [
+        {"name": "remote__topos-github__viewer", "description": "The current GraphQL viewer account"}
+    ]
+    index_tools(conn, tools, embed_fn=fake_embed)
+    out = retrieve_tools(
+        conn,
+        "what were my most recent commits",
+        connector_scope="topos-github",
+        k=2,
+        embed_fn=fake_embed,
+        extra_identity_names=["viewer"],
+    )
+    names = [t["name"] for t in out["tools"]]
+    assert "remote__topos-github__viewer" in names
+    entry = next(t for t in out["tools"] if t["name"] == "remote__topos-github__viewer")
+    assert entry["injected"] is True
+    assert set(out["identity"]) == {
+        "remote__topos-github__get_me",
+        "remote__topos-github__viewer",
+    }
+
+
+def test_partial_stale_identity_row_injected_with_null_similarity(conn):
+    # Only the identity row is dims-stale (older embedding model); the cosine
+    # scan skips it while the fresh rows still match, so backend stays cosine —
+    # the ride-along must not invent a score for it.
+    from topos.features.signal.vector_codec import encode_f32
+
+    index_tools(conn, TOOLS, embed_fn=fake_embed)
+    conn.execute(
+        "UPDATE tool_index SET vector_blob = ?, dims = 3 WHERE tool_name = ?",
+        (encode_f32([1.0, 0.0, 0.0]), "remote__topos-github__get_me"),
+    )
+    out = retrieve_tools(
+        conn,
+        "what were my most recent commits",
+        connector_scope="topos-github",
+        k=2,
+        embed_fn=fake_embed,
+    )
+    assert out["backend"] == "cosine"
+    entry = next(t for t in out["tools"] if t["name"] == "remote__topos-github__get_me")
+    assert entry["similarity"] is None
+    assert entry["injected"] is True
+    assert out["identity"] == ["remote__topos-github__get_me"]
+
+
+def test_identity_tool_in_top_k_is_not_duplicated_or_flagged(conn):
+    # A profile-themed query ranks get_me into the top-k naturally: no
+    # duplicate entry, no injected flag, still reported as identity.
+    index_tools(conn, TOOLS, embed_fn=fake_embed)
+    out = retrieve_tools(
+        conn,
+        "show my user profile",
+        connector_scope="topos-github",
+        k=2,
+        embed_fn=fake_embed,
+    )
+    names = [t["name"] for t in out["tools"]]
+    assert names.count("remote__topos-github__get_me") == 1
+    assert names[0] == "remote__topos-github__get_me"
+    entry = next(t for t in out["tools"] if t["name"] == "remote__topos-github__get_me")
+    assert "injected" not in entry
+    assert out["identity"] == ["remote__topos-github__get_me"]
+
+
 def test_index_status_reports_counts(conn):
     index_tools(conn, TOOLS, embed_fn=fake_embed)
     status = index_status(conn)

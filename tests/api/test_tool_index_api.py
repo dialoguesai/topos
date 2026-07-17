@@ -108,6 +108,48 @@ async def test_index_then_retrieve_round_trip(wired_app):
 
 
 @pytest.mark.asyncio
+async def test_scoped_retrieve_rides_identity_tools_along(wired_app):
+    # PLAN_HELP_NUDGE A2: a scoped retrieve force-includes identity-shaped
+    # tools that rank below k, plus any per-request `identity_tools` override.
+    transport = ASGITransport(app=wired_app)
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        indexed = await client.post(
+            "/v1/tools/index",
+            headers={"Authorization": "Bearer test-key"},
+            json={
+                "tools": TOOLS
+                + [{"name": "remote__topos-github__viewer", "description": "GraphQL viewer account"}]
+            },
+        )
+        assert indexed.status_code == 200
+
+        retrieved = await client.post(
+            "/v1/tools/retrieve",
+            headers={"Authorization": "Bearer test-key"},
+            json={
+                "query": "what were my most recent commits",
+                "connector_scope": "topos-github",
+                "k": 1,
+                "identity_tools": ["viewer"],
+            },
+        )
+        assert retrieved.status_code == 200
+        out = retrieved.json()
+        names = [t["name"] for t in out["tools"]]
+        # k=1 keeps only the commit tool; both identity tools ride along.
+        assert names[0] == "remote__topos-github__list_commits"
+        assert "remote__topos-github__get_me" in names
+        assert "remote__topos-github__viewer" in names
+        assert set(out["identity"]) == {
+            "remote__topos-github__get_me",
+            "remote__topos-github__viewer",
+        }
+        injected = {t["name"]: t.get("injected") for t in out["tools"]}
+        assert injected["remote__topos-github__get_me"] is True
+        assert injected["remote__topos-github__viewer"] is True
+
+
+@pytest.mark.asyncio
 async def test_retrieve_requires_query_and_index_requires_tools(wired_app):
     transport = ASGITransport(app=wired_app)
     async with AsyncClient(transport=transport, base_url="http://test") as client:
