@@ -314,3 +314,60 @@ def test_semantic_hits_carry_event_at(monkeypatch) -> None:
     hits, error = retrieval_mod._semantic_hits("docker yesterday")
     assert error is None
     assert hits[0]["event_at"] == "2026-07-16T10:00:00+00:00"
+
+
+# --- M4: parsed time window surfaces in the packet/public_result -------------------------
+
+
+def test_time_window_surfaced_for_dated_query(dated_goals_conn, monkeypatch) -> None:
+    monkeypatch.setattr("topos.core.state.get_db_connection", lambda: dated_goals_conn)
+    adapters = AdapterFactory.create("local_database", conn=dated_goals_conn)
+    adapter = DefaultSignalRetrievalAdapter(adapters)
+    manifest = resolve_scope_manifest("work_context:read")
+    bundle = adapter.retrieve(
+        RetrievalRequest(
+            manifest=manifest,
+            access_mode="summary",
+            query_text="What were my goals yesterday?",
+            now=NOW,
+        )
+    )
+    window = bundle.context_packet.get("time_window")
+    assert window == {
+        "source": "query_planner",
+        "from": "2026-07-16T00:00:00+00:00",
+        "to": "2026-07-16T23:59:59+00:00",
+    }
+
+
+def test_time_window_absent_for_untimed_query(dated_goals_conn, monkeypatch) -> None:
+    monkeypatch.setattr("topos.core.state.get_db_connection", lambda: dated_goals_conn)
+    adapters = AdapterFactory.create("local_database", conn=dated_goals_conn)
+    adapter = DefaultSignalRetrievalAdapter(adapters)
+    manifest = resolve_scope_manifest("work_context:read")
+    bundle = adapter.retrieve(
+        RetrievalRequest(
+            manifest=manifest,
+            access_mode="summary",
+            query_text="What are my goals?",
+            now=NOW,
+        )
+    )
+    assert "time_window" not in bundle.context_packet
+
+
+def test_game_layer_copies_time_window_into_summary_payload() -> None:
+    from topos.query.game_layer import DefaultGameLayer
+
+    result = DefaultGameLayer().apply(
+        context_packet={
+            "summaries": [{"topic": "t"}],
+            "time_window": {"source": "query_planner", "from": "a", "to": "b"},
+        },
+        access_mode="summary",
+        scope_id="work_context:read",
+        query_text="what happened yesterday",
+    )
+    assert result.payload.get("time_window") == {
+        "source": "query_planner", "from": "a", "to": "b",
+    }
