@@ -609,7 +609,7 @@ class SQLiteSignalFeatureStore:
         return summary_id
 
     def _list_rows(self, table: str, *, dimension: Optional[str], limit: int, offset: int) -> ListPage:
-        query = f"SELECT payload_json FROM {table}"
+        query = f"SELECT payload_json, created_at FROM {table}"
         params: List[Any] = []
         if dimension is not None:
             query += " WHERE dimension=?"
@@ -618,7 +618,14 @@ class SQLiteSignalFeatureStore:
         total = int(count[0]) if count else 0
         query += " ORDER BY rowid LIMIT ? OFFSET ?"
         params.extend([limit, offset])
-        items = [json.loads(r[0]) for r in self._conn.execute(query, params).fetchall()]
+        items: List[Dict[str, Any]] = []
+        for payload_json, created_at in self._conn.execute(query, params).fetchall():
+            item = json.loads(payload_json)
+            # The row timestamp lives in the column, not the payload; without it
+            # facts are undated downstream (no recency decay, no time filtering).
+            if created_at:
+                item.setdefault("created_at", created_at)
+            items.append(item)
         return ListPage(items=items, total=total, offset=offset, limit=limit)
 
     def get_by_dimension(self, dimension: str, *, limit: int = 100, offset: int = 0) -> ListPage:

@@ -587,19 +587,55 @@ def _resolve_source_ids(
     return resolve_retrieval_source_ids(manifest, installed_source_ids)
 
 
+def _parse_instant(raw: Any) -> Optional[datetime]:
+    if not raw:
+        return None
+    try:
+        ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return ts if ts.tzinfo else ts.replace(tzinfo=timezone.utc)
+
+
 def _parse_row_timestamp(row: Dict[str, Any]) -> Optional[datetime]:
     for field in ("event_at", "ts", "occurred_at", "created_at"):
-        raw = row.get(field)
-        if not raw:
-            continue
-        try:
-            ts = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
-            if ts.tzinfo is None:
-                ts = ts.replace(tzinfo=timezone.utc)
+        ts = _parse_instant(row.get(field))
+        if ts is not None:
             return ts
-        except ValueError:
-            continue
     return None
+
+
+def _prefer_time_window(
+    items: List[Dict[str, Any]],
+    time_range: Optional[Tuple[str, str]],
+) -> List[Dict[str, Any]]:
+    """Keep the items inside the plan's time window when any exist.
+
+    Soft fallback, mirroring the vector lane's unscoped retry: a time-scoped
+    ask over a lane with nothing in-window degrades to dated-but-out-of-window
+    evidence rather than an empty lane — but every returned item is annotated
+    with `in_time_window` so synthesis can say "nothing from yesterday; most
+    recent instead" rather than passing off stale items as in-range. Undated
+    items count as out-of-window: they cannot evidence a date-scoped claim.
+    """
+    if not time_range or not items:
+        return items
+    start = _parse_instant(time_range[0])
+    end = _parse_instant(time_range[1])
+    if start is None or end is None:
+        return items
+    in_window: List[Dict[str, Any]] = []
+    for item in items:
+        ts = _parse_row_timestamp(item)
+        if ts is not None and start <= ts <= end:
+            in_window.append(item)
+    if in_window:
+        for item in in_window:
+            item["in_time_window"] = True
+        return in_window
+    for item in items:
+        item["in_time_window"] = False
+    return items
 
 
 def _apply_filter_manifest_rows(
@@ -641,6 +677,7 @@ def _load_user_goal_summaries(
     source_ids: Optional[List[str]] = None,
     limit: int = _SUMMARY_ITEM_CAP,
     conn: Optional[Any] = None,
+    time_range: Optional[Tuple[str, str]] = None,
 ) -> List[Dict[str, Any]]:
     try:
         # Prefer the query's own connection (multi-db verification, seeded evals);
@@ -652,20 +689,40 @@ def _load_user_goal_summaries(
         if conn is None:
             return []
         params: List[Any] = []
-        query = "SELECT goal_id, record_id, source_id, goal_text FROM user_goals"
+        # event_at is the source message's time from the unified timeline
+        # (user_goals.record_id = message_id); created_at is only ingest time.
+        # Without a date field goals can never answer "yesterday's goals" and
+        # dodge recency decay entirely.
+        select = (
+            "SELECT g.goal_id, g.record_id, g.source_id, g.goal_text, g.created_at,"
+            " (SELECT MAX(t.event_at) FROM timeline t WHERE t.record_id = g.record_id)"
+            " FROM user_goals g"
+        )
+        where = ""
         if source_ids:
             placeholders = ",".join("?" for _ in source_ids)
-            query += f" WHERE source_id IN ({placeholders})"
+            where = f" WHERE g.source_id IN ({placeholders})"
             params.extend(source_ids)
-        query += " ORDER BY created_at DESC LIMIT ?"
+        tail = " ORDER BY g.created_at DESC LIMIT ?"
         params.append(max(limit * 3, 50))
-        rows = conn.execute(query, tuple(params)).fetchall()
+        try:
+            rows = conn.execute(select + where + tail, tuple(params)).fetchall()
+        except Exception:
+            # Databases predating the timeline projection: dated by ingest only.
+            rows = [
+                (*row, None)
+                for row in conn.execute(
+                    "SELECT goal_id, record_id, source_id, goal_text, created_at"
+                    " FROM user_goals" + where.replace("g.", "") + tail.replace("g.", ""),
+                    tuple(params),
+                ).fetchall()
+            ]
         items: List[Dict[str, Any]] = []
         tokens = _query_tokens(query_text)
         query_lower = (query_text or "").lower()
         goal_intent = any(term in query_lower for term in _EXTRA_SURFACE_TERMS)
         seen_texts: set = set()
-        for goal_id, record_id, source_id, goal_text in rows:
+        for goal_id, record_id, source_id, goal_text, created_at, event_at in rows:
             text = str(goal_text or "").strip()
             if not text:
                 continue
@@ -686,10 +743,13 @@ def _load_user_goal_summaries(
                     "record_id": record_id,
                     "source_id": source_id,
                     "dimension": "work",
+                    "event_at": event_at or created_at,
+                    "created_at": created_at,
                     "relevance_score": round(_goal_relevance(text, query_text), 4),
                     "retrieval_source": "user_goal",
                 }
             )
+        items = _prefer_time_window(items, time_range)
         items.sort(key=lambda item: float(item.get("relevance_score") or 0.0), reverse=True)
         return items[:limit]
     except Exception as exc:
@@ -2059,7 +2119,10 @@ def _build_summary_items(
             str(s).strip() for s in (manifest.default_source_ids or []) if str(s).strip()
         ] or (source_ids or None)
         goal_items = _load_user_goal_summaries(
-            query_text, source_ids=goal_source_ids or None, conn=bundle_conn
+            query_text,
+            source_ids=goal_source_ids or None,
+            conn=bundle_conn,
+            time_range=getattr(plan, "time_range", None) if plan else None,
         )
 
     canonical_items = _load_canonical_summary_items(
@@ -2236,6 +2299,12 @@ def _build_summary_items(
                     "retrieval_source": "signal_fact",
                 }
             )
+    # Same time-window preference as the goal lane: dimension facts now carry
+    # created_at (and sometimes event_at) — a "yesterday" ask keeps in-window
+    # facts when any exist, annotated fallback otherwise.
+    fact_items = _prefer_time_window(
+        fact_items, getattr(plan, "time_range", None) if plan else None
+    )
     fact_items.sort(key=lambda item: float(item.get("relevance_score") or 0.0), reverse=True)
     if first_person:
         # The dimension-dump lane carries raw stat payloads too — the same
