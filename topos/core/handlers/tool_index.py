@@ -66,6 +66,13 @@ async def handle_tools_retrieve(message: Dict[str, Any]) -> Optional[Dict[str, A
     query = str(payload.get("query") or "").strip()
     if not query:
         return {"id": req_id, "status": "error", "error": "query is required"}
+    # Per-connector identity-tool override (PLAN_HELP_NUDGE A2).
+    raw_identity = payload.get("identity_tools")
+    identity_tools = (
+        [str(n) for n in raw_identity if str(n or "").strip()]
+        if isinstance(raw_identity, list)
+        else []
+    )
     try:
         from ...features.signal.tool_index import retrieve_tools
 
@@ -75,6 +82,7 @@ async def handle_tools_retrieve(message: Dict[str, Any]) -> Optional[Dict[str, A
             query,
             connector_scope=payload.get("connector_scope"),
             k=int(payload.get("k") or 8),
+            extra_identity_names=identity_tools,
         )
         return {"id": req_id, "status": "ok", "payload": result}
     except Exception as exc:  # noqa: BLE001

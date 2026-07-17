@@ -47,6 +47,16 @@ _TABLE = "tool_index"
 # with a workable move.
 CORE_TOOL_NAMES: tuple[str, ...] = ("query_scope", "describe_connector", "list_connectors")
 
+# Identity-shaped bare tool names that ride along in scoped retrievals
+# (PLAN_HELP_NUDGE A2). Identity tools never rank for task-verb queries ("what
+# were my commits" embeds nothing profile-shaped — get_me sat 24/27 by cosine
+# on the live GitHub index) yet they are the prerequisite for any first-person
+# question: without the login the model fills in a placeholder username and
+# confidently reports empty results.
+IDENTITY_TOOL_NAMES: frozenset[str] = frozenset(
+    {"get_me", "whoami", "me", "get_current_user", "get_authenticated_user", "about_me"}
+)
+
 # Wire-name shape for remote connector tools: remote__{connector}__{tool}.
 _REMOTE_WIRE_RE = re.compile(r"^remote__(?P<connector>[^_].*?)__(?P<tool>.+)$")
 
@@ -263,11 +273,22 @@ def retrieve_tools(
     connector_scope: Optional[str] = None,
     k: int = 8,
     embed_fn: Optional[EmbedFn] = None,
+    extra_identity_names: Sequence[str] = (),
 ) -> Dict[str, Any]:
     """Rank indexed tools for a query; always carries CORE_TOOL_NAMES.
 
     Returns {"tools": [{name, connector_id, description, similarity}], "core",
-    "backend": "cosine" | "keyword_fallback", "model", "indexed_count", "k"}.
+    "identity", "backend": "cosine" | "keyword_fallback", "model",
+    "indexed_count", "k"}.
+
+    When ``connector_scope`` is set, the scoped connector's identity-shaped
+    tools (IDENTITY_TOOL_NAMES, plus ``extra_identity_names`` for connectors
+    whose identity tool has a nonstandard bare name, e.g. GraphQL ``viewer``)
+    always ride along regardless of similarity. Matched names are echoed in the
+    ``identity`` field (empty when unscoped or nothing matched). Ride-alongs
+    outside the top-k carry ``injected: True`` (``similarity: None`` when no
+    score was computable, e.g. a dims-stale row) — so ``tools`` may exceed
+    ``k`` and isn't strictly similarity-sorted at the tail.
     """
     ensure_table(conn)
     k = max(1, min(int(k or 8), 50))
@@ -308,9 +329,44 @@ def retrieve_tools(
 
     scored.sort(key=lambda pair: pair[0], reverse=True)
     top = [{**meta, "similarity": round(score, 6)} for score, meta in scored[:k]]
+
+    # Identity ride-along (PLAN_HELP_NUDGE A2): rows is already scope-filtered
+    # (WHERE connector_id = ?), so matching here can never pull in another
+    # connector's identity tool.
+    identity: List[str] = []
+    if scope:
+        wanted = IDENTITY_TOOL_NAMES | {
+            str(n).strip() for n in extra_identity_names if str(n).strip()
+        }
+        top_names = {t["name"] for t in top}
+        scored_by_name = {meta["name"]: score for score, meta in scored}
+        for name, connector, description, _model, _blob in rows:
+            name = str(name)
+            if _bare_name(name) not in wanted or name in identity:
+                continue
+            identity.append(name)
+            if name in top_names:
+                continue  # already ranked into the top-k on its own; no flag
+            entry: Dict[str, Any] = {
+                "name": name,
+                "connector_id": str(connector),
+                "description": str(description),
+                # Keep the computed (low) score when the scan produced one; a
+                # dims-stale/decode-skipped row gets None — don't invent one.
+                "similarity": round(scored_by_name[name], 6) if name in scored_by_name else None,
+                "injected": True,
+            }
+            top.append(entry)
+        if not identity:
+            logger.debug(
+                "tool_index scoped retrieval found no identity tool to inject (scope=%s)",
+                scope,
+            )
+
     return {
         "tools": top,
         "core": list(CORE_TOOL_NAMES),
+        "identity": identity,
         "backend": backend,
         "model": active_model_label() if embed_fn is None else "injected",
         "indexed_count": len(rows),

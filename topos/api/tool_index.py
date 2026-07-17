@@ -40,6 +40,10 @@ class RetrieveToolsRequest(BaseModel):
     query: str
     connector_scope: Optional[str] = None
     k: int = 8
+    # Per-connector identity-tool override (PLAN_HELP_NUDGE A2): bare names to
+    # ride along beyond IDENTITY_TOOL_NAMES, for connectors whose identity tool
+    # has a nonstandard name (e.g. GraphQL ``viewer``).
+    identity_tools: Optional[List[str]] = None
 
 
 def _require_conn():
@@ -74,6 +78,7 @@ def tools_retrieve(body: RetrieveToolsRequest):
         body.query,
         connector_scope=body.connector_scope,
         k=body.k,
+        extra_identity_names=body.identity_tools or (),
     )
 
 
