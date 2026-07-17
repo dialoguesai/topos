@@ -1095,6 +1095,14 @@ def _load_canonical_summary_items(
                 "relevance_score": round(_canonical_relevance(text, query_text), 4),
                 "retrieval_source": f"canonical:{table}",
             }
+            # Per-table event-time column (same keys the recency sort in
+            # _list_canonical_rows uses); without it canonical rows can neither
+            # decay in fusion nor answer a date-scoped ask.
+            for ts_key in ("event_at", "starts_at", "occurred_at", "entry_at"):
+                ts_val = clean.get(ts_key) or row.get(ts_key)
+                if ts_val:
+                    item["event_at"] = ts_val
+                    break
             if owner is not None:
                 item["owner_authored"] = owner
             items.append(item)
@@ -1500,6 +1508,9 @@ def _semantic_hits(
                     "similarity": item.get("similarity"),
                     "source_id": item.get("source_id"),
                     "signal_dimension": item.get("signal_dimension"),
+                    # Without the event time, vector items are exempt from
+                    # recency decay by accident and undated at synthesis.
+                    "event_at": item.get("event_at"),
                 }
             )
         return hits, result.get("error")
@@ -2136,6 +2147,9 @@ def _build_summary_items(
         conn=bundle_conn,
         exposure_visible=exposure_visible,
     )
+    canonical_items = _prefer_time_window(
+        canonical_items, getattr(plan, "time_range", None) if plan else None
+    )
 
     # Interaction browse ("who do I talk to"): the contact registry is the
     # ground truth of interaction partners — mention-only names (someone the
@@ -2225,6 +2239,7 @@ def _build_summary_items(
             "record_id": hit.get("record_id"),
             "source_id": hit.get("source_id"),
             "signal_dimension": hit.get("signal_dimension"),
+            "event_at": hit.get("event_at"),
             "relevance_score": round(similarity, 4),
             "retrieval_source": "vector",
         }
