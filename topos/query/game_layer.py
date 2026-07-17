@@ -165,6 +165,10 @@ class DefaultGameLayer:
         elif access_mode == "summary":
             payload["answer_type"] = "summary"
             payload["summaries"] = context_packet.get("summaries") or []
+            # Planner-parsed date window (present only when retrieval honored
+            # one) — lets synthesis state the searched range explicitly.
+            if context_packet.get("time_window"):
+                payload["time_window"] = context_packet["time_window"]
         else:
             payload["answer_type"] = "raw"
             payload["rows"] = context_packet.get("rows") or []

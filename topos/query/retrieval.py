@@ -2692,6 +2692,18 @@ class DefaultSignalRetrievalAdapter:
                 )
                 if summaries:
                     touched.append("signal")
+                # Surface the planner's parsed window so synthesis can state
+                # which dates were searched ("nothing from 2026-07-16") instead
+                # of inferring it from per-item timestamps. Summary mode only:
+                # its lanes honor the window; raw/inference do not yet
+                # (PLAN_TEMPORAL_COHERENCE.md M5/M6) and must not claim to.
+                if plan is not None and (plan.time_range or plan.as_of):
+                    window: Dict[str, Any] = {"source": "query_planner"}
+                    if plan.time_range:
+                        window["from"], window["to"] = plan.time_range
+                    if plan.as_of:
+                        window["as_of"] = plan.as_of
+                    packet["time_window"] = window
             else:
                 summaries = []
                 for dim in manifest.primary_dimensions:
