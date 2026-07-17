@@ -209,3 +209,108 @@ def test_signal_fact_items_carry_created_at(dated_goals_conn) -> None:
     page = adapters.signal.get_by_dimension("work")
     assert page.items
     assert all(item.get("created_at") for item in page.items)
+
+
+# --- M1: canonical lane carries event_at + honors the plan window ------------------------
+
+
+@pytest.fixture
+def dated_canonical_conn(tmp_path):
+    db_path = tmp_path / "dated_canonical.db"
+    c = sqlite3.connect(str(db_path))
+    apply_all_migrations(c)
+    CanonicalTablesManager(c)
+    for message_id, event_at, content in (
+        ("m_docker_yday", "2026-07-16T10:00:00+00:00", "debugged the docker compose stack"),
+        ("m_docker_old", "2026-06-01T10:00:00+00:00", "first tried docker on the laptop"),
+    ):
+        c.execute(
+            """
+            INSERT INTO ai_chat_messages (
+                message_id, conversation_id, sender_type, source_id, content, event_at
+            ) VALUES (?, 'conv1', 'user', 'chatgpt_ingestion', ?, ?)
+            """,
+            (message_id, content, event_at),
+        )
+    c.commit()
+    yield c
+    c.close()
+
+
+def test_canonical_items_carry_event_at(dated_canonical_conn, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "topos.core.state.get_db_connection", lambda: dated_canonical_conn
+    )
+    adapters = AdapterFactory.create("local_database", conn=dated_canonical_conn)
+    adapter = DefaultSignalRetrievalAdapter(adapters)
+    manifest = resolve_scope_manifest("ai_conversations:read")
+    bundle = adapter.retrieve(
+        RetrievalRequest(
+            manifest=manifest,
+            access_mode="summary",
+            query_text="What have I done with docker?",
+            now=NOW,
+        )
+    )
+    summaries = bundle.context_packet.get("summaries") or []
+    canonical = [
+        s for s in summaries
+        if str(s.get("retrieval_source") or "").startswith("canonical:")
+    ]
+    assert canonical
+    assert all(s.get("event_at") for s in canonical)
+
+
+def test_canonical_lane_prefers_yesterday_window(dated_canonical_conn, monkeypatch) -> None:
+    monkeypatch.setattr(
+        "topos.core.state.get_db_connection", lambda: dated_canonical_conn
+    )
+    adapters = AdapterFactory.create("local_database", conn=dated_canonical_conn)
+    adapter = DefaultSignalRetrievalAdapter(adapters)
+    manifest = resolve_scope_manifest("ai_conversations:read")
+    bundle = adapter.retrieve(
+        RetrievalRequest(
+            manifest=manifest,
+            access_mode="summary",
+            query_text="What did I do with docker yesterday?",
+            now=NOW,
+        )
+    )
+    summaries = bundle.context_packet.get("summaries") or []
+    canonical = [
+        s for s in summaries
+        if str(s.get("retrieval_source") or "").startswith("canonical:")
+    ]
+    assert canonical
+    assert {s.get("record_id") for s in canonical} == {"m_docker_yday"}
+    assert all(s.get("in_time_window") is True for s in canonical)
+
+
+# --- M2: vector lane hits carry event_at -------------------------------------------------
+
+
+def test_semantic_hits_carry_event_at(monkeypatch) -> None:
+    from topos.query import retrieval as retrieval_mod
+
+    class _FakeService:
+        def search_vectors(self, **kwargs):
+            return {
+                "items": [
+                    {
+                        "record_id": "m_vec",
+                        "text_preview": "docker compose debugging",
+                        "similarity": 0.91,
+                        "source_id": "chatgpt_ingestion",
+                        "signal_dimension": "work",
+                        "event_at": "2026-07-16T10:00:00+00:00",
+                    }
+                ],
+                "total": 1,
+            }
+
+    monkeypatch.setattr(
+        "topos.features.signal.service.get_signal_service", lambda: _FakeService()
+    )
+    hits, error = retrieval_mod._semantic_hits("docker yesterday")
+    assert error is None
+    assert hits[0]["event_at"] == "2026-07-16T10:00:00+00:00"
