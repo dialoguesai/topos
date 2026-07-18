@@ -371,3 +371,20 @@ def test_game_layer_copies_time_window_into_summary_payload() -> None:
     assert result.payload.get("time_window") == {
         "source": "query_planner", "from": "a", "to": "b",
     }
+
+
+# --- Client-now threading: "yesterday" is the USER's calendar day ------------------------
+
+
+def test_planner_resolves_yesterday_in_client_local_day() -> None:
+    from datetime import datetime
+
+    from topos.query.planner import build_query_plan
+
+    # 22:00 on Jul 17 in US Central = 03:00 Jul 18 UTC. The user's "yesterday"
+    # is Jul 16; a server-UTC clock would have said Jul 17.
+    local_now = datetime.fromisoformat("2026-07-17T22:00:00-05:00")
+    plan = build_query_plan(None, "What were my goals yesterday?", now=local_now)
+    assert plan.time_range is not None
+    assert plan.time_range[0].startswith("2026-07-16T")
+    assert plan.time_range[1].startswith("2026-07-16T")
