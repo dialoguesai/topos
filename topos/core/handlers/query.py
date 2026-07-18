@@ -50,11 +50,24 @@ async def handle_query(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                     "session_id": payload.get("query_session_id") or payload.get("session_id"),
                 },
             }
+        # Client-supplied reference instant (offset-aware ISO): "yesterday"
+        # resolves against the USER's calendar day, not this server's UTC day.
+        # Unparseable/absent → None → planner wall clock.
+        query_now = None
+        raw_now = str(payload.get("now") or "").strip()
+        if raw_now:
+            try:
+                from datetime import datetime
+
+                query_now = datetime.fromisoformat(raw_now.replace("Z", "+00:00"))
+            except ValueError:
+                logger.debug("unparseable query now=%r ignored", raw_now)
         result = await get_query_orchestrator(conn=hub.get_db_connection()).execute(
             query_text=intent,
             scope_id=scope_id,
             access_mode=str(payload.get("access_mode") or "summary"),
             manifest=manifest,
+            now=query_now,
             query_session_id=payload.get("query_session_id") or payload.get("session_id"),
             filter_manifest=filter_manifest,
             field_transforms=payload.get("field_transforms"),
