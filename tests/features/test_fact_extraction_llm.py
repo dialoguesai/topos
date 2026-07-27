@@ -743,3 +743,87 @@ class TestIncrementalProgress:
         calls["n"] = 0
         assert extract_owner_facts_llm(conn, rows, extractor=_stub) == 0
         assert calls["n"] == 0
+
+
+# --------------------------------------------------------------------------
+# Owner-selectable model resolution + think suppression (post think-mode bug).
+# --------------------------------------------------------------------------
+
+
+class _ModelSettings:
+    """Minimal settings stub for resolution-chain tests."""
+
+    def __init__(self, facts="", extraction="", query=""):
+        self.facts_llm_model = facts
+        self.ollama_extraction_model = extraction
+        self.ollama_query_model = query
+
+
+class TestModelResolution:
+    def test_chain_prefers_facts_then_extraction_then_query(self):
+        from topos.features.facts.llm_extract import _resolved_extraction_model
+
+        assert (
+            _resolved_extraction_model(_ModelSettings("m-facts", "m-ext", "m-q")) == "m-facts"
+        )
+        assert _resolved_extraction_model(_ModelSettings("", "m-ext", "m-q")) == "m-ext"
+        assert _resolved_extraction_model(_ModelSettings("", "", "m-q")) == "m-q"
+        assert _resolved_extraction_model(_ModelSettings()) == ""
+
+    def test_engine_config_device_override_wins(self, conn):
+        from topos.features.facts.llm_extract import _resolved_extraction_model
+
+        conn.execute(
+            "CREATE TABLE IF NOT EXISTS engine_config (key TEXT PRIMARY KEY, value TEXT)"
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO engine_config (key, value) VALUES ('facts_llm_model', 'm-device')"
+        )
+        conn.commit()
+        settings = _ModelSettings("m-facts", "m-ext", "m-q")
+        assert _resolved_extraction_model(settings, conn) == "m-device"
+        # Cleared override falls back to the env chain.
+        conn.execute("UPDATE engine_config SET value='' WHERE key='facts_llm_model'")
+        conn.commit()
+        assert _resolved_extraction_model(settings, conn) == "m-facts"
+
+    def test_normalize_put_model_validates(self):
+        from topos.config.facts_llm import normalize_put_model
+
+        assert normalize_put_model({"model": "qwen3.5:9b-mlx"}) == "qwen3.5:9b-mlx"
+        assert normalize_put_model({"model": "  m1  "}) == "m1"
+        assert normalize_put_model({}) == ""
+        assert normalize_put_model(None) == ""
+        with pytest.raises(ValueError):
+            normalize_put_model({"model": "bad model name"})
+        with pytest.raises(ValueError):
+            normalize_put_model({"model": "x" * 300})
+        with pytest.raises(ValueError):
+            normalize_put_model(42)
+
+
+class TestThinkSuppression:
+    def test_real_extractor_requests_think_false(self, monkeypatch):
+        """The Ollama extractor must ask the adapter to suppress chain-of-thought.
+
+        Reasoning models (qwen3.5 &c.) otherwise burn the whole num_predict
+        budget thinking and return an empty response — the July 2026 zero-facts
+        regression. The adapter downgrades the flag per model capability, so
+        asking is always safe; never asking is the bug.
+        """
+        from topos.engine.backends.ollama import OllamaAdapter
+        from topos.features.facts.llm_extract import _make_ollama_extractor
+
+        captured = {}
+
+        def _fake_generate(self, model, prompt, **kwargs):
+            captured["model"] = model
+            captured.update(kwargs)
+            return {"text": "[]", "usage": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}}
+
+        monkeypatch.setattr(OllamaAdapter, "_generate", _fake_generate)
+        extractor = _make_ollama_extractor("some-model")
+        assert extractor("prompt text", {"id": "r1"}) == []
+        assert captured["model"] == "some-model"
+        assert captured["think"] is False
+        assert captured["temperature"] == 0.0

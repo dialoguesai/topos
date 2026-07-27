@@ -495,7 +495,7 @@ def extract_facts_from_batch(
     try:
         from .llm_extract import extract_owner_facts_llm, facts_llm_enabled
 
-        if facts_llm_enabled():
+        if facts_llm_enabled(conn=conn):
             written += extract_owner_facts_llm(conn, rows)
     except Exception as exc:  # noqa: BLE001 — ingestion must never crash on the LLM pass
         import logging
