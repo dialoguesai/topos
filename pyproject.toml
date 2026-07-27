@@ -84,6 +84,12 @@ where = ["."]
 include = ["topos*", "shared*"]
 
 [tool.pytest.ini_options]
+# tmp_path hygiene: this suite's fixtures build whole node DBs (100s of MB per
+# run). Keep only the last run's FAILED dirs — passed dirs are removed as tests
+# finish, so tmp never accumulates across runs. Killed runs can still leave
+# locked roots behind; topos.runtime_housekeeping sweeps those on node start.
+tmp_path_retention_count = 1
+tmp_path_retention_policy = "failed"
 filterwarnings = [
   "ignore::DeprecationWarning:pydantic.*",
   "ignore:on_event is deprecated.*:DeprecationWarning:fastapi.*",
