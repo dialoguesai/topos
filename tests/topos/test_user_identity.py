@@ -67,7 +67,10 @@ async def test_user_identity_api_get_and_put(monkeypatch, tmp_path):
         {
             "TOPOS_KEY": "test-key",
             "CONTROL_PLANE_URL": "",
-            "DATABASE_PATH": str(tmp_path / "engine.db"),
+            # Settings only reads TOPOS_DATABASE_PATH (pydantic v2 ignores
+            # Field(env=...)); the old DATABASE_PATH name silently fell through
+            # to the developer's live ~/.topos/database.db.
+            "TOPOS_DATABASE_PATH": str(tmp_path / "engine.db"),
         },
     )
     from topos.core.state import get_db_connection
@@ -119,7 +122,7 @@ async def test_user_identity_api_requires_dataset_id(monkeypatch, tmp_path):
         {
             "TOPOS_KEY": "test-key",
             "CONTROL_PLANE_URL": "",
-            "DATABASE_PATH": str(tmp_path / "engine-missing.db"),
+            "TOPOS_DATABASE_PATH": str(tmp_path / "engine-missing.db"),
         },
     )
     transport = ASGITransport(app=app)

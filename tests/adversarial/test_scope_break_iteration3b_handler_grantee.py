@@ -12,7 +12,9 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = [pytest.mark.adversarial, pytest.mark.gap]
+# mark.live: handler-level probes against the real ~/.topos/database.db by
+# design; without it the deterministic public lane ran these against the live DB.
+pytestmark = [pytest.mark.adversarial, pytest.mark.gap, pytest.mark.live]
 
 LIVE_DB = Path(os.environ.get("TOPOS_DATABASE_PATH", Path.home() / ".topos" / "database.db"))
 

@@ -64,6 +64,11 @@ def engine_runtime_isolation():
     # Keep tests deterministic even when they still set legacy variable names.
     os.environ.setdefault("TOPOS_KEY", "test-key")
     os.environ.setdefault("ENABLE_HEALTH_AUTH", "false")
+    # Never leave the DB path unset: an unset TOPOS_DATABASE_PATH resolves to
+    # the developer's live ~/.topos/database.db (root conftest _no_live_db_guard
+    # set the popped value; re-assert it so re-imported Settings stay guarded).
+    if original_env.get("TOPOS_DATABASE_PATH"):
+        os.environ["TOPOS_DATABASE_PATH"] = original_env["TOPOS_DATABASE_PATH"]
     # Snapshot original module objects so teardown restores identities. A bare
     # purge forks modules: later tests that bound topos.core.handlers/state at
     # collection time monkeypatch the old objects while re-imports resolve fresh

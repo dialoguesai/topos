@@ -22,11 +22,15 @@ def load_topos_app(monkeypatch, env: dict):
 
 
 @pytest.mark.asyncio
-async def test_smoke_health_and_auth(monkeypatch):
+async def test_smoke_health_and_auth(monkeypatch, tmp_path):
     """Smoke: health 200; /api/local 401 without auth, 200 with valid Bearer."""
     app = load_topos_app(
         monkeypatch,
-        {"TOPOS_KEY": "test-key", "CONTROL_PLANE_URL": ""},
+        {
+            "TOPOS_KEY": "test-key",
+            "CONTROL_PLANE_URL": "",
+            "TOPOS_DATABASE_PATH": str(tmp_path / "engine.db"),
+        },
     )
     transport = ASGITransport(app=app)
     async with LifespanManager(app):

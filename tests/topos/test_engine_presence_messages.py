@@ -8,7 +8,7 @@ from topos.testing.lifespan import LifespanManager
 
 
 @pytest.mark.asyncio
-async def test_startup_sends_engine_register_message(monkeypatch: pytest.MonkeyPatch):
+async def test_startup_sends_engine_register_message(monkeypatch: pytest.MonkeyPatch, tmp_path):
     from topos import app as app_module
     from topos.config.settings import settings
     import topos.core.state as state
@@ -34,6 +34,9 @@ async def test_startup_sends_engine_register_message(monkeypatch: pytest.MonkeyP
 
     # Ensure startup path enables control plane client.
     monkeypatch.setattr(settings, "control_plane_url", "ws://example.test/ws/engine", raising=False)
+    # Startup opens the configured DB (state + install_service); keep it off
+    # the developer's live ~/.topos/database.db.
+    monkeypatch.setattr(settings, "topos_database_path", str(tmp_path / "engine.db"))
     monkeypatch.setattr(app_module, "ControlPlaneClient", FakeControlPlaneClient, raising=True)
 
     async with LifespanManager(app_module.app):
