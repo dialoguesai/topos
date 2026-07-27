@@ -133,15 +133,16 @@ _OWNER_SUBJECT_TOKENS = frozenset({"", "owner", "me", "i", "myself", "self", "th
 _DISABLED_TOKENS = frozenset({"0", "false", "off", "no"})
 
 
-def _resolved_extraction_model(settings: Any) -> str:
-    """The model B4 would use: ollama_extraction_model, else the query model."""
-    model = str(getattr(settings, "ollama_extraction_model", "") or "").strip()
-    if model:
-        return model
-    return str(getattr(settings, "ollama_query_model", "") or "").strip()
+def _resolved_extraction_model(settings: Any, conn: Any = None) -> str:
+    """The model B4 would use. Owner-selectable, first non-empty wins:
+    engine_config device override (when ``conn`` is given) → env
+    TOPOS_FACTS_LLM_MODEL → ollama_extraction_model → ollama_query_model."""
+    from ...config.facts_llm import resolve_facts_llm_model
+
+    return resolve_facts_llm_model(settings, conn)
 
 
-def facts_llm_enabled(settings: Any = None) -> bool:
+def facts_llm_enabled(settings: Any = None, conn: Any = None) -> bool:
     """Is the additive LLM fact pass ON?
 
     Tri-state ``TOPOS_FACTS_LLM`` (Settings.topos_facts_llm):
@@ -173,7 +174,7 @@ def facts_llm_enabled(settings: Any = None) -> bool:
 
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return False
-    return bool(_resolved_extraction_model(settings))
+    return bool(_resolved_extraction_model(settings, conn))
 
 
 # ---------------------------------------------------------------------------
@@ -440,11 +441,15 @@ def _make_ollama_extractor(model: str) -> Callable[[str, Dict[str, Any]], List[D
         if is_shutdown_requested():
             raise InterruptedError("engine shutting down")
         # temp 0 => deterministic; bounded output; keep_alive default so the
-        # model stays warm across the batch.
+        # model stays warm across the batch. think=False: reasoning models
+        # (qwen3.5 &c.) otherwise spend the whole num_predict budget on
+        # chain-of-thought and return an empty response — the adapter adapts
+        # the flag per model capability, so non-thinking models are unaffected.
         generated = adapter._generate(  # noqa: SLF001 (intentional low-level reuse)
             model,
             prompt,
             num_predict=_NUM_PREDICT,
+            think=False,
             temperature=0.0,
             timeout=FACTS_LLM_HTTP_TIMEOUT,
         )
@@ -796,7 +801,7 @@ def extract_owner_facts_llm(
 
     real_extractor_factory: Optional[Callable[[], Callable]] = None
     if extractor is None:
-        resolved_model = str(model or _resolved_extraction_model(settings) or "").strip()
+        resolved_model = str(model or _resolved_extraction_model(settings, conn) or "").strip()
         if not resolved_model:
             logger.debug("LLM fact pass: no extraction model configured; inert")
             return 0

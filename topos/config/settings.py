@@ -117,6 +117,12 @@ class Settings(BaseSettings):
     # Resolve with features.facts.llm_extract.facts_llm_enabled(), not by reading
     # this field directly (the auto default lives there).
     topos_facts_llm: Optional[str] = Field(None, env="TOPOS_FACTS_LLM")
+    # Owner-selectable model for the LLM fact pass. Empty ⇒ fall back to
+    # ollama_extraction_model → ollama_query_model. A per-node device override
+    # (engine_config["facts_llm_model"], set via /v1/facts-llm-config) wins over
+    # this env default. Resolve with config.facts_llm.resolve_facts_llm_model();
+    # thinking vs non-thinking is auto-detected per model by the Ollama adapter.
+    facts_llm_model: str = Field("", env="TOPOS_FACTS_LLM_MODEL")
     engine_default_provider: str = Field("huggingface", env="ENGINE_DEFAULT_PROVIDER")
     # §D minimizer runs on EVERY grantee query, so it uses a small/fast local model. The judge
     # only runs in nightly privacy evals (F.4/CER semantic scoring), so it can be larger/slower.

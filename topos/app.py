@@ -39,6 +39,7 @@ from .api import (
     ui_config as ui_config_routes,
     data_explorer_table_prefs as data_explorer_table_prefs_routes,
     sanitization_ollama_config as sanitization_ollama_config_routes,
+    facts_llm_config as facts_llm_config_routes,
     signal_extraction_config as signal_extraction_config_routes,
     filter_lab as filter_lab_routes,
     enrichment_lab as enrichment_lab_routes,
@@ -123,6 +124,7 @@ app.include_router(ui_config_routes.router)
 app.include_router(data_explorer_table_prefs_routes.router)
 app.include_router(user_identity_routes.router)
 app.include_router(sanitization_ollama_config_routes.router)
+app.include_router(facts_llm_config_routes.router)
 app.include_router(signal_extraction_config_routes.router)
 app.include_router(filter_lab_routes.router)
 app.include_router(enrichment_lab_routes.router)

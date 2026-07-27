@@ -260,6 +260,61 @@ async def handle_delete_sanitization_ollama_config(message: Dict[str, Any]) -> O
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}
 
+@handles("get_facts_llm_config")
+async def handle_get_facts_llm_config(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    from ...config.facts_llm import effective_config_for_api
+
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    try:
+        data = effective_config_for_api(settings, conn)
+        return {"id": req_id, "status": "ok", "payload": {"status": "ok", **data}}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+@handles("put_facts_llm_config")
+async def handle_put_facts_llm_config(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    from ...config.facts_llm import (
+        ENGINE_CONFIG_KEY_FACTS_LLM_MODEL,
+        effective_config_for_api,
+        normalize_put_model,
+    )
+
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    payload = message.get("payload") or {}
+    try:
+        model = normalize_put_model(payload)
+        set_engine_config_value(conn, ENGINE_CONFIG_KEY_FACTS_LLM_MODEL, model)
+        data = effective_config_for_api(settings, conn)
+        return {"id": req_id, "status": "ok", "payload": {"status": "ok", **data}}
+    except ValueError as exc:
+        return {"id": req_id, "status": "error", "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+@handles("delete_facts_llm_config")
+async def handle_delete_facts_llm_config(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    from ...config.facts_llm import (
+        ENGINE_CONFIG_KEY_FACTS_LLM_MODEL,
+        effective_config_for_api,
+    )
+
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    try:
+        set_engine_config_value(conn, ENGINE_CONFIG_KEY_FACTS_LLM_MODEL, "")
+        data = effective_config_for_api(settings, conn)
+        return {"id": req_id, "status": "ok", "payload": {"status": "ok", **data}}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
 @handles("get_signal_extraction_config")
 async def handle_get_signal_extraction_config(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")

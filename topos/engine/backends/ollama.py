@@ -13,6 +13,19 @@ from .generative_response import parse_generative_response
 
 logger = logging.getLogger("topos.engine.ollama")
 
+# Per-process thinking-capability cache, keyed by (base_url, model). Populated
+# lazily from /api/show ("capabilities" contains "thinking"). Module-level so
+# every OllamaAdapter instance (they are cheap and constructed per call site)
+# shares one probe per model.
+_THINKING_CAPABILITY_CACHE: Dict[tuple, bool] = {}
+# Models that support thinking but REJECT think=false (e.g. gpt-oss family:
+# 'does not support disabling thinking'). For these we omit the param and
+# instead widen num_predict so the chain-of-thought cannot starve the answer.
+_THINK_DISABLE_REJECTED: set = set()
+# When a thinking model cannot disable thinking, its CoT competes with the
+# answer for output budget; widen num_predict so the JSON still fits.
+_THINKING_NUM_PREDICT_FLOOR = 2048
+
 _STRUCTURED_SUBTYPES = frozenset(
     {
         "topic_extraction",
@@ -71,6 +84,55 @@ class OllamaAdapter:
                 return True
         except Exception:
             return False
+
+    def model_supports_thinking(self, model: str) -> bool:
+        """True when /api/show lists the 'thinking' capability for ``model``.
+
+        Cached per (base_url, model) for the process lifetime. A failed probe
+        is NOT cached (transient hiccups retry on the next call) and returns
+        False — the caller then omits ``think``, which is always accepted.
+        """
+        key = (self._base_url, str(model))
+        cached = _THINKING_CAPABILITY_CACHE.get(key)
+        if cached is not None:
+            return cached
+        req = urllib.request.Request(
+            f"{self._base_url}/api/show",
+            data=json.dumps({"model": str(model)}).encode("utf-8"),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+        except Exception as exc:  # noqa: BLE001 — degrade to "unknown, omit think"
+            logger.debug("thinking-capability probe failed for %s: %s", model, exc)
+            return False
+        supports = "thinking" in (data.get("capabilities") or [])
+        _THINKING_CAPABILITY_CACHE[key] = supports
+        logger.info(
+            "Ollama model %s thinking capability: %s", model, supports
+        )
+        return supports
+
+    def resolve_think(self, model: str, desired: Optional[bool]) -> Optional[bool]:
+        """Adapt a desired ``think`` flag to what ``model`` actually accepts.
+
+        - desired None → None (caller doesn't care; model default applies).
+        - model without the thinking capability → None (omit the param; some
+          Ollama versions 400 on it, and it is meaningless anyway).
+        - model that rejected think=false before → None (see _generate, which
+          widens num_predict for these instead).
+        - otherwise → desired.
+        """
+        if desired is None:
+            return None
+        key = (self._base_url, str(model))
+        if desired is False and key in _THINK_DISABLE_REJECTED:
+            return None
+        if not self.model_supports_thinking(model):
+            return None
+        return desired
 
     def list_models(self) -> List[str]:
         """Return list of model names available on the server (from /api/tags)."""
@@ -203,6 +265,68 @@ class OllamaAdapter:
         temperature: Optional[float] = None,
         timeout: float = 300,
     ) -> Dict[str, Any]:
+        # think auto-adaptation: callers state intent (False = suppress
+        # chain-of-thought for structured output); what is actually sent depends
+        # on the model. Non-thinking models get the param omitted; models that
+        # rejected think=false before keep thinking but get a wider output
+        # budget so the CoT cannot starve the answer (Ollama returns thinking
+        # in a separate field, so 'response' stays clean either way).
+        requested_think = think
+        think = self.resolve_think(model, think)
+        if (
+            requested_think is False
+            and think is None
+            and (self._base_url, str(model)) in _THINK_DISABLE_REJECTED
+            and num_predict is not None
+        ):
+            num_predict = max(num_predict, _THINKING_NUM_PREDICT_FLOOR)
+        try:
+            return self._generate_once(
+                model,
+                prompt,
+                num_predict=num_predict,
+                keep_alive=keep_alive,
+                think=think,
+                temperature=temperature,
+                timeout=timeout,
+            )
+        except RuntimeError as exc:
+            # First contact with a gpt-oss-style model: thinking capability is
+            # advertised but cannot be turned off. Remember, widen, retry once.
+            if think is False and "disabling thinking" in str(exc).lower():
+                _THINK_DISABLE_REJECTED.add((self._base_url, str(model)))
+                logger.info(
+                    "Ollama model %s rejects think=false; retrying with thinking "
+                    "enabled and num_predict floor %d",
+                    model,
+                    _THINKING_NUM_PREDICT_FLOOR,
+                )
+                return self._generate_once(
+                    model,
+                    prompt,
+                    num_predict=(
+                        max(num_predict, _THINKING_NUM_PREDICT_FLOOR)
+                        if num_predict is not None
+                        else None
+                    ),
+                    keep_alive=keep_alive,
+                    think=None,
+                    temperature=temperature,
+                    timeout=timeout,
+                )
+            raise
+
+    def _generate_once(
+        self,
+        model: str,
+        prompt: str,
+        *,
+        num_predict: Optional[int],
+        keep_alive: Optional[str],
+        think: Optional[bool],
+        temperature: Optional[float],
+        timeout: float,
+    ) -> Dict[str, Any]:
         body: Dict[str, Any] = {"model": model, "prompt": prompt, "stream": False}
         if keep_alive is not None:
             body["keep_alive"] = keep_alive
@@ -235,6 +359,15 @@ class OllamaAdapter:
                         "total_tokens": max(0, total_tokens),
                     },
                 }
+        except urllib.error.HTTPError as e:
+            # Include the response body: Ollama puts the actionable message
+            # there (e.g. '"x" does not support disabling thinking') and the
+            # bare status line hides it.
+            try:
+                detail = e.read().decode("utf-8", "replace")[:500]
+            except Exception:  # noqa: BLE001
+                detail = ""
+            raise RuntimeError(f"Ollama request failed: {e} {detail}".rstrip()) from e
         except urllib.error.URLError as e:
             raise RuntimeError(f"Ollama request failed: {e}") from e
 
