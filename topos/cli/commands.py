@@ -230,6 +230,10 @@ def main(db_path, topos_key, set_topos_key, discover, port, host, skip_update_ch
         os.environ["TOPOS_DATABASE_PATH"] = db_path
         click.echo(f"Database path: {db_path}")
 
+    from topos.runtime_housekeeping import start_background_housekeeping
+
+    start_background_housekeeping()
+
     _emit_startup_banner(host=host, port=port)
     uvicorn.run(app, host=host, port=port, log_config=get_uvicorn_log_config())
 
