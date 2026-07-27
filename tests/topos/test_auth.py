@@ -22,11 +22,15 @@ def load_topos_app(monkeypatch, env: dict):
 
 
 @pytest.mark.asyncio
-async def test_local_mcp_401_without_auth(monkeypatch):
+async def test_local_mcp_401_without_auth(monkeypatch, tmp_path):
     """POST /api/local/list_database_tables returns 401 when Authorization is missing."""
     app = load_topos_app(
         monkeypatch,
-        {"TOPOS_KEY": "test-key", "TOPOS_CONTROL_PLANE_URL": ""},
+        {
+            "TOPOS_KEY": "test-key",
+            "TOPOS_CONTROL_PLANE_URL": "",
+            "TOPOS_DATABASE_PATH": str(tmp_path / "engine.db"),
+        },
     )
     transport = ASGITransport(app=app)
     async with LifespanManager(app):
@@ -36,11 +40,15 @@ async def test_local_mcp_401_without_auth(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_local_mcp_401_wrong_bearer(monkeypatch):
+async def test_local_mcp_401_wrong_bearer(monkeypatch, tmp_path):
     """POST /api/local/list_database_tables returns 401 when Bearer token is wrong."""
     app = load_topos_app(
         monkeypatch,
-        {"TOPOS_KEY": "test-key", "TOPOS_CONTROL_PLANE_URL": ""},
+        {
+            "TOPOS_KEY": "test-key",
+            "TOPOS_CONTROL_PLANE_URL": "",
+            "TOPOS_DATABASE_PATH": str(tmp_path / "engine.db"),
+        },
     )
     transport = ASGITransport(app=app)
     async with LifespanManager(app):
@@ -53,11 +61,15 @@ async def test_local_mcp_401_wrong_bearer(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_local_mcp_200_with_valid_bearer(monkeypatch):
+async def test_local_mcp_200_with_valid_bearer(monkeypatch, tmp_path):
     """POST /api/local/list_database_tables returns 200 with valid Bearer (body may be error if no DB)."""
     app = load_topos_app(
         monkeypatch,
-        {"TOPOS_KEY": "test-key", "TOPOS_CONTROL_PLANE_URL": ""},
+        {
+            "TOPOS_KEY": "test-key",
+            "TOPOS_CONTROL_PLANE_URL": "",
+            "TOPOS_DATABASE_PATH": str(tmp_path / "engine.db"),
+        },
     )
     transport = ASGITransport(app=app)
     async with LifespanManager(app):
@@ -72,11 +84,15 @@ async def test_local_mcp_200_with_valid_bearer(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_healthcheck_no_auth_required(monkeypatch):
+async def test_healthcheck_no_auth_required(monkeypatch, tmp_path):
     """GET /healthcheck is reachable without auth (liveness/readiness)."""
     app = load_topos_app(
         monkeypatch,
-        {"TOPOS_KEY": "test-key", "TOPOS_CONTROL_PLANE_URL": ""},
+        {
+            "TOPOS_KEY": "test-key",
+            "TOPOS_CONTROL_PLANE_URL": "",
+            "TOPOS_DATABASE_PATH": str(tmp_path / "engine.db"),
+        },
     )
     transport = ASGITransport(app=app)
     async with LifespanManager(app):

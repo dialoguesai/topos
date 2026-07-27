@@ -55,6 +55,42 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             item.add_marker(pytest.mark.public)
 
 
+# Lanes that legitimately reach a real database; everything else must never
+# touch ~/.topos/database.db (or the other canonical candidates in
+# topos.core.state._resolve_database_path_from_settings).
+_LIVE_DB_EXEMPT_MARKERS = ("live", "e2e", "qq_eval")
+
+
+@pytest.fixture(scope="session")
+def _live_db_guard_path(tmp_path_factory: pytest.TempPathFactory) -> str:
+    return str(tmp_path_factory.mktemp("no-live-db") / "guard.db")
+
+
+@pytest.fixture(autouse=True)
+def _no_live_db_guard(request, monkeypatch, _live_db_guard_path):
+    """Belt-and-braces: force TOPOS_DATABASE_PATH to a tmp file for every test.
+
+    Without this, any code path that reaches topos.core.state.get_db_connection()
+    (TestClient startup, install_service, query pipeline fallback, ...) resolves
+    the unset path to the developer's live ~/.topos/database.db. Tests still
+    override with their own paths via monkeypatch; live/e2e/qq_eval lanes are
+    exempt because they intentionally run against a real database.
+    """
+    if any(request.node.get_closest_marker(m) for m in _LIVE_DB_EXEMPT_MARKERS):
+        yield
+        return
+    monkeypatch.setenv("TOPOS_DATABASE_PATH", _live_db_guard_path)
+    try:
+        from topos.config.settings import settings as runtime_settings
+    except Exception:
+        pass
+    else:
+        # The settings singleton read env at import time; patch it too so code
+        # holding a reference sees the guard path without a module reload.
+        monkeypatch.setattr(runtime_settings, "topos_database_path", _live_db_guard_path, raising=False)
+    yield
+
+
 _CORE_RELOAD_MODULES = (
     "topos.config.settings",
     "topos.core.state",

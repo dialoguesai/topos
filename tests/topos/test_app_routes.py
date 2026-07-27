@@ -22,10 +22,14 @@ def load_topos_app(monkeypatch, env: dict):
 
 
 @pytest.mark.asyncio
-async def test_healthcheck_returns_ok(monkeypatch):
+async def test_healthcheck_returns_ok(monkeypatch, tmp_path):
     app = load_topos_app(
         monkeypatch,
-        {"TOPOS_KEY": "test-key", "CONTROL_PLANE_URL": ""},
+        {
+            "TOPOS_KEY": "test-key",
+            "CONTROL_PLANE_URL": "",
+            "TOPOS_DATABASE_PATH": str(tmp_path / "engine.db"),
+        },
     )
     transport = ASGITransport(app=app)
     async with LifespanManager(app):
@@ -36,10 +40,14 @@ async def test_healthcheck_returns_ok(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_local_list_database_tables_requires_auth(monkeypatch):
+async def test_local_list_database_tables_requires_auth(monkeypatch, tmp_path):
     app = load_topos_app(
         monkeypatch,
-        {"TOPOS_KEY": "test-key", "CONTROL_PLANE_URL": ""},
+        {
+            "TOPOS_KEY": "test-key",
+            "CONTROL_PLANE_URL": "",
+            "TOPOS_DATABASE_PATH": str(tmp_path / "engine.db"),
+        },
     )
     transport = ASGITransport(app=app)
     async with LifespanManager(app):
@@ -54,10 +62,14 @@ async def test_local_list_database_tables_requires_auth(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_local_get_table_schema_requires_auth(monkeypatch):
+async def test_local_get_table_schema_requires_auth(monkeypatch, tmp_path):
     app = load_topos_app(
         monkeypatch,
-        {"TOPOS_KEY": "test-key", "CONTROL_PLANE_URL": ""},
+        {
+            "TOPOS_KEY": "test-key",
+            "CONTROL_PLANE_URL": "",
+            "TOPOS_DATABASE_PATH": str(tmp_path / "engine.db"),
+        },
     )
     transport = ASGITransport(app=app)
     async with LifespanManager(app):

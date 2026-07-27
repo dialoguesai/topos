@@ -16,7 +16,9 @@ from topos.query.manifest_validation import resolve_scope_manifest
 from topos.query.pipeline import QueryPipelineOrchestrator
 from topos.storage.adapters.factory import AdapterFactory
 
-pytestmark = [pytest.mark.adversarial, pytest.mark.gap]
+# mark.live: the whole module reads the real ~/.topos/database.db by design;
+# without it the deterministic public lane ran these against the live DB.
+pytestmark = [pytest.mark.adversarial, pytest.mark.gap, pytest.mark.live]
 
 LIVE_DB = Path(os.environ.get("TOPOS_DATABASE_PATH", Path.home() / ".topos" / "database.db"))
 

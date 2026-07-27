@@ -85,7 +85,21 @@ def test_remove_preset_leaves_canonical_rows(conn: sqlite3.Connection) -> None:
     )
     conn.commit()
 
-    with patch("topos.sources.scrub_service.install_service.uninstall_source") as uninstall:
+    # The flat-table list comes from the install's source definition; supply it
+    # here so the test doesn't depend on grow_journal being installed in the
+    # database install_service happens to resolve.
+    source_def = {
+        "source_id": "grow_journal",
+        "source_type": "ui_stream",
+        "tables": [{"table_id": "grow_journal_sessions"}],
+    }
+    with (
+        patch("topos.sources.scrub_service.install_service.uninstall_source") as uninstall,
+        patch(
+            "topos.sources.scrub_service.install_service.get_active_source_definition",
+            return_value=source_def,
+        ),
+    ):
         uninstall.return_value = {"uninstalled": True}
         result = scrub_source(
             source_id="grow_journal",
