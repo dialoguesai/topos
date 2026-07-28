@@ -109,6 +109,7 @@ def list_facts(
                 # assistant | page-author | …). Powers the person→ambient badge.
                 "asserted_by": payload.get("asserted_by", "owner"),
                 "excluded_by_owner": bool(payload.get("excluded_by_owner")),
+                "verified_by_owner": bool(payload.get("verified_by_owner")),
                 "rendered": FactStore.render(fact, subject_name=subject_name),
                 "source_refs": fact["source_refs"],
                 "valid_from": fact["valid_from"],

@@ -114,6 +114,7 @@
   "post_source_test_ingestion",
   "put_data_explorer_table_prefs",
   "put_exposure_profile_config",
+  "put_fact_verdict",
   "put_facts_llm_config",
   "put_sanitization_ollama_config",
   "put_signal_extraction_config",
@@ -175,10 +176,13 @@
   "tools_index",
   "tools_index_status",
   "tools_retrieve",
+  "truth_prompts",
+  "truth_seed_fact",
   "uma_get_messages",
   "uma_get_oplog",
   "uma_get_rows",
   "update_routine_run",
-  "upsert_home_chat_session"
+  "upsert_home_chat_session",
+  "verify_claim"
  ]
 }

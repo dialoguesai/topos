@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import os
 import re
@@ -1112,6 +1113,64 @@ def _load_canonical_summary_items(
         # (non-message) rows keep relative order, other-authored rows last.
         items.sort(key=lambda item: _owner_rank(item.get("owner_authored")))
     return items[:_SUMMARY_ITEM_CAP]
+
+
+def _load_attention_summary_items(conn: Optional[Any], limit: int = 10) -> List[Dict[str, Any]]:
+    """Latest attention-triage objects (daily digests + interest profiles) as
+    summary items — the attention:read scope's primary content
+    (PLAN_ATTENTION_TRIAGE.md M2). The attention_summary payload already
+    enforces the silence invariant (no discard references), so shaping is safe."""
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT object_type, object_key, payload_json FROM signal_objects "
+            "WHERE signal_dimension='interests' AND valid_to IS NULL "
+            "AND object_type IN ('attention_summary','interest_profile') "
+            "ORDER BY substr(object_key, -10) DESC, object_type ASC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    except Exception:
+        return []
+    items: List[Dict[str, Any]] = []
+    for otype, okey, payload_json in rows:
+        try:
+            payload = json.loads(payload_json or "{}")
+        except (TypeError, ValueError):
+            continue
+        day = payload.get("day") or payload.get("asof") or str(okey).split(":")[-1]
+        if otype == "attention_summary":
+            valid = payload.get("movers_valid")
+            if valid:
+                movers = ", ".join(str(v) for v in valid[:3])
+            else:
+                movers = ", ".join(str(v) for v, _c in (payload.get("movers") or [])[:3])
+            surface = "; ".join(
+                str(s.get("title") or "") for s in (payload.get("surface") or [])[:3])
+            distraction = "; ".join(
+                f"{d.get('group')} x{d.get('count')}"
+                for d in (payload.get("distraction_patterns") or [])[:3])
+            pctl = payload.get("day_kl_percentile")
+            surprise = (f"surprise p{int(pctl * 100)}" if isinstance(pctl, (int, float))
+                        else f"KL={payload.get('day_kl')}")
+            parts = [f"Attention digest {day} ({surprise})"]
+            if movers:
+                parts.append(f"surprise movers: {movers}")
+            if surface:
+                parts.append(f"missed-but-matters: {surface}")
+            if distraction:
+                parts.append(f"distraction patterns: {distraction}")
+            text = ". ".join(parts)
+        else:
+            top = ", ".join(str(v) for v, _c in (payload.get("top_vocab") or [])[:6])
+            text = f"Interest profile {day}: top interests {top}"
+        items.append({
+            "topic": text.split(" (KL", 1)[0].split(": top", 1)[0],
+            "summary_text": text,
+            "record_id": okey,
+            "retrieval_source": otype,
+        })
+    return items
 
 
 def _load_brief_summary_items(
@@ -2715,6 +2774,12 @@ class DefaultSignalRetrievalAdapter:
                             continue
                         if item.get("summary_text") or item.get("topic") or item.get("dimension"):
                             summaries.append({k: v for k, v in item.items() if k != "content"})
+            if manifest.scope_id == "attention:read":
+                attention_items = _load_attention_summary_items(
+                    getattr(self._adapters.signal, "_conn", None))
+                if attention_items:
+                    summaries = attention_items + list(summaries)
+                    touched.append("signal")
             packet["summaries"] = summaries
             counts["summaries"] = len(summaries)
             # Abstention is a complete answer: when a query found nothing, do not
@@ -2771,6 +2836,10 @@ class DefaultSignalRetrievalAdapter:
                     scores.append({k: v for k, v in item.items() if k not in _INFERENCE_EXCLUDED_KEYS})
             elif manifest.scope_id == "schedule:read":
                 for item in _load_brief_summary_items(["Time"]):
+                    scores.append({k: v for k, v in item.items() if k not in _INFERENCE_EXCLUDED_KEYS})
+            elif manifest.scope_id == "attention:read":
+                for item in _load_attention_summary_items(
+                        getattr(self._adapters.signal, "_conn", None)):
                     scores.append({k: v for k, v in item.items() if k not in _INFERENCE_EXCLUDED_KEYS})
             for dim in manifest.primary_dimensions:
                 page = self._adapters.signal.get_by_dimension(dim.lower(), limit=50, offset=0)

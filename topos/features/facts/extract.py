@@ -459,7 +459,17 @@ def extract_facts_from_batch(
                 table = "profile_records"
             elif row.get("entry_at") is not None or row.get("mood_tag") is not None:
                 table = "journal_entries"
-            elif str(row.get("sender_type") or "") in ("user", "assistant"):
+            elif str(row.get("sender_type") or "") in ("user", "assistant") or (
+                str(row.get("sender_type") or "") in ("human", "system")
+                and "is_from_self" not in row
+                and "sender_id" not in row
+            ):
+                # 'human' is the canonical OWNER value for ai_chat_messages
+                # (chatgpt parser), but messenger writes 'human' for other
+                # people too — only infer ai_chat when the conversation-table
+                # marker KEYS are absent entirely (ambiguous rows fail closed
+                # into the conversation branch below). Mirrors llm_extract's
+                # table inference and the roles.py contract.
                 table = "ai_chat_messages"
             elif row.get("is_from_self") is not None or row.get("sender_id") is not None:
                 table = "conversation_messages"

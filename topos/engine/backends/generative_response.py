@@ -91,6 +91,10 @@ def parse_generative_response(
         if not isinstance(goals, list):
             goals = []
         return {"goals": goals, "model": model}
+    if subtype == "truth_verdict":
+        parsed = parse_json_object(response_text)
+        lanes = parsed.get("lanes") if isinstance(parsed, dict) else None
+        return {"lanes": lanes if isinstance(lanes, dict) else {}, "model": model}
     if subtype == "query_inference":
         parsed = parse_json_object(response_text)
         if isinstance(parsed, dict):

@@ -68,6 +68,32 @@
       "implementation_status": "live"
     },
     {
+      "scope_id": "attention:read",
+      "description": "Attention triage: daily interest profiles, triage digests (what deserved attention, what was missed, distraction patterns), and the verdict ledger behind them.",
+      "example_questions": [
+        "What did I miss yesterday that matters?",
+        "What were my distraction patterns this week?",
+        "What did you filter out this week?"
+      ],
+      "primary_dimensions": [
+        "Interests"
+      ],
+      "raw_tables": [],
+      "signal_objects": [
+        "interest_profile",
+        "attention_summary"
+      ],
+      "summary_objects": [
+        "attention_summary"
+      ],
+      "inference_objects": [
+        "interest_profile"
+      ],
+      "default_mode_ceiling": "summary",
+      "default_source_ids": [],
+      "implementation_status": "live"
+    },
+    {
       "scope_id": "availability:read",
       "description": "Free/busy availability windows derived from the schedule \u2014 never event titles or message content.",
       "example_questions": [
@@ -94,13 +120,13 @@
         "content"
       ],
       "implementation_status": "live",
+      "required_health": {
+        "time.depth_score": 0.3
+      },
       "fit_facets_exposed": [
         "timing_feasibility",
         "commitment_conflict"
       ],
-      "required_health": {
-        "time.depth_score": 0.3
-      },
       "default_source_ids": [
         "demo_calendar_file",
         "calendar_stub"

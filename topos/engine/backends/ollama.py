@@ -33,6 +33,7 @@ _STRUCTURED_SUBTYPES = frozenset(
         "raw_to_summary",
         "goal_extraction",
         "query_inference",
+        "truth_verdict",
         "emotion_classification",
         "emo_27",
     }
@@ -53,13 +54,16 @@ def _num_predict_for_subtype(subtype: str) -> Optional[int]:
         return 2048
     if subtype == "goal_extraction":
         return 512
+    if subtype == "truth_verdict":
+        # Small strict-JSON verdict; a tight cap keeps the nose responsive.
+        return 256
     return None
 
 
 def _temperature_for_subtype(subtype: str) -> Optional[float]:
     """Query inference must be deterministic: at default temperature llama3.2
     flips yes↔unknown on identical score-only evidence packets."""
-    if subtype == "query_inference":
+    if subtype in ("query_inference", "truth_verdict"):
         return 0.0
     return None
 

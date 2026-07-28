@@ -7,24 +7,39 @@
     {
       "id": "Goal",
       "description": "A stated or inferred aim with horizon and status.",
-      "fields": ["goal_text", "horizon", "status", "confidence"]
+      "fields": [
+        "goal_text",
+        "horizon",
+        "status",
+        "confidence"
+      ]
     },
     {
       "id": "SeekingSignal",
       "description": "Active opportunity-seeking tag (collaboration, role, intro).",
-      "fields": ["seeking_kind", "domain_tags", "urgency_band", "confidence"]
+      "fields": [
+        "seeking_kind",
+        "domain_tags",
+        "urgency_band",
+        "confidence"
+      ]
     },
     {
       "id": "Constraint",
       "description": "Limit on what opportunities fit (time, geography, values).",
-      "fields": ["constraint_kind", "description_band", "confidence"]
+      "fields": [
+        "constraint_kind",
+        "description_band",
+        "confidence"
+      ]
     }
   ],
   "signal_objects": [
     "user_goals",
     "seeking_signals",
     "goal_alignment_vector",
-    "intention_tags"
+    "intention_tags",
+    "declared_intent"
   ],
   "gate_objects": [
     "seeking_signals",
@@ -34,17 +49,31 @@
   "canonical_contributions": {
     "user_goals": {
       "primary_weight": 1.0,
-      "secondary_dimensions": ["work", "profile"]
+      "secondary_dimensions": [
+        "work",
+        "profile"
+      ]
     },
     "ai_chat_messages": {
       "primary_weight": 0.7,
-      "secondary_dimensions": ["memory", "work"]
+      "secondary_dimensions": [
+        "memory",
+        "work"
+      ]
     },
     "journal_entries": {
       "primary_weight": 0.5,
-      "secondary_dimensions": ["wellbeing", "memory", "profile"]
+      "secondary_dimensions": [
+        "wellbeing",
+        "memory",
+        "profile"
+      ]
     }
   },
-  "view_types": ["goal_list", "seeking_tags", "narrative_brief_optional"],
+  "view_types": [
+    "goal_list",
+    "seeking_tags",
+    "narrative_brief_optional"
+  ],
   "extraction_hints": "Stable goals vs near-term seeking signals; separate long-horizon aims from temporary pessimism in recent data."
 }

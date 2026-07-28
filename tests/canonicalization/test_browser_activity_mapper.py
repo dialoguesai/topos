@@ -94,8 +94,16 @@ def test_click_event_with_pointer_dict_content_has_no_span() -> None:
     assert "highlight" not in out["metadata_json"]
 
 
-def test_missing_hostname_leaves_key_absent() -> None:
+def test_missing_hostname_derived_from_url() -> None:
+    # BT6 (PLAN_ATTENTION_TRIAGE.md): plugin batches that send url without
+    # hostname get it derived, so downstream vocab never goes empty.
     out = _map({"id": "n1", "event_type": "visit", "url": "https://x/y"})
+    assert out["hostname"] == "x"
+    assert out["metadata_json"]["hostname"] == "x"
+
+
+def test_missing_hostname_and_url_leaves_key_absent() -> None:
+    out = _map({"id": "n2", "event_type": "visit"})
     assert out["hostname"] is None
     assert "hostname" not in out["metadata_json"]
 

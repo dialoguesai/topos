@@ -76,6 +76,27 @@ def maps_to_canonical_table(source_def: Any) -> bool:
     return inferred is not None
 
 
+def bundled_lane_conflict(payload: Dict[str, Any]) -> Optional[str]:
+    """Reason string when a payload's lane contradicts its bundled triple, else None.
+
+    A conflict is permanent: the bundled triple is authoritative, so no retry can
+    make the payload installable. Callers that replay persisted payloads use this
+    to demote the record instead of failing on every pass.
+    """
+    schema_id = str(payload.get("schema_id") or "").strip()
+    parser_id = str(payload.get("parser_id") or "").strip()
+    group_id = str(payload.get("canonical_group_id") or "").strip()
+    if not group_id:
+        return None
+    inferred = infer_bundled_canonical_triple(schema_id=schema_id, parser_id=parser_id)
+    if not inferred or group_id == inferred[1]:
+        return None
+    return (
+        f"canonical_group_id {group_id!r} does not match bundled lane "
+        f"{inferred[1]!r} for schema {schema_id or parser_id!r}"
+    )
+
+
 def normalize_canonical_source_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     Fill bundled canonical_mapper_id from schema/parser; drop deprecated connected flag.
@@ -94,11 +115,9 @@ def normalize_canonical_source_payload(payload: Dict[str, Any]) -> Dict[str, Any
     inferred = infer_bundled_canonical_triple(schema_id=schema_id, parser_id=parser_id)
     if inferred:
         inferred_mapper, inferred_group = inferred
-        if group_id and group_id != inferred_group:
-            raise ValueError(
-                f"canonical_group_id {group_id!r} does not match bundled lane "
-                f"{inferred_group!r} for schema {schema_id or parser_id!r}"
-            )
+        conflict = bundled_lane_conflict(merged)
+        if conflict:
+            raise ValueError(conflict)
         if not group_id:
             merged["canonical_group_id"] = inferred_group
         if not mapper_id:

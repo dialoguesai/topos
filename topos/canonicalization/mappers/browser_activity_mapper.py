@@ -24,6 +24,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from ...ingestion.parsers.base import NormalizedRecord
 from .base import CanonicalMapper, CanonicalRecord, MappingMetadata
@@ -77,6 +78,13 @@ class BrowserActivityCanonicalMapper(CanonicalMapper):
             "schema": payload.get("schema") or payload.get("schema_id"),
         }
         hostname = payload.get("hostname")
+        if not hostname and payload.get("url"):
+            # BT6 (PLAN_ATTENTION_TRIAGE.md): some plugin batches send url
+            # without hostname; derive it so downstream vocab never goes empty.
+            try:
+                hostname = urlparse(str(payload.get("url"))).hostname
+            except ValueError:
+                hostname = None
         if hostname:
             metadata["hostname"] = hostname
 

@@ -29,6 +29,7 @@ GENERATIVE_LLM_SUBTYPES = frozenset(
         "raw_to_summary",
         "goal_extraction",
         "query_inference",
+        "truth_verdict",
         "emotion_classification",
         "emo_27",
     }
@@ -71,7 +72,7 @@ def resolve_llm_usage_purpose(
         "emo_27",
     }:
         return PURPOSE_INGESTION_PIPELINE
-    if subtype_key == "query_inference":
+    if subtype_key in ("query_inference", "truth_verdict"):
         return PURPOSE_USER_REQUEST
     if subtype_key in GENERATIVE_LLM_SUBTYPES:
         return PURPOSE_INGESTION_PIPELINE

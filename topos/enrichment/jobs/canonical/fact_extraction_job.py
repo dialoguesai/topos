@@ -62,4 +62,8 @@ class FactExtractionJob(BaseEnrichmentJob):
         if progress_callback:
             progress_callback(len(canonical_messages), len(canonical_messages))
         logger.debug("[PIPELINE:FACTS] asserted %d facts", written)
-        return []
+        # FactStore already persisted the facts above; the _written sentinel
+        # carries the count so orchestrator records_created reflects the real
+        # writes instead of a hardcoded 0 (nothing here goes through
+        # write_signal_records).
+        return [{"_written": int(written or 0)}]

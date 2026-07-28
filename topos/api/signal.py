@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from ..auth import require_api_key
@@ -480,6 +480,34 @@ async def list_facts(
     )
 
 
+@router.post("/facts/verdict")
+async def post_fact_verdict(
+    object_id: str = Body(...),
+    action: str = Body(..., description="confirm | reject | edit"),
+    object_value: Optional[str] = Body(default=None),
+    asserted_by: Optional[str] = Body(default=None),
+    note: Optional[str] = Body(default=None),
+    _api_key: str = Depends(require_api_key),
+):
+    """Owner verdict on one fact: confirm (attest true), reject (close +
+    tombstone this value), or edit (correct the value and/or attribution)."""
+    from ..features.facts.verdicts import apply_fact_verdict
+
+    try:
+        return apply_fact_verdict(
+            _entities_conn(),
+            object_id=object_id,
+            action=action,
+            object_value=object_value,
+            asserted_by=asserted_by,
+            note=note,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
 @router.get("/insights")
 async def list_stat_insights(
     dimension: Optional[str] = Query(default=None, max_length=40),
@@ -623,3 +651,62 @@ async def refresh_dimension_brief(
         return await service.refresh_brief(dimension, limit=limit)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+# --------------------------------------------------------------- attention triage
+
+@router.get("/attention/dashboard")
+async def attention_dashboard(
+    _api_key: str = Depends(require_api_key),
+    days: int = Query(14, ge=1, le=90),
+    include_titles: bool = Query(True),
+):
+    """Data spine for the /data/attention tab (PLAN_ATTENTION_ANALYTICS_EXECUTION WS5.1):
+    windowed triage verdicts + per-day attention summaries + active pins.
+    Owner-only surface; titles can be suppressed (D9 redact-previews toggle)."""
+    import json as _json
+    from ..core.state import get_db_connection
+
+    conn = get_db_connection()
+    if conn is None:
+        raise HTTPException(status_code=503, detail="database unavailable")
+
+    cutoff = conn.execute(
+        "SELECT date(MAX(day), ?) FROM triage_verdicts", (f"-{days} day",)).fetchone()[0]
+    verdicts = []
+    for row in conn.execute(
+            "SELECT day, record_id, canonical_table, verdict, comp_novelty, comp_resid, "
+            "knn_surprisal, item_kl, attachment, gen_score, align_mass, visit_count, "
+            "engagement_kind, junk, user_label, grounds_json FROM triage_verdicts "
+            "WHERE day >= ? ORDER BY day", (cutoff or "1970-01-01",)):
+        verdicts.append({
+            "day": row[0], "record_id": row[1] if include_titles else None,
+            "table": row[2], "verdict": row[3], "comp_novelty": row[4],
+            "comp_resid": row[5], "knn_surprisal": row[6], "item_kl": row[7],
+            "attachment": row[8], "gen_score": row[9], "align_mass": row[10],
+            "visit_count": row[11], "engagement_kind": row[12], "junk": row[13],
+            "user_label": row[14],
+            "grounds": _json.loads(row[15] or "[]"),
+        })
+    summaries = []
+    for (pj,) in conn.execute(
+            "SELECT payload_json FROM signal_objects WHERE object_type='attention_summary' "
+            "AND valid_to IS NULL ORDER BY object_key"):
+        p = _json.loads(pj)
+        if not include_titles:
+            for section in ("surface", "signal", "seeds"):
+                for item in p.get(section, []):
+                    item.pop("title", None)
+        summaries.append(p)
+    intents = [
+        _json.loads(pj) for (pj,) in conn.execute(
+            "SELECT payload_json FROM signal_objects WHERE object_type='declared_intent' "
+            "AND valid_to IS NULL")
+    ]
+    return {
+        "days": days,
+        "verdicts": verdicts,
+        "summaries": summaries,
+        "active_intents": [i for i in intents if i.get("status", "active") == "active"],
+        "disclosure": "owner_only",
+    }
