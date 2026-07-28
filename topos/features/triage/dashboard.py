@@ -40,6 +40,27 @@ def attention_dashboard_data(conn: sqlite3.Connection, *, days: int = 14,
                 for item in p.get(section, []):
                     item.pop("title", None)
         summaries.append(p)
+    if include_titles and verdicts:
+        ids = [v["record_id"] for v in verdicts]
+        titles: Dict[str, str] = {}
+        def chunks(seq, n=400):
+            for i in range(0, len(seq), n):
+                yield seq[i:i + n]
+        for tbl, key, col in (
+                ("activity_events", "event_id", "title"),
+                ("journal_entries", "entry_id", "category || ' @ ' || COALESCE(place_name,'?')"),
+                ("ai_chat_messages", "message_id", "substr(COALESCE(content,''),1,80)"),
+                ("conversation_messages", "message_id", "substr(COALESCE(content,''),1,80)")):
+            try:
+                for ch in chunks(ids):
+                    q = f"SELECT {key}, {col} FROM {tbl} WHERE {key} IN ({','.join('?' * len(ch))})"
+                    for rid, t in conn.execute(q, ch):
+                        titles.setdefault(rid, t)
+            except sqlite3.OperationalError:
+                continue
+        for v in verdicts:
+            v["title"] = (titles.get(v["record_id"]) or v["table"] or "")[:90]
+
     intents = [
         json.loads(pj) for (pj,) in conn.execute(
             "SELECT payload_json FROM signal_objects WHERE object_type='declared_intent' "
