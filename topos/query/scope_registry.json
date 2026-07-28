@@ -105,13 +105,18 @@
       "raw_tables": [],
       "signal_objects": [
         "availability_scores",
-        "busy_blocks"
+        "availability_window_scores",
+        "commitment_hard_blocks",
+        "flex_windows",
+        "meeting_load_band",
+        "routine_confidence"
       ],
       "summary_objects": [
         "availability_summary"
       ],
       "inference_objects": [
-        "availability_windows"
+        "availability_window_scores",
+        "flex_windows"
       ],
       "default_mode_ceiling": "inference",
       "must_not_retrieve": [

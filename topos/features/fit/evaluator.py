@@ -65,15 +65,54 @@ def _evaluate_facet(
         scores = store.list_objects("time", object_type="availability_window_scores", limit=1)
         payload = (scores[0].get("payload") if scores else {}) or {}
         windows = payload.get("windows") or []
-        target = str(ctx.get("target_window_start") or "2026-03-16T11:00:00Z")
-        hit = any(str(w.get("start") or "").startswith("2026-03-16") for w in windows if isinstance(w, dict))
+        target_date = str(ctx.get("target_window_start") or "")[:10]
+        if not target_date:
+            # No target requested: feasibility = any known free window.
+            hit = bool(windows)
+        else:
+            hit = any(
+                str(w.get("start") or "").startswith(target_date)
+                for w in windows
+                if isinstance(w, dict)
+            )
+        if hit:
+            return {
+                "facet_id": facet_id,
+                "score": 0.85,
+                "confidence": float(scores[0]["confidence"]) if scores else 0.3,
+                "public_band": "overlap_found",
+            }
+        # No free window — a negotiable busy block (flex halo) on the target
+        # date still allows a soft yes: "possible, requires rescheduling".
+        flex_hit = False
+        if target_date:
+            flex = store.list_objects("time", object_type="flex_windows", limit=1)
+            flex_payload = (flex[0].get("payload") if flex else {}) or {}
+            flex_hit = any(
+                str(w.get("start") or "").startswith(target_date)
+                or str((w.get("flex_before") or {}).get("start") or "").startswith(target_date)
+                or str((w.get("flex_after") or {}).get("end") or "").startswith(target_date)
+                for w in (flex_payload.get("windows") or [])
+                if isinstance(w, dict)
+            )
         return {
             "facet_id": facet_id,
-            "score": 0.85 if hit else 0.2,
+            "score": 0.6 if flex_hit else 0.2,
             "confidence": float(scores[0]["confidence"]) if scores else 0.3,
-            "public_band": "overlap_found" if hit else "no_overlap",
+            "public_band": "negotiable_overlap" if flex_hit else "no_overlap",
         }
     if facet_id == "commitment_conflict":
+        load = store.list_objects("time", object_type="meeting_load_band", limit=1)
+        load_payload = (load[0].get("payload") if load else {}) or {}
+        load_band = str(load_payload.get("band") or "")
+        if load_band:
+            score = {"light": 0.9, "moderate": 0.65, "heavy": 0.35}.get(load_band, 0.5)
+            return {
+                "facet_id": facet_id,
+                "score": score,
+                "confidence": float(load[0]["confidence"]),
+                "public_band": f"{load_band}_load",
+            }
         blocks = store.list_objects("time", object_type="commitment_hard_blocks", limit=1)
         payload = (blocks[0].get("payload") if blocks else {}) or {}
         count = int(payload.get("busy_window_count") or 0)
@@ -110,6 +149,21 @@ def _evaluate_facet(
             "score": round(score, 4),
             "confidence": 0.7 if edges else 0.35,
             "public_band": "aligned" if score >= 0.5 else "weak_alignment",
+        }
+    if facet_id == "willingness":
+        seeking = store.list_objects(
+            "intentions", object_type="opportunity_seeking_score", limit=1
+        )
+        payload = (seeking[0].get("payload") if seeking else {}) or {}
+        band = str(payload.get("band") or "")
+        score = {"actively_seeking": 0.85, "receptive": 0.55, "dormant": 0.25}.get(
+            band, 0.3
+        )
+        return {
+            "facet_id": facet_id,
+            "score": score,
+            "confidence": float(seeking[0]["confidence"]) if seeking else 0.3,
+            "public_band": band or "unknown_seeking",
         }
     if facet_id == "capacity":
         return {

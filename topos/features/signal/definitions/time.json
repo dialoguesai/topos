@@ -1,13 +1,23 @@
 {
-  "definition_version": "1.0.0",
+  "definition_version": "1.1.0",
   "dimension_id": "time",
   "status": "typed",
-  "core_question": "When are they busy, free, and predictably available?",
+  "core_question": "When are they busy, free, and predictably available — and which busy time is negotiable?",
   "primary_entity_types": [
     {
       "id": "AvailabilityWindow",
       "description": "A time span where the person is free or busy with confidence.",
-      "fields": ["start", "end", "availability_kind", "confidence", "hard_or_soft"]
+      "fields": [
+        "start",
+        "end",
+        "availability_kind",
+        "confidence",
+        "hard_or_soft",
+        "movability_score",
+        "movability_band",
+        "attendance_priority",
+        "priority_confidence"
+      ]
     },
     {
       "id": "Commitment",
@@ -25,7 +35,9 @@
     "commitment_hard_blocks",
     "event_counts",
     "routine_confidence",
-    "meeting_load_band"
+    "meeting_load_band",
+    "flex_windows",
+    "availability_summary"
   ],
   "gate_objects": [
     "availability_window_scores",
