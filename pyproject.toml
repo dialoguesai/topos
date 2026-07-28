@@ -112,5 +112,5 @@ markers = [
   "eval_nightly: statistical privacy eval (attacker advantage, minimality, latency); nightly",
   "eval_release: release-tier privacy eval (negotiation A/B, Pareto); run per release",
 ]
-pythonpath = ["tests/gap/p3/engine", "tests/gap/p4/engine", "tests/gap/qq/engine", "tests/acceptance/wiki_mvp"]
+pythonpath = ["tests/gap/p3/engine", "tests/gap/p4/engine", "tests/gap/qq/engine", "tests/acceptance/wiki_mvp", "tests/evals/time_signal"]
 testpaths = ["tests"]
