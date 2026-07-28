@@ -125,6 +125,19 @@ class DimensionSummaryJob(BaseEnrichmentJob):
                 source_id=str(source_id or "") or None,
                 only_dimension=only_dimension,
             )
+            # Piggyback (badge-pass pattern): auto-tag new conversations as
+            # work/personal with the configured local model. Best-effort;
+            # owner-set tags are never touched.
+            try:
+                from ....features.signal.conversation_context import (
+                    classify_untagged_conversations,
+                )
+
+                structured_result["conversation_context"] = (
+                    classify_untagged_conversations(conn)
+                )
+            except Exception as exc:  # noqa: BLE001 — never blocks enrichment
+                logger.debug("conversation-context pass failed: %s", exc)
 
         store = DimensionBriefStore(conn)
         updated_dims: List[str] = []

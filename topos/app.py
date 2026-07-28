@@ -15,6 +15,7 @@ from .api import (
     app_registry as app_registry_routes,
     backup as backup_routes,
     compute_remote as compute_remote_routes,
+    conversation_context as conversation_context_routes,
     engine_run as engine_run_routes,
     data_commit as data_commit_routes,
     db as db_routes,
@@ -107,6 +108,7 @@ app.include_router(device_routes.router)
 app.include_router(backup_routes.router)
 app.include_router(analytics_routes.router)
 app.include_router(sources_routes.router)
+app.include_router(conversation_context_routes.router, prefix="/v1")
 app.include_router(source_install_routes.router, prefix="/v1")
 app.include_router(source_scrub_routes.router, prefix="/v1")
 app.include_router(intelligence_lifecycle_routes.router, prefix="/v1")

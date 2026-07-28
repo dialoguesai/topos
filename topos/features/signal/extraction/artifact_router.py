@@ -10,6 +10,22 @@ from .artifact_store import ExtractionArtifactStore
 from .rule_extractors import extract_artifacts
 
 
+def _conversation_context_tag(conn, record: Dict[str, Any]) -> Optional[str]:
+    """Owner-set work/personal tag on the message's parent conversation."""
+    conversation_id = str(record.get("conversation_id") or "").strip()
+    if not conversation_id:
+        return None
+    try:
+        row = conn.execute(
+            "SELECT context_tag FROM conversations "
+            "WHERE conversation_id=? AND context_tag IS NOT NULL LIMIT 1",
+            (conversation_id,),
+        ).fetchone()
+    except Exception:
+        return None
+    return str(row[0]) if row and row[0] else None
+
+
 def route_canonical_record(
     conn,
     *,
@@ -19,6 +35,11 @@ def route_canonical_record(
     artifact_store = ExtractionArtifactStore(conn)
     object_store = SignalObjectStore(conn)
     counts = {"artifacts": 0, "objects": 0}
+
+    if canonical_table in ("conversation_messages", "conversation_message"):
+        tag = _conversation_context_tag(conn, record)
+        if tag:
+            record = {**record, "_conversation_context": tag}
 
     for artifact_type, payload, affinity, source_refs, confidence in extract_artifacts(
         canonical_table, record

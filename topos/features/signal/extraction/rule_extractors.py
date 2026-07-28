@@ -297,10 +297,14 @@ def extract_from_message(record: Dict[str, Any]) -> List[ArtifactDraft]:
         return []
     entity_key = _anon_entity_key(sender)
     refs = [_source_ref("conversation_messages", message_id)]
+    # Owner-set conversation context wins over the historical professional
+    # default (work → professional, personal → personal; unset keeps default).
+    context = str(record.get("_conversation_context") or "")
+    tier = {"work": "professional", "personal": "personal"}.get(context, "professional")
     edge = {
         "target_entity_key": entity_key,
         "warmth_band": "medium",
-        "tier": "professional",
+        "tier": tier,
         "cadence_band": "recent",
         "context_tags": _infer_context_tags(str(record.get("content") or "")),
     }
