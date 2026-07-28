@@ -280,3 +280,6 @@ def test_attention_dashboard_endpoint(conn, tmp_path, monkeypatch):
 
     r2 = client.get("/v1/signal/attention/dashboard?days=14&include_titles=false")
     assert all(v["record_id"] is None for v in r2.json()["verdicts"])
+    assert "rank" in d and "points" in d["rank"] and "badges" in d
+    if d["rank"]["tier"] is not None:
+        assert {"glyph", "label", "threshold"} <= set(d["rank"]["tier"])
