@@ -10,7 +10,7 @@ from typing import Any, Dict
 
 def attention_dashboard_data(conn: sqlite3.Connection, *, days: int = 14,
                              include_titles: bool = True) -> Dict[str, Any]:
-    from .badges import current_badge, earned_badges, rank
+    from .badges import current_badge, earned_badges, rank, worn_badge
     from .readiness import newsletter_readiness
 
     cutoff = conn.execute(
@@ -74,6 +74,7 @@ def attention_dashboard_data(conn: sqlite3.Connection, *, days: int = 14,
         "badges": earned_badges(conn),
         "current_badge": current_badge(conn),
         "rank": rank(conn),
+        "worn": worn_badge(conn),
         "readiness": newsletter_readiness(conn),
         "disclosure": "owner_only",
     }

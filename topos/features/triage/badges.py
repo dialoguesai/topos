@@ -170,3 +170,54 @@ def award_badges(conn: sqlite3.Connection) -> List[str]:
     triaged = _count("SELECT COUNT(*) FROM triage_verdicts")
     maybe("ten_thousand_things", triaged >= 10000, {"triaged": triaged})
     return new
+
+
+# ---- worn badge (owner choice; PLAN_NEWSLETTER_UNLOCK §7/§9) ------------------
+
+def set_worn_badge(conn: sqlite3.Connection, badge_id: Optional[str]) -> Dict[str, Any]:
+    """Pin any EARNED badge (achievement or rank tier) to the header chip;
+    None clears the pin (back to automatic rank display)."""
+    store = SignalObjectStore(conn)
+    return store.upsert_object(
+        "intentions", "worn_badge", "worn_badge",
+        {"badge_id": badge_id, "disclosure": "owner_only"},
+        source_refs=[{"set_by": "owner"}],
+        confidence=1.0, extractor_version="badges_v1", created_by="owner")
+
+
+def _wearable(conn: sqlite3.Connection) -> Dict[str, Dict[str, Any]]:
+    out: Dict[str, Dict[str, Any]] = {}
+    for b in earned_badges(conn):
+        t = next((t for t in TIERS if t["id"] == b.get("badge_id")), None)
+        if t:
+            out[t["id"]] = {"badge_id": t["id"], "glyph": t["glyph"], "label": t["label"]}
+    pts = points_total(conn)
+    for t in RANK_TIERS:
+        if pts >= t["threshold"]:
+            out[t["id"]] = {"badge_id": t["id"], "glyph": t["glyph"], "label": t["label"]}
+    return out
+
+
+def worn_badge(conn: sqlite3.Connection) -> Optional[Dict[str, Any]]:
+    """What the chip shows: the pinned earned badge if any, else the rank tier,
+    else the highest achievement. Wearing a humble badge is a supported flex."""
+    import json as _json
+    wearable = _wearable(conn)
+    try:
+        row = conn.execute(
+            "SELECT payload_json FROM signal_objects WHERE object_type='worn_badge' "
+            "AND valid_to IS NULL ORDER BY valid_from DESC LIMIT 1").fetchone()
+        pref = _json.loads(row[0]).get("badge_id") if row else None
+    except (sqlite3.OperationalError, TypeError, ValueError):
+        pref = None
+    if pref and pref in wearable:
+        return {**wearable[pref], "source": "pinned"}
+    r = rank(conn)
+    if r["tier"]:
+        return {**{k: r["tier"][k] for k in ("glyph", "label")},
+                "badge_id": r["tier"]["id"], "source": "rank"}
+    cb = current_badge(conn)
+    if cb:
+        return {"badge_id": cb["badge_id"], "glyph": cb["glyph"],
+                "label": cb["label"], "source": "default"}
+    return None

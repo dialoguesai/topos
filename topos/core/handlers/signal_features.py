@@ -775,3 +775,19 @@ async def handle_signal_attention_dashboard(message: Dict[str, Any]) -> Optional
         return {"id": req_id, "status": "ok", "payload": result}
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("signal_set_worn_badge")
+async def handle_signal_set_worn_badge(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    try:
+        from ...features.triage.badges import set_worn_badge, worn_badge
+
+        conn = hub.get_db_connection()
+        set_worn_badge(conn, payload.get("badge_id") or None)
+        return {"id": req_id, "status": "ok", "payload": {"worn": worn_badge(conn)}}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}

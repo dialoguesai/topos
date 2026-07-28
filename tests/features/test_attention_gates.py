@@ -351,3 +351,28 @@ def test_points_and_rank_two_currency(conn):
     r = rank(conn)
     assert r["tier"]["id"] == "trace" and r["tier"]["glyph"] == "·"
     assert r["next_tier"]["id"] == "signal" and r["next_tier"]["points_needed"] == 5
+
+
+def test_worn_badge_pin_and_default(conn):
+    """§7/§9: chip defaults to rank; owner may pin ANY earned badge, even a
+    humble one; unearned pins are ignored."""
+    from topos.features.triage.badges import award_badges, set_worn_badge, worn_badge
+    from topos.features.triage.intents import pin_intent
+
+    _seed_history(conn)
+    for i in range(101):
+        _journal(conn, f"2026-07-19T0{i % 10}:1{i % 6}:00", f"jw-{i}", f"entry {i}")
+    conn.commit()
+    award_badges(conn)
+    pin_intent(conn, "future intent")
+    award_badges(conn)  # first_signal + chronicler + first_pin = 55 pts → trace
+    w = worn_badge(conn)
+    assert w["source"] == "rank" and w["badge_id"] == "trace"
+    set_worn_badge(conn, "first_signal")   # the humble flex
+    w2 = worn_badge(conn)
+    assert w2 == {"badge_id": "first_signal", "glyph": "·",
+                  "label": "First Signal", "source": "pinned"}
+    set_worn_badge(conn, "constellation")  # unearned tier → ignored
+    assert worn_badge(conn)["source"] == "pinned" or worn_badge(conn)["badge_id"] != "constellation"
+    set_worn_badge(conn, None)             # clear → back to rank
+    assert worn_badge(conn)["source"] == "rank"
