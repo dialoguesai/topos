@@ -126,6 +126,7 @@ SUPPORTED_MESSAGE_TYPES = [
     "post_source_test_ingestion",
     "put_data_explorer_table_prefs",
     "put_exposure_profile_config",
+    "put_fact_verdict",
     "put_facts_llm_config",
     "put_sanitization_ollama_config",
     "put_signal_extraction_config",

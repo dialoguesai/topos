@@ -70,6 +70,40 @@ def build_generative_prompt(subtype: str, payload: Dict[str, Any]) -> str:
             '{"goals": [{"text": "...", "confidence": 0.8, "horizon": "short"}]}\n\nText: '
             f"{text}"
         )
+    if subtype == "truth_verdict":
+        # Per-lane truthfulness stance for the mode-gated verify_claim path
+        # (PLAN_TRUTHFULNESS_PLUGIN.md). Evidence arrives pre-filtered by the
+        # mode's aperture; this prompt only compares, never retrieves.
+        claim = str(payload.get("claim") or "")
+        lanes = payload.get("lanes") or {}
+        lane_lines = []
+        for lane_name, texts in lanes.items():
+            if isinstance(texts, list) and texts:
+                joined = "\n".join(f"  - {str(t)[:300]}" for t in texts[:8])
+                lane_lines.append(f"{lane_name}:\n{joined}")
+        lanes_block = "\n".join(lane_lines) or "(no evidence)"
+        return (
+            "You judge whether a spoken claim agrees with stored facts. For each "
+            "evidence lane, decide independently using ONLY that lane's facts.\n"
+            'Reply JSON only: {"lanes": {"<lane>": {"stance": '
+            '"supports"|"contradicts"|"no_evidence", "confidence": <0.0-1.0>}}}\n'
+            '- "supports": the lane\'s facts are consistent with the claim.\n'
+            '- "contradicts": the lane\'s facts are inconsistent with the claim '
+            "(opposite preference, mutually exclusive value, or the claim denies "
+            "something the facts assert).\n"
+            '- "no_evidence": the facts are about UNRELATED attributes.\n'
+            "- IMPORTANT: single-valued attributes (a person's name, age, "
+            "origin, a favorite): if a fact states a DIFFERENT value than the "
+            'claim asserts, that lane "contradicts" with high confidence — a '
+            "different stored value is evidence of falsehood, never "
+            '"no_evidence". Claim "my name is Timothy" vs fact "goes by Jonny" '
+            '→ contradicts.\n'
+            "- Spelling variants of the same spoken name/word (Jonny/Johnny, "
+            "Sara/Sarah) are the SAME value → supports.\n"
+            "- Judge only lanes present below; confidence reflects how directly "
+            "the facts bear on the claim. Never invent facts.\n\n"
+            f"Claim: {claim[:500]}\n\nEvidence lanes:\n{lanes_block[:2500]}"
+        )
     if subtype == "query_inference":
         # Typed answers, not forced booleans: the old "yes|no|unknown" template
         # made every who/what/list question structurally unanswerable (the

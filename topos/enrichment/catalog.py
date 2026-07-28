@@ -92,6 +92,7 @@ _OUTPUT_TABLES: Dict[str, Tuple[str, ...]] = {
     "statistics": ("signal_facts",),
     "facts": ("signal_objects",),
     "timeline": ("timeline",),
+    "attention_triage": ("triage_verdicts", "signal_objects"),
 }
 
 # Jobs whose enrich() is a pure function over records (no direct table writes),
@@ -243,6 +244,18 @@ _STATIC_METADATA: Dict[str, Dict[str, Any]] = {
         "description": "Projects records onto the episodic Timeline view.",
         "cost_tier": COST_LOW,
         "value_props": ("signal_density",),
+    },
+    "attention_triage": {
+        "title": "Attention triage",
+        "description": (
+            "Triage of each day's newly ingested items against the decayed "
+            "interest model: 2x2 verdicts (signal/surface/distraction/discard) "
+            "grounded in deterministic instruments (compression novelty, "
+            "Bayesian surprise, attachment), plus daily interest-profile and "
+            "attention-summary objects."
+        ),
+        "cost_tier": COST_LOW,
+        "value_props": ("signal_density", "precision_retrieval"),
     },
     "attachments": {
         "title": "Attachment indexing",

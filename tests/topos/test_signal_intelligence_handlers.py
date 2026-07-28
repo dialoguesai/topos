@@ -21,7 +21,9 @@ from topos.storage.db.migrations import apply_all_migrations
 
 @pytest.fixture()
 def conn(tmp_path, monkeypatch):
-    c = sqlite3.connect(str(tmp_path / "intelligence.db"))
+    # check_same_thread=False matches production (core/state.py) — handlers run
+    # reads via run_db_read/asyncio.to_thread, off the fixture's thread.
+    c = sqlite3.connect(str(tmp_path / "intelligence.db"), check_same_thread=False)
     apply_all_migrations(c)
     monkeypatch.setattr(hub, "get_db_connection", lambda: c)
     yield c

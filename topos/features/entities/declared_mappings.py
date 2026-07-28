@@ -20,7 +20,59 @@ from typing import Any, Dict, List, Optional
 # Edge type for "the owner worked on this project at this time".
 EDGE_WORKED_ON = "worked_on"
 
+# Own-product domains → project entity (BT5, PLAN_ATTENTION_TRIAGE.md):
+# frequency-based interest models cannot know a domain is the owner's own
+# product; visits to these must never read as distraction. Suffix-matched.
+OWN_DOMAIN_PROJECTS: Dict[str, str] = {
+    "dialogues.ai": "Dialogues",
+    "pitchrotator.vercel.app": "PitchRotator",
+    "grow-beta.web.app": "Grow App",
+    "localhost": "Dialogues",
+    "127.0.0.1": "Dialogues",
+}
+
+
+# Term→project declarations (PLAN_INTENT_STEERING.md F4): owner-declared topic
+# terms that bond items to a project the entity graph doesn't know yet.
+OWN_TERM_PROJECTS: Dict[str, str] = {
+    "witcher": "Witcher Network",
+}
+
+
+def own_project_for_terms(text: str) -> Optional[str]:
+    low = str(text or "").lower()
+    for term, project in OWN_TERM_PROJECTS.items():
+        if term in low:
+            return project
+    return None
+
+
+def own_project_for_host(host: str) -> Optional[str]:
+    """Project name when `host` (or a parent domain) is an own-product domain."""
+    h = str(host or "").strip().lower().removeprefix("www.")
+    if not h:
+        return None
+    h = h.split(":")[0]  # strip port (localhost:3000)
+    parts = h.split(".")
+    for i in range(len(parts)):
+        if ".".join(parts[i:]) in OWN_DOMAIN_PROJECTS:
+            return OWN_DOMAIN_PROJECTS[".".join(parts[i:])]
+    return OWN_DOMAIN_PROJECTS.get(h)
+
+
 DECLARED_ENTITY_MAPPINGS: Dict[str, Dict[str, Any]] = {
+    "browser_visits": {
+        # Own-domain visits mint the project entity (attachment + alignment
+        # substrate for attention triage); unknown domains mint nothing.
+        "entities": [
+            {"path": "hostname", "transform": "own_domain_project", "type": "project"},
+        ],
+    },
+    "browser_events": {
+        "entities": [
+            {"path": "hostname", "transform": "own_domain_project", "type": "project"},
+        ],
+    },
     "github_activity": {
         # Commit prose is terse technical text — NER guesses are worse than
         # nothing here (they minted person-type repo nodes).
@@ -66,6 +118,9 @@ def _transform(value: str, transform: Optional[str]) -> str:
         # "dialoguesai/topos-react-app" → "dialoguesai"
         parts = value.split("/")
         return parts[0].strip() if len(parts) >= 2 and parts[0].strip() else ""
+    if transform == "own_domain_project":
+        # hostname → own project name, or "" (skipped) for third-party domains.
+        return own_project_for_host(value) or ""
     return value
 
 

@@ -15,6 +15,7 @@ from ..core.state import get_db_connection
 from ..enrichment.jobs import CANONICAL_JOBS, RAW_JOBS
 from ..ingestion.parsers import PARSER_REGISTRY
 from ..storage.db.postgres import connect_postgres, execute_query, fetch_all, fetch_one
+from .bundled_canonical_triples import bundled_lane_conflict
 from .runtime_install import RuntimeInstallHandle, install_source_definition
 from .scrub_attribution import scrub_attributed_rows
 
@@ -903,6 +904,28 @@ def _is_rehydratable_source_definition(source_def: Dict[str, Any]) -> bool:
     return source_kind_from_payload(source_def) == SOURCE_KIND_INGESTION
 
 
+def _supersede_install(*, scope_key: str, source_id: str, reason: str) -> None:
+    """Retire an active install row that can never install again.
+
+    Lock order matches uninstall_source (DB connection, then _LOCK).
+    """
+    now = _utc_now_iso()
+    with _db_conn() as conn:
+        with _LOCK:
+            _ACTIVE_HANDLES.pop((scope_key, source_id), None)
+            execute_query(
+                conn,
+                f"""
+                UPDATE {INSTALL_TABLE}
+                SET is_active = 0, status = 'superseded', failure_reason = %s, updated_at = %s
+                WHERE scope_key = %s AND source_id = %s AND is_active = 1
+                """,
+                (reason, now, scope_key, source_id),
+            )
+            if settings.topos_database_mode != "postgres":
+                conn.commit()
+
+
 def rehydrate_active_installs_runtime(*, source_id: Optional[str] = None) -> Dict[str, int]:
     """Ensure active installs are present in runtime registries after restarts.
 
@@ -913,6 +936,8 @@ def rehydrate_active_installs_runtime(*, source_id: Optional[str] = None) -> Dic
     records = [rec for rec in list_installs(source_id=source_id) if rec.is_active]
     rehydrated = 0
     failed = 0
+    # (scope_key, source_id, reason) for rows retired after the locked pass.
+    superseded: List[Tuple[str, str, str]] = []
     with _LOCK:
         for rec in records:
             source_def = rec.source_definition_json if isinstance(rec.source_definition_json, dict) else {}
@@ -924,6 +949,13 @@ def rehydrate_active_installs_runtime(*, source_id: Optional[str] = None) -> Dic
                     rec.source_id,
                     rec.scope,
                 )
+                continue
+            # A runtime install predating the bundled source keeps a lane the
+            # bundled triple contradicts. Retrying it warns on every sources
+            # list; the bundled definition wins, so retire the row instead.
+            conflict = bundled_lane_conflict(source_def)
+            if conflict:
+                superseded.append((_scope_key(rec.scope), rec.source_id, conflict))
                 continue
             try:
                 scope_key = _scope_key(rec.scope)
@@ -949,5 +981,27 @@ def rehydrate_active_installs_runtime(*, source_id: Optional[str] = None) -> Dic
                     rec.scope,
                     exc,
                 )
-    return {"active_installs": len(records), "rehydrated": rehydrated, "failed": failed}
+    for scope_key, sid, reason in superseded:
+        try:
+            _supersede_install(scope_key=scope_key, source_id=sid, reason=reason)
+            logger.warning(
+                "Superseded stale source install (bundled definition wins): source_id=%s scope=%s reason=%s",
+                sid,
+                _scope_dict(scope_key),
+                reason,
+            )
+        except Exception as exc:  # noqa: BLE001
+            failed += 1
+            logger.warning(
+                "Failed to supersede stale source install: source_id=%s scope=%s error=%s",
+                sid,
+                _scope_dict(scope_key),
+                exc,
+            )
+    return {
+        "active_installs": len(records),
+        "rehydrated": rehydrated,
+        "failed": failed,
+        "superseded": len(superseded),
+    }
 

@@ -157,7 +157,13 @@ class EnrichmentOrchestrator(BaseObject):
                     )
                 else:
                     table_name = derived_table or job.get_job_name()
-                    results["records_created"][table_name] = 0
+                    # Direct-write jobs report counts via the _written sentinel
+                    # (see run_signal_derivation); plain no-output jobs stay 0.
+                    results["records_created"][table_name] = sum(
+                        int(r.get("_written") or 0)
+                        for r in (records or [])
+                        if isinstance(r, dict)
+                    )
                     logger.debug(
                         "[PIPELINE:ENRICHMENT] %s → %s: completed with 0 records (job %d/%d, %.1f%% complete)",
                         self,
@@ -323,6 +329,11 @@ class SignalDerivationOrchestrator(EnrichmentOrchestrator):
                     results["envelopes"].append(env.to_dict())
                     continue
                 records = [r for r in records if not r.get("_deferred")]
+                # Direct-write jobs (facts → FactStore) persist inside enrich()
+                # and report their count via a _written sentinel instead of
+                # returning rows for write_signal_records.
+                direct_written = sum(int(r.get("_written") or 0) for r in records if "_written" in r)
+                records = [r for r in records if "_written" not in r]
                 provenance = {"provider": records[0].get("provider") if records else "unknown", "job_id": job_name}
                 if records:
                     model = records[0].get("model")
@@ -336,9 +347,9 @@ class SignalDerivationOrchestrator(EnrichmentOrchestrator):
                         provenance={**provenance, "sync_batch_id": sync_batch_id, "source_id": source_id},
                         conn=conn,
                     )
-                    results["records_created"][job_name] = count
+                    results["records_created"][job_name] = count + direct_written
                 else:
-                    results["records_created"][job_name] = 0
+                    results["records_created"][job_name] = direct_written
                 env = JobEnvelope(
                     stage=PipelineStage.SIGNAL_DERIVE,
                     source_id=source_id,

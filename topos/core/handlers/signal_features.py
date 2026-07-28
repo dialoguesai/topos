@@ -555,6 +555,32 @@ async def handle_signal_list_facts(message: Dict[str, Any]) -> Optional[Dict[str
         return {"id": req_id, "status": "error", "error": str(exc)}
 
 
+@handles("put_fact_verdict")
+async def handle_put_fact_verdict(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Owner verdict on one fact: confirm / reject / edit (value or attribution)."""
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    try:
+        from ...features.facts.verdicts import apply_fact_verdict
+
+        conn = hub.get_db_connection()
+        result = apply_fact_verdict(
+            conn,
+            object_id=str(payload.get("object_id") or ""),
+            action=str(payload.get("action") or ""),
+            object_value=payload.get("object_value"),
+            asserted_by=payload.get("asserted_by"),
+            note=payload.get("note"),
+        )
+        return {"id": req_id, "status": "ok", "payload": result}
+    except (LookupError, ValueError) as exc:
+        return {"id": req_id, "status": "error", "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
 @handles("signal_list_insights")
 async def handle_signal_list_insights(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")

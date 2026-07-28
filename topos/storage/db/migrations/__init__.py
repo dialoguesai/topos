@@ -130,6 +130,14 @@ from .calendar_events_scheduling_v1 import (
     MIGRATION_ID as CALENDAR_EVENTS_SCHEDULING_V1_ID,  # noqa: F401 — exported for tests/tools
     apply_calendar_events_scheduling_v1_up,
 )
+from .attention_triage_v1 import (
+    MIGRATION_ID as ATTENTION_TRIAGE_V1_ID,  # noqa: F401 — exported for tests/tools
+    apply_attention_triage_v1_up,
+)
+from .attention_triage_v2 import (
+    MIGRATION_ID as ATTENTION_TRIAGE_V2_ID,  # noqa: F401 — exported for tests/tools
+    apply_attention_triage_v2_up,
+)
 
 __all__ = ["apply_all_migrations", "ensure_migrations_applied"]
 
@@ -205,6 +213,9 @@ def apply_all_migrations(conn: sqlite3.Connection) -> None:
     apply_documents_v1_up(conn)
     # B1 calendar scheduling: availability + value/movability columns.
     apply_calendar_events_scheduling_v1_up(conn)
+    # Attention triage verdict storage (new table — safe to run unconditionally).
+    apply_attention_triage_v1_up(conn)
+    apply_attention_triage_v2_up(conn)
 
 
 def ensure_migrations_applied(conn: sqlite3.Connection) -> None:
@@ -285,3 +296,7 @@ def ensure_migrations_applied(conn: sqlite3.Connection) -> None:
     # Calendar scheduling column adds re-run cheaply after legacy DDL
     # (calendar_events uses CREATE TABLE IF NOT EXISTS).
     apply_calendar_events_scheduling_v1_up(conn)
+    if not _migration_applied(conn, ATTENTION_TRIAGE_V1_ID):
+        apply_attention_triage_v1_up(conn)
+    # v2 column adds are PRAGMA-guarded; run unconditionally.
+    apply_attention_triage_v2_up(conn)
