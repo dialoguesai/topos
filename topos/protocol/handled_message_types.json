@@ -161,6 +161,7 @@
     "signal_owner_override_object",
     "signal_refresh_brief",
     "signal_search_vectors",
+    "signal_set_worn_badge",
     "signal_update_brief",
     "signal_upload",
     "signal_vector_source_text",
@@ -186,4 +187,4 @@
     "upsert_home_chat_session",
     "verify_claim"
   ]
-}
+}\n

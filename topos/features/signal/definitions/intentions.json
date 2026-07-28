@@ -40,7 +40,8 @@
     "goal_alignment_vector",
     "intention_tags",
     "declared_intent",
-    "badge"
+    "badge",
+    "worn_badge"
   ],
   "gate_objects": [
     "seeking_signals",
