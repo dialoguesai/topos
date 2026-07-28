@@ -755,3 +755,23 @@ async def handle_signal_exclude_entity(message: Dict[str, Any]) -> Optional[Dict
         return {"id": req_id, "status": "error", "error": str(exc), "code": 400}
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("signal_attention_dashboard")
+async def handle_signal_attention_dashboard(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    try:
+        from ...features.triage.dashboard import attention_dashboard_data
+
+        conn = hub.get_db_connection()
+        result = attention_dashboard_data(
+            conn,
+            days=min(int(payload.get("days") or 14), 90),
+            include_titles=bool(payload.get("include_titles", True)),
+        )
+        return {"id": req_id, "status": "ok", "payload": result}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
