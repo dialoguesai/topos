@@ -704,7 +704,10 @@ async def attention_dashboard(
             "AND valid_to IS NULL")
     ]
     from ..features.triage.readiness import newsletter_readiness
+    from ..features.triage.badges import current_badge, earned_badges
     return {
+        "badges": earned_badges(conn),
+        "current_badge": current_badge(conn),
         "days": days,
         "verdicts": verdicts,
         "summaries": summaries,
