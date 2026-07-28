@@ -34,8 +34,55 @@ TIERS: List[Dict[str, str]] = [
      "blurb": "25 verdict labels given"},
     {"id": "two_way_street", "label": "Two-Way Street", "glyph": "⇄",
      "blurb": "you inspected the ledger"},
+    {"id": "chronicler", "label": "Chronicler", "glyph": "✎",
+     "blurb": "one hundred journal entries kept"},
+    {"id": "cartographer", "label": "Cartographer", "glyph": "🗺",
+     "blurb": "a thousand entities on your map"},
+    {"id": "ten_thousand_things", "label": "Ten Thousand Things", "glyph": "∞",
+     "blurb": "ten thousand items triaged"},
 ]
 _RANK = {t["id"]: i for i, t in enumerate(TIERS)}
+
+# ---- two-currency mechanics (PLAN_NEWSLETTER_UNLOCK.md §9) --------------------
+# Achievement points; network-effect actions weigh highest so rank tracks the
+# flywheel. host/lighthouse are CP-awarded (cross-topos events) — points
+# reserved here so rank math lives in one place.
+POINTS: Dict[str, int] = {
+    "first_signal": 10, "triangulated": 20, "steady_stream": 30, "first_pin": 15,
+    "steered": 25, "signal_unlocked": 50, "calibrated": 40, "two_way_street": 20,
+    "chronicler": 30, "cartographer": 40, "ten_thousand_things": 75,
+    "host": 60, "lighthouse": 100,
+}
+
+# Public rank tiers: absolute, log-spaced thresholds; computed ON-NODE — no
+# leaderboard, no central comparison. Status without surveillance.
+RANK_TIERS: List[Dict[str, Any]] = [
+    {"id": "trace", "label": "Trace", "glyph": "·", "threshold": 10},
+    {"id": "signal", "label": "Signal", "glyph": "◆", "threshold": 60},
+    {"id": "resonance", "label": "Resonance", "glyph": "≋", "threshold": 150},
+    {"id": "beacon", "label": "Beacon", "glyph": "◈", "threshold": 300},
+    {"id": "constellation", "label": "Constellation", "glyph": "✦", "threshold": 500},
+]
+
+
+def points_total(conn: sqlite3.Connection) -> int:
+    return sum(POINTS.get(b.get("badge_id", ""), 0) for b in earned_badges(conn))
+
+
+def rank(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """The public layer: point tally -> tier. Worn chip defaults to the tier
+    glyph; achievement-glyph wearing stays the owner's IYKYK option."""
+    pts = points_total(conn)
+    tier = None
+    for t in RANK_TIERS:
+        if pts >= t["threshold"]:
+            tier = t
+    nxt = next((t for t in RANK_TIERS if pts < t["threshold"]), None)
+    return {
+        "points": pts,
+        "tier": tier,
+        "next_tier": None if nxt is None else {**nxt, "points_needed": nxt["threshold"] - pts},
+    }
 
 
 def earned_badges(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
@@ -109,4 +156,17 @@ def award_badges(conn: sqlite3.Connection) -> List[str]:
     labels = conn.execute(
         "SELECT COUNT(*) FROM triage_verdicts WHERE user_label IS NOT NULL").fetchone()[0]
     maybe("calibrated", labels >= 25, {"labels": labels})
+
+    def _count(sql: str) -> int:
+        try:
+            return conn.execute(sql).fetchone()[0]
+        except sqlite3.OperationalError:
+            return 0
+
+    journals = _count("SELECT COUNT(*) FROM journal_entries")
+    maybe("chronicler", journals >= 100, {"journal_entries": journals})
+    entities = _count("SELECT COUNT(*) FROM entities")
+    maybe("cartographer", entities >= 1000, {"entities": entities})
+    triaged = _count("SELECT COUNT(*) FROM triage_verdicts")
+    maybe("ten_thousand_things", triaged >= 10000, {"triaged": triaged})
     return new
