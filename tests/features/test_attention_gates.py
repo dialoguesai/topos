@@ -331,3 +331,23 @@ def test_badges_award_idempotent_hierarchy(conn):
     cb = current_badge(conn)
     assert cb["badge_id"] == "first_pin" and cb["glyph"]
     assert [b["badge_id"] for b in earned_badges(conn)] == ["first_signal", "first_pin"]
+
+
+def test_points_and_rank_two_currency(conn):
+    """§9: achievements accumulate points; rank tier from absolute thresholds."""
+    from topos.features.triage.badges import award_badges, points_total, rank
+    from topos.features.triage.intents import pin_intent
+
+    _seed_history(conn)
+    for i in range(101):  # chronicler territory
+        _journal(conn, f"2026-07-19T0{i % 10}:1{i % 6}:00", f"jx-{i}", f"entry {i}")
+    conn.commit()
+    award_badges(conn)
+    pin_intent(conn, "future intent")
+    award_badges(conn)
+    pts = points_total(conn)
+    # first_signal 10 + first_pin 15 + chronicler 30 = 55 (2 connectors: no triangulated)
+    assert pts == 55, pts
+    r = rank(conn)
+    assert r["tier"]["id"] == "trace" and r["tier"]["glyph"] == "·"
+    assert r["next_tier"]["id"] == "signal" and r["next_tier"]["points_needed"] == 5
