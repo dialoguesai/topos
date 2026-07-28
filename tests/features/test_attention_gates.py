@@ -280,3 +280,36 @@ def test_user_labels_survive_replay(conn):
     label = conn.execute(
         "SELECT user_label FROM triage_verdicts WHERE record_id='v-lab'").fetchone()[0]
     assert label == "keep"
+
+
+def test_newsletter_readiness_gate(conn):
+    """PLAN_NEWSLETTER_UNLOCK: gate closed on thin data, open on rich data,
+    demo sources never count."""
+    from datetime import date
+    from topos.features.triage.readiness import newsletter_readiness
+
+    asof = date(2026, 7, 20)
+    r = newsletter_readiness(conn, asof=asof)
+    assert not r["ready"] and set(r["missing"]) == {"connectors", "streak_days", "total_items"}
+
+    for d in range(1, 9):  # 8-day streak, 3 real connectors, demo noise excluded
+        day = f"2026-07-{12 + d:02d}"
+        for i in range(9):
+            _timeline_row = conn.execute(
+                "INSERT OR IGNORE INTO timeline (event_at, record_id, source_id, canonical_table) "
+                "VALUES (?,?,?,?)",
+                (f"{day}T10:{i:02d}:00", f"r-{day}-{i}",
+                 ["browser_visits", "grow_journal", "imessage"][i % 3], "activity_events"))
+        conn.execute(
+            "INSERT OR IGNORE INTO timeline (event_at, record_id, source_id, canonical_table) "
+            "VALUES (?,?,?,?)", (f"{day}T11:00:00", f"demo-{day}", "demo_browser_file", "activity_events"))
+    for i in range(200):
+        conn.execute(
+            "INSERT OR IGNORE INTO timeline (event_at, record_id, source_id, canonical_table) "
+            "VALUES (?,?,?,?)", (f"2026-07-10T0{i % 10}:00:00", f"bulk-{i}", "browser_visits", "activity_events"))
+    conn.commit()
+    r2 = newsletter_readiness(conn, asof=asof)
+    assert r2["connectors"]["have"] == 3
+    assert r2["streak_days"]["have"] >= 7
+    assert r2["ready"], r2
+    assert "demo_browser_file" not in r2["connectors"]["sources"]

@@ -703,10 +703,12 @@ async def attention_dashboard(
             "SELECT payload_json FROM signal_objects WHERE object_type='declared_intent' "
             "AND valid_to IS NULL")
     ]
+    from ..features.triage.readiness import newsletter_readiness
     return {
         "days": days,
         "verdicts": verdicts,
         "summaries": summaries,
         "active_intents": [i for i in intents if i.get("status", "active") == "active"],
+        "readiness": newsletter_readiness(conn),
         "disclosure": "owner_only",
     }
