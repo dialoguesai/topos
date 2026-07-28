@@ -54,6 +54,13 @@ class AttentionTriageJob(BaseEnrichmentJob):
             done += 1
             if progress_callback:
                 progress_callback(done, len(days))
+        try:
+            from ....features.triage.badges import award_badges
+            fresh = award_badges(conn)
+            if fresh:
+                logger.info("badges awarded: %s", fresh)
+        except Exception:
+            logger.exception("badge award pass failed")
         if progress_callback:
             progress_callback(len(days), len(days))
         return []

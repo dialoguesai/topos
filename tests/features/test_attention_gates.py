@@ -313,3 +313,21 @@ def test_newsletter_readiness_gate(conn):
     assert r2["streak_days"]["have"] >= 7
     assert r2["ready"], r2
     assert "demo_browser_file" not in r2["connectors"]["sources"]
+
+
+def test_badges_award_idempotent_hierarchy(conn):
+    """Badges award once, in criteria order; current_badge = highest earned."""
+    from datetime import date
+    from topos.features.triage.badges import award_badges, current_badge, earned_badges
+    from topos.features.triage.intents import pin_intent
+
+    _seed_history(conn)  # 2 real connectors (grow_journal + browser_visits), no streak
+    new = award_badges(conn)
+    assert "first_signal" in new and "triangulated" not in new
+    assert award_badges(conn) == []  # idempotent
+    pin_intent(conn, "test future intent for badge checks")
+    new2 = award_badges(conn)
+    assert new2 == ["first_pin"]
+    cb = current_badge(conn)
+    assert cb["badge_id"] == "first_pin" and cb["glyph"]
+    assert [b["badge_id"] for b in earned_badges(conn)] == ["first_signal", "first_pin"]
