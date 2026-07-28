@@ -59,15 +59,28 @@ def _manifest_for(scope_id: str) -> ScopeResolutionManifest:
 async def _run_case(case: Dict[str, Any], conn: sqlite3.Connection) -> Dict[str, Any]:
     bundle = AdapterFactory.create("local_database", conn=conn)
     orchestrator = QueryPipelineOrchestrator(adapters=bundle)
-    return await orchestrator.execute(
-        query_text=case["query"],
-        scope_id=case["scope_id"],
-        access_mode=case["access_mode"],
-        manifest=_manifest_for(case["scope_id"]),
-        query_session_id=f"ts-{case['case_id']}",
-        requester_id=case.get("persona") or "grantee",
-        is_grantee_request=True,
-    )
+
+    async def _execute() -> Dict[str, Any]:
+        return await orchestrator.execute(
+            query_text=case["query"],
+            scope_id=case["scope_id"],
+            access_mode=case["access_mode"],
+            manifest=_manifest_for(case["scope_id"]),
+            query_session_id=f"ts-{case['case_id']}",
+            requester_id=case.get("persona") or "grantee",
+            is_grantee_request=True,
+        )
+
+    result = await _execute()
+    if case.get("repeat_session"):
+        # Same session + same intent: the second turn must replay the cached
+        # artifact (memory_hit), never re-run retrieval.
+        assert result.get("turn_outcome") == "live_query", (
+            f"{case['case_id']}: first turn should be live_query, "
+            f"got {result.get('turn_outcome')}"
+        )
+        result = await _execute()
+    return result
 
 
 def _assert_expectations(case: Dict[str, Any], result: Dict[str, Any]) -> None:
@@ -95,8 +108,9 @@ def _assert_expectations(case: Dict[str, Any], result: Dict[str, Any]) -> None:
 
 
 def test_catalog_versions_pinned():
-    assert TS_CATALOG_VERSION == "ts-1"
-    assert TS_CORPUS_VERSION == "ts-1"
+    assert TS_CATALOG_VERSION == "ts-2"
+    assert TS_CORPUS_VERSION == "ts-2"
+    assert len(REQUEST_CASES) + len(FIT_CASES) == 100
 
 
 def test_catalog_covers_all_aspects():
@@ -133,14 +147,27 @@ async def test_request_case(case, corpus_conn, empty_conn, monkeypatch):
 
 @pytest.mark.parametrize("case", FIT_CASES, ids=[c["case_id"] for c in FIT_CASES])
 def test_fit_case(case, corpus_conn):
-    from topos.features.fit.evaluator import evaluate_opportunity
+    from topos.features.fit.evaluator import compute_fit_readiness, evaluate_opportunity
+
+    expect = case["expect"]
+    kind = case.get("kind") or "verdict"
+
+    if kind == "readiness":
+        readiness = compute_fit_readiness(corpus_conn)
+        assert readiness["schedule_meeting"] >= expect["schedule_meeting_min"]
+        return
 
     result = evaluate_opportunity(
         corpus_conn,
         case["opportunity_type"],
         context=case.get("context"),
     )
-    expect = case["expect"]
+    if kind == "shape":
+        assert len(result["facet_results"]) == expect["facet_count"]
+        assert result["confidence_band"] in {"high", "medium", "low"}
+        assert isinstance(result["pass"], bool)
+        return
+
     assert result["pass"] is expect["pass"], (
         f"{case['case_id']}: composite {result['composite_score']} "
         f"(threshold {result['pass_threshold']}) → pass={result['pass']}"

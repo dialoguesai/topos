@@ -32,19 +32,23 @@ import sqlite3
 from pathlib import Path
 from typing import Any, Dict, List
 
-TS_CORPUS_VERSION = "ts-1"
+TS_CORPUS_VERSION = "ts-2"
 
 CALENDAR_SOURCE_ID = "demo_calendar_file"
 
 TITLE_CANARY_BOARD = "Nightingale Board Sync"
 TITLE_CANARY_DEEP = "Falconer Deep Work"
 TITLE_CANARY_ONE = "Quetzal 1:1"
+TITLE_CANARY_DINNER = "Osprey Dinner Reservation"
 ATTENDEE_CANARY = "Wren Ashby"
+LOCATION_CANARY = "Wrenfield Marina"
+DESCRIPTION_CANARY = "Project Thunderbird budget review"
 GOAL_CANARY = "Looking for a technical cofounder for the kestrel project"
 MESSAGE_CANARY = "drafting the peregrine launch memo"
 
 FREE_WINDOW_DATES = ("2026-07-24", "2026-07-31")
 SOFT_ONEOFF_DATE = "2026-07-30"
+WEEKEND_FLEX_DATE = "2026-07-25"
 HARD_ONLY_DATE = "2026-07-21"
 
 N_CALENDAR = 12  # 4 board + 3 deep + 2 one-on-one + 2 free + 1 hard one-off... see below
@@ -122,6 +126,37 @@ def _calendar_rows() -> List[Dict[str, Any]]:
             "attendee_count": 3,
             "movability_score": 0.15,
             "attendance_priority": "must_attend",
+            "description": DESCRIPTION_CANARY,
+        }
+    )
+    # Immovable evening dinner with location canary (ts-2): fixed personal time.
+    for i, day in enumerate(("2026-07-16", "2026-07-23")):
+        rows.append(
+            {
+                "event_id": f"dinner-{i}",
+                "title": TITLE_CANARY_DINNER,
+                "starts_at": f"{day}T18:00:00+00:00",
+                "ends_at": f"{day}T19:30:00+00:00",
+                "is_busy": 1,
+                "is_recurring": 1,
+                "attendee_count": 2,
+                "movability_score": 0.2,
+                "attendance_priority": "must_attend",
+                "location": LOCATION_CANARY,
+            }
+        )
+    # Weekend solo flexible block (ts-2): weekend negotiability signal.
+    rows.append(
+        {
+            "event_id": "weekend-flex",
+            "title": TITLE_CANARY_DEEP,
+            "starts_at": f"{WEEKEND_FLEX_DATE}T09:00:00+00:00",
+            "ends_at": f"{WEEKEND_FLEX_DATE}T10:00:00+00:00",
+            "is_busy": 1,
+            "is_recurring": 0,
+            "attendee_count": 1,
+            "movability_score": 0.85,
+            "attendance_priority": "optional",
         }
     )
     rows.append(
@@ -156,8 +191,9 @@ def build_ts_corpus(db_path: Path) -> Path:
                 INSERT OR REPLACE INTO calendar_events (
                     event_id, title, starts_at, ends_at, source_id,
                     is_busy, is_recurring, attendee_count,
-                    movability_score, attendance_priority, metadata_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    movability_score, attendance_priority, metadata_json,
+                    location, description
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     row["event_id"],
@@ -171,6 +207,8 @@ def build_ts_corpus(db_path: Path) -> Path:
                     row["movability_score"],
                     row["attendance_priority"],
                     row.get("metadata_json"),
+                    row.get("location"),
+                    row.get("description"),
                 ),
             )
 
@@ -210,6 +248,15 @@ def build_ts_corpus(db_path: Path) -> Path:
                 "VALUES (?, 'browse', 'https://kittiwake-dashboard.example', "
                 "'kittiwake dashboard', ?, 'browser_plugin')",
                 (f"act-{i}", f"{day}T19:15:00+00:00"),
+            )
+        # Sunday-night browsing (ts-2): a night-band rhythm signal.
+        for i, day in enumerate(("2026-07-12", "2026-07-19", "2026-07-26")):
+            conn.execute(
+                "INSERT OR REPLACE INTO activity_events "
+                "(event_id, activity_type, url, title, occurred_at, source_id) "
+                "VALUES (?, 'browse', 'https://kittiwake-dashboard.example', "
+                "'kittiwake dashboard', ?, 'browser_plugin')",
+                (f"act-night-{i}", f"{day}T22:30:00+00:00"),
             )
         for i, day in enumerate(("2026-07-11", "2026-07-18", "2026-07-25")):
             conn.execute(
