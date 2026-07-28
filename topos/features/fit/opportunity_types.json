@@ -19,6 +19,15 @@
         {"id": "commitment_conflict", "weight": 0.30, "method": "busy_overlap"}
       ],
       "pass_threshold": 0.5
+    },
+    "opportunity_outreach": {
+      "label": "Good candidate for an offered opportunity",
+      "facets": [
+        {"id": "willingness", "weight": 0.35, "method": "seeking_band"},
+        {"id": "timing_feasibility", "weight": 0.45, "method": "interval_overlap"},
+        {"id": "commitment_conflict", "weight": 0.20, "method": "busy_overlap"}
+      ],
+      "pass_threshold": 0.6
     }
   }
 }

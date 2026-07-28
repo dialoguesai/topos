@@ -1173,6 +1173,99 @@ def _load_attention_summary_items(conn: Optional[Any], limit: int = 10) -> List[
     return items
 
 
+def _load_time_summary_items(conn: Optional[Any], limit: int = 8) -> List[Dict[str, Any]]:
+    """Derived time-dimension objects as summary items — the availability:read
+    scope's negotiability layer (PLAN_TIME_SIGNAL_UPGRADE M3). Payloads are
+    title/attendee-free by construction; raw movability scores stay owner-side,
+    only bands are phrased here."""
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute(
+            "SELECT object_type, object_key, payload_json FROM signal_objects "
+            "WHERE signal_dimension='time' AND valid_to IS NULL "
+            "AND object_type IN ('availability_summary','meeting_load_band',"
+            "'flex_windows','routine_confidence') "
+            "ORDER BY object_type ASC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    except Exception:
+        return []
+    items: List[Dict[str, Any]] = []
+    for otype, okey, payload_json in rows:
+        try:
+            payload = json.loads(payload_json or "{}")
+        except (TypeError, ValueError):
+            continue
+        if otype == "availability_summary":
+            text = str(payload.get("summary_text") or "")
+        elif otype == "meeting_load_band":
+            text = (
+                f"Meeting load ({payload.get('band')}): "
+                f"{payload.get('busy_hours_7d')} busy hours in the last 7 days; "
+                f"{payload.get('soft_count')} of "
+                f"{int(payload.get('hard_count') or 0) + int(payload.get('soft_count') or 0)} "
+                "blocks negotiable"
+            )
+        elif otype == "flex_windows":
+            windows = payload.get("windows") or []
+            spans = "; ".join(
+                f"{w.get('start')} — {w.get('end')} ({w.get('negotiability')}; "
+                f"soft shoulders {(w.get('flex_before') or {}).get('start')} → "
+                f"{(w.get('flex_after') or {}).get('end')})"
+                for w in windows[:4]
+                if isinstance(w, dict)
+            )
+            text = f"Conditionally available (negotiable busy time): {spans}"
+        else:
+            bands = "; ".join(
+                f"{b.get('day_of_week')} {b.get('time_band')} ({b.get('dominant_kind')})"
+                for b in (payload.get("top_bands") or [])[:3]
+                if isinstance(b, dict)
+            )
+            text = (
+                f"Activity rhythm (confidence {payload.get('confidence')}): "
+                f"typically active {bands}" if bands else ""
+            )
+        if not text:
+            continue
+        items.append({
+            "topic": text.split(":", 1)[0],
+            "summary_text": text,
+            "record_id": f"{otype}:{okey}",
+            "retrieval_source": otype,
+        })
+    try:
+        commitment_rows = conn.execute(
+            "SELECT object_key, payload_json FROM signal_objects "
+            "WHERE signal_dimension='time' AND valid_to IS NULL "
+            "AND object_type='Commitment' ORDER BY object_key LIMIT 6",
+        ).fetchall()
+    except Exception:
+        commitment_rows = []
+    if commitment_rows:
+        parts = []
+        for okey, payload_json in commitment_rows:
+            try:
+                payload = json.loads(payload_json or "{}")
+            except (TypeError, ValueError):
+                continue
+            parts.append(
+                f"{payload.get('day_of_week')} {payload.get('start_clock')} "
+                f"({payload.get('kind')}, {payload.get('movability_band') or 'unknown'}, "
+                f"~{payload.get('load_weight')}h/wk)"
+            )
+        if parts:
+            text = "Recurring commitments: " + "; ".join(parts)
+            items.append({
+                "topic": "Recurring commitments",
+                "summary_text": text,
+                "record_id": "Commitment:rollup",
+                "retrieval_source": "Commitment",
+            })
+    return items
+
+
 def _load_brief_summary_items(
     dimensions: List[str], *, conn: Optional[Any] = None
 ) -> List[Dict[str, Any]]:
@@ -2780,6 +2873,12 @@ class DefaultSignalRetrievalAdapter:
                 if attention_items:
                     summaries = attention_items + list(summaries)
                     touched.append("signal")
+            if manifest.scope_id == "availability:read":
+                time_items = _load_time_summary_items(
+                    getattr(self._adapters.signal, "_conn", None))
+                if time_items:
+                    summaries = time_items + list(summaries)
+                    touched.append("signal")
             packet["summaries"] = summaries
             counts["summaries"] = len(summaries)
             # Abstention is a complete answer: when a query found nothing, do not
@@ -2836,6 +2935,10 @@ class DefaultSignalRetrievalAdapter:
                     scores.append({k: v for k, v in item.items() if k not in _INFERENCE_EXCLUDED_KEYS})
             elif manifest.scope_id == "schedule:read":
                 for item in _load_brief_summary_items(["Time"]):
+                    scores.append({k: v for k, v in item.items() if k not in _INFERENCE_EXCLUDED_KEYS})
+            elif manifest.scope_id == "availability:read":
+                for item in _load_time_summary_items(
+                        getattr(self._adapters.signal, "_conn", None)):
                     scores.append({k: v for k, v in item.items() if k not in _INFERENCE_EXCLUDED_KEYS})
             elif manifest.scope_id == "attention:read":
                 for item in _load_attention_summary_items(

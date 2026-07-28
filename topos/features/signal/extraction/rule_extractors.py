@@ -218,17 +218,39 @@ def extract_from_journal(record: Dict[str, Any]) -> List[ArtifactDraft]:
     return drafts
 
 
+def _movability_band(score: Optional[float]) -> Optional[str]:
+    if score is None:
+        return None
+    if score >= 0.7:
+        return "flexible"
+    if score >= 0.4:
+        return "negotiable"
+    return "fixed"
+
+
 def extract_from_calendar(record: Dict[str, Any]) -> List[ArtifactDraft]:
     event_id = str(record.get("event_id") or record.get("record_id") or "")
     if not event_id:
         return []
     busy = _calendar_is_busy(record)
     refs = [_source_ref("calendar_events", event_id)]
+    movability = record.get("movability_score")
+    try:
+        movability = float(movability) if movability is not None else None
+    except (TypeError, ValueError):
+        movability = None
+    # A busy block with high movability is a soft boundary, not a wall
+    # (value-layer columns are NULL for pre-migration rows → unknown → hard).
+    soft_busy = movability is not None and movability >= 0.5
     interval = {
         "start": str(record.get("starts_at") or ""),
         "end": str(record.get("ends_at") or ""),
         "availability_kind": "busy" if busy else "free",
-        "hard_or_soft": "hard" if busy else "soft",
+        "hard_or_soft": ("soft" if soft_busy else "hard") if busy else "soft",
+        "movability_score": movability,
+        "movability_band": _movability_band(movability),
+        "attendance_priority": str(record.get("attendance_priority") or "") or None,
+        "priority_confidence": record.get("priority_confidence"),
         "location_band": str(record.get("location") or "")[:80] or None,
     }
     return [

@@ -9,6 +9,8 @@ from typing import Any, Dict, List
 
 from ..signal_object_store import SignalObjectStore
 from .aggregates import recompute_all_gate_aggregates
+from .commitments import recompute_commitments
+from .rhythm import recompute_rhythm
 
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
@@ -376,6 +378,10 @@ def materialize_scope_signal_objects(conn: sqlite3.Connection) -> Dict[str, int]
         counts["top_topics_pruned"] = reconcile_top_topics_objects(conn)
     except Exception:  # noqa: BLE001 — reconciliation must never block materialization
         counts["top_topics_pruned"] = 0
+    # Rhythm + commitments before gate aggregates: availability_summary (a time
+    # aggregate) folds in the routine_confidence this pass just wrote.
+    counts["rhythm"] = recompute_rhythm(store, conn)
+    counts["commitments"] = recompute_commitments(store, conn)
     aggregates = recompute_all_gate_aggregates(store)
     counts["aggregates"] = sum(int(v or 0) for v in aggregates.values())
     return counts
