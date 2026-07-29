@@ -83,13 +83,11 @@ class TestShowLogsMenu:
         )
 
     def test_menu_includes_show_logs_when_log_path_set(self, tmp_path):
-        pytest.importorskip("pystray")
-        items = [str(i.text) for i in self._tray(tmp_path / "node.log")._build_menu().items]
+        items = self._tray(tmp_path / "node.log")._menu_labels()
         assert "Show Logs" in items
 
     def test_menu_omits_show_logs_without_log_path(self):
-        pytest.importorskip("pystray")
-        items = [str(i.text) for i in self._tray(None)._build_menu().items]
+        items = self._tray(None)._menu_labels()
         assert "Show Logs" not in items
 
     def test_open_log_viewer_darwin_uses_console(self, tmp_path, monkeypatch):

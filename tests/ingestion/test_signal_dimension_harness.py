@@ -27,7 +27,7 @@ from topos.sources.registry import (
     DEMO_PLACES_FILE,
     DEMO_RESUME_FILE,
 )
-from topos.sources.definitions import DataSourceDefinition
+from topos.sources.definitions import CANONICAL_ADDRESS_BOOK_SOURCE_ID, DataSourceDefinition
 from topos.storage.db.migrations import apply_all_migrations
 
 
@@ -214,9 +214,11 @@ def test_demo_contacts_canonicalize(migrated_conn) -> None:
         sync_batch_id="batch-c",
     )
     assert result.messages_created == 2
+    # Contact rows land on the unified address-book source; identifiers keep the
+    # ingesting source_id so scrub/attribution can still attribute the import.
     assert migrated_conn.execute(
         "SELECT COUNT(*) AS n FROM contacts WHERE source_id=?",
-        (DEMO_CONTACTS_FILE.source_id,),
+        (CANONICAL_ADDRESS_BOOK_SOURCE_ID,),
     ).fetchone()["n"] == 1
     assert migrated_conn.execute(
         "SELECT COUNT(*) AS n FROM contact_identifiers WHERE contact_id='contact-sara'",

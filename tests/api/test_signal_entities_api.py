@@ -14,7 +14,8 @@ from topos.storage.db.migrations import apply_all_migrations
 
 @pytest.fixture()
 def populated_conn(tmp_path):
-    conn = sqlite3.connect(str(tmp_path / "entities_api.db"))
+    # check_same_thread=False: /entities/graph runs graph work in asyncio.to_thread.
+    conn = sqlite3.connect(str(tmp_path / "entities_api.db"), check_same_thread=False)
     apply_all_migrations(conn)
     resolver = EntityResolver(conn)
     conn.execute(

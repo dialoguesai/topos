@@ -94,6 +94,30 @@
         "Fact-extraction think suppression and claim-verify handlers affect FUTURE LLM passes only — existing signal_facts are not invalidated.",
         "New WS handlers (signal_attention_dashboard, signal_set_worn_badge, verify_claim, conversation_context*, facts_llm_config*, truth_*, put_fact_verdict): CPs must treat as optional until the fleet is on 1.3.0; bump engine-compat when the app depends on them."
       ]
+    },
+    {
+      "version": "1.3.1",
+      "summary": "Patch release anchoring the upgrade ladder after 1.3.0 (no derived-layer invalidation).",
+      "steps": []
+    },
+    {
+      "version": "1.3.2",
+      "summary": "Entity black hole owner controls + turn-level taint, complexity data-page engine (summary/timeline/topics/influence), app-mode shell contract (attach-don't-double-start, file logs, tray over HTTP), unified timeline daily reads, scope-registry sync.",
+      "steps": [
+        {
+          "id": "blackhole-complexity-timeline-schema",
+          "kind": "none",
+          "title": "blackhole / complexity / timeline_daily additive schema",
+          "why": "Handled by ledger-guarded schema migrations at first boot; listed so release notes and the fleet dashboard show the additive tables/columns without a derived reprocess step.",
+          "order": 0
+        }
+      ],
+      "notes": [
+        "No re-embedding and no canonical re-ingest: raw/canonical rows and signal_embeddings remain valid.",
+        "Blackhole filtering is runtime policy over existing data — no backfill step.",
+        "Complexity snapshots fill via enrichment piggyback going forward; pre-1.3.2 nodes get coverage on the next enrichment pass.",
+        "New WS handlers (blackhole_*, complexity_*, signal_timeline_daily): CPs must treat as optional until the fleet is on 1.3.2; bump engine-compat when the app depends on them."
+      ]
     }
   ]
 }

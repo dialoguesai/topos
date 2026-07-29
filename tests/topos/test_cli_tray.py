@@ -79,7 +79,7 @@ class TestToposTray:
             host="0.0.0.0", port=9000, version="1.0.0", package_name="topos-node", on_quit=lambda: None
         )
         assert t.health_url == "http://127.0.0.1:9000/healthcheck"
-        assert t.docs_url == "http://127.0.0.1:9000/docs"
+        assert t.docs_url == tray.TOPOS_DOCS_URL  # product docs, not the local API docs
 
     def test_specific_host_kept(self):
         t = tray.ToposTray(

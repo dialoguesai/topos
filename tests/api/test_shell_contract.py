@@ -163,19 +163,15 @@ class TestTrayConsumesContract:
         assert t.log_path == Path("/tmp/logs/node.log")
 
     def test_attached_menu_quit_leaves_node_running(self):
-        pytest.importorskip("pystray")
-        items = [str(i.text) for i in self._tray(attached=True)._build_menu().items]
+        items = self._tray(attached=True)._menu_labels()
         assert "Close Tray (node keeps running)" in items
         assert "Quit Topos Node" not in items
 
     def test_update_menu_states(self):
-        pytest.importorskip("pystray")
         t = self._tray()
         t.update = {"available": True, "latest": "1.4.0", "applying": False, "last_result": None}
-        assert "Update to v1.4.0" in [str(i.text) for i in t._build_menu().items]
+        assert "Update to v1.4.0" in t._menu_labels()
         t.update = {"available": True, "latest": "1.4.0", "applying": True, "last_result": None}
-        assert "Installing update…" in [str(i.text) for i in t._build_menu().items]
+        assert "Installing update…" in t._menu_labels()
         t.update = {"available": True, "latest": "1.4.0", "applying": False, "last_result": "success"}
-        assert "Update installed — restart to finish" in [
-            str(i.text) for i in t._build_menu().items
-        ]
+        assert "Update installed — restart to finish" in t._menu_labels()

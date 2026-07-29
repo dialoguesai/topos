@@ -121,6 +121,12 @@ class TestModelReadiness:
         bundle = _bundle()
         bundle.signal.put_fact({"dimension": "memory", "source_id": "s", "record_id": "m1"})
 
+        # Pin model recommendation so CI hosts without a local LLM install do
+        # not collapse both sides to the same HF-only readiness fraction.
+        monkeypatch.setattr(
+            "topos.features.signal.model_recommendations.signal_model_recommendation",
+            lambda _conn=None: {"provider": "ollama", "meets_minimum": True},
+        )
         monkeypatch.setattr(dh, "check_provider_status", lambda: {"ollama": "up", "huggingface": "up"})
         up = DataHealthComputer(bundle).compute()["memory"]["model_readiness_score"]
 
