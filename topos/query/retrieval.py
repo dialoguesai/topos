@@ -1115,6 +1115,78 @@ def _load_canonical_summary_items(
     return items[:_SUMMARY_ITEM_CAP]
 
 
+def _load_complexity_summary_items(conn: Optional[Any]) -> List[Dict[str, Any]]:
+    """Latest cached complexity snapshot as summary items — the
+    complexity:read scope's content (PLAN_COMPLEXITY_DATA_PAGE.md M3).
+    Reads the derived complexity_snapshots cache only; never recomputes on
+    the query path."""
+    if conn is None:
+        return []
+    try:
+        from ..features.complexity.store import load_latest_summary
+
+        summary = load_latest_summary(conn)
+    except Exception:
+        return []
+    if not isinstance(summary, dict) or not summary:
+        return []
+    items: List[Dict[str, Any]] = []
+    day = str(summary.get("computed_at") or "")[:10]
+    readings = summary.get("readings") or {}
+
+    def _score(key: str) -> Optional[float]:
+        block = readings.get(key) or {}
+        value = block.get("score")
+        return float(value) if isinstance(value, (int, float)) else None
+
+    focus = readings.get("current_focus") or summary.get("focus_index") or {}
+    parts = [f"Structure readings {day}".strip()]
+    scores = []
+    for key, label in (
+        ("current_focus", "focus"),
+        ("structural_clarity", "structural clarity"),
+        ("information_breadth", "information breadth"),
+        ("pipeline_confidence", "pipeline confidence"),
+    ):
+        value = _score(key)
+        if value is not None:
+            scores.append(f"{label} {value:.0f}/100")
+    if scores:
+        parts.append(", ".join(scores))
+    baseline = (focus.get("baseline") or {}) if isinstance(focus, dict) else {}
+    if baseline.get("status") == "ok" and isinstance(baseline.get("percentile"), (int, float)):
+        parts.append(f"focus at p{int(baseline['percentile'] * 100)} of the trailing 12 weeks")
+    interpretation = str(focus.get("interpretation") or "").strip()
+    if interpretation:
+        parts.append(interpretation)
+    text = ". ".join(part for part in parts if part)
+    items.append({
+        "topic": f"Structure readings {day}".strip(),
+        "summary_text": text,
+        "record_id": "complexity:summary_latest",
+        "retrieval_source": "complexity_summary",
+    })
+
+    threads = summary.get("influence_threads") or []
+    lines = []
+    for thread in threads[:5]:
+        if not isinstance(thread, dict):
+            continue
+        status = str(thread.get("epistemic_status") or "").replace("_", " ")
+        lines.append(
+            f"{thread.get('source_label')} → {thread.get('target_label')}"
+            + (f" ({status})" if status else "")
+        )
+    if lines:
+        items.append({
+            "topic": "Influence threads",
+            "summary_text": "Influence threads: " + "; ".join(lines),
+            "record_id": "complexity:influence_latest",
+            "retrieval_source": "complexity_influence",
+        })
+    return items
+
+
 def _load_attention_summary_items(conn: Optional[Any], limit: int = 10) -> List[Dict[str, Any]]:
     """Latest attention-triage objects (daily digests + interest profiles) as
     summary items — the attention:read scope's primary content
@@ -2955,6 +3027,12 @@ class DefaultSignalRetrievalAdapter:
                     getattr(self._adapters.signal, "_conn", None), query_text)
                 if time_items:
                     summaries = time_items + list(summaries)
+                    touched.append("signal")
+            if manifest.scope_id == "complexity:read":
+                complexity_items = _load_complexity_summary_items(
+                    getattr(self._adapters.signal, "_conn", None))
+                if complexity_items:
+                    summaries = complexity_items + list(summaries)
                     touched.append("signal")
             packet["summaries"] = summaries
             counts["summaries"] = len(summaries)
