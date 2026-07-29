@@ -1,0 +1,69 @@
+# Changelog
+
+All notable changes to `topos-node` are documented here.
+Format follows [Keep a Changelog](https://keepachangelog.com/); lane tags
+follow `RELEASING.md` (`[S1]`, `[E:…]`, `[D]`, `[O]`, …).
+
+The machine-readable twin of each release is
+`topos/upgrades/manifests.json`.
+
+## [Unreleased]
+
+## [1.3.3] — 2026-07-29
+
+### Added
+
+- `[S1] [O]` Single migration registry (`MIGRATIONS`), `PRAGMA user_version`
+  fast-path, fail-loud schema migrations, pre-migration backup under
+  `~/.topos/backups/`, downgrade guard when `user_version` is ahead of this
+  build (PLAN_NODE_RELEASE_MIGRATIONS M0–M2).
+- `[O]` `scripts/cut_release.py`, `check_release_artifacts.py`,
+  `sync_migration_checksums.py`, `RELEASING.md`.
+- `[P] [O]` Attention triage: `signal_pin_intent` / `signal_retire_intent`
+  control-plane handlers.
+
+## [1.3.2] — 2026-07-29
+
+### Added
+
+- `[S1] [O]` Entity black hole owner controls + turn-level taint.
+- `[S1] [O]` Complexity data-page engine (summary / timeline / topics / influence).
+- `[O]` App-mode shell contract (attach-don't-double-start, file logs, tray over HTTP).
+- `[O]` Unified timeline daily reads; scope-registry sync.
+
+## [1.3.1] — 2026-07-29
+
+### Fixed
+
+- `[O]` Prioritize UI bootstrap over upgrade reprocess (patch anchor; no
+  derived-layer invalidation).
+
+## [1.3.0] — 2026-07-29
+
+### Added
+
+- `[S1] [E:attention_triage]` Attention triage (daily 2×2 verdicts, badges/ranks, dashboard).
+- `[O]` Negotiable time-signal availability (flex / rhythm / commitments).
+- `[S1]` Conversation context tags (work / personal).
+- `[O]` Claim verification / fact verdicts; facts-LLM think gating.
+
+## [1.2.7] — 2026-07-22
+
+### Fixed
+
+- `[O]` Temporal coherence and client-local now for relative dates.
+
+## [1.2.0] — 2026-07-10
+
+### Changed
+
+- `[E:entities] [D]` NER wordpiece stitcher — re-extract entities + rebuild
+  entity graph on upgrade (see manifests.json `1.2.0`).
+- `[S1]` Temporal entity graph layers, provenance roles, Louvain neighborhoods.
+
+## [1.1.0] — 2026-06-01
+
+### Added
+
+- `[S1] [D]` Dense intelligence upgrade (stats engine, entity spine, fact
+  store, incremental clustering, query planner). Anchors the upgrade ladder.

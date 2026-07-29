@@ -18,6 +18,11 @@ def _set_local_db(monkeypatch: pytest.MonkeyPatch, db_path: str) -> None:
         monkeypatch.setattr(target, "engine_pool_mode", "off", raising=False)
         monkeypatch.setattr(target, "database_mode", "local", raising=False)
         monkeypatch.setattr(target, "database_path", str(db_path), raising=False)
+    # Minimal fixture schema — skip the full migration registry.
+    monkeypatch.setattr(
+        "topos.storage.db.migrations.ensure_migrations_applied",
+        lambda *_a, **_k: None,
+    )
 
 
 async def _handle(message: dict) -> dict:

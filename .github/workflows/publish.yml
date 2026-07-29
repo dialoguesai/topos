@@ -47,7 +47,13 @@ jobs:
                   f"Tag/version mismatch: tag={tag_version}, pyproject={package_version}"
               )
           print(f"Version check passed: {package_version}")
+          Path("/tmp/topos-release-version").write_text(package_version, encoding="utf-8")
           PY
+
+      - name: Verify release artifacts (manifest, changelog, checksums)
+        run: |
+          VERSION="$(cat /tmp/topos-release-version)"
+          python scripts/check_release_artifacts.py --version "${VERSION}"
 
       - name: Build package artifacts
         run: uv build

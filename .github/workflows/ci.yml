@@ -30,6 +30,9 @@ jobs:
       - name: Verify dependency pins match lockfile
         run: python scripts/sync-dep-pins.py --check
 
+      - name: Verify migration registry checksums
+        run: python scripts/sync_migration_checksums.py --check
+
       - name: Run public test lane
         run: uv run pytest tests -m "public and not e2e and not live and not qq_eval" -q
 

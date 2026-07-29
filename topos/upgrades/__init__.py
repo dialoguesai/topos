@@ -26,7 +26,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 _MANIFESTS_PATH = Path(__file__).with_name("manifests.json")
 
@@ -45,22 +45,55 @@ def _version_key(version: str) -> Tuple[int, ...]:
     return tuple(int(part) for part in str(version).strip().split("."))
 
 
-def load_manifests() -> List[Dict[str, Any]]:
-    """All release manifests, oldest → newest. Raises on malformed entries."""
+UNRELEASED_VERSION = "unreleased"
+
+
+def _validate_release(release: Dict[str, Any]) -> None:
+    version = release.get("version")
+    if not version:
+        raise ValueError("release entry needs 'version'")
+    if version != UNRELEASED_VERSION:
+        _version_key(version)  # must parse as semver
+    for step in release.get("steps", []):
+        if step["kind"] not in STEP_KINDS:
+            raise ValueError(
+                f"unknown step kind {step['kind']!r} in release {version}"
+            )
+        if not step.get("id") or not step.get("why"):
+            raise ValueError(f"step in release {version} needs 'id' and 'why'")
+
+
+def load_manifests(*, include_unreleased: bool = False) -> List[Dict[str, Any]]:
+    """Shipped release manifests, oldest → newest. Raises on malformed entries.
+
+    The staging ``\"unreleased\"`` entry (PLAN §4d) is excluded by default so
+    ``steps_between`` never executes in-flight PR work. Pass
+    ``include_unreleased=True`` for cut_release / CI guards.
+    """
     data = json.loads(_MANIFESTS_PATH.read_text(encoding="utf-8"))
     manifests = data["releases"]
+    shipped: List[Dict[str, Any]] = []
+    unreleased: Optional[Dict[str, Any]] = None
     for release in manifests:
-        _version_key(release["version"])  # must parse
-        for step in release.get("steps", []):
-            if step["kind"] not in STEP_KINDS:
-                raise ValueError(
-                    f"unknown step kind {step['kind']!r} in release {release['version']}"
-                )
-            if not step.get("id") or not step.get("why"):
-                raise ValueError(
-                    f"step in release {release['version']} needs 'id' and 'why'"
-                )
-    return sorted(manifests, key=lambda r: _version_key(r["version"]))
+        _validate_release(release)
+        if release["version"] == UNRELEASED_VERSION:
+            unreleased = release
+            continue
+        shipped.append(release)
+    ordered = sorted(shipped, key=lambda r: _version_key(r["version"]))
+    if include_unreleased and unreleased is not None:
+        ordered.append(unreleased)
+    return ordered
+
+
+def load_unreleased() -> Optional[Dict[str, Any]]:
+    """Return the staging unreleased entry, or None if absent."""
+    data = json.loads(_MANIFESTS_PATH.read_text(encoding="utf-8"))
+    for release in data.get("releases", []):
+        if release.get("version") == UNRELEASED_VERSION:
+            _validate_release(release)
+            return release
+    return None
 
 
 def steps_between(installed: str, shipped: str) -> List[Dict[str, Any]]:
@@ -69,10 +102,11 @@ def steps_between(installed: str, shipped: str) -> List[Dict[str, Any]]:
     Later releases' steps run after earlier ones; duplicate step ids keep the
     LATEST occurrence (a later release re-requiring a rebuild supersedes the
     earlier request — running it once at the end is sufficient).
+    Staging ``unreleased`` is never included.
     """
     lo, hi = _version_key(installed), _version_key(shipped)
     ordered: List[Dict[str, Any]] = []
-    for release in load_manifests():
+    for release in load_manifests(include_unreleased=False):
         v = _version_key(release["version"])
         if lo < v <= hi:
             ordered.extend(release.get("steps", []))

@@ -1,0 +1,31 @@
+{
+  "$comment": "SHA-256 of shipped, non-always_run migration modules. CI fails if a hash changes \u2014 migrations are append-only.",
+  "checksums": {
+    "attention_triage_v1": "d4ec54ac95d829e2730e807caf8c0db294548282607cb7733d076ef1a6409eb0",
+    "canonical_nsfw_v1": "0f2c2fb8d0b5f4bfffcbe1e8fcba9c02496b1029e85252853e15841d36221d62",
+    "complexity_v1": "0bdbf7bea28e3e52790b1bc5c8a3e798af04d4e8acc2b4da5696e43f824118c3",
+    "documents_v1": "e69f447696078c1a1fa7597ecd0fdc658841f62c9705393b80cf92f6b4ba9278",
+    "entity_blackhole_v1": "f31dd047e57e1747a26a163346da617f21bae4cedb0b81ac21b302de5e1fddc9",
+    "episodes_v1": "377a043c7fad3ef5a21c8b60371f756a458b78ebf3c893039faa192c2722869b",
+    "explicit_signal_ia_extraction_artifacts_v1": "e089b4c0565341220a02c62e70ff75c8989c3af31833acd311e12c02fe277f72",
+    "explicit_signal_ia_signal_objects_v1": "265e84f58cdb3d329d9c71338d93e261cb84a8f233d5186a45a92676e800d5ab",
+    "remediation_person_model_v1": "c3dbd27c3ca732b11b3c96c4486b4369f3ef624c04dee35e0ff96ba131050693",
+    "scope_source_generation_v1": "dfa82ad66d2a574e765c53728635ceb901b6f62f30a4973f03f118cac700292b",
+    "signal_dimension_backfill_v1": "274912dbbedcc07670e4c4d33f0bd2d4e10e5192f559c67e3d912efe2afbda24",
+    "signal_dimension_harness": "9682f1ebdf30245ac2c0b2bebcf64cd478883018497ce1399cca52930a1dc6c4",
+    "vector_storage_v1": "882cc53888367c5325c6e4c442cd362b25a90fbb4486694d08b85636ff9510f1",
+    "vector_storage_v2": "7396efe98fc2f0e6d775f80705ea1727b8feb8c62cc2527a9dfab48c6f5469cb",
+    "vector_storage_v3": "2ac37e46a9b5255ff34d1f4829bffc2bf105d77dce9199c0d8324185f42aecd9",
+    "wiki_clusters_v2": "40f668773c6a9d6fc7d869069a45f649c4a13a4494767ce7f945a6dfcf86f5a2",
+    "wiki_entities_v1": "020874fc3cee3d2a9c0ca4a446a6bd1eb0beee2d48c4053c9aef2327af32c784",
+    "wiki_entity_review_v2": "1701d3c7d78accbc9cf67f689fb41a4d73230c305e2ebdd3bdfbe7d5734a3f7f",
+    "wiki_facts_v1": "ecd128da9ef00bf20727645284d567450663507cad1a576419a5349bce809ae2",
+    "wiki_lifecycle_v1": "2decce39892a12fa4297953eb311204a7b2c397ab364fa2fe1536525fd74fe1f",
+    "wiki_mvp_phase0": "0a1ded2d1f19fb02f0366e2b096d06c2198e7b2364f66ced350a368c1d178772",
+    "wiki_mvp_phase4_messages_cutover": "95d6507dfeb9e737ad4e6267e8724d8a0d829177035154147547ef546e35acce",
+    "wiki_mvp_phase5_topic_clusters_v1": "950a6f9fbc99faeb4d25ecd0a413088aecc929ba1ff31b3879e9877ceaabe35e",
+    "wiki_mvp_phase6_dimension_briefs_v1": "02159eee8e1640d99fe230a71c6f11b84101e3cc8475cdcfc47a39a7e2d8f0c9",
+    "wiki_stats_v1": "02f3a41f10b00e376870b9d329dde030cf4dffde4736a9a9f2b3286a609ef208",
+    "wiki_timeline_v1": "b43a7715511a5a2a040e540d39aea97918645d970e16dc10fd0e95b97660d836"
+  }
+}
