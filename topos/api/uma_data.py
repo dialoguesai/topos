@@ -253,8 +253,12 @@ async def get_uma_messages(
     )
     items = _get_messages_from_db(conn, effective_dataset_id, limited, offset, allowed_tables=allowed_tables)
     try:
+        # UMA data proxy = the grantee HTTP lane; filter unconditionally.
+        from ..features.lifecycle.blackhole_guard import BlackholeGuard, CallerClass
+
         items, uma_contact_sidecar = apply_message_contact_pipeline(
             items,
+            blackhole_guard=BlackholeGuard(conn, caller_class=CallerClass.GRANTEE),
             conn=conn,
             dataset_id=effective_dataset_id,
             allowed_scopes=allowed_scopes,

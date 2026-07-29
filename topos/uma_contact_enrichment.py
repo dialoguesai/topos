@@ -741,6 +741,21 @@ def load_identifier_fallback_labels(
     return out
 
 
+def _apply_blackhole_to_message_rows(rows: List[Dict[str, Any]], guard: Any) -> List[Dict[str, Any]]:
+    """Drop messages that mention a black-holed entity.
+
+    Applied on every exit from the pipeline, including the early one: a caller
+    with no dataset_id still gets rows back, and those rows still carry names.
+    """
+    if guard is None:
+        return rows
+    return guard.filter_canonical_rows(
+        rows,
+        record_id_keys=("record_id", "message_id", "id"),
+        text_keys=("content", "content_disclosure", "text", "body"),
+    )
+
+
 def apply_message_contact_pipeline(
     items: List[Dict[str, Any]],
     *,
@@ -749,6 +764,7 @@ def apply_message_contact_pipeline(
     allowed_scopes: List[str],
     manifest: Optional[FilterManifest],
     filters: Optional[Dict[str, Any]],
+    blackhole_guard: Any,
 ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
     """
     Apply message_contact_participation, owner sharing_policy row exclusion, grant block/allow lists,
@@ -756,9 +772,13 @@ def apply_message_contact_pipeline(
 
     Returns ``(rows, sidecar)``. ``sidecar["message_owner"]`` describes the dataset owner so clients
     can label owner-authored rows (see per-row ``sender_is_owner`` and ``is_from_self``).
+
+    ``blackhole_guard`` is required rather than defaulted: this is the messages
+    read path, and a protected-entity filter that a call site can forget is one
+    that will be forgotten. Pass an owner guard for an owner self-read.
     """
     if not items or not conn or not dataset_id:
-        return items, {}
+        return _apply_blackhole_to_message_rows(items, blackhole_guard), {}
 
     scope_set = {str(s).strip() for s in (allowed_scopes or []) if s}
     can_resolve = "contacts:resolve" in scope_set
@@ -1029,4 +1049,4 @@ def apply_message_contact_pipeline(
         }
     }
 
-    return out_rows, sidecar
+    return _apply_blackhole_to_message_rows(out_rows, blackhole_guard), sidecar

@@ -621,6 +621,8 @@ async def handle_get_messages(message: Dict[str, Any]) -> Optional[Dict[str, Any
                 owner_allowed_scopes = ["messages:read", "contacts:resolve"]
             try:
                 pre_len = len(messages)
+                from ...features.lifecycle.blackhole_guard import guard_from_message
+
                 after_contact, uma_contact_sidecar = apply_message_contact_pipeline(
                     messages,
                     conn=db_conn,
@@ -628,6 +630,7 @@ async def handle_get_messages(message: Dict[str, Any]) -> Optional[Dict[str, Any
                     allowed_scopes=owner_allowed_scopes,
                     manifest=filter_manifest,
                     filters=filters_for_pipeline,
+                    blackhole_guard=guard_from_message(db_conn, message),
                 )
                 manifest_for_generic = strip_contact_runtime_filters(filter_manifest)
                 transform_diag: Dict[str, Any] = {}
