@@ -752,6 +752,54 @@ def _blackhole_logger():
     return logging.getLogger("topos.core.handlers.signal_features")
 
 
+@handles("blackhole_check_text")
+async def handle_blackhole_check_text(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Does *this text* mention a protected entity, and what may process it?
+
+    The per-turn counterpart to `blackhole_status`. Home chat assembles its
+    prompt client-side, so the control plane cannot answer this itself — but it
+    can ask the node, which holds the names. That keeps the constraint on the
+    turns that actually warrant it instead of on every turn the user ever sends.
+
+    Returns whether the text is protected and which providers may handle it —
+    never which entity matched. The answer is enough to route on and useless as
+    a lookup.
+
+    Errors report protected with the strictest provider set: a node that cannot
+    check must not be read as "this text is fine".
+    """
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    text = str(payload.get("text") or "")
+    try:
+        from ...features.lifecycle.blackhole_llm import evaluate
+
+        verdict = evaluate(hub.get_db_connection(), {"text": text}, provider="")
+        return {
+            "id": req_id,
+            "status": "ok",
+            "payload": {
+                "protected": bool(verdict.tainted),
+                "allowed_providers": sorted(verdict.allowed_providers),
+            },
+        }
+    except Exception as exc:  # noqa: BLE001
+        _blackhole_logger().warning("blackhole_check_text failed, reporting protected: %s", exc)
+        from ...features.lifecycle.blackhole import TIER_PROVIDERS
+
+        return {
+            "id": req_id,
+            "status": "ok",
+            "payload": {
+                "protected": True,
+                "allowed_providers": sorted(TIER_PROVIDERS["local_only"]),
+                "degraded": True,
+            },
+        }
+
+
 @handles("blackhole_status")
 async def handle_blackhole_status(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Whether this topos protects anything — a boolean, never a name.

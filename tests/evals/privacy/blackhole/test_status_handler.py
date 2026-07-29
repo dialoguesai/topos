@@ -96,3 +96,68 @@ def test_unreadable_store_reports_protected(monkeypatch):
 def test_missing_id_is_ignored(conn):
     """Consistent with every other handler: no id, no reply."""
     assert asyncio.run(handle_blackhole_status({"type": "blackhole_status"})) is None
+
+
+# ------------------------------------------------- per-turn text check
+
+
+def _check(text: str):
+    from topos.core.handlers.signal_features import handle_blackhole_check_text
+
+    return asyncio.run(
+        handle_blackhole_check_text(
+            {"id": "r1", "type": "blackhole_check_text", "payload": {"text": text}}
+        )
+    )["payload"]
+
+
+def test_unrelated_text_is_unconstrained(conn):
+    """Protecting one entity must not constrain every prompt."""
+    BlackholeStore(conn).blackhole_entity(entity_ref="ent-bh")
+
+    result = _check("summarise my week at work")
+
+    assert result["protected"] is False
+    assert result["allowed_providers"] == []
+
+
+def test_text_naming_a_protected_entity_is_constrained(conn):
+    BlackholeStore(conn).blackhole_entity(entity_ref="ent-bh")
+
+    result = _check(f"what did {SECRET} say yesterday?")
+
+    assert result["protected"] is True
+    assert "openai" not in result["allowed_providers"]
+    assert "redpill" in result["allowed_providers"]
+
+
+def test_local_only_tier_is_reflected_per_turn(conn):
+    BlackholeStore(conn).blackhole_entity(entity_ref="ent-bh", processing_tier="local_only")
+
+    result = _check(f"about {SECRET}")
+
+    assert set(result["allowed_providers"]) == {"huggingface", "ollama"}
+
+
+def test_check_reply_names_no_entity(conn):
+    """Same rule as the status handler: route on it, never look anything up."""
+    BlackholeStore(conn).blackhole_entity(entity_ref="ent-bh")
+
+    blob = str(_check(f"about {SECRET}")).lower()
+
+    assert SECRET.lower() not in blob
+    assert "ent-bh" not in blob
+
+
+def test_unreadable_store_constrains_the_turn(monkeypatch):
+    class SickConn:
+        def execute(self, *_a, **_k):
+            raise sqlite3.OperationalError("database disk image is malformed")
+
+    monkeypatch.setattr(hub, "get_db_connection", lambda: SickConn())
+
+    result = _check("anything")
+
+    assert result["protected"] is True
+    assert result["degraded"] is True
+    assert set(result["allowed_providers"]) == {"huggingface", "ollama"}
