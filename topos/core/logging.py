@@ -4,6 +4,8 @@ import os
 import re
 import sys
 from datetime import datetime
+from logging.handlers import RotatingFileHandler
+from pathlib import Path
 from time import time
 
 from ..config.settings import settings
@@ -57,10 +59,43 @@ def align_uvicorn_loggers() -> None:
         uvicorn_logger.propagate = True
 
 
+LOG_FILE_MAX_BYTES = 10 * 1024 * 1024
+LOG_FILE_BACKUP_COUNT = 3
+
+
+def default_node_log_path() -> Path:
+    return Path.home() / ".topos" / "logs" / "node.log"
+
+
+def get_log_file_path() -> Path | None:
+    """Log-file destination (TOPOS_LOG_FILE), or None when logging to stdout."""
+    raw = (os.getenv("TOPOS_LOG_FILE") or "").strip()
+    if not raw:
+        return None
+    return Path(raw).expanduser()
+
+
+def _build_file_handler(path: Path, log_format: str) -> logging.Handler:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    handler = RotatingFileHandler(
+        path,
+        maxBytes=LOG_FILE_MAX_BYTES,
+        backupCount=LOG_FILE_BACKUP_COUNT,
+        encoding="utf-8",
+    )
+    if log_format == "json":
+        handler.setFormatter(JsonFormatter())
+    else:
+        # No ANSI colors in files — plain timestamped lines.
+        handler.setFormatter(
+            logging.Formatter("%(asctime)s | %(levelname)s | %(name)s: %(message)s")
+        )
+    return handler
+
+
 def configure_logging() -> None:
-    """Configure logging to stdout based on environment/log settings."""
+    """Configure logging to stdout, or to a rotating file when TOPOS_LOG_FILE is set."""
     suppress_ml_progress_bars()
-    handler = logging.StreamHandler(sys.stdout)
 
     def resolve_format() -> str:
         if settings.log_format:
@@ -70,12 +105,17 @@ def configure_logging() -> None:
         return "color"
 
     log_format = resolve_format()
-    if log_format == "json":
-        handler.setFormatter(JsonFormatter())
-    elif log_format == "color" and sys.stdout.isatty():
-        handler.setFormatter(ColorFormatter())
+    log_file = get_log_file_path()
+    if log_file is not None:
+        handler = _build_file_handler(log_file, log_format)
     else:
-        handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
+        handler = logging.StreamHandler(sys.stdout)
+        if log_format == "json":
+            handler.setFormatter(JsonFormatter())
+        elif log_format == "color" and sys.stdout.isatty():
+            handler.setFormatter(ColorFormatter())
+        else:
+            handler.setFormatter(logging.Formatter("%(levelname)s: %(message)s"))
 
     root = logging.getLogger()
     # Set log level from settings

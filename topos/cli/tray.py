@@ -34,7 +34,6 @@ STATUS_COLORS = {
 }
 
 HEALTH_POLL_SECONDS = 5.0
-UPDATE_POLL_SECONDS = 3600.0
 TOPOS_APP_URL = "https://topos.dialogues.ai"
 
 
@@ -69,6 +68,18 @@ def should_enable_tray(cli_flag: bool | None = None) -> bool:
     return gui_plausible and tray_available()
 
 
+def open_log_viewer(log_path: Path) -> None:
+    """Open the log file in the platform's live-ish viewer (Console.app on macOS)."""
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_path.touch(exist_ok=True)  # Console.app errors on a missing file
+    if sys.platform == "darwin":
+        subprocess.Popen(["open", "-a", "Console", str(log_path)])
+    elif sys.platform == "win32":
+        os.startfile(str(log_path))  # noqa: S606 — user-initiated menu action
+    else:
+        subprocess.Popen(["xdg-open", str(log_path)])
+
+
 def _glyph_filename() -> str:
     """Pick the glyph that contrasts with the menu bar / taskbar."""
     if sys.platform == "darwin":
@@ -101,7 +112,14 @@ def create_status_image(status: str, glyph: str | None = None):
 
 
 class ToposTray:
-    """Owns the pystray icon plus the health/update poller threads."""
+    """Owns the pystray icon plus the status poller thread.
+
+    The tray talks to the node exclusively over the localhost shell contract
+    (``/healthcheck`` + ``/v1/shell/*``) — it is the reference implementation
+    of the same contract the Swift/Windows shells will consume. That is also
+    what makes ``attached`` mode work: supervising a node this process did
+    not start is no different from supervising its own.
+    """
 
     def __init__(
         self,
@@ -111,16 +129,23 @@ class ToposTray:
         version: str,
         package_name: str,
         on_quit,
+        log_path: Path | None = None,
+        attached: bool = False,
     ) -> None:
         poll_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
-        self.health_url = f"http://{poll_host}:{port}/healthcheck"
-        self.docs_url = f"http://{poll_host}:{port}/docs"
+        base = f"http://{poll_host}:{port}"
+        self.health_url = f"{base}/healthcheck"
+        self.docs_url = f"{base}/docs"
+        self.status_url = f"{base}/v1/shell/status"
+        self.update_url = f"{base}/v1/shell/update"
         self.version = version
         self.package_name = package_name
         self._on_quit = on_quit
+        self.log_path = log_path
+        self.attached = attached
         self._glyph = _glyph_filename()
         self.status = "starting"
-        self.update_info = None  # runtime_update.UpdateInfo when one is available
+        self.update = {"available": False, "latest": None, "applying": False, "last_result": None}
         self._icon = None
 
     # -- status ------------------------------------------------------------
@@ -130,24 +155,32 @@ class ToposTray:
 
         while self._icon is not None and self._icon.visible:
             try:
-                healthy = httpx.get(self.health_url, timeout=3.0).status_code == 200
+                # 401/403 = health auth enabled; the node answered, so it's up.
+                healthy = httpx.get(self.health_url, timeout=3.0).status_code in (200, 401, 403)
             except Exception:
                 healthy = False
+            if healthy:
+                self._fetch_shell_status()
             self._set_status("healthy" if healthy else "down")
             time.sleep(HEALTH_POLL_SECONDS)
 
-    def _poll_updates(self) -> None:
-        from topos.runtime_update import check_for_update, should_skip_update_check
+    def _fetch_shell_status(self) -> None:
+        import httpx
 
-        if should_skip_update_check(cli_skip=False):
+        try:
+            payload = httpx.get(self.status_url, timeout=3.0).json()
+        except Exception:
             return
-        while self._icon is not None and self._icon.visible:
-            try:
-                self.update_info = check_for_update(self.package_name)
-            except Exception:
-                self.update_info = None
+        update = payload.get("update") or {}
+        changed = update != self.update
+        self.update = update
+        if payload.get("version"):
+            self.version = payload["version"]
+        if self.log_path is None and payload.get("log_file"):
+            self.log_path = Path(payload["log_file"])
+            changed = True
+        if changed:
             self._refresh()
-            time.sleep(UPDATE_POLL_SECONDS)
 
     def _set_status(self, status: str) -> None:
         if self.status == status:
@@ -160,7 +193,7 @@ class ToposTray:
         if icon is None:
             return
         display = self.status
-        if display == "healthy" and self.update_info is not None:
+        if display == "healthy" and self.update.get("available"):
             display = "update"
         try:
             icon.icon = create_status_image(display, glyph=self._glyph)
@@ -188,13 +221,18 @@ class ToposTray:
             pystray.MenuItem("Open Topos", self._open_app),
             pystray.MenuItem("Open API Docs", self._open_docs),
         ]
-        if self.update_info is not None:
+        if self.log_path is not None:
+            items.append(pystray.MenuItem("Show Logs", self._show_logs))
+        if self.update.get("applying"):
+            items.append(pystray.MenuItem("Installing update…", None, enabled=False))
+        elif self.update.get("last_result") == "success":
+            items.append(pystray.MenuItem("Update installed — restart to finish", None, enabled=False))
+        elif self.update.get("available"):
             items.append(
-                pystray.MenuItem(
-                    f"Update to v{self.update_info.latest}", self._apply_update
-                )
+                pystray.MenuItem(f"Update to v{self.update.get('latest')}", self._apply_update)
             )
-        items.extend([pystray.Menu.SEPARATOR, pystray.MenuItem("Quit Topos Node", self._quit)])
+        quit_label = "Close Tray (node keeps running)" if self.attached else "Quit Topos Node"
+        items.extend([pystray.Menu.SEPARATOR, pystray.MenuItem(quit_label, self._quit)])
         return pystray.Menu(*items)
 
     def _open_docs(self, icon=None, item=None) -> None:
@@ -203,17 +241,24 @@ class ToposTray:
     def _open_app(self, icon=None, item=None) -> None:
         webbrowser.open_new(TOPOS_APP_URL)
 
+    def _show_logs(self, icon=None, item=None) -> None:
+        if self.log_path is not None:
+            open_log_viewer(self.log_path)
+
     def _apply_update(self, icon=None, item=None) -> None:
         def worker() -> None:
-            from topos.runtime_update import apply_package_update
+            import httpx
 
-            ok = apply_package_update(self.package_name)
-            if ok:
-                self.update_info = None
-                self._notify("Update installed. Restart topos-node to use it.")
-            else:
-                self._notify(f"Update failed. Run `uv tool upgrade {self.package_name}`.")
-            self._refresh()
+            try:
+                result = httpx.post(self.update_url, timeout=10.0).json()
+            except Exception:
+                self._notify(f"Update failed to start. Run `uv tool upgrade {self.package_name}`.")
+                return
+            if result.get("started"):
+                self._notify("Installing update… restart Topos Node when it finishes.")
+            elif result.get("reason") == "already_applying":
+                self._notify("An update is already installing.")
+            self._fetch_shell_status()
 
         threading.Thread(target=worker, daemon=True).start()
 
@@ -246,7 +291,6 @@ class ToposTray:
         def on_setup(icon) -> None:
             icon.visible = True
             threading.Thread(target=self._poll_health, daemon=True).start()
-            threading.Thread(target=self._poll_updates, daemon=True).start()
 
         try:
             icon.run(setup=on_setup)
@@ -255,7 +299,36 @@ class ToposTray:
             self._on_quit()
 
 
-def serve_with_tray(app, *, host: str, port: int, log_config, version: str, package_name: str) -> None:
+def attach_tray(
+    *,
+    host: str,
+    port: int,
+    version: str,
+    package_name: str,
+    log_path: Path | None = None,
+) -> None:
+    """Supervise an already-running node: tray only, no server; Quit closes just the tray."""
+    ToposTray(
+        host=host,
+        port=port,
+        version=version,
+        package_name=package_name,
+        on_quit=lambda: None,
+        log_path=log_path,
+        attached=True,
+    ).run()
+
+
+def serve_with_tray(
+    app,
+    *,
+    host: str,
+    port: int,
+    log_config,
+    version: str,
+    package_name: str,
+    log_path: Path | None = None,
+) -> None:
     """Serve uvicorn on a daemon thread with the tray on the main thread.
 
     Falls back to plain foreground serving if the tray cannot start (e.g. no
@@ -278,6 +351,7 @@ def serve_with_tray(app, *, host: str, port: int, log_config, version: str, pack
         version=version,
         package_name=package_name,
         on_quit=stop_server,
+        log_path=log_path,
     )
     try:
         tray.run()

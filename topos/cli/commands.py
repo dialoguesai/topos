@@ -132,6 +132,29 @@ def _emit_startup_banner(host: str, port: int, package_name: str = DEFAULT_PACKA
     os.environ["TOPOS_STARTUP_BANNER_EMITTED"] = "1"
 
 
+def _probe_running_node(host: str, port: int) -> dict | None:
+    """Return the running node's shell status (or minimal version dict) if one
+    is already serving this port; None when the port is free or not a topos node."""
+    import httpx
+
+    probe_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
+    base = f"http://{probe_host}:{port}"
+    try:
+        response = httpx.get(f"{base}/v1/shell/status", timeout=2.0)
+        if response.status_code == 200 and response.json().get("name") == "topos-node":
+            return response.json()
+    except Exception:
+        return None
+    try:
+        # Older node without the shell endpoint.
+        response = httpx.get(f"{base}/version", timeout=2.0)
+        if response.status_code == 200 and "version" in response.json():
+            return {"version": response.json()["version"]}
+    except Exception:
+        return None
+    return None
+
+
 def _maybe_offer_self_update(
     skip_update_check: bool,
     package_name: str = DEFAULT_PACKAGE_NAME,
@@ -200,7 +223,13 @@ def _maybe_offer_self_update(
     default=None,
     help="Show a menu-bar/system-tray status icon (default: auto-detect GUI).",
 )
-def main(db_path, topos_key, set_topos_key, discover, port, host, skip_update_check, tray) -> None:
+@click.option(
+    "--app",
+    "app_mode",
+    is_flag=True,
+    help="App mode: tray icon only, logs to ~/.topos/logs/node.log instead of the terminal.",
+)
+def main(db_path, topos_key, set_topos_key, discover, port, host, skip_update_check, tray, app_mode) -> None:
     """Topos Control Plane API entry point."""
     if set_topos_key:
         env_path = _save_topos_key(set_topos_key)
@@ -227,7 +256,44 @@ def main(db_path, topos_key, set_topos_key, discover, port, host, skip_update_ch
     _load_env_file(USER_ENV_PATH)
     _load_env_file(LEGACY_ENV_PATH)
 
+    if app_mode and tray is None:
+        tray = True
+
+    # Attach, don't double-start: two nodes on one ~/.topos DB is a corruption
+    # risk, and for launchers "make sure Topos is running" should be idempotent.
+    running = _probe_running_node(host, port)
+    if running is not None:
+        running_version = running.get("version", "unknown")
+        from topos.cli import tray as tray_module
+
+        if tray_module.should_enable_tray(cli_flag=tray):
+            click.echo(
+                f"Topos Node v{running_version} is already running on port {port} — "
+                "attaching tray to it (closing this tray leaves the node running)."
+            )
+            log_file = running.get("log_file")
+            tray_module.attach_tray(
+                host=host,
+                port=port,
+                version=running_version,
+                package_name=DEFAULT_PACKAGE_NAME,
+                log_path=Path(log_file) if log_file else None,
+            )
+            return
+        raise click.ClickException(
+            f"Topos Node v{running_version} is already running on port {port}. "
+            "Use --port to start a second instance."
+        )
+
     _resolve_topos_key(topos_key)
+
+    if app_mode:
+        # Must happen before `topos.app` is imported — configure_logging() runs
+        # at import time and reads TOPOS_LOG_FILE to pick file vs stdout.
+        from topos.core.logging import default_node_log_path
+
+        os.environ.setdefault("TOPOS_LOG_FILE", str(default_node_log_path()))
+        click.echo(f"App mode: logs → {os.environ['TOPOS_LOG_FILE']}")
 
     from topos.app import app
     from topos.core.logging import get_uvicorn_log_config
@@ -245,6 +311,8 @@ def main(db_path, topos_key, set_topos_key, discover, port, host, skip_update_ch
     from topos.cli import tray as tray_module
 
     if tray_module.should_enable_tray(cli_flag=tray):
+        from topos.core.logging import get_log_file_path
+
         tray_module.serve_with_tray(
             app,
             host=host,
@@ -252,6 +320,7 @@ def main(db_path, topos_key, set_topos_key, discover, port, host, skip_update_ch
             log_config=get_uvicorn_log_config(),
             version=_get_runtime_version(),
             package_name=DEFAULT_PACKAGE_NAME,
+            log_path=get_log_file_path(),
         )
     else:
         uvicorn.run(app, host=host, port=port, log_config=get_uvicorn_log_config())
