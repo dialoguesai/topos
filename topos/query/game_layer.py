@@ -113,20 +113,22 @@ class DefaultGameLayer:
                     }
                 )
             elif "availability" in scope_id:
-                windows: List[str] = []
-                for score in context_packet.get("scores") or []:
-                    if not isinstance(score, dict):
-                        continue
-                    text = str(score.get("summary_text") or score.get("topic") or "").strip()
-                    if text:
-                        windows.append(text)
-                yes_no = bool(windows or context_packet.get("scores") or context_packet.get("semantic_hits"))
+                # Minimum disclosure: ONE band, one confidence — the requester
+                # learns whether the window works (yes / conditional / no),
+                # never the schedule bundle. Band computed store-side
+                # (retrieval._availability_band); absent band ⇒ honest unknown.
+                band_info = context_packet.get("availability_band") or {}
+                band = str(band_info.get("band") or "unknown")
                 payload.update(
                     {
-                        "answer_type": "yes_no",
-                        "answer": "yes" if yes_no else "no",
-                        "confidence": 0.6 if windows else 0.0,
-                        "windows": windows[:6],
+                        "answer_type": "band",
+                        "band": band,
+                        "answer": {
+                            "overlap_found": "yes",
+                            "negotiable_overlap": "conditional",
+                            "no_overlap": "no",
+                        }.get(band, "unknown"),
+                        "confidence": float(band_info.get("confidence") or 0.0),
                     }
                 )
             elif _is_list_query(q) or (

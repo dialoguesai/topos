@@ -196,16 +196,24 @@ def test_fit_target_date_respected() -> None:
     assert conflict["public_band"] == "light_load"
 
 
-def test_time_summary_items_for_availability_scope() -> None:
+def test_time_summary_items_are_intent_proportional() -> None:
     conn = _conn()
     _seed_calendar(conn)
     recompute_time_aggregates(SignalObjectStore(conn))
-    items = _load_time_summary_items(conn)
-    sources = {item["retrieval_source"] for item in items}
-    assert "availability_summary" in sources
-    assert "flex_windows" in sources
-    assert "meeting_load_band" in sources
-    blob = " ".join(item["summary_text"] for item in items)
+
+    # A flexibility question serves the flex layer, not the whole bundle.
+    flex_items = _load_time_summary_items(conn, "is any of their busy time movable?")
+    assert {i["retrieval_source"] for i in flex_items} == {"flex_windows"}
+
+    # A load question serves the load band only.
+    load_items = _load_time_summary_items(conn, "how heavy is their meeting load?")
+    assert {i["retrieval_source"] for i in load_items} == {"meeting_load_band"}
+
+    # No aspect keywords ⇒ the compact digest alone — never the full bundle.
+    default_items = _load_time_summary_items(conn, "tell me about tuesday")
+    assert {i["retrieval_source"] for i in default_items} <= {"availability_summary"}
+
+    blob = " ".join(i["summary_text"] for i in flex_items + load_items + default_items)
     # Bands cross the boundary; raw scores and titles never do.
     assert "0.9" not in blob
     assert "cal-soft" not in blob
