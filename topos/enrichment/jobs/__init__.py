@@ -13,6 +13,7 @@ from .canonical.sentiment_job import SentimentJob
 from .canonical.statistics_job import StatisticsJob
 from .canonical.timeline_job import TimelineJob
 from .canonical.attention_triage_job import AttentionTriageJob
+from .canonical.complexity_snapshot_job import ComplexitySnapshotJob
 from .canonical.topic_clusters_job import TopicClusterJob
 from .canonical.topics_job import TopicsJob
 from .canonical.url_classification_enrichment_job import UrlClassificationEnrichmentJob
@@ -50,6 +51,7 @@ SIGNAL_DERIVATION_JOBS = [
     FactExtractionJob(),
     TimelineJob(),
     AttentionTriageJob(),
+    ComplexitySnapshotJob(),
 ]
 
 SIGNAL_JOB_REGISTRY = {job.get_job_name(): job for job in SIGNAL_DERIVATION_JOBS}
