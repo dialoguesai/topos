@@ -19,7 +19,7 @@ from .focus import HEADLINE_WINDOW, compute_focus_readings
 from .graph_metrics import compute_structure_clarity
 from .influence import compute_influence_threads
 from .projection import EvidenceCache
-from .store import load_latest_summary, upsert_snapshot
+from .store import load_latest_summary, load_snapshots, upsert_snapshot
 from .topic_merge import build_supertopics
 from .topics import compute_topic_quality
 from .volatility import compute_shift_timeline, summarize_shift
@@ -159,6 +159,17 @@ def compute_complexity_snapshot(
         )
         # Append-only personal-baseline history so future runs can compare
         # against genuinely historical readings, not just recomputed windows.
+        # Carries all four reading scores so trajectories (not just focus)
+        # accrue day by day (PLAN_TIMELINE_UNIFIED.md G3).
+        readings = summary.get("readings") or {}
+
+        def _reading_score(key: str) -> float:
+            block = readings.get(key) or {}
+            try:
+                return float(block.get("score") or 0.0)
+            except (TypeError, ValueError):
+                return 0.0
+
         upsert_snapshot(
             conn,
             snapshot_id=f"focus_baseline_{datetime.now(timezone.utc).strftime('%Y%m%d')}",
@@ -167,10 +178,36 @@ def compute_complexity_snapshot(
                 "score": current_focus["score"],
                 "effective_topics": current_focus["effective_topics"],
                 "window_days": window_days,
+                "clarity": _reading_score("structural_clarity"),
+                "breadth": _reading_score("information_breadth"),
+                "pipeline": _reading_score("pipeline_confidence"),
             },
             commit=False,
         )
     return summary
+
+
+def load_readings_history(conn: sqlite3.Connection, limit: int = 180) -> List[Dict[str, Any]]:
+    """Day-keyed reading scores from the append-only daily snapshots."""
+    out: List[Dict[str, Any]] = []
+    for row in load_snapshots(conn, metric_set="focus_baseline", limit=limit):
+        snapshot_id = str(row.get("snapshot_id") or "")
+        suffix = snapshot_id.rsplit("_", 1)[-1]
+        if len(suffix) != 8 or not suffix.isdigit():
+            continue
+        metrics = row.get("metrics") if isinstance(row.get("metrics"), dict) else {}
+        out.append(
+            {
+                "day": f"{suffix[0:4]}-{suffix[4:6]}-{suffix[6:8]}",
+                "focus": metrics.get("score"),
+                "effective_topics": metrics.get("effective_topics"),
+                "clarity": metrics.get("clarity"),
+                "breadth": metrics.get("breadth"),
+                "pipeline": metrics.get("pipeline"),
+            }
+        )
+    out.sort(key=lambda item: str(item["day"]))
+    return out
 
 
 def get_complexity_summary(
@@ -193,10 +230,13 @@ def get_complexity_summary(
             # A cached summary computed with different parameters must not be
             # served as if it answered this request.
             if all(cached_params.get(k) == v for k, v in requested.items()):
+                cached["readings_history"] = load_readings_history(conn)
                 return cached
-    return compute_complexity_snapshot(
+    summary = compute_complexity_snapshot(
         conn, weeks=weeks, window_days=window_days, half_life_days=half_life_days
     )
+    summary["readings_history"] = load_readings_history(conn)
+    return summary
 
 
 def get_shift_timeline(

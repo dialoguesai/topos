@@ -92,6 +92,31 @@ async def handle_complexity_timeline(message: Dict[str, Any]) -> Optional[Dict[s
         return {"id": req_id, "status": "error", "error": str(exc), "code": 503}
 
 
+@handles("complexity_topics_daily")
+async def handle_complexity_topics_daily(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = _payload(message)
+    try:
+        import topos.core.handlers as hub
+
+        from ...features.complexity.topics_daily import topics_daily
+
+        conn = hub.get_db_connection()
+        if conn is None:
+            return {"id": req_id, "status": "error", "error": "Database not available", "code": 503}
+        result = await asyncio.to_thread(
+            topics_daily,
+            conn,
+            days=_clamped_int(payload, "days", 90, 1, 365),
+            top=_clamped_int(payload, "top", 10, 1, 24),
+        )
+        return {"id": req_id, "status": "ok", "payload": result}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc), "code": 503}
+
+
 @handles("complexity_influence")
 async def handle_complexity_influence(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")

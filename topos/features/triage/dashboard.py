@@ -61,11 +61,18 @@ def attention_dashboard_data(conn: sqlite3.Connection, *, days: int = 14,
         for v in verdicts:
             v["title"] = (titles.get(v["record_id"]) or v["table"] or "")[:90]
 
-    intents = [
-        json.loads(pj) for (pj,) in conn.execute(
-            "SELECT payload_json FROM signal_objects WHERE object_type='declared_intent' "
-            "AND valid_to IS NULL")
-    ]
+    intents = []
+    for row in conn.execute(
+        "SELECT payload_json, valid_from FROM signal_objects WHERE object_type='declared_intent' "
+        "AND valid_to IS NULL"
+    ):
+        try:
+            intent = json.loads(row[0])
+        except (TypeError, ValueError):
+            continue
+        # Pin instant lives on the row — surface it so pin days are plottable.
+        intent.setdefault("pinned_at", row[1])
+        intents.append(intent)
     return {
         "days": days,
         "verdicts": verdicts,
