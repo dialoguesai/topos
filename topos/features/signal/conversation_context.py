@@ -70,7 +70,7 @@ def _parse_label(answer: Any) -> Optional[str]:
 def _classify_with_model(model: str, excerpts: List[str]) -> Optional[str]:
     from ...config.settings import settings  # noqa: F401 — engine client env
     from ...engine.client import get_engine_client_or_local
-    from ...engine.tasks import ModelRequest, ProcessingTask
+    from ...engine.tasks import ModelRequest, ProcessingTask, RequestedBy
 
     task = ProcessingTask(
         id="conversation_context",
@@ -83,6 +83,8 @@ def _classify_with_model(model: str, excerpts: List[str]) -> Optional[str]:
             "context": "\n---\n".join(excerpts),
         },
         model_request=ModelRequest(provider="ollama", model=model),
+        # Piggybacked on dimension_summary / enrichment — not an interactive UI ask.
+        requested_by=RequestedBy(origin="ingestion_pipeline"),
     )
     try:
         result = get_engine_client_or_local(None).run(task)

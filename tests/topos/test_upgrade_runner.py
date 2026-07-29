@@ -139,3 +139,65 @@ def test_kill_switch(conn, monkeypatch):
     result = run_pending_upgrades(conn, shipped="1.2.0", executors=_recording_executors(log))
     assert log == [] and result.get("disabled") is True
     assert read_baseline(conn) is None  # nothing stamped; retries when re-enabled
+
+
+def test_enrichment_reprocess_keeps_signal_lane_off(conn, monkeypatch):
+    """Upgrade steps must not fan into embeddings/cluster LLM/dimension briefs."""
+    from topos.upgrades import runner as upgrade_runner
+
+    conn.execute(
+        "INSERT INTO timeline (event_at, record_id, source_id) "
+        "VALUES (datetime('now'), 'r1', 'gmail_messages')"
+    )
+    conn.commit()
+
+    calls = []
+
+    async def fake_core(**kwargs):
+        calls.append(kwargs)
+        return {"status": "ok"}
+
+    monkeypatch.setattr("topos.api.enrichment._process_enrichment_core", fake_core)
+    step = {
+        "id": "backfill-attention-triage",
+        "kind": "enrichment_reprocess",
+        "params": {"job_names": ["attention_triage"], "force_reprocess": True},
+        "_runner_step_index": 0,
+        "_runner_steps_total": 1,
+    }
+    detail = upgrade_runner._exec_enrichment_reprocess(step, conn)
+    assert calls, "enrichment core should have been invoked"
+    assert calls[0]["include_signal"] is False
+    assert calls[0]["job_names"] == ["attention_triage"]
+    assert detail["include_signal"] is False
+
+
+def test_start_background_waits_for_ready_event(conn, monkeypatch):
+    import threading
+    import time
+
+    from topos.upgrades.runner import start_background
+
+    _seed_data(conn)
+    ran = threading.Event()
+
+    def fake_run(conn_, shipped=None, executors=None):
+        ran.set()
+        return {"steps_run": 0, "steps_failed": 0}
+
+    monkeypatch.setattr("topos.upgrades.runner.run_pending_upgrades", fake_run)
+    monkeypatch.setattr("topos.upgrades.runner.plan_upgrade", lambda _c: {
+        "shipped": "1.3.0",
+        "baseline": "1.2.7",
+        "fresh_install": False,
+        "steps": [{"id": "backfill-attention-triage"}],
+    })
+
+    ready = threading.Event()
+    thread = start_background(conn, ready_event=ready, ui_grace_s=0.05, ready_timeout_s=2.0)
+    assert thread is not None
+    time.sleep(0.1)
+    assert not ran.is_set(), "upgrade must not start before UI ready-event"
+    ready.set()
+    assert ran.wait(timeout=2.0), "upgrade should start after ready-event + grace"
+    thread.join(timeout=2.0)

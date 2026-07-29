@@ -5,6 +5,7 @@ import importlib.util
 import logging
 import os
 import sys
+import threading
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
@@ -171,19 +172,9 @@ async def startup_event() -> None:
                 logger.info("Stage 9 migrations applied at startup: %d renames", len(result["applied"]))
     except Exception as e:
         logger.debug("Stage 9 migrations at startup (non-fatal): %s", e)
-    # Upgrade runner: compare the stamped derivation baseline against the
-    # shipped version and re-derive what this release invalidated (manifest in
-    # topos/upgrades). Heavy steps run in a daemon thread; the node serves
-    # stale derived data meanwhile. Fresh installs stamp-and-skip.
-    try:
-        from .core.state import get_db_connection as _get_conn_for_upgrades
-        from .upgrades.runner import start_background as _start_upgrades
-
-        _upgrade_conn = state.db_conn if state.db_conn is not None else _get_conn_for_upgrades()
-        if _upgrade_conn is not None:
-            _start_upgrades(_upgrade_conn)
-    except Exception as e:
-        logger.warning("Upgrade runner at startup failed (non-fatal): %s", e)
+    # Upgrade runner is armed later — after control-plane / local readiness —
+    # so the React UI can fetch bootstrap data before enrichment reprocess
+    # contends for SQLite / Ollama / MPS. See _arm_upgrade_runner below.
     try:
         from .core.state import get_db_connection as _get_conn_for_pipeline
         from .pipeline.job_runner import recover_pipeline_jobs, start_pipeline_worker
@@ -294,6 +285,41 @@ async def startup_event() -> None:
         state.engine_presence_task = asyncio.create_task(_presence_loop())
     start_runtime_update_monitor()
     start_update_hotkey_listener()
+
+    # Upgrade runner: plan/stamp cheaply, but defer heavy re-derivation until the
+    # UI can bootstrap (CP connected + grace). Fresh installs stamp-and-skip.
+    try:
+        from .core.state import get_db_connection as _get_conn_for_upgrades
+        from .upgrades.runner import (
+            ready_timeout_seconds as _upgrade_ready_timeout,
+            start_background as _start_upgrades,
+            ui_grace_seconds as _upgrade_ui_grace,
+        )
+
+        _upgrade_conn = state.db_conn if state.db_conn is not None else _get_conn_for_upgrades()
+        if _upgrade_conn is not None:
+            _upgrade_ready = threading.Event()
+            _start_upgrades(
+                _upgrade_conn,
+                ready_event=_upgrade_ready,
+                ui_grace_s=_upgrade_ui_grace(),
+                ready_timeout_s=_upgrade_ready_timeout(),
+            )
+
+            async def _signal_upgrade_ui_ready() -> None:
+                try:
+                    if state.control_plane_client is not None:
+                        await state.control_plane_client.wait_until_connected(
+                            timeout_s=_upgrade_ready_timeout()
+                        )
+                except Exception as ready_exc:  # noqa: BLE001
+                    logger.debug("Upgrade UI-ready wait ended: %s", ready_exc)
+                finally:
+                    _upgrade_ready.set()
+
+            asyncio.create_task(_signal_upgrade_ui_ready())
+    except Exception as e:
+        logger.warning("Upgrade runner at startup failed (non-fatal): %s", e)
 
     if settings.enable_sync and settings.topos_user_id:
         state.sync_client = SyncClient(

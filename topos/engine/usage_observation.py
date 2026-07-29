@@ -56,7 +56,12 @@ def resolve_llm_usage_purpose(
         return origin_key
     source_key = str(source_id or "").strip().lower()
     # Signal derivation helpers reuse query_inference plumbing but are ingestion work.
-    if source_key in {"cluster_labeler", "cluster_labels", "topic_clusters"}:
+    if source_key in {
+        "cluster_labeler",
+        "cluster_labels",
+        "topic_clusters",
+        "conversation_context",
+    }:
         return PURPOSE_INGESTION_PIPELINE
     subtype_key = str(subtype or "").strip().lower()
     type_key = str(task_type or "").strip().lower()

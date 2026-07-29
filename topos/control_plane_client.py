@@ -49,6 +49,10 @@ _FAST_INBOUND_MESSAGE_TYPES = frozenset(
         "signal_entity_graph",
         "signal_list_entities",
         "signal_get_entity",
+        # Shell bootstrap / upgrade banner — must not sit behind inbound saturation
+        # while a version upgrade reprocess is walking sources.
+        "get_runtime_bootstrap",
+        "get_upgrade_status",
     }
 )
 

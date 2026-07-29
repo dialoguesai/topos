@@ -18,12 +18,13 @@
           "params": {
             "job_names": ["entities"],
             "force_reprocess": true,
+            "include_signal": false,
             "per_source": true,
             "source_filter": "sources with canonical message/journal/activity records"
           },
-          "progress": "GET /v1/enrichment/progress/{job_id}",
+          "progress": "TUI progress bar on the node + GET /v1/upgrade/status",
           "idempotent": "record_mention is INSERT OR IGNORE; re-running converges",
-          "estimated_duration": "~10–20 min per 1.5k records (CPU-bound NER); node stays usable, serves stale graph meanwhile",
+          "estimated_duration": "~10–20 min per 1.5k records (CPU-bound NER); node stays usable, serves stale graph meanwhile; signal/LLM lane stays off (graph rebuild is the next step)",
           "order": 1
         },
         {
@@ -76,12 +77,13 @@
           "params": {
             "job_names": ["attention_triage"],
             "force_reprocess": true,
+            "include_signal": false,
             "per_source": true,
             "source_filter": "sources with canonical message/journal/activity records"
           },
-          "progress": "GET /v1/enrichment/progress/{job_id}",
+          "progress": "TUI progress bar on the node + GET /v1/upgrade/status",
           "idempotent": "verdicts are (day, record_id) upserts; signal objects no-op when unchanged",
-          "estimated_duration": "seconds–minutes depending on day span; CPU-bound instruments, no LLM",
+          "estimated_duration": "seconds–minutes depending on day span; CPU-bound instruments, no LLM (signal lane off)",
           "order": 1
         }
       ],
