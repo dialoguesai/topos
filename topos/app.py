@@ -48,6 +48,7 @@ from .api import (
     home_chat as home_chat_routes,
     privacy_disclose as privacy_disclose_routes,
     signal as signal_routes,
+    shell as shell_routes,
     tool_index as tool_index_routes,
     upgrades as upgrades_routes,
 )
@@ -100,6 +101,7 @@ app.add_middleware(
 )
 
 app.include_router(health_routes.router)
+app.include_router(shell_routes.router)
 app.include_router(upgrades_routes.router)
 app.include_router(local_mcp_routes.router)
 app.include_router(llm_routes.router)
