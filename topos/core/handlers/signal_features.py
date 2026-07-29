@@ -746,6 +746,50 @@ async def handle_signal_entity_merge(message: Dict[str, Any]) -> Optional[Dict[s
         return {"id": req_id, "status": "error", "error": str(exc)}
 
 
+def _blackhole_logger():
+    import logging
+
+    return logging.getLogger("topos.core.handlers.signal_features")
+
+
+@handles("blackhole_status")
+async def handle_blackhole_status(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Whether this topos protects anything — a boolean, never a name.
+
+    The control plane needs this to decide model routing for home chat, where
+    it receives an already-assembled prompt and so has no stamped structure to
+    inspect. Deliberately the least informative answer that supports the
+    decision: the control plane learns that protection exists, never who is
+    protected, so this handler cannot become a disclosure channel of its own.
+
+    Errors report `has_blackholes: true`. A caller that cannot read the flags
+    must route as though protection existed rather than assume it did not.
+    """
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    try:
+        from ...features.lifecycle.blackhole import BlackholeStore
+
+        store = BlackholeStore(hub.get_db_connection())
+        records = store.list()
+        return {
+            "id": req_id,
+            "status": "ok",
+            "payload": {
+                "has_blackholes": bool(records),
+                "pending_rebuild": store.has_pending_rebuild(),
+            },
+        }
+    except Exception as exc:  # noqa: BLE001
+        _blackhole_logger().warning("blackhole_status failed, reporting protected: %s", exc)
+        return {
+            "id": req_id,
+            "status": "ok",
+            "payload": {"has_blackholes": True, "pending_rebuild": True, "degraded": True},
+        }
+
+
 @handles("signal_exclude_entity")
 async def handle_signal_exclude_entity(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
