@@ -428,11 +428,13 @@ async def handle_signal_list_entities(message: Dict[str, Any]) -> Optional[Dict[
     payload = message.get("payload") or {}
     try:
         from ...features.entities.reads import list_entities
+        from ...features.lifecycle.blackhole_guard import guard_from_message
 
         conn = hub.get_db_connection()
         result = await run_db_read(
             list_entities,
             conn,
+            guard=guard_from_message(conn, message),
             q=payload.get("q"),
             entity_type=payload.get("entity_type"),
             contacts_only=bool(payload.get("contacts_only")),
@@ -455,9 +457,14 @@ async def handle_signal_get_entity(message: Dict[str, Any]) -> Optional[Dict[str
         return {"id": req_id, "status": "error", "error": "entity_id required", "code": 400}
     try:
         from ...features.entities.reads import get_entity_detail
+        from ...features.lifecycle.blackhole_guard import guard_from_message
 
         conn = hub.get_db_connection()
-        detail = await run_db_read(get_entity_detail, conn, entity_id)
+        detail = await run_db_read(
+            get_entity_detail, conn, entity_id, guard=guard_from_message(conn, message)
+        )
+        # Same 404 a never-stored id gets — the protected case must not be
+        # distinguishable by status code or message (D5).
         if detail is None:
             return {"id": req_id, "status": "error", "error": "entity not found", "code": 404}
         return {"id": req_id, "status": "ok", "payload": detail}
@@ -473,11 +480,13 @@ async def handle_signal_entity_graph(message: Dict[str, Any]) -> Optional[Dict[s
     payload = message.get("payload") or {}
     try:
         from ...features.entities.reads import entity_graph
+        from ...features.lifecycle.blackhole_guard import guard_from_message
 
         conn = hub.get_db_connection()
         result = await run_db_read(
             entity_graph,
             conn,
+            guard=guard_from_message(conn, message),
             limit_nodes=min(int(payload.get("limit_nodes") or 100), 5000),
             limit_edges=min(int(payload.get("limit_edges") or 300), 20000),
             min_weight=float(payload.get("min_weight") or 0.0),

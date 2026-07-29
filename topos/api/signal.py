@@ -217,9 +217,12 @@ async def list_entities(
 ):
     """Resolved entity registry (entity spine), sorted by mention count."""
     from ..features.entities.reads import list_entities as _list
+    from ..features.lifecycle.blackhole_guard import owner_ui_guard
 
+    conn = _entities_conn()
     return _list(
-        _entities_conn(),
+        conn,
+        guard=owner_ui_guard(conn),
         q=q,
         entity_type=entity_type,
         contacts_only=contacts_only,
@@ -253,11 +256,13 @@ async def get_entity_graph(
     import asyncio
 
     from ..features.entities.reads import entity_graph
+    from ..features.lifecycle.blackhole_guard import owner_ui_guard
 
     conn = _entities_conn()
     return await asyncio.to_thread(
         entity_graph,
         conn,
+        guard=owner_ui_guard(conn),
         limit_nodes=limit_nodes,
         limit_edges=limit_edges,
         min_weight=min_weight,
@@ -347,8 +352,10 @@ async def get_entity(
 ):
     """Entity detail: aliases, connections, recent mentions, dossier (owner view)."""
     from ..features.entities.reads import get_entity_detail
+    from ..features.lifecycle.blackhole_guard import owner_ui_guard
 
-    detail = get_entity_detail(_entities_conn(), entity_id)
+    conn = _entities_conn()
+    detail = get_entity_detail(conn, entity_id, guard=owner_ui_guard(conn))
     if detail is None:
         raise HTTPException(status_code=404, detail=f"entity not found: {entity_id}")
     return detail
@@ -456,6 +463,66 @@ async def exclude_entity_from_intelligence(
         return ExclusionStore(_entities_conn()).exclude_entity(entity_ref=entity_id)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+
+class EntityBlackholeBody(BaseModel):
+    processing_tier: str = Field(default="secure", max_length=20)
+    note: Optional[str] = Field(default=None, max_length=500)
+
+
+@router.post("/entities/{entity_id}/blackhole")
+async def blackhole_entity(
+    entity_id: str,
+    body: EntityBlackholeBody = EntityBlackholeBody(),
+    _api_key: str = Depends(require_api_key),
+):
+    """Owner black hole: this entity is mine alone.
+
+    Nothing is deleted — the owner keeps full visibility. Every other caller
+    (third-party MCP agents, routines, grantees) is denied, and content
+    mentioning it may only be processed by the tier's secure model set.
+    Raises a rebuild-needed notification before the rebuild runs (D4).
+    """
+    from ..features.lifecycle.blackhole import BlackholeStore
+
+    try:
+        return BlackholeStore(_entities_conn()).blackhole_entity(
+            entity_ref=entity_id,
+            processing_tier=body.processing_tier,
+            note=body.note,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@router.delete("/entities/{entity_id}/blackhole")
+async def unblackhole_entity(
+    entity_id: str,
+    _api_key: str = Depends(require_api_key),
+):
+    """Lift a black hole. Existing grants are not restored — normal permissions resume."""
+    from ..features.lifecycle.blackhole import BlackholeStore
+
+    return BlackholeStore(_entities_conn()).unblackhole_entity(entity_ref=entity_id)
+
+
+@router.get("/blackholes")
+async def list_blackholes(_api_key: str = Depends(require_api_key)):
+    """The owner's off-limits list (mirrors the exclusions list in the drawer)."""
+    from ..features.lifecycle.blackhole import BlackholeStore
+
+    store = BlackholeStore(_entities_conn())
+    return {"blackholes": store.list(), "notifications": store.notifications(state="open")}
+
+
+@router.post("/blackholes/notifications/{notification_id}/dismiss")
+async def dismiss_blackhole_notification(
+    notification_id: str,
+    _api_key: str = Depends(require_api_key),
+):
+    from ..features.lifecycle.blackhole import BlackholeStore
+
+    return {"dismissed": BlackholeStore(_entities_conn()).dismiss_notification(notification_id)}
 
 
 @router.get("/facts")
@@ -669,3 +736,81 @@ async def attention_dashboard(
     if conn is None:
         raise HTTPException(status_code=503, detail="database unavailable")
     return attention_dashboard_data(conn, days=days, include_titles=include_titles)
+
+
+# --------------------------------------------------------------- complexity
+
+@router.get("/complexity/summary")
+async def complexity_summary(
+    _api_key: str = Depends(require_api_key),
+    recompute: bool = Query(False),
+    weeks: int = Query(12, ge=1, le=104),
+    window_days: int = Query(30, ge=1, le=3650),
+    half_life_days: Optional[float] = Query(None, ge=0.1, le=3650.0),
+):
+    """Data spine for the /data/complexity tab (PLAN_COMPLEXITY_DATA_PAGE.md).
+
+    Snapshot computation is CPU-bound (~1s cold on a live-size DB), so it runs
+    in a worker thread; warm calls serve the complexity_snapshots cache.
+    """
+    import asyncio
+
+    from ..core.state import get_db_connection
+    from ..features.complexity.engine import get_complexity_summary
+
+    conn = get_db_connection()
+    if conn is None:
+        raise HTTPException(status_code=503, detail="database unavailable")
+    return await asyncio.to_thread(
+        get_complexity_summary,
+        conn,
+        recompute=recompute,
+        weeks=weeks,
+        window_days=window_days,
+        half_life_days=half_life_days,
+    )
+
+
+@router.get("/complexity/timeline")
+async def complexity_timeline(
+    _api_key: str = Depends(require_api_key),
+    recompute: bool = Query(False),
+    weeks: int = Query(12, ge=1, le=104),
+):
+    import asyncio
+
+    from ..core.state import get_db_connection
+    from ..features.complexity.engine import get_shift_timeline
+
+    conn = get_db_connection()
+    if conn is None:
+        raise HTTPException(status_code=503, detail="database unavailable")
+    return await asyncio.to_thread(get_shift_timeline, conn, recompute=recompute, weeks=weeks)
+
+
+@router.get("/complexity/influence")
+async def complexity_influence(
+    _api_key: str = Depends(require_api_key),
+    recompute: bool = Query(False),
+    weeks: int = Query(12, ge=1, le=104),
+    top_k: int = Query(5, ge=1, le=50),
+    window_days: int = Query(90, ge=1, le=3650),
+    target: Optional[str] = Query(None, max_length=500),
+):
+    import asyncio
+
+    from ..core.state import get_db_connection
+    from ..features.complexity.engine import get_influence_threads
+
+    conn = get_db_connection()
+    if conn is None:
+        raise HTTPException(status_code=503, detail="database unavailable")
+    return await asyncio.to_thread(
+        get_influence_threads,
+        conn,
+        recompute=recompute,
+        weeks=weeks,
+        top_k=top_k,
+        window_days=window_days,
+        target=target,
+    )

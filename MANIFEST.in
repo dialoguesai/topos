@@ -3,3 +3,5 @@
 # topos/query/scope_registry.json, whose absence denies every scoped query.
 recursive-include topos *.json
 recursive-include shared *.json
+# Tray icon glyphs (topos/cli/assets) — without them the tray cannot render.
+recursive-include topos *.png

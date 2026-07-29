@@ -1,4 +1,11 @@
-"""Owner-facing read queries over the entity spine (People tab backend)."""
+"""Read queries over the entity spine (People tab backend).
+
+Every entry point takes a required `guard`. It is keyword-only and has no
+default on purpose: a black-hole filter that can be forgotten is a black-hole
+filter that will be forgotten, and the failure mode of forgetting is a silent
+leak. With no default, a call site that has not decided who is asking raises
+`TypeError` instead of quietly serving protected rows.
+"""
 
 from __future__ import annotations
 
@@ -6,6 +13,7 @@ import json
 import sqlite3
 from typing import Any, Dict, List, Optional
 
+from ..lifecycle.blackhole_guard import BlackholeGuard
 from .dossier import load_dossier_for_entity
 from .edges import graph_snapshot, top_edges
 
@@ -40,6 +48,7 @@ def _row_to_entity(row: Any) -> Dict[str, Any]:
 def list_entities(
     conn: sqlite3.Connection,
     *,
+    guard: BlackholeGuard,
     q: Optional[str] = None,
     entity_type: Optional[str] = None,
     contacts_only: bool = False,
@@ -59,6 +68,14 @@ def list_entities(
         params.append(str(entity_type).strip().lower())
     if contacts_only:
         where.append("contact_id IS NOT NULL")
+
+    # Spliced into every query below — rows, total and the type histogram alike,
+    # so a protected entity cannot be inferred from a count that fails to match
+    # the rows it accompanies.
+    bh_clause, bh_params = guard.sql_exclusion("entity_id")
+    if bh_clause:
+        where.append(bh_clause)
+        params.extend(bh_params)
     where_sql = " AND ".join(where)
 
     total = conn.execute(
@@ -74,8 +91,10 @@ def list_entities(
         (*params, limit, offset),
     ).fetchall()
 
+    type_where = "is_self = 0" + (f" AND {bh_clause}" if bh_clause else "")
     type_rows = conn.execute(
-        "SELECT entity_type, COUNT(*) FROM entities WHERE is_self = 0 GROUP BY entity_type"
+        f"SELECT entity_type, COUNT(*) FROM entities WHERE {type_where} GROUP BY entity_type",
+        bh_params,
     ).fetchall()
 
     return {
@@ -91,9 +110,17 @@ def get_entity_detail(
     conn: sqlite3.Connection,
     entity_id: str,
     *,
+    guard: BlackholeGuard,
     mention_limit: int = 20,
     edge_limit: int = 12,
 ) -> Optional[Dict[str, Any]]:
+    # A protected entity takes the same exit as one that was never stored. The
+    # caller turns `None` into its ordinary not-found response, so "hidden from
+    # you" and "never existed" are the same answer (D5) — no separate branch to
+    # get wrong, and no forbidden-shaped error that only real entities can
+    # produce.
+    if guard.blocks_entity_id(entity_id):
+        return None
     row = conn.execute(
         f"SELECT {_ENTITY_COLUMNS} FROM entities WHERE entity_id = ?",
         (str(entity_id),),
@@ -122,14 +149,36 @@ def get_entity_detail(
         }
         for m in mentions
     ]
-    entity["connections"] = top_edges(conn, str(entity_id), limit=edge_limit)
-    entity["dossier"] = load_dossier_for_entity(conn, str(entity_id))
+    # A visible entity may be connected to a protected one: the neighbour list
+    # and the dossier prose both name it, so both are filtered even though the
+    # subject of this read is perfectly visible.
+    connections = top_edges(conn, str(entity_id), limit=edge_limit)
+    entity["connections"] = guard.filter_rows(
+        connections,
+        id_keys=("entity_id", "src_entity_id", "dst_entity_id", "other_entity_id"),
+        name_keys=("canonical_name", "name"),
+    )
+    dossier = load_dossier_for_entity(conn, str(entity_id))
+    if isinstance(dossier, dict) and not guard.sees_everything:
+        dossier = dict(dossier)
+        if dossier.get("summary_text") is not None:
+            dossier["summary_text"] = guard.withhold_if_mentions(dossier["summary_text"])
+        # The neighbour list is a second, separate copy of the name — stripping
+        # the prose and leaving this in place would have leaked it verbatim.
+        if isinstance(dossier.get("top_connections"), list):
+            dossier["top_connections"] = guard.filter_rows(
+                dossier["top_connections"],
+                id_keys=("entity_id",),
+                name_keys=("canonical_name", "name", "label"),
+            )
+    entity["dossier"] = dossier
     return entity
 
 
 def entity_graph(
     conn: sqlite3.Connection,
     *,
+    guard: BlackholeGuard,
     limit_nodes: int = 100,
     limit_edges: int = 300,
     min_weight: float = 0.0,
@@ -138,7 +187,7 @@ def entity_graph(
     selection: str = "weight",
     offset: int = 0,
 ) -> Dict[str, Any]:
-    return graph_snapshot(
+    snapshot = graph_snapshot(
         conn,
         limit_nodes=max(1, min(int(limit_nodes), 5000)),
         limit_edges=max(1, min(int(limit_edges), 20000)),
@@ -148,3 +197,22 @@ def entity_graph(
         selection=str(selection or "weight"),
         offset=max(0, int(offset or 0)),
     )
+    if guard.sees_everything or not isinstance(snapshot, dict):
+        return snapshot
+
+    # Both ends of every edge, not just the node list: an edge pointing at a
+    # removed node still says "someone is here", and its weight and type say
+    # roughly who. Counts in `meta` are restated to match what is returned.
+    nodes = guard.filter_rows(
+        snapshot.get("nodes") or [],
+        id_keys=("node_id",),
+        name_keys=("label",),
+    )
+    edges = guard.filter_rows(
+        snapshot.get("edges") or [],
+        id_keys=("src_node_id", "dst_node_id"),
+    )
+    meta = dict(snapshot.get("meta") or {})
+    meta["returned_nodes"] = len(nodes)
+    meta["returned_edges"] = len(edges)
+    return {**snapshot, "nodes": nodes, "edges": edges, "meta": meta}
