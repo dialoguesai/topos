@@ -315,6 +315,85 @@ async def handle_delete_facts_llm_config(message: Dict[str, Any]) -> Optional[Di
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}
 
+@handles("get_conversation_context")
+async def handle_get_conversation_context(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    from ...api.conversation_context import read_conversation_context
+
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    payload = message.get("payload") or {}
+    conversation_id = str(payload.get("conversation_id") or "").strip()
+    dataset_id = str(payload.get("dataset_id") or "").strip()
+    if not conversation_id or not dataset_id:
+        return {"id": req_id, "status": "error", "error": "conversation_id and dataset_id required"}
+    try:
+        data = read_conversation_context(conn, conversation_id, dataset_id)
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+    if data is None:
+        return {"id": req_id, "status": "error", "error": "Unknown conversation"}
+    return {"id": req_id, "status": "ok", "payload": data}
+
+@handles("put_conversation_context")
+async def handle_put_conversation_context(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    from ...api.conversation_context import write_conversation_context
+
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    payload = message.get("payload") or {}
+    conversation_id = str(payload.get("conversation_id") or "").strip()
+    dataset_id = str(payload.get("dataset_id") or "").strip()
+    if not conversation_id or not dataset_id:
+        return {"id": req_id, "status": "error", "error": "conversation_id and dataset_id required"}
+    try:
+        data = write_conversation_context(conn, conversation_id, dataset_id, payload.get("context_tag"))
+    except (ValueError, LookupError) as exc:
+        return {"id": req_id, "status": "error", "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+    return {"id": req_id, "status": "ok", "payload": data}
+
+@handles("get_conversation_context_llm_config")
+async def handle_get_conversation_context_llm_config(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    from ...config.conversation_context_llm import effective_config_for_api
+
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    try:
+        data = effective_config_for_api(settings, conn)
+        return {"id": req_id, "status": "ok", "payload": {"status": "ok", **data}}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+@handles("put_conversation_context_llm_config")
+async def handle_put_conversation_context_llm_config(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    from ...config.conversation_context_llm import (
+        ENGINE_CONFIG_KEY_CONVERSATION_CONTEXT_LLM_MODEL,
+        effective_config_for_api,
+        normalize_put_model,
+    )
+
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    payload = message.get("payload") or {}
+    try:
+        model = normalize_put_model(payload)
+        set_engine_config_value(conn, ENGINE_CONFIG_KEY_CONVERSATION_CONTEXT_LLM_MODEL, model)
+        data = effective_config_for_api(settings, conn)
+        return {"id": req_id, "status": "ok", "payload": {"status": "ok", **data}}
+    except ValueError as exc:
+        return {"id": req_id, "status": "error", "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
 @handles("get_signal_extraction_config")
 async def handle_get_signal_extraction_config(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")

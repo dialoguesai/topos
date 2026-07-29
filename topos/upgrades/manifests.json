@@ -56,6 +56,42 @@
         "Extraction default model moved to the quality tier (qwen3.5:9b-mlx) — affects FUTURE extractions only; small-RAM devices surface tier=stress in model recommendations and should downsize via settings.",
         "Fleet skew: 1.1.0 nodes lack the signal_entity_graph_search handler — CPs must treat it as optional until the fleet is on 1.2.0."
       ]
+    },
+    {
+      "version": "1.3.0",
+      "summary": "Attention triage (daily 2x2 verdicts, badges/ranks, dashboard), negotiable time-signal availability (flex/rhythm/commitments), conversation context tags (work/personal), claim verification / fact verdicts, facts-LLM think gating.",
+      "steps": [
+        {
+          "id": "attention-triage-schema",
+          "kind": "none",
+          "title": "attention_triage_v1/v2 + conversation_context_v1 schema",
+          "why": "Handled by ledger-guarded / always-run schema migrations at first boot; listed so release notes and the fleet dashboard show the additive tables/columns (triage_verdicts, conversations.context_tag).",
+          "order": 0
+        },
+        {
+          "id": "backfill-attention-triage",
+          "kind": "enrichment_reprocess",
+          "title": "Backfill attention triage for existing sources",
+          "why": "1.3.0 adds the attention_triage enrichment job and triage_verdicts ledger. Pre-1.3.0 nodes have no verdicts or interest-profile/attention-summary objects; reprocessing fills the new derived layer from existing canonical rows without touching raw/canonical.",
+          "params": {
+            "job_names": ["attention_triage"],
+            "force_reprocess": true,
+            "per_source": true,
+            "source_filter": "sources with canonical message/journal/activity records"
+          },
+          "progress": "GET /v1/enrichment/progress/{job_id}",
+          "idempotent": "verdicts are (day, record_id) upserts; signal objects no-op when unchanged",
+          "estimated_duration": "seconds–minutes depending on day span; CPU-bound instruments, no LLM",
+          "order": 1
+        }
+      ],
+      "notes": [
+        "No re-embedding and no canonical re-ingest: raw/canonical rows and signal_embeddings remain valid.",
+        "Time-signal flex/rhythm/commitment objects fill on the next scope materialization (dimension_summary / structured signal path); no dedicated rematerialize endpoint is wired into the upgrade runner yet.",
+        "Conversation context_tag columns are additive empty; owner API + local-LLM auto-label fill going forward (owner stamps always win).",
+        "Fact-extraction think suppression and claim-verify handlers affect FUTURE LLM passes only — existing signal_facts are not invalidated.",
+        "New WS handlers (signal_attention_dashboard, signal_set_worn_badge, verify_claim, conversation_context*, facts_llm_config*, truth_*, put_fact_verdict): CPs must treat as optional until the fleet is on 1.3.0; bump engine-compat when the app depends on them."
+      ]
     }
   ]
 }

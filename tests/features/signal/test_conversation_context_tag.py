@@ -258,3 +258,97 @@ def test_context_llm_config_api(monkeypatch) -> None:
         json={"model": "bad name with spaces"},
         headers=headers,
     ).status_code == 400
+
+
+def _ws_call(msg_type: str, payload: dict) -> dict:
+    import asyncio
+
+    from topos.core.handlers import HANDLERS
+
+    return asyncio.run(HANDLERS[msg_type]({"id": "req-1", "payload": payload}))
+
+
+def test_context_ws_handlers_roundtrip(monkeypatch) -> None:
+    """WS mirror of the HTTP context endpoints (CP proxy path)."""
+    conn = _conn()
+    _seed_conversation(conn, "conv-ws", None)
+    conn.commit()
+
+    import topos.core.handlers as hub
+
+    monkeypatch.setattr(hub, "get_db_connection", lambda: conn)
+
+    put = _ws_call(
+        "put_conversation_context",
+        {"conversation_id": "conv-ws", "dataset_id": "ds-1", "context_tag": "work"},
+    )
+    assert put["status"] == "ok", put
+    assert put["payload"]["context_tag"] == "work"
+    assert put["payload"]["context_tag_source"] == "owner"
+
+    got = _ws_call(
+        "get_conversation_context", {"conversation_id": "conv-ws", "dataset_id": "ds-1"}
+    )
+    assert got["status"] == "ok"
+    assert got["payload"]["context_tag"] == "work"
+
+    cleared = _ws_call(
+        "put_conversation_context",
+        {"conversation_id": "conv-ws", "dataset_id": "ds-1", "context_tag": None},
+    )
+    assert cleared["payload"]["context_tag"] is None
+    assert cleared["payload"]["context_tag_source"] == "owner"
+
+    bad = _ws_call(
+        "put_conversation_context",
+        {"conversation_id": "conv-ws", "dataset_id": "ds-1", "context_tag": "secret"},
+    )
+    assert bad["status"] == "error" and "context_tag" in bad["error"]
+
+    unknown = _ws_call(
+        "get_conversation_context", {"conversation_id": "nope", "dataset_id": "ds-1"}
+    )
+    assert unknown["status"] == "error" and unknown["error"] == "Unknown conversation"
+
+    missing_args = _ws_call("get_conversation_context", {"conversation_id": "conv-ws"})
+    assert missing_args["status"] == "error" and "dataset_id" in missing_args["error"]
+
+
+def test_context_llm_config_ws_handlers(monkeypatch) -> None:
+    """WS mirror of the classifier model-config endpoints (CP proxy path)."""
+    conn = _conn()
+    conn.execute("CREATE TABLE IF NOT EXISTS engine_config (key TEXT PRIMARY KEY, value TEXT)")
+    conn.commit()
+
+    import topos.core.handlers as hub
+    import topos.core.handlers.config as handlers_config
+
+    monkeypatch.setattr(hub, "get_db_connection", lambda: conn)
+    monkeypatch.setattr(
+        handlers_config,
+        "set_engine_config_value",
+        lambda c, key, value: (
+            c.execute(
+                "INSERT INTO engine_config (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
+                (key, value),
+            ),
+            c.commit(),
+        ),
+    )
+
+    put = _ws_call("put_conversation_context_llm_config", {"model": "qwen3.5:9b-mlx"})
+    assert put["status"] == "ok", put
+    assert put["payload"]["override"] == "qwen3.5:9b-mlx"
+    assert put["payload"]["source"] == "device_override"
+
+    got = _ws_call("get_conversation_context_llm_config", {})
+    assert got["status"] == "ok"
+    assert got["payload"]["model"] == "qwen3.5:9b-mlx"
+
+    cleared = _ws_call("put_conversation_context_llm_config", {"model": ""})
+    assert cleared["status"] == "ok"
+    assert cleared["payload"]["override"] is None
+
+    bad = _ws_call("put_conversation_context_llm_config", {"model": "bad name with spaces"})
+    assert bad["status"] == "error" and "model" in bad["error"]
