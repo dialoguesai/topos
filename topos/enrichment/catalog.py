@@ -93,6 +93,7 @@ _OUTPUT_TABLES: Dict[str, Tuple[str, ...]] = {
     "facts": ("signal_objects",),
     "timeline": ("timeline",),
     "attention_triage": ("triage_verdicts", "signal_objects"),
+    "complexity_snapshot": ("complexity_snapshots",),
 }
 
 # Jobs whose enrich() is a pure function over records (no direct table writes),
@@ -256,6 +257,18 @@ _STATIC_METADATA: Dict[str, Dict[str, Any]] = {
         ),
         "cost_tier": COST_LOW,
         "value_props": ("signal_density", "precision_retrieval"),
+    },
+    "complexity_snapshot": {
+        "title": "Structure readings",
+        "description": (
+            "Keeps the structure dashboard warm: recomputes the complexity "
+            "summary snapshot (focus, structural clarity, information breadth, "
+            "pipeline confidence, influence threads) after canonical batches, "
+            "throttled to every few hours. Pure information-theoretic and "
+            "graph math — no LLM calls."
+        ),
+        "cost_tier": COST_LOW,
+        "value_props": ("signal_density",),
     },
     "attachments": {
         "title": "Attachment indexing",
