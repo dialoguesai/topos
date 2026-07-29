@@ -94,32 +94,6 @@
       "implementation_status": "live"
     },
     {
-      "scope_id": "complexity:read",
-      "description": "Structure readings: focus concentration vs personal baseline, structural clarity of the entity graph, information breadth, pipeline confidence, weekly shift spikes, and ranked influence threads between entities and topics.",
-      "example_questions": [
-        "How focused have I been this month?",
-        "Is my attention more scattered than usual?",
-        "What is influencing my work on this project?",
-        "How has the structure of my activity shifted recently?"
-      ],
-      "primary_dimensions": [
-        "Interests"
-      ],
-      "raw_tables": [],
-      "signal_objects": [
-        "complexity_summary",
-        "complexity_influence"
-      ],
-      "summary_objects": [
-        "complexity_summary",
-        "complexity_influence"
-      ],
-      "inference_objects": [],
-      "default_mode_ceiling": "summary",
-      "default_source_ids": [],
-      "implementation_status": "live"
-    },
-    {
       "scope_id": "availability:read",
       "description": "Free/busy availability windows derived from the schedule \u2014 never event titles or message content.",
       "example_questions": [
@@ -154,14 +128,40 @@
       "required_health": {
         "time.depth_score": 0.3
       },
-      "fit_facets_exposed": [
-        "timing_feasibility",
-        "commitment_conflict"
-      ],
       "default_source_ids": [
         "demo_calendar_file",
         "calendar_stub"
+      ],
+      "fit_facets_exposed": [
+        "timing_feasibility",
+        "commitment_conflict"
       ]
+    },
+    {
+      "scope_id": "complexity:read",
+      "description": "Structure readings: focus concentration vs personal baseline, structural clarity of the entity graph, information breadth, pipeline confidence, weekly shift spikes, and ranked influence threads between entities and topics.",
+      "example_questions": [
+        "How focused have I been this month?",
+        "Is my attention more scattered than usual?",
+        "What is influencing my work on this project?",
+        "How has the structure of my activity shifted recently?"
+      ],
+      "primary_dimensions": [
+        "Interests"
+      ],
+      "raw_tables": [],
+      "signal_objects": [
+        "complexity_summary",
+        "complexity_influence"
+      ],
+      "summary_objects": [
+        "complexity_summary",
+        "complexity_influence"
+      ],
+      "inference_objects": [],
+      "default_mode_ceiling": "summary",
+      "default_source_ids": [],
+      "implementation_status": "live"
     },
     {
       "scope_id": "contacts:resolve",
@@ -309,13 +309,13 @@
       ],
       "default_mode_ceiling": "inference",
       "implementation_status": "live",
-      "fit_facets_exposed": [
-        "relationship_warmth",
-        "domain_overlap"
-      ],
       "default_source_ids": [
         "demo_contacts_file",
         "demo_messenger_file"
+      ],
+      "fit_facets_exposed": [
+        "relationship_warmth",
+        "domain_overlap"
       ]
     },
     {
