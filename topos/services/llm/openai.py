@@ -24,6 +24,29 @@ def _normalize_provider(raw: Any) -> str:
     return "openai"
 
 
+def _ollama_generate_timeout() -> httpx.Timeout:
+    return httpx.Timeout(
+        float(getattr(settings, "engine_ollama_generate_timeout_sec", 300.0) or 300.0),
+        connect=10.0,
+    )
+
+
+def _resolve_payload_think(payload: Dict[str, Any], *, default: Optional[bool]) -> Optional[bool]:
+    """Honor an explicit payload.think; otherwise use ``default``.
+
+    Non-stream llm_generation (routines / API) defaults to think=False so
+    thinking models (qwen3.5, …) do not burn the whole num_predict budget on
+    chain-of-thought and return an empty ``response``. Streaming chat keeps
+    the model default (``default=None`` → omit the param).
+    """
+    if "think" in payload:
+        raw = payload.get("think")
+        if raw is None:
+            return None
+        return bool(raw)
+    return default
+
+
 async def _ollama_generate(payload: Dict[str, Any]) -> Dict[str, Any]:
     prompt = payload.get("prompt") or ""
     model_raw = payload.get("model")
@@ -34,7 +57,13 @@ async def _ollama_generate(payload: Dict[str, Any]) -> Dict[str, Any]:
     max_tokens = payload.get("max_tokens")
     temperature = payload.get("temperature")
     base = settings.engine_ollama_base_url.rstrip("/")
+    # Routines / non-stream API: suppress CoT so the visible answer is not
+    # starved. Models that reject think=false still get a request without it
+    # (Ollama returns 400); we retry once without the flag below.
+    think = _resolve_payload_think(payload, default=False)
     body: Dict[str, Any] = {"model": model, "prompt": prompt, "stream": False}
+    if think is not None:
+        body["think"] = think
     opts: Dict[str, Any] = {}
     if max_tokens is not None:
         opts["num_predict"] = max_tokens
@@ -42,18 +71,30 @@ async def _ollama_generate(payload: Dict[str, Any]) -> Dict[str, Any]:
         opts["temperature"] = temperature
     if opts:
         body["options"] = opts
-    timeout = httpx.Timeout(settings.sanitization_ollama_timeout_sec, connect=10.0)
+    timeout = _ollama_generate_timeout()
     logger.info(
-        "Ollama generate: model=%r base=%s prompt_chars=%d max_tokens=%s temperature=%s",
+        "Ollama generate: model=%r base=%s prompt_chars=%d max_tokens=%s temperature=%s think=%s",
         model,
         base,
         len(prompt),
         max_tokens,
         temperature,
+        think,
     )
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             r = await client.post(f"{base}/api/generate", json=body)
+            if (
+                r.status_code >= 400
+                and think is False
+                and "disabling thinking" in (r.text or "").lower()
+            ):
+                logger.info(
+                    "Ollama model %s rejects think=false; retrying without think flag",
+                    model,
+                )
+                body.pop("think", None)
+                r = await client.post(f"{base}/api/generate", json=body)
     except httpx.RequestError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -108,7 +149,12 @@ async def _ollama_stream_generate(
         opts["temperature"] = temperature
     if opts:
         body["options"] = opts
-    timeout = httpx.Timeout(settings.sanitization_ollama_timeout_sec, connect=10.0)
+    # Streaming chat: leave thinking at the model default unless the client
+    # opted in/out explicitly. Still use the longer generate timeout.
+    think = _resolve_payload_think(payload, default=None)
+    if think is not None:
+        body["think"] = think
+    timeout = _ollama_generate_timeout()
     output_parts: list[str] = []
     resp_model = model
     prompt_tokens = 0

@@ -140,6 +140,12 @@ class Settings(BaseSettings):
     sanitization_ollama_host: Optional[str] = Field(None, env="SANITIZATION_OLLAMA_HOST")
     sanitization_ollama_default_model: str = Field("llama3.2", env="SANITIZATION_OLLAMA_DEFAULT_MODEL")
     sanitization_ollama_timeout_sec: float = Field(120.0, env="SANITIZATION_OLLAMA_TIMEOUT_SEC")
+    # llm_generation / routine hops — must cover local thinking models. Do NOT
+    # reuse sanitization_ollama_timeout_sec (120s): that cuts digest synthesis
+    # mid-flight and surfaces as "Ollama unreachable".
+    engine_ollama_generate_timeout_sec: float = Field(
+        300.0, env="ENGINE_OLLAMA_GENERATE_TIMEOUT_SEC"
+    )
     ollama_list_timeout_sec: float = Field(10.0, env="OLLAMA_LIST_TIMEOUT_SEC")
     sanitization_ollama_auto_pull: bool = Field(True, env="SANITIZATION_OLLAMA_AUTO_PULL")
     sanitization_ollama_max_input_chars: int = Field(8000, env="SANITIZATION_OLLAMA_MAX_INPUT_CHARS")
