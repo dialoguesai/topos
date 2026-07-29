@@ -89,16 +89,20 @@ def earned_badges(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     import json
     try:
         rows = conn.execute(
-            "SELECT payload_json FROM signal_objects WHERE object_type='badge' "
+            "SELECT payload_json, valid_from FROM signal_objects WHERE object_type='badge' "
             "AND valid_to IS NULL").fetchall()
     except sqlite3.OperationalError:
         return []
     out = []
-    for (pj,) in rows:
+    for row in rows:
         try:
-            out.append(json.loads(pj))
+            badge = json.loads(row[0])
         except (TypeError, ValueError):
             continue
+        # Award instant lives on the row, not in the payload — surface it so
+        # unlock days are plottable (PLAN_TIMELINE_UNIFIED.md G6).
+        badge.setdefault("earned_at", row[1])
+        out.append(badge)
     return sorted(out, key=lambda b: _RANK.get(b.get("badge_id", ""), -1))
 
 

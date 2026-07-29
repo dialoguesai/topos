@@ -733,6 +733,23 @@ async def refresh_dimension_brief(
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
+# --------------------------------------------------------------- timeline rollup
+
+@router.get("/timeline/daily")
+async def timeline_daily(
+    _api_key: str = Depends(require_api_key),
+    days: int = Query(90, ge=1, le=365),
+):
+    """Per-day lane counts + births + episodes (PLAN_TIMELINE_UNIFIED.md E1)."""
+    from ..core.state import get_db_connection
+    from ..features.timeline_rollup import timeline_daily_rollup
+
+    conn = get_db_connection()
+    if conn is None:
+        raise HTTPException(status_code=503, detail="database unavailable")
+    return timeline_daily_rollup(conn, days=days)
+
+
 # --------------------------------------------------------------- attention triage
 
 @router.get("/attention/dashboard")
@@ -799,6 +816,24 @@ async def complexity_timeline(
     if conn is None:
         raise HTTPException(status_code=503, detail="database unavailable")
     return await asyncio.to_thread(get_shift_timeline, conn, recompute=recompute, weeks=weeks)
+
+
+@router.get("/complexity/topics/daily")
+async def complexity_topics_daily(
+    _api_key: str = Depends(require_api_key),
+    days: int = Query(90, ge=1, le=365),
+    top: int = Query(10, ge=1, le=24),
+):
+    """Per-day supertopic shares — the braid's substrate (PLAN_TIMELINE_UNIFIED.md E2)."""
+    import asyncio
+
+    from ..core.state import get_db_connection
+    from ..features.complexity.topics_daily import topics_daily
+
+    conn = get_db_connection()
+    if conn is None:
+        raise HTTPException(status_code=503, detail="database unavailable")
+    return await asyncio.to_thread(topics_daily, conn, days=days, top=top)
 
 
 @router.get("/complexity/influence")

@@ -404,6 +404,23 @@ def graph_snapshot(
                 node_ids.append(node)
     nodes_before_cap = len(node_ids)
     node_ids = node_ids[:lim_n]
+    # Event-time birth per node (earliest mention) so temporal UIs can plot
+    # life history rather than derivation history (PLAN_TIMELINE_UNIFIED.md G7).
+    first_seen: Dict[str, str] = {}
+    if node_ids:
+        try:
+            for chunk_start in range(0, len(node_ids), 400):
+                chunk = node_ids[chunk_start : chunk_start + 400]
+                for fs_row in conn.execute(
+                    "SELECT entity_id, MIN(event_at) FROM entity_mentions "
+                    "WHERE event_at IS NOT NULL AND event_at > '2000-01-01' "
+                    f"AND entity_id IN ({','.join('?' * len(chunk))}) GROUP BY entity_id",
+                    chunk,
+                ):
+                    if fs_row[1]:
+                        first_seen[str(fs_row[0])] = str(fs_row[1])
+        except sqlite3.OperationalError:
+            first_seen = {}
     nodes = []
     for entity_id in node_ids:
         row = conn.execute(
@@ -429,6 +446,7 @@ def graph_snapshot(
                     "node_id": entity_id,
                     "node_type": row[1],
                     "label": row[0],
+                    "first_event_at": first_seen.get(entity_id),
                     "metadata_json": json.dumps(meta),
                 }
             )
