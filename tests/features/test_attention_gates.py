@@ -376,3 +376,96 @@ def test_worn_badge_pin_and_default(conn):
     assert worn_badge(conn)["source"] == "pinned" or worn_badge(conn)["badge_id"] != "constellation"
     set_worn_badge(conn, None)             # clear → back to rank
     assert worn_badge(conn)["source"] == "rank"
+
+
+# ------------------------------------------------- intent horizons (fade / retire)
+
+def test_intent_fades_once_horizon_elapses(conn):
+    """A pin is a bet with a shelf life: a quarter-horizon pin declared 200 days
+    ago has elapsed and stops steering, while a fresh pin stays live. Fading is
+    read-time only — the object itself survives, reported as 'faded'."""
+    from datetime import date, timedelta
+
+    from topos.features.triage.intents import (
+        active_intents,
+        faded_intents,
+        intent_status,
+        pin_intent,
+    )
+
+    stale_day = (date.today() - timedelta(days=200)).isoformat()
+    pin_intent(conn, "old thesis about kayak logistics", horizon="quarter",
+               origin_timeframe=stale_day)
+    pin_intent(conn, "current thesis about obsidian churn", horizon="quarter")
+
+    live = [i["intent_text"] for i in active_intents(conn)]
+    assert live == ["current thesis about obsidian churn"]
+
+    faded = faded_intents(conn)
+    assert [i["intent_text"] for i in faded] == ["old thesis about kayak logistics"]
+    assert faded[0]["status"] == "faded"          # object kept, status reported
+    assert faded[0]["origin_timeframe"] == stale_day
+    # still there, untouched, in the store — fading is never destructive
+    assert conn.execute(
+        "SELECT COUNT(*) FROM signal_objects WHERE object_type='declared_intent' "
+        "AND valid_to IS NULL").fetchone()[0] == 2
+
+    # the horizon, not the age, decides: 30 days out is dead for "weeks",
+    # alive for "months".
+    short = {"intent_text": "x", "horizon": "weeks",
+             "origin_timeframe": (date.today() - timedelta(days=30)).isoformat()}
+    assert intent_status(short) == "faded"
+    assert intent_status({**short, "horizon": "months"}) == "active"
+
+
+def test_retire_intent_drops_it_from_active(conn):
+    """Manual retire still works, and outranks the horizon."""
+    from topos.features.triage.intents import active_intents, pin_intent, retire_intent
+
+    pinned = pin_intent(conn, "ship the newsletter unlock")
+    key = pinned["object_key"]
+    assert [i["intent_text"] for i in active_intents(conn)] == ["ship the newsletter unlock"]
+
+    retire_intent(conn, key)
+    assert active_intents(conn) == []
+    status = json.loads(conn.execute(
+        "SELECT payload_json FROM signal_objects WHERE object_key=? "
+        "AND valid_to IS NULL", (key,)).fetchone()[0])["status"]
+    assert status == "retired"
+    assert retire_intent(conn, "intent:no-such-pin") is None
+
+
+def test_signal_pin_and_retire_intent_handlers(conn, monkeypatch):
+    """WS round-trip: the app can author a pin and retire it, and each call
+    answers with the refreshed live list."""
+    import asyncio
+
+    import topos.core.handlers as hub
+    from topos.core.handlers.signal_features import (
+        handle_signal_pin_intent,
+        handle_signal_retire_intent,
+    )
+    from topos.features.triage.intents import active_intents
+
+    monkeypatch.setattr(hub, "get_db_connection", lambda: conn)
+
+    res = asyncio.run(handle_signal_pin_intent({
+        "id": "p1",
+        "payload": {"intent_text": "find second-brain dropouts",
+                    "horizon": "weeks", "links": ["ent-topos"]},
+    }))
+    assert res["status"] == "ok"
+    intents = res["payload"]["intents"]
+    assert [i["intent_text"] for i in intents] == ["find second-brain dropouts"]
+    assert intents[0]["horizon"] == "weeks"
+    assert intents[0]["links"] == ["ent-topos"]
+    assert intents[0]["origin_timeframe"]  # fade clock starts at pin time
+
+    blank = asyncio.run(handle_signal_pin_intent({"id": "p2", "payload": {"intent_text": "  "}}))
+    assert blank["status"] == "error"
+
+    out = asyncio.run(handle_signal_retire_intent({
+        "id": "r1", "payload": {"object_key": intents[0]["_key"]}}))
+    assert out["status"] == "ok"
+    assert out["payload"]["intents"] == []
+    assert active_intents(conn) == []

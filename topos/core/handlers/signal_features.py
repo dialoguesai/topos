@@ -993,3 +993,43 @@ async def handle_signal_set_worn_badge(message: Dict[str, Any]) -> Optional[Dict
         return {"id": req_id, "status": "ok", "payload": {"worn": worn_badge(conn)}}
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("signal_pin_intent")
+async def handle_signal_pin_intent(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    try:
+        from ...features.triage.intents import active_intents, pin_intent
+
+        intent_text = str(payload.get("intent_text") or "").strip()
+        if not intent_text:
+            raise ValueError("intent_text is required")
+        conn = hub.get_db_connection()
+        pin_intent(
+            conn,
+            intent_text,
+            horizon=payload.get("horizon") or "quarter",
+            links=payload.get("links") or [],
+        )
+        return {"id": req_id, "status": "ok", "payload": {"intents": active_intents(conn)}}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("signal_retire_intent")
+async def handle_signal_retire_intent(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    try:
+        from ...features.triage.intents import active_intents, retire_intent
+
+        conn = hub.get_db_connection()
+        retire_intent(conn, payload.get("object_key") or "")
+        return {"id": req_id, "status": "ok", "payload": {"intents": active_intents(conn)}}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}

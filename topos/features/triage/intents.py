@@ -14,9 +14,16 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+from datetime import date, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..signal.signal_object_store import SignalObjectStore
+
+# A pin is a bet with a shelf life. The horizon is coarse on purpose — owners
+# think in "weeks / months / this quarter", not in target dates — and it is the
+# only thing that decides when the pin stops steering.
+HORIZON_DAYS = {"weeks": 21, "months": 60, "quarter": 90}
+DEFAULT_HORIZON = "quarter"
 
 _STOP = {"the", "a", "an", "and", "or", "of", "to", "in", "for", "on", "with",
          "my", "our", "their", "this", "that", "is", "are", "be", "see",
@@ -28,15 +35,46 @@ def _keywords(text: str) -> List[str]:
     return [w for w in words if w not in _STOP]
 
 
+def _parse_day(value: Any) -> Optional[date]:
+    try:
+        return date.fromisoformat(str(value)[:10])
+    except (TypeError, ValueError):
+        return None
+
+
+def intent_faded(intent: Dict[str, Any], *, today: Optional[date] = None) -> bool:
+    """Has this pin's horizon elapsed since it was declared?
+
+    Read-time only — nothing is ever rewritten. An intent with no parseable
+    origin never fades (we cannot date it, so we keep steering by it).
+    """
+    origin = _parse_day(intent.get("origin_timeframe"))
+    if origin is None:
+        return False
+    days = HORIZON_DAYS.get(str(intent.get("horizon") or DEFAULT_HORIZON),
+                            HORIZON_DAYS[DEFAULT_HORIZON])
+    return origin + timedelta(days=days) < (today or date.today())
+
+
+def intent_status(intent: Dict[str, Any], *, today: Optional[date] = None) -> str:
+    """Reported status: an explicit retire wins, otherwise the horizon decides."""
+    stored = str(intent.get("status") or "active")
+    if stored != "active":
+        return stored
+    return "faded" if intent_faded(intent, today=today) else "active"
+
+
 def pin_intent(conn: sqlite3.Connection, intent_text: str, *,
-               horizon: str = "quarter", links: Optional[List[str]] = None,
+               horizon: str = DEFAULT_HORIZON, links: Optional[List[str]] = None,
                origin_timeframe: Optional[str] = None) -> Dict[str, Any]:
     """F1: create (or refresh) a declared_intent signal object."""
     key = "intent:" + re.sub(r"[^a-z0-9]+", "-", intent_text.lower())[:60].strip("-")
     payload = {
         "intent_text": intent_text,
         "horizon": horizon,
-        "origin_timeframe": origin_timeframe,
+        # The fade clock starts the moment the pin is made unless the owner
+        # backdates it — an undated pin would otherwise steer forever.
+        "origin_timeframe": origin_timeframe or date.today().isoformat(),
         "status": "active",
         "links": links or [],
         "keywords": _keywords(intent_text),
@@ -49,7 +87,7 @@ def pin_intent(conn: sqlite3.Connection, intent_text: str, *,
         confidence=1.0, extractor_version="owner_declared", created_by="owner")
 
 
-def active_intents(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+def _all_intents(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     try:
         rows = conn.execute(
             "SELECT object_key, payload_json FROM signal_objects "
@@ -62,10 +100,49 @@ def active_intents(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
             p = json.loads(pj)
         except (TypeError, ValueError):
             continue
-        if p.get("status", "active") == "active":
-            p["_key"] = key
-            out.append(p)
+        p["_key"] = key
+        out.append(p)
     return out
+
+
+def active_intents(conn: sqlite3.Connection,
+                   *, today: Optional[date] = None) -> List[Dict[str, Any]]:
+    """The live pins: neither retired by hand nor faded by their horizon."""
+    return [p for p in _all_intents(conn) if intent_status(p, today=today) == "active"]
+
+
+def faded_intents(conn: sqlite3.Connection, *, limit: int = 5,
+                  today: Optional[date] = None) -> List[Dict[str, Any]]:
+    """Pins whose horizon has elapsed, most recently declared first."""
+    out = []
+    for p in _all_intents(conn):
+        if intent_status(p, today=today) != "faded":
+            continue
+        p["status"] = "faded"
+        out.append(p)
+    out.sort(key=lambda p: str(p.get("origin_timeframe") or ""), reverse=True)
+    return out[:limit]
+
+
+def retire_intent(conn: sqlite3.Connection, object_key: str) -> Optional[Dict[str, Any]]:
+    """Manual retire — the owner calling it before the horizon does."""
+    key = str(object_key or "").strip()
+    row = conn.execute(
+        "SELECT payload_json FROM signal_objects WHERE object_type='declared_intent' "
+        "AND object_key=? AND valid_to IS NULL", (key,)).fetchone()
+    if not row:
+        return None
+    try:
+        payload = json.loads(row[0])
+    except (TypeError, ValueError):
+        return None
+    payload["status"] = "retired"
+    payload.pop("_key", None)
+    store = SignalObjectStore(conn)
+    return store.upsert_object(
+        "intentions", "declared_intent", key, payload,
+        source_refs=[{"declared_by": "owner"}],
+        confidence=1.0, extractor_version="owner_declared", created_by="owner")
 
 
 def intent_match(text: str, intents: List[Dict[str, Any]],

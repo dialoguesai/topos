@@ -1,5 +1,5 @@
 {
-  "$comment": "Per-release derived-data upgrade manifests. Schema migrations handle table SHAPE; entries here declare which DERIVED layers a release invalidates and how to recompute them. Consumed by steps_between(installed, shipped) — see topos/upgrades/__init__.py. Steps MUST be idempotent and safe to re-run after interruption.",
+  "$comment": "Per-release derived-data upgrade manifests. Schema migrations handle table SHAPE; entries here declare which DERIVED layers a release invalidates and how to recompute them. Consumed by steps_between(installed, shipped) \u2014 see topos/upgrades/__init__.py. Steps MUST be idempotent and safe to re-run after interruption.",
   "releases": [
     {
       "version": "1.1.0",
@@ -16,7 +16,9 @@
           "title": "Re-extract entities with the wordpiece stitcher",
           "why": "5f687e9 changed NER post-processing (word-level aggregation + wordpiece stitching): 1.1.0-era extractions contain ##-fragment junk and silently truncated surfaces ('Jon' for 'Jonny'). Message rows are untouched; message_entities/entity_mentions produced by the old extractor are stale.",
           "params": {
-            "job_names": ["entities"],
+            "job_names": [
+              "entities"
+            ],
             "force_reprocess": true,
             "include_signal": false,
             "per_source": true,
@@ -24,7 +26,7 @@
           },
           "progress": "TUI progress bar on the node + GET /v1/upgrade/status",
           "idempotent": "record_mention is INSERT OR IGNORE; re-running converges",
-          "estimated_duration": "~10–20 min per 1.5k records (CPU-bound NER); node stays usable, serves stale graph meanwhile; signal/LLM lane stays off (graph rebuild is the next step)",
+          "estimated_duration": "~10\u201320 min per 1.5k records (CPU-bound NER); node stays usable, serves stale graph meanwhile; signal/LLM lane stays off (graph rebuild is the next step)",
           "order": 1
         },
         {
@@ -39,7 +41,9 @@
           "progress": "synchronous (seconds at personal scale); response is the before/after report",
           "idempotent": "full-refresh semantics (mz-tagged edges rebuilt, evidence edges recomputed from mentions)",
           "estimated_duration": "<10s",
-          "depends_on": ["reextract-entities"],
+          "depends_on": [
+            "reextract-entities"
+          ],
           "order": 2,
           "$comment": "Must run AFTER re-extraction completes: rebuilding from a partially restored mention set guts evidence edges (observed live 2026-07-10)."
         },
@@ -54,8 +58,8 @@
       "notes": [
         "No re-embedding: the embedding model is unchanged in 1.2.0 (signal_embeddings remain valid).",
         "No canonical re-ingest: raw and canonical rows are untouched by every 1.2.0 change.",
-        "Extraction default model moved to the quality tier (qwen3.5:9b-mlx) — affects FUTURE extractions only; small-RAM devices surface tier=stress in model recommendations and should downsize via settings.",
-        "Fleet skew: 1.1.0 nodes lack the signal_entity_graph_search handler — CPs must treat it as optional until the fleet is on 1.2.0."
+        "Extraction default model moved to the quality tier (qwen3.5:9b-mlx) \u2014 affects FUTURE extractions only; small-RAM devices surface tier=stress in model recommendations and should downsize via settings.",
+        "Fleet skew: 1.1.0 nodes lack the signal_entity_graph_search handler \u2014 CPs must treat it as optional until the fleet is on 1.2.0."
       ]
     },
     {
@@ -75,7 +79,9 @@
           "title": "Backfill attention triage for existing sources",
           "why": "1.3.0 adds the attention_triage enrichment job and triage_verdicts ledger. Pre-1.3.0 nodes have no verdicts or interest-profile/attention-summary objects; reprocessing fills the new derived layer from existing canonical rows without touching raw/canonical.",
           "params": {
-            "job_names": ["attention_triage"],
+            "job_names": [
+              "attention_triage"
+            ],
             "force_reprocess": true,
             "include_signal": false,
             "per_source": true,
@@ -83,7 +89,7 @@
           },
           "progress": "TUI progress bar on the node + GET /v1/upgrade/status",
           "idempotent": "verdicts are (day, record_id) upserts; signal objects no-op when unchanged",
-          "estimated_duration": "seconds–minutes depending on day span; CPU-bound instruments, no LLM (signal lane off)",
+          "estimated_duration": "seconds\u2013minutes depending on day span; CPU-bound instruments, no LLM (signal lane off)",
           "order": 1
         }
       ],
@@ -91,7 +97,7 @@
         "No re-embedding and no canonical re-ingest: raw/canonical rows and signal_embeddings remain valid.",
         "Time-signal flex/rhythm/commitment objects fill on the next scope materialization (dimension_summary / structured signal path); no dedicated rematerialize endpoint is wired into the upgrade runner yet.",
         "Conversation context_tag columns are additive empty; owner API + local-LLM auto-label fill going forward (owner stamps always win).",
-        "Fact-extraction think suppression and claim-verify handlers affect FUTURE LLM passes only — existing signal_facts are not invalidated.",
+        "Fact-extraction think suppression and claim-verify handlers affect FUTURE LLM passes only \u2014 existing signal_facts are not invalidated.",
         "New WS handlers (signal_attention_dashboard, signal_set_worn_badge, verify_claim, conversation_context*, facts_llm_config*, truth_*, put_fact_verdict): CPs must treat as optional until the fleet is on 1.3.0; bump engine-compat when the app depends on them."
       ]
     },
@@ -114,10 +120,34 @@
       ],
       "notes": [
         "No re-embedding and no canonical re-ingest: raw/canonical rows and signal_embeddings remain valid.",
-        "Blackhole filtering is runtime policy over existing data — no backfill step.",
+        "Blackhole filtering is runtime policy over existing data \u2014 no backfill step.",
         "Complexity snapshots fill via enrichment piggyback going forward; pre-1.3.2 nodes get coverage on the next enrichment pass.",
         "New WS handlers (blackhole_*, complexity_*, signal_timeline_daily): CPs must treat as optional until the fleet is on 1.3.2; bump engine-compat when the app depends on them."
       ]
+    },
+    {
+      "version": "1.3.3",
+      "summary": "Release migration hardening (PLAN_NODE_RELEASE_MIGRATIONS M0\u2013M2) + attention pin/retire intent handlers.",
+      "steps": [
+        {
+          "id": "migration-registry-hardening",
+          "kind": "none",
+          "title": "Single migration registry + backup + downgrade guard",
+          "why": "PLAN_NODE_RELEASE_MIGRATIONS M0\u2013M2: unify apply/ensure on one MIGRATIONS registry, PRAGMA user_version fast-path, fail-loud on shape failures, pre-migration backup under ~/.topos/backups, downgrade guard when user_version is ahead of this build. No derived-layer invalidation.",
+          "order": 0
+        }
+      ],
+      "notes": [
+        "Code + schema-runner only \u2014 raw/canonical/derived rows are untouched.",
+        "Nodes upgrading into this release get a pre-migration backup when ledger-pending migrations exist.",
+        "Also ships signal_pin_intent / signal_retire_intent (protocol + code only; no derived invalidation)."
+      ]
+    },
+    {
+      "version": "unreleased",
+      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "steps": [],
+      "notes": []
     }
   ]
 }

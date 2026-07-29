@@ -293,11 +293,37 @@ def get_db_connection() -> Optional[sqlite3.Connection]:
         except Exception as tuning_exc:  # noqa: BLE001
             logger.warning("Connection tuning skipped: %s", tuning_exc)
         try:
-            from ..storage.db.migrations import ensure_migrations_applied
+            from ..storage.db.migrations import (
+                DowngradeGuardError,
+                MigrationError,
+                ensure_migrations_applied,
+            )
 
             ensure_migrations_applied(db_conn)
+        except (MigrationError, DowngradeGuardError) as migration_exc:
+            # Shape migrations must fail loud — serving a half-migrated DB corrupts data.
+            logger.error("Schema migration failed; refusing to open database: %s", migration_exc)
+            try:
+                db_conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+            db_conn = None
+            _db_conn_path = None
+            raise
         except Exception as migration_exc:  # noqa: BLE001
-            logger.warning("Wiki MVP migrations skipped on startup: %s", migration_exc)
+            from ..storage.db.migrations import MigrationError as _MigrationError
+
+            logger.error(
+                "Unexpected schema migration failure; refusing to open database: %s",
+                migration_exc,
+            )
+            try:
+                db_conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+            db_conn = None
+            _db_conn_path = None
+            raise _MigrationError(str(migration_exc)) from migration_exc
         try:
             from ..storage.raw.browser_flat_tables import backfill_browser_visits_from_raw_retention
 
@@ -306,6 +332,12 @@ def get_db_connection() -> Optional[sqlite3.Connection]:
             logger.debug("browser_visits raw→flat backfill skipped: %s", backfill_exc)
         return db_conn
     except Exception as e:
+        # Shape-migration failures must propagate (fail loud). Only soft-fail
+        # unrelated connection errors so callers can treat conn=None as "no DB".
+        from ..storage.db.migrations import DowngradeGuardError, MigrationError
+
+        if isinstance(e, (MigrationError, DowngradeGuardError)):
+            raise
         logger.warning("Failed to create database connection: %s", e)
         db_conn = None
         _db_conn_path = None

@@ -18,6 +18,12 @@ def _set_local_db(monkeypatch: pytest.MonkeyPatch, db_path: str) -> None:
         monkeypatch.setattr(target, "engine_pool_mode", "off", raising=False)
         monkeypatch.setattr(target, "database_mode", "local", raising=False)
         monkeypatch.setattr(target, "database_path", str(db_path), raising=False)
+    # These fixtures seed a minimal schema for delete-lineage logic; do not run
+    # the full migration registry against that incomplete shape.
+    monkeypatch.setattr(
+        "topos.storage.db.migrations.ensure_migrations_applied",
+        lambda *_a, **_k: None,
+    )
 
 
 async def _handle(message: dict) -> dict:

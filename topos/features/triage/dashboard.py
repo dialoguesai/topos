@@ -61,6 +61,8 @@ def attention_dashboard_data(conn: sqlite3.Connection, *, days: int = 14,
         for v in verdicts:
             v["title"] = (titles.get(v["record_id"]) or v["table"] or "")[:90]
 
+    from .intents import intent_status
+
     intents = []
     for row in conn.execute(
         "SELECT payload_json, valid_from FROM signal_objects WHERE object_type='declared_intent' "
@@ -72,12 +74,18 @@ def attention_dashboard_data(conn: sqlite3.Connection, *, days: int = 14,
             continue
         # Pin instant lives on the row — surface it so pin days are plottable.
         intent.setdefault("pinned_at", row[1])
+        intent["status"] = intent_status(intent)
         intents.append(intent)
+    # Faded pins are not live steering, but the app shows what elapsed rather
+    # than letting an intent vanish silently.
+    faded = sorted((i for i in intents if i["status"] == "faded"),
+                   key=lambda i: str(i.get("origin_timeframe") or ""), reverse=True)[:5]
     return {
         "days": days,
         "verdicts": verdicts,
         "summaries": summaries,
-        "active_intents": [i for i in intents if i.get("status", "active") == "active"],
+        "active_intents": [i for i in intents if i["status"] == "active"],
+        "faded_intents": faded,
         "badges": earned_badges(conn),
         "current_badge": current_badge(conn),
         "rank": rank(conn),
