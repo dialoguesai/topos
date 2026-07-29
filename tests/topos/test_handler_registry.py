@@ -15,6 +15,7 @@ SUPPORTED_MESSAGE_TYPES = [
     "advance_routine_next_run_at",
     "app_ingest",
     "auto_resolve_source_contacts",
+    "blackhole_check_text",
     "blackhole_status",
     "check_inbox_write",
     "compute_invoke",
