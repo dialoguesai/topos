@@ -25,17 +25,15 @@ def _conversation_row(conn, conversation_id: str, dataset_id: str):
     ).fetchone()
 
 
-@router.get(
-    "/conversations/{conversation_id}/context",
-    dependencies=[Depends(require_api_key)],
-)
-async def get_conversation_context(conversation_id: str, dataset_id: str) -> dict:
-    conn = get_db_connection()
-    if conn is None:
-        raise HTTPException(status_code=503, detail="Database not available")
+def read_conversation_context(conn, conversation_id: str, dataset_id: str) -> dict | None:
+    """Context-tag payload for a conversation, or None when it is unknown.
+
+    Shared by the HTTP endpoint below and the WS handler
+    (core.handlers.config get_conversation_context) so both stay one source.
+    """
     row = _conversation_row(conn, conversation_id, dataset_id)
     if row is None:
-        raise HTTPException(status_code=404, detail="Unknown conversation")
+        return None
     return {
         "status": "ok",
         "conversation_id": row[0],
@@ -45,29 +43,17 @@ async def get_conversation_context(conversation_id: str, dataset_id: str) -> dic
     }
 
 
-@router.put(
-    "/conversations/{conversation_id}/context",
-    dependencies=[Depends(require_api_key)],
-)
-async def set_conversation_context(
-    conversation_id: str,
-    payload: dict = Body(default_factory=dict),
-) -> dict:
-    dataset_id = str(payload.get("dataset_id") or "").strip()
-    if not dataset_id:
-        raise HTTPException(status_code=422, detail="dataset_id is required")
-    raw_tag = payload.get("context_tag")
+def write_conversation_context(conn, conversation_id: str, dataset_id: str, raw_tag) -> dict:
+    """Owner set/clear of the context tag.
+
+    Raises ValueError on an invalid tag, LookupError when the conversation is
+    unknown. Shared by the HTTP endpoint and the WS handler.
+    """
     tag = str(raw_tag).strip().lower() if raw_tag is not None else None
     if tag is not None and tag not in CONTEXT_TAG_VALUES:
-        raise HTTPException(
-            status_code=422,
-            detail=f"context_tag must be one of {sorted(CONTEXT_TAG_VALUES)} or null",
-        )
-    conn = get_db_connection()
-    if conn is None:
-        raise HTTPException(status_code=503, detail="Database not available")
+        raise ValueError(f"context_tag must be one of {sorted(CONTEXT_TAG_VALUES)} or null")
     if _conversation_row(conn, conversation_id, dataset_id) is None:
-        raise HTTPException(status_code=404, detail="Unknown conversation")
+        raise LookupError("Unknown conversation")
     # Owner decisions always win: stamped 'owner' even when clearing, so the
     # auto-classifier never refills a conversation the owner chose to untag.
     conn.execute(
@@ -83,6 +69,42 @@ async def set_conversation_context(
         "context_tag": tag,
         "context_tag_source": "owner",
     }
+
+
+@router.get(
+    "/conversations/{conversation_id}/context",
+    dependencies=[Depends(require_api_key)],
+)
+async def get_conversation_context(conversation_id: str, dataset_id: str) -> dict:
+    conn = get_db_connection()
+    if conn is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    data = read_conversation_context(conn, conversation_id, dataset_id)
+    if data is None:
+        raise HTTPException(status_code=404, detail="Unknown conversation")
+    return data
+
+
+@router.put(
+    "/conversations/{conversation_id}/context",
+    dependencies=[Depends(require_api_key)],
+)
+async def set_conversation_context(
+    conversation_id: str,
+    payload: dict = Body(default_factory=dict),
+) -> dict:
+    dataset_id = str(payload.get("dataset_id") or "").strip()
+    if not dataset_id:
+        raise HTTPException(status_code=422, detail="dataset_id is required")
+    conn = get_db_connection()
+    if conn is None:
+        raise HTTPException(status_code=503, detail="Database not available")
+    try:
+        return write_conversation_context(conn, conversation_id, dataset_id, payload.get("context_tag"))
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 # --- classifier model config (settings surface) -----------------------------------
