@@ -35,6 +35,7 @@ STATUS_COLORS = {
 
 HEALTH_POLL_SECONDS = 5.0
 TOPOS_APP_URL = "https://topos.dialogues.ai"
+TOPOS_DOCS_URL = "https://topos.dialogues.ai/docs/welcome"
 
 
 def tray_available() -> bool:
@@ -135,7 +136,7 @@ class ToposTray:
         poll_host = "127.0.0.1" if host in ("0.0.0.0", "::") else host
         base = f"http://{poll_host}:{port}"
         self.health_url = f"{base}/healthcheck"
-        self.docs_url = f"{base}/docs"
+        self.docs_url = TOPOS_DOCS_URL
         self.status_url = f"{base}/v1/shell/status"
         self.update_url = f"{base}/v1/shell/update"
         self.version = version
@@ -203,6 +204,31 @@ class ToposTray:
 
     # -- menu --------------------------------------------------------------
 
+    def _menu_labels(self) -> list[str]:
+        """Plain menu labels — testable without initializing a GUI display."""
+        labels = {
+            "starting": "starting…",
+            "healthy": "running",
+            "down": "not responding",
+        }
+        items = [
+            f"Topos Node v{self.version} — {labels.get(self.status, self.status)}",
+            "Open Topos",
+            "Open Docs",
+        ]
+        if self.log_path is not None:
+            items.append("Show Logs")
+        if self.update.get("applying"):
+            items.append("Installing update…")
+        elif self.update.get("last_result") == "success":
+            items.append("Update installed — restart to finish")
+        elif self.update.get("available"):
+            items.append(f"Update to v{self.update.get('latest')}")
+        items.append(
+            "Close Tray (node keeps running)" if self.attached else "Quit Topos Node"
+        )
+        return items
+
     def _build_menu(self):
         import pystray
 
@@ -219,7 +245,7 @@ class ToposTray:
             ),
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Open Topos", self._open_app),
-            pystray.MenuItem("Open API Docs", self._open_docs),
+            pystray.MenuItem("Open Docs", self._open_docs),
         ]
         if self.log_path is not None:
             items.append(pystray.MenuItem("Show Logs", self._show_logs))
