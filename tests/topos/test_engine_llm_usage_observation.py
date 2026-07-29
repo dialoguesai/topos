@@ -40,6 +40,12 @@ def test_resolve_llm_usage_purpose_maps_enrichment_and_query():
         resolve_llm_usage_purpose(subtype="query_inference", source_id="cluster_labeler")
         == "ingestion_pipeline"
     )
+    assert (
+        resolve_llm_usage_purpose(
+            subtype="query_inference", source_id="conversation_context"
+        )
+        == "ingestion_pipeline"
+    )
     assert resolve_llm_usage_purpose(subtype="goal_extraction") == "ingestion_pipeline"
 
 

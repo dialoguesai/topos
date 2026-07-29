@@ -15,6 +15,11 @@ re-derivation steps all completed) against the shipped version and executes
   * kill-switch: TOPOS_UPGRADE_RUNNER=off disables execution (nothing stamps,
     so re-enabling picks up where it left off).
 
+Heavy steps are deferred until the UI can bootstrap (control-plane ready +
+grace window), then run in a daemon thread with a TUI progress bar. Enrichment
+reprocess steps run only the declared ``job_names`` — they do NOT fan out into
+the signal/LLM lane (that was starving startup UI traffic).
+
 Executors are injectable for tests; the real ones dispatch step kinds to
 engine internals (no HTTP self-calls).
 """
@@ -26,6 +31,7 @@ import logging
 import os
 import sqlite3
 import threading
+import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
@@ -35,12 +41,20 @@ logger = logging.getLogger("topos.upgrades.runner")
 
 _BASELINE_KEY = "engine.upgrade.baseline"
 _BOOTSTRAP_BASELINE = "1.1.0"
+_DEFAULT_UI_GRACE_SECONDS = 20.0
+_DEFAULT_READY_TIMEOUT_SECONDS = 60.0
 
 ExecutorFn = Callable[[Dict[str, Any], sqlite3.Connection], Dict[str, Any]]
 
 # Status snapshot for the /upgrade/status surface (module-level, single node).
 _state_lock = threading.Lock()
-_runner_state: Dict[str, Any] = {"running": False, "current_step": None, "last_result": None}
+_runner_state: Dict[str, Any] = {
+    "running": False,
+    "waiting_for_ui": False,
+    "current_step": None,
+    "progress": None,
+    "last_result": None,
+}
 
 
 def _now() -> str:
@@ -53,10 +67,64 @@ def _enabled() -> bool:
     )
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        return max(0.0, float(raw))
+    except (TypeError, ValueError):
+        return default
+
+
+def ui_grace_seconds() -> float:
+    """Seconds to wait after readiness so the React UI can fetch bootstrap data."""
+    return _env_float("TOPOS_UPGRADE_UI_GRACE_SECONDS", _DEFAULT_UI_GRACE_SECONDS)
+
+
+def ready_timeout_seconds() -> float:
+    return _env_float("TOPOS_UPGRADE_READY_TIMEOUT_SECONDS", _DEFAULT_READY_TIMEOUT_SECONDS)
+
+
 def _shipped_version() -> str:
     from topos.__version__ import __version__
 
     return __version__
+
+
+def _set_runner_state(**updates: Any) -> None:
+    with _state_lock:
+        _runner_state.update(updates)
+
+
+def _progress_snapshot(
+    *,
+    step_id: str,
+    step_index: int,
+    steps_total: int,
+    unit_label: str,
+    completed: int,
+    total: int,
+    detail: Optional[str] = None,
+) -> Dict[str, Any]:
+    total = max(0, int(total))
+    completed = max(0, min(int(completed), total if total else int(completed)))
+    fraction = (completed / total) if total else 0.0
+    # Blend step index with in-step fraction so multi-step upgrades read smoothly.
+    if steps_total > 0:
+        overall = (max(0, step_index) + fraction) / steps_total
+    else:
+        overall = fraction
+    return {
+        "step_id": step_id,
+        "step_index": step_index,
+        "steps_total": steps_total,
+        "unit_label": unit_label,
+        "completed": completed,
+        "total": total,
+        "percent": round(100.0 * overall, 1),
+        "detail": detail,
+    }
 
 
 def read_baseline(conn: sqlite3.Connection) -> Optional[str]:
@@ -186,28 +254,74 @@ def _real_source_ids(conn: sqlite3.Connection) -> List[str]:
 
 
 def _exec_enrichment_reprocess(step: Dict[str, Any], conn: sqlite3.Connection) -> Dict[str, Any]:
-    """Walk real sources through the enrichment core with force_reprocess."""
+    """Walk real sources through the enrichment core with force_reprocess.
+
+    Upgrade manifests declare specific ``job_names`` (e.g. attention_triage).
+    Unless a step explicitly sets ``include_signal: true``, we keep the signal /
+    LLM derivation lane OFF — otherwise every source fans out into embeddings,
+    cluster labeling, dimension briefs, and conversation-context LLM calls and
+    starves the UI during first boot after an upgrade.
+    """
     import asyncio
 
     from ..api.enrichment import _process_enrichment_core
+    from ..enrichment.progress_bar import ProgressBar
 
     params = step.get("params") or {}
     job_names = params.get("job_names") or None
-    detail: Dict[str, Any] = {"sources": {}}
-    for source_id in _real_source_ids(conn):
-        try:
-            out = asyncio.run(
-                _process_enrichment_core(
-                    source_id=source_id,
-                    job_names=list(job_names) if job_names else None,
-                    force_reprocess=bool(params.get("force_reprocess", True)),
+    include_signal = bool(params.get("include_signal", False))
+    source_ids = _real_source_ids(conn)
+    step_id = str(step.get("id") or "enrichment_reprocess")
+    step_index = int(step.get("_runner_step_index") or 0)
+    steps_total = int(step.get("_runner_steps_total") or 1)
+    detail: Dict[str, Any] = {"sources": {}, "include_signal": include_signal}
+    def _run_sources(pbar: Optional[ProgressBar] = None) -> None:
+        for idx, source_id in enumerate(source_ids):
+            _set_runner_state(
+                progress=_progress_snapshot(
+                    step_id=step_id,
+                    step_index=step_index,
+                    steps_total=steps_total,
+                    unit_label="sources",
+                    completed=idx,
+                    total=len(source_ids),
+                    detail=source_id,
                 )
             )
-            detail["sources"][source_id] = str(out.get("status") or "ok")
-        except ValueError:
-            detail["sources"][source_id] = "unknown_source_skipped"
-        except Exception as exc:  # noqa: BLE001 — one source must not kill the walk
-            detail["sources"][source_id] = f"error: {exc}"
+            if pbar is not None:
+                pbar.set_description(f"Upgrade {step_id} · {source_id}")
+            try:
+                out = asyncio.run(
+                    _process_enrichment_core(
+                        source_id=source_id,
+                        job_names=list(job_names) if job_names else None,
+                        force_reprocess=bool(params.get("force_reprocess", True)),
+                        include_signal=include_signal,
+                    )
+                )
+                detail["sources"][source_id] = str(out.get("status") or "ok")
+            except ValueError:
+                detail["sources"][source_id] = "unknown_source_skipped"
+            except Exception as exc:  # noqa: BLE001 — one source must not kill the walk
+                detail["sources"][source_id] = f"error: {exc}"
+            if pbar is not None:
+                pbar.update(1)
+
+    if source_ids:
+        with ProgressBar(total=len(source_ids), desc=f"Upgrade {step_id}", width=40) as pbar:
+            _run_sources(pbar)
+    else:
+        _run_sources(None)
+    _set_runner_state(
+        progress=_progress_snapshot(
+            step_id=step_id,
+            step_index=step_index,
+            steps_total=steps_total,
+            unit_label="sources",
+            completed=len(source_ids),
+            total=len(source_ids),
+        )
+    )
     return detail
 
 
@@ -256,7 +370,9 @@ def run_pending_upgrades(
 
     ran = failed = 0
     failed_ids: set = set()
-    for step in plan["steps"]:
+    steps = list(plan["steps"])
+    steps_total = len(steps)
+    for step_index, step in enumerate(steps):
         step_id = str(step["id"])
         status = _ledger_status(conn, shipped_v, step_id)
         if status == "done":
@@ -274,12 +390,26 @@ def run_pending_upgrades(
             failed_ids.add(step_id)
             failed += 1
             continue
-        with _state_lock:
-            _runner_state.update(running=True, current_step=step_id)
+        annotated = dict(step)
+        annotated["_runner_step_index"] = step_index
+        annotated["_runner_steps_total"] = steps_total
+        _set_runner_state(
+            running=True,
+            waiting_for_ui=False,
+            current_step=step_id,
+            progress=_progress_snapshot(
+                step_id=step_id,
+                step_index=step_index,
+                steps_total=steps_total,
+                unit_label="steps",
+                completed=0,
+                total=1,
+            ),
+        )
         _ledger_set(conn, shipped_v, step_id, "running", started=True)
         logger.info("upgrade step %s (%s) starting", step_id, step["kind"])
         try:
-            detail = executor(step, conn)
+            detail = executor(annotated, conn)
             _ledger_set(conn, shipped_v, step_id, "done", detail if isinstance(detail, dict) else None)
             ran += 1
         except Exception as exc:  # noqa: BLE001 — ledger the failure, keep the node up
@@ -287,8 +417,7 @@ def run_pending_upgrades(
             _ledger_set(conn, shipped_v, step_id, "failed", {"error": str(exc)})
             failed_ids.add(step_id)
             failed += 1
-    with _state_lock:
-        _runner_state.update(running=False, current_step=None)
+    _set_runner_state(running=False, waiting_for_ui=False, current_step=None, progress=None)
 
     all_done = all(
         _ledger_status(conn, shipped_v, str(s["id"])) == "done" for s in plan["steps"]
@@ -297,27 +426,74 @@ def run_pending_upgrades(
         _stamp_baseline(conn, shipped_v)
         logger.info("upgrade to %s complete (%d steps)", shipped_v, ran)
     result = {"steps_run": ran, "steps_failed": failed, "baseline_advanced": all_done}
-    with _state_lock:
-        _runner_state["last_result"] = result
+    _set_runner_state(last_result=result)
     return result
 
 
-def start_background(conn: sqlite3.Connection) -> Optional[threading.Thread]:
-    """Boot entrypoint: plan quickly; heavy steps run off the event loop."""
+def start_background(
+    conn: sqlite3.Connection,
+    *,
+    ready_event: Optional[threading.Event] = None,
+    ui_grace_s: Optional[float] = None,
+    ready_timeout_s: Optional[float] = None,
+) -> Optional[threading.Thread]:
+    """Boot entrypoint: plan quickly; heavy steps wait for UI, then run off-loop.
+
+    ``ready_event`` should be set once the control plane (or local HTTP) is able
+    to serve the React app's initial bootstrap. A grace window then lets those
+    requests finish before enrichment reprocess contends for SQLite / Ollama /
+    MPS. Fresh installs stamp-and-skip inline (no thread).
+    """
     if not _enabled():
         return None
     plan = plan_upgrade(conn)
     if plan["fresh_install"] or not plan["steps"]:
         run_pending_upgrades(conn)  # cheap: stamp/no-op inline
         return None
+    grace = _DEFAULT_UI_GRACE_SECONDS if ui_grace_s is None else max(0.0, float(ui_grace_s))
+    ready_timeout = (
+        _DEFAULT_READY_TIMEOUT_SECONDS if ready_timeout_s is None else max(0.0, float(ready_timeout_s))
+    )
     logger.info(
-        "upgrade %s → %s: %d step(s) queued (%s)",
+        "upgrade %s → %s: %d step(s) queued (%s); waiting for UI readiness "
+        "(timeout=%.0fs, grace=%.0fs) before starting",
         plan["baseline"], plan["shipped"], len(plan["steps"]),
         ", ".join(s["id"] for s in plan["steps"]),
+        ready_timeout,
+        grace,
     )
-    thread = threading.Thread(
-        target=run_pending_upgrades, args=(conn,), name="topos-upgrade-runner", daemon=True
+    _set_runner_state(
+        waiting_for_ui=True,
+        running=False,
+        current_step=None,
+        progress={
+            "step_id": None,
+            "percent": 0.0,
+            "detail": "waiting_for_ui",
+            "grace_seconds": grace,
+        },
     )
+
+    def _target() -> None:
+        try:
+            if ready_event is not None:
+                signaled = ready_event.wait(timeout=ready_timeout if ready_timeout > 0 else None)
+                if not signaled:
+                    logger.warning(
+                        "upgrade ready-event timed out after %.0fs; starting anyway",
+                        ready_timeout,
+                    )
+            if grace > 0:
+                logger.info(
+                    "UI grace: deferring upgrade work for %.0fs so bootstrap can finish",
+                    grace,
+                )
+                time.sleep(grace)
+            run_pending_upgrades(conn)
+        finally:
+            _set_runner_state(waiting_for_ui=False)
+
+    thread = threading.Thread(target=_target, name="topos-upgrade-runner", daemon=True)
     thread.start()
     return thread
 
@@ -333,7 +509,9 @@ def runner_status(conn: sqlite3.Connection) -> Dict[str, Any]:
         "fresh_install": plan["fresh_install"],
         "pending_steps": [s["id"] for s in plan["steps"]],
         "running": state["running"],
+        "waiting_for_ui": state.get("waiting_for_ui", False),
         "current_step": state["current_step"],
+        "progress": state.get("progress"),
         "last_result": state["last_result"],
         "ledger": ledger_rows(conn),
     }

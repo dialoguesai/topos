@@ -347,3 +347,10 @@ def test_record_failure_logs_endpoint_context(monkeypatch, caplog):
 
     assert "endpoint=wss://cp.example/ws/engine" in caplog.text
     assert "event=connection_failed" in caplog.text
+
+
+def test_ui_bootstrap_types_bypass_inbound_saturation():
+    fast = control_plane_client._FAST_INBOUND_MESSAGE_TYPES
+    assert "get_runtime_bootstrap" in fast
+    assert "get_upgrade_status" in fast
+    assert "healthcheck" in fast
