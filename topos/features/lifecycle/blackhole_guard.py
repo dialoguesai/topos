@@ -99,6 +99,7 @@ class BlackholeGuard:
         self._ids: Optional[Set[str]] = None
         self._terms: Optional[Set[str]] = None
         self._pending: Optional[Set[str]] = None
+        self._record_ids: Optional[Set[str]] = None
 
     # ------------------------------------------------------------ posture
 
@@ -138,6 +139,41 @@ class BlackholeGuard:
         if self._pending is None:
             self._pending = BlackholeStore(self._conn).pending_rebuild_names()
         return self._pending
+
+    def blocked_record_ids(self) -> Set[str]:
+        """Canonical records that mention a protected entity, via `entity_mentions`.
+
+        Canonical rows (messages, journal entries, calendar events) carry no
+        entity id of their own — the link lives in the mention table. This is
+        the exact half of the filter; a text scan is still needed alongside it
+        for a name the resolver never bound.
+        """
+        if self.sees_everything:
+            return set()
+        if self._record_ids is None:
+            blocked = self._blocked_ids()
+            if not blocked:
+                self._record_ids = set()
+            else:
+                placeholders = ",".join("?" for _ in blocked)
+                try:
+                    rows = self._conn.execute(
+                        f"SELECT DISTINCT record_id FROM entity_mentions "
+                        f"WHERE entity_id IN ({placeholders})",
+                        sorted(blocked),
+                    ).fetchall()
+                except sqlite3.OperationalError as exc:
+                    if "no such table" in str(exc).lower():
+                        rows = []
+                    else:
+                        raise
+                self._record_ids = {str(r[0]) for r in rows if r and r[0]}
+        return self._record_ids
+
+    def blocks_record_id(self, record_id: Optional[str]) -> bool:
+        if self.sees_everything or not record_id:
+            return False
+        return str(record_id) in self.blocked_record_ids()
 
     def blocks_entity_id(self, entity_id: Optional[str]) -> bool:
         if self.sees_everything or not entity_id:
@@ -199,6 +235,30 @@ class BlackholeGuard:
             if any(self.blocks_entity_id(row.get(k)) for k in id_keys):
                 continue
             if any(self.blocks_name(row.get(k)) for k in name_keys):
+                continue
+            kept.append(row)
+        return kept
+
+    def filter_canonical_rows(
+        self,
+        rows: Sequence[Dict[str, Any]],
+        *,
+        record_id_keys: Sequence[str] = ("record_id", "message_id", "id"),
+        text_keys: Sequence[str] = ("content", "text", "body", "summary_text"),
+    ) -> List[Dict[str, Any]]:
+        """Drop canonical rows that mention a protected entity.
+
+        Both halves are needed and neither is sufficient alone: the mention join
+        catches records the resolver bound (exact, and survives paraphrase of the
+        name), the text scan catches a spelling or nickname it never bound.
+        """
+        if self.sees_everything:
+            return list(rows)
+        kept: List[Dict[str, Any]] = []
+        for row in rows:
+            if any(self.blocks_record_id(row.get(k)) for k in record_id_keys):
+                continue
+            if any(self.text_mentions_blackholed(row.get(k)) for k in text_keys):
                 continue
             kept.append(row)
         return kept

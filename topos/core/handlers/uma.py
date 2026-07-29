@@ -102,6 +102,18 @@ def _narrowing_sql(ids: Optional[set], table_prefix: str) -> tuple[str, list]:
     return f" AND {table_prefix}message_id IN ({placeholders})", id_list
 
 
+def _uma_blackhole_guard(conn):
+    """Grantee guard for the UMA read paths.
+
+    UMA is the grant-based lane: whoever is reading here reached this data
+    through someone's grant, so protected entities are filtered unconditionally
+    rather than inferred from a caller string.
+    """
+    from ...features.lifecycle.blackhole_guard import BlackholeGuard, CallerClass
+
+    return BlackholeGuard(conn, caller_class=CallerClass.GRANTEE)
+
+
 @handles("uma_get_messages")
 async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
@@ -257,6 +269,7 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
                     pre_contact_len = len(messages)
                     after_contact, uma_contact_sidecar = apply_message_contact_pipeline(
                         messages,
+                        blackhole_guard=_uma_blackhole_guard(db_conn),
                         conn=db_conn,
                         dataset_id=dataset_id,
                         allowed_scopes=allowed_scopes,
@@ -493,6 +506,7 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
             pre_contact_len = len(messages)
             messages, uma_contact_sidecar = apply_message_contact_pipeline(
                 messages,
+                blackhole_guard=_uma_blackhole_guard(db_conn),
                 conn=db_conn,
                 dataset_id=dataset_id,
                 allowed_scopes=allowed_scopes,
@@ -560,6 +574,7 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
         pre_contact_len = len(messages)
         messages, uma_contact_sidecar = apply_message_contact_pipeline(
             messages,
+            blackhole_guard=_uma_blackhole_guard(db_conn),
             conn=db_conn,
             dataset_id=dataset_id,
             allowed_scopes=allowed_scopes,
