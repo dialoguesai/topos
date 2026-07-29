@@ -18,6 +18,88 @@ from .tasks import ExecutionMeta, ProcessingResult, ProcessingTask
 from .validator import validate_task
 
 
+def apply_blackhole_egress_policy(task: ProcessingTask):
+    """`(task, error)` — rewrite the provider when the input is protected.
+
+    Gate A of the secure-processing policy. Placed on `Engine.run`'s path
+    because every engine-originated inference funnels through it — enrichment,
+    extraction, embeddings alike — so one check covers them all rather than an
+    audit of each call site.
+
+    Returns the task unchanged when nothing is protected. Returns a rewritten
+    task when the payload mentions a protected entity and the configured
+    provider is inadmissible but a secure one exists. Returns an error only when
+    nothing admissible can serve it — fail closed, never a silent downgrade to
+    the configured provider.
+    """
+    try:
+        from ..features.lifecycle.blackhole_llm import describe_block, evaluate
+    except Exception:  # noqa: BLE001 — policy module missing is not a leak path
+        return task, None
+
+    conn, owned = _policy_db_connection()
+    try:
+        verdict = evaluate(conn, task.input, provider=task.model_request.provider)
+    except Exception as exc:  # noqa: BLE001
+        # A store that is present but unwell must not be read as "nothing is
+        # protected". Refuse the task rather than route it somewhere unproven.
+        logger.warning("blackhole egress policy unavailable, refusing task: %s", exc)
+        return task, f"blackhole_policy_unavailable: {exc}"
+    finally:
+        if owned and conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    if not verdict.tainted:
+        return task, None
+    if verdict.blocked:
+        return task, describe_block(verdict)
+    if verdict.redirected:
+        rewritten = task.model_copy(
+            update={
+                "model_request": task.model_request.model_copy(
+                    # The model name belonged to the old provider; let the
+                    # registry pick the right one for the new adapter.
+                    update={"provider": verdict.provider, "model": None}
+                )
+            }
+        )
+        return rewritten, None
+    return task, None
+
+
+def _policy_db_connection():
+    """`(conn, owned)` — a short-lived read handle for the policy, or `(None, False)`.
+
+    Deliberately *not* the shared `core.state` connection. `Engine.run` executes
+    on worker threads, and a SQLite handle created on another thread raises the
+    moment it is touched. Borrowing the app's handle made every engine task
+    depend on which thread happened to have opened it — a coupling that turned a
+    privacy check into a source of unrelated failures.
+
+    Opening per call is cheap for an existing SQLite file and keeps the policy
+    honest about *current* state: a cached snapshot would leave a window in
+    which a just-protected entity is still processed under the old rules.
+    """
+    try:
+        from ..core.state import _resolve_database_path_from_settings
+
+        path = _resolve_database_path_from_settings()
+    except Exception:  # noqa: BLE001
+        return None, False
+    if not path:
+        return None, False
+    try:
+        import sqlite3
+
+        return sqlite3.connect(str(path)), True
+    except Exception:  # noqa: BLE001
+        # No store reachable means no black holes exist to enforce.
+        return None, False
+
+
 class Engine:
     """Core processing engine. run(task) sync; submit(task) async via queue."""
 
@@ -78,6 +160,17 @@ class Engine:
             )
         # Intake: normalize defaults
         normalized = normalize_task(task)
+        # Secure-processing policy (entity black hole, D1): content mentioning a
+        # protected entity may only reach an admissible provider. Runs before
+        # routing so an inadmissible adapter is never even constructed with it.
+        normalized, egress_error = apply_blackhole_egress_policy(normalized)
+        if egress_error:
+            return format_result(
+                task_id=task.id,
+                status="failed",
+                raw_output={},
+                error=egress_error,
+            )
         # Build adapter config: subtype and model from task or registry
         config = self._build_inference_config(normalized)
         # Route to backend

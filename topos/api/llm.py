@@ -16,6 +16,51 @@ logger = logging.getLogger("topos.api.llm")
 router = APIRouter()
 
 
+def _enforce_blackhole_egress(body: GenerationRequest) -> GenerationRequest:
+    """Gate B: this route reaches cloud providers without passing the engine router.
+
+    `Engine.run` gates every task-shaped inference, but these two endpoints call
+    the LLM service directly, so the same policy has to be applied here or the
+    hole stays open. Rewrites the provider onto a secure one when the prompt
+    mentions a protected entity; refuses when nothing secure can serve it.
+
+    The refusal is owner-facing (this route is API-key authenticated) and still
+    names no entity — the reason may be logged somewhere less private.
+    """
+    from fastapi import HTTPException
+
+    try:
+        from ..engine.engine import _policy_db_connection
+        from ..features.lifecycle.blackhole_llm import describe_block, evaluate
+    except Exception:  # noqa: BLE001
+        return body
+
+    conn, owned = _policy_db_connection()
+    try:
+        verdict = evaluate(
+            conn,
+            {"prompt": body.prompt, "system": getattr(body, "system", None)},
+            provider=body.provider or "",
+        )
+    except Exception as exc:  # noqa: BLE001
+        raise HTTPException(status_code=503, detail=f"blackhole_policy_unavailable: {exc}")
+    finally:
+        if owned and conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+    if not verdict.tainted:
+        return body
+    if verdict.blocked:
+        raise HTTPException(status_code=503, detail=describe_block(verdict))
+    if verdict.redirected:
+        logger.info("blackhole: llm route redirected to %s", verdict.provider)
+        return body.model_copy(update={"provider": verdict.provider, "model": None})
+    return body
+
+
 @router.post(
     "/llm_generation",
     response_model=GenerationResponse,
@@ -28,6 +73,7 @@ async def llm_generation(body: GenerationRequest):
         body.model,
         len(body.prompt or ""),
     )
+    body = _enforce_blackhole_egress(body)
     services: Services = get_services()
     result = await services.llm.generate(body.model_dump())
     usage = result.get("usage") if isinstance(result, dict) else {}
@@ -60,6 +106,7 @@ async def llm_generation_alias(body: GenerationRequest):
         body.model,
         len(body.prompt or ""),
     )
+    body = _enforce_blackhole_egress(body)
     services: Services = get_services()
     result = await services.llm.generate(body.model_dump())
     usage = result.get("usage") if isinstance(result, dict) else {}

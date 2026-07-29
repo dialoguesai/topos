@@ -483,16 +483,29 @@ async def blackhole_entity(
     mentioning it may only be processed by the tier's secure model set.
     Raises a rebuild-needed notification before the rebuild runs (D4).
     """
-    from ..features.lifecycle.blackhole import BlackholeStore
+    import asyncio
 
+    from ..features.lifecycle.blackhole import BlackholeStore
+    from ..features.lifecycle.blackhole_rebuild import rebuild_for_blackhole
+
+    conn = _entities_conn()
     try:
-        return BlackholeStore(_entities_conn()).blackhole_entity(
+        result = BlackholeStore(conn).blackhole_entity(
             entity_ref=entity_id,
             processing_tier=body.processing_tier,
             note=body.note,
         )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
+
+    # D4: the notification above was raised first, so the owner already knows the
+    # hide is incomplete; now do the rebuild that makes it true. Non-owners are
+    # withheld the prose artifacts for the duration, so this running late is safe
+    # while it running silently would not be.
+    if not result.get("already_blackholed"):
+        result["rebuild"] = await asyncio.to_thread(rebuild_for_blackhole, conn, entity_id)
+        result["rebuild"] = result["rebuild"].as_dict()
+    return result
 
 
 @router.delete("/entities/{entity_id}/blackhole")
