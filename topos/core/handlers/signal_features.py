@@ -752,6 +752,107 @@ def _blackhole_logger():
     return logging.getLogger("topos.core.handlers.signal_features")
 
 
+@handles("signal_blackhole_entity")
+async def handle_signal_blackhole_entity(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Owner marks an entity off-limits, and the rebuild that makes it true runs.
+
+    The rebuild is inline rather than deferred: the owner has just been told a
+    rebuild is needed (D4 raises that notification first), and the artifacts it
+    withdraws are withheld from everyone else until it finishes. Finishing here
+    keeps that window as short as the work allows.
+    """
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    entity_id = str(payload.get("entity_id") or "").strip()
+    if not entity_id:
+        return {"id": req_id, "status": "error", "error": "entity_id required", "code": 400}
+    try:
+        from ...features.lifecycle.blackhole import BlackholeStore
+        from ...features.lifecycle.blackhole_rebuild import rebuild_for_blackhole
+
+        conn = hub.get_db_connection()
+        result = BlackholeStore(conn).blackhole_entity(
+            entity_ref=entity_id,
+            processing_tier=str(payload.get("processing_tier") or "secure"),
+            note=payload.get("note"),
+        )
+        if not result.get("already_blackholed"):
+            result["rebuild"] = (await run_db_read(rebuild_for_blackhole, conn, entity_id)).as_dict()
+        return {"id": req_id, "status": "ok", "payload": result}
+    except ValueError as exc:
+        return {"id": req_id, "status": "error", "error": str(exc), "code": 400}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("signal_unblackhole_entity")
+async def handle_signal_unblackhole_entity(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Lift a black hole. Existing grants are not restored — normal rules resume."""
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    entity_id = str(payload.get("entity_id") or "").strip()
+    if not entity_id:
+        return {"id": req_id, "status": "error", "error": "entity_id required", "code": 400}
+    try:
+        from ...features.lifecycle.blackhole import BlackholeStore
+
+        result = BlackholeStore(hub.get_db_connection()).unblackhole_entity(entity_ref=entity_id)
+        return {"id": req_id, "status": "ok", "payload": result}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("signal_list_blackholes")
+async def handle_signal_list_blackholes(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The owner's own off-limits list — names included.
+
+    Unlike `blackhole_status`, this one does name entities, because it exists to
+    show the owner what they have protected. It is reachable only through the
+    owner-only proxy route, never as an agent-callable tool.
+    """
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    try:
+        from ...features.lifecycle.blackhole import BlackholeStore
+
+        store = BlackholeStore(hub.get_db_connection())
+        return {
+            "id": req_id,
+            "status": "ok",
+            "payload": {
+                "blackholes": store.list(),
+                "notifications": store.notifications(state="open"),
+            },
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("signal_dismiss_blackhole_notification")
+async def handle_signal_dismiss_blackhole_notification(
+    message: Dict[str, Any]
+) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    notification_id = str(payload.get("notification_id") or "").strip()
+    if not notification_id:
+        return {"id": req_id, "status": "error", "error": "notification_id required", "code": 400}
+    try:
+        from ...features.lifecycle.blackhole import BlackholeStore
+
+        dismissed = BlackholeStore(hub.get_db_connection()).dismiss_notification(notification_id)
+        return {"id": req_id, "status": "ok", "payload": {"dismissed": dismissed}}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
 @handles("blackhole_check_text")
 async def handle_blackhole_check_text(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Does *this text* mention a protected entity, and what may process it?
