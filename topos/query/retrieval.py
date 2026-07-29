@@ -2361,7 +2361,98 @@ def _rrf_fuse_summary_lists(
     return fused
 
 
+def _blackhole_policy_for_summary(
+    items: List[Dict[str, Any]],
+    *,
+    conn: Optional[Any],
+    disclosure_tier: str,
+) -> List[Dict[str, Any]]:
+    """Apply the entity black hole to assembled summary items.
+
+    This is the grantee-facing pipeline, so the rule splits on who is asking:
+
+    * **Not `owner_raw`** — a grantee. Items mentioning a protected entity are
+      dropped outright. `resolve_disclosure_tier` never elevates a grantee to
+      `owner_raw`, so this tier check is a sound proxy for "not the owner".
+    * **`owner_raw`** — the owner or something running as them (a routine).
+      Items are kept, because the owner is entitled to them, but each protected
+      item is stamped `blackhole_protected`. That stamp is the taint feed the
+      control plane needs: it cannot detect protected content itself, and
+      without it Gate C on the BYOK route can never fire.
+
+    Items carry names as prose with no entity id, so this is a name scan — the
+    same floor described in `blackhole_llm`, not a ceiling.
+    """
+    if conn is None or not items:
+        return items
+    try:
+        from ..features.lifecycle.blackhole import (
+            blackholed_name_terms,
+            normalize_entity_name,
+        )
+    except Exception:  # noqa: BLE001
+        return items
+    try:
+        terms = blackholed_name_terms(conn)
+    except Exception:  # noqa: BLE001
+        # A store that cannot answer must not silently serve protected content
+        # to a grantee; the owner's own path is unaffected.
+        if str(disclosure_tier or "") == "owner_raw":
+            return items
+        raise
+    if not terms:
+        return items
+
+    owner_view = str(disclosure_tier or "") == "owner_raw"
+    kept: List[Dict[str, Any]] = []
+    for item in items:
+        blob = normalize_entity_name(_item_text_blob(item))
+        hit = bool(blob) and any(term in blob for term in terms)
+        if not hit:
+            kept.append(item)
+            continue
+        if owner_view:
+            kept.append({**item, "blackhole_protected": True})
+    return kept
+
+
 def _build_summary_items(
+    *,
+    manifest: ScopeResolutionManifest,
+    adapters: AdapterBundle,
+    query_text: str,
+    semantic_hits: List[Dict[str, Any]],
+    ranked_clusters: List[Dict[str, Any]],
+    installed_source_ids: Optional[List[str]] = None,
+    disclosure_tier: str = "owner_raw",
+    plan=None,
+    now: Optional[datetime] = None,
+) -> List[Dict[str, Any]]:
+    """Assemble summary items, then apply the black-hole policy to every exit.
+
+    The policy is applied here rather than inside the builder because the
+    builder has two return paths (fused and unfused); wrapping is the only way
+    to be sure a future third path cannot bypass it.
+    """
+    items = _build_summary_items_unfiltered(
+        manifest=manifest,
+        adapters=adapters,
+        query_text=query_text,
+        semantic_hits=semantic_hits,
+        ranked_clusters=ranked_clusters,
+        installed_source_ids=installed_source_ids,
+        disclosure_tier=disclosure_tier,
+        plan=plan,
+        now=now,
+    )
+    return _blackhole_policy_for_summary(
+        items,
+        conn=getattr(adapters.signal, "_conn", None),
+        disclosure_tier=disclosure_tier,
+    )
+
+
+def _build_summary_items_unfiltered(
     *,
     manifest: ScopeResolutionManifest,
     adapters: AdapterBundle,
