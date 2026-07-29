@@ -194,7 +194,13 @@ def _maybe_offer_self_update(
     is_flag=True,
     help="Skip checking PyPI for a newer topos-node version.",
 )
-def main(db_path, topos_key, set_topos_key, discover, port, host, skip_update_check) -> None:
+@click.option(
+    "--tray/--no-tray",
+    "tray",
+    default=None,
+    help="Show a menu-bar/system-tray status icon (default: auto-detect GUI).",
+)
+def main(db_path, topos_key, set_topos_key, discover, port, host, skip_update_check, tray) -> None:
     """Topos Control Plane API entry point."""
     if set_topos_key:
         env_path = _save_topos_key(set_topos_key)
@@ -235,7 +241,20 @@ def main(db_path, topos_key, set_topos_key, discover, port, host, skip_update_ch
     start_background_housekeeping()
 
     _emit_startup_banner(host=host, port=port)
-    uvicorn.run(app, host=host, port=port, log_config=get_uvicorn_log_config())
+
+    from topos.cli import tray as tray_module
+
+    if tray_module.should_enable_tray(cli_flag=tray):
+        tray_module.serve_with_tray(
+            app,
+            host=host,
+            port=port,
+            log_config=get_uvicorn_log_config(),
+            version=_get_runtime_version(),
+            package_name=DEFAULT_PACKAGE_NAME,
+        )
+    else:
+        uvicorn.run(app, host=host, port=port, log_config=get_uvicorn_log_config())
 
 
 if __name__ == "__main__":

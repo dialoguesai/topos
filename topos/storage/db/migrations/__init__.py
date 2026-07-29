@@ -142,6 +142,14 @@ from .attention_triage_v2 import (
     MIGRATION_ID as ATTENTION_TRIAGE_V2_ID,  # noqa: F401 — exported for tests/tools
     apply_attention_triage_v2_up,
 )
+from .entity_blackhole_v1 import (
+    MIGRATION_ID as ENTITY_BLACKHOLE_V1_ID,  # noqa: F401 — exported for tests/tools
+    apply_entity_blackhole_v1_up,
+)
+from .complexity_v1 import (
+    MIGRATION_ID as COMPLEXITY_V1_ID,  # noqa: F401 — exported for tests/tools
+    apply_complexity_v1_up,
+)
 
 __all__ = ["apply_all_migrations", "ensure_migrations_applied"]
 
@@ -222,6 +230,10 @@ def apply_all_migrations(conn: sqlite3.Connection) -> None:
     # Attention triage verdict storage (new table — safe to run unconditionally).
     apply_attention_triage_v1_up(conn)
     apply_attention_triage_v2_up(conn)
+    # Entity black hole flag + rebuild notifications (new tables — safe unconditionally).
+    apply_entity_blackhole_v1_up(conn)
+    # Complexity snapshot cache (new table — safe to run unconditionally).
+    apply_complexity_v1_up(conn)
 
 
 def ensure_migrations_applied(conn: sqlite3.Connection) -> None:
@@ -308,3 +320,7 @@ def ensure_migrations_applied(conn: sqlite3.Connection) -> None:
         apply_attention_triage_v1_up(conn)
     # v2 column adds are PRAGMA-guarded; run unconditionally.
     apply_attention_triage_v2_up(conn)
+    if not _migration_applied(conn, ENTITY_BLACKHOLE_V1_ID):
+        apply_entity_blackhole_v1_up(conn)
+    if not _migration_applied(conn, COMPLEXITY_V1_ID):
+        apply_complexity_v1_up(conn)
