@@ -1173,24 +1173,72 @@ def _load_attention_summary_items(conn: Optional[Any], limit: int = 10) -> List[
     return items
 
 
-def _load_time_summary_items(conn: Optional[Any], limit: int = 8) -> List[Dict[str, Any]]:
+# Intent → time-objects routing (minimal-disclosure pass): a grantee's summary
+# answer carries only the layers their question is about. No keyword match ⇒
+# the compact availability digest alone — never the full bundle by default.
+_TIME_ASPECT_KEYWORDS: Dict[str, Tuple[str, ...]] = {
+    # "meet"/"meeting" is deliberately absent: it appears in load and
+    # commitment questions constantly and would drag the digest into every
+    # answer, defeating intent-proportionality.
+    "availability_summary": (
+        "free", "open", "window", "availab", "slot", "space", "spot",
+        "minute", "session", "call",
+    ),
+    "flex_windows": (
+        "negotiab", "flex", "mov", "shift", "reschedul", "conditional",
+        "give", "immovable", "soft", "earlier", "run past",
+    ),
+    "meeting_load_band": (
+        "load", "busy hours", "bandwidth", "capacity", "heavy", "light",
+        "how busy", "hours",
+    ),
+    "routine_confidence": (
+        "rhythm", "active", "responsive", "routine", "predictab", "habit",
+        "pattern", "morning", "evening", "night", "usually",
+    ),
+    "Commitment": (
+        "commitment", "recurring", "standing", "weekly", "collide",
+    ),
+}
+
+
+def _time_aspects_for_query(query_text: str) -> set:
+    lowered = str(query_text or "").lower()
+    wanted = {
+        otype
+        for otype, keywords in _TIME_ASPECT_KEYWORDS.items()
+        if any(k in lowered for k in keywords)
+    }
+    return wanted or {"availability_summary"}
+
+
+def _load_time_summary_items(
+    conn: Optional[Any], query_text: str = "", limit: int = 8
+) -> List[Dict[str, Any]]:
     """Derived time-dimension objects as summary items — the availability:read
     scope's negotiability layer (PLAN_TIME_SIGNAL_UPGRADE M3). Payloads are
     title/attendee-free by construction; raw movability scores stay owner-side,
-    only bands are phrased here."""
+    only bands are phrased here. Items are filtered to the ASPECT the query is
+    about (minimal disclosure): a load question never also reveals commitments."""
     if conn is None:
         return []
-    try:
-        rows = conn.execute(
-            "SELECT object_type, object_key, payload_json FROM signal_objects "
-            "WHERE signal_dimension='time' AND valid_to IS NULL "
-            "AND object_type IN ('availability_summary','meeting_load_band',"
-            "'flex_windows','routine_confidence') "
-            "ORDER BY object_type ASC LIMIT ?",
-            (limit,),
-        ).fetchall()
-    except Exception:
+    wanted = _time_aspects_for_query(query_text)
+    object_types = sorted(wanted - {"Commitment"})
+    if not object_types and "Commitment" not in wanted:
         return []
+    rows = []
+    if object_types:
+        placeholders = ",".join("?" for _ in object_types)
+        try:
+            rows = conn.execute(
+                "SELECT object_type, object_key, payload_json FROM signal_objects "
+                "WHERE signal_dimension='time' AND valid_to IS NULL "
+                f"AND object_type IN ({placeholders}) "
+                "ORDER BY object_type ASC LIMIT ?",
+                (*object_types, limit),
+            ).fetchall()
+        except Exception:
+            return []
     items: List[Dict[str, Any]] = []
     for otype, okey, payload_json in rows:
         try:
@@ -1235,14 +1283,16 @@ def _load_time_summary_items(conn: Optional[Any], limit: int = 8) -> List[Dict[s
             "record_id": f"{otype}:{okey}",
             "retrieval_source": otype,
         })
-    try:
-        commitment_rows = conn.execute(
-            "SELECT object_key, payload_json FROM signal_objects "
-            "WHERE signal_dimension='time' AND valid_to IS NULL "
-            "AND object_type='Commitment' ORDER BY object_key LIMIT 6",
-        ).fetchall()
-    except Exception:
-        commitment_rows = []
+    commitment_rows = []
+    if "Commitment" in wanted:
+        try:
+            commitment_rows = conn.execute(
+                "SELECT object_key, payload_json FROM signal_objects "
+                "WHERE signal_dimension='time' AND valid_to IS NULL "
+                "AND object_type='Commitment' ORDER BY object_key LIMIT 6",
+            ).fetchall()
+        except Exception:
+            commitment_rows = []
     if commitment_rows:
         parts = []
         for okey, payload_json in commitment_rows:
@@ -1264,6 +1314,33 @@ def _load_time_summary_items(conn: Optional[Any], limit: int = 8) -> List[Dict[s
                 "retrieval_source": "Commitment",
             })
     return items
+
+
+def _availability_band(conn: Optional[Any], query_text: str) -> Optional[Dict[str, Any]]:
+    """Minimum-disclosure availability verdict for inference mode: one band,
+    one confidence — target window in, band out (PLAN_TIME_SIGNAL_UPGRADE §
+    minimal-disclosure pass). Bands: overlap_found | negotiable_overlap |
+    no_overlap | unknown. Nothing else crosses."""
+    if conn is None:
+        return None
+    try:
+        from ..features.fit.evaluator import evaluate_opportunity
+
+        hints = _iso_date_hints(query_text or "")
+        context = {"target_window_start": hints[0]} if hints else {}
+        result = evaluate_opportunity(conn, "schedule_meeting", context=context)
+    except Exception:
+        return None
+    timing = next(
+        (f for f in result.get("facet_results") or [] if f.get("facet_id") == "timing_feasibility"),
+        None,
+    )
+    if not timing:
+        return None
+    return {
+        "band": str(timing.get("public_band") or "unknown"),
+        "confidence": float(timing.get("confidence") or 0.0),
+    }
 
 
 def _load_brief_summary_items(
@@ -2875,7 +2952,7 @@ class DefaultSignalRetrievalAdapter:
                     touched.append("signal")
             if manifest.scope_id == "availability:read":
                 time_items = _load_time_summary_items(
-                    getattr(self._adapters.signal, "_conn", None))
+                    getattr(self._adapters.signal, "_conn", None), query_text)
                 if time_items:
                     summaries = time_items + list(summaries)
                     touched.append("signal")
@@ -2937,9 +3014,14 @@ class DefaultSignalRetrievalAdapter:
                 for item in _load_brief_summary_items(["Time"]):
                     scores.append({k: v for k, v in item.items() if k not in _INFERENCE_EXCLUDED_KEYS})
             elif manifest.scope_id == "availability:read":
-                for item in _load_time_summary_items(
-                        getattr(self._adapters.signal, "_conn", None)):
-                    scores.append({k: v for k, v in item.items() if k not in _INFERENCE_EXCLUDED_KEYS})
+                # Minimal disclosure: inference answers with ONE band, not the
+                # summary bundle. The band is computed here (store access) and
+                # rendered by the game layer; no time items enter the packet.
+                band = _availability_band(
+                    getattr(self._adapters.signal, "_conn", None), query_text
+                )
+                if band:
+                    packet["availability_band"] = band
             elif manifest.scope_id == "attention:read":
                 for item in _load_attention_summary_items(
                         getattr(self._adapters.signal, "_conn", None)):

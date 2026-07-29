@@ -468,7 +468,9 @@ class QueryPipelineOrchestrator:
             query_text=query_text,
         )
         timings.game_layer_ms = now_ms() - _t0
-        if access_mode == "inference":
+        if access_mode == "inference" and public.payload.get("answer_type") != "band":
+            # Band answers are deterministic verdicts (minimal disclosure) —
+            # the LLM pass would only replace them with prose.
             _t0 = now_ms()
             inf = await asyncio.to_thread(
                 run_query_inference,

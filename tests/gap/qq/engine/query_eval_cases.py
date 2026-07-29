@@ -139,11 +139,11 @@ def eval_q4_collaborators(response: Dict[str, Any]) -> Tuple[bool, str]:
         return ok, msg
     pr = _public_result(response)
     answer_type = pr.get("answer_type")
-    if answer_type in ("list", "yes_no"):
+    if answer_type in ("list", "yes_no", "band"):
         return True, f"answer_type={answer_type}"
     if isinstance(pr.get("items"), list) and pr["items"]:
         return True, f"list with {len(pr['items'])} items"
-    return False, f"expected list/yes_no inference shape, got {answer_type}"
+    return False, f"expected list/yes_no/band inference shape, got {answer_type}"
 
 
 def eval_q5_illustration(response: Dict[str, Any]) -> Tuple[bool, str]:

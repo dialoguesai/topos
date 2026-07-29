@@ -108,7 +108,7 @@ def _assert_expectations(case: Dict[str, Any], result: Dict[str, Any]) -> None:
 
 
 def test_catalog_versions_pinned():
-    assert TS_CATALOG_VERSION == "ts-2"
+    assert TS_CATALOG_VERSION == "ts-3"
     assert TS_CORPUS_VERSION == "ts-2"
     assert len(REQUEST_CASES) + len(FIT_CASES) == 100
 
