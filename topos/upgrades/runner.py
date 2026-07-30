@@ -295,7 +295,9 @@ def _exec_enrichment_reprocess(step: Dict[str, Any], conn: sqlite3.Connection) -
                     _process_enrichment_core(
                         source_id=source_id,
                         job_names=list(job_names) if job_names else None,
-                        force_reprocess=bool(params.get("force_reprocess", True)),
+                        # Default False: stale-predicate (spec_version) resumes;
+                        # manifests may still set force_reprocess=true for wipes.
+                        force_reprocess=bool(params.get("force_reprocess", False)),
                         include_signal=include_signal,
                     )
                 )
@@ -335,9 +337,100 @@ def _exec_engine_endpoint(step: Dict[str, Any], conn: sqlite3.Connection) -> Dic
     raise ValueError(f"no internal dispatch for endpoint step: {path!r}")
 
 
+def _exec_canonical_reprocess(step: Dict[str, Any], conn: sqlite3.Connection) -> Dict[str, Any]:
+    """Re-run raw→canonical (or canonical-only) for declared sources."""
+    import asyncio
+
+    from ..ingestion.reprocess import reprocess_source
+
+    params = step.get("params") or {}
+    from_stage = str(params.get("from_stage") or "raw")
+    if from_stage not in ("raw", "canonical"):
+        raise ValueError(f"canonical_reprocess from_stage must be raw|canonical, got {from_stage!r}")
+    source_ids = list(params.get("source_ids") or []) or _real_source_ids(conn)
+    detail: Dict[str, Any] = {"sources": {}, "from_stage": from_stage}
+    for source_id in source_ids:
+        try:
+            out = asyncio.run(
+                reprocess_source(
+                    source_id=str(source_id),
+                    dataset_id=str(params.get("dataset_id") or "default"),
+                    from_stage=from_stage,  # type: ignore[arg-type]
+                    force=bool(params.get("force", False)),
+                )
+            )
+            detail["sources"][source_id] = str(out.get("status") or "ok")
+        except Exception as exc:  # noqa: BLE001
+            detail["sources"][source_id] = f"error: {exc}"
+    return detail
+
+
+def _exec_derived_rebuild(step: Dict[str, Any], conn: sqlite3.Connection) -> Dict[str, Any]:
+    """Rebuild derived layers: graph, topic clusters, and/or timeline."""
+    params = step.get("params") or {}
+    targets = list(params.get("targets") or params.get("layers") or [])
+    if not targets:
+        targets = ["entity_graph"]
+    detail: Dict[str, Any] = {"targets": {}}
+    for target in targets:
+        name = str(target)
+        try:
+            if name in ("entity_graph", "graph", "entities_graph"):
+                from ..features.entities.maintenance import rebuild_entity_graph
+
+                detail["targets"][name] = dict(rebuild_entity_graph(conn))
+            elif name in ("topic_clusters", "clusters"):
+                from ..features.signal.topic_clustering import recompute_topic_clusters
+
+                detail["targets"][name] = dict(recompute_topic_clusters(conn) or {})
+            elif name in ("timeline",):
+                from ..features.timeline_projection import repair_timeline_for_source
+
+                written = 0
+                for source_id in _real_source_ids(conn):
+                    report = repair_timeline_for_source(
+                        conn, source_id, missing_only=True, dry_run=False
+                    )
+                    written += int((report or {}).get("totals", {}).get("written", 0))
+                detail["targets"][name] = {"written": written}
+            else:
+                raise ValueError(f"unknown derived_rebuild target {name!r}")
+        except Exception as exc:  # noqa: BLE001
+            detail["targets"][name] = {"error": str(exc)}
+            raise
+    return detail
+
+
+def _exec_reembed(step: Dict[str, Any], conn: sqlite3.Connection) -> Dict[str, Any]:
+    """Re-embed via enrichment job then rebuild ANN (vec0) from signal_embeddings."""
+    params = dict(step.get("params") or {})
+    params.setdefault("job_names", ["embeddings"])
+    params.setdefault("include_signal", True)
+    params.setdefault("force_reprocess", False)
+    annotated = dict(step)
+    annotated["params"] = params
+    enrich_detail = _exec_enrichment_reprocess(annotated, conn)
+    from ..storage.db.migrations.vector_storage_v4 import rebuild_vec_table
+    from ..engine.backends.huggingface import embedding_model_profile
+
+    profile = embedding_model_profile()
+    dims = int(profile.get("dims") or 384)
+    rebuild_vec_table(conn, dims=dims)
+    return {"enrichment": enrich_detail, "vec_dims": dims}
+
+
+def _exec_none(step: Dict[str, Any], conn: sqlite3.Connection) -> Dict[str, Any]:
+    """Document-only step — no derived work."""
+    return {"noop": True, "id": step.get("id")}
+
+
 DEFAULT_EXECUTORS: Dict[str, ExecutorFn] = {
     "enrichment_reprocess": _exec_enrichment_reprocess,
     "engine_endpoint": _exec_engine_endpoint,
+    "canonical_reprocess": _exec_canonical_reprocess,
+    "derived_rebuild": _exec_derived_rebuild,
+    "reembed": _exec_reembed,
+    "none": _exec_none,
 }
 
 
@@ -368,7 +461,7 @@ def run_pending_upgrades(
             _stamp_baseline(conn, shipped_v)
         return {"steps_run": 0, "steps_failed": 0}
 
-    ran = failed = 0
+    ran = failed = pending_consent = 0
     failed_ids: set = set()
     steps = list(plan["steps"])
     steps_total = len(steps)
@@ -377,11 +470,41 @@ def run_pending_upgrades(
         status = _ledger_status(conn, shipped_v, step_id)
         if status == "done":
             continue
+        consent = str(step.get("consent") or "auto").strip().lower()
+        if consent == "prompt" and status in (None, "pending_consent"):
+            # Sticky until POST /v1/upgrade/consent flips status to "pending".
+            if status != "pending_consent":
+                _ledger_set(
+                    conn,
+                    shipped_v,
+                    step_id,
+                    "pending_consent",
+                    {
+                        "cost": step.get("cost") or "slow",
+                        "title": step.get("title"),
+                        "why": step.get("why"),
+                    },
+                )
+            pending_consent += 1
+            logger.info("upgrade step %s waiting for consent (cost=%s)", step_id, step.get("cost"))
+            continue
         deps = step.get("depends_on") or []
-        if any(d in failed_ids or _ledger_status(conn, shipped_v, d) != "done" for d in deps):
-            logger.warning("step %s skipped: dependency not done (%s)", step_id, deps)
-            failed_ids.add(step_id)
-            failed += 1
+        blocked_by_consent = False
+        for dep in deps:
+            dep_status = _ledger_status(conn, shipped_v, dep)
+            if dep in failed_ids or dep_status == "failed":
+                logger.warning("step %s skipped: dependency failed (%s)", step_id, deps)
+                failed_ids.add(step_id)
+                failed += 1
+                blocked_by_consent = True
+                break
+            if dep_status != "done":
+                # Waiting on consent or still pending — retry next boot.
+                blocked_by_consent = True
+                break
+        if blocked_by_consent and step_id not in failed_ids:
+            continue
+        if step_id in failed_ids:
             continue
         executor = executors.get(str(step["kind"]))
         if executor is None:
@@ -425,7 +548,12 @@ def run_pending_upgrades(
     if all_done:
         _stamp_baseline(conn, shipped_v)
         logger.info("upgrade to %s complete (%d steps)", shipped_v, ran)
-    result = {"steps_run": ran, "steps_failed": failed, "baseline_advanced": all_done}
+    result = {
+        "steps_run": ran,
+        "steps_failed": failed,
+        "steps_pending_consent": pending_consent,
+        "baseline_advanced": all_done,
+    }
     _set_runner_state(last_result=result)
     return result
 
@@ -500,6 +628,23 @@ def start_background(
 
 def runner_status(conn: sqlite3.Connection) -> Dict[str, Any]:
     plan = plan_upgrade(conn)
+    shipped_v = plan["shipped"]
+    pending_consent_steps: List[Dict[str, Any]] = []
+    for step in plan["steps"]:
+        step_id = str(step["id"])
+        if _ledger_status(conn, shipped_v, step_id) == "pending_consent" or (
+            str(step.get("consent") or "auto").lower() == "prompt"
+            and _ledger_status(conn, shipped_v, step_id) in (None, "pending_consent")
+        ):
+            pending_consent_steps.append(
+                {
+                    "id": step_id,
+                    "title": step.get("title"),
+                    "why": step.get("why"),
+                    "cost": step.get("cost") or "slow",
+                    "kind": step.get("kind"),
+                }
+            )
     with _state_lock:
         state = dict(_runner_state)
     return {
@@ -508,6 +653,7 @@ def runner_status(conn: sqlite3.Connection) -> Dict[str, Any]:
         "baseline": read_baseline(conn),
         "fresh_install": plan["fresh_install"],
         "pending_steps": [s["id"] for s in plan["steps"]],
+        "pending_consent_steps": pending_consent_steps,
         "running": state["running"],
         "waiting_for_ui": state.get("waiting_for_ui", False),
         "current_step": state["current_step"],
@@ -515,3 +661,33 @@ def runner_status(conn: sqlite3.Connection) -> Dict[str, Any]:
         "last_result": state["last_result"],
         "ledger": ledger_rows(conn),
     }
+
+
+def consent_upgrade_step(
+    conn: sqlite3.Connection,
+    step_id: str,
+    *,
+    shipped: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Approve a ``pending_consent`` step so the next runner pass executes it."""
+    plan = plan_upgrade(conn, shipped=shipped)
+    shipped_v = plan["shipped"]
+    match = next((s for s in plan["steps"] if str(s.get("id")) == str(step_id)), None)
+    if match is None:
+        raise ValueError(f"unknown upgrade step {step_id!r} for {shipped_v}")
+    status = _ledger_status(conn, shipped_v, str(step_id))
+    if status not in (None, "pending_consent"):
+        return {
+            "status": "ok",
+            "step_id": step_id,
+            "ledger_status": status,
+            "message": "step already past consent",
+        }
+    _ledger_set(
+        conn,
+        shipped_v,
+        str(step_id),
+        "pending",
+        {"consented_at": _now(), "cost": match.get("cost"), "why": match.get("why")},
+    )
+    return {"status": "ok", "step_id": step_id, "ledger_status": "pending"}

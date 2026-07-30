@@ -26,7 +26,14 @@ MANIFESTS = REPO_ROOT / "topos" / "upgrades" / "manifests.json"
 CHANGELOG = REPO_ROOT / "CHANGELOG.md"
 
 # Keep in sync with topos.upgrades.runner.DEFAULT_EXECUTORS + kind "none".
-EXECUTABLE_KINDS = frozenset({"enrichment_reprocess", "engine_endpoint", "none"})
+EXECUTABLE_KINDS = frozenset({
+    "enrichment_reprocess",
+    "engine_endpoint",
+    "canonical_reprocess",
+    "derived_rebuild",
+    "reembed",
+    "none",
+})
 
 
 def _load_releases() -> list[dict]:

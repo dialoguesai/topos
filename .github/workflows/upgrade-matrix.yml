@@ -1,0 +1,73 @@
+name: Upgrade matrix
+
+# PLAN_NODE_RELEASE_MIGRATIONS M4 — catch-up from a floored baseline fixture.
+# Default path uses --from-current (cheap, stable). Nightly may switch to PyPI
+# wheels when older topos-node==VERSION installs remain reliable.
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # nightly UTC
+  workflow_dispatch:
+  workflow_call:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+jobs:
+  upgrade-matrix:
+    name: Fixture catch-up (from-current)
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up uv
+        uses: astral-sh/setup-uv@v4
+        with:
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --extra dev --extra local
+
+      - name: Restore cached fixture
+        id: cache-fixture
+        uses: actions/cache@v4
+        with:
+          path: .cache/upgrade-fixtures
+          # Keyed on floor + migration registry so schema changes rebuild.
+          key: upgrade-fixture-1.1.0-${{ hashFiles('topos/storage/db/migrations/registry.py', 'topos/storage/db/migrations/registry_checksums.json', 'scripts/build_upgrade_fixture.py') }}
+
+      - name: Build from-current fixture (baseline 1.1.0)
+        # Support floor. PyPI install of old wheels can be heavy/flaky; CI uses
+        # --from-current (current schema + stamped baseline). Nightly may omit
+        # --from-current when topos-node==1.1.0 (or other floor) installs cleanly.
+        run: |
+          mkdir -p .cache/upgrade-fixtures
+          FIXTURE=".cache/upgrade-fixtures/from-current-1.1.0.db"
+          if [ ! -f "${FIXTURE}" ]; then
+            uv run python scripts/build_upgrade_fixture.py \
+              --from-current --version 1.1.0 --out "${FIXTURE}"
+          else
+            echo "Using cached fixture ${FIXTURE}"
+          fi
+          cp "${FIXTURE}" /tmp/upgrade-fixture.db
+
+      - name: Run upgrade matrix
+        run: uv run python scripts/run_upgrade_matrix.py --db /tmp/upgrade-fixture.db
+
+      - name: Upload fixture artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: upgrade-fixture-1.1.0
+          path: .cache/upgrade-fixtures/from-current-1.1.0.db
+          if-no-files-found: error
+          retention-days: 30

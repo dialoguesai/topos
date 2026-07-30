@@ -158,6 +158,10 @@ from .complexity_v1 import (
     MIGRATION_ID as COMPLEXITY_V1_ID,
     apply_complexity_v1_up,
 )
+from .enrichment_spec_version_v1 import (
+    MIGRATION_ID as ENRICHMENT_SPEC_VERSION_V1_ID,
+    apply_enrichment_spec_version_v1_up,
+)
 
 ApplyFn = Callable[[sqlite3.Connection], object]
 
@@ -256,6 +260,7 @@ MIGRATIONS: List[MigrationSpec] = [
     _spec(45, ATTENTION_TRIAGE_V2_ID, apply_attention_triage_v2_up, always_run=True),
     _spec(46, ENTITY_BLACKHOLE_V1_ID, apply_entity_blackhole_v1_up),
     _spec(47, COMPLEXITY_V1_ID, apply_complexity_v1_up),
+    _spec(48, ENRICHMENT_SPEC_VERSION_V1_ID, apply_enrichment_spec_version_v1_up),
 ]
 
 
@@ -315,4 +320,5 @@ __all__ = [
     "ATTENTION_TRIAGE_V2_ID",
     "ENTITY_BLACKHOLE_V1_ID",
     "COMPLEXITY_V1_ID",
+    "ENRICHMENT_SPEC_VERSION_V1_ID",
 ]

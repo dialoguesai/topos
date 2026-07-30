@@ -33,6 +33,11 @@ jobs:
       - name: Verify migration registry checksums
         run: python scripts/sync_migration_checksums.py --check
 
+      - name: Spec-version nudge for enrichment/model diffs
+        run: python scripts/check_spec_version_nudge.py
+        env:
+          TOPOS_DIFF_BASE: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || 'origin/main' }}
+
       - name: Run public test lane
         run: uv run pytest tests -m "public and not e2e and not live and not qq_eval" -q
 

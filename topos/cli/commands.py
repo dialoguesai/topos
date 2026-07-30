@@ -307,6 +307,28 @@ def main(db_path, topos_key, set_topos_key, discover, port, host, skip_update_ch
     start_background_housekeeping()
 
     _emit_startup_banner(host=host, port=port)
+    try:
+        from topos.core.state import get_db_connection
+        from topos.upgrades.runner import runner_status
+
+        _conn = get_db_connection()
+        if _conn is not None:
+            _pending = (runner_status(_conn).get("pending_consent_steps") or [])
+            if _pending:
+                click.echo("")
+                click.echo("Upgrade steps waiting for your consent:")
+                for step in _pending:
+                    click.echo(
+                        f"  • {step.get('id')}: {step.get('title') or step.get('why') or ''}"
+                        f" (cost={step.get('cost') or 'slow'})"
+                    )
+                click.echo(
+                    "Approve with: POST /v1/upgrade/consent {\"step_id\": \"...\"} "
+                    "or the Engine settings banner."
+                )
+                click.echo("")
+    except Exception:
+        pass
 
     from topos.cli import tray as tray_module
 

@@ -38,6 +38,18 @@ def _insert_matching_columns(
     )
 
 
+def _record_spec_version(record: Dict[str, Any], job_id: str = "") -> int:
+    raw = record.get("spec_version")
+    if raw is not None:
+        try:
+            return int(raw)
+        except (TypeError, ValueError):
+            pass
+    from .models.mvp_defaults import job_spec_version
+
+    return job_spec_version(job_id or str(record.get("job_id") or ""))
+
+
 class DerivedTablesManager(BaseObject):
     """Manages derived tables for enrichment data."""
 
@@ -210,26 +222,18 @@ class DerivedTablesManager(BaseObject):
                             if isinstance(all_emotions_val, list)
                             else (all_emotions_val if isinstance(all_emotions_val, str) else "[]")
                         )
-                        values.append(
-                            (
-                                record.get("message_id"),
-                                record.get("source_id"),
-                                record.get("emotion_label"),
-                                record.get("confidence"),
-                                record.get("model_name") or record.get("model"),
-                                all_emotions_str,
-                                extracted_at,
-                            )
-                        )
-                    self.conn.executemany(
-                        """
-                        INSERT OR REPLACE INTO message_emotions (
-                            message_id, source_id, emotion_label, confidence,
-                            model_name, all_emotions_json, created_at
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        values,
-                    )
+                        row = {
+                            "message_id": record.get("message_id"),
+                            "source_id": record.get("source_id"),
+                            "emotion_label": record.get("emotion_label"),
+                            "confidence": record.get("confidence"),
+                            "model_name": record.get("model_name") or record.get("model"),
+                            "all_emotions_json": all_emotions_str,
+                            "created_at": extracted_at,
+                            "spec_version": _record_spec_version(record, "emo_27"),
+                        }
+                        _insert_matching_columns(self.conn, "message_emotions", cols, row)
+                        values.append(1)
                 elif use_wiki:
                     import json
                     import uuid
@@ -238,21 +242,17 @@ class DerivedTablesManager(BaseObject):
                         message_id = record.get("message_id") or record.get("record_id")
                         emotion_id = str(record.get("emotion_id") or uuid.uuid4())
                         payload = json.dumps({**record, "message_id": message_id})
-                        self.conn.execute(
-                            """
-                            INSERT OR REPLACE INTO message_emotions (
-                                emotion_id, record_id, source_id, model, provider, payload_json
-                            ) VALUES (?, ?, ?, ?, ?, ?)
-                            """,
-                            (
-                                emotion_id,
-                                message_id,
-                                record.get("source_id"),
-                                record.get("model_name") or record.get("model"),
-                                record.get("provider"),
-                                payload,
-                            ),
-                        )
+                        row = {
+                            "emotion_id": emotion_id,
+                            "record_id": message_id,
+                            "source_id": record.get("source_id"),
+                            "model": record.get("model_name") or record.get("model"),
+                            "provider": record.get("provider"),
+                            "payload_json": payload,
+                            "spec_version": _record_spec_version(record, "emo_27"),
+                        }
+                        _insert_matching_columns(self.conn, "message_emotions", cols, row)
+                        values = [1]  # noqa: F841 — keep written accounting below
                 else:
                     logger.warning("%s: message_emotions schema not recognized", self)
                     return 0
@@ -292,21 +292,20 @@ class DerivedTablesManager(BaseObject):
                 entity_id = str(record.get("entity_id") or uuid.uuid4())
                 payload = json.dumps({**record, "record_id": record_id, "entity_id": entity_id})
                 if "payload_json" in cols:
-                    self.conn.execute(
-                        """
-                        INSERT OR REPLACE INTO message_entities (
-                            entity_id, record_id, source_id, entity_text, model, provider, payload_json
-                        ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            entity_id,
-                            record_id,
-                            record.get("source_id"),
-                            entity_text,
-                            record.get("model"),
-                            record.get("provider"),
-                            payload,
-                        ),
+                    _insert_matching_columns(
+                        self.conn,
+                        "message_entities",
+                        cols,
+                        {
+                            "entity_id": entity_id,
+                            "record_id": record_id,
+                            "source_id": record.get("source_id"),
+                            "entity_text": entity_text,
+                            "model": record.get("model"),
+                            "provider": record.get("provider"),
+                            "payload_json": payload,
+                            "spec_version": _record_spec_version(record, "entities"),
+                        },
                     )
                 if "message_id" in cols:
                     try:
@@ -341,21 +340,20 @@ class DerivedTablesManager(BaseObject):
                 if not goal_text:
                     continue
                 goal_id = str(record.get("goal_id") or uuid.uuid4())
-                self.conn.execute(
-                    """
-                    INSERT OR REPLACE INTO user_goals (
-                        goal_id, record_id, source_id, goal_text, model, provider, payload_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                    """,
-                    (
-                        goal_id,
-                        record_id,
-                        record.get("source_id"),
-                        goal_text,
-                        record.get("model"),
-                        record.get("provider"),
-                        json.dumps({**record, "goal_id": goal_id}),
-                    ),
+                _insert_matching_columns(
+                    self.conn,
+                    "user_goals",
+                    cols,
+                    {
+                        "goal_id": goal_id,
+                        "record_id": record_id,
+                        "source_id": record.get("source_id"),
+                        "goal_text": goal_text,
+                        "model": record.get("model"),
+                        "provider": record.get("provider"),
+                        "payload_json": json.dumps({**record, "goal_id": goal_id}),
+                        "spec_version": _record_spec_version(record, "goal_extraction"),
+                    },
                 )
                 written += 1
             commit_connection(self.conn)
@@ -406,6 +404,7 @@ class DerivedTablesManager(BaseObject):
                 "model": record.get("model"),
                 "provider": record.get("provider"),
                 "payload_json": json.dumps({**record, "topic_id": topic_id}),
+                "spec_version": _record_spec_version(record, "topics"),
             }
             if "message_id" in cols:
                 values["message_id"] = record.get("message_id") or record_id
@@ -435,6 +434,7 @@ class DerivedTablesManager(BaseObject):
                 "model": record.get("model"),
                 "provider": record.get("provider"),
                 "payload_json": json.dumps({**record, "sentiment_id": sentiment_id}),
+                "spec_version": _record_spec_version(record, "sentiment"),
             }
             if "message_id" in cols:
                 values["message_id"] = record.get("message_id") or record_id
@@ -464,6 +464,7 @@ class DerivedTablesManager(BaseObject):
                 "dims": record.get("dims") or (len(vector) if isinstance(vector, list) else None),
                 "vector_json": json.dumps(vector) if vector is not None else None,
                 "payload_json": json.dumps({**record, "embedding_id": embedding_id}),
+                "spec_version": _record_spec_version(record, "embeddings"),
             }
             if "message_id" in cols:
                 values["message_id"] = record.get("message_id") or record_id
@@ -487,32 +488,70 @@ class DerivedTablesManager(BaseObject):
             for i in range(0, len(records), batch_size):
                 batch = records[i : i + batch_size]
                 values = []
+                cols = _table_columns(self.conn, "browser_url_classification")
                 for record in batch:
                     record_id = record.get("record_id") or record.get("event_id")
                     if not record_id:
                         continue
-                    values.append(
-                        (
-                            record.get("enriched_from_table") or "activity_events",
-                            record_id,
-                            record.get("dataset_id"),
-                            record.get("url"),
-                            record.get("title"),
-                            record.get("url_category") or record.get("category"),
-                            record.get("url_confidence") if record.get("url_confidence") is not None else record.get("confidence"),
-                            record.get("model_name") or record.get("model"),
+                    row = {
+                        "enriched_from_table": record.get("enriched_from_table") or "activity_events",
+                        "record_id": record_id,
+                        "dataset_id": record.get("dataset_id"),
+                        "url": record.get("url"),
+                        "title": record.get("title"),
+                        "url_category": record.get("url_category") or record.get("category"),
+                        "url_confidence": (
+                            record.get("url_confidence")
+                            if record.get("url_confidence") is not None
+                            else record.get("confidence")
+                        ),
+                        "model_name": record.get("model_name") or record.get("model"),
+                        "updated_at": "datetime('now')",
+                        "spec_version": _record_spec_version(record, "url_classification"),
+                    }
+                    # updated_at uses SQL datetime — keep prior executemany path for that col
+                    if "spec_version" in cols:
+                        self.conn.execute(
+                            """
+                            INSERT OR REPLACE INTO browser_url_classification
+                            (enriched_from_table, record_id, dataset_id, url, title,
+                             url_category, url_confidence, model_name, updated_at, spec_version)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
+                            """,
+                            (
+                                row["enriched_from_table"],
+                                row["record_id"],
+                                row["dataset_id"],
+                                row["url"],
+                                row["title"],
+                                row["url_category"],
+                                row["url_confidence"],
+                                row["model_name"],
+                                row["spec_version"],
+                            ),
                         )
-                    )
+                    else:
+                        self.conn.execute(
+                            """
+                            INSERT OR REPLACE INTO browser_url_classification
+                            (enriched_from_table, record_id, dataset_id, url, title,
+                             url_category, url_confidence, model_name, updated_at)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                            """,
+                            (
+                                row["enriched_from_table"],
+                                row["record_id"],
+                                row["dataset_id"],
+                                row["url"],
+                                row["title"],
+                                row["url_category"],
+                                row["url_confidence"],
+                                row["model_name"],
+                            ),
+                        )
+                    values.append(1)
                 if not values:
                     continue
-                self.conn.executemany(
-                    """
-                    INSERT OR REPLACE INTO browser_url_classification
-                    (enriched_from_table, record_id, dataset_id, url, title, url_category, url_confidence, model_name, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-                    """,
-                    values,
-                )
                 commit_connection(self.conn)
                 written += len(values)
         except Exception as exc:

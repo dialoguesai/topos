@@ -5,6 +5,7 @@
     "canonical_nsfw_v1": "0f2c2fb8d0b5f4bfffcbe1e8fcba9c02496b1029e85252853e15841d36221d62",
     "complexity_v1": "0bdbf7bea28e3e52790b1bc5c8a3e798af04d4e8acc2b4da5696e43f824118c3",
     "documents_v1": "e69f447696078c1a1fa7597ecd0fdc658841f62c9705393b80cf92f6b4ba9278",
+    "enrichment_spec_version_v1": "f336bd58990d01035b7d909e0e6c74b4099a916d5d2748ab06ca469515b9c2e1",
     "entity_blackhole_v1": "f31dd047e57e1747a26a163346da617f21bae4cedb0b81ac21b302de5e1fddc9",
     "episodes_v1": "377a043c7fad3ef5a21c8b60371f756a458b78ebf3c893039faa192c2722869b",
     "explicit_signal_ia_extraction_artifacts_v1": "e089b4c0565341220a02c62e70ff75c8989c3af31833acd311e12c02fe277f72",

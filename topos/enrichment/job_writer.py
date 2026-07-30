@@ -54,8 +54,38 @@ def _write_wiki_table(
     id_field: str,
     provenance: Dict[str, Any],
 ) -> None:
+    from .models.mvp_defaults import job_spec_version
+
     row_id = str(record.get(id_field) or uuid.uuid4())
     payload = _merge_provenance({**record, id_field: row_id}, provenance)
+    job_id = str(payload.get("job_id") or provenance.get("job_id") or "")
+    spec_v = payload.get("spec_version")
+    if spec_v is None:
+        spec_v = job_spec_version(job_id)
+    cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if "spec_version" in cols:
+        conn.execute(
+            f"""
+            INSERT INTO {table} (
+                {id_field}, record_id, source_id, model, provider, payload_json, spec_version
+            ) VALUES (?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT({id_field}) DO UPDATE SET
+                payload_json=excluded.payload_json,
+                model=excluded.model,
+                provider=excluded.provider,
+                spec_version=excluded.spec_version
+            """,
+            (
+                row_id,
+                record.get("record_id") or record.get("message_id"),
+                record.get("source_id"),
+                payload.get("model"),
+                payload.get("provider"),
+                json.dumps(payload),
+                int(spec_v),
+            ),
+        )
+        return
     conn.execute(
         f"""
         INSERT INTO {table} (
@@ -130,9 +160,15 @@ def _write_signal_records_unlocked(
     provenance: Optional[Dict[str, Any]] = None,
     conn: Optional[sqlite3.Connection] = None,
 ) -> int:
+    from .models.mvp_defaults import job_spec_version
+
     prov = dict(provenance or {})
     prov.setdefault("job_id", job_name)
+    prov.setdefault("spec_version", job_spec_version(job_name))
     written = 0
+    for rec in records:
+        rec.setdefault("spec_version", prov["spec_version"])
+        rec.setdefault("job_id", job_name)
 
     legacy_table = _LEGACY_TABLE_BY_JOB.get(job_name)
     if tables_manager and legacy_table and job_name not in _SIGNAL_ONLY_JOBS:
