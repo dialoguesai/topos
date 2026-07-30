@@ -183,7 +183,7 @@ def _maybe_offer_self_update(
     return True
 
 
-@click.command()
+@click.group(invoke_without_command=True)
 @click.option(
     "--db-path",
     help="Database file path (SQLite). If not specified, uses auto-discovery.",
@@ -229,8 +229,27 @@ def _maybe_offer_self_update(
     is_flag=True,
     help="App mode: tray icon only, logs to ~/.topos/logs/node.log instead of the terminal.",
 )
-def main(db_path, topos_key, set_topos_key, discover, port, host, skip_update_check, tray, app_mode) -> None:
-    """Topos Control Plane API entry point."""
+@click.pass_context
+def main(
+    ctx,
+    db_path,
+    topos_key,
+    set_topos_key,
+    discover,
+    port,
+    host,
+    skip_update_check,
+    tray,
+    app_mode,
+) -> None:
+    """Topos Control Plane API entry point.
+
+    Subcommands:
+      reprocess   Re-run raw→canonical for a source (recovery utility).
+    """
+    if ctx.invoked_subcommand is not None:
+        return
+
     if set_topos_key:
         env_path = _save_topos_key(set_topos_key)
         click.echo(f"Saved TOPOS_KEY to {env_path}")
@@ -346,6 +365,11 @@ def main(db_path, topos_key, set_topos_key, discover, port, host, skip_update_ch
         )
     else:
         uvicorn.run(app, host=host, port=port, log_config=get_uvicorn_log_config())
+
+
+from topos.cli.reprocess_cmd import reprocess_command  # noqa: E402
+
+main.add_command(reprocess_command)
 
 
 if __name__ == "__main__":
