@@ -572,19 +572,33 @@ async def _generic_backfill_core(
                     "errors": [],
                 }
         else:
+            from ..enrichment.catalog import catalog_spec_version
+
             coverage_table = coverage_table_for_job(job_name)
             if coverage_table and _table_exists(db_conn, coverage_table):
                 cols = _table_columns(db_conn, coverage_table)
                 id_col = "message_id" if "message_id" in cols else "record_id"
                 if "source_id" in cols and id_col in cols:
-                    done = {
-                        str(row[0])
-                        for row in db_conn.execute(
-                            f"SELECT DISTINCT {id_col} FROM {coverage_table} WHERE source_id=?",
-                            (source_id,),
-                        ).fetchall()
-                        if row[0]
-                    }
+                    min_spec = catalog_spec_version(job_name)
+                    if "spec_version" in cols:
+                        done = {
+                            str(row[0])
+                            for row in db_conn.execute(
+                                f"SELECT DISTINCT {id_col} FROM {coverage_table} "
+                                f"WHERE source_id=? AND COALESCE(spec_version, 0) >= ?",
+                                (source_id, min_spec),
+                            ).fetchall()
+                            if row[0]
+                        }
+                    else:
+                        done = {
+                            str(row[0])
+                            for row in db_conn.execute(
+                                f"SELECT DISTINCT {id_col} FROM {coverage_table} WHERE source_id=?",
+                                (source_id,),
+                            ).fetchall()
+                            if row[0]
+                        }
                     records = [r for r in records if _record_identifier(r) not in done]
 
     if isinstance(limit, int) and limit > 0:
@@ -650,13 +664,45 @@ async def _generic_backfill_core(
     }
 
 
-def _get_enriched_message_ids(table_name: str, conn) -> set[str]:
-    """Get set of message_ids that have enrichment records in the given table."""
+def _get_enriched_message_ids(
+    table_name: str,
+    conn,
+    *,
+    min_spec_version: Optional[int] = None,
+) -> set[str]:
+    """Ids that already satisfy coverage for ``table_name``.
+
+    When ``min_spec_version`` is set and the table has ``spec_version``, only
+    rows with ``COALESCE(spec_version, 0) >= min_spec_version`` count as done
+    (PLAN M3 stale predicate). Otherwise presence-only.
+    """
     if not conn:
         return set()
     try:
-        cursor = conn.execute(f"SELECT DISTINCT message_id FROM {table_name}")
-        return {row[0] for row in cursor.fetchall()}
+        cols = _table_columns(conn, table_name)
+        if not cols:
+            return set()
+        if "message_id" in cols and "record_id" in cols:
+            id_expr = "COALESCE(message_id, record_id)"
+        elif "message_id" in cols:
+            id_expr = "message_id"
+        elif "record_id" in cols:
+            id_expr = "record_id"
+        else:
+            return set()
+        if (
+            min_spec_version is not None
+            and "spec_version" in cols
+            and isinstance(min_spec_version, int)
+        ):
+            cursor = conn.execute(
+                f"SELECT DISTINCT {id_expr} FROM {table_name} "
+                f"WHERE COALESCE(spec_version, 0) >= ?",
+                (int(min_spec_version),),
+            )
+        else:
+            cursor = conn.execute(f"SELECT DISTINCT {id_expr} FROM {table_name}")
+        return {str(row[0]) for row in cursor.fetchall() if row[0]}
     except Exception as e:
         logger.warning("Failed to query enriched message IDs from %s: %s", table_name, e)
         return set()
@@ -758,12 +804,18 @@ async def _find_unprocessed_messages(
         db_conn, source_def, dataset_id=dataset_id
     )
     if generic_messages:
+        from ..enrichment.catalog import catalog_spec_version
+
         enriched: Optional[set[str]] = None
         job_table_map = {job.get_job_name(): job.get_derived_table() for job in CANONICAL_JOBS}
         for job_name in jobs_to_check:
             table_name = job_table_map.get(job_name)
             if table_name:
-                job_ids = _get_enriched_message_ids(table_name, db_conn)
+                job_ids = _get_enriched_message_ids(
+                    table_name,
+                    db_conn,
+                    min_spec_version=catalog_spec_version(job_name),
+                )
                 enriched = job_ids if enriched is None else (enriched & job_ids)
             else:
                 logger.warning("Unknown enrichment job: %s (skipping check)", job_name)
@@ -947,6 +999,8 @@ async def _find_unprocessed_messages(
     # row for it (intersection). The previous union behavior skipped messages
     # that had been enriched by any single job, leaving partial enrichment
     # permanently un-backfillable.
+    from ..enrichment.catalog import catalog_spec_version
+
     enriched_ids: Optional[set[str]] = None
     # Create a mapping from job name to table name using the job registry
     job_to_table = {job.get_job_name(): job.get_derived_table() for job in CANONICAL_JOBS}
@@ -954,7 +1008,11 @@ async def _find_unprocessed_messages(
     for job_name in jobs_to_check:
         table_name = job_to_table.get(job_name)
         if table_name:
-            job_ids = _get_enriched_message_ids(table_name, db_conn)
+            job_ids = _get_enriched_message_ids(
+                table_name,
+                db_conn,
+                min_spec_version=catalog_spec_version(job_name),
+            )
             enriched_ids = job_ids if enriched_ids is None else (enriched_ids & job_ids)
         else:
             logger.warning("Unknown enrichment job: %s (skipping check)", job_name)

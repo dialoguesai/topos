@@ -735,50 +735,107 @@ class SQLiteVectorIndex:
         vector_blob = encode_vector(vector, fmt) if vector is not None else None
         search_text = metadata.get("search_text") or metadata.get("text_preview")
         provenance = {**metadata, "embedding_id": embedding_id}
+        emb_cols = {
+            str(row[1])
+            for row in self._conn.execute("PRAGMA table_info(signal_embeddings)").fetchall()
+        }
+        spec_version = metadata.get("spec_version")
+        if spec_version is None and "spec_version" in emb_cols:
+            from ....enrichment.models.mvp_defaults import job_spec_version
 
-        self._conn.execute(
-            """
-            INSERT INTO signal_embeddings (
-                embedding_id, record_id, source_id, signal_dimension, model, provider,
-                dims, text_preview, provenance_json, vector_blob, vector_format,
-                content_hash, chunk_index, event_at, conversation_id, record_type, search_text
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(record_id, model, chunk_index) DO UPDATE SET
-                embedding_id=excluded.embedding_id,
-                source_id=excluded.source_id,
-                signal_dimension=excluded.signal_dimension,
-                provider=excluded.provider,
-                dims=excluded.dims,
-                text_preview=excluded.text_preview,
-                provenance_json=excluded.provenance_json,
-                vector_blob=excluded.vector_blob,
-                vector_format=excluded.vector_format,
-                content_hash=excluded.content_hash,
-                event_at=excluded.event_at,
-                conversation_id=excluded.conversation_id,
-                record_type=excluded.record_type,
-                search_text=excluded.search_text
-            """,
-            (
-                embedding_id,
-                record_id,
-                metadata.get("source_id"),
-                metadata.get("signal_dimension"),
-                model,
-                metadata.get("provider"),
-                metadata.get("dims"),
-                metadata.get("text_preview"),
-                json.dumps(provenance),
-                vector_blob,
-                fmt if vector is not None else metadata.get("vector_format", "json"),
-                metadata.get("content_hash"),
-                chunk_index,
-                metadata.get("event_at"),
-                metadata.get("conversation_id"),
-                metadata.get("record_type"),
-                search_text,
-            ),
-        )
+            spec_version = job_spec_version("embeddings")
+
+        if "spec_version" in emb_cols:
+            self._conn.execute(
+                """
+                INSERT INTO signal_embeddings (
+                    embedding_id, record_id, source_id, signal_dimension, model, provider,
+                    dims, text_preview, provenance_json, vector_blob, vector_format,
+                    content_hash, chunk_index, event_at, conversation_id, record_type,
+                    search_text, spec_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(record_id, model, chunk_index) DO UPDATE SET
+                    embedding_id=excluded.embedding_id,
+                    source_id=excluded.source_id,
+                    signal_dimension=excluded.signal_dimension,
+                    provider=excluded.provider,
+                    dims=excluded.dims,
+                    text_preview=excluded.text_preview,
+                    provenance_json=excluded.provenance_json,
+                    vector_blob=excluded.vector_blob,
+                    vector_format=excluded.vector_format,
+                    content_hash=excluded.content_hash,
+                    event_at=excluded.event_at,
+                    conversation_id=excluded.conversation_id,
+                    record_type=excluded.record_type,
+                    search_text=excluded.search_text,
+                    spec_version=excluded.spec_version
+                """,
+                (
+                    embedding_id,
+                    record_id,
+                    metadata.get("source_id"),
+                    metadata.get("signal_dimension"),
+                    model,
+                    metadata.get("provider"),
+                    metadata.get("dims"),
+                    metadata.get("text_preview"),
+                    json.dumps(provenance),
+                    vector_blob,
+                    fmt if vector is not None else metadata.get("vector_format", "json"),
+                    metadata.get("content_hash"),
+                    chunk_index,
+                    metadata.get("event_at"),
+                    metadata.get("conversation_id"),
+                    metadata.get("record_type"),
+                    search_text,
+                    int(spec_version) if spec_version is not None else None,
+                ),
+            )
+        else:
+            self._conn.execute(
+                """
+                INSERT INTO signal_embeddings (
+                    embedding_id, record_id, source_id, signal_dimension, model, provider,
+                    dims, text_preview, provenance_json, vector_blob, vector_format,
+                    content_hash, chunk_index, event_at, conversation_id, record_type, search_text
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(record_id, model, chunk_index) DO UPDATE SET
+                    embedding_id=excluded.embedding_id,
+                    source_id=excluded.source_id,
+                    signal_dimension=excluded.signal_dimension,
+                    provider=excluded.provider,
+                    dims=excluded.dims,
+                    text_preview=excluded.text_preview,
+                    provenance_json=excluded.provenance_json,
+                    vector_blob=excluded.vector_blob,
+                    vector_format=excluded.vector_format,
+                    content_hash=excluded.content_hash,
+                    event_at=excluded.event_at,
+                    conversation_id=excluded.conversation_id,
+                    record_type=excluded.record_type,
+                    search_text=excluded.search_text
+                """,
+                (
+                    embedding_id,
+                    record_id,
+                    metadata.get("source_id"),
+                    metadata.get("signal_dimension"),
+                    model,
+                    metadata.get("provider"),
+                    metadata.get("dims"),
+                    metadata.get("text_preview"),
+                    json.dumps(provenance),
+                    vector_blob,
+                    fmt if vector is not None else metadata.get("vector_format", "json"),
+                    metadata.get("content_hash"),
+                    chunk_index,
+                    metadata.get("event_at"),
+                    metadata.get("conversation_id"),
+                    metadata.get("record_type"),
+                    search_text,
+                ),
+            )
         if vector is not None:
             sync_vec_row(self._conn, embedding_id=embedding_id, vector=[float(x) for x in vector])
         commit_connection(self._conn)

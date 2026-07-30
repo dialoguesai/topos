@@ -36,6 +36,12 @@ STEP_KINDS = frozenset({
     "enrichment_reprocess",
     # A single idempotent engine endpoint call (e.g. the graph rebuild).
     "engine_endpoint",
+    # Re-run raw→canonical (or canonical-only) via reprocess_source.
+    "canonical_reprocess",
+    # Rebuild derived layers (entity graph, topic clusters, timeline).
+    "derived_rebuild",
+    # Re-embed + rebuild ANN (vec0) as one unit.
+    "reembed",
     # Nothing to run — entry documents that a change needs no data action.
     "none",
 })

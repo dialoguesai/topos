@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -107,7 +108,14 @@ def _previous_pypi_version(current: str) -> str | None:
     return older[-1] if older else None
 
 
-def _install_and_verify(python: Path, wheel: Path, *, upgrade_from: str | None) -> None:
+def _install_and_verify(
+    python: Path,
+    wheel: Path,
+    *,
+    upgrade_from: str | None,
+    seeded_db: Path | None = None,
+    work_dir: Path | None = None,
+) -> None:
     pip = [str(python), "-m", "pip"]
     _run([*pip, "install", "--upgrade", "pip"])
     if upgrade_from:
@@ -124,9 +132,18 @@ def _install_and_verify(python: Path, wheel: Path, *, upgrade_from: str | None) 
     env = os.environ.copy()
     env["TOPOS_SKIP_UPDATE_CHECK"] = "1"
     env["TOPOS_KEY"] = "release-smoke-test-key"
+    if seeded_db is not None:
+        if not seeded_db.is_file():
+            raise SystemExit(f"Seeded DB not found: {seeded_db}")
+        dest_root = work_dir or Path(tempfile.mkdtemp(prefix="topos-seeded-db-"))
+        dest = dest_root / "database.db"
+        shutil.copy2(seeded_db, dest)
+        env["TOPOS_DATABASE_PATH"] = str(dest)
+        print(f"seeded_db → TOPOS_DATABASE_PATH={dest}", flush=True)
     _run([str(topos_node), "--help"], env=env)
     _run([str(topos_node), "--discover"], env=env)
     _run([str(python), "-c", IMPORT_CHECK_SCRIPT], env=env)
+    # APP_BOOT_CHECK hits /healthcheck (and /, /version); must be 200 with seeded DB.
     _run([str(python), "-c", APP_BOOT_CHECK], env=env, timeout=120)
 
 
@@ -153,6 +170,15 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="Auto-pick the latest PyPI release older than the wheel version",
     )
+    parser.add_argument(
+        "--seeded-db",
+        type=Path,
+        metavar="PATH",
+        help=(
+            "Copy this SQLite DB to TOPOS_DATABASE_PATH before TestClient boot "
+            "and assert /healthcheck returns 200"
+        ),
+    )
     args = parser.parse_args(argv)
 
     wheel = args.wheel or _find_wheel(args.dist_dir)
@@ -170,12 +196,19 @@ def main(argv: list[str] | None = None) -> int:
             print("Upgrade smoke skipped: no older PyPI release found")
 
     with tempfile.TemporaryDirectory(prefix="topos-release-smoke-") as tmp:
-        venv_dir = Path(tmp) / "venv"
+        tmp_path = Path(tmp)
+        venv_dir = tmp_path / "venv"
         _run([sys.executable, "-m", "venv", str(venv_dir)])
         python = venv_dir / "bin" / "python"
         if not python.exists():
             python = venv_dir / "Scripts" / "python.exe"
-        _install_and_verify(python, wheel, upgrade_from=upgrade_from)
+        _install_and_verify(
+            python,
+            wheel,
+            upgrade_from=upgrade_from,
+            seeded_db=args.seeded_db.expanduser().resolve() if args.seeded_db else None,
+            work_dir=tmp_path,
+        )
 
     print("release_smoke_ok")
     return 0

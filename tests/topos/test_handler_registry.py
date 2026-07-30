@@ -24,6 +24,7 @@ SUPPORTED_MESSAGE_TYPES = [
     "complexity_topics_daily",
     "compute_invoke",
     "connection_info",
+    "consent_upgrade_step",
     "create_routine",
     "create_routine_run",
     "delete_data_explorer_table_prefs",

@@ -21,6 +21,33 @@ MVP_JOB_SPECS = [
     ("availability_scores", "availability_scoring", "rules", "", True),
 ]
 
+# Per-job output contract version (PLAN_NODE_RELEASE_MIGRATIONS M3).
+# Bump when model/prompt/logic changes invalidate prior rows. Anti-joins treat
+# missing/NULL coverage ``spec_version`` as 0.
+JOB_SPEC_VERSIONS: dict[str, int] = {
+    "emo_27": 1,
+    "entities": 1,
+    "embeddings": 1,
+    "sentiment": 1,
+    "url_classification": 1,
+    "topics": 1,
+    "dimension_summary": 1,
+    "goal_extraction": 1,
+    "relationship_edges": 1,
+    "availability_scores": 1,
+    "topic_clusters": 1,
+    "statistics": 1,
+    "facts": 1,
+    "timeline": 1,
+    "attention_triage": 1,
+    "complexity_snapshot": 1,
+}
+
+
+def job_spec_version(job_id: str) -> int:
+    """Catalog contract version for ``job_id`` (default 1)."""
+    return int(JOB_SPEC_VERSIONS.get(str(job_id or "").strip(), 1))
+
 
 def load_mvp_defaults(registry: ModelRegistry) -> None:
     """Register all MVP signal derivation jobs with provider defaults."""

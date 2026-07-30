@@ -467,6 +467,37 @@ async def handle_get_upgrade_status(message):
         return {"id": req_id, "status": "error", "error": str(exc)}
 
 
+@handles("consent_upgrade_step")
+async def handle_consent_upgrade_step(message):
+    """Approve a pending_consent upgrade step (PLAN M3)."""
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    step_id = str(payload.get("step_id") or "").strip()
+    if not step_id:
+        return {"id": req_id, "status": "error", "error": "step_id required"}
+    run_now = bool(payload.get("run_now", True))
+    try:
+        from ...core.state import get_db_connection
+        from ...upgrades.runner import consent_upgrade_step, run_pending_upgrades
+
+        conn = get_db_connection()
+        if conn is None:
+            return {"id": req_id, "status": "error", "error": "database unavailable"}
+        result = consent_upgrade_step(conn, step_id)
+        run_result = run_pending_upgrades(conn) if run_now else None
+        return {
+            "id": req_id,
+            "status": "ok",
+            "payload": {"consent": result, "run": run_result},
+        }
+    except ValueError as exc:
+        return {"id": req_id, "status": "error", "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
 @handles("get_exposure_profile_config")
 async def handle_get_exposure_profile_config(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")

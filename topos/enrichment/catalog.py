@@ -15,7 +15,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Tuple
 
 from .jobs import CANONICAL_JOBS, RAW_JOBS, SIGNAL_JOB_REGISTRY
-from .models.mvp_defaults import MVP_JOB_SPECS
+from .models.mvp_defaults import MVP_JOB_SPECS, job_spec_version
 
 LANE_RAW = "raw"
 LANE_CANONICAL = "canonical"
@@ -48,6 +48,8 @@ class EnrichmentCatalogEntry:
     # Raw-lane stubs that currently produce no output.
     stub: bool = False
     value_props: Tuple[str, ...] = field(default_factory=tuple)
+    # Output-contract version; bump when prior coverage rows are stale (M3).
+    spec_version: int = 1
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -66,6 +68,7 @@ class EnrichmentCatalogEntry:
             "baseline": self.baseline,
             "stub": self.stub,
             "value_props": list(self.value_props),
+            "spec_version": int(self.spec_version),
         }
 
 
@@ -334,8 +337,17 @@ def _build_catalog() -> Dict[str, EnrichmentCatalogEntry]:
             baseline=job_id in baseline,
             stub=is_stub,
             value_props=tuple(meta.get("value_props") or ()),
+            spec_version=job_spec_version(job_id),
         )
     return entries
+
+
+def catalog_spec_version(job_id: str) -> int:
+    """Return the catalog ``spec_version`` for ``job_id`` (default 1)."""
+    entry = get_catalog_entry(job_id)
+    if entry is not None:
+        return int(entry.spec_version)
+    return job_spec_version(job_id)
 
 
 _CATALOG: Optional[Dict[str, EnrichmentCatalogEntry]] = None

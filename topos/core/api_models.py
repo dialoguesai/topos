@@ -108,6 +108,11 @@ class DeviceInfoResponse(BaseModel):
     oplog_bytes_since_last_sync: Optional[int] = None
     database_size_bytes: Optional[int] = None
     storage_breakdown: Optional[Dict[str, Any]] = None
+    # Upgrade runner summary (PLAN_NODE_RELEASE_MIGRATIONS M5). Optional for
+    # older clients / hosted paths without a SQLite upgrade ledger.
+    upgrade_baseline: Optional[str] = None
+    pending_upgrade_steps: Optional[List[str]] = None
+    pending_consent_steps: Optional[List[Any]] = None
 
 
 class DeviceNameRequest(BaseModel):

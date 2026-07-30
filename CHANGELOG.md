@@ -9,6 +9,15 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.4] — 2026-07-29
+
+- `[S1] [O]` Coverage `spec_version` columns + catalog `JOB_SPEC_VERSIONS`
+  (PLAN_NODE_RELEASE_MIGRATIONS M3); writers stamp; anti-join treats NULL as 0.
+- `[O]` Upgrade step kinds `canonical_reprocess` / `derived_rebuild` /
+  `reembed`; `consent: prompt` → `pending_consent` + `/v1/upgrade/consent`.
+- `[O]` Upgrade-matrix CI fixture builder + catch-up runner (M4); seeded-DB
+  release smoke; device_info upgrade summary fields for fleet (M5).
+
 ## [1.3.3] — 2026-07-29
 
 ### Added

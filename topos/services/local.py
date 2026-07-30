@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from ..__version__ import __version__
 from ..core.api_models import (
@@ -19,6 +19,38 @@ from ..config.settings import settings
 from ..storage.db.paths import sqlite_on_disk_size_bytes
 from ..storage.db.storage_breakdown import compute_local_storage_breakdown
 from fastapi import HTTPException, status
+
+
+def _upgrade_summary_from_runner(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """Compact upgrade fields for device_info (fleet nudge / consent UX)."""
+    try:
+        from ..upgrades.runner import runner_status
+
+        status_payload = runner_status(conn)
+    except Exception:
+        return {
+            "upgrade_baseline": None,
+            "pending_upgrade_steps": None,
+            "pending_consent_steps": None,
+        }
+    pending_consent = status_payload.get("pending_consent_steps") or []
+    compact_consent: List[Any] = []
+    for step in pending_consent:
+        if isinstance(step, dict):
+            compact_consent.append(
+                {
+                    "id": step.get("id"),
+                    "title": step.get("title"),
+                    "cost": step.get("cost") or "slow",
+                }
+            )
+        elif step:
+            compact_consent.append(str(step))
+    return {
+        "upgrade_baseline": status_payload.get("baseline"),
+        "pending_upgrade_steps": list(status_payload.get("pending_steps") or []),
+        "pending_consent_steps": compact_consent,
+    }
 
 
 def _resolve_device_database_path() -> Optional[Path]:
@@ -121,6 +153,14 @@ class LocalDeviceService:
                 if storage_breakdown is not None:
                     database_size_bytes = int(storage_breakdown.get("total_bytes") or database_size_bytes or 0)
 
+        upgrade_fields: Dict[str, Any] = {
+            "upgrade_baseline": None,
+            "pending_upgrade_steps": None,
+            "pending_consent_steps": None,
+        }
+        if state.db_conn is not None:
+            upgrade_fields = _upgrade_summary_from_runner(state.db_conn)
+
         return DeviceInfoResponse(
             user_id=user_id,
             dataset_id=dataset_id,
@@ -143,6 +183,9 @@ class LocalDeviceService:
             oplog_bytes_since_last_sync=None,
             database_size_bytes=database_size_bytes,
             storage_breakdown=storage_breakdown,
+            upgrade_baseline=upgrade_fields.get("upgrade_baseline"),
+            pending_upgrade_steps=upgrade_fields.get("pending_upgrade_steps"),
+            pending_consent_steps=upgrade_fields.get("pending_consent_steps"),
         )
 
     async def set_device_name(self, device_name: str) -> DeviceNameResponse:
