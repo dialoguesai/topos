@@ -78,17 +78,21 @@ async def test_reprocess_api_contract_and_idempotency(monkeypatch) -> None:
         source_id="chatgpt_file_ingestion",
         dataset_id="user:chatgpt",
         from_stage="raw",
+        run_enrichment=False,
     )
     assert first["status"] == "accepted"
     assert first["sync_batch_id"]
     assert "raw_write" in first["stages"]
     assert "canonical_map" in first["stages"]
     assert first["records_created"] >= 0
+    assert first.get("raw_rows_loaded") == 1
+    assert first.get("raw_table")
 
     second = await reprocess_source(
         source_id="chatgpt_file_ingestion",
         dataset_id="user:chatgpt",
         from_stage="raw",
+        run_enrichment=False,
     )
     assert second["status"] == "accepted"
     assert second["records_created"] == 0 or second["records_unchanged"] >= 0

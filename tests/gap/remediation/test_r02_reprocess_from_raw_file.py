@@ -30,6 +30,7 @@ async def test_reprocess_from_raw_restores_canonical(monkeypatch) -> None:
         source_id="chatgpt_file_ingestion",
         dataset_id="user:chatgpt",
         from_stage="raw",
+        run_enrichment=False,
     )
     assert result.get("records_created", 0) + result.get("records_updated", 0) >= 1
     row = conn.execute("SELECT COUNT(*) FROM ai_chat_messages").fetchone()[0]

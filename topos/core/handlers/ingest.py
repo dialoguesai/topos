@@ -420,12 +420,16 @@ async def handle_ingestion_reprocess(message: Dict[str, Any]) -> Optional[Dict[s
     try:
         from ...ingestion.reprocess import reprocess_source
 
+        limit_raw = payload.get("limit")
+        limit = int(limit_raw) if limit_raw is not None and str(limit_raw).strip() != "" else None
         result = await reprocess_source(
             source_id=str(payload["source_id"]),
             dataset_id=str(payload["dataset_id"]),
             from_stage=payload.get("from_stage") or "raw",
             sync_batch_id=payload.get("sync_batch_id"),
             force=bool(payload.get("force", False)),
+            limit=limit,
+            run_enrichment=bool(payload.get("run_enrichment", True)),
         )
         return {"id": req_id, "status": "ok", "payload": result}
     except KeyError as exc:

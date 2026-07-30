@@ -21,13 +21,27 @@ async def report_progress() -> dict:
 
 @router.post("/ingestion/reprocess", dependencies=[Depends(require_api_key)])
 async def ingestion_reprocess(payload: dict = Body(default_factory=dict)) -> dict:
+    """Re-run raw→canonical for a source (optional newest-N via ``limit``).
+
+    Body:
+      - source_id (required)
+      - dataset_id (required)
+      - from_stage: ``raw`` (default) | ``canonical``
+      - limit: optional int — newest N raw rows only
+      - run_enrichment: optional bool (default true)
+      - force / sync_batch_id: optional
+    """
     try:
+        limit_raw = payload.get("limit")
+        limit = int(limit_raw) if limit_raw is not None and str(limit_raw).strip() != "" else None
         return await reprocess_source(
             source_id=str(payload["source_id"]),
             dataset_id=str(payload["dataset_id"]),
             from_stage=payload.get("from_stage") or "raw",
             sync_batch_id=payload.get("sync_batch_id"),
             force=bool(payload.get("force", False)),
+            limit=limit,
+            run_enrichment=bool(payload.get("run_enrichment", True)),
         )
     except KeyError as exc:
         raise HTTPException(status_code=400, detail=f"Missing field: {exc}") from exc
