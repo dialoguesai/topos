@@ -339,7 +339,7 @@ def _sqlite_query_plan(conn: Any, sql: str, params: tuple[Any, ...]) -> List[str
             plan.append(str(row[-1] if len(row) >= 4 else row))
     return plan
 
-@handles("get_database_explorer_summary")
+@handles("get_database_explorer_summary", owner_only=True)
 async def handle_get_database_explorer_summary(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     if not req_id:
@@ -1187,7 +1187,7 @@ async def handle_pooled_scope_backfill_rollback(message: Dict[str, Any]) -> Opti
         logger.error("pooled_scope_backfill_rollback failed: %s", exc, exc_info=True)
         return {"id": req_id, "status": "error", "error": str(exc)}
 
-@handles("delete_database_table")
+@handles("delete_database_table", owner_only=True)
 async def handle_delete_database_table(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     if not req_id:
@@ -1363,7 +1363,7 @@ async def handle_delete_database_table(message: Dict[str, Any]) -> Optional[Dict
             pass
         return {"id": req_id, "status": "error", "error": str(exc)}
 
-@handles("delete_database_rows")
+@handles("delete_database_rows", owner_only=True)
 async def handle_delete_database_rows(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     if not req_id:

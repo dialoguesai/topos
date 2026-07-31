@@ -162,6 +162,14 @@ from .enrichment_spec_version_v1 import (
     MIGRATION_ID as ENRICHMENT_SPEC_VERSION_V1_ID,
     apply_enrichment_spec_version_v1_up,
 )
+from .entity_context_vectors_v1 import (
+    MIGRATION_ID as ENTITY_CONTEXT_VECTORS_V1_ID,
+    apply_entity_context_vectors_v1_up,
+)
+from .entity_affinity_v1 import (
+    MIGRATION_ID as ENTITY_AFFINITY_V1_ID,
+    apply_entity_affinity_v1_up,
+)
 
 ApplyFn = Callable[[sqlite3.Connection], object]
 
@@ -261,6 +269,8 @@ MIGRATIONS: List[MigrationSpec] = [
     _spec(46, ENTITY_BLACKHOLE_V1_ID, apply_entity_blackhole_v1_up),
     _spec(47, COMPLEXITY_V1_ID, apply_complexity_v1_up),
     _spec(48, ENRICHMENT_SPEC_VERSION_V1_ID, apply_enrichment_spec_version_v1_up),
+    _spec(49, ENTITY_CONTEXT_VECTORS_V1_ID, apply_entity_context_vectors_v1_up),
+    _spec(50, ENTITY_AFFINITY_V1_ID, apply_entity_affinity_v1_up),
 ]
 
 
@@ -321,4 +331,6 @@ __all__ = [
     "ENTITY_BLACKHOLE_V1_ID",
     "COMPLEXITY_V1_ID",
     "ENRICHMENT_SPEC_VERSION_V1_ID",
+    "ENTITY_CONTEXT_VECTORS_V1_ID",
+    "ENTITY_AFFINITY_V1_ID",
 ]
