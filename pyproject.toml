@@ -111,6 +111,8 @@ filterwarnings = [
   "ignore:on_event is deprecated.*:DeprecationWarning:fastapi.*",
 ]
 markers = [
+  "journey: binds this test to a J-* journey note in topos-ops-wiki (the id is the marker arg)",
+  "check: binds this test to a C-* check note in topos-ops-wiki (the id is the marker arg)",
   "gap: gap verification test (sprint pack); must pass after sprint lands",
   "qq_eval: live query quality/latency eval against owner database",
   "acceptance: Wiki MVP acceptance test (AT-1 through AT-8)",
