@@ -416,3 +416,97 @@ def test_topic_consolidation_executor_is_registered():
     from topos.enrichment.jobs.canonical.topic_clusters_job import TOPIC_CONSOLIDATION_KIND
 
     assert TOPIC_CONSOLIDATION_KIND in EXECUTORS, "deferred work needs a worker that runs it"
+
+
+# --- the diagnostic must not become the problem ------------------------------
+
+
+def test_loop_warning_is_rate_limited_per_call_site():
+    """A 250ms poll loop turned this warning into thousands of stack traces."""
+    import asyncio
+    import logging
+
+    from topos.storage.db import write_gate
+
+    write_gate.reset_loop_warning_state()
+    records: list[logging.LogRecord] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = _Capture()
+    write_gate.logger.addHandler(handler)
+    try:
+
+        async def hammer() -> None:
+            for _ in range(50):
+                with write_gate.with_db_write():
+                    pass
+
+        asyncio.run(hammer())
+    finally:
+        write_gate.logger.removeHandler(handler)
+        write_gate.reset_loop_warning_state()
+
+    warned = [r for r in records if "acquired on the event-loop thread" in r.getMessage()]
+    assert len(warned) == 1, f"expected one warning for 50 acquisitions, got {len(warned)}"
+    # It has to say WHERE, or it is unactionable.
+    assert "in hammer" in warned[0].getMessage()
+
+
+def test_distinct_call_sites_each_get_warned():
+    """A noisy first offender must never mask a second one."""
+    import asyncio
+    import logging
+
+    from topos.storage.db import write_gate
+
+    write_gate.reset_loop_warning_state()
+    messages: list[str] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    handler = _Capture()
+    write_gate.logger.addHandler(handler)
+    try:
+
+        async def site_one() -> None:
+            with write_gate.with_db_write():
+                pass
+
+        async def site_two() -> None:
+            with write_gate.with_db_write():
+                pass
+
+        async def both() -> None:
+            await site_one()
+            await site_one()
+            await site_two()
+
+        asyncio.run(both())
+    finally:
+        write_gate.logger.removeHandler(handler)
+        write_gate.reset_loop_warning_state()
+
+    warned = [m for m in messages if "acquired on the event-loop thread" in m]
+    assert len(warned) == 2, f"one warning per site expected, got {len(warned)}"
+    assert any("site_one" in m for m in warned)
+    assert any("site_two" in m for m in warned)
+
+
+def test_worker_loop_claims_off_the_event_loop():
+    """claim_next_job takes the blocking write gate; it must not run on the loop."""
+    import inspect
+
+    from topos.pipeline import job_runner
+
+    src = inspect.getsource(job_runner._worker_loop)
+    assert "asyncio.to_thread(claim_next_job" in src, (
+        "the worker must offload claim_next_job — polling it on the event loop "
+        "stalls every coroutine behind the write gate four times a second"
+    )
+    # And it should ease off when there is nothing to do.
+    assert "_MAX_POLL_SECONDS" in src

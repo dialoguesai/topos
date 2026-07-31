@@ -13,6 +13,7 @@ import logging
 import sqlite3
 import threading
 import time
+import traceback
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Callable, Iterator, Optional, TypeVar
@@ -59,19 +60,63 @@ def _on_event_loop() -> bool:
         return False
 
 
+#: One warning per call site, then silence for this long. A poll loop hitting
+#: the gate four times a second turned this diagnostic into its own problem:
+#: thousands of WARNING lines with a stack trace each, drowning the log it was
+#: meant to make readable. Per-site so a second offender is never masked by a
+#: noisy first one.
+_LOOP_WARN_INTERVAL_S = 300.0
+_loop_warn_seen: dict[str, float] = {}
+_loop_warn_lock = threading.Lock()
+
+
+def _warn_loop_acquisition() -> None:
+    """Report a gate acquisition on the event-loop thread, at most periodically.
+
+    Not raised: failing a write to punish a bad call site is worse than the
+    stall it warns about.
+    """
+    # Skip this module AND contextlib: `with_db_write` is a @contextmanager, so
+    # contextlib's __enter__ sits between us and the real caller. Reporting
+    # "contextlib.py:135" would make the warning unactionable.
+    stack = traceback.extract_stack(limit=12)[:-2]
+    site = "unknown"
+    for frame in reversed(stack):
+        name = frame.filename.rsplit("/", 1)[-1]
+        if name in ("write_gate.py", "contextlib.py"):
+            continue
+        site = f"{name}:{frame.lineno} in {frame.name}"
+        break
+
+    now = time.monotonic()
+    with _loop_warn_lock:
+        last = _loop_warn_seen.get(site)
+        if last is not None and (now - last) < _LOOP_WARN_INTERVAL_S:
+            return
+        first_time = last is None
+        _loop_warn_seen[site] = now
+
+    logger.warning(
+        "[WRITE_GATE] acquired on the event-loop thread from %s — this blocks "
+        "every coroutine including the control-plane keepalive; move this DB "
+        "work into asyncio.to_thread%s",
+        site,
+        "" if first_time else f" (repeats suppressed for {int(_LOOP_WARN_INTERVAL_S)}s)",
+        stack_info=first_time,
+    )
+
+
+def reset_loop_warning_state() -> None:
+    """Forget which call sites have warned. For tests."""
+    with _loop_warn_lock:
+        _loop_warn_seen.clear()
+
+
 @contextmanager
 def with_db_write() -> Iterator[None]:
     """Serialize a write-critical section across threads."""
     if _on_event_loop():
-        # Loud on purpose: this is the shape of the 2026-07-30 outage. Not
-        # raised, because failing a write to punish a bad call site would be a
-        # worse outcome than the stall it warns about.
-        logger.warning(
-            "[WRITE_GATE] acquired on the event-loop thread — this blocks every "
-            "coroutine including the control-plane keepalive; move this DB work "
-            "into asyncio.to_thread",
-            stack_info=True,
-        )
+        _warn_loop_acquisition()
     waited_at = time.monotonic()
     with _WRITE_LOCK:
         waited = time.monotonic() - waited_at
