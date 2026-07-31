@@ -218,7 +218,16 @@ async def process_job(conn, job: Dict[str, Any]) -> None:
         update_job_progress(conn, job_id, {"status": "failed", "error": str(exc)})
 
 
+#: Idle poll interval. Every tick claims against SQLite, so this is also how
+#: often the worker competes for the write gate.
+_IDLE_POLL_SECONDS = 0.25
+#: Backoff ceiling once the queue has been empty for a while. An idle node has
+#: no reason to hit the database four times a second.
+_MAX_POLL_SECONDS = 5.0
+
+
 async def _worker_loop(conn_factory: Callable[[], Any]) -> None:
+    idle_delay = _IDLE_POLL_SECONDS
     while True:
         if not _enabled():
             await asyncio.sleep(1.0)
@@ -227,10 +236,18 @@ async def _worker_loop(conn_factory: Callable[[], Any]) -> None:
         if conn is None:
             await asyncio.sleep(1.0)
             continue
-        job = claim_next_job(conn, lease_owner=_lease_owner)
+        # claim_next_job takes the process-wide write gate — a BLOCKING
+        # threading lock. Called directly here it ran on the event loop, so
+        # every 250ms the loop could stall behind whatever writer held the
+        # gate (a batch write, or a 77s graph rebuild), taking the
+        # control-plane keepalive down with it. Offload it.
+        job = await asyncio.to_thread(claim_next_job, conn, lease_owner=_lease_owner)
         if job is None:
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(idle_delay)
+            # Ease off while nothing is queued; snap back the moment work lands.
+            idle_delay = min(idle_delay * 1.5, _MAX_POLL_SECONDS)
             continue
+        idle_delay = _IDLE_POLL_SECONDS
         try:
             await process_job(conn, job)
         except Exception as exc:  # noqa: BLE001
