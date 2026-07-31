@@ -7,6 +7,7 @@ import platform
 import shutil
 import sqlite3
 import sys
+import threading
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -158,6 +159,11 @@ control_plane_client: ControlPlaneClient | None = None
 
 db_conn: sqlite3.Connection | None = None
 _db_conn_path: str | None = None  # resolved path for current db_conn; invalidate if settings path changes
+#: Thread that owns ``db_conn`` — every other thread gets its own connection to
+#: the same file (see ``get_db_connection``). None until the database is opened.
+_conn_owner_thread: int | None = None
+#: Per-thread connections keyed implicitly by thread identity.
+_thread_state = threading.local()
 
 # Re-export write gate so callers can `from topos.core.state import with_db_write`.
 from ..storage.db.write_gate import (  # noqa: E402
@@ -207,12 +213,116 @@ def _resolve_database_path_from_settings() -> Optional[Path]:
 
 
 def get_db_connection() -> Optional[sqlite3.Connection]:
-    """Get or create database connection.
+    """The calling thread's database connection.
 
-    Returns existing connection if it matches the current configured path; otherwise opens the
-    correct file (tests may change ``DATABASE_PATH`` between imports; see ``_db_conn_path``).
+    A ``sqlite3.Connection`` holds exactly ONE transaction state, so handing the
+    same object to concurrent threads corrupts it — that is what produced
+
+        cannot start a transaction within a transaction
+        cannot commit - no transaction is active
+        Safety level may not be changed inside a transaction
+
+    and cost an 88-record batch its facts on 2026-07-30.
+    ``check_same_thread=False`` silenced Python's guard; it never made the
+    connection safe. The concurrency is structural: the graph refresher runs on
+    its own ``threading.Timer`` thread and enrichment jobs run in
+    ``asyncio.to_thread`` workers, all against this one function.
+
+    So each thread now gets its OWN connection to the same file. WAL already
+    allows concurrent readers plus one writer, and ``write_gate`` still
+    serializes writers. The signature is deliberately unchanged so all ~457 call
+    sites keep working untouched.
+
+    The owner thread (whoever opened the database first) keeps the module-global
+    ``db_conn``: migrations run there exactly once, and code that injects a
+    handle — notably tests using ``:memory:``, which CANNOT be reopened per
+    thread because each connection would get its own empty database — keeps
+    working as before.
     """
-    global db_conn, _db_conn_path
+    owner = _get_owner_db_connection()
+    if owner is None:
+        return None
+
+    # In-memory databases live only inside their connection; per-thread copies
+    # would be empty. Share it, as before.
+    if _db_conn_path is None:
+        return owner
+
+    if threading.get_ident() == _conn_owner_thread:
+        return owner
+
+    return _get_thread_db_connection(_db_conn_path)
+
+
+def _get_thread_db_connection(resolved_path: str) -> Optional[sqlite3.Connection]:
+    """A connection to ``resolved_path`` private to the calling thread.
+
+    Migrations and backfills are NOT re-run here: the owner connection has
+    already applied them by the time any other thread can reach this.
+    """
+    cached = getattr(_thread_state, "conn", None)
+    cached_path = getattr(_thread_state, "path", None)
+    if cached is not None and cached_path == resolved_path:
+        try:
+            cached.execute("SELECT 1")
+            _ensure_row_factory(cached)
+            return cached
+        except (sqlite3.ProgrammingError, sqlite3.OperationalError):
+            try:
+                cached.close()
+            except Exception:  # noqa: BLE001
+                pass
+            _thread_state.conn = None
+            _thread_state.path = None
+    elif cached is not None:
+        # Path changed under us (tests re-point DATABASE_PATH).
+        try:
+            cached.close()
+        except Exception:  # noqa: BLE001
+            pass
+        _thread_state.conn = None
+        _thread_state.path = None
+
+    try:
+        conn = sqlite3.connect(resolved_path, check_same_thread=False)
+        conn.row_factory = sqlite3.Row
+    except sqlite3.Error as exc:
+        logger.warning("Failed to open per-thread database connection: %s", exc)
+        return None
+
+    try:
+        from ..storage.db.connection_tuning import tune_connection
+
+        tune_connection(conn)
+    except Exception as exc:  # noqa: BLE001 — tuning is an optimization, not a gate
+        logger.debug("Per-thread connection tuning skipped: %s", exc)
+
+    _thread_state.conn = conn
+    _thread_state.path = resolved_path
+    logger.debug(
+        "Opened per-thread database connection thread=%s path=%s",
+        threading.get_ident(),
+        resolved_path,
+    )
+    return conn
+
+
+def close_thread_db_connection() -> None:
+    """Close the calling thread's connection. For worker teardown and tests."""
+    conn = getattr(_thread_state, "conn", None)
+    if conn is None:
+        return
+    try:
+        conn.close()
+    except Exception:  # noqa: BLE001
+        pass
+    _thread_state.conn = None
+    _thread_state.path = None
+
+
+def _get_owner_db_connection() -> Optional[sqlite3.Connection]:
+    """Establish/validate the owner connection (migrations run here, once)."""
+    global db_conn, _db_conn_path, _conn_owner_thread
 
     from ..config.settings import settings
 
@@ -280,6 +390,7 @@ def get_db_connection() -> Optional[sqlite3.Connection]:
         db_conn = sqlite3.connect(str(db_path), check_same_thread=False)
         db_conn.row_factory = sqlite3.Row
         _db_conn_path = resolved
+        _conn_owner_thread = threading.get_ident()
         logger.debug("Created database connection: %s", db_path)
         try:
             from ..storage.db.connection_tuning import tune_connection

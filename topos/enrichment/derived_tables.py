@@ -13,6 +13,17 @@ from ..utils.base_object import BaseObject
 
 logger = logging.getLogger("topos.enrichment.derived_tables")
 
+#: Connections whose enrichment DDL has already been applied, by ``id()``.
+#: Bounded by the number of live connections (one per thread), not by records.
+#: ``reset_ensured_tables_cache()`` exists for tests that rebuild a schema
+#: underneath a reused connection id.
+_ENSURED_CONNECTIONS: set[int] = set()
+
+
+def reset_ensured_tables_cache() -> None:
+    """Forget which connections have had enrichment DDL applied."""
+    _ENSURED_CONNECTIONS.clear()
+
 
 def _table_columns(conn: sqlite3.Connection, table: str) -> set[str]:
     try:
@@ -87,10 +98,24 @@ class DerivedTablesManager(BaseObject):
             self._ensure_tables()
 
     def _ensure_tables(self) -> None:
-        """Ensure enrichment tables exist."""
+        """Ensure enrichment tables exist.
+
+        DDL is idempotent in SQL but not free: it takes a lock, and this class
+        is constructed PER RECORD on the direct-ingest path. One 88-record
+        GitHub import produced `DerivedTablesManager#121` through `#196`, each
+        re-issuing the same CREATE statements inside the ingest loop while the
+        pipeline and the graph refresher were competing for the same database.
+
+        So remember, per connection, that the DDL has already run. Keyed by
+        connection identity — a different connection (per-thread, or a test's
+        in-memory handle) must still run it.
+        """
         if not self.conn:
             return
-        
+        conn_key = id(self.conn)
+        if conn_key in _ENSURED_CONNECTIONS:
+            return
+
         try:
             # Create message_emotions table (Stage 9: model_name, all_emotions_json)
             self.conn.execute("""
@@ -142,8 +167,10 @@ class DerivedTablesManager(BaseObject):
             """)
             
             commit_connection(self.conn)
+            _ENSURED_CONNECTIONS.add(conn_key)
             logger.debug("%s: Ensured message_emotions table exists", self)
         except Exception as e:
+            # Not recorded as ensured — a later instance retries.
             logger.error("%s: Failed to ensure enrichment tables: %s", self, e)
             if self.conn:
                 self.conn.rollback()

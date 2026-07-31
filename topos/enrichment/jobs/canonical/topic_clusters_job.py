@@ -15,6 +15,50 @@ from ....storage.adapters.factory import AdapterFactory
 
 logger = logging.getLogger("topos.enrichment.jobs.topic_clusters")
 
+#: pipeline_jobs.kind for a deferred full topic-cluster consolidation.
+TOPIC_CONSOLIDATION_KIND = "topic_consolidation"
+
+
+def _defer_consolidation(conn) -> bool:
+    """Queue the full recompute instead of running it inside this batch.
+
+    Returns True when it was queued (caller should return early). Falls back to
+    False — run inline, as before — if the queue is unavailable, because a
+    consolidation that never happens is worse than a slow one.
+
+    Coalescing is free: ``enqueue_job`` is idempotent on the key, so a hundred
+    batches in a row leave exactly one pending consolidation.
+    """
+    if conn is None:
+        return False
+    if str(os.environ.get("TOPOS_DEFER_TOPIC_CONSOLIDATION", "on")).strip().lower() in (
+        "0",
+        "false",
+        "off",
+        "no",
+    ):
+        return False
+    try:
+        from ....pipeline.job_store import enqueue_job
+
+        enqueue_job(
+            conn,
+            kind=TOPIC_CONSOLIDATION_KIND,
+            payload={"reason": "consolidation_due"},
+            idempotency_key="topic_consolidation:pending",
+        )
+        logger.info(
+            "[PIPELINE:TOPIC_CLUSTERS] consolidation due; queued for after this batch"
+        )
+        return True
+    except Exception as exc:  # noqa: BLE001
+        logger.warning(
+            "[PIPELINE:TOPIC_CLUSTERS] could not queue consolidation (%s); running inline",
+            exc,
+        )
+        return False
+
+
 _SMALL_BATCH_THRESHOLD = 20
 _RECLUSTER_COOLDOWN_MINUTES = 30
 _INCREMENTAL_MAX_BATCH = 200
@@ -125,6 +169,17 @@ class TopicClusterJob(BaseEnrichmentJob):
                 result["pooled"],
             )
             if not consolidation_due(conn):
+                self._refresh_top_topics(conn)
+                if progress_callback:
+                    progress_callback(1, 1)
+                return []
+            # Consolidation is a FULL recompute across every clustered source
+            # (27 of them; 44s observed on 2026-07-30) and it used to run inline,
+            # inside the ingest batch, holding the write gate. The incremental
+            # assignment above has already placed this batch's records — the
+            # recompute only moves centroids, which nothing downstream needs
+            # before this batch finishes. So queue it durably and return.
+            if _defer_consolidation(conn):
                 self._refresh_top_topics(conn)
                 if progress_callback:
                     progress_callback(1, 1)
