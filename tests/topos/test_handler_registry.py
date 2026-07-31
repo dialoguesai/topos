@@ -89,6 +89,7 @@ SUPPORTED_MESSAGE_TYPES = [
     "get_ui_config",
     "get_upgrade_status",
     "get_user_identity",
+    "graph_cypher_query",
     "healthcheck",
     "import_apple_contacts",
     "import_contacts_apple_global",

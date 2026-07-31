@@ -1826,11 +1826,19 @@ def _strip_vector_keys(item: Dict[str, Any]) -> Dict[str, Any]:
     Even a null centroid_vector is a contract violation on the cross-user
     surface — the no-raw-vectors gate scans for vector-shaped keys, not just
     populated arrays.
+
+    ``centroid_blob`` and any ``*_centroid`` are covered because entity
+    mention-context centroids (PLAN_GRAPH_QUERY_AND_LATENT_EDGES §3.6) are
+    vector-shaped under names that matched none of the older patterns.
     """
     return {
         k: v
         for k, v in item.items()
-        if not (k.endswith("_vector") or k in ("embedding", "vector", "embedding_blob"))
+        if not (
+            k.endswith("_vector")
+            or k.endswith("_centroid")
+            or k in ("embedding", "vector", "embedding_blob", "centroid", "centroid_blob")
+        )
     }
 
 

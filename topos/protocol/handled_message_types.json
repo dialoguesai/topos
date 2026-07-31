@@ -77,6 +77,7 @@
   "get_ui_config",
   "get_upgrade_status",
   "get_user_identity",
+  "graph_cypher_query",
   "healthcheck",
   "import_apple_contacts",
   "import_contacts_apple_global",
@@ -204,5 +205,11 @@
   "update_routine_run",
   "upsert_home_chat_session",
   "verify_claim"
+ ],
+ "owner_only_message_types": [
+  "delete_database_rows",
+  "delete_database_table",
+  "get_database_explorer_summary",
+  "graph_cypher_query"
  ]
 }
