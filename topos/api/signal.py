@@ -147,7 +147,48 @@ async def list_signal_dimensions(_api_key: str = Depends(require_api_key)):
 @router.get("/data-health")
 async def get_signal_data_health(_api_key: str = Depends(require_api_key)):
     service = get_signal_service()
-    return service.get_data_health()
+    health = service.get_data_health()
+    # Derived data that a failed job still owes. Surfaced on the health route
+    # because "a batch silently lost its facts" is exactly the condition this
+    # endpoint exists to catch, and it was invisible until now.
+    try:
+        from ..core.state import get_db_connection
+        from ..enrichment.derivation_recovery import pending_derivation_summary
+
+        if isinstance(health, dict):
+            health["derivation_debt"] = pending_derivation_summary(get_db_connection())
+    except Exception as exc:  # noqa: BLE001 — health must never 500
+        logger.debug("derivation debt summary skipped: %s", exc)
+    return health
+
+
+@router.get("/derivation-debt")
+async def get_derivation_debt(_api_key: str = Depends(require_api_key)):
+    """Derivation jobs that failed and still owe their output."""
+    from ..core.state import get_db_connection
+    from ..enrichment.derivation_recovery import (
+        list_pending_derivation_retries,
+        pending_derivation_summary,
+    )
+
+    conn = get_db_connection()
+    return {
+        "summary": pending_derivation_summary(conn),
+        "pending": list_pending_derivation_retries(conn, limit=200),
+    }
+
+
+@router.post("/derivation-debt/retry")
+async def retry_derivation_debt(
+    dry_run: bool = Query(default=False),
+    source_id: Optional[str] = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=200),
+    _api_key: str = Depends(require_api_key),
+):
+    """Re-run failed derivations. ``dry_run`` reports without writing."""
+    from ..enrichment.derivation_recovery import retry_pending_derivations
+
+    return await retry_pending_derivations(source_id=source_id, limit=limit, dry_run=dry_run)
 
 
 @router.get("/topic-clusters")

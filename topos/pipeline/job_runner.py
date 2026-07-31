@@ -125,10 +125,45 @@ async def _execute_enrichment_process_source(payload: Dict[str, Any]) -> Dict[st
     )
 
 
+async def _execute_topic_consolidation(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Full topic-cluster recompute, deferred out of the ingest path.
+
+    Queued by ``topic_clusters_job`` when consolidation comes due. Running it
+    inline cost 44s inside an 88-record batch while holding the write gate; here
+    it runs alone, and only after the batch that triggered it has finished.
+    """
+    from ..core.state import get_db_connection
+    from ..enrichment.pipeline_activity import is_derivation_in_flight
+    from ..features.signal.topic_clustering import (
+        _resolved_topic_cluster_source_ids,
+        recompute_topic_clusters,
+    )
+
+    if is_derivation_in_flight():
+        # Re-queued rather than run: a consolidation during a batch is exactly
+        # what this executor exists to avoid.
+        return {"status": "error", "error": "derivation in flight; will retry"}
+
+    conn = get_db_connection()
+    if conn is None:
+        return {"status": "error", "error": "no database connection"}
+
+    result = await asyncio.to_thread(
+        recompute_topic_clusters,
+        conn,
+        source_ids=list(_resolved_topic_cluster_source_ids()),
+        sync_batch_id=None,
+        min_records=3,
+    )
+    logger.info("topic consolidation complete: %s", result)
+    return {"status": "ok", "result": result}
+
+
 EXECUTORS: Dict[str, ExecutorFn] = {
     "inbox_deferred_enrichment": _execute_inbox_deferred_enrichment,
     "file_ingestion": _execute_file_ingestion,
     "enrichment_process_source": _execute_enrichment_process_source,
+    "topic_consolidation": _execute_topic_consolidation,
 }
 
 

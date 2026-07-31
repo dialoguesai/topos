@@ -53,17 +53,24 @@ def _default_rebuild() -> None:
     from ...storage.db.write_gate import with_db_write
     from .maintenance import rebuild_entity_graph
 
+    from ...core.state import close_thread_db_connection
+
     conn = get_db_connection()
     if conn is None:
         logger.debug("graph refresh skipped: no database connection")
         return
-    with with_db_write():
-        report = rebuild_entity_graph(conn)
-        try:
-            _mark_materialized(conn)
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("graph materialization stamp failed: %s", exc)
-    logger.info("graph refresh: %s", report)
+    try:
+        with with_db_write():
+            report = rebuild_entity_graph(conn)
+            try:
+                _mark_materialized(conn)
+            except Exception as exc:  # noqa: BLE001
+                logger.debug("graph materialization stamp failed: %s", exc)
+        logger.info("graph refresh: %s", report)
+    finally:
+        # This runs on a short-lived Timer thread, which now gets its own
+        # connection; without this each refresh would leak one.
+        close_thread_db_connection()
 
 
 class _Refresher:
@@ -93,6 +100,24 @@ class _Refresher:
             self._timer.start()
 
     def _fire(self) -> None:
+        # A full rebuild during a derivation batch is both contended and
+        # premature: the batch is still writing the entities this would index,
+        # and the rebuild holds the process-wide write gate for its whole run
+        # (77s observed on 2026-07-30). Re-arm instead and rebuild once the
+        # batch is done.
+        try:
+            from ...enrichment.pipeline_activity import is_derivation_in_flight
+
+            if is_derivation_in_flight():
+                with self._lock:
+                    self._timer = None
+                    self._dirty = True
+                logger.debug("graph refresh deferred: derivation batch in flight")
+                self.mark()
+                return
+        except Exception:  # noqa: BLE001 — coordination is best-effort
+            pass
+
         with self._lock:
             self._timer = None
             if self._running:

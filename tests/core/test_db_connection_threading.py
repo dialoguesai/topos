@@ -1,0 +1,418 @@
+"""Per-thread SQLite connections, and durable derivation-failure records.
+
+Regression cover for the 2026-07-30 incident: an 88-record github_activity
+ingest lost its `facts` output and reported the batch clean.
+
+    ERROR job facts failed: cannot commit - no transaction is active
+    DEBUG complete source_id=github_activity jobs_run=8 deferred=[]
+
+Root cause was one process-wide sqlite connection shared across the graph
+refresher's `threading.Timer` thread and the `asyncio.to_thread` job workers. A
+Connection has ONE transaction state, so concurrent users corrupt it.
+"""
+
+from __future__ import annotations
+
+import sqlite3
+import threading
+from pathlib import Path
+
+import pytest
+
+pytestmark = pytest.mark.p1
+
+
+# --- the race itself ---------------------------------------------------------
+
+
+def test_one_shared_connection_corrupts_transactions(tmp_path: Path):
+    """Demonstrates WHY per-thread connections are required.
+
+    Two threads on ONE connection produce exactly the errors from the incident.
+    If this ever stops raising, sqlite has changed and the fix can be revisited.
+    """
+    db = tmp_path / "shared.db"
+    conn = sqlite3.connect(str(db), check_same_thread=False)
+    conn.execute("CREATE TABLE t (v INTEGER)")
+    conn.commit()
+
+    errors: list[str] = []
+    began = threading.Event()
+
+    def writer_a() -> None:
+        try:
+            conn.execute("BEGIN")
+            began.set()
+            # Hold the transaction open while B tries to use the same handle.
+            threading.Event().wait(0.25)
+            conn.execute("INSERT INTO t VALUES (1)")
+            conn.commit()
+        except sqlite3.Error as exc:
+            errors.append(f"A:{exc}")
+
+    def writer_b() -> None:
+        began.wait(2)
+        try:
+            conn.execute("BEGIN")
+            conn.execute("INSERT INTO t VALUES (2)")
+            conn.commit()
+        except sqlite3.Error as exc:
+            errors.append(f"B:{exc}")
+
+    ta, tb = threading.Thread(target=writer_a), threading.Thread(target=writer_b)
+    ta.start(), tb.start()
+    ta.join(5), tb.join(5)
+    conn.close()
+
+    assert errors, "expected a transaction-state collision on a shared connection"
+    assert any("transaction" in e for e in errors), errors
+
+
+def test_separate_connections_do_not_collide(tmp_path: Path):
+    """The same workload on per-thread connections completes cleanly."""
+    db = tmp_path / "perthread.db"
+    setup = sqlite3.connect(str(db))
+    setup.execute("PRAGMA journal_mode=WAL")
+    setup.execute("CREATE TABLE t (v INTEGER)")
+    setup.commit()
+    setup.close()
+
+    errors: list[str] = []
+    lock = threading.Lock()  # stands in for write_gate's writer serialization
+
+    def writer(value: int) -> None:
+        own = sqlite3.connect(str(db), timeout=5)
+        try:
+            with lock:
+                own.execute("BEGIN IMMEDIATE")
+                own.execute("INSERT INTO t VALUES (?)", (value,))
+                own.commit()
+        except sqlite3.Error as exc:  # pragma: no cover - failure path
+            errors.append(str(exc))
+        finally:
+            own.close()
+
+    threads = [threading.Thread(target=writer, args=(i,)) for i in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(10)
+
+    assert errors == []
+    check = sqlite3.connect(str(db))
+    assert check.execute("SELECT COUNT(*) FROM t").fetchone()[0] == 8
+    check.close()
+
+
+# --- get_db_connection hands each thread its own -----------------------------
+
+
+def test_get_db_connection_is_per_thread(tmp_path, monkeypatch):
+    from topos.core import state
+
+    db = tmp_path / "engine.db"
+    monkeypatch.setattr(state, "db_conn", None, raising=False)
+    monkeypatch.setattr(state, "_db_conn_path", None, raising=False)
+    monkeypatch.setattr(state, "_conn_owner_thread", None, raising=False)
+    monkeypatch.setattr(state, "_thread_state", threading.local(), raising=False)
+    monkeypatch.setattr(state, "_resolve_database_path_from_settings", lambda: db, raising=False)
+
+    main_conn = state.get_db_connection()
+    if main_conn is None:
+        pytest.skip("database could not be opened in this environment")
+
+    # Same thread -> same object (no churn).
+    assert state.get_db_connection() is main_conn
+
+    seen: dict[str, object] = {}
+
+    def worker() -> None:
+        seen["conn"] = state.get_db_connection()
+        seen["again"] = state.get_db_connection()
+        state.close_thread_db_connection()
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join(10)
+
+    assert seen.get("conn") is not None
+    assert seen["conn"] is not main_conn, "worker thread must not share the owner connection"
+    assert seen["again"] is seen["conn"], "per-thread connection should be cached"
+
+
+def test_in_memory_handle_is_shared_not_reopened(monkeypatch):
+    """`:memory:` cannot be reopened per thread — each copy would be empty."""
+    from topos.core import state
+
+    mem = sqlite3.connect(":memory:", check_same_thread=False)
+    mem.row_factory = sqlite3.Row
+    mem.execute("CREATE TABLE marker (v INTEGER)")
+    mem.commit()
+
+    monkeypatch.setattr(state, "db_conn", mem, raising=False)
+    monkeypatch.setattr(state, "_db_conn_path", None, raising=False)
+    monkeypatch.setattr(state, "_conn_owner_thread", None, raising=False)
+    monkeypatch.setattr(state, "_thread_state", threading.local(), raising=False)
+
+    seen: dict[str, object] = {}
+
+    def worker() -> None:
+        conn = state.get_db_connection()
+        seen["conn"] = conn
+        # The shared in-memory DB must still have the table.
+        seen["rows"] = conn.execute("SELECT COUNT(*) FROM marker").fetchone()[0]
+
+    t = threading.Thread(target=worker)
+    t.start()
+    t.join(10)
+
+    assert seen.get("conn") is mem
+    assert seen.get("rows") == 0
+    mem.close()
+
+
+# --- durable derivation failures ---------------------------------------------
+
+
+def _memory_db() -> sqlite3.Connection:
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def test_failed_derivation_is_recorded_and_listed():
+    from topos.enrichment.derivation_recovery import (
+        list_pending_derivation_retries,
+        pending_derivation_summary,
+        record_failed_derivation,
+    )
+
+    conn = _memory_db()
+    job_id = record_failed_derivation(
+        conn,
+        source_id="github_activity",
+        sync_batch_id="1bcab09c",
+        job_name="facts",
+        error="cannot commit - no transaction is active",
+        record_ids=[f"push:{i}" for i in range(88)],
+        record_count=88,
+    )
+    assert job_id
+
+    pending = list_pending_derivation_retries(conn)
+    assert len(pending) == 1
+    entry = pending[0]
+    assert entry["job_name"] == "facts"
+    assert entry["source_id"] == "github_activity"
+    assert entry["record_count"] == 88
+    assert "no transaction is active" in entry["error"]
+
+    summary = pending_derivation_summary(conn)
+    assert summary["healthy"] is False
+    assert summary["pending_derivations"] == 1
+    assert summary["affected_records"] == 88
+    assert summary["by_job"] == {"facts": 1}
+    conn.close()
+
+
+def test_recording_the_same_failure_twice_is_one_debt():
+    from topos.enrichment.derivation_recovery import (
+        list_pending_derivation_retries,
+        record_failed_derivation,
+    )
+
+    conn = _memory_db()
+    for _ in range(3):
+        record_failed_derivation(
+            conn,
+            source_id="github_activity",
+            sync_batch_id="batch-1",
+            job_name="facts",
+            error="boom",
+            record_count=5,
+        )
+    assert len(list_pending_derivation_retries(conn)) == 1
+    conn.close()
+
+
+def test_success_clears_the_debt():
+    from topos.enrichment.derivation_recovery import (
+        clear_derivation_retry,
+        list_pending_derivation_retries,
+        pending_derivation_summary,
+        record_failed_derivation,
+    )
+
+    conn = _memory_db()
+    record_failed_derivation(
+        conn,
+        source_id="github_activity",
+        sync_batch_id="batch-1",
+        job_name="facts",
+        error="boom",
+        record_count=5,
+    )
+    assert clear_derivation_retry(conn, sync_batch_id="batch-1", job_name="facts") is True
+    assert list_pending_derivation_retries(conn) == []
+    assert pending_derivation_summary(conn)["healthy"] is True
+    conn.close()
+
+
+def test_recording_never_raises_without_a_connection():
+    """Losing the DB must not turn a partial batch into a crashed one."""
+    from topos.enrichment.derivation_recovery import (
+        clear_derivation_retry,
+        list_pending_derivation_retries,
+        pending_derivation_summary,
+        record_failed_derivation,
+    )
+
+    assert record_failed_derivation(
+        None, source_id="s", sync_batch_id="b", job_name="j", error="e"
+    ) is None
+    assert clear_derivation_retry(None, sync_batch_id="b", job_name="j") is False
+    assert list_pending_derivation_retries(None) == []
+    assert pending_derivation_summary(None)["healthy"] is True
+
+
+# --- pipeline coordination ---------------------------------------------------
+
+
+def test_derivation_in_flight_is_visible_to_background_rebuilds():
+    from topos.enrichment.pipeline_activity import (
+        derivation_in_flight,
+        is_derivation_in_flight,
+        reset_for_tests,
+    )
+
+    reset_for_tests()
+    assert is_derivation_in_flight() is False
+    with derivation_in_flight():
+        assert is_derivation_in_flight() is True
+        # Nested/concurrent batches must not clear the flag early.
+        with derivation_in_flight():
+            assert is_derivation_in_flight() is True
+        assert is_derivation_in_flight() is True
+    assert is_derivation_in_flight() is False
+
+
+def test_derivation_flag_clears_on_exception():
+    from topos.enrichment.pipeline_activity import (
+        derivation_in_flight,
+        is_derivation_in_flight,
+        reset_for_tests,
+    )
+
+    reset_for_tests()
+    with pytest.raises(ValueError):
+        with derivation_in_flight():
+            raise ValueError("batch blew up")
+    assert is_derivation_in_flight() is False, "a failed batch must not wedge the flag"
+
+
+def test_graph_refresh_defers_while_a_batch_is_running():
+    """A 77s rebuild must not fire mid-batch and hold the write gate."""
+    from topos.enrichment.pipeline_activity import derivation_in_flight, reset_for_tests
+    from topos.features.entities.graph_refresh import _Refresher
+
+    reset_for_tests()
+    ran: list[int] = []
+    refresher = _Refresher(rebuild_fn=lambda: ran.append(1))
+
+    with derivation_in_flight():
+        refresher._fire()
+        assert ran == [], "rebuild should have deferred while the batch is in flight"
+
+    refresher._fire()
+    assert ran == [1], "rebuild should run once the batch is done"
+    refresher.shutdown()
+
+
+# --- DDL is issued once per connection, not once per record ------------------
+
+
+def test_enrichment_ddl_runs_once_per_connection():
+    """One 88-record import built 75 managers, each re-issuing the same DDL."""
+    from topos.enrichment.derived_tables import (
+        DerivedTablesManager,
+        reset_ensured_tables_cache,
+    )
+
+    class Counting(sqlite3.Connection):
+        creates = 0
+
+        def execute(self, sql, *a, **k):  # type: ignore[override]
+            if "CREATE" in str(sql).upper():
+                Counting.creates += 1
+            return super().execute(sql, *a, **k)
+
+    reset_ensured_tables_cache()
+    conn = sqlite3.connect(":memory:", factory=Counting)
+    conn.row_factory = sqlite3.Row
+    try:
+        for _ in range(75):
+            DerivedTablesManager(conn=conn)
+        first_pass = Counting.creates
+        assert 0 < first_pass <= 10, f"expected one DDL pass, got {first_pass} statements"
+
+        # A different connection must still get its own DDL.
+        Counting.creates = 0
+        other = sqlite3.connect(":memory:", factory=Counting)
+        other.row_factory = sqlite3.Row
+        DerivedTablesManager(conn=other)
+        assert Counting.creates > 0, "a new connection must still be initialized"
+        other.close()
+    finally:
+        reset_ensured_tables_cache()
+        conn.close()
+
+
+# --- global recompute is deferred out of the ingest path ---------------------
+
+
+def test_consolidation_is_queued_not_run_inline():
+    """A full recompute across 27 sources took 44s inside an 88-record batch."""
+    from topos.enrichment.jobs.canonical.topic_clusters_job import (
+        TOPIC_CONSOLIDATION_KIND,
+        _defer_consolidation,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    try:
+        assert _defer_consolidation(conn) is True
+        # Idempotent: a hundred batches leave exactly one pending consolidation.
+        for _ in range(10):
+            _defer_consolidation(conn)
+        count = conn.execute(
+            "SELECT COUNT(*) FROM pipeline_jobs WHERE kind=?", (TOPIC_CONSOLIDATION_KIND,)
+        ).fetchone()[0]
+        assert count == 1, f"consolidation should coalesce, found {count} rows"
+    finally:
+        conn.close()
+
+
+def test_consolidation_deferral_can_be_disabled(monkeypatch):
+    """Escape hatch: a consolidation that never happens is worse than a slow one."""
+    from topos.enrichment.jobs.canonical.topic_clusters_job import _defer_consolidation
+
+    monkeypatch.setenv("TOPOS_DEFER_TOPIC_CONSOLIDATION", "off")
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    try:
+        assert _defer_consolidation(conn) is False, "should fall back to running inline"
+    finally:
+        conn.close()
+
+
+def test_consolidation_falls_back_inline_when_queue_unavailable():
+    from topos.enrichment.jobs.canonical.topic_clusters_job import _defer_consolidation
+
+    assert _defer_consolidation(None) is False
+
+
+def test_topic_consolidation_executor_is_registered():
+    from topos.pipeline.job_runner import EXECUTORS
+    from topos.enrichment.jobs.canonical.topic_clusters_job import TOPIC_CONSOLIDATION_KIND
+
+    assert TOPIC_CONSOLIDATION_KIND in EXECUTORS, "deferred work needs a worker that runs it"

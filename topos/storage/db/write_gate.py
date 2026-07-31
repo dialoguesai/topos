@@ -34,11 +34,59 @@ def db_write_lock() -> threading.RLock:
     return _WRITE_LOCK
 
 
+#: Threshold above which holding the gate is reported. A rebuild that holds it
+#: for 77s (observed 2026-07-30) starves every other writer, and if the event
+#: loop is one of them the control-plane websocket misses its keepalive and the
+#: node looks offline.
+_SLOW_HOLD_WARN_S = 5.0
+
+
+def _on_event_loop() -> bool:
+    """True when called from a thread running an asyncio event loop.
+
+    ``_WRITE_LOCK`` is a blocking OS lock, so taking it here stalls EVERY
+    coroutine on this loop — including the control-plane keepalive. Such a call
+    is a bug: DB work belongs in ``asyncio.to_thread``.
+    """
+    try:
+        import asyncio
+
+        asyncio.get_running_loop()
+        return True
+    except RuntimeError:
+        return False
+    except Exception:  # noqa: BLE001 — diagnostics must never break a write
+        return False
+
+
 @contextmanager
 def with_db_write() -> Iterator[None]:
     """Serialize a write-critical section across threads."""
+    if _on_event_loop():
+        # Loud on purpose: this is the shape of the 2026-07-30 outage. Not
+        # raised, because failing a write to punish a bad call site would be a
+        # worse outcome than the stall it warns about.
+        logger.warning(
+            "[WRITE_GATE] acquired on the event-loop thread — this blocks every "
+            "coroutine including the control-plane keepalive; move this DB work "
+            "into asyncio.to_thread",
+            stack_info=True,
+        )
+    waited_at = time.monotonic()
     with _WRITE_LOCK:
-        yield
+        waited = time.monotonic() - waited_at
+        held_at = time.monotonic()
+        try:
+            yield
+        finally:
+            held = time.monotonic() - held_at
+            if held >= _SLOW_HOLD_WARN_S or waited >= _SLOW_HOLD_WARN_S:
+                logger.warning(
+                    "[WRITE_GATE] slow section: waited=%.1fs held=%.1fs — other "
+                    "writers were blocked for this long",
+                    waited,
+                    held,
+                )
 
 
 def is_busy_error(exc: BaseException) -> bool:
