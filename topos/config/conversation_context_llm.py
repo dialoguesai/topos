@@ -14,7 +14,10 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
+
+if TYPE_CHECKING:
+    from topos.config.model_packs import RoleBinding
 
 logger = logging.getLogger("topos.config.conversation_context_llm")
 
@@ -45,13 +48,67 @@ def device_context_llm_model(conn: Optional[sqlite3.Connection]) -> str:
 
 def resolve_context_llm_model(settings: Any, conn: Optional[sqlite3.Connection] = None) -> str:
     override = device_context_llm_model(conn)
-    if override:
-        return override
+
+    # Resolution order (PLAN_MODEL_PACKS.md M3 / S6): device override → pack
+    # `classify` role → engine default, via the one node resolver.
+    engine_default = ""
     for attr in ("ollama_extraction_model", "ollama_query_model"):
         value = str(getattr(settings, attr, "") or "").strip()
         if value:
-            return value
-    return ""
+            engine_default = value
+            break
+
+    if conn is not None:
+        from .model_packs import (
+            SOURCE_OVERRIDE,
+            SOURCE_PACK,
+            active_pack_dict,
+            resolve_model,
+        )
+
+        resolved = resolve_model(
+            role="classify",
+            override=override or None,
+            pack=active_pack_dict(conn),
+            engine_default=(
+                {"provider": "ollama", "model": engine_default} if engine_default else None
+            ),
+        )
+        if resolved.source == SOURCE_OVERRIDE and resolved.model:
+            return resolved.model
+        if resolved.source == SOURCE_PACK and resolved.provider != "ollama":
+            resolved = resolve_model(
+                role="classify",
+                engine_default=(
+                    {"provider": "ollama", "model": engine_default} if engine_default else None
+                ),
+            )
+        if resolved.model:
+            return resolved.model
+
+    return override or engine_default
+
+
+def resolve_context_llm_params(
+    conn: Optional[sqlite3.Connection], model: str
+) -> Optional["RoleBinding"]:
+    """The pack's `classify` binding, but only for the model it was set on.
+
+    Picking the model and picking its parameters are one decision, so they live
+    together: `resolve_context_llm_model` can return a device override or a
+    settings default instead of the pack's model, and applying another
+    binding's `thinking`/`context` to that model would run it at settings its
+    owner never chose for it.
+    """
+    if conn is None or not model:
+        return None
+
+    from .model_packs import resolve_role_binding
+
+    binding = resolve_role_binding(conn, "classify")
+    if binding is None or binding.provider != "ollama" or binding.model != model:
+        return None
+    return binding
 
 
 def normalize_put_model(payload: Any) -> str:

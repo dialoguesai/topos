@@ -53,13 +53,48 @@ def device_facts_llm_model(conn: Optional[sqlite3.Connection]) -> str:
 def resolve_facts_llm_model(settings: Any, conn: Optional[sqlite3.Connection] = None) -> str:
     """Effective model for the LLM fact pass ("" ⇒ pass stays inert)."""
     override = device_facts_llm_model(conn)
-    if override:
-        return override
+
+    # Resolution order (PLAN_MODEL_PACKS.md M3 / S6): device override → pack
+    # `classify` role → this function's own default chain. Routed through the
+    # one node resolver so precedence cannot drift from home chat / routines.
+    # This module only ever runs against local Ollama — a cloud-bound pack
+    # role falls through to the engine default rather than leaving the machine.
+    engine_default = ""
     for attr in ("facts_llm_model", "ollama_extraction_model", "ollama_query_model"):
         value = str(getattr(settings, attr, "") or "").strip()
         if value:
-            return value
-    return ""
+            engine_default = value
+            break
+
+    if conn is not None:
+        from .model_packs import (
+            SOURCE_OVERRIDE,
+            SOURCE_PACK,
+            active_pack_dict,
+            resolve_model,
+        )
+
+        resolved = resolve_model(
+            role="classify",
+            override=override or None,
+            pack=active_pack_dict(conn),
+            engine_default=(
+                {"provider": "ollama", "model": engine_default} if engine_default else None
+            ),
+        )
+        if resolved.source == SOURCE_OVERRIDE and resolved.model:
+            return resolved.model
+        if resolved.source == SOURCE_PACK and resolved.provider != "ollama":
+            resolved = resolve_model(
+                role="classify",
+                engine_default=(
+                    {"provider": "ollama", "model": engine_default} if engine_default else None
+                ),
+            )
+        if resolved.model:
+            return resolved.model
+
+    return override or engine_default
 
 
 def normalize_put_model(payload: Any) -> str:
