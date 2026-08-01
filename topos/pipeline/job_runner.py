@@ -236,12 +236,25 @@ async def _worker_loop(conn_factory: Callable[[], Any]) -> None:
         if conn is None:
             await asyncio.sleep(1.0)
             continue
+
         # claim_next_job takes the process-wide write gate — a BLOCKING
-        # threading lock. Called directly here it ran on the event loop, so
-        # every 250ms the loop could stall behind whatever writer held the
-        # gate (a batch write, or a 77s graph rebuild), taking the
-        # control-plane keepalive down with it. Offload it.
-        job = await asyncio.to_thread(claim_next_job, conn, lease_owner=_lease_owner)
+        # threading lock. Called directly it ran on the event loop, so every
+        # 250ms the loop could stall behind whatever writer held the gate (a
+        # batch write, or a 77s graph rebuild), taking the control-plane
+        # keepalive down with it.
+        #
+        # The factory is re-invoked INSIDE the worker thread rather than
+        # capturing the connection above. get_db_connection is thread-local, so
+        # this hands the thread its own handle; passing the loop thread's
+        # connection across would silently reinstate the cross-thread sharing
+        # that caused the 2026-07-30 transaction corruption in the first place.
+        def _claim() -> Optional[Dict[str, Any]]:
+            own = conn_factory()
+            if own is None:
+                return None
+            return claim_next_job(own, lease_owner=_lease_owner)
+
+        job = await asyncio.to_thread(_claim)
         if job is None:
             await asyncio.sleep(idle_delay)
             # Ease off while nothing is queued; snap back the moment work lands.
