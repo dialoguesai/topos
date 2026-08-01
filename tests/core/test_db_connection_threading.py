@@ -504,9 +504,17 @@ def test_worker_loop_claims_off_the_event_loop():
     from topos.pipeline import job_runner
 
     src = inspect.getsource(job_runner._worker_loop)
-    assert "asyncio.to_thread(claim_next_job" in src, (
-        "the worker must offload claim_next_job — polling it on the event loop "
+    assert "asyncio.to_thread(_claim)" in src, (
+        "the worker must offload the claim — polling it on the event loop "
         "stalls every coroutine behind the write gate four times a second"
+    )
+    # And it must open its OWN connection in that thread. Passing the loop
+    # thread's connection across would silently reinstate the cross-thread
+    # sharing that caused the transaction corruption this file exists for.
+    claim_body = src[src.index("def _claim"):]
+    assert "conn_factory()" in claim_body, (
+        "the offloaded claim must re-invoke the factory inside the worker "
+        "thread, not capture the event loop's connection"
     )
     # And it should ease off when there is nothing to do.
     assert "_MAX_POLL_SECONDS" in src
