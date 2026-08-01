@@ -7,11 +7,13 @@ import sqlite3
 
 import pytest
 
+from topos.config.model_packs import apply_sync_payload
 from topos.config.settings import Settings
 from topos.config.signal_extraction import (
     ENGINE_CONFIG_KEY_SIGNAL_EXTRACTION_DEVICE,
     effective_config_for_api,
     normalize_put_device_overrides,
+    resolve_signal_extraction_config,
     resolve_signal_extraction_model_request,
     resolve_signal_extraction_query_model,
 )
@@ -111,3 +113,55 @@ def test_normalize_put_device_overrides_platform_without_model(memory_settings: 
 def test_normalize_put_device_overrides_requires_model_for_ollama() -> None:
     with pytest.raises(ValueError, match="query_model"):
         normalize_put_device_overrides({"device_overrides": {"provider": "ollama", "version": 1}})
+
+
+# --- PLAN_MODEL_PACKS.md M3: device override -> pack's `tool` role -> default -------
+
+
+def _seed_pack(conn: sqlite3.Connection, *, provider: str, model: str) -> None:
+    apply_sync_payload(
+        conn,
+        {
+            "revision": 1,
+            "active": "pack-1",
+            "packs": [{"pack_id": "pack-1", "roles": {"tool": {"provider": provider, "model": model}}}],
+        },
+    )
+
+
+def test_resolve_signal_extraction_config_uses_pack_tool_role_when_no_device_override(
+    memory_settings: Settings,
+) -> None:
+    conn = _memory_conn()
+    _seed_pack(conn, provider="redpill", model="qwen/qwen3.6-27b")
+    cfg = resolve_signal_extraction_config(memory_settings, conn)
+    assert cfg.provider == "redpill"
+    assert cfg.query_model == "qwen/qwen3.6-27b"
+
+
+def test_resolve_signal_extraction_config_device_override_wins_over_pack(memory_settings: Settings) -> None:
+    conn = _memory_conn()
+    _seed_pack(conn, provider="redpill", model="qwen/qwen3.6-27b")
+    conn.execute(
+        "INSERT INTO engine_config (key, value) VALUES (?, ?)",
+        (
+            ENGINE_CONFIG_KEY_SIGNAL_EXTRACTION_DEVICE,
+            json.dumps({"version": 1, "provider": "ollama", "query_model": "mistral:latest"}),
+        ),
+    )
+    conn.commit()
+    cfg = resolve_signal_extraction_config(memory_settings, conn)
+    assert cfg.provider == "ollama"
+    assert cfg.query_model == "mistral:latest"
+
+
+def test_resolve_signal_extraction_config_falls_through_for_unsupported_pack_provider(
+    memory_settings: Settings,
+) -> None:
+    conn = _memory_conn()
+    # anthropic/grok aren't in SIGNAL_EXTRACTION_PROVIDERS -- must fall through
+    # to this function's own default rather than erroring or using them.
+    _seed_pack(conn, provider="anthropic", model="claude-opus-4-6")
+    cfg = resolve_signal_extraction_config(memory_settings, conn)
+    assert cfg.provider == "ollama"
+    assert cfg.query_model == memory_settings.ollama_extraction_model

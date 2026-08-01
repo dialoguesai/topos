@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING, Any, Literal, Optional, Tuple
 from pydantic import BaseModel, ConfigDict, Field
 
 if TYPE_CHECKING:
+    from topos.config.model_packs import RoleBinding
     from topos.config.settings import Settings
 
 logger = logging.getLogger("topos.config.signal_extraction")
@@ -62,6 +63,11 @@ def resolve_signal_extraction_config(
     if conn is not None:
         raw = _read_engine_config_value(conn, ENGINE_CONFIG_KEY_SIGNAL_EXTRACTION_DEVICE)
         device = parse_device_overrides_json(raw)
+
+    # Resolution order (PLAN_MODEL_PACKS.md M3 / S6): device override → pack
+    # `tool` role → this function's own default, via the one node resolver. An
+    # explicit device override — provider OR model alone — always wins; it is
+    # a deliberate per-machine pin a pack must not silently supersede.
     provider = str(device.provider or "ollama").strip().lower()
     if provider not in SIGNAL_EXTRACTION_PROVIDERS:
         provider = "ollama"
@@ -79,6 +85,25 @@ def resolve_signal_extraction_config(
         default_model = DEFAULT_REDPILL_MODEL
     elif provider == "openai":
         default_model = str(settings.openai_model or "gpt-4o-mini").strip()
+
+    device_override_present = device.provider is not None or bool(model_override)
+    if not device_override_present and conn is not None:
+        from .model_packs import SOURCE_PACK, active_pack_dict, resolve_model
+
+        resolved = resolve_model(
+            role="tool",
+            pack=active_pack_dict(conn),
+            engine_default={"provider": provider, "model": default_model},
+        )
+        if resolved.source == SOURCE_PACK and resolved.provider in SIGNAL_EXTRACTION_PROVIDERS:
+            return DeviceSignalExtractionOverrides(
+                version=device.version,
+                provider=resolved.provider,  # type: ignore[arg-type]
+                query_model=resolved.model,
+            )
+        # Pack names a provider signal extraction doesn't support here
+        # (e.g. anthropic/grok) — fall through to this function's own default.
+
     return DeviceSignalExtractionOverrides(
         version=device.version,
         provider=provider,  # type: ignore[arg-type]
@@ -110,6 +135,32 @@ def resolve_signal_extraction_model_request(
 
         return "redpill", resolve_redpill_model(model)
     return "ollama", model or settings.ollama_query_model
+
+
+def resolve_signal_extraction_pack_params(
+    conn: Optional[sqlite3.Connection],
+    model: Optional[str],
+    *,
+    role: str = "tool",
+) -> Optional["RoleBinding"]:
+    """The pack's binding for `role`, but only for the model it was set on.
+
+    Picking the model and picking its parameters are one decision, so they live
+    together: `resolve_signal_extraction_config` gives a device override
+    precedence over the pack, and applying the pack's `thinking`/`context` to
+    the overridden model would run it at settings its owner never chose for it.
+    """
+    if conn is None or not model or not role:
+        return None
+
+    from .model_packs import resolve_role_binding
+
+    binding = resolve_role_binding(conn, role)
+    if binding is None or binding.model != model:
+        return None
+    if binding.provider not in SIGNAL_EXTRACTION_PROVIDERS:
+        return None
+    return binding
 
 
 def get_signal_extraction_query_model() -> str:

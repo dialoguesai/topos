@@ -191,11 +191,26 @@ def _ollama_chat(
     model: str,
     timeout_sec: float,
     auto_pull: bool = True,
+    think: Optional[bool] = None,
+    num_ctx: Optional[int] = None,
+    num_predict: Optional[int] = None,
 ) -> str:
     import httpx
 
     url = f"{host.rstrip('/')}/api/chat"
-    body = {"model": model, "messages": messages, "stream": False}
+    body: Dict[str, Any] = {"model": model, "messages": messages, "stream": False}
+    # Omitted rather than defaulted when unset: sanitization ran without any of
+    # these for its whole life, and sending Ollama's own defaults explicitly
+    # would change every existing install's behaviour to prove a pack works.
+    if think is not None:
+        body["think"] = think
+    options: Dict[str, Any] = {}
+    if num_ctx is not None:
+        options["num_ctx"] = num_ctx
+    if num_predict is not None:
+        options["num_predict"] = num_predict
+    if options:
+        body["options"] = options
     with httpx.Client(timeout=timeout_sec) as client:
         resp = client.post(url, json=body)
         if (
@@ -251,6 +266,10 @@ def apply_text_transform_with_ollama(
     if max_in > 0 and len(text) > max_in:
         text = text[:max_in] + "\n[TRUNCATED_FOR_LLM]"
 
+    # Only the pack binding that names THIS model, so a device override or a
+    # per-transform model does not inherit knobs set for a different one.
+    pack = effective.params_for(model)
+
     messages = _build_messages(transform_id, text, dict(params or {}))
     raw = _ollama_chat(
         messages,
@@ -258,6 +277,9 @@ def apply_text_transform_with_ollama(
         model=model,
         timeout_sec=effective.timeout_sec,
         auto_pull=effective.auto_pull,
+        think=pack.thinking if pack else None,
+        num_ctx=pack.context if pack else None,
+        num_predict=pack.max_tokens if pack else None,
     )
     out = _strip_fences(raw)
 

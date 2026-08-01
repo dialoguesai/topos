@@ -230,13 +230,17 @@ class OllamaAdapter:
         model = config.get("model") or "llama3.2:3b"
         try:
             prompt = build_generative_prompt(subtype, payload)
+            # A pack's binding beats the per-subtype default: the default is a
+            # code-shipped guess about a subtype, the binding is the owner
+            # stating it about this model. An absent key keeps the guess.
             generated = self._generate(
                 model,
                 prompt,
-                num_predict=_num_predict_for_subtype(subtype),
+                num_predict=config.get("max_tokens") or _num_predict_for_subtype(subtype),
                 keep_alive=None,
-                think=_think_for_subtype(subtype),
+                think=config.get("thinking", _think_for_subtype(subtype)),
                 temperature=_temperature_for_subtype(subtype),
+                num_ctx=config.get("context"),
             )
             response_text = str(generated.get("text") or "")
             out = parse_generative_response(response_text, subtype, model, payload=payload)
@@ -267,6 +271,7 @@ class OllamaAdapter:
         keep_alive: Optional[str] = None,
         think: Optional[bool] = None,
         temperature: Optional[float] = None,
+        num_ctx: Optional[int] = None,
         timeout: float = 300,
     ) -> Dict[str, Any]:
         # think auto-adaptation: callers state intent (False = suppress
@@ -292,6 +297,7 @@ class OllamaAdapter:
                 keep_alive=keep_alive,
                 think=think,
                 temperature=temperature,
+                num_ctx=num_ctx,
                 timeout=timeout,
             )
         except RuntimeError as exc:
@@ -316,6 +322,7 @@ class OllamaAdapter:
                     keep_alive=keep_alive,
                     think=None,
                     temperature=temperature,
+                    num_ctx=num_ctx,
                     timeout=timeout,
                 )
             raise
@@ -329,6 +336,7 @@ class OllamaAdapter:
         keep_alive: Optional[str],
         think: Optional[bool],
         temperature: Optional[float],
+        num_ctx: Optional[int],
         timeout: float,
     ) -> Dict[str, Any]:
         body: Dict[str, Any] = {"model": model, "prompt": prompt, "stream": False}
@@ -341,6 +349,8 @@ class OllamaAdapter:
             options["num_predict"] = num_predict
         if temperature is not None:
             options["temperature"] = temperature
+        if num_ctx is not None:
+            options["num_ctx"] = num_ctx
         if options:
             body["options"] = options
         req = urllib.request.Request(

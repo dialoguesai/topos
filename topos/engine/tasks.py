@@ -16,6 +16,13 @@ class ModelRequest(BaseModel):
 
     provider: str = Field(..., description="e.g. ollama, huggingface")
     model: Optional[str] = Field(None, description="Model name or id; default from registry if omitted")
+    # Inference knobs a model pack's role binding stated for THIS model. None is
+    # "not stated", which leaves the adapter's per-subtype default in place —
+    # the caller resolving the pack is the only one who knows whether the
+    # binding names the model the task actually runs on.
+    thinking: Optional[bool] = Field(None, description="Ollama `think`")
+    context: Optional[int] = Field(None, description="Ollama `options.num_ctx`")
+    max_tokens: Optional[int] = Field(None, description="Ollama `options.num_predict`")
 
 
 class ExecutionSpec(BaseModel):

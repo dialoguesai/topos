@@ -304,6 +304,8 @@ def emit_engine_llm_usage_observation(
     source_id: Optional[str] = None,
     duration_ms: Optional[int] = None,
     ttfb_ms: Optional[int] = None,
+    pack_id: Optional[str] = None,
+    role: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Record + emit llm.generate usage for a completed generative Engine task.
 
@@ -318,6 +320,24 @@ def emit_engine_llm_usage_observation(
         total_tokens = prompt_tokens + completion_tokens
     if total_tokens <= 0:
         return None
+
+    # S6: stamp (pack_id, role) so spend is queryable per posture on every surface.
+    resolved_pack_id = str(pack_id or "").strip() or None
+    resolved_role = str(role or "").strip().lower() or None
+    if resolved_pack_id is None or resolved_role is None:
+        try:
+            from ..config.model_packs import attribution_for_engine_call
+            from ..core.state import get_db_connection
+
+            inferred_pack, inferred_role = attribution_for_engine_call(
+                get_db_connection(),
+                subtype=subtype_key,
+                task_type=task_type,
+            )
+            resolved_pack_id = resolved_pack_id or inferred_pack
+            resolved_role = resolved_role or inferred_role
+        except Exception:
+            logger.debug("pack attribution lookup failed", exc_info=True)
 
     purpose = resolve_llm_usage_purpose(
         task_type=task_type,
@@ -353,6 +373,10 @@ def emit_engine_llm_usage_observation(
         "task_type": str(task_type or ""),
         "source_id": str(source_id or ""),
     }
+    if resolved_pack_id:
+        metadata["pack_id"] = resolved_pack_id
+    if resolved_role:
+        metadata["role"] = resolved_role
     if resolved_ttfb is not None:
         metadata["ttfb_ms"] = max(0, resolved_ttfb)
     if resolved_duration is not None:

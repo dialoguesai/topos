@@ -173,6 +173,10 @@ class DimensionSummaryJob(BaseEnrichmentJob):
                 },
                 provider=engine_provider,
                 model=extraction_model,
+                # Signal extraction sits on the pack's `tool` role, so the knobs
+                # the owner set there apply to this call too.
+                pack_role="tool",
+                conn=conn,
             )
             if result.status == "completed":
                 output = result.output or {}

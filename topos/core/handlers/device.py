@@ -227,12 +227,31 @@ async def handle_compute_invoke(message: Dict[str, Any]) -> Optional[Dict[str, A
         error_code=str(forwarded.get("error_code") or "COMPUTE_EXECUTION_FAILED"),
     )
 
+def _unusable_num_ctx(payload: Dict[str, Any]) -> Optional[str]:
+    """Check `num_ctx` alone, not the whole `GenerationRequest`.
+
+    Validating the envelope here would be the obvious move and the wrong one:
+    `GenerationRequest.max_tokens` caps at 4096, while the routines lane
+    deliberately asks for 8000-16000 to clear the reasoning floor. So only the
+    bound that has no other enforcement on this path is applied.
+    """
+    raw = payload.get("num_ctx")
+    if raw is None:
+        return None
+    if isinstance(raw, bool) or not isinstance(raw, int) or raw < 1:
+        return f"num_ctx must be a positive integer, got {raw!r}"
+    return None
+
+
 @handles("llm_generation")
 async def handle_llm_generation(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     if not req_id:
         return None
     payload = message.get("payload") or {}
+    unusable = _unusable_num_ctx(payload)
+    if unusable is not None:
+        return {"id": req_id, "status": "error", "error": unusable, "error_code": 422}
     logger.info(
         "llm_generation request: provider=%r model=%r prompt_chars=%d stream=%s",
         payload.get("provider"),
