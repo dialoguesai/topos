@@ -19,6 +19,15 @@ class GenerationRequest(BaseModel):
     temperature: Optional[float] = Field(None, ge=0.0, le=2.0)
     provider: Optional[Literal["openai", "ollama", "anthropic", "grok", "platform"]] = None
     model: Optional[str] = Field(None, max_length=256)
+    #: Chain-of-thought on/off, as set by a model pack's role binding. Undeclared
+    #: fields are dropped here, so without this a pack's `thinking: false` would
+    #: arrive at the backend as "nothing stated" and take the hard-coded default
+    #: instead. None IS "nothing stated" — see `_resolve_payload_think`.
+    think: Optional[bool] = None
+    #: Ollama's context window, as set by a model pack's role binding. Same
+    #: reason as `think`: an undeclared field is dropped here, so the pack's
+    #: `context` would never reach `options.num_ctx`.
+    num_ctx: Optional[int] = Field(None, ge=1)
 
     @field_validator("prompt")
     @classmethod

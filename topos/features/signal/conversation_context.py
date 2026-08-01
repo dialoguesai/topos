@@ -67,11 +67,20 @@ def _parse_label(answer: Any) -> Optional[str]:
     return None
 
 
-def _classify_with_model(model: str, excerpts: List[str]) -> Optional[str]:
+def _classify_with_model(
+    model: str,
+    excerpts: List[str],
+    conn: Optional[sqlite3.Connection] = None,
+) -> Optional[str]:
+    from ...config.conversation_context_llm import resolve_context_llm_params
     from ...config.settings import settings  # noqa: F401 — engine client env
     from ...engine.client import get_engine_client_or_local
     from ...engine.tasks import ModelRequest, ProcessingTask, RequestedBy
 
+    # The Ollama adapter hard-codes think=False for `query_inference`, so a pack
+    # that turned thinking ON for `classify` was honoured by facts extraction
+    # and silently dropped here — one model running at two different settings.
+    binding = resolve_context_llm_params(conn, model)
     task = ProcessingTask(
         id="conversation_context",
         type="query_inference",
@@ -82,7 +91,13 @@ def _classify_with_model(model: str, excerpts: List[str]) -> Optional[str]:
             "query": _PROMPT,
             "context": "\n---\n".join(excerpts),
         },
-        model_request=ModelRequest(provider="ollama", model=model),
+        model_request=ModelRequest(
+            provider="ollama",
+            model=model,
+            thinking=binding.thinking if binding else None,
+            context=binding.context if binding else None,
+            max_tokens=binding.max_tokens if binding else None,
+        ),
         # Piggybacked on dimension_summary / enrichment — not an interactive UI ask.
         requested_by=RequestedBy(origin="ingestion_pipeline"),
     )
@@ -125,7 +140,7 @@ def classify_untagged_conversations(
             return {"examined": 0, "tagged": 0}
 
         def classify(excerpts: List[str]) -> Optional[str]:  # noqa: F811
-            return _classify_with_model(model, excerpts)
+            return _classify_with_model(model, excerpts, conn)
 
     for conversation_id, dataset_id in candidates:
         excerpts = _first_messages(conn, conversation_id)
