@@ -38,13 +38,14 @@ def _resolve_payload_think(payload: Dict[str, Any], *, default: Optional[bool]) 
     thinking models (qwen3.5, …) do not burn the whole num_predict budget on
     chain-of-thought and return an empty ``response``. Streaming chat keeps
     the model default (``default=None`` → omit the param).
+
+    A null is "not stated", not "omit the param". `GenerationRequest.think`
+    exists now, so every dumped request carries the key, and reading a
+    present-but-null as an instruction would flip the non-stream default for
+    every caller that never mentioned thinking at all.
     """
-    if "think" in payload:
-        raw = payload.get("think")
-        if raw is None:
-            return None
-        return bool(raw)
-    return default
+    raw = payload.get("think")
+    return default if raw is None else bool(raw)
 
 
 async def _ollama_generate(payload: Dict[str, Any]) -> Dict[str, Any]:
@@ -56,6 +57,7 @@ async def _ollama_generate(payload: Dict[str, Any]) -> Dict[str, Any]:
     )
     max_tokens = payload.get("max_tokens")
     temperature = payload.get("temperature")
+    num_ctx = payload.get("num_ctx")
     base = settings.engine_ollama_base_url.rstrip("/")
     # Routines / non-stream API: suppress CoT so the visible answer is not
     # starved. Models that reject think=false still get a request without it
@@ -69,6 +71,8 @@ async def _ollama_generate(payload: Dict[str, Any]) -> Dict[str, Any]:
         opts["num_predict"] = max_tokens
     if temperature is not None:
         opts["temperature"] = temperature
+    if num_ctx is not None:
+        opts["num_ctx"] = num_ctx
     if opts:
         body["options"] = opts
     timeout = _ollama_generate_timeout()
@@ -140,6 +144,7 @@ async def _ollama_stream_generate(
     )
     max_tokens = payload.get("max_tokens")
     temperature = payload.get("temperature")
+    num_ctx = payload.get("num_ctx")
     base = settings.engine_ollama_base_url.rstrip("/")
     body: Dict[str, Any] = {"model": model, "prompt": prompt, "stream": True}
     opts: Dict[str, Any] = {}
@@ -147,6 +152,8 @@ async def _ollama_stream_generate(
         opts["num_predict"] = max_tokens
     if temperature is not None:
         opts["temperature"] = temperature
+    if num_ctx is not None:
+        opts["num_ctx"] = num_ctx
     if opts:
         body["options"] = opts
     # Streaming chat: leave thinking at the model default unless the client

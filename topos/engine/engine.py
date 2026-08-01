@@ -329,4 +329,15 @@ class Engine:
         return {
             "subtype": task.subtype or "",
             "model": model,
+            # Absent, not None, when the pack said nothing: adapters read these
+            # with `config.get(...)` and fall back to their per-subtype default.
+            **{
+                key: value
+                for key, value in (
+                    ("thinking", task.model_request.thinking),
+                    ("context", task.model_request.context),
+                    ("max_tokens", task.model_request.max_tokens),
+                )
+                if value is not None
+            },
         }

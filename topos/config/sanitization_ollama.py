@@ -14,6 +14,8 @@ from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from topos.config.model_packs import RoleBinding
+
 if TYPE_CHECKING:
     from topos.config.settings import Settings
 
@@ -57,6 +59,22 @@ class SanitizationOllamaEffective(BaseModel):
     auto_pull: bool
     max_input_chars: int
     models: Dict[str, str]
+    #: The active pack's `tool` binding, carried whole rather than merged, so a
+    #: caller can check that the model it is about to run IS the one the owner
+    #: set these knobs on. The cached binding itself: a local restatement of it
+    #: would be a second shape for one payload, and the two would drift.
+    pack: Optional["RoleBinding"] = None
+
+    def params_for(self, model: str) -> Optional["RoleBinding"]:
+        """The pack's parameters, but only for the model they were set on.
+
+        A device override or a per-transform model pins a different model, and
+        applying `thinking`/`context` from another binding to it would run a
+        model at settings its owner never chose for it.
+        """
+        if self.pack is None or self.pack.model != model:
+            return None
+        return self.pack
 
 
 def _settings_transform_model_map(settings: Any) -> Dict[str, Optional[str]]:
@@ -114,7 +132,24 @@ def resolve_sanitization_ollama_effective(
     if not host:
         host = "http://127.0.0.1:11434"
 
-    default_model = (device.default_model or settings.sanitization_ollama_default_model or "llama3.2").strip()
+    # The pack supplies PARAMETERS here, never the model. Which model redacts
+    # PII is a privacy decision with its own resolution order (device override,
+    # per-transform setting, then this default); slipping the pack's model in
+    # would move redaction onto a different model whenever a pack is active.
+    pack: Optional[RoleBinding] = None
+    if conn is not None:
+        from .model_packs import resolve_role_binding
+
+        binding = resolve_role_binding(conn, "tool")
+        # Sanitization only ever talks to Ollama — a pack that put a cloud
+        # provider on `tool` is not applicable here, so its parameters are
+        # dropped rather than applied to a local model they were not set on.
+        if binding is not None and binding.provider == "ollama":
+            pack = binding
+
+    default_model = str(device.default_model or "").strip()
+    if not default_model:
+        default_model = (settings.sanitization_ollama_default_model or "llama3.2").strip()
 
     timeout_sec = float(device.timeout_sec if device.timeout_sec is not None else settings.sanitization_ollama_timeout_sec)
     auto_pull = bool(getattr(settings, "sanitization_ollama_auto_pull", True))
@@ -144,6 +179,7 @@ def resolve_sanitization_ollama_effective(
         auto_pull=auto_pull,
         max_input_chars=max_input_chars,
         models=models,
+        pack=pack,
     )
 
 

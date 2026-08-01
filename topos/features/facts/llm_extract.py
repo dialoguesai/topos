@@ -425,15 +425,34 @@ def _likely_has_owner_fact(content: str) -> bool:
 # ---------------------------------------------------------------------------
 
 
-def _make_ollama_extractor(model: str) -> Callable[[str, Dict[str, Any]], List[Dict[str, Any]]]:
+def _make_ollama_extractor(
+    model: str,
+    conn: Optional[sqlite3.Connection] = None,
+) -> Callable[[str, Dict[str, Any]], List[Dict[str, Any]]]:
     """Build a synchronous extractor bound to the OllamaAdapter transport.
 
     The returned callable raises on transport failure so the batch loop's
     try/except can degrade gracefully (and stop hammering a dead server).
+
+    `conn` is read once, here, for the active pack's `classify` binding — and
+    only when that binding names `model`, so a device-pinned extraction model
+    does not inherit knobs the owner set on a different one.
     """
+    from ...config.model_packs import resolve_role_binding
     from ...engine.backends.ollama import OllamaAdapter
 
     adapter = OllamaAdapter()
+
+    binding = resolve_role_binding(conn, "classify")
+    if binding is None or binding.provider != "ollama" or binding.model != model:
+        binding = None
+    # think=False is the measured default, not an absence of opinion: reasoning
+    # models (qwen3.5 &c.) otherwise spend the whole num_predict budget on
+    # chain-of-thought and return an empty response. A pack that states
+    # `thinking` supersedes it; a pack that is silent must not cost it.
+    think = binding.thinking if (binding and binding.thinking is not None) else False
+    num_ctx = binding.context if binding else None
+    num_predict = binding.max_tokens if (binding and binding.max_tokens) else _NUM_PREDICT
 
     def _extract(prompt: str, row: Dict[str, Any]) -> List[Dict[str, Any]]:
         from ...runtime_shutdown import is_shutdown_requested
@@ -441,16 +460,15 @@ def _make_ollama_extractor(model: str) -> Callable[[str, Dict[str, Any]], List[D
         if is_shutdown_requested():
             raise InterruptedError("engine shutting down")
         # temp 0 => deterministic; bounded output; keep_alive default so the
-        # model stays warm across the batch. think=False: reasoning models
-        # (qwen3.5 &c.) otherwise spend the whole num_predict budget on
-        # chain-of-thought and return an empty response — the adapter adapts
-        # the flag per model capability, so non-thinking models are unaffected.
+        # model stays warm across the batch. The adapter adapts `think` per
+        # model capability, so non-thinking models are unaffected either way.
         generated = adapter._generate(  # noqa: SLF001 (intentional low-level reuse)
             model,
             prompt,
-            num_predict=_NUM_PREDICT,
-            think=False,
+            num_predict=num_predict,
+            think=think,
             temperature=0.0,
+            num_ctx=num_ctx,
             timeout=FACTS_LLM_HTTP_TIMEOUT,
         )
         response = str(generated.get("text") or "") if isinstance(generated, dict) else str(generated or "")
@@ -807,7 +825,7 @@ def extract_owner_facts_llm(
             return 0
 
         def real_extractor_factory() -> Callable[[str, Dict[str, Any]], List[Dict[str, Any]]]:
-            return _make_ollama_extractor(resolved_model)
+            return _make_ollama_extractor(resolved_model, conn)
 
     from ..lifecycle.exclusions import excluded_record_ids
 
