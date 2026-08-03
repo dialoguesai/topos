@@ -147,7 +147,8 @@ async def run_mcp_eval(mcp_url: str, topos_key: str) -> List[EvalRunResult]:
         from mcp import ClientSession
         from mcp.client.streamable_http import streamablehttp_client
     except ImportError as exc:
-        raise SystemExit(f"MCP SDK required for --mcp: {exc}") from exc
+        # Raise (not SystemExit) so release runners can capture mcp_error without aborting.
+        raise RuntimeError(f"MCP SDK required for MCP lane: {exc}") from exc
 
     results: List[EvalRunResult] = []
     base = mcp_url.rstrip("/")
