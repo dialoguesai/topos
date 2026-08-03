@@ -691,6 +691,123 @@ async def handle_signal_entity_review_action(message: Dict[str, Any]) -> Optiona
         return {"id": req_id, "status": "error", "error": str(exc)}
 
 
+@handles("signal_affinity_status")
+async def handle_signal_affinity_status(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    try:
+        from ...features.entities.affinity_owner import get_affinity_status
+
+        conn = hub.get_db_connection()
+        return {"id": req_id, "status": "ok", "payload": get_affinity_status(conn)}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("signal_affinity_config")
+async def handle_signal_affinity_config(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    percentile = payload.get("percentile")
+    nudge = payload.get("nudge")
+    if percentile is None and nudge is None:
+        return {
+            "id": req_id,
+            "status": "error",
+            "error": "provide percentile or nudge (fewer|more|ok)",
+            "code": 400,
+        }
+    try:
+        from ...features.entities.affinity_owner import apply_affinity_config
+
+        conn = hub.get_db_connection()
+        return {
+            "id": req_id,
+            "status": "ok",
+            "payload": apply_affinity_config(
+                conn,
+                percentile=float(percentile) if percentile is not None else None,
+                nudge=str(nudge) if nudge is not None else None,  # type: ignore[arg-type]
+            ),
+        }
+    except ValueError as exc:
+        return {"id": req_id, "status": "error", "error": str(exc), "code": 400}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("signal_affinity_recompute")
+async def handle_signal_affinity_recompute(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    try:
+        from ...features.entities.affinity_owner import recompute_affinity_now
+
+        conn = hub.get_db_connection()
+        return {"id": req_id, "status": "ok", "payload": recompute_affinity_now(conn)}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("signal_affinity_pairs")
+async def handle_signal_affinity_pairs(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    try:
+        from ...features.entities.affinity_owner import list_affinity_pairs_for_review
+
+        conn = hub.get_db_connection()
+        return {
+            "id": req_id,
+            "status": "ok",
+            "payload": list_affinity_pairs_for_review(
+                conn, limit=min(int(payload.get("limit") or 50), 200)
+            ),
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("signal_affinity_label")
+async def handle_signal_affinity_label(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    a = str(payload.get("a") or "").strip()
+    b = str(payload.get("b") or "").strip()
+    label = str(payload.get("label") or "").strip()
+    if not a or not b or not label:
+        return {"id": req_id, "status": "error", "error": "a, b, and label required", "code": 400}
+    try:
+        from ...features.entities.affinity_owner import label_affinity_pair
+
+        conn = hub.get_db_connection()
+        cosine = payload.get("cosine")
+        return {
+            "id": req_id,
+            "status": "ok",
+            "payload": label_affinity_pair(
+                conn,
+                entity_a=a,
+                entity_b=b,
+                label=label,
+                note=payload.get("note"),
+                cosine=float(cosine) if cosine is not None else None,
+            ),
+        }
+    except ValueError as exc:
+        return {"id": req_id, "status": "error", "error": str(exc), "code": 400}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
 @handles("signal_entity_split")
 async def handle_signal_entity_split(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")

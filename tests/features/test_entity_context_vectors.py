@@ -369,6 +369,33 @@ class TestSelfExclusion:
         assert result["entities_considered"] == 1
 
 
+class TestBlackholeExclusion:
+    def test_blackholed_person_gets_no_centroid(self, conn) -> None:
+        """Blackhole is a build-time gate, same as is_self — never pay the cost."""
+        from topos.features.lifecycle.blackhole import BlackholeStore
+
+        _add_entity(conn, "protected", "person", "Dana Reyes")
+        _add_entity(conn, "other", "person", "Devi Raman")
+        for entity_id in ("protected", "other"):
+            for i in range(MIN_CONTEXT_MENTIONS):
+                _add_mention_with_embedding(
+                    conn,
+                    entity_id,
+                    f"rec-{entity_id}-{i}",
+                    _basis(i if entity_id == "protected" else i + 1),
+                    content_hash=f"{entity_id}-{i}",
+                )
+        conn.commit()
+        BlackholeStore(conn).blackhole_entity(entity_ref="protected")
+
+        result = rebuild_entity_context_vectors(conn)
+
+        assert load_context_centroid(conn, "protected") is None
+        assert load_context_centroid(conn, "other") is not None
+        assert result["entities_considered"] == 1
+        assert result["skipped_blackholed"] >= 1
+
+
 class TestCentroidShape:
     def test_centroid_is_l2_normalised(self, conn) -> None:
         _add_entity(conn, "p1", "person", "Maya Chen")

@@ -187,6 +187,15 @@ class ExclusionStore:
             "DELETE FROM entity_edges WHERE src_entity_id=? OR dst_entity_id=?",
             (entity_id, entity_id),
         ).rowcount
+        # Latent centroids are keyed only by entity_id; leave them and the next
+        # affinity rebuild can invent edges naming a deleted person.
+        try:
+            result["context_vectors_removed"] = self._conn.execute(
+                "DELETE FROM entity_context_vectors WHERE entity_id=?",
+                (entity_id,),
+            ).rowcount
+        except Exception:  # noqa: BLE001 — table may be absent on pre-migration DBs
+            result["context_vectors_removed"] = 0
         self._conn.execute(
             "UPDATE signal_objects SET valid_to=datetime('now') "
             "WHERE object_type='entity_dossier' AND object_key=? AND valid_to IS NULL",

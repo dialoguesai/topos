@@ -72,6 +72,14 @@ class TestStatusImage:
         image = tray.create_status_image("nonsense", glyph="topos_white.png")
         assert image.getpixel((27, 27)) == tray.STATUS_COLORS["starting"]
 
+    def test_update_status_uses_download_badge_not_orange_dot(self):
+        image = tray.create_status_image("update", glyph="topos_white.png")
+        # Badge circle is white on the white glyph (contrast for dark menu bars).
+        assert image.getpixel((22, 22)) == (255, 255, 255, 255)
+        # Arrow shaft near center is black ink on that circle.
+        r, g, b, a = image.getpixel((26, 24))
+        assert a == 255 and r < 40 and g < 40 and b < 40
+
 
 class TestToposTray:
     def test_poll_host_rewrites_wildcard_bind(self):

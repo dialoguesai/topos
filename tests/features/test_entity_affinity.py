@@ -674,6 +674,85 @@ class TestComplexityIsolation:
         assert EDGE_SEMANTIC_AFFINITY not in ALLOWED_EDGE_TYPES
 
 
+class TestBlackholeSuppression:
+    def test_blackholed_centroid_does_not_seed_new_edges(self, conn) -> None:
+        from topos.features.lifecycle.blackhole import BlackholeStore
+
+        _add_person(conn, "a", "Ana")
+        _add_person(conn, "b", "Bo")
+        _add_person(conn, "c", "Cy")
+        _add_centroid(conn, "a", _unit({0: 1.0}))
+        _add_centroid(conn, "b", _tilted(1, 0.9))
+        _add_centroid(conn, "c", _tilted(1, 0.85))
+        _seed_headroom(conn, 40)
+        conn.commit()
+        BlackholeStore(conn).blackhole_entity(entity_ref="a")
+
+        result = rebuild_affinity_edges(conn, percentile=0.0)
+
+        active = _active_pairs(conn)
+        assert all("a" not in pair for pair in active)
+        assert result["skipped_blackholed"] >= 1
+        # The two non-blackholed people can still bind to each other.
+        assert ("b", "c") in active or ("c", "b") in active
+
+    def test_existing_affinity_edge_touching_blackhole_is_frozen(self, conn) -> None:
+        """Owner keeps id-joinable latent edges; rebuild must not close them."""
+        from topos.features.lifecycle.blackhole import BlackholeStore
+
+        _add_person(conn, "a", "Ana")
+        _add_person(conn, "b", "Bo")
+        _add_centroid(conn, "a", _unit({0: 1.0}))
+        _add_centroid(conn, "b", _tilted(1, 0.9))
+        _seed_headroom(conn, 40)
+        conn.commit()
+        rebuild_affinity_edges(conn, percentile=0.0)
+        assert _active_pairs(conn) == {("a", "b")}
+
+        BlackholeStore(conn).blackhole_entity(entity_ref="a")
+        # Drop the centroid as blackhole_rebuild would; freeze must not depend
+        # on the centroid still being present.
+        conn.execute("DELETE FROM entity_context_vectors WHERE entity_id='a'")
+        conn.commit()
+
+        result = rebuild_affinity_edges(conn, percentile=0.0)
+
+        assert _active_pairs(conn) == {("a", "b")}
+        assert result["edges_frozen_blackhole"] == 1
+        assert result["edges_superseded"] == 0
+
+
+class TestGraphSnapshotAffinityExemption:
+    def test_min_weight_does_not_hide_affinity_cosines(self, conn) -> None:
+        from topos.features.entities.edges import graph_snapshot
+
+        _add_person(conn, "a", "Ana")
+        _add_person(conn, "b", "Bo")
+        conn.execute(
+            """
+            INSERT INTO entity_edges
+                (edge_id, src_entity_id, dst_entity_id, edge_type,
+                 weight, evidence_count, valid_from)
+            VALUES ('edg-aff', 'a', 'b', ?, 0.82, 4, '2026-07-01T00:00:00Z')
+            """,
+            (EDGE_SEMANTIC_AFFINITY,),
+        )
+        conn.execute(
+            """
+            INSERT INTO entity_edges
+                (edge_id, src_entity_id, dst_entity_id, edge_type,
+                 weight, evidence_count, valid_from)
+            VALUES ('edg-co', 'a', 'b', 'co_occurrence', 0.5, 1, '2026-07-01T00:00:00Z')
+            """
+        )
+        conn.commit()
+
+        snap = graph_snapshot(conn, min_weight=1.5, limit_edges=50, limit_nodes=50)
+        types = {e["edge_type"] for e in snap["edges"]}
+        assert EDGE_SEMANTIC_AFFINITY in types
+        assert "co_occurrence" not in types
+
+
 class TestEmptyNode:
     def test_no_centroids_still_logs_and_writes_nothing(self, conn) -> None:
         _seed_headroom(conn, 10)
