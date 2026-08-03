@@ -2240,6 +2240,15 @@ def _fusion_item_key(item: Dict[str, Any]) -> str:
     if record_id and retrieval.startswith("canonical:contact_identifiers"):
         ident = str(item.get("summary_text") or item.get("topic") or "")[:80]
         return f"rec:{record_id}|ident:{ident}"
+    # user_goals.record_id is the source ai_chat / message id. Collapsing the
+    # extracted goal with the full chat row under rec:{id} lets the shorter
+    # goal_text win (goals lane is fused first) and drops needle fragments that
+    # only live in the message — C26 "goals extraction personal" then misses
+    # "coverage, and pursue edtech". Keep each goal distinct from the message
+    # and from sibling goals on the same source record.
+    if record_id and retrieval == "user_goal":
+        goal_id = str(item.get("goal_id") or item.get("summary_text") or "")[:80]
+        return f"rec:{record_id}|goal:{goal_id}"
     if record_id:
         return f"rec:{record_id}"
     cluster_id = str(item.get("cluster_id") or "")
@@ -2518,6 +2527,7 @@ def _build_summary_items_unfiltered(
     hit_record_ids = {str(h.get("record_id")) for h in semantic_hits if h.get("record_id")}
     prefer_goals = "user_goals" in (manifest.signal_objects or [])
     work_scope = manifest.scope_id == "work_context:read"
+    ai_scope = manifest.scope_id == "ai_conversations:read"
     source_ids = _resolve_source_ids(manifest, installed_source_ids)
 
     first_person = bool(getattr(plan, "first_person_intent", False)) if plan else False
@@ -2851,7 +2861,10 @@ def _build_summary_items_unfiltered(
                 is not False
             ]
         recency_intent = any(t in (query_text or "").lower() for t in _RECENCY_TERMS)
-        canonical_weight = 2.0 if work_scope else 1.0
+        # ai_conversations:read's primary evidence is the chat row itself; lift it
+        # like work_context so goal/stat lanes (also on that manifest) cannot bury
+        # known-item needles when the ask literally contains "goal".
+        canonical_weight = 2.0 if (work_scope or ai_scope) else 1.0
         vector_weight = 0.6 if work_scope else 1.0
         # Interest/identity asks ("what are my interests/values/beliefs") want the
         # lanes that SUMMARIZE the owner — dimension briefs, topic clusters, facts —
@@ -2869,6 +2882,15 @@ def _build_summary_items_unfiltered(
         # Work / goal-intent asks need authored goals above ambient lanes;
         # modest lift (floor still pins ≥2) for dense "working on" quality.
         goals_weight = 1.4 if goal_items and (work_scope or goal_intent) else 1.0
+        # Diversity floors: goals stay pinned on goal-intent; ai_conversations
+        # also pins the chat lane so extracted user_goals / Work-dimension stats
+        # cannot occupy every slot when the ask is for conversations (C26).
+        min_per: Optional[Dict[str, int]] = None
+        if goal_items and goal_intent:
+            min_per = {"goals": 2}
+        if ai_scope and canonical_items:
+            min_per = dict(min_per or {})
+            min_per["canonical"] = max(int(min_per.get("canonical") or 0), 3)
         # NOTE: cosine similarity must NOT waive the zero-df gate — a strong hit
         # on the generic half of a query ("compiler rewrite") cannot evidence a
         # name the corpus does not contain ("Threnody-7"). The N-lane found
@@ -2894,13 +2916,7 @@ def _build_summary_items_unfiltered(
             ),
             rare_tokens=rare_query_tokens,
             now=now,
-            # A goal-intent query ("what have I been working on", "my goals")
-            # must surface the owner's authored goals even when high-volume
-            # lanes would otherwise crowd them out — but only if goals loaded
-            # (an empty lane guarantees nothing).
-            min_per_source=(
-                {"goals": 2} if goal_items and goal_intent else None
-            ),
+            min_per_source=min_per,
         )
 
     # Legacy path (TOPOS_FUSION_RRF=off): incomparable absolute scores.
