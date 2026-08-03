@@ -157,3 +157,58 @@ def test_contacts_resolve_raw_surfaces_identifier_under_installed_filter(conn) -
         str(r.get("identifier") or "") == phone and r.get("_table") == "contact_identifiers"
         for r in rows
     )
+
+
+def test_contacts_resolve_summary_surfaces_full_name_under_installed_filter(conn) -> None:
+    """Regression for A3 C15: first-name contact summary must surface full display name.
+
+    Same installed-source trap as C7/C14: with only demo_contacts_file installed,
+    dropping canonical_address_book left summary mode without contact rows, so
+    'What do I know about my contact John?' never contained 'Echo Foxtrot'.
+    """
+    from topos.query.retrieval import DefaultSignalRetrievalAdapter
+    from topos.query.types import RetrievalRequest
+    from topos.storage.adapters.factory import AdapterFactory
+
+    for contact_id, name in (
+        ("contact-john-ludlow", "Echo Foxtrot"),
+        ("contact-john-other", "Echo Golf"),
+    ):
+        conn.execute(
+            """
+            INSERT INTO contacts (
+                contact_id, dataset_id, source_id, display_name, is_self, created_at, updated_at
+            ) VALUES (?, 'dataset-1', ?, ?, 0, datetime('now'), datetime('now'))
+            """,
+            (contact_id, CANONICAL_ADDRESS_BOOK_SOURCE_ID, name),
+        )
+        conn.execute(
+            """
+            INSERT INTO contact_identifiers (
+                dataset_id, source_id, identifier, identifier_type, contact_id
+            ) VALUES ('dataset-1', '*', ?, 'email', ?)
+            """,
+            (f"{contact_id}@example.com", contact_id),
+        )
+    conn.commit()
+
+    adapters = AdapterFactory.create("local_database", conn=conn)
+    adapter = DefaultSignalRetrievalAdapter(adapters)
+    manifest = resolve_scope_manifest("contacts:resolve")
+    bundle = adapter.retrieve(
+        RetrievalRequest(
+            manifest=manifest,
+            access_mode="summary",
+            query_text="What do I know about my contact John?",
+            disclosure_tier="owner_raw",
+            installed_source_ids=["demo_contacts_file"],
+        )
+    )
+    summaries = bundle.context_packet.get("summaries") or []
+    blob = str(summaries)
+    assert "Echo Foxtrot" in blob
+    assert any(
+        "Echo Foxtrot" in str(item.get("summary_text") or "")
+        and str(item.get("retrieval_source") or "").startswith("canonical:contacts")
+        for item in summaries
+    )
