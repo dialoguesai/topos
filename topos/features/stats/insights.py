@@ -75,6 +75,31 @@ def _windowed_insight(
     }
 
 
+def _identifier_lookup_keys(ident: str) -> List[str]:
+    """Normalize phone-like identifiers so +1… and bare digits share a label."""
+    raw = str(ident or "").strip()
+    if not raw:
+        return []
+    keys = [raw]
+    digits = "".join(c for c in raw if c.isdigit())
+    if digits and digits != raw:
+        keys.append(digits)
+    if digits.startswith("1") and len(digits) == 11:
+        keys.append(digits[1:])
+        keys.append(f"+{digits}")
+    elif len(digits) == 10:
+        keys.append(f"+1{digits}")
+        keys.append(f"1{digits}")
+    # Dedup preserving order
+    out: List[str] = []
+    seen: set[str] = set()
+    for k in keys:
+        if k and k not in seen:
+            seen.add(k)
+            out.append(k)
+    return out
+
+
 def _contact_label_map(conn) -> Dict[str, str]:
     """identifier -> display name for message/cadence stat groups (plan C6). Stat tags
     read 'Messages with +17184834576'; a name is both more useful and closes an
@@ -90,10 +115,13 @@ def _contact_label_map(conn) -> Dict[str, str]:
         return {}
     label: Dict[str, str] = {}
     for ident, name in rows:
-        ident = str(ident or "").strip()
-        # First non-empty display name wins; identifiers can map to several rows.
-        if ident and ident not in label:
-            label[ident] = str(name).strip()
+        display = str(name).strip()
+        if not display:
+            continue
+        # First non-empty display name wins; map common identifier variants (C6).
+        for key in _identifier_lookup_keys(str(ident or "").strip()):
+            if key not in label:
+                label[key] = display
     return label
 
 
@@ -103,6 +131,11 @@ def _group_label(group_key: str, label_map: Dict[str, str]) -> str:
     if group_key == "self":
         return "myself"
     name = label_map.get(group_key)
+    if not name:
+        for key in _identifier_lookup_keys(group_key):
+            name = label_map.get(key)
+            if name:
+                break
     return f"{name} ({group_key})" if name else group_key
 
 
