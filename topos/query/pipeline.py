@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
@@ -62,6 +63,29 @@ def _selector_enforcement_enabled() -> bool:
     return True
 
 
+def _looks_like_named_person_ask(query_text: str) -> bool:
+    """True when the query appears to select a named person (First Last + ask verbs).
+
+    Used so fabricated / unlinked person asks suppress under an active entity
+    allow-list — otherwise raw dumps return content for absent names while
+    unauthorized reals return empty (existence-channel leak; D1.3 / A7).
+    """
+    q = str(query_text or "").strip()
+    if not q:
+        return False
+    # Multi-token proper-name shape; single Capitalized tokens are too ambiguous.
+    if not re.search(r"\b[A-Z][a-zA-Z'.\-]+(?:\s+[A-Z][a-zA-Z'.\-]+)+\b", q):
+        return False
+    return bool(
+        re.search(
+            r"(?i)\b("
+            r"about|with|from|said|messages?|meeting|prep with|what has|tell me"
+            r")\b",
+            q,
+        )
+    )
+
+
 def _selector_unauthorized(db_conn, query_text: str, manifest) -> bool:
     """Selector-aware disclosure (plan A2, the Maya problem): True when a GRANTEE query
     names a real third-party PERSON entity the grant does not authorize selecting.
@@ -69,7 +93,11 @@ def _selector_unauthorized(db_conn, query_text: str, manifest) -> bool:
     When entity_selector_policy_active is False (legacy grant — keys missing), do not
     suppress. When active and allow-list empty, deny ANY named person — because when the
     requester supplies the selector, response-side redaction is meaningless. Topic/place
-    entities are NOT selectors. Fabricated names don't link, so refusal ≡ absence.
+    entities are NOT selectors.
+
+    When active and the ask is person-shaped but links to no person (fabricated name),
+    also suppress — denial≡absence vs unauthorized reals (CQE; closes raw-dump
+    distinguishability on D13-GT-R*).
     """
     if not query_text or db_conn is None:
         return False
@@ -82,10 +110,11 @@ def _selector_unauthorized(db_conn, query_text: str, manifest) -> bool:
     except Exception:
         return False
     persons = [e for e in linked if str(e.get("entity_type") or "").lower() == "person"]
-    if not persons:
-        return False
     accessible = {str(x).strip() for x in (getattr(manifest, "accessible_entity_ids", None) or [])}
-    return any(str(e.get("entity_id") or "").strip() not in accessible for e in persons)
+    if persons:
+        return any(str(e.get("entity_id") or "").strip() not in accessible for e in persons)
+    # Unlinked person-shaped ask: suppress so fabricated ≡ unauthorized empty.
+    return _looks_like_named_person_ask(query_text)
 
 
 def _persist_negotiation_round(store, session_id, requester_id, session_data, neg_round) -> None:

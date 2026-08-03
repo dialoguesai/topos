@@ -94,8 +94,10 @@ def test_seeded_grant_allow_list_denial_equals_absence(tmp_path: Path, monkeypat
         assert _selector_unauthorized(conn, "meeting with Maya Chen", manifest) is False
         # Off-list real person → unauthorized (A2.E2 false-permit guard)
         assert _selector_unauthorized(conn, "prep with Alex Rivera", manifest) is True
-        # Fabricated → no person link → not unauthorized (absence path)
-        assert _selector_unauthorized(conn, f"tell me about {FABRICATED}", manifest) is False
+        # Fabricated person-shaped ask → suppress (denial≡absence; A7 raw-dump fix)
+        assert _selector_unauthorized(conn, f"tell me about {FABRICATED}", manifest) is True
+        # Topic ask without a person-name shape → not a selector suppress
+        assert _selector_unauthorized(conn, "show messages about the houseboat sale", manifest) is False
     finally:
         conn.close()
 
