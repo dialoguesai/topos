@@ -9,6 +9,7 @@
     "entity_affinity_v1": "b87080cd5d93ebe0999e6ce2a1c3911b07802ceaa54e293d93df3f698adf9bf8",
     "entity_blackhole_v1": "f31dd047e57e1747a26a163346da617f21bae4cedb0b81ac21b302de5e1fddc9",
     "entity_context_vectors_v1": "448731ab491d5675278b2d1c39be59eb8526af5891f005c8e170d9fbd382b4e3",
+    "entity_context_vectors_v2": "6b33b2a69d36bc3aa41a6baec6ade09bf5ce4a1833e101ccab11806ee6fed278",
     "episodes_v1": "377a043c7fad3ef5a21c8b60371f756a458b78ebf3c893039faa192c2722869b",
     "explicit_signal_ia_extraction_artifacts_v1": "e089b4c0565341220a02c62e70ff75c8989c3af31833acd311e12c02fe277f72",
     "explicit_signal_ia_signal_objects_v1": "265e84f58cdb3d329d9c71338d93e261cb84a8f233d5186a45a92676e800d5ab",

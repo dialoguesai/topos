@@ -46,7 +46,10 @@ logger = logging.getLogger(__name__)
 
 #: Bumped whenever the scoring or capping rules change, so a stored edge can be
 #: told apart from one written under different rules. Rides in metadata_json.
-AFFINITY_SPEC_VERSION = 1
+#: 2 — §3.1a: centroids now gate on source diversity and reject degeneracy,
+#: merge candidates are suppressed, and evidence_count counts source documents
+#: rather than mention records. A v1 edge is not comparable to a v2 one.
+AFFINITY_SPEC_VERSION = 2
 
 #: Top-N neighbours per entity, MUTUAL only (§3.4). Rank-based, therefore
 #: scale-free: it means the same thing on a node with tight centroids as on one
@@ -119,14 +122,20 @@ def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
 
 
 def _load_centroids(conn: sqlite3.Connection) -> List[Tuple[str, List[float], int]]:
-    """(entity_id, unit vector, mention_sample), ordered for determinism.
+    """(entity_id, unit vector, source_sample), ordered for determinism.
+
+    ``source_sample``, not ``mention_sample``, because that number becomes the
+    edge's ``evidence_count`` and §3.1a is exactly the finding that a mention
+    count is not evidence: thirty-eight records of one re-read page is one
+    document's worth of context reported as thirty-eight. Distinct source
+    documents is the count an owner reading ``evidence_count`` would mean.
 
     Rows whose width disagrees with the majority are dropped: a mixed-model
     history must not produce cosines between vectors from different spaces.
     """
     rows = conn.execute(
         """
-        SELECT entity_id, centroid_blob, mention_sample
+        SELECT entity_id, centroid_blob, source_sample
         FROM entity_context_vectors
         WHERE centroid_blob IS NOT NULL
         ORDER BY entity_id
@@ -241,7 +250,7 @@ def _mutual_top_pairs(
     for (a, b), cosine in scores.items():
         if b not in neighbours.get(a, ()) or a not in neighbours.get(b, ()):
             continue
-        # evidence_count = the LESSER endpoint's mention_sample: an edge is only
+        # evidence_count = the LESSER endpoint's source_sample: an edge is only
         # standing on as much context as its thinner side supplies.
         pairs.append((a, b, cosine, min(samples.get(a, 0), samples.get(b, 0))))
     pairs.sort(key=lambda item: (-item[2], item[0], item[1]))
@@ -261,6 +270,30 @@ def _active_co_occurrence_pairs(conn: sqlite3.Connection) -> set:
         a, b = str(src), str(dst)
         pairs.add((a, b) if a < b else (b, a))
     return pairs
+
+
+def _merge_candidate_pairs(conn: sqlite3.Connection) -> set:
+    """Pairs consolidation would call one person (§3.1a defect B).
+
+    On the live node BOTH surviving pairs at the shipped floor were this:
+    ``Jonny ↔ Jonny Johnson`` and ``Jonny Johnson ↔ draftin1`` — the owner and
+    their own unconsolidated aliases, scoring high precisely because two names
+    for one person are mentioned in one person's contexts. That is a
+    consolidation finding wearing an affinity label.
+
+    Delegated to ``consolidation.merge_candidate_pairs`` rather than answered
+    with a name check here: the sweep's rules are the definition of "same
+    person" on this spine, and a second, subtly different definition living in
+    this module is how the two drift apart. Never fatal — a rebuild that cannot
+    consult consolidation still writes edges, it just suppresses less.
+    """
+    try:
+        from .consolidation import merge_candidate_pairs
+
+        return merge_candidate_pairs(conn)
+    except Exception as exc:  # noqa: BLE001 — suppression must not fail a rebuild
+        logger.warning("merge-candidate suppression unavailable: %s", exc)
+        return set()
 
 
 def _other_active_edge_count(conn: sqlite3.Connection) -> int:
@@ -304,6 +337,10 @@ def rebuild_affinity_edges(
     co_occurring = _active_co_occurrence_pairs(conn)
     suppressed = [pair for pair in candidates if (pair[0], pair[1]) in co_occurring]
     candidates = [pair for pair in candidates if (pair[0], pair[1]) not in co_occurring]
+
+    merge_candidates = _merge_candidate_pairs(conn)
+    aliased = [pair for pair in candidates if (pair[0], pair[1]) in merge_candidates]
+    candidates = [pair for pair in candidates if (pair[0], pair[1]) not in merge_candidates]
 
     other_active = _other_active_edge_count(conn)
     ceiling = int(other_active * AFFINITY_CEILING_RATIO)
@@ -393,6 +430,13 @@ def rebuild_affinity_edges(
                 AFFINITY_SPEC_VERSION,
             ),
         )
+        # Persist the whole-recipe hash so a later boot can ask "has the derived
+        # layer recipe moved?" without re-deriving the knobs (PLAN M4). The
+        # integer AFFINITY_SPEC_VERSION above stays the local affinity-rules
+        # stamp; the hash covers affinity + centroids + embedding + retrieval.
+        from ..signal.derived_spec import persist_derived_spec_version
+
+        derived_hash = persist_derived_spec_version(conn)
         if commit:
             conn.commit()
 
@@ -402,6 +446,7 @@ def rebuild_affinity_edges(
         "edges_superseded": len(existing),
         "edges_written": len(rows),
         "suppressed_co_occurring": len(suppressed),
+        "suppressed_merge_candidates": len(aliased),
         "other_active_edges": other_active,
         "ceiling": ceiling,
         "ceiling_hit": ceiling_hit,
@@ -409,6 +454,7 @@ def rebuild_affinity_edges(
         "resolved_cosine": resolved_cosine,
         "floor_cosine": floor,
         "spec_version": AFFINITY_SPEC_VERSION,
+        "derived_spec_version": derived_hash,
         "computed_at": now,
     }
     logger.info("semantic affinity edges rebuilt: %s", result)

@@ -74,14 +74,33 @@ def _add_person(conn, entity_id: str, name: str, *, mentions: int = 6) -> None:
     )
 
 
-def _add_centroid(conn, entity_id: str, vector, *, mention_sample: int = 10) -> None:
+def _add_centroid(
+    conn,
+    entity_id: str,
+    vector,
+    *,
+    mention_sample: int = 10,
+    source_sample: int | None = None,
+) -> None:
+    """A stored centroid. ``source_sample`` defaults to the mention count.
+
+    The default is deliberate: these tests are about edge construction, not
+    about the §3.1a floors, so the uninteresting case is an entity whose
+    records each came from their own document.
+    """
     conn.execute(
         """
         INSERT INTO entity_context_vectors
-            (entity_id, centroid_blob, mention_sample, model_name, computed_at)
-        VALUES (?, ?, ?, 'test-model', '2026-07-31T00:00:00Z')
+            (entity_id, centroid_blob, mention_sample, source_sample,
+             model_name, computed_at)
+        VALUES (?, ?, ?, ?, 'test-model', '2026-07-31T00:00:00Z')
         """,
-        (entity_id, encode_f32(vector), mention_sample),
+        (
+            entity_id,
+            encode_f32(vector),
+            mention_sample,
+            mention_sample if source_sample is None else source_sample,
+        ),
     )
 
 
@@ -226,11 +245,25 @@ class TestCoOccurrenceSuppression:
 
 
 class TestCeiling:
+    #: Unrelated names on purpose. "Person 0"/"Person 1" share a token and score
+    #: 0.86 on token-set similarity, so the §3.1a merge-candidate suppression
+    #: would eat the whole fixture before the ceiling ever got a say.
+    _NAMES = [
+        "Devi Raman",
+        "Kwame Osei",
+        "Lucia Ferrari",
+        "Hiroshi Tanaka",
+        "Marguerite Yourcenar",
+        "Bogdan Petrescu",
+        "Ngozi Adeyemi",
+        "Soren Lindqvist",
+    ]
+
     def _seed_dense(self, conn, *, people: int, headroom: int) -> None:
         """Every pair mutually ranked and comfortably above the floor."""
         for i in range(people):
             entity_id = f"p{i:02d}"
-            _add_person(conn, entity_id, f"Person {i}")
+            _add_person(conn, entity_id, self._NAMES[i])
             # Small distinct tilts: all pair cosines >= 0.9 * 0.9 = 0.81.
             _add_centroid(conn, entity_id, _tilted(1 + (i % (_DIMS - 1)), 0.9 + i * 0.001))
         _seed_headroom(conn, headroom)
@@ -540,6 +573,97 @@ class TestAntiAliasRegression:
         assert flagged & active == set()
         assert ("sara", "sarah") not in active
         assert active == {("other", "sarah"), ("other", "sara")}
+
+
+    def test_alias_pair_with_near_identical_contexts_still_gets_no_edge(
+        self, conn
+    ) -> None:
+        """§3.1a defect B, in the live shape that exposed it.
+
+        At the shipped floor BOTH surviving pairs on the node were this:
+        ``Jonny ↔ Jonny Johnson`` at 0.682 and ``Jonny Johnson ↔ draftin1`` at
+        0.759 — the owner and their own unconsolidated aliases. Two names for
+        one person are mentioned in one person's contexts, so their CENTROIDS
+        agree, which is exactly why an orthogonal-context fixture cannot test
+        this: the previous test passes on cosine alone. Here the alias pair is
+        the single strongest pair in the graph and must still write nothing.
+        """
+        _add_person(conn, "jonny", "Jonny")
+        _add_person(conn, "jonny_johnson", "Jonny Johnson")
+        _add_person(conn, "other", "Devi Raman")
+        _add_centroid(conn, "jonny", _unit({0: 1.0}))
+        _add_centroid(conn, "jonny_johnson", _tilted(1, 0.99))
+        _add_centroid(conn, "other", _tilted(2, 0.6))
+        _seed_headroom(conn, 40)
+        conn.commit()
+
+        result = rebuild_affinity_edges(conn, percentile=0.0)
+
+        active = _active_pairs(conn)
+        assert ("jonny", "jonny_johnson") not in active
+        assert result["suppressed_merge_candidates"] == 1
+        # The graph is otherwise productive: suppression is targeted, not a
+        # blanket refusal to write edges.
+        assert active
+
+    def test_a_dismissed_merge_review_stops_suppressing(self, conn) -> None:
+        """The owner saying "not the same person" makes the pair legitimate."""
+        _add_person(conn, "ana", "Ana Silva")
+        _add_person(conn, "anahi", "Anahi Silva")
+        _add_centroid(conn, "ana", _unit({0: 1.0}))
+        _add_centroid(conn, "anahi", _tilted(1, 0.95))
+        _seed_headroom(conn, 40)
+        conn.commit()
+
+        suppressed = rebuild_affinity_edges(conn, percentile=0.0)
+        assert suppressed["suppressed_merge_candidates"] == 1
+        assert _active_pairs(conn) == set()
+
+        # Renaming removes the name-similarity finding; the dismissed review
+        # row is what must not resurrect the suppression.
+        conn.execute(
+            "UPDATE entities SET canonical_name='Marguerite Yourcenar', "
+            "normalized_name='marguerite yourcenar' WHERE entity_id='anahi'"
+        )
+        conn.execute(
+            """
+            INSERT INTO entity_review
+                (review_id, surface_text, candidate_entity_id, score, kind,
+                 subject_entity_id, reason, status)
+            VALUES ('rev-dismissed', 'Anahi Silva', 'ana', 0.85, 'merge',
+                    'anahi', 'fuzzy:token_set_0.85', 'dismissed')
+            """
+        )
+        conn.commit()
+
+        allowed = rebuild_affinity_edges(conn, percentile=0.0)
+
+        assert allowed["suppressed_merge_candidates"] == 0
+        assert ("ana", "anahi") in _active_pairs(conn)
+
+
+class TestEvidenceCount:
+    def test_evidence_counts_source_documents_not_mention_records(self, conn) -> None:
+        """§3.1a: a mention count is not evidence.
+
+        ``draftin1`` carried 38 mention records drawn from ONE document. An
+        edge reporting 38 there would be reporting a re-read count as
+        corroboration.
+        """
+        _add_person(conn, "a", "Ana")
+        _add_person(conn, "b", "Bo")
+        _add_centroid(conn, "a", _unit({0: 1.0}), mention_sample=38, source_sample=4)
+        _add_centroid(conn, "b", _tilted(1, 0.9), mention_sample=31, source_sample=9)
+        _seed_headroom(conn, 40)
+        conn.commit()
+
+        rebuild_affinity_edges(conn, percentile=0.0)
+
+        evidence = conn.execute(
+            "SELECT evidence_count FROM entity_edges WHERE edge_type=? AND valid_to IS NULL",
+            (EDGE_SEMANTIC_AFFINITY,),
+        ).fetchone()[0]
+        assert evidence == 4
 
 
 class TestComplexityIsolation:
