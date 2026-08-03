@@ -46,3 +46,29 @@ def test_resolve_manifest_applies_scope_table_allowlist() -> None:
         filter_manifest={"scope_table_allowlist": {"contacts:resolve": ["contacts"]}},
     )
     assert manifest.canonical_tables == ["contacts"]
+
+
+@pytest.mark.check("C-quality-selector-entity-grant")
+def test_resolve_manifest_maps_accessible_entity_ids_from_grant_filters() -> None:
+    """D-002 / A2.1: grant sibling accessible_entity_ids populate the selector allow-list."""
+    manifest = resolve_scope_manifest(
+        "messages:read",
+        filter_manifest={
+            "filter_manifest": {"access_mode_ceiling": "summary"},
+            "accessible_entity_ids": ["ent_maya", "ent_alex", "ent_maya"],
+            "accessible_entity_cohorts": ["none"],
+        },
+    )
+    assert manifest.accessible_entity_ids == ["ent_maya", "ent_alex"]
+    assert manifest.accessible_entity_cohorts == ["none"]
+
+
+@pytest.mark.check("C-quality-selector-entity-grant")
+def test_resolve_manifest_unknown_cohort_does_not_widen_access() -> None:
+    """v1 cohorts are accepted for audit but do not add entity ids until implemented."""
+    manifest = resolve_scope_manifest(
+        "messages:read",
+        filter_manifest={"accessible_entity_cohorts": ["contacts", "calendar_attendees"]},
+    )
+    assert manifest.accessible_entity_ids == []
+    assert manifest.accessible_entity_cohorts == ["contacts", "calendar_attendees"]

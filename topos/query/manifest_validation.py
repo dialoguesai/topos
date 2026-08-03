@@ -58,6 +58,62 @@ def _read_scope_table_allowlist(filter_manifest: Optional[Dict[str, Any]], scope
     return [str(t).strip() for t in tables if str(t).strip()]
 
 
+def _normalize_id_list(raw: Any) -> List[str]:
+    if not isinstance(raw, list):
+        return []
+    out: List[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        sid = str(item or "").strip()
+        if not sid or sid in seen:
+            continue
+        seen.add(sid)
+        out.append(sid)
+    return out
+
+
+def _resolve_accessible_entity_cohorts(cohorts: List[str]) -> List[str]:
+    """D-002 v1: cohorts are accepted on the grant but only none/empty resolve.
+
+    Unknown cohort ids are ignored (fail closed — they do not widen access). Future
+    resolvers (e.g. contacts, calendar attendees) land here and union into the allow-list.
+    """
+    resolved: List[str] = []
+    for raw in cohorts:
+        key = str(raw or "").strip().lower()
+        if not key or key in ("none", "empty", "nil"):
+            continue
+        # Reserved for A2.1 follow-ups — do not widen access until implemented.
+        continue
+    return resolved
+
+
+def _read_accessible_entity_policy(
+    filter_manifest: Optional[Dict[str, Any]],
+) -> tuple[List[str], List[str]]:
+    """Read grant siblings accessible_entity_ids / accessible_entity_cohorts (D-002).
+
+    Stored on uma_permissions.filters next to filter_manifest (not inside pydantic
+    FilterManifest — that strips unknown keys). Accept top-level on the filters blob
+    or, for test convenience, nested under filter_manifest.
+    """
+    if not filter_manifest or not isinstance(filter_manifest, dict):
+        return [], []
+    nested = filter_manifest.get("filter_manifest")
+    nested_dict = nested if isinstance(nested, dict) else {}
+
+    def _get(key: str) -> Any:
+        if key in filter_manifest:
+            return filter_manifest.get(key)
+        return nested_dict.get(key)
+
+    explicit = _normalize_id_list(_get("accessible_entity_ids"))
+    cohorts = _normalize_id_list(_get("accessible_entity_cohorts"))
+    from_cohorts = _resolve_accessible_entity_cohorts(cohorts)
+    merged = _normalize_id_list([*explicit, *from_cohorts])
+    return merged, cohorts
+
+
 def manifest_from_scope_entry(entry: Dict[str, Any]) -> ScopeResolutionManifest:
     source_ids = list(entry.get("default_source_ids") or [])
     single = entry.get("default_source_id")
@@ -112,6 +168,13 @@ def resolve_scope_manifest(
         manifest = replace(manifest, canonical_tables=filtered)
     if filter_manifest is not None:
         manifest = replace(manifest, filter_manifest=filter_manifest)
+    entity_ids, entity_cohorts = _read_accessible_entity_policy(filter_manifest)
+    if entity_ids or entity_cohorts:
+        manifest = replace(
+            manifest,
+            accessible_entity_ids=entity_ids,
+            accessible_entity_cohorts=entity_cohorts,
+        )
 
     if client_manifest:
         client_sid = str(client_manifest.get("scope_id") or "").strip()
