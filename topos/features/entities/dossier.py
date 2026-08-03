@@ -13,10 +13,40 @@ import json
 import sqlite3
 from typing import Any, Dict, List, Optional
 
-from .edges import top_edges
+from .edges import EDGE_SEMANTIC_AFFINITY, top_edges
 
 SIGNIFICANT_MENTIONS = 3
 MAX_DOSSIERS = 50
+
+
+def format_connection_label(connection: Any) -> str:
+    """Render a top_connections entry for prose/retrieval (string or structured)."""
+    if isinstance(connection, str):
+        return connection
+    if not isinstance(connection, dict):
+        return str(connection)
+    name = (
+        connection.get("canonical_name")
+        or connection.get("entity_name")
+        or connection.get("entity_id")
+        or "?"
+    )
+    edge_type = connection.get("edge_type")
+    weight = connection.get("weight")
+    if edge_type and weight is not None:
+        return f"{name} ({edge_type}, w={weight})"
+    if edge_type:
+        return f"{name} ({edge_type})"
+    return str(name)
+
+
+def _structured_connection(edge: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "entity_id": edge["entity_id"],
+        "canonical_name": edge["entity_name"],
+        "edge_type": edge["edge_type"],
+        "weight": edge["weight"],
+    }
 
 
 def significant_entities(conn: sqlite3.Connection, *, limit: int = MAX_DOSSIERS) -> List[Dict[str, Any]]:
@@ -89,14 +119,21 @@ def _stat_lines_for_entity(conn: sqlite3.Connection, entity: Dict[str, Any]) -> 
 
 def build_dossier(conn: sqlite3.Connection, entity: Dict[str, Any]) -> Dict[str, Any]:
     entity_id = str(entity["entity_id"])
-    edges = top_edges(conn, entity_id, limit=8)
+    # Observed edges and latent affinity use incompatible weight scales; keep
+    # them as separate structured lists so BlackholeGuard can filter by id and
+    # readers never rank a cosine against a decayed evidence count.
+    observed = [
+        e
+        for e in top_edges(conn, entity_id, limit=12)
+        if e.get("edge_type") != EDGE_SEMANTIC_AFFINITY
+    ][:5]
+    affinity = top_edges(
+        conn, entity_id, edge_type=EDGE_SEMANTIC_AFFINITY, limit=5
+    )
     mentions = _recent_mentions(conn, entity_id)
     tables = sorted(
         {str(m.get("canonical_table") or "") for m in mentions if m.get("canonical_table")}
     )
-    connections = [
-        f"{e['entity_name']} ({e['edge_type']}, w={e['weight']})" for e in edges[:5]
-    ]
     summary_bits = [
         f"{entity['canonical_name']} — {entity['entity_type']}",
         f"{entity['mention_count']} mentions"
@@ -111,7 +148,8 @@ def build_dossier(conn: sqlite3.Connection, entity: Dict[str, Any]) -> Dict[str,
         "entity_type": entity["entity_type"],
         "canonical_name": entity["canonical_name"],
         "summary_text": "; ".join(summary_bits) + ".",
-        "top_connections": connections,
+        "top_connections": [_structured_connection(e) for e in observed],
+        "affinity_connections": [_structured_connection(e) for e in affinity],
         "recent_activity": [
             f"{str(m.get('event_at') or '')[:10]} {m.get('canonical_table')}: {m.get('surface_text')}"
             for m in mentions

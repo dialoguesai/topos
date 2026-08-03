@@ -362,7 +362,11 @@ def graph_snapshot(
     lim_e = max(1, int(limit_edges))
     lim_n = max(1, int(limit_nodes))
 
-    where_params: List[Any] = [min_weight]
+    # Affinity weights are cosines in [0, 1] (see affinity.py); the caller's
+    # min_weight is calibrated for accumulating-count spine edges. Applying the
+    # same floor would hide every latent edge. Quality is already gated at write
+    # time (AFFINITY_FLOOR_ABS), so semantic_affinity is exempt from this filter.
+    where_params: List[Any] = [EDGE_SEMANTIC_AFFINITY, min_weight]
     if as_of:
         clause = (
             " AND (valid_from IS NULL OR valid_from <= ?)"
@@ -374,7 +378,9 @@ def graph_snapshot(
     else:
         clause = " AND valid_to IS NULL"
 
-    where_sql = f"FROM entity_edges WHERE weight >= ?{clause}"
+    where_sql = (
+        f"FROM entity_edges WHERE (edge_type = ? OR weight >= ?){clause}"
+    )
     total_edges_matching = int(
         conn.execute(f"SELECT COUNT(*) {where_sql}", tuple(where_params)).fetchone()[0]
     )

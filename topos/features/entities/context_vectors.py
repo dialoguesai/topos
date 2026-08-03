@@ -8,10 +8,10 @@ the canonical *name* (``ensure_name_embeddings``), so cosine over it says
 "Sarah Chen" ≈ "Sara Chen". That is a dedup signal, already consumed by the
 consolidation sweep; affinity built on it would only rediscover aliases.
 
-Scope is ``person`` only (decision D3) and ``is_self`` is excluded, both enforced
-here at build time so the cost is never paid for out-of-scope entities rather
-than filtered downstream. Same 384-dim ``all-MiniLM-L6-v2`` space as
-``signal_embeddings`` — no new model.
+Scope is ``person`` only (decision D3); ``is_self`` and blackholed entities are
+excluded, all enforced here at build time so the cost is never paid for
+out-of-scope entities rather than filtered downstream. Same 384-dim
+``all-MiniLM-L6-v2`` space as ``signal_embeddings`` — no new model.
 
 SOURCE DIVERSITY, NOT MENTION COUNT (§3.1a defect A). Counting mentions was the
 original floor and it does not measure what it was asked to measure. One browser
@@ -204,17 +204,25 @@ def rebuild_entity_context_vectors(
     once every centroid exists, which is why it runs after the loop rather than
     inside it.
     """
-    candidates = conn.execute(
-        """
-        SELECT entity_id FROM entities
-        WHERE entity_type = ? AND COALESCE(is_self, 0) = 0
-        ORDER BY entity_id
-        """,
-        (CONTEXT_VECTOR_ENTITY_TYPE,),
-    ).fetchall()
+    from ..lifecycle.blackhole import blackholed_entity_ids
+
+    blocked = blackholed_entity_ids(conn)
+    candidates = [
+        (entity_id,)
+        for (entity_id,) in conn.execute(
+            """
+            SELECT entity_id FROM entities
+            WHERE entity_type = ? AND COALESCE(is_self, 0) = 0
+            ORDER BY entity_id
+            """,
+            (CONTEXT_VECTOR_ENTITY_TYPE,),
+        ).fetchall()
+        if str(entity_id) not in blocked
+    ]
 
     skipped_below_source_floor = 0
     skipped_below_mention_floor = 0
+    skipped_blackholed = len(blocked)
     now = _now()
     built: Dict[str, tuple] = {}
     for (entity_id,) in candidates:
@@ -285,6 +293,7 @@ def rebuild_entity_context_vectors(
         "skipped_below_floor": skipped_below_source_floor + skipped_below_mention_floor,
         "skipped_below_source_floor": skipped_below_source_floor,
         "skipped_below_mention_floor": skipped_below_mention_floor,
+        "skipped_blackholed": skipped_blackholed,
         "dropped_degenerate": len(degenerate),
         "min_sources": int(min_sources),
         "min_mentions": int(min_mentions),

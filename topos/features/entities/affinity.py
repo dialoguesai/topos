@@ -132,7 +132,15 @@ def _load_centroids(conn: sqlite3.Connection) -> List[Tuple[str, List[float], in
 
     Rows whose width disagrees with the majority are dropped: a mixed-model
     history must not produce cosines between vectors from different spaces.
+
+    Blackholed entities are omitted here (same build-time gate as centroids):
+    affinity must not invent new latent structure around a protected person.
+    Existing affinity edges that already touch a blackhole are frozen by
+    ``rebuild_affinity_edges`` rather than superseded, so the owner keeps them.
     """
+    from ..lifecycle.blackhole import blackholed_entity_ids
+
+    blocked = blackholed_entity_ids(conn)
     rows = conn.execute(
         """
         SELECT entity_id, centroid_blob, source_sample
@@ -144,6 +152,9 @@ def _load_centroids(conn: sqlite3.Connection) -> List[Tuple[str, List[float], in
     decoded: List[Tuple[str, List[float], int]] = []
     widths: Dict[int, int] = {}
     for entity_id, blob, mention_sample in rows:
+        eid = str(entity_id)
+        if eid in blocked:
+            continue
         try:
             vector = decode_vector(blob, "f32")
         except VectorCodecError:
@@ -151,7 +162,7 @@ def _load_centroids(conn: sqlite3.Connection) -> List[Tuple[str, List[float], in
         if not vector:
             continue
         widths[len(vector)] = widths.get(len(vector), 0) + 1
-        decoded.append((str(entity_id), normalize_vector(vector), int(mention_sample or 0)))
+        decoded.append((eid, normalize_vector(vector), int(mention_sample or 0)))
     if not decoded:
         return []
     dominant = max(widths.items(), key=lambda kv: (kv[1], -kv[0]))[0]
@@ -324,6 +335,9 @@ def rebuild_affinity_edges(
     running it twice on unchanged inputs yields the same active set, plus one
     superseded revision per edge.
     """
+    from ..lifecycle.blackhole import blackholed_entity_ids
+
+    blocked = blackholed_entity_ids(conn)
     centroids = _load_centroids(conn)
     resolved_percentile = _resolve_percentile(conn, percentile)
     resolved_cosine = _estimate_floor(centroids, resolved_percentile)
@@ -369,14 +383,24 @@ def rebuild_affinity_edges(
             """,
             (EDGE_SEMANTIC_AFFINITY,),
         ).fetchall()
+        # Freeze affinity edges that touch a blackhole: the owner keeps the
+        # latent link (id-joinable, filtered at read for everyone else), and
+        # the rebuild must not close it while refusing to rewrite it.
+        frozen_blackhole = 0
+        superseded = 0
         for src, dst in existing:
+            src_id, dst_id = str(src), str(dst)
+            if src_id in blocked or dst_id in blocked:
+                frozen_blackhole += 1
+                continue
             supersede_edge(
                 conn,
-                src_entity_id=str(src),
-                dst_entity_id=str(dst),
+                src_entity_id=src_id,
+                dst_entity_id=dst_id,
                 edge_type=EDGE_SEMANTIC_AFFINITY,
                 valid_to=now,
             )
+            superseded += 1
 
         rows = []
         for a, b, cosine, evidence in candidates:
@@ -443,10 +467,12 @@ def rebuild_affinity_edges(
     result = {
         "entities_considered": len(centroids),
         "pairs_considered": pairs_considered,
-        "edges_superseded": len(existing),
+        "edges_superseded": superseded,
+        "edges_frozen_blackhole": frozen_blackhole,
         "edges_written": len(rows),
         "suppressed_co_occurring": len(suppressed),
         "suppressed_merge_candidates": len(aliased),
+        "skipped_blackholed": len(blocked),
         "other_active_edges": other_active,
         "ceiling": ceiling,
         "ceiling_hit": ceiling_hit,

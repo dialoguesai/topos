@@ -15,7 +15,7 @@ from typing import Any, Dict, List, Optional
 
 from ..lifecycle.blackhole_guard import BlackholeGuard
 from .dossier import load_dossier_for_entity
-from .edges import graph_snapshot, top_edges
+from .edges import EDGE_SEMANTIC_AFFINITY, graph_snapshot, top_edges
 
 _ENTITY_COLUMNS = (
     "entity_id, entity_type, canonical_name, aliases_json, identifiers_json,"
@@ -152,11 +152,28 @@ def get_entity_detail(
     # A visible entity may be connected to a protected one: the neighbour list
     # and the dossier prose both name it, so both are filtered even though the
     # subject of this read is perfectly visible.
-    connections = top_edges(conn, str(entity_id), limit=edge_limit)
+    #
+    # Affinity edges are fetched separately: their weights are cosines in
+    # [0, 1] and lose any mixed ORDER BY weight DESC ranking against evidence
+    # counts. The drawer / selection panel render them as their own section.
+    observed = [
+        e
+        for e in top_edges(conn, str(entity_id), limit=max(1, int(edge_limit)))
+        if e.get("edge_type") != EDGE_SEMANTIC_AFFINITY
+    ]
+    affinity = top_edges(
+        conn,
+        str(entity_id),
+        edge_type=EDGE_SEMANTIC_AFFINITY,
+        limit=max(1, int(edge_limit)),
+    )
+    id_keys = ("entity_id", "src_entity_id", "dst_entity_id", "other_entity_id")
+    name_keys = ("canonical_name", "name", "entity_name")
     entity["connections"] = guard.filter_rows(
-        connections,
-        id_keys=("entity_id", "src_entity_id", "dst_entity_id", "other_entity_id"),
-        name_keys=("canonical_name", "name"),
+        observed, id_keys=id_keys, name_keys=name_keys
+    )
+    entity["affinity_connections"] = guard.filter_rows(
+        affinity, id_keys=id_keys, name_keys=name_keys
     )
     dossier = load_dossier_for_entity(conn, str(entity_id))
     if isinstance(dossier, dict) and not guard.sees_everything:
@@ -165,12 +182,22 @@ def get_entity_detail(
             dossier["summary_text"] = guard.withhold_if_mentions(dossier["summary_text"])
         # The neighbour list is a second, separate copy of the name — stripping
         # the prose and leaving this in place would have leaked it verbatim.
-        if isinstance(dossier.get("top_connections"), list):
-            dossier["top_connections"] = guard.filter_rows(
-                dossier["top_connections"],
-                id_keys=("entity_id",),
-                name_keys=("canonical_name", "name", "label"),
-            )
+        # Structured entries (entity_id) are preferred; legacy string rows are
+        # filtered by text scan so a pre-migration dossier cannot leak either.
+        for key in ("top_connections", "affinity_connections"):
+            rows = dossier.get(key)
+            if not isinstance(rows, list):
+                continue
+            if rows and all(isinstance(r, str) for r in rows):
+                dossier[key] = [
+                    r for r in rows if not guard.text_mentions_blackholed(r)
+                ]
+            else:
+                dossier[key] = guard.filter_rows(
+                    rows,
+                    id_keys=("entity_id",),
+                    name_keys=("canonical_name", "name", "label", "entity_name"),
+                )
     entity["dossier"] = dossier
     return entity
 

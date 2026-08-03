@@ -47,14 +47,45 @@ def read_mentions(conn: sqlite3.Connection, guard: BlackholeGuard) -> List[Dict[
 
 def read_edges(conn: sqlite3.Connection, guard: BlackholeGuard) -> List[Dict[str, Any]]:
     """Both ends filtered: an edge to a protected node leaks by adjacency even
-    when the node itself is withheld."""
+    when the node itself is withheld.
+
+    Covers every ``entity_edges`` type, including ``semantic_affinity`` (latent
+    cosine edges) — the corpus plants one so this is not vacuously clean.
+    """
     rows = [
-        {"src_entity_id": r[0], "dst_entity_id": r[1], "metadata_json": r[2]}
+        {
+            "src_entity_id": r[0],
+            "dst_entity_id": r[1],
+            "edge_type": r[2],
+            "metadata_json": r[3],
+        }
         for r in conn.execute(
-            "SELECT src_entity_id, dst_entity_id, metadata_json FROM entity_edges"
+            "SELECT src_entity_id, dst_entity_id, edge_type, metadata_json "
+            "FROM entity_edges"
         )
     ]
     return guard.filter_rows(rows, id_keys=("src_entity_id", "dst_entity_id"))
+
+
+def read_context_vectors(
+    conn: sqlite3.Connection, guard: BlackholeGuard
+) -> List[Dict[str, Any]]:
+    """Mention-context centroids are keyed only by entity_id."""
+    try:
+        rows = [
+            {"entity_id": r[0], "model_name": r[1], "centroid_marker": r[2]}
+            for r in conn.execute(
+                "SELECT entity_id, model_name, centroid_blob FROM entity_context_vectors"
+            )
+        ]
+    except sqlite3.OperationalError:
+        return []
+    # Decode the planted marker bytes so serialize() can see the token.
+    for row in rows:
+        blob = row.get("centroid_marker")
+        if isinstance(blob, (bytes, bytearray)):
+            row["centroid_marker"] = bytes(blob).decode("utf-8", errors="replace")
+    return guard.filter_rows(rows, id_keys=("entity_id",))
 
 
 def read_facts(conn: sqlite3.Connection, guard: BlackholeGuard) -> List[Dict[str, Any]]:
@@ -130,11 +161,12 @@ def read_dossiers(conn: sqlite3.Connection, guard: BlackholeGuard) -> List[Dict[
         # protected one: dropping the whole record would punish the visible
         # entity for the association, and its absence would itself be a signal.
         payload["summary_text"] = guard.withhold_if_mentions(payload.get("summary_text"))
-        payload["top_connections"] = guard.filter_rows(
-            payload.get("top_connections") or [],
-            id_keys=("entity_id",),
-            name_keys=("canonical_name",),
-        )
+        for key in ("top_connections", "affinity_connections"):
+            payload[key] = guard.filter_rows(
+                payload.get(key) or [],
+                id_keys=("entity_id",),
+                name_keys=("canonical_name", "entity_name", "name", "label"),
+            )
         kept.append(payload)
     return kept
 
@@ -214,6 +246,7 @@ SURFACES: Dict[str, Reader] = {
     "entities": read_entities,
     "mentions": read_mentions,
     "edges": read_edges,
+    "context_vectors": read_context_vectors,
     "facts": read_facts,
     "dossiers": read_dossiers,
     "embeddings": read_embedding_chunks,

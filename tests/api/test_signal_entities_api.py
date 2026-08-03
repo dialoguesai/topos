@@ -104,6 +104,7 @@ async def test_entity_detail_includes_mentions_and_connections(client_ctx) -> No
     assert body["recent_mentions"][0]["event_at"] == "2026-06-03T10:00:00Z"
     assert body["connections"][0]["entity_name"] == "Mudlark Studio"
     assert body["connections"][0]["edge_type"] == "co_occurrence"
+    assert body.get("affinity_connections") == []
     assert body["dossier"] is None or isinstance(body["dossier"], dict)
 
 
