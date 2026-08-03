@@ -67,7 +67,9 @@ EvalFn = Callable[[Dict[str, Any]], Tuple[bool, str]]
 # (own non-gating d1_hole_punchers lane; D1.1 remains NH* in negative_hard). CompositionCase
 # gains optional family_id/variant_index for D1.4 paraphrase variance. Existing lane
 # composites comparable to qq-catalog-11 via shared case_ids.
-QUERY_CATALOG_VERSION = "qq-catalog-12"
+# qq-catalog-13 (Prov authored-goals path lock): D3 re-scoped ai_conversations→work_context
+# and requires ≥1 user_goal in fused sources (product "working on lately" path).
+QUERY_CATALOG_VERSION = "qq-catalog-13"
 
 _DEFAULT_LATENCY_MS = {
     "summary": int(os.environ.get("TOPOS_QQ_LATENCY_SUMMARY_MS", "10000")),
@@ -234,6 +236,10 @@ def eval_d3_retrieval_diversity(response: Dict[str, Any]) -> Tuple[bool, str]:
     # carries discriminative content tokens, which this deliberately does not).
     if len(sources) < 3:
         return False, f"low retrieval diversity: {sorted(sources)}"
+    # qq-catalog-13: "working on lately" must surface authored goals on the
+    # work_context path — diversity alone greenwashed ai_conversations runs.
+    if "user_goal" not in sources:
+        return False, f"no user_goal in fused sources: {sorted(sources)}"
     return True, f"{len(items)} items from {len(sources)} sources: {sorted(sources)}"
 
 
@@ -345,8 +351,8 @@ QUALITY_CASES: List[QueryQualityCase] = [
                      description="Entity spine surfaces the Topos dossier + mentions"),
     QueryQualityCase("D2", "Which places do I visit most often?", "places:read", "summary", eval_d2_stat_insight,
                      description="Aggregate intent routes to stat insights (place visits, live scope)"),
-    QueryQualityCase("D3", "What have I been working on lately?", "ai_conversations:read", "summary", eval_d3_retrieval_diversity,
-                     description="Broad query fuses >=4 retrieval sources, >=10 items"),
+    QueryQualityCase("D3", "What have I been working on lately?", "work_context:read", "summary", eval_d3_retrieval_diversity,
+                     description="Work-context working-on ask fuses >=3 sources incl. authored user_goal"),
     QueryQualityCase("D4", "Who is Marcus?", "relationship_context:read", "summary", eval_d4_person_dossier,
                      description="Person query returns dossier + supporting mentions (Marcus: real mention evidence)"),
 ]

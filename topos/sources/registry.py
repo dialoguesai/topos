@@ -41,7 +41,9 @@ CHATGPT_FILE = _source(
     enrichment_trigger="automatic",
     ingestion_trigger="manual",  # Ingestion processing waits for manual trigger after upload
     default_scope_id="ai_conversations",
-    allowed_scope_ids=["ai_conversations:read"],
+    # work_context:read — authored goals from ChatGPT feed the work surface;
+    # get_sources_by_scope must see this or installs/grants omit the goal source.
+    allowed_scope_ids=["ai_conversations:read", "work_context:read"],
     default_filter_hints=["rolling_window_days", "max_rows"],
     filter_tier_kind="sensitivity",
     default_filter_tiers={
@@ -76,7 +78,7 @@ CHATGPT_UI = _source(
     analytics_profile_id="chatgpt_dev",
     enrichment_trigger="automatic",  # Enrichment runs automatically during ingestion
     default_scope_id="ai_conversations",
-    allowed_scope_ids=["ai_conversations:read"],
+    allowed_scope_ids=["ai_conversations:read", "work_context:read"],
     default_filter_hints=["rolling_window_days", "max_rows"],
     filter_tier_kind="sensitivity",
     default_filter_tiers={

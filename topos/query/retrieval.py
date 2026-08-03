@@ -76,7 +76,20 @@ _SURFACE_INTENT_TERMS: Dict[str, Tuple[str, ...]] = {
     ),
 }
 # Non-canonical surfaces that participate in the same routing decision.
-_EXTRA_SURFACE_TERMS: Tuple[str, ...] = ("goal", "objective", "priorit", "working on")
+# Keep this ≥ the work_context router lexicon for paraphrases that never say
+# "goal" ("working toward", "projects", "roadmap") — otherwise goals load but
+# fail the keep/floor gates and drown under vector/recent lanes.
+_EXTRA_SURFACE_TERMS: Tuple[str, ...] = (
+    "goal",
+    "objective",
+    "priorit",
+    "working on",
+    "working toward",
+    "working towards",
+    "working",
+    "project",
+    "roadmap",
+)
 _RECENCY_TERMS = frozenset(
     {"recent", "recently", "latest", "newest", "last", "today", "yesterday",
      "now", "current", "currently",
@@ -228,6 +241,9 @@ _FIRST_PERSON_SHAPE_TOKENS = frozenset(
         "goal", "goals", "think", "feel", "believe",
         "people", "talk", "talked", "talking", "interact", "interacted",
         "interaction", "interactions",
+        # Work-context answer shape ("what am I working toward / which projects")
+        "project", "projects", "working", "toward", "towards",
+        "focused", "focus", "roadmap", "priority", "priorities",
     }
 )
 
@@ -1579,6 +1595,12 @@ def _query_tokens(query_text: str) -> List[str]:
             "reading",
             "read",
             "reads",
+            # Work-phrasing leftovers after surface strip ("working toward",
+            # "projects I'm focused on") — answer shape, never goal text.
+            "toward",
+            "towards",
+            "focused",
+            "focus",
         }
     )
     return [
@@ -2822,6 +2844,12 @@ def _build_summary_items_unfiltered(
         recent_weight = 0.4 if identity_ask else 1.0
         brief_weight = 1.6 if identity_ask else 0.8
         cluster_weight = 1.2 if identity_ask else 0.8
+        goal_intent = any(
+            t in (query_text or "").lower() for t in _EXTRA_SURFACE_TERMS
+        )
+        # Work / goal-intent asks need authored goals above ambient lanes;
+        # modest lift (floor still pins ≥2) for dense "working on" quality.
+        goals_weight = 1.4 if goal_items and (work_scope or goal_intent) else 1.0
         # NOTE: cosine similarity must NOT waive the zero-df gate — a strong hit
         # on the generic half of a query ("compiler rewrite") cannot evidence a
         # name the corpus does not contain ("Threnody-7"). The N-lane found
@@ -2831,7 +2859,7 @@ def _build_summary_items_unfiltered(
                 ("stat_insights", 2.0, stat_items),
                 ("facts_store", 1.5, fact_store_items),
                 ("entities", 1.5, entity_items),
-                ("goals", 1.0, goal_items),
+                ("goals", goals_weight, goal_items),
                 ("canonical", canonical_weight, canonical_items),
                 ("contacts", 1.2, interaction_items),
                 ("briefs", brief_weight, brief_items),
@@ -2852,10 +2880,7 @@ def _build_summary_items_unfiltered(
             # lanes would otherwise crowd them out — but only if goals loaded
             # (an empty lane guarantees nothing).
             min_per_source=(
-                {"goals": 2}
-                if goal_items
-                and any(t in (query_text or "").lower() for t in _EXTRA_SURFACE_TERMS)
-                else None
+                {"goals": 2} if goal_items and goal_intent else None
             ),
         )
 

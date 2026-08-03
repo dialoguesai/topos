@@ -146,6 +146,15 @@ _FP_AUTHORED_STAT_RE = re.compile(
     re.I,
 )
 _FP_GOALS_RE = re.compile(r"\bmy (?:\w+ )?goals?\b", re.I)
+# Work-context paraphrases that never say "my goals" but still ask for the
+# owner's authored work surface ("what have I been working on lately?").
+_FP_WORK_RE = re.compile(
+    r"\b(?:have i been |am i |i(?:'ve| have) been )working\b"
+    r"|\bworking (?:on|toward|towards)\b"
+    r"|\bmy (?:\w+ )?projects?\b"
+    r"|\bwhat (?:projects?|goals?) (?:am i|have i)\b",
+    re.I,
+)
 
 
 def first_person_flags(query_text: str) -> Tuple[bool, bool, bool]:
@@ -158,6 +167,7 @@ def first_person_flags(query_text: str) -> Tuple[bool, bool, bool]:
         or interaction
         or bool(_FP_AUTHORED_STAT_RE.search(q))
         or bool(_FP_GOALS_RE.search(q))
+        or bool(_FP_WORK_RE.search(q))
     )
     return intent, belief, interaction
 
