@@ -63,7 +63,11 @@ EvalFn = Callable[[Dict[str, Any]], Tuple[bool, str]]
 # retrieval; skipped under --no-mcp). Own non-gating lanes (present/absent/guard/boundary),
 # red-first; promote I-C1 + the absent lane to gates once the intercept is deployed.
 # Existing lanes untouched — composite comparable to qq-catalog-10 via shared case_ids.
-QUERY_CATALOG_VERSION = "qq-catalog-11"
+# qq-catalog-12 (D1.2–D1.5 hole-punchers): +D12/D13/D14/D15 cases in d1_hole_puncher_cases.py
+# (own non-gating d1_hole_punchers lane; D1.1 remains NH* in negative_hard). CompositionCase
+# gains optional family_id/variant_index for D1.4 paraphrase variance. Existing lane
+# composites comparable to qq-catalog-11 via shared case_ids.
+QUERY_CATALOG_VERSION = "qq-catalog-12"
 
 _DEFAULT_LATENCY_MS = {
     "summary": int(os.environ.get("TOPOS_QQ_LATENCY_SUMMARY_MS", "10000")),
