@@ -71,7 +71,10 @@ EvalFn = Callable[[Dict[str, Any]], Tuple[bool, str]]
 # and requires ≥1 user_goal in fused sources (product "working on lately" path).
 # qq-catalog-14 (A7 D1.3 grantee×tier): +D13-GT-* grantee denial≡absence cells at
 # summary/inference/raw; leak_delta_by_tier on d1_hole_punchers. Owner D13-1..3 unchanged.
-QUERY_CATALOG_VERSION = "qq-catalog-14"
+# qq-catalog-15 (D1.7 / Wave B2): GEN lane qq-gen-1→qq-gen-2 — 15 answerable + 15
+# unanswerable probes (was 3+2 decorative); G1 re-scoped ai_conversations→messages
+# (Q2 lesson). Comparability break on GEN composite by design; other lanes untouched.
+QUERY_CATALOG_VERSION = "qq-catalog-15"
 
 _DEFAULT_LATENCY_MS = {
     "summary": int(os.environ.get("TOPOS_QQ_LATENCY_SUMMARY_MS", "10000")),
