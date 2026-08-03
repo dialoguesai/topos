@@ -6,7 +6,9 @@ stat families).
 Uses the MODERN path (run_post_canonical_pipeline → SignalDerivationOrchestrator), which
 writes signal_embeddings + the sqlite-vec ANN table correctly. Restricts to fast jobs and
 skips the slow Ollama LLM jobs (dimension_summary/topic_clusters — gemma4:12b is minutes per
-message, and those layers were measured non-bottlenecks). Per source, so scope + provenance
+message, and those layers were measured non-bottlenecks). The ``facts`` job here is
+**rules-floor only** (forces ``TOPOS_FACTS_LLM=0``); concurrent LLM fact extract is
+``scripts/backfill_fact_llm.py`` (B10 / P4.3). Per source, so scope + provenance
 stay correct. Embeddings dedup by content_hash: unchanged rows are no-ops; only newly-
 embeddable rows (contacts/places) actually embed.
 
@@ -164,6 +166,10 @@ async def main() -> int:
     args = ap.parse_args()
 
     os.environ["TOPOS_DATABASE_PATH"] = args.db
+    # FAST path = rules-floor facts only. The LLM fact pass (~25s/row without
+    # fan-out) is a separate bulk op: scripts/backfill_fact_llm.py (B10 / P4.3).
+    # Leaving TOPOS_FACTS_LLM on here accidentally turns "fast" into hours.
+    os.environ["TOPOS_FACTS_LLM"] = "0"
     from topos.storage.adapters.factory import AdapterFactory
     AdapterFactory.create("local_database", db_path=Path(args.db))
     from topos.core.state import get_db_connection

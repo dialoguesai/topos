@@ -650,6 +650,56 @@ class TestConcurrency:
         assert lives and lives[0]["asserted_by"] == "assistant"  # attributed, never owner
         assert allergic == []  # witnessed row: ZERO owner facts (role gate upstream)
 
+    def test_concurrency_param_speeds_up_wall_clock(self, conn, tmp_path):
+        """B10: explicit concurrency=N overlaps slow extractors (sleep stub).
+
+        Serial (1) wall clock ≈ N * sleep; concurrent (4) should finish in well
+        under half that — proves fan-out is live, not just correctness-preserving.
+        """
+        import time
+
+        import topos.features.facts.llm_extract as llm
+
+        sleep_s = 0.05
+        n = 8
+
+        def _stub(prompt, row):
+            time.sleep(sleep_s)
+            mid = str(row.get("message_id"))
+            return [{"predicate": "practices", "object": f"yoga-{mid}"}]
+
+        rows = self._multi_row_batch()[:n]
+
+        # Serial on a fresh DB.
+        serial_db = sqlite3.connect(str(tmp_path / "serial_t.db"))
+        serial_db.row_factory = sqlite3.Row
+        apply_all_migrations(serial_db)
+        serial_db.execute(
+            "INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name, is_self)"
+            " VALUES ('ent-owner', 'person', 'Owner', 'owner', 1)"
+        )
+        serial_db.commit()
+        t0 = time.perf_counter()
+        serial_written = extract_owner_facts_llm(
+            serial_db, rows, extractor=_stub, concurrency=1
+        )
+        serial_elapsed = time.perf_counter() - t0
+        serial_db.close()
+
+        t1 = time.perf_counter()
+        conc_written = extract_owner_facts_llm(
+            conn, rows, extractor=_stub, concurrency=4
+        )
+        conc_elapsed = time.perf_counter() - t1
+
+        assert serial_written == conc_written == n
+        # Concurrent must beat serial by a clear margin (fan-out of 4 on 8 rows).
+        assert conc_elapsed < serial_elapsed * 0.6
+        # And stay near the theoretical lower bound (~2 waves * sleep).
+        assert conc_elapsed < (n * sleep_s) * 0.55
+        # Keep the module default intact for other tests (we used the param).
+        assert llm.FACTS_LLM_CONCURRENCY >= 1
+
 
 # --------------------------------------------------------------------------
 # Incremental persistence + resume: multi-hour fact_llm must survive Ctrl+C.
