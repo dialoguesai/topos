@@ -181,7 +181,7 @@ class DataHealthComputer:
         if self._conn is not None and count > 0:
             # SQLite payloads rarely carry created_at; the column does.
             try:
-                for table in ("signal_facts", "signal_scores", "signal_summaries"):
+                for table in ("signal_facts", "signal_scores"):
                     row = self._conn.execute(
                         f"SELECT MAX(created_at) FROM {table} WHERE dimension=?",  # noqa: S608
                         (dim_id,),

@@ -21,7 +21,6 @@ _LEGACY_TABLE_BY_JOB: Dict[str, str] = {
     "topics": "message_topics",
     "sentiment": "message_sentiment",
     "goal_extraction": "user_goals",
-    "dimension_summary": "signal_summaries",
     "url_classification": "signal_tags",
     "availability_scores": "signal_scores",
 }

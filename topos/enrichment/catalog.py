@@ -87,7 +87,8 @@ _OUTPUT_TABLES: Dict[str, Tuple[str, ...]] = {
     "sentiment": ("message_sentiment",),
     "embeddings": ("signal_embeddings",),
     "url_classification": ("browser_url_classification", "signal_tags", "signal_facts"),
-    "dimension_summary": ("signal_summaries",),
+    # C5/B3: signal_summaries dropped; living briefs are written inside the job
+    # (no source_id delete target — supports_delete stays False).
     "goal_extraction": ("user_goals",),
     "relationship_edges": ("relationship_edges",),
     "availability_scores": ("signal_scores",),

@@ -17,7 +17,6 @@ _ENRICHMENT_TABLES = frozenset(
         "signal_facts",
         "signal_scores",
         "signal_tags",
-        "signal_summaries",
         "signal_objects",
         "signal_dimension_profiles",
         "message_emotions",
