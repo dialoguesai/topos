@@ -2232,12 +2232,20 @@ def _load_recent_summary_items(
 
 def _fusion_item_key(item: Dict[str, Any]) -> str:
     record_id = str(item.get("record_id") or "")
+    retrieval = str(item.get("retrieval_source") or "")
+    # contact_identifiers alias contact_id as record_id (same as the contacts
+    # row). Collapsing them under one fusion key lets a token-heavier email/phone
+    # summary replace the display-name row — C15 "contact John" then misses
+    # "John Ludlow". Keep identifier rows distinct from the contact + each other.
+    if record_id and retrieval.startswith("canonical:contact_identifiers"):
+        ident = str(item.get("summary_text") or item.get("topic") or "")[:80]
+        return f"rec:{record_id}|ident:{ident}"
     if record_id:
         return f"rec:{record_id}"
     cluster_id = str(item.get("cluster_id") or "")
     if cluster_id:
         return f"cluster:{cluster_id}"
-    return f"txt:{str(item.get('retrieval_source') or '')}:{str(item.get('topic') or '')[:80]}"
+    return f"txt:{retrieval}:{str(item.get('topic') or '')[:80]}"
 
 
 # Contributors whose items describe *current state* rather than events in
