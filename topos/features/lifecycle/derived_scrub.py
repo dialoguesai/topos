@@ -44,6 +44,55 @@ def _recount_entity_mentions(conn: sqlite3.Connection) -> int:
     return int(cursor.rowcount or 0)
 
 
+def _delete_entity_cascade(conn: sqlite3.Connection, entity_id: str) -> Dict[str, int]:
+    """Hard-delete one entity and its mention/edge/vector/review footprint.
+
+    Closes the open dossier (valid_to) rather than deleting the signal_object
+    row — same provenance-preserving choice as orphan prune.
+    """
+    counts = {"mentions": 0, "edges": 0, "vectors": 0, "reviews": 0, "dossiers_closed": 0}
+    try:
+        cur = conn.execute(
+            "DELETE FROM entity_mentions WHERE entity_id=?", (entity_id,)
+        )
+        counts["mentions"] = int(cur.rowcount or 0)
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cur = conn.execute(
+            "DELETE FROM entity_edges WHERE src_entity_id=? OR dst_entity_id=?",
+            (entity_id, entity_id),
+        )
+        counts["edges"] = int(cur.rowcount or 0)
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cur = conn.execute(
+            "DELETE FROM entity_context_vectors WHERE entity_id=?", (entity_id,)
+        )
+        counts["vectors"] = int(cur.rowcount or 0)
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cur = conn.execute(
+            "DELETE FROM entity_review WHERE candidate_entity_id=?", (entity_id,)
+        )
+        counts["reviews"] = int(cur.rowcount or 0)
+    except sqlite3.OperationalError:
+        pass
+    try:
+        cur = conn.execute(
+            "UPDATE signal_objects SET valid_to=datetime('now') "
+            "WHERE object_type='entity_dossier' AND object_key=? AND valid_to IS NULL",
+            (f"dossier:{entity_id}",),
+        )
+        counts["dossiers_closed"] = int(cur.rowcount or 0)
+    except sqlite3.OperationalError:
+        pass
+    conn.execute("DELETE FROM entities WHERE entity_id=?", (entity_id,))
+    return counts
+
+
 def _delete_orphan_entities(conn: sqlite3.Connection) -> List[str]:
     """Entities with no remaining mentions and no LIVE contact anchor are removed.
 
@@ -87,17 +136,84 @@ def _delete_orphan_entities(conn: sqlite3.Connection) -> List[str]:
         ).fetchall()
     orphan_ids = [str(r[0]) for r in rows]
     for entity_id in orphan_ids:
-        conn.execute("DELETE FROM entities WHERE entity_id=?", (entity_id,))
-        conn.execute(
-            "DELETE FROM entity_edges WHERE src_entity_id=? OR dst_entity_id=?",
-            (entity_id, entity_id),
-        )
-        conn.execute(
-            "UPDATE signal_objects SET valid_to=datetime('now') "
-            "WHERE object_type='entity_dossier' AND object_key=? AND valid_to IS NULL",
-            (f"dossier:{entity_id}",),
-        )
+        _delete_entity_cascade(conn, entity_id)
     return orphan_ids
+
+
+def purge_junk_minted_entities(
+    conn: sqlite3.Connection, *, dry_run: bool = False
+) -> Dict[str, Any]:
+    """One-shot C4 residual scrub: remove already-minted junk spine entities.
+
+    Uses the same ``is_valid_entity_surface`` predicate as the mint filter so
+    allowlisted short names (AWS, Max, C3) survive. Synthetic hubs and the
+    self entity are never candidates. After apply, evidence edges are rebuilt
+    from surviving mentions.
+    """
+    from ..entities.resolver import is_valid_entity_surface
+
+    report: Dict[str, Any] = {
+        "junk_entities_found": 0,
+        "junk_entities_removed": 0,
+        "mentions_removed": 0,
+        "edges_removed": 0,
+        "dry_run": bool(dry_run),
+        "samples": [],
+    }
+    if not _table_exists(conn, "entities"):
+        return report
+
+    keep_clause = (
+        "entity_type NOT IN ('goal', 'conversation') "
+        "AND entity_id NOT LIKE 'goal_%' "
+        "AND entity_id NOT LIKE 'topic_%' "
+        "AND entity_id NOT LIKE 'conv_%' "
+        "AND is_self = 0"
+    )
+    try:
+        rows = conn.execute(
+            f"SELECT entity_id, canonical_name FROM entities WHERE {keep_clause}"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return report
+
+    junk: List[tuple] = []
+    for entity_id, canonical_name in rows:
+        if not is_valid_entity_surface(str(canonical_name or "")):
+            junk.append((str(entity_id), str(canonical_name or "")))
+
+    report["junk_entities_found"] = len(junk)
+    report["samples"] = [
+        {"entity_id": eid, "canonical_name": name} for eid, name in junk[:20]
+    ]
+    if dry_run or not junk:
+        return report
+
+    for entity_id, _name in junk:
+        counts = _delete_entity_cascade(conn, entity_id)
+        report["junk_entities_removed"] += 1
+        report["mentions_removed"] += counts["mentions"]
+        report["edges_removed"] += counts["edges"]
+
+    from ..entities.maintenance import rebuild_evidence_edges
+
+    rebuilt = rebuild_evidence_edges(conn)
+    report["edges_rebuilt"] = rebuilt
+    conn.commit()
+    logger.info(
+        "C4 scrub: removed %d junk entities (%d mentions, %d edges)",
+        report["junk_entities_removed"],
+        report["mentions_removed"],
+        report["edges_removed"],
+    )
+    return report
+
+
+def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+    ).fetchone()
+    return row is not None
 
 
 def _rebuild_entity_edges(conn: sqlite3.Connection) -> int:

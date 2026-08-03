@@ -591,22 +591,9 @@ class SQLiteSignalFeatureStore:
         return score_id
 
     def put_summary(self, summary: Dict[str, Any]) -> str:
-        summary_id = str(summary.get("summary_id") or uuid.uuid4())
-        self._conn.execute(
-            """
-            INSERT INTO signal_summaries (summary_id, dimension, source_id, payload_json)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(summary_id) DO UPDATE SET payload_json=excluded.payload_json
-            """,
-            (
-                summary_id,
-                summary.get("dimension"),
-                summary.get("source_id"),
-                json.dumps({**summary, "summary_id": summary_id}),
-            ),
-        )
-        commit_connection(self._conn)
-        return summary_id
+        # C5/B3: signal_summaries dropped; living briefs are the product path.
+        # Protocol method retained for fakes/tests; SQLite is a no-op.
+        return str(summary.get("summary_id") or uuid.uuid4())
 
     def _list_rows(self, table: str, *, dimension: Optional[str], limit: int, offset: int) -> ListPage:
         query = f"SELECT payload_json, created_at FROM {table}"
@@ -631,8 +618,7 @@ class SQLiteSignalFeatureStore:
     def get_by_dimension(self, dimension: str, *, limit: int = 100, offset: int = 0) -> ListPage:
         facts = self._list_rows("signal_facts", dimension=dimension, limit=limit, offset=offset).items
         scores = self._list_rows("signal_scores", dimension=dimension, limit=limit, offset=offset).items
-        summaries = self._list_rows("signal_summaries", dimension=dimension, limit=limit, offset=offset).items
-        items = facts + scores + summaries
+        items = facts + scores
         return ListPage(items=items[:limit], total=len(items), offset=offset, limit=limit)
 
     def list(self, *, dimension: Optional[str] = None, limit: int = 100, offset: int = 0) -> ListPage:

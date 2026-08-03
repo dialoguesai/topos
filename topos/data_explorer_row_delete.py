@@ -50,7 +50,6 @@ _ENRICHMENT_SIGNAL_TABLES = frozenset(
         "signal_scores",
         "signal_embeddings",
         "relationship_edges",
-        "signal_summaries",
         "graph_nodes",
         "graph_edges",
         "data_health_dimension",

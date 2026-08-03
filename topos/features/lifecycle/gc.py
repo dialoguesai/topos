@@ -41,7 +41,7 @@ DEPRECATED_TABLES = {
     # product path is entity_edges (+ /data/graph as-of scrubber → Wave B9).
     "graph_nodes": "superseded by entity graph (entities + entity_edges)",
     "graph_edges": "superseded by entity_edges",
-    "signal_summaries": "never populated; summaries live on briefs/facts",
+    # signal_summaries: DROPPED (C5/B3) — never populated; briefs/facts are the path.
     "signal_tags": "never populated; tags live in signal_objects payloads",
     "message_embeddings": "superseded by signal_embeddings",
 }
