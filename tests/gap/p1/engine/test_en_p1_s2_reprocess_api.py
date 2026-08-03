@@ -14,7 +14,10 @@ from topos.ingestion.reprocess import reprocess_source
 from topos.storage.db.migrations import apply_all_migrations
 from topos.storage.raw.raw_tables_manager import RawTablesManager
 
-pytestmark = pytest.mark.gap
+pytestmark = [
+    pytest.mark.gap,
+    pytest.mark.check("C-eng-ingest-reprocess-idempotent"),
+]
 
 
 @pytest.mark.asyncio
