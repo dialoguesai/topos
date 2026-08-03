@@ -3129,19 +3129,28 @@ def _build_cohort_aggregate_summary(
     *,
     person_count: Optional[int],
     scope_id: str,
+    cohort_labels: Optional[List[str]] = None,
+    peer_count: Optional[int] = None,
 ) -> Dict[str, Any]:
     """Non-entity-specific aggregate text — no person names, no per-entity rows."""
-    if person_count is None:
+    labels = [str(x).strip().lower() for x in (cohort_labels or []) if str(x).strip()]
+    label_hint = ", ".join(labels[:3]) if labels else "granted cohort"
+    if person_count is None and peer_count is None:
         body = (
             "Cohort aggregate (non-entity-specific): messaging and contact activity "
-            "can be summarized across people without naming individuals. "
-            "Individual people are not selectable under this grant."
+            f"can be summarized across the {label_hint} without naming individuals. "
+            "Individual people are not listed in this rollup."
         )
     else:
+        parts = []
+        if person_count is not None:
+            parts.append(f"about {person_count} people in the granted cohort membership")
+        if peer_count is not None and peer_count != person_count:
+            parts.append(f"about {peer_count} active message peers")
+        detail = "; ".join(parts) if parts else "cohort activity"
         body = (
-            f"Cohort aggregate (non-entity-specific): about {person_count} people "
-            "appear in the contact graph. Individual people are not disclosed "
-            "under this grant."
+            f"Cohort aggregate (non-entity-specific): {detail} "
+            f"({label_hint}). Individual people are not disclosed in this rollup."
         )
     return {
         "summary_text": body,
@@ -3175,17 +3184,33 @@ class DefaultSignalRetrievalAdapter:
         packet: Dict[str, Any],
         retrieval_meta: Dict[str, Any],
     ) -> RetrievalBundle:
-        """A8: mode-appropriate non-entity-specific aggregate (no named-person data)."""
+        """A8/C1: mode-appropriate non-entity-specific aggregate (no named-person data)."""
         from ..core.state import get_db_connection
+        from .cohort_resolvers import resolve_accessible_entity_cohorts
 
         try:
             db_conn = get_db_connection()
         except Exception:
             db_conn = None
-        person_count = _count_non_self_persons(db_conn)
+        cohorts = list(getattr(request.manifest, "accessible_entity_cohorts", None) or [])
+        # Prefer resolved membership size (C1) over whole-graph person count.
+        membership = resolve_accessible_entity_cohorts(cohorts, db_conn) if db_conn else []
+        person_count: Optional[int]
+        if membership:
+            person_count = len(membership)
+        else:
+            person_count = _count_non_self_persons(db_conn)
+        peer_count: Optional[int] = None
+        if db_conn is not None and any(
+            str(c).strip().lower() == "message_peers" for c in cohorts
+        ):
+            peers = resolve_accessible_entity_cohorts(["message_peers"], db_conn)
+            peer_count = len(peers) if peers else None
         summary = _build_cohort_aggregate_summary(
             person_count=person_count,
             scope_id=str(getattr(request.manifest, "scope_id", "") or ""),
+            cohort_labels=cohorts,
+            peer_count=peer_count,
         )
         mode = request.access_mode
         if mode == "raw":
@@ -3215,6 +3240,8 @@ class DefaultSignalRetrievalAdapter:
         retrieval_meta["aggregate_only"] = True
         if person_count is not None:
             retrieval_meta["cohort_person_count"] = person_count
+        if peer_count is not None:
+            retrieval_meta["cohort_peer_count"] = peer_count
         self._last_stores = ["entities"] if person_count is not None else []
         return RetrievalBundle(
             context_packet=packet,
@@ -3265,7 +3292,7 @@ class DefaultSignalRetrievalAdapter:
 
         # A2.3 / A8 refuse-vs-aggregate: aggregate-only ask under active selector / cohort
         # grant → non-entity-specific rollup. No named-person rows; no full retrieve.
-        # Cohort → entity-id resolvers remain Wave C1 (thin count stub here).
+        # C1 membership resolvers widen named allow-list separately; this path stays nameless.
         if request.cohort_aggregate:
             return self._cohort_aggregate_bundle(request, packet, retrieval_meta)
 

@@ -115,8 +115,9 @@ def _looks_like_aggregate_ask(query_text: str) -> bool:
 def _cohort_aggregate_permitted(manifest) -> bool:
     """True when the grant lists a recognized cohort token (A8 aggregate permit).
 
-    Recognized tokens do not widen `accessible_entity_ids` until C1 resolvers land;
-    they only unlock the non-entity-specific aggregate answer path.
+    Membership tokens (`contacts`, `message_peers`, `calendar_attendees`) also
+    widen `accessible_entity_ids` via C1 resolvers; `stats_aggregate` stays
+    aggregate-only (no named-person widen).
     """
     for raw in getattr(manifest, "accessible_entity_cohorts", None) or []:
         key = str(raw or "").strip().lower()
@@ -148,7 +149,7 @@ def _selector_cohort_aggregate_allowed(db_conn, query_text: str, manifest) -> bo
     Triggers (either — both require aggregate-only + active policy):
       1. grant lists a recognized cohort token (`_cohort_aggregate_permitted`), or
       2. ask is clearly aggregate-only under an active entity-selector policy
-         (enums-first / stats-style under enums; full cohort resolvers = Wave C1).
+         (enums-first / stats-style under enums; C1 widens membership separately).
 
     Named-person / person-shaped asks must NOT use this path (caller enforces
     `_selector_unauthorized` first → denial≡absence).
@@ -158,7 +159,7 @@ def _selector_cohort_aggregate_allowed(db_conn, query_text: str, manifest) -> bo
     if not _is_aggregate_only_ask(db_conn, query_text):
         return False
     # Preferred grant signal is a recognized cohort token; active selector alone
-    # is enough for this thin Wave A slice (C1 still owns real membership resolve).
+    # still permits the non-entity-specific aggregate path.
     return True
 
 
@@ -416,8 +417,12 @@ class QueryPipelineOrchestrator:
         )
 
         from ..core.state import get_db_connection
+        from .cohort_resolvers import apply_cohort_membership
 
         db_conn = _db_conn_from_adapters(self._adapters) or get_db_connection()
+        # C1: widen allow-list from grant cohorts at grant-apply time (before
+        # selector / refuse-vs-aggregate). Fail closed when DB missing.
+        manifest = apply_cohort_membership(manifest, db_conn)
         installed_source_ids = list_installed_source_ids(db_conn)
         resolved_source_ids = resolve_retrieval_source_ids(manifest, installed_source_ids or None)
         data_health_version = get_data_health_version(scope_id, resolved_source_ids, db_conn)
