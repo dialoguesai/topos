@@ -2701,11 +2701,14 @@ def _build_summary_items_unfiltered(
         canonical_items, getattr(plan, "time_range", None) if plan else None
     )
 
-    # Interaction browse ("who do I talk to"): the contact registry is the
-    # ground truth of interaction partners — mention-only names (someone the
-    # senders gossip about) have no contact row and cannot pollute it (IMB7).
+    # Interaction browse ("who do I talk to"): contacts + co-participation
+    # edges. Contacts alone greened IMB7 as a workaround (mention-only names
+    # have no contact row). P3.2 adds communicates_with neighbors of self so
+    # talked-to answers survive without the contacts lane and still exclude
+    # mention-only third parties (Odile).
     interaction_items: List[Dict[str, Any]] = []
     if first_person and interaction_browse:
+        seen_names: set[str] = set()
         try:
             contact_rows = _list_canonical_rows(
                 adapters, "contacts", source_ids=source_ids, limit=30,
@@ -2720,6 +2723,10 @@ def _build_summary_items_unfiltered(
             name = str(row.get("display_name") or "").strip()
             if not name:
                 continue
+            key = name.lower()
+            if key in seen_names:
+                continue
+            seen_names.add(key)
             interaction_items.append(
                 {
                     "topic": name,
@@ -2730,6 +2737,40 @@ def _build_summary_items_unfiltered(
                     "retrieval_source": "canonical:contacts",
                 }
             )
+        if bundle_conn is not None:
+            try:
+                from ..features.entities.edges import EDGE_COMMUNICATES, top_edges
+
+                self_row = bundle_conn.execute(
+                    "SELECT entity_id FROM entities WHERE is_self=1 LIMIT 1"
+                ).fetchone()
+                if self_row:
+                    for edge in top_edges(
+                        bundle_conn,
+                        str(self_row[0]),
+                        edge_type=EDGE_COMMUNICATES,
+                        limit=20,
+                    ):
+                        name = str(edge.get("entity_name") or "").strip()
+                        if not name:
+                            continue
+                        key = name.lower()
+                        if key in seen_names:
+                            continue
+                        seen_names.add(key)
+                        interaction_items.append(
+                            {
+                                "topic": name,
+                                "summary_text": f"Talked with: {name}",
+                                "record_id": edge.get("entity_id"),
+                                "relevance_score": min(
+                                    0.85, 0.55 + float(edge.get("weight") or 0.0) * 0.05
+                                ),
+                                "retrieval_source": "entity_edge:communicates_with",
+                            }
+                        )
+            except Exception as exc:
+                logger.debug("interaction edge browse skipped: %s", exc)
         interaction_items = interaction_items[:15]
 
     brief_dims = list(manifest.primary_dimensions)

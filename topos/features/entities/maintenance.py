@@ -8,15 +8,20 @@ them, so:
     (lifecycle/derived_scrub calls in here), and
   * if extraction was disabled/partial for a stretch, the graph under-counts.
 
-`rebuild_evidence_edges` recomputes both evidence edge types deterministically
-from the `entity_mentions` table (the resolved, deduped record↔entity links),
-which is cheap at personal scale and needs no NER re-run. `part_of` edges are
-structural (derived from entity names, not mention evidence) and are left
-untouched; closed/superseded history rows are preserved.
+`rebuild_evidence_edges` recomputes both evidence edge types deterministically:
+
+  * ``co_occurrence`` from `entity_mentions` (entities named in the same record);
+  * ``communicates_with`` from **thread co-participation** (distinct senders /
+    conversation_participants who share a conversation) — NOT from
+    sender→NER-mention links. Mention-only names (gossip / third parties) must
+    never mint a talked-to edge (P3.2 / IMB7).
+
+Cheap at personal scale; no NER re-run. `part_of` edges are structural and are
+left untouched; closed/superseded history rows are preserved.
 
 Note the historical bug this fixes: the previous rebuild deleted
 `communicates_with` edges but only recreated `co_occurrence`, so every
-source-scrub silently and permanently dropped every sender→entity edge.
+source-scrub silently and permanently dropped every co-participation edge.
 """
 
 from __future__ import annotations
@@ -24,7 +29,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from typing import Callable, Dict, Optional
+from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 logger = logging.getLogger("topos.features.entities.maintenance")
 
@@ -35,6 +40,15 @@ _SENDER_TABLES = {
     "ai_chat_messages": "sender_id",
     "conversation_message": "sender_id",
 }
+
+_SELF_SENDER_TOKENS = frozenset({"self", "me", "owner", "user"})
+
+# conversation_id column candidates per message table.
+_CONVERSATION_ID_COLUMNS = (
+    "conversation_id",
+    "chat_id",
+    "thread_id",
+)
 
 
 def _pk_column(conn: sqlite3.Connection, table: str) -> Optional[str]:
@@ -73,6 +87,248 @@ def _load_senders(conn: sqlite3.Connection, tables: set[str]) -> Dict[str, str]:
         for rec_id, sender in rows:
             senders[str(rec_id)] = str(sender)
     return senders
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> Set[str]:
+    try:
+        return {str(c[1]) for c in conn.execute(f"PRAGMA table_info({table})")}
+    except sqlite3.Error:
+        return set()
+
+
+def lookup_person_entity(
+    conn: sqlite3.Connection,
+    sender_raw: str,
+    *,
+    is_from_self: bool = False,
+) -> Optional[str]:
+    """Resolve a message sender to an existing person entity — never mint.
+
+    Talked-to edges must only bind known participants (contacts / is_self /
+    identifier-linked people). Bare NER surfaces and gossip names stay out.
+    """
+    if is_from_self or str(sender_raw or "").strip().lower() in _SELF_SENDER_TOKENS:
+        row = conn.execute(
+            "SELECT entity_id FROM entities WHERE is_self=1 LIMIT 1"
+        ).fetchone()
+        if row:
+            return str(row[0])
+
+    raw = str(sender_raw or "").strip()
+    if not raw:
+        return None
+    needle = raw.lower()
+
+    # contact_id exact (conversation_participants path)
+    row = conn.execute(
+        "SELECT entity_id FROM entities WHERE contact_id=? AND entity_type='person' LIMIT 1",
+        (raw,),
+    ).fetchone()
+    if row:
+        return str(row[0])
+
+    # identifiers_json contains the messenger sender_id / handle
+    try:
+        for entity_id, identifiers_json in conn.execute(
+            "SELECT entity_id, identifiers_json FROM entities "
+            "WHERE entity_type='person' AND identifiers_json IS NOT NULL "
+            "AND identifiers_json != '[]'"
+        ):
+            try:
+                identifiers = json.loads(identifiers_json or "[]")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            if needle in {str(i).strip().lower() for i in identifiers if i}:
+                return str(entity_id)
+    except sqlite3.Error:
+        pass
+
+    # contact_identifiers join
+    try:
+        row = conn.execute(
+            """
+            SELECT e.entity_id FROM entities e
+            JOIN contact_identifiers ci ON ci.contact_id = e.contact_id
+            WHERE e.entity_type='person' AND lower(ci.identifier)=?
+            LIMIT 1
+            """,
+            (needle,),
+        ).fetchone()
+        if row:
+            return str(row[0])
+    except sqlite3.Error:
+        pass
+
+    # Exact display / normalized name (contact-seeded people only — avoids
+    # binding mention-only entities that share a first name).
+    row = conn.execute(
+        """
+        SELECT entity_id FROM entities
+        WHERE entity_type='person' AND contact_id IS NOT NULL
+          AND (lower(canonical_name)=? OR normalized_name=?)
+        LIMIT 1
+        """,
+        (needle, needle),
+    ).fetchone()
+    if row:
+        return str(row[0])
+
+    return None
+
+
+def _load_conversation_participation(
+    conn: sqlite3.Connection,
+    *,
+    conversation_ids: Optional[Iterable[str]] = None,
+) -> Dict[str, List[Dict[str, object]]]:
+    """conversation_id -> list of {entity_id, event_at, role} participant events.
+
+    Sources: message senders (authored/observed/…) plus conversation_participants
+    membership rows. Mention-only entities never appear here.
+    """
+    conv_filter = {str(c) for c in conversation_ids} if conversation_ids is not None else None
+    by_conv: Dict[str, List[Dict[str, object]]] = {}
+
+    for table, sender_col in _SENDER_TABLES.items():
+        cols = _table_columns(conn, table)
+        if not cols or sender_col not in cols:
+            continue
+        id_col = _pk_column(conn, table)
+        if not id_col:
+            continue
+        conv_col = next((c for c in _CONVERSATION_ID_COLUMNS if c in cols), None)
+        if not conv_col:
+            continue
+        select_cols = [id_col, conv_col, sender_col]
+        has_self = "is_from_self" in cols
+        has_role = "actor_role" in cols
+        has_event = "event_at" in cols
+        if has_self:
+            select_cols.append("is_from_self")
+        if has_role:
+            select_cols.append("actor_role")
+        if has_event:
+            select_cols.append("event_at")
+        try:
+            rows = conn.execute(
+                f"SELECT {', '.join(select_cols)} FROM {table} "
+                f"WHERE {sender_col} IS NOT NULL AND {sender_col} != '' "
+                f"AND {conv_col} IS NOT NULL AND {conv_col} != ''"
+            ).fetchall()
+        except sqlite3.Error as exc:
+            logger.debug("participation load failed for %s: %s", table, exc)
+            continue
+        for row in rows:
+            conv_id = str(row[1])
+            if conv_filter is not None and conv_id not in conv_filter:
+                continue
+            sender_raw = str(row[2])
+            idx = 3
+            is_from_self = False
+            if has_self:
+                is_from_self = row[idx] in (1, True, "1")
+                idx += 1
+            role = "ambient"
+            if has_role:
+                role = str(row[idx] or "").strip() or role
+                idx += 1
+            event_at = None
+            if has_event:
+                event_at = row[idx]
+            entity_id = lookup_person_entity(
+                conn, sender_raw, is_from_self=is_from_self
+            )
+            if not entity_id:
+                continue
+            if not has_role:
+                # Cheap posture fallback when actor_role is absent.
+                role = "authored" if is_from_self else "participated"
+            by_conv.setdefault(conv_id, []).append(
+                {"entity_id": entity_id, "event_at": event_at, "role": role}
+            )
+
+    # Membership rows cover silent participants (read receipts / added-but-quiet).
+    try:
+        part_rows = conn.execute(
+            """
+            SELECT conversation_id, contact_id FROM conversation_participants
+            WHERE contact_id IS NOT NULL AND contact_id != ''
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        part_rows = []
+    for conv_id, contact_id in part_rows:
+        conv_key = str(conv_id)
+        if conv_filter is not None and conv_key not in conv_filter:
+            continue
+        entity_id = lookup_person_entity(conn, str(contact_id))
+        if not entity_id:
+            continue
+        events = by_conv.setdefault(conv_key, [])
+        if any(e["entity_id"] == entity_id for e in events):
+            continue
+        events.append(
+            {"entity_id": entity_id, "event_at": None, "role": "participated"}
+        )
+
+    return by_conv
+
+
+def fold_communicates_with_edges(
+    conn: sqlite3.Connection,
+    *,
+    conversation_ids: Optional[Iterable[str]] = None,
+    clear_active: bool = False,
+) -> Tuple[int, Dict[tuple, Dict[str, int]]]:
+    """Write communicates_with edges from thread co-participation.
+
+    When ``clear_active`` is True (rebuild path), deletes active
+    communicates_with rows first. Returns (update_count, edge_role_mix).
+    """
+    from .edges import EDGE_COMMUNICATES, _canonical_order, update_edge
+
+    if clear_active:
+        conn.execute(
+            "DELETE FROM entity_edges "
+            "WHERE edge_type='communicates_with' AND valid_to IS NULL"
+        )
+
+    by_conv = _load_conversation_participation(
+        conn, conversation_ids=conversation_ids
+    )
+    edge_roles: Dict[tuple, Dict[str, int]] = {}
+    comm = 0
+
+    def _tally(src: str, dst: str, role: str) -> None:
+        key = _canonical_order(src, dst, EDGE_COMMUNICATES) + (EDGE_COMMUNICATES,)
+        mix = edge_roles.setdefault(key, {})
+        mix[role] = mix.get(role, 0) + 1
+
+    for _conv_id, events in by_conv.items():
+        # Distinct participants in this thread.
+        participants = list(dict.fromkeys(str(e["entity_id"]) for e in events))
+        if len(participants) < 2:
+            continue
+        # Evidence: each message event links its sender to every other
+        # co-participant (talked-to), never to mention-only third parties.
+        for ev in events:
+            src = str(ev["entity_id"])
+            role = str(ev.get("role") or "participated")
+            event_at = ev.get("event_at")
+            for dst in participants:
+                if dst == src:
+                    continue
+                update_edge(
+                    conn,
+                    src_entity_id=src,
+                    dst_entity_id=dst,
+                    edge_type=EDGE_COMMUNICATES,
+                    event_at=str(event_at) if event_at else None,
+                )
+                _tally(src, dst, role)
+                comm += 1
+
+    return comm, edge_roles
 
 
 def _record_role_map(conn: sqlite3.Connection, by_record: Dict[str, Dict]) -> Dict[str, str]:
@@ -151,14 +407,19 @@ def rebuild_evidence_edges(
     *,
     sender_lookup: Optional[Callable[[sqlite3.Connection, set], Dict[str, str]]] = None,
 ) -> Dict[str, int]:
-    """Recompute co_occurrence + communicates_with edges from surviving mentions.
+    """Recompute co_occurrence + communicates_with evidence edges.
 
     Deletes only the ACTIVE (valid_to IS NULL) evidence edges and rebuilds them;
     part_of and closed history are preserved. Each rebuilt edge is stamped with
     its evidence's provenance (metadata.actor_role + role_mix) so the graph can
     render the personal→ambient attribution spectrum. Returns counts written.
+
+    ``sender_lookup`` is retained for API compatibility with older tests but is
+    no longer used for communicates_with (P3.2 co-participation replaces
+    sender→mention linking).
     """
-    from .edges import EDGE_CO_OCCURRENCE, EDGE_COMMUNICATES, _canonical_order, update_edge
+    del sender_lookup  # unused — kept for call-site compatibility
+    from .edges import EDGE_CO_OCCURRENCE, _canonical_order, update_edge
     from .resolver import EntityResolver
 
     resolver = EntityResolver(conn)
@@ -186,12 +447,9 @@ def rebuild_evidence_edges(
         )
         rec["ents"].append(str(entity_id))
 
-    tables = {r["table"] for r in by_record.values() if r["table"]}
-    lookup = sender_lookup or _load_senders
-    sender_by_record = lookup(conn, tables)
     role_by_record = _record_role_map(conn, by_record)
 
-    co = comm = 0
+    co = 0
     # (src, dst, type) -> {role: evidence_count}; stamped onto edges afterwards.
     edge_roles: Dict[tuple, Dict[str, int]] = {}
 
@@ -217,25 +475,13 @@ def rebuild_evidence_edges(
                 )
                 _tally(unique[i], unique[j], EDGE_CO_OCCURRENCE, role)
                 co += 1
-        sender_raw = sender_by_record.get(record_id)
-        if sender_raw:
-            try:
-                sender_id, _tier = resolver.resolve(sender_raw, entity_type="person")
-            except ValueError:
-                sender_id = None
-            if sender_id:
-                for ent in unique:
-                    if ent == sender_id:
-                        continue
-                    update_edge(
-                        conn,
-                        src_entity_id=sender_id,
-                        dst_entity_id=ent,
-                        edge_type=EDGE_COMMUNICATES,
-                        event_at=event_at,
-                    )
-                    _tally(sender_id, ent, EDGE_COMMUNICATES, role)
-                    comm += 1
+
+    # P3.2: talked-to edges from thread co-participants only.
+    comm, comm_roles = fold_communicates_with_edges(
+        conn, clear_active=False  # already cleared above with co_occurrence
+    )
+    for key, mix in comm_roles.items():
+        edge_roles[key] = mix
 
     # Stamp the aggregated provenance onto each active edge's metadata.
     for (src, dst, edge_type), mix in edge_roles.items():
@@ -330,13 +576,14 @@ def rebuild_entity_graph(
     """Full cheap rebuild of the entity graph from existing derived data.
 
     Recounts mention totals, optionally prunes mention-orphaned entities,
-    rebuilds co-occurrence/communicates evidence edges from mentions, and
-    (by default) materializes facts + topic clusters from signal_objects into
-    labeled temporal edges. Refreshes dossiers. Returns a before/after report.
+    rebuilds co-occurrence (from mentions) + communicates_with (from thread
+    co-participation), and (by default) materializes facts + topic clusters
+    from signal_objects into labeled temporal edges. Refreshes dossiers.
+    Returns a before/after report.
 
-    No NER re-run — bounded by the current `entity_mentions` + `signal_objects`.
-    To grow the mention set, re-run the `entities` enrichment job
-    (force_reprocess).
+    No NER re-run — bounded by the current `entity_mentions` + message
+    senders / `conversation_participants` + `signal_objects`. To grow the
+    mention set, re-run the `entities` enrichment job (force_reprocess).
     """
     from ..lifecycle.derived_scrub import _delete_orphan_entities, _recount_entity_mentions
 

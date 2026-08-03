@@ -186,7 +186,6 @@ class EntitiesJob(BaseEnrichmentJob):
         from ....features.entities.dossier import refresh_dossiers
         from ....features.entities.edges import (
             EDGE_CO_OCCURRENCE,
-            EDGE_COMMUNICATES,
             update_edge,
         )
         from ....features.entities.resolver import EntityResolver, map_ner_type
@@ -273,20 +272,9 @@ class EntitiesJob(BaseEnrichmentJob):
                         event_at=rec.get("event_at"),
                     )
 
-            # Sender speaks about the mentioned entity -> communicates/discusses signal
-            sender = str(msg.get("sender_id") or "").strip()
-            if sender:
-                try:
-                    sender_id, _ = resolver.resolve(sender, entity_type="person")
-                    update_edge(
-                        conn,
-                        src_entity_id=sender_id,
-                        dst_entity_id=entity_id,
-                        edge_type=EDGE_COMMUNICATES,
-                        event_at=rec.get("event_at"),
-                    )
-                except ValueError:
-                    pass
+            # P3.2: do NOT write communicates_with for sender→NER-mention.
+            # Mention-only third parties (IMB7 Odile) are not talked-to partners;
+            # co-participation is folded below from conversation senders.
 
         # Co-occurrence within the same record
         for record_id, ids in entities_by_record.items():
@@ -301,5 +289,17 @@ class EntitiesJob(BaseEnrichmentJob):
                         edge_type=EDGE_CO_OCCURRENCE,
                         event_at=event_at,
                     )
+
+        # Thread co-participation → communicates_with (talked-to vs mentioned).
+        conv_ids = {
+            str(m.get("conversation_id") or m.get("chat_id") or "").strip()
+            for m in msg_by_id.values()
+        }
+        conv_ids.discard("")
+        if conv_ids:
+            from ....features.entities.maintenance import fold_communicates_with_edges
+
+            fold_communicates_with_edges(conn, conversation_ids=conv_ids)
+
         conn.commit()
         refresh_dossiers(conn)

@@ -217,17 +217,16 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
 
 
 def _rebuild_entity_edges(conn: sqlite3.Connection) -> int:
-    """Recompute evidence edges from remaining mentions.
+    """Recompute evidence edges after a scrub.
 
-    Decayed weights cannot subtract removed evidence, so co_occurrence and
-    communicates_with are rebuilt from surviving mentions. part_of edges are
-    structural (derived from names, not scrubbed evidence) and are kept for
-    surviving entities.
+    Decayed weights cannot subtract removed evidence, so co_occurrence is
+    rebuilt from surviving mentions and communicates_with from thread
+    co-participation (P3.2). part_of edges are structural (derived from
+    names, not scrubbed evidence) and are kept for surviving entities.
 
-    Delegates to the shared entity-graph rebuild so co_occurrence AND
-    communicates_with are recreated — previously this deleted communicates_with
-    but only rebuilt co_occurrence, silently dropping every sender→entity edge
-    on each scrub.
+    Delegates to the shared entity-graph rebuild so both edge types are
+    recreated — previously this deleted communicates_with but only rebuilt
+    co_occurrence, silently dropping every co-participation edge on each scrub.
     """
     from ..entities.maintenance import rebuild_evidence_edges
 
