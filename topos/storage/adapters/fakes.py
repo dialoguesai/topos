@@ -234,6 +234,15 @@ class InMemoryVectorIndex:
             del self._items[key]
         return len(to_delete)
 
+    def delete_embeddings(self, embedding_ids: List[str]) -> int:
+        deleted = 0
+        for embedding_id in embedding_ids:
+            key = str(embedding_id)
+            if key in self._items:
+                del self._items[key]
+                deleted += 1
+        return deleted
+
 
 class InMemoryGraphEdgeStore:
     def __init__(self) -> None:

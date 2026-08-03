@@ -463,9 +463,9 @@ def purge_derived_for_records(
     ]
     conn.execute(f"DELETE FROM signal_embeddings WHERE record_id IN ({placeholders})", ids)
     if embedding_ids:
-        from ...storage.adapters.sqlite.vector_search import delete_vec_rows
+        from ...storage.adapters.sqlite.stores import SQLiteVectorIndex
 
-        delete_vec_rows(conn, embedding_ids)
+        SQLiteVectorIndex(conn).delete_embeddings(embedding_ids)
     report["embeddings_removed"] = len(embedding_ids)
 
     for table, column in (

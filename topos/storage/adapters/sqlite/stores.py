@@ -918,6 +918,21 @@ class SQLiteVectorIndex:
         commit_connection(self._conn)
         return cur.rowcount
 
+    def delete_embeddings(self, embedding_ids: List[str]) -> int:
+        """Drop ANN companion rows for the given embedding ids.
+
+        Callers outside ``storage/adapters`` must use this (or ``delete_by_record``)
+        rather than reaching into the physical ANN backend — see
+        PLAN_GRAPH_QUERY_AND_LATENT_EDGES §5 (M3).
+        """
+        from .vector_search import delete_vec_rows
+
+        ids = [str(item) for item in embedding_ids if str(item).strip()]
+        if not ids:
+            return 0
+        delete_vec_rows(self._conn, ids)
+        return len(ids)
+
 
 class SQLiteGraphEdgeStore:
     def __init__(self, conn: sqlite3.Connection) -> None:
