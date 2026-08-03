@@ -3,8 +3,9 @@
 Cohort-permitted / aggregate-only asks under an active entity selector →
 non-entity-specific aggregate. Named-person asks still denial≡absence.
 
-Limitation (documented): cohort → entity-id resolvers remain Wave C1; this slice
-uses a thin person-count stub + recognized cohort tokens for aggregate permit.
+C1 membership resolvers widen named allow-list separately; these cases keep
+cohort tokens on grants without contact-linked seed rows so named asks stay
+denied (aggregate utility + denial≡absence regression).
 """
 
 from __future__ import annotations
@@ -89,7 +90,7 @@ def test_aggregate_ask_detection() -> None:
     assert _looks_like_aggregate_ask("Tell me everything about Maya Chen") is False
 
 
-def test_cohort_token_permits_aggregate_without_widening_ids() -> None:
+def test_cohort_token_permits_aggregate() -> None:
     m = _manifest(ids=[], cohorts=["contacts"], active=True)
     assert _cohort_aggregate_permitted(m) is True
     assert _cohort_aggregate_permitted(_manifest(cohorts=["none"], active=True)) is False
@@ -110,8 +111,8 @@ def test_aggregate_only_rejects_named_person_shape() -> None:
         )
 
 
-def test_named_person_still_unauthorized_under_cohort_grant() -> None:
-    """A7 regression: cohort on grant must not false-permit named individuals."""
+def test_named_person_still_unauthorized_under_empty_cohort_ids() -> None:
+    """A7 regression: cohort token alone without resolved membership must not false-permit."""
     manifest = _manifest(ids=[], cohorts=["contacts"], active=True)
     with patch(
         "topos.features.entities.linking.link_query_entities",
@@ -177,6 +178,7 @@ async def test_seeded_cohort_aggregate_vs_named_person_denial(
     }
     manifest = resolve_scope_manifest("messages:read", filter_manifest=grant)
     assert manifest.entity_selector_policy_active is True
+    # Seed has no contact_id rows → contacts cohort resolves empty; named stay denied.
     assert manifest.accessible_entity_ids == []
     assert "contacts" in manifest.accessible_entity_cohorts
 

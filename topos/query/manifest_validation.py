@@ -72,21 +72,19 @@ def _normalize_id_list(raw: Any) -> List[str]:
     return out
 
 
-def _resolve_accessible_entity_cohorts(cohorts: List[str]) -> List[str]:
-    """D-002 v1: cohorts are accepted on the grant but only none/empty resolve to ids.
+def _resolve_accessible_entity_cohorts(
+    cohorts: List[str],
+    db_conn: Optional[Any] = None,
+) -> List[str]:
+    """D-002 / C1: resolve membership cohort tokens → person entity ids.
 
-    Cohort tokens do not widen `accessible_entity_ids` here (fail closed until Wave C1
-    resolvers). Recognized tokens (contacts, message_peers, …) still unlock the A2.3 / A8
-    non-entity-specific aggregate path via `manifest.accessible_entity_cohorts` audit.
+    Without ``db_conn``, membership cohorts fail closed to ``[]`` (A8 aggregate
+    permit still uses the audit ``accessible_entity_cohorts`` list). Pipeline
+    re-applies resolvers with a live connection before selector checks.
     """
-    resolved: List[str] = []
-    for raw in cohorts:
-        key = str(raw or "").strip().lower()
-        if not key or key in ("none", "empty", "nil"):
-            continue
-        # Reserved for A2.1 follow-ups — do not widen access until implemented.
-        continue
-    return resolved
+    from .cohort_resolvers import resolve_accessible_entity_cohorts
+
+    return resolve_accessible_entity_cohorts(cohorts, db_conn)
 
 
 def _entity_selector_policy_keys_present(filter_manifest: Optional[Dict[str, Any]]) -> bool:
@@ -106,6 +104,7 @@ def _entity_selector_policy_keys_present(filter_manifest: Optional[Dict[str, Any
 
 def _read_accessible_entity_policy(
     filter_manifest: Optional[Dict[str, Any]],
+    db_conn: Optional[Any] = None,
 ) -> tuple[List[str], List[str], bool]:
     """Read grant siblings accessible_entity_ids / accessible_entity_cohorts (D-002).
 
@@ -113,7 +112,8 @@ def _read_accessible_entity_policy(
     FilterManifest — that strips unknown keys). Accept top-level on the filters blob
     or, for test convenience, nested under filter_manifest.
 
-    Returns (merged_ids, cohorts, policy_active).
+    Returns (merged_ids, cohorts, policy_active). Merged ids = enums ∪ resolve(cohorts)
+    when ``db_conn`` is available (C1); otherwise enums only (fail closed).
     """
     if not filter_manifest or not isinstance(filter_manifest, dict):
         return [], [], False
@@ -128,7 +128,9 @@ def _read_accessible_entity_policy(
 
     explicit = _normalize_id_list(_get("accessible_entity_ids"))
     cohorts = _normalize_id_list(_get("accessible_entity_cohorts"))
-    from_cohorts = _resolve_accessible_entity_cohorts(cohorts)
+    # Fail closed without an explicit db_conn; pipeline.apply_cohort_membership
+    # widens at grant-apply time with the live connection.
+    from_cohorts = _resolve_accessible_entity_cohorts(cohorts, db_conn)
     merged = _normalize_id_list([*explicit, *from_cohorts])
     return merged, cohorts, policy_active
 
@@ -161,10 +163,14 @@ def resolve_scope_manifest(
     *,
     client_manifest: Optional[Dict[str, Any]] = None,
     filter_manifest: Optional[Dict[str, Any]] = None,
+    db_conn: Optional[Any] = None,
 ) -> ScopeResolutionManifest:
     """
     Build authoritative manifest from engine scope registry.
     Client-supplied manifest fields that affect retrieval boundaries are ignored.
+
+    Optional ``db_conn`` enables C1 cohort → entity-id resolution at grant-resolve
+    time. Pipeline also re-applies resolvers before selector checks.
     """
     sid = (scope_id or "").strip()
     if not sid:
@@ -187,7 +193,9 @@ def resolve_scope_manifest(
         manifest = replace(manifest, canonical_tables=filtered)
     if filter_manifest is not None:
         manifest = replace(manifest, filter_manifest=filter_manifest)
-    entity_ids, entity_cohorts, policy_active = _read_accessible_entity_policy(filter_manifest)
+    entity_ids, entity_cohorts, policy_active = _read_accessible_entity_policy(
+        filter_manifest, db_conn=db_conn
+    )
     if policy_active:
         manifest = replace(
             manifest,

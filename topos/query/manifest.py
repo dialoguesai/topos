@@ -33,10 +33,10 @@ class ScopeResolutionManifest:
     #   entity_selector_policy_active=True + non-empty ids → allow-list
     # Owner tier ignores this entirely.
     accessible_entity_ids: List[str] = field(default_factory=list)
-    # Cohort rule ids from the grant (audit / A2.3). v1: do not resolve to entity ids
-    # (C1); recognized tokens permit A8 non-entity-specific aggregate. See
-    # manifest_validation._resolve_accessible_entity_cohorts + pipeline
-    # `_cohort_aggregate_permitted`.
+    # Cohort rule ids from the grant (audit / A2.3 / C1). Membership tokens
+    # (`contacts`, `message_peers`, `calendar_attendees`) widen
+    # `accessible_entity_ids` via cohort_resolvers; `stats_aggregate` / `none`
+    # are aggregate-permit only. See `_cohort_aggregate_permitted`.
     accessible_entity_cohorts: List[str] = field(default_factory=list)
     entity_selector_policy_active: bool = False
 

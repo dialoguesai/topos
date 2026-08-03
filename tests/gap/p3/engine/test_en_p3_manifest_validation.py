@@ -65,8 +65,8 @@ def test_resolve_manifest_maps_accessible_entity_ids_from_grant_filters() -> Non
 
 
 @pytest.mark.check("C-quality-selector-entity-grant")
-def test_resolve_manifest_unknown_cohort_does_not_widen_access() -> None:
-    """Cohorts are accepted for audit / A8 aggregate permit but do not add entity ids (C1)."""
+def test_resolve_manifest_cohort_without_db_fails_closed() -> None:
+    """Without db_conn, membership cohorts stay audit-only (fail closed; C1 needs DB)."""
     manifest = resolve_scope_manifest(
         "messages:read",
         filter_manifest={"accessible_entity_cohorts": ["contacts", "calendar_attendees"]},
