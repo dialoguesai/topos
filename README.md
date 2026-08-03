@@ -61,6 +61,14 @@ Topos Engine uses both local and model-hub paths so users can choose flexibility
 
 The `shared/` package in this repo is part of the node runtime contract. It contains common schema and filtering definitions used by both API and engine paths.
 
+### Architecture notes (where truth lives)
+
+This README is orientation, not the architecture ledger. Prefer:
+
+- **As-built / why:** sibling `topos-research-wiki` → `20_ARCHITECTURE/` (`As_Built_Node`, firewall, query, MCP, graph, …)
+- **As-is invariants / checks:** sibling `topos-ops-wiki` → `25_SYSTEMS/` (`SYS-node`, `SYS-cognitive-firewall`, …)
+- **Target design:** `topos-data-wiki` (`status: target`) — do not implement from it without checking as-built
+
 ## Quick Start
 
 ### 1) Install
