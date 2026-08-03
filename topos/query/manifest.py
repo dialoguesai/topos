@@ -24,12 +24,14 @@ class ScopeResolutionManifest:
     default_source_ids: List[str] = field(default_factory=list)
     filter_manifest: Optional[Dict[str, Any]] = None
     must_not_retrieve: List[str] = field(default_factory=list)
-    # Selector-aware disclosure (plan A2): entity_ids a GRANTEE is authorized to select by
-    # name. Empty = default-deny (a grantee may not select any named third party — the safe
-    # floor until the grant layer populates this). The owner tier ignores it entirely.
-    # A2.1 (grant-schema) will populate this per grant; today it stays empty ⇒ grantees who
-    # name a real person are answered as if that person is absent (indistinguishability).
+    # Selector-aware disclosure (plan A2 / D-002): entity_ids a GRANTEE is authorized to
+    # select by name. Empty = default-deny. Populated from grant filters siblings
+    # `accessible_entity_ids` ∪ resolve(`accessible_entity_cohorts`) (D-002: both; v1 enums-first).
+    # Owner tier ignores this entirely.
     accessible_entity_ids: List[str] = field(default_factory=list)
+    # Cohort rule ids from the grant (audit / A2.3). v1: only "none"/empty resolve; see
+    # manifest_validation._resolve_accessible_entity_cohorts.
+    accessible_entity_cohorts: List[str] = field(default_factory=list)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -49,4 +51,5 @@ class ScopeResolutionManifest:
             filter_manifest=data.get("filter_manifest"),
             must_not_retrieve=list(data.get("must_not_retrieve") or []),
             accessible_entity_ids=list(data.get("accessible_entity_ids") or []),
+            accessible_entity_cohorts=list(data.get("accessible_entity_cohorts") or []),
         )
