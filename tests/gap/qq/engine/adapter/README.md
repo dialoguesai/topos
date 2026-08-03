@@ -13,7 +13,7 @@ engine, not in the portable package.
 |---|---|
 | `target_engine.py` | `QueryTarget` via the in-process pipeline; `EvidencePacket` from the DDR (`TOPOS_QUERY_DDR=1`); `normalize_result` reused by the runner |
 | `target_mcp.py` | `QueryTarget` over the CP MCP gateway (owner `query_scope`, persistent session, `X-Topos-Client: topos-home-chat/1`); reuses `target_engine.normalize_result` — one normalizer, two transports. Grantee/`shared_*` parity is a later lane (refused loudly, not half-measured) |
-| `sql_oracle.py` | `Oracle` — needle groups + topic terms → graded 0/1/2 relevance, per-case truth computed once from SQL |
+| `sql_oracle.py` | `Oracle` — needle groups + topic terms + class hooks (browse membership, recency window) → graded 0/1/2; truth computed once from SQL |
 | `llm_judge.py` | `Judge` on local Ollama (`qwen3.5:9b-mlx`, think-off JSON verdicts); localhost-only, enforced |
 
 The **catalog data** (concrete cases referencing real scopes) is the existing
