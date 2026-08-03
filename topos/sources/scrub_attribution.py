@@ -13,7 +13,9 @@ from ..storage.db.postgres import execute_query, fetch_all, fetch_one
 
 INSTALL_TABLE = "source_runtime_installs"
 _VEC_BATCH_SIZE = 500
-_VEC_TABLE = "signal_embeddings_vec"
+# Logical label for scrub audit rows — not the physical ANN table name.
+# Callers outside storage/adapters go through VectorIndex (PLAN M3).
+_VECTOR_INDEX_LABEL = "vector_index"
 _KNOWN_FLAT_TABLES_BY_SOURCE: Dict[str, List[str]] = {
     "browser_visits": ["browser_visits"],
     "browser_events": ["browser_events"],
@@ -232,16 +234,16 @@ def _select_embedding_ids(conn: Any, table_name: str, source_column: str, source
 def _delete_vec_rows_batched(conn: Any, embedding_ids: Sequence[str]) -> int:
     if not embedding_ids or not isinstance(conn, sqlite3.Connection):
         return 0
-    from ..storage.adapters.sqlite.vector_search import delete_vec_rows
+    from ..storage.adapters.sqlite.stores import SQLiteVectorIndex
 
     unique_ids = list(dict.fromkeys(str(item) for item in embedding_ids if str(item).strip()))
     if not unique_ids:
         return 0
+    index = SQLiteVectorIndex(conn)
     deleted = 0
     for start in range(0, len(unique_ids), _VEC_BATCH_SIZE):
         batch = unique_ids[start : start + _VEC_BATCH_SIZE]
-        delete_vec_rows(conn, batch)
-        deleted += len(batch)
+        deleted += index.delete_embeddings(batch)
     return deleted
 
 
@@ -362,7 +364,7 @@ def scrub_attributed_rows(conn: Any, source_id: str) -> AttributionScrubResult:
     vec_deleted = _delete_vec_rows_batched(conn, embedding_ids)
     if vec_deleted > 0:
         result.tables.append(
-            TableAction(table=_VEC_TABLE, action="vec_rows_deleted", count=vec_deleted)
+            TableAction(table=_VECTOR_INDEX_LABEL, action="vec_rows_deleted", count=vec_deleted)
         )
 
     result.rows_deleted = rows_deleted
@@ -413,7 +415,7 @@ def plan_attributed_rows(conn: Any, source_id: str) -> AttributionScrubResult:
     vec_count = len(dict.fromkeys(str(item) for item in embedding_ids if str(item).strip()))
     if vec_count > 0:
         result.tables.append(
-            TableAction(table=_VEC_TABLE, action="vec_rows_deleted", count=vec_count)
+            TableAction(table=_VECTOR_INDEX_LABEL, action="vec_rows_deleted", count=vec_count)
         )
 
     result.rows_deleted = rows_deleted

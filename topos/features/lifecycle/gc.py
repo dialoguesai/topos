@@ -182,7 +182,7 @@ def purge_junk_embeddings(conn: sqlite3.Connection) -> int:
     go via the existing AFTER DELETE trigger; ANN rows are removed explicitly.
     """
     from ...features.signal.embed_context import is_derivable_content
-    from ...storage.adapters.sqlite.vector_search import delete_vec_rows
+    from ...storage.adapters.sqlite.stores import SQLiteVectorIndex
 
     if not _table_exists(conn, "signal_embeddings"):
         return 0
@@ -197,13 +197,14 @@ def purge_junk_embeddings(conn: sqlite3.Connection) -> int:
             junk_embedding_ids.append(str(embedding_id))
             if record_id:
                 junk_record_ids.add(str(record_id))
+    index = SQLiteVectorIndex(conn)
     for start in range(0, len(junk_embedding_ids), 200):
         chunk = junk_embedding_ids[start : start + 200]
         placeholders = ",".join("?" for _ in chunk)
         conn.execute(
             f"DELETE FROM signal_embeddings WHERE embedding_id IN ({placeholders})", chunk
         )
-        delete_vec_rows(conn, chunk)
+        index.delete_embeddings(chunk)
     if junk_record_ids and _table_exists(conn, "topic_cluster_members"):
         ids = list(junk_record_ids)
         for start in range(0, len(ids), 200):
