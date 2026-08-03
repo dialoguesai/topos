@@ -503,25 +503,65 @@ class EntityResolver:
         canonical_table: Optional[str] = None,
         confidence: Optional[float] = None,
         event_at: Optional[str] = None,
+        authored_by_owner: Optional[int] = None,
     ) -> None:
-        cursor = self._conn.execute(
-            """
-            INSERT OR IGNORE INTO entity_mentions (
-                mention_id, entity_id, record_id, source_id, canonical_table,
-                surface_text, confidence, event_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                f"men_{uuid.uuid4().hex[:16]}",
-                entity_id,
-                record_id,
-                source_id,
-                canonical_table,
-                surface_text,
-                confidence,
-                event_at,
-            ),
-        )
+        mention_cols = {
+            row[1]
+            for row in self._conn.execute("PRAGMA table_info(entity_mentions)").fetchall()
+        }
+        has_authored_col = "authored_by_owner" in mention_cols
+        # P3.1: denormalized owner-authorship for IMB / misattribution expansion.
+        # Explicit arg wins; else resolve from the parent canonical row.
+        if has_authored_col and authored_by_owner is None:
+            try:
+                from topos.storage.db.migrations.entity_mentions_authored_v1 import (
+                    lookup_authored_by_owner,
+                )
+
+                authored_by_owner = lookup_authored_by_owner(
+                    self._conn, record_id, canonical_table=canonical_table
+                )
+            except Exception:  # noqa: BLE001 — never block mention mint on lookup
+                authored_by_owner = None
+        if has_authored_col:
+            cursor = self._conn.execute(
+                """
+                INSERT OR IGNORE INTO entity_mentions (
+                    mention_id, entity_id, record_id, source_id, canonical_table,
+                    surface_text, confidence, event_at, authored_by_owner
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"men_{uuid.uuid4().hex[:16]}",
+                    entity_id,
+                    record_id,
+                    source_id,
+                    canonical_table,
+                    surface_text,
+                    confidence,
+                    event_at,
+                    authored_by_owner,
+                ),
+            )
+        else:
+            cursor = self._conn.execute(
+                """
+                INSERT OR IGNORE INTO entity_mentions (
+                    mention_id, entity_id, record_id, source_id, canonical_table,
+                    surface_text, confidence, event_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"men_{uuid.uuid4().hex[:16]}",
+                    entity_id,
+                    record_id,
+                    source_id,
+                    canonical_table,
+                    surface_text,
+                    confidence,
+                    event_at,
+                ),
+            )
         if not cursor.rowcount:
             return  # duplicate mention (batch replay) — don't inflate counts
         self._conn.execute(

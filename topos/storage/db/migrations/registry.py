@@ -190,6 +190,10 @@ from .message_emotions_role_backfill_v1 import (
     MIGRATION_ID as MESSAGE_EMOTIONS_ROLE_BACKFILL_V1_ID,
     apply_message_emotions_role_backfill_v1_up,
 )
+from .entity_mentions_authored_v1 import (
+    MIGRATION_ID as ENTITY_MENTIONS_AUTHORED_V1_ID,
+    apply_entity_mentions_authored_v1_up,
+)
 
 ApplyFn = Callable[[sqlite3.Connection], object]
 
@@ -296,6 +300,12 @@ MIGRATIONS: List[MigrationSpec] = [
     _spec(53, MESSAGE_EMOTIONS_ROLE_V1_ID, apply_message_emotions_role_v1_up, always_run=True),
     _spec(54, SIGNAL_SUMMARIES_DROP_V1_ID, apply_signal_summaries_drop_v1_up),
     _spec(55, MESSAGE_EMOTIONS_ROLE_BACKFILL_V1_ID, apply_message_emotions_role_backfill_v1_up),
+    _spec(
+        56,
+        ENTITY_MENTIONS_AUTHORED_V1_ID,
+        apply_entity_mentions_authored_v1_up,
+        always_run=True,
+    ),
 ]
 
 
