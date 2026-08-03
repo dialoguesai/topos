@@ -19,7 +19,7 @@ pytestmark = [pytest.mark.check("C-quality-d1-hole-punchers")]
 
 
 def test_catalog_version_includes_d1_hole_punchers() -> None:
-    assert QUERY_CATALOG_VERSION == "qq-catalog-12"
+    assert QUERY_CATALOG_VERSION == "qq-catalog-13"
 
 
 def test_d1_1_reexports_nh_cases() -> None:
