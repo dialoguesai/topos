@@ -71,17 +71,20 @@ def _ensure_message_tables(conn) -> None:
 
 
 def _seed_conversation_message(conn, message_id: str, actor_role: str) -> None:
+    """Seed parent row fields ``record_role`` needs (not sparse actor_role alone)."""
     _ensure_message_tables(conn)
+    is_self = 1 if actor_role == "authored" else 0
     conn.execute(
         """
         INSERT OR REPLACE INTO conversation_messages
-            (message_id, conversation_id, source_id, sender_type, actor_role)
-        VALUES (?, 'c1', 'imessage', ?, ?)
+            (message_id, conversation_id, source_id, sender_type,
+             sender_id, is_from_self, actor_role)
+        VALUES (?, 'c1', 'imessage', 'human', ?, ?, NULL)
         """,
         (
             message_id,
-            "self" if actor_role == "authored" else "contact",
-            actor_role,
+            "self" if is_self else "contact-1",
+            is_self,
         ),
     )
     conn.commit()
@@ -108,7 +111,7 @@ def _seed_emotion(conn, message_id: str, *, role=None) -> None:
         conn.commit()
 
 
-def test_backfill_stamps_null_from_actor_role(conn) -> None:
+def test_backfill_stamps_null_via_record_role(conn) -> None:
     _seed_conversation_message(conn, "m_auth", "authored")
     _seed_conversation_message(conn, "m_obs", "observed")
     _seed_emotion(conn, "m_auth", role=None)
@@ -117,6 +120,7 @@ def test_backfill_stamps_null_from_actor_role(conn) -> None:
     report = backfill_message_emotions_role(conn)
     conn.commit()
     assert report["updated"] == 2
+    assert report["actor_role_stamped"] == 2
 
     rows = {
         r[0]: r[1]
@@ -125,6 +129,15 @@ def test_backfill_stamps_null_from_actor_role(conn) -> None:
         ).fetchall()
     }
     assert rows == {"m_auth": "authored", "m_obs": "observed"}
+
+    parent_roles = {
+        r[0]: r[1]
+        for r in conn.execute(
+            "SELECT message_id, actor_role FROM conversation_messages "
+            "WHERE message_id IN ('m_auth','m_obs')"
+        ).fetchall()
+    }
+    assert parent_roles == {"m_auth": "authored", "m_obs": "observed"}
 
     kept = conn.execute(
         """

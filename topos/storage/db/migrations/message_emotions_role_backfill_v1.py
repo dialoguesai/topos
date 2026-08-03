@@ -1,25 +1,38 @@
 """Wave B5: stamp ``role`` on legacy ``message_emotions`` rows.
 
-Write-path (emo_27) already stamps role; wellbeing filters keep
-``NULL OR authored/addressed``. Legacy NULLs therefore leak observed-role
-emotions into owner wellbeing. This one-shot backfill copies the
-materialized ``actor_role`` from the parent message tables (P4.1), which
-is already ledger-guarded and indexed.
+Write-path (emo_27) already stamps role via ``record_role``; wellbeing filters
+keep ``NULL OR authored/addressed``. Legacy NULLs therefore leak observed-role
+emotions into owner wellbeing.
 
-Posture-cap drift vs emo_27 write path (ambient → observed) is a documented
-fast-follow; joining ``actor_role`` is the Wave-B5-sized path.
+Live lesson (same as B6 / P3.1): the materialized ``actor_role`` column is
+sparse on nodes where data landed after the one-shot P4.1 backfill. Joining
+``actor_role`` alone no-ops (~0 updates / thousands still NULL). This backfill
+computes role through :func:`record_role` from parent row fields — THE single
+source of truth — and optionally refreshes ``actor_role`` when it is NULL.
 """
 
 from __future__ import annotations
 
 import sqlite3
+from typing import Any, Dict, List, Tuple
 
 MIGRATION_ID = "message_emotions_role_backfill_v1"
 
-_BATCH = 5000
+_BATCH = 2000
 
-# Parent message tables that carry actor_role (migration order 36).
-_PARENT_TABLES = ("conversation_messages", "ai_chat_messages")
+# Parent tables: (table, pk, columns record_role needs).
+_PARENT_SPECS: Tuple[Tuple[str, str, Tuple[str, ...]], ...] = (
+    (
+        "conversation_messages",
+        "message_id",
+        ("sender_type", "sender_id", "is_from_self", "event_type", "message_type"),
+    ),
+    (
+        "ai_chat_messages",
+        "message_id",
+        ("sender_type", "sender_id"),
+    ),
+)
 
 
 def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
@@ -46,43 +59,72 @@ def _migration_applied(conn: sqlite3.Connection, migration_id: str) -> bool:
 
 
 def backfill_message_emotions_role(conn: sqlite3.Connection) -> dict[str, int]:
-    """Stamp NULL roles from parent ``actor_role``. Idempotent (NULL-only).
+    """Stamp NULL emotion roles via ``record_role`` on parent rows.
 
-    Returns counts: ``updated``, ``still_null`` (orphans / unmatched FKs).
+    Idempotent (NULL-only). Returns ``updated``, ``still_null``, and
+    ``actor_role_stamped`` (side-fill of sparse parent ``actor_role``).
     No-ops cleanly on wiki-shaped ``message_emotions`` (no ``message_id``).
     """
-    report = {"updated": 0, "still_null": 0}
+    from topos.features.provenance.roles import record_role
+
+    report = {"updated": 0, "still_null": 0, "actor_role_stamped": 0}
     if not _table_exists(conn, "message_emotions"):
         return report
     cols = _columns(conn, "message_emotions")
     if "role" not in cols or "message_id" not in cols:
         return report
 
-    for parent in _PARENT_TABLES:
-        if not _table_exists(conn, parent):
+    for table, pk, role_cols in _PARENT_SPECS:
+        if not _table_exists(conn, table):
             continue
-        parent_cols = _columns(conn, parent)
-        if "actor_role" not in parent_cols or "message_id" not in parent_cols:
+        present = _columns(conn, table)
+        if pk not in present:
             continue
+        fields = [c for c in role_cols if c in present]
+        has_actor_role = "actor_role" in present
+        select_cols = ", ".join([f"p.{pk}"] + [f"p.{c}" for c in fields])
+        if has_actor_role:
+            select_cols += ", p.actor_role"
+
         while True:
             rows = conn.execute(
                 f"""
-                SELECT e.message_id, p.actor_role
+                SELECT {select_cols}
                 FROM message_emotions e
-                JOIN {parent} p ON p.message_id = e.message_id
+                JOIN {table} p ON p.{pk} = e.message_id
                 WHERE e.role IS NULL
-                  AND p.actor_role IS NOT NULL
                 LIMIT ?
                 """,
                 (_BATCH,),
             ).fetchall()
             if not rows:
                 break
+
+            emotion_updates: List[Tuple[str, str]] = []
+            actor_updates: List[Tuple[str, str]] = []
+            for row in rows:
+                mid = row[0]
+                record: Dict[str, Any] = {
+                    col: row[i + 1] for i, col in enumerate(fields)
+                }
+                role = record_role(record, table=table)
+                emotion_updates.append((role, mid))
+                if has_actor_role:
+                    existing = row[1 + len(fields)]
+                    if existing is None:
+                        actor_updates.append((role, mid))
+
             conn.executemany(
                 "UPDATE message_emotions SET role = ? WHERE message_id = ? AND role IS NULL",
-                [(role, mid) for mid, role in rows],
+                emotion_updates,
             )
-            report["updated"] += len(rows)
+            report["updated"] += len(emotion_updates)
+            if actor_updates:
+                conn.executemany(
+                    f"UPDATE {table} SET actor_role = ? WHERE {pk} = ? AND actor_role IS NULL",
+                    actor_updates,
+                )
+                report["actor_role_stamped"] += len(actor_updates)
             if len(rows) < _BATCH:
                 break
 
