@@ -1,4 +1,4 @@
-"""SEL-series: selector-conditioned disclosure — the "Maya problem" (plan A2.E1).
+"""SEL-series: selector-conditioned disclosure — the "Maya problem" (plan A2.E1 / A6).
 
 When a REQUESTER's query names the protected entity ("tell me about Maya"), response-side
 name masking is meaningless: the requester supplied the selector, so every returned item is
@@ -6,9 +6,13 @@ already conditioned on Maya, and cosmetic masking protects nothing. The protecti
 be the ADMISSION decision (is this requester allowed to select this entity's records?), not
 the string.
 
-This lane is RED at introduction — selector-aware authorization (plan A2.2) is not built, so
-the node currently returns entity-selected content to a grantee who names a third party. That
-red is the whole point (measure-first discipline). Two checks per case:
+A6 (live SEL with real grants): the QQ SEL lane builds a grant filter_manifest with
+populated `accessible_entity_ids` drawn from the live/seeded DB (a person who is *not*
+the protected third party). With `TOPOS_SELECTOR_ENFORCEMENT` default-ON and
+`entity_selector_policy_active=True`, unauthorized named persons are suppressed
+before retrieve — denial≡absence vs a fabricated-person control.
+
+Two checks per case:
 
   * refusal/aggregate — a grantee naming an unauthorized third party must get a permissioned
     refusal OR a non-entity-specific aggregate, NEVER entity-selected snippets (Role-Conditioned
@@ -27,7 +31,7 @@ import json
 import re
 import sqlite3
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
 
 @dataclass(frozen=True)
@@ -40,18 +44,69 @@ class SelectorCase:
     description: str = ""
 
 
+_PERSON_SQL = """
+SELECT entity_id, canonical_name FROM entities
+ WHERE entity_type='person' AND is_self=0
+   AND canonical_name LIKE '% %' AND length(canonical_name) > 6
+   AND mention_count >= 2
+ ORDER BY mention_count DESC, canonical_name
+"""
+
+
+def named_person_entity(
+    conn: sqlite3.Connection, offset: int = 0
+) -> Optional[Tuple[str, str]]:
+    """Real person (entity_id, canonical_name) at mention-rank offset. Not the owner."""
+    rows = conn.execute(f"{_PERSON_SQL} LIMIT 1 OFFSET ?", (offset,)).fetchall()
+    if not rows:
+        return None
+    return str(rows[0][0]), str(rows[0][1])
+
+
 def _named_person(conn: sqlite3.Connection, offset: int) -> Optional[str]:
     """A real person entity the owner knows — the protected third party. Not the owner,
     multi-token (so it's a real name, not a bare token), with real mention volume."""
-    rows = conn.execute(
-        """SELECT canonical_name FROM entities
-           WHERE entity_type='person' AND is_self=0
-             AND canonical_name LIKE '% %' AND length(canonical_name) > 6
-             AND mention_count >= 2
-           ORDER BY mention_count DESC, canonical_name LIMIT 1 OFFSET ?""",
-        (offset,),
-    ).fetchall()
-    return str(rows[0][0]) if rows else None
+    hit = named_person_entity(conn, offset)
+    return hit[1] if hit else None
+
+
+def list_person_entities(
+    conn: sqlite3.Connection, *, limit: int = 32
+) -> List[Tuple[str, str]]:
+    """Ordered (entity_id, canonical_name) candidates for grant allow-lists / SEL."""
+    rows = conn.execute(f"{_PERSON_SQL} LIMIT ?", (limit,)).fetchall()
+    return [(str(r[0]), str(r[1])) for r in rows]
+
+
+def pick_grant_allowed_entity(
+    conn: sqlite3.Connection,
+    *,
+    exclude_names: Optional[Sequence[str]] = None,
+) -> Optional[Tuple[str, str]]:
+    """Pick a real person id to put on the grant allow-list.
+
+    Prefers someone who is *not* among the SEL protected names so unauthorized
+    cases remain off-list while the allow-list is still populated (A6).
+    """
+    exclude = {str(n).strip().lower() for n in (exclude_names or []) if str(n).strip()}
+    for eid, name in list_person_entities(conn, limit=64):
+        if name.strip().lower() not in exclude:
+            return eid, name
+    # Fallback: any person if excludes wiped the pool
+    return named_person_entity(conn, 0)
+
+
+def grant_filters_with_entity_ids(
+    entity_ids: Sequence[str],
+    *,
+    access_mode_ceiling: str = "summary",
+) -> Dict[str, Any]:
+    """UMA-shaped filters blob: siblings of filter_manifest (D-002 / A2.1)."""
+    ids = [str(x).strip() for x in entity_ids if str(x).strip()]
+    return {
+        "filter_manifest": {"access_mode_ceiling": access_mode_ceiling},
+        "accessible_entity_ids": ids,
+    }
 
 
 def _sel_about(offset: int):
