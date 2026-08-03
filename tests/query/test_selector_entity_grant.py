@@ -89,3 +89,19 @@ def test_selector_enforcement_defaults_on(monkeypatch: pytest.MonkeyPatch) -> No
     assert _selector_enforcement_enabled() is False
     monkeypatch.setenv("TOPOS_SELECTOR_ENFORCEMENT", "1")
     assert _selector_enforcement_enabled() is True
+
+
+def test_fabricated_person_ask_suppresses_under_active_policy() -> None:
+    """A7 / D1.3: unlinked person-shaped ask must suppress (denial≡absence)."""
+    from topos.query.pipeline import _looks_like_named_person_ask
+
+    manifest = _manifest(ids=["ent_maya"], active=True)
+    with patch("topos.features.entities.linking.link_query_entities", return_value=[]):
+        assert (
+            _selector_unauthorized(
+                object(), "Tell me everything about Zephyrine Quaddlebock", manifest
+            )
+            is True
+        )
+    assert _looks_like_named_person_ask("What has Zephyrine Quaddlebock said to me?") is True
+    assert _looks_like_named_person_ask("show messages about the houseboat sale") is False

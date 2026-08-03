@@ -69,7 +69,9 @@ EvalFn = Callable[[Dict[str, Any]], Tuple[bool, str]]
 # composites comparable to qq-catalog-11 via shared case_ids.
 # qq-catalog-13 (Prov authored-goals path lock): D3 re-scoped ai_conversations→work_context
 # and requires ≥1 user_goal in fused sources (product "working on lately" path).
-QUERY_CATALOG_VERSION = "qq-catalog-13"
+# qq-catalog-14 (A7 D1.3 grantee×tier): +D13-GT-* grantee denial≡absence cells at
+# summary/inference/raw; leak_delta_by_tier on d1_hole_punchers. Owner D13-1..3 unchanged.
+QUERY_CATALOG_VERSION = "qq-catalog-14"
 
 _DEFAULT_LATENCY_MS = {
     "summary": int(os.environ.get("TOPOS_QQ_LATENCY_SUMMARY_MS", "10000")),
