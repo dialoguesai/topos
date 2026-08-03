@@ -1,6 +1,7 @@
 {
   "$comment": "SHA-256 of shipped, non-always_run migration modules. CI fails if a hash changes \u2014 migrations are append-only.",
   "checksums": {
+    "affinity_pair_labels_v1": "c13117a44c79982704d91cb71164efac477b96c5b46812b7b5137b207832c498",
     "attention_triage_v1": "d4ec54ac95d829e2730e807caf8c0db294548282607cb7733d076ef1a6409eb0",
     "canonical_nsfw_v1": "0f2c2fb8d0b5f4bfffcbe1e8fcba9c02496b1029e85252853e15841d36221d62",
     "complexity_v1": "0bdbf7bea28e3e52790b1bc5c8a3e798af04d4e8acc2b4da5696e43f824118c3",

@@ -174,6 +174,14 @@ from .entity_context_vectors_v2 import (
     MIGRATION_ID as ENTITY_CONTEXT_VECTORS_V2_ID,
     apply_entity_context_vectors_v2_up,
 )
+from .affinity_pair_labels_v1 import (
+    MIGRATION_ID as AFFINITY_PAIR_LABELS_V1_ID,
+    apply_affinity_pair_labels_v1_up,
+)
+from .message_emotions_role_v1 import (
+    MIGRATION_ID as MESSAGE_EMOTIONS_ROLE_V1_ID,
+    apply_message_emotions_role_v1_up,
+)
 
 ApplyFn = Callable[[sqlite3.Connection], object]
 
@@ -276,6 +284,8 @@ MIGRATIONS: List[MigrationSpec] = [
     _spec(49, ENTITY_CONTEXT_VECTORS_V1_ID, apply_entity_context_vectors_v1_up),
     _spec(50, ENTITY_AFFINITY_V1_ID, apply_entity_affinity_v1_up),
     _spec(51, ENTITY_CONTEXT_VECTORS_V2_ID, apply_entity_context_vectors_v2_up),
+    _spec(52, AFFINITY_PAIR_LABELS_V1_ID, apply_affinity_pair_labels_v1_up),
+    _spec(53, MESSAGE_EMOTIONS_ROLE_V1_ID, apply_message_emotions_role_v1_up, always_run=True),
 ]
 
 
