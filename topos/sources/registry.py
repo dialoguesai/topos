@@ -219,6 +219,8 @@ GITHUB_ACTIVITY = _source(
 )
 
 # Sprint 02: Messenger ingestion (local_sync -> conversation_messages)
+# B11: goal_extraction on authored (is_from_self) rows so messenger goals
+# exist outside chatgpt — role gate in GoalExtractionJob skips non-owner text.
 IMESSAGE = _source(
     source_id="imessage",
     posture="mixed",
@@ -230,7 +232,7 @@ IMESSAGE = _source(
     canonical_group_id="conversations",
     raw_enrichment_jobs=[],
     canonical_enrichment_jobs=["emo_27"],
-    signal_derivation_jobs=['emo_27'],
+    signal_derivation_jobs=['emo_27', 'goal_extraction'],
     analytics_profile_id=None,
     enrichment_trigger="automatic",
     ingestion_trigger="automatic",  # Sync runs on schedule or "Sync now"
@@ -268,7 +270,7 @@ SIGNAL = _source(
     canonical_group_id="conversations",
     raw_enrichment_jobs=[],
     canonical_enrichment_jobs=["emo_27"],
-    signal_derivation_jobs=['emo_27'],
+    signal_derivation_jobs=['emo_27', 'goal_extraction'],
     analytics_profile_id=None,
     enrichment_trigger="automatic",
     ingestion_trigger="automatic",
@@ -439,7 +441,11 @@ DEMO_MESSENGER_FILE = _source(
     parser_id="demo.messenger.v1",
     canonical_group_id="conversations",
     canonical_enrichment_jobs=["emo_27"],
-    signal_derivation_jobs=['emo_27'],
+    signal_derivation_jobs=['emo_27', 'goal_extraction'],
+    enrichment_trigger="automatic",
+    ingestion_trigger="automatic",
+    default_scope_id="messages",
+    allowed_scope_ids=["messages:read"],
     file_ingest_shape=_DEMO_FILE_SHAPE,
 )
 
@@ -488,11 +494,12 @@ DEMO_JOURNAL_FILE = _source(
     parser_id="demo.journal.v1",
     canonical_group_id="journal",
     canonical_enrichment_jobs=["emo_27"],
-    signal_derivation_jobs=['emo_27'],
+    # B11: journal is personal-by-construction; goals feed work_context too.
+    signal_derivation_jobs=['emo_27', 'goal_extraction'],
     enrichment_trigger="automatic",
     ingestion_trigger="automatic",
     default_scope_id="health",
-    allowed_scope_ids=["health:read"],
+    allowed_scope_ids=["health:read", "work_context:read"],
     file_ingest_shape=_DEMO_FILE_SHAPE,
 )
 

@@ -76,8 +76,9 @@ EvalFn = Callable[[Dict[str, Any]], Tuple[bool, str]]
 # (Q2 lesson). Comparability break on GEN composite by design; other lanes untouched.
 # qq-catalog-16 (Wave B8): +IMBG1–IMBG10 GEN-judged IMB phrasing lane (qq-imb-gen-1)
 # on the IMB scratch corpus; attribution IdealBadPair + poison-in-answer checks.
+# qq-catalog-17 (Wave B11): +D3M messenger authored-goals path (messages:read + user_goal).
 # Existing lane composites comparable to qq-catalog-15 via shared case_ids.
-QUERY_CATALOG_VERSION = "qq-catalog-16"
+QUERY_CATALOG_VERSION = "qq-catalog-17"
 
 _DEFAULT_LATENCY_MS = {
     "summary": int(os.environ.get("TOPOS_QQ_LATENCY_SUMMARY_MS", "10000")),
@@ -251,6 +252,29 @@ def eval_d3_retrieval_diversity(response: Dict[str, Any]) -> Tuple[bool, str]:
     return True, f"{len(items)} items from {len(sources)} sources: {sorted(sources)}"
 
 
+def eval_d3m_messenger_goals(response: Dict[str, Any]) -> Tuple[bool, str]:
+    """B11 D3-like: messages:read must fuse authored user_goal from messenger."""
+    ok, msg = _not_denied(response)
+    if not ok:
+        return ok, msg
+    items = _summary_items(response)
+    sources = _sources(items)
+    goals = [i for i in items if i.get("retrieval_source") == "user_goal"]
+    if not goals:
+        return False, f"no user_goal in messages:read fuse: {sorted(sources)}"
+    messenger_ids = {"imessage", "signal", "demo_messenger_file"}
+    messenger_goals = [
+        g for g in goals if str(g.get("source_id") or "") in messenger_ids
+    ]
+    if not messenger_goals:
+        return (
+            False,
+            "user_goal present but none from messenger sources "
+            f"(source_ids={[g.get('source_id') for g in goals]})",
+        )
+    return True, f"{len(messenger_goals)} messenger user_goal items"
+
+
 def eval_d4_person_dossier(response: Dict[str, Any]) -> Tuple[bool, str]:
     ok, msg = _not_denied(response)
     if not ok:
@@ -361,6 +385,14 @@ QUALITY_CASES: List[QueryQualityCase] = [
                      description="Aggregate intent routes to stat insights (place visits, live scope)"),
     QueryQualityCase("D3", "What have I been working on lately?", "work_context:read", "summary", eval_d3_retrieval_diversity,
                      description="Work-context working-on ask fuses >=3 sources incl. authored user_goal"),
+    QueryQualityCase(
+        "D3M",
+        "What goals have I mentioned in my messages?",
+        "messages:read",
+        "summary",
+        eval_d3m_messenger_goals,
+        description="B11: messages:read fuses authored user_goal from messenger corpus",
+    ),
     QueryQualityCase("D4", "Who is Marcus?", "relationship_context:read", "summary", eval_d4_person_dossier,
                      description="Person query returns dossier + supporting mentions (Marcus: real mention evidence)"),
 ]

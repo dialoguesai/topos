@@ -24,7 +24,7 @@ pytestmark = [pytest.mark.check("C-quality-imb-phrasing")]
 
 def test_imb_generative_catalog_version() -> None:
     assert IMB_GENERATIVE_CATALOG_VERSION == "qq-imb-gen-1"
-    assert QUERY_CATALOG_VERSION == "qq-catalog-16"
+    assert QUERY_CATALOG_VERSION == "qq-catalog-17"
 
 
 def test_imb_generative_mirrors_imb_probes() -> None:
