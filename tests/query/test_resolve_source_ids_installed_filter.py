@@ -98,3 +98,62 @@ def test_contacts_retrieval_reads_canonical_address_book(conn) -> None:
     )
 
     assert any(row.get("record_id") == "contact-1" for row in rows)
+
+
+def test_canonical_address_book_survives_installed_demo_filter() -> None:
+    """demo_contacts_file alone must not drop the derived address book."""
+    manifest = resolve_scope_manifest("contacts:resolve")
+    resolved = resolve_retrieval_source_ids(manifest, ["demo_contacts_file"])
+    assert "demo_contacts_file" in resolved
+    assert CANONICAL_ADDRESS_BOOK_SOURCE_ID in resolved
+
+
+def test_contacts_resolve_raw_surfaces_identifier_under_installed_filter(conn) -> None:
+    """Regression for A3 C7/C14: name query must surface the phone needle.
+
+    Live contacts live under canonical_address_book; identifiers often under '*'.
+    Installed-source filtering used to keep only demo_contacts_file and return
+    zero rows even though the needle existed in contact_identifiers.
+    """
+    from topos.query.retrieval import DefaultSignalRetrievalAdapter
+    from topos.query.types import RetrievalRequest
+    from topos.storage.adapters.factory import AdapterFactory
+
+    phone = "2108786568"
+    conn.execute(
+        """
+        INSERT INTO contacts (
+            contact_id, dataset_id, source_id, display_name, is_self, created_at, updated_at
+        ) VALUES ('contact-jessica', 'dataset-1', ?, 'Papa November', 0, datetime('now'), datetime('now'))
+        """,
+        (CANONICAL_ADDRESS_BOOK_SOURCE_ID,),
+    )
+    conn.execute(
+        """
+        INSERT INTO contact_identifiers (
+            dataset_id, source_id, identifier, identifier_type, contact_id
+        ) VALUES ('dataset-1', '*', ?, 'phone', 'contact-jessica')
+        """,
+        (phone,),
+    )
+    conn.commit()
+
+    adapters = AdapterFactory.create("local_database", conn=conn)
+    adapter = DefaultSignalRetrievalAdapter(adapters)
+    manifest = resolve_scope_manifest("contacts:resolve")
+    bundle = adapter.retrieve(
+        RetrievalRequest(
+            manifest=manifest,
+            access_mode="raw",
+            query_text="Find the contact record for Papa November",
+            disclosure_tier="owner_raw",
+            installed_source_ids=["demo_contacts_file"],
+        )
+    )
+    rows = bundle.context_packet.get("rows") or []
+    blob = str(rows).lower()
+    assert phone in blob
+    assert any(
+        str(r.get("identifier") or "") == phone and r.get("_table") == "contact_identifiers"
+        for r in rows
+    )
