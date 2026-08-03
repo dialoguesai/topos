@@ -287,10 +287,10 @@ def eval_d4_person_dossier(response: Dict[str, Any]) -> Tuple[bool, str]:
     )
     mentions = sum(1 for i in items if i.get("retrieval_source") == "entity_mention" and "marcus" in _blob(i))
     if not dossier:
-        return False, f"no Luc dossier item (sources: {_sources(items)})"
+        return False, f"no Marcus dossier item (sources: {_sources(items)})"
     if mentions < 1:
         return False, "dossier present but no supporting mentions"
-    return True, f"Luc dossier + {mentions} mentions"
+    return True, f"Marcus dossier + {mentions} mentions"
 
 
 def eval_no_forbidden_inference_keys(response: Dict[str, Any]) -> Tuple[bool, str]:

@@ -32,6 +32,9 @@ _INFERENCE_SEMANTIC_EXCLUDED_KEYS = frozenset(
     {"content", "text", "body", "content_preview", "text_preview", "title"}
 )
 _SUMMARY_ITEM_CAP = 25
+# Work "working on lately" asks: keep authored goals visible without letting a
+# dense user_goals corpus monopolize the summary cap (D3 diversity floor).
+_WORK_GOAL_FUSION_CAP = 8
 _SEMANTIC_HIT_LIMIT = 20
 _CLUSTER_LIMIT = 5
 _GOAL_SUMMARY_BOOST = 0.88
@@ -3041,12 +3044,27 @@ def _build_summary_items_unfiltered(
         # modest lift (floor still pins ≥2) for dense "working on" quality.
         goals_weight = 1.4 if goal_items and (work_scope or goal_intent) else 1.0
         emotions_weight = 1.8 if emotion_items and mood_ask else 1.0
+        # Cap goals on work "working on" asks so a dense authored-goals corpus
+        # cannot monopolize the summary cap (D3: need ≥3 retrieval_sources).
+        # Floor below still guarantees ≥2 user_goal items.
+        goals_for_fuse = goal_items
+        if work_scope and goal_intent and len(goal_items) > _WORK_GOAL_FUSION_CAP:
+            goals_for_fuse = goal_items[:_WORK_GOAL_FUSION_CAP]
         # Diversity floors: goals stay pinned on goal-intent; ai_conversations
         # also pins the chat lane so extracted user_goals / Work-dimension stats
         # cannot occupy every slot when the ask is for conversations (C26).
         min_per: Optional[Dict[str, int]] = None
         if goal_items and goal_intent:
             min_per = {"goals": 2}
+        if (
+            work_scope
+            and goal_intent
+            and recency_intent
+            and recent_items
+        ):
+            # "lately" / "recently" work asks: keep a recency spine beside goals.
+            min_per = dict(min_per or {})
+            min_per["recent"] = max(int(min_per.get("recent") or 0), 2)
         if emotion_items and mood_ask:
             min_per = dict(min_per or {})
             min_per["emotions"] = max(int(min_per.get("emotions") or 0), 1)
@@ -3062,7 +3080,7 @@ def _build_summary_items_unfiltered(
                 ("stat_insights", 2.0, stat_items),
                 ("facts_store", 1.5, fact_store_items),
                 ("entities", 1.5, entity_items),
-                ("goals", goals_weight, goal_items),
+                ("goals", goals_weight, goals_for_fuse),
                 ("emotions", emotions_weight, emotion_items),
                 ("canonical", canonical_weight, canonical_items),
                 ("contacts", 1.2, interaction_items),
