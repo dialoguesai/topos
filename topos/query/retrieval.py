@@ -579,6 +579,8 @@ def resolve_retrieval_source_ids(
     manifest: ScopeResolutionManifest,
     installed_source_ids: Optional[List[str]] = None,
 ) -> List[str]:
+    from ..sources.definitions import CANONICAL_ADDRESS_BOOK_SOURCE_ID
+
     ids = [str(s).strip() for s in (manifest.default_source_ids or []) if str(s).strip()]
     if not ids and manifest.default_source_id:
         ids = [str(manifest.default_source_id)]
@@ -588,6 +590,15 @@ def resolve_retrieval_source_ids(
     if not installed:
         return ids
     filtered = [sid for sid in ids if sid in installed]
+    # Derived address-book rows are not runtime-installed connectors. When the
+    # scope's manifest includes them, keep them even if only a demo/connector
+    # contact source is installed — otherwise live contacts:resolve returns
+    # empty while contact_identifiers still hold the needles (C7/C14).
+    if (
+        CANONICAL_ADDRESS_BOOK_SOURCE_ID in ids
+        and CANONICAL_ADDRESS_BOOK_SOURCE_ID not in filtered
+    ):
+        filtered.append(CANONICAL_ADDRESS_BOOK_SOURCE_ID)
     if filtered:
         return filtered
     logger.debug(
