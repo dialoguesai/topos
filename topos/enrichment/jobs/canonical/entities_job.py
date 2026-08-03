@@ -234,6 +234,19 @@ class EntitiesJob(BaseEnrichmentJob):
                 )
             except ValueError:
                 continue
+            authored_flag = None
+            if msg:
+                from ....storage.db.migrations.entity_mentions_authored_v1 import (
+                    authored_flag_for_row,
+                )
+
+                table = str(
+                    rec.get("canonical_table")
+                    or msg.get("_table")
+                    or msg.get("canonical_table")
+                    or ""
+                )
+                authored_flag = authored_flag_for_row(msg, table=table)
             resolver.record_mention(
                 entity_id,
                 record_id=record_id,
@@ -242,6 +255,7 @@ class EntitiesJob(BaseEnrichmentJob):
                 canonical_table=rec.get("canonical_table"),
                 confidence=confidence,
                 event_at=rec.get("event_at"),
+                authored_by_owner=authored_flag,
             )
             entities_by_record.setdefault(record_id, []).append(entity_id)
 

@@ -245,6 +245,37 @@ def test_odile_is_mention_only(corpus_conn):
         ) == 1
 
 
+def test_odile_mentions_not_owner_authored(corpus_conn):
+    """P3.1 / B6 IMB wire: mention-only Odile rows must carry authored_by_owner=0.
+
+    Catches write-path / seed regressions that would stamp observed-speech
+    mentions as owner-authored (misattribution expansion failure mode).
+    """
+    assert _one(
+        corpus_conn,
+        """SELECT COUNT(*) FROM pragma_table_info('entity_mentions')
+           WHERE name = 'authored_by_owner'""",
+    ) == 1
+    assert _one(
+        corpus_conn,
+        """SELECT COUNT(*) FROM entity_mentions
+           WHERE entity_id = 'imb-ent-odile' AND authored_by_owner = 0""",
+    ) == 6
+    assert _one(
+        corpus_conn,
+        """SELECT COUNT(*) FROM entity_mentions
+           WHERE entity_id = 'imb-ent-odile'
+             AND (authored_by_owner IS NULL OR authored_by_owner = 1)""",
+    ) == 0
+    # Parent messages are observed (is_from_self=0) — join consistency.
+    assert _one(
+        corpus_conn,
+        """SELECT COUNT(*) FROM entity_mentions m
+           JOIN conversation_messages c ON c.message_id = m.record_id
+           WHERE m.entity_id = 'imb-ent-odile' AND c.is_from_self = 1""",
+    ) == 0
+
+
 def test_fts_index_carries_honest_df_statistics(corpus_conn):
     """search_text-only signal_embeddings rows (no vectors) must have populated the
     FTS index via triggers: ambient tokens common, authored needles rare — the

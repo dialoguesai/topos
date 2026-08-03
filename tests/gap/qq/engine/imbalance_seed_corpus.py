@@ -430,12 +430,15 @@ def _seed_identities(conn: sqlite3.Connection) -> None:
     mention_n = 0
     for sender in SENDERS:
         for slot_idx, i in enumerate(_ODILE_SLOTS):
+            # P3.1 / B6: Odile mentions are always on *others'* speech
+            # (SENDERS' observed rows) — authored_by_owner=0 by construction.
+            # Eval tripwire: test_odile_mentions_not_owner_authored.
             conn.execute(
                 """INSERT INTO entity_mentions
                    (mention_id, entity_id, record_id, canonical_table, surface_text,
-                    event_at, source_id)
+                    event_at, source_id, authored_by_owner)
                    VALUES (?, 'imb-ent-odile', ?, 'conversation_messages', ?, ?,
-                           'demo_messenger_file')""",
+                           'demo_messenger_file', 0)""",
                 (
                     f"imb-mention-odile-{mention_n}",
                     f"imb-{sender['key']}-{i:04d}",
