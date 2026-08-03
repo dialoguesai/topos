@@ -135,7 +135,7 @@ def entity_context_items(
     read to CLOSED revisions: ended relationships render with the
     "no longer current" marker instead of being invisible (B2.2/T7).
     """
-    from .dossier import format_connection_label, load_dossier_for_entity
+    from .dossier import ensure_dossier, format_connection_label, load_dossier_for_entity
     from .edges import EDGE_SEMANTIC_AFFINITY, top_edges
 
     include_closed = temporal_shift == "past"
@@ -150,7 +150,15 @@ def entity_context_items(
                 for e in widened
                 if e.get("valid_to") and e.get("edge_type") != EDGE_SEMANTIC_AFFINITY
             ]
+        # Prefer the live store row; if refresh skipped this entity (below
+        # SIGNIFICANT_MENTIONS) or supersede left no active revision, materialize
+        # so named person asks stay on entity_dossier rather than thin graph.
         dossier = load_dossier_for_entity(conn, entity_id)
+        if dossier is None:
+            try:
+                dossier = ensure_dossier(conn, entity)
+            except Exception:
+                dossier = None
         if dossier:
             text = dossier.get("summary_text") or ""
             connections = dossier.get("top_connections") or []

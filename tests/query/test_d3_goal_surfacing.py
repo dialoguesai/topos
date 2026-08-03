@@ -56,3 +56,27 @@ def test_min_per_source_no_op_when_lane_empty():
     )
     assert len(fused) == 25
     assert all(i["retrieval_source"] == "vector" for i in fused)
+
+
+def test_work_goal_cap_leaves_room_for_recent_diversity():
+    """Dense goal corpora must not erase recency from a 'lately' work ask (D3)."""
+    from topos.query.retrieval import _WORK_GOAL_FUSION_CAP
+
+    goals = _items("user_goal", 40, "g")[:_WORK_GOAL_FUSION_CAP]
+    recent = _items("recent", 10, "r")
+    facts = _items("signal_fact", 4, "f")
+    fused = _rrf_fuse_summary_lists(
+        [
+            ("goals", 1.4, goals),
+            ("signal_facts", 1.0, facts),
+            ("recent", 1.0, recent),
+        ],
+        cap=25,
+        min_per_source={"goals": 2, "recent": 2},
+    )
+    sources = {i["retrieval_source"] for i in fused}
+    assert "user_goal" in sources
+    assert "recent" in sources
+    assert len(sources) >= 3 or "signal_fact" in sources
+    assert sum(1 for i in fused if i["retrieval_source"] == "user_goal") >= 2
+    assert sum(1 for i in fused if i["retrieval_source"] == "recent") >= 2

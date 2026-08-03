@@ -343,6 +343,40 @@ class TestDossiers:
         ).fetchone()[0]
         assert live == 1
 
+    def test_ensure_dossier_materializes_below_significance(self, conn) -> None:
+        """Named asks must not degrade to entity_graph after supersede (D4)."""
+        from topos.features.entities.dossier import ensure_dossier, load_dossier_for_entity
+
+        _seed_contacts(conn)
+        resolver = EntityResolver(conn)
+        resolver.seed_from_contacts()
+        maya, _ = resolver.resolve("Maya Chen", entity_type="person")
+        # Only two mentions — below SIGNIFICANT_MENTIONS=3, so refresh skips.
+        for i in range(2):
+            resolver.record_mention(
+                maya,
+                record_id=f"sub-{i}",
+                surface_text="Maya Chen",
+                canonical_table="conversation_messages",
+                event_at=f"2026-06-0{i + 1}T10:00:00Z",
+            )
+        conn.commit()
+        assert refresh_dossiers(conn) == 0
+        assert load_dossier_for_entity(conn, maya) is None
+        payload = ensure_dossier(
+            conn,
+            {
+                "entity_id": maya,
+                "entity_type": "person",
+                "canonical_name": "Maya Chen",
+                "mention_count": 2,
+            },
+        )
+        assert payload is not None and "Maya Chen" in payload["summary_text"]
+        assert load_dossier_for_entity(conn, maya) is not None
+        items = entity_context_items(conn, link_query_entities(conn, "Who is Maya Chen?"))
+        assert any(i.get("retrieval_source") == "entity_dossier" for i in items)
+
 
 class TestQueryLinking:
     def test_link_by_name_and_alias(self, conn) -> None:
