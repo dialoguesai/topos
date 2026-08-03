@@ -37,6 +37,10 @@ DEPRECATED_TABLES = {
     "persons": "superseded by entities (entity_type='person')",
     "person_aliases": "superseded by entities.aliases_json",
     "relationship_edges": "superseded by entity_edges",
+    # D1.8 / B1: dual-graph furniture store — retrieval no longer packages it;
+    # product path is entity_edges (+ /data/graph as-of scrubber → Wave B9).
+    "graph_nodes": "superseded by entity graph (entities + entity_edges)",
+    "graph_edges": "superseded by entity_edges",
     "signal_summaries": "never populated; summaries live on briefs/facts",
     "signal_tags": "never populated; tags live in signal_objects payloads",
     "message_embeddings": "superseded by signal_embeddings",
