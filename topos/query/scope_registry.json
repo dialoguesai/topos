@@ -188,7 +188,7 @@
     },
     {
       "scope_id": "health:read",
-      "description": "Wellbeing signals from journal entries: moods, wellness summaries, and wellness scores.",
+      "description": "Wellbeing signals from journal entries and role-filtered message emotions: moods, wellness summaries, and wellness scores.",
       "example_questions": [
         "How has my mood trended this month?"
       ],
@@ -198,7 +198,9 @@
       "raw_tables": [
         "journal_entries"
       ],
-      "signal_objects": [],
+      "signal_objects": [
+        "message_emotions"
+      ],
       "summary_objects": [
         "wellness_summary"
       ],

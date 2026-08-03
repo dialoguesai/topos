@@ -244,8 +244,34 @@ _FIRST_PERSON_SHAPE_TOKENS = frozenset(
         # Work-context answer shape ("what am I working toward / which projects")
         "project", "projects", "working", "toward", "towards",
         "focused", "focus", "roadmap", "priority", "priorities",
+        # Mood / emotion ask shape (D1.8 — message_emotions contributor)
+        "mood", "moods", "emotion", "emotions", "feeling", "feelings",
+        "emotional", "wellbeing", "well-being",
     }
 )
+
+# Lexical cues that should load the role-filtered message_emotions aggregate.
+_MOOD_EMOTION_TERMS: Tuple[str, ...] = (
+    "mood",
+    "moods",
+    "emotion",
+    "emotions",
+    "feeling",
+    "feelings",
+    "felt",
+    "emotional",
+    "anxious",
+    "anxiety",
+    "stress",
+    "stressed",
+    "wellbeing",
+    "well-being",
+)
+
+
+def _mood_emotion_intent(query_text: str) -> bool:
+    q = (query_text or "").lower()
+    return any(term in q for term in _MOOD_EMOTION_TERMS)
 
 
 def _roles_owner_authored(table: str, row: Dict[str, Any]) -> Optional[bool]:
@@ -1140,6 +1166,79 @@ def _load_canonical_summary_items(
         # (non-message) rows keep relative order, other-authored rows last.
         items.sort(key=lambda item: _owner_rank(item.get("owner_authored")))
     return items[:_SUMMARY_ITEM_CAP]
+
+
+def _load_emotion_summary_items(
+    conn: Optional[Any],
+    *,
+    limit: int = 8,
+) -> List[Dict[str, Any]]:
+    """Role-filtered emotion aggregate for mood/emotion asks (D1.8 wire).
+
+    Same authorship filter as MCP message joins: keep ``authored`` /
+    ``addressed`` / legacy NULL; drop ``observed`` (other people's affect).
+    Returns at most one summary item plus optional per-label detail rows.
+    """
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute(
+            """
+            SELECT emotion_label, COUNT(*) AS n, AVG(confidence) AS avg_conf
+            FROM message_emotions
+            WHERE emotion_label IS NOT NULL
+              AND TRIM(emotion_label) != ''
+              AND (role IS NULL OR role IN ('authored', 'addressed'))
+            GROUP BY emotion_label
+            ORDER BY n DESC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        ).fetchall()
+    except Exception as exc:
+        logger.debug("message_emotions load skipped: %s", exc)
+        return []
+    if not rows:
+        return []
+    parts = [
+        f"{str(label)} ({int(n)})"
+        for label, n, _avg in rows
+        if label is not None
+    ]
+    if not parts:
+        return []
+    body = "Owner authored/addressed emotion signals: " + ", ".join(parts) + "."
+    top_label = str(rows[0][0])
+    top_n = int(rows[0][1] or 0)
+    items: List[Dict[str, Any]] = [
+        {
+            "topic": "owner emotion signals",
+            "summary_text": body,
+            "emotion_label": top_label,
+            "emotion_count": top_n,
+            "relevance_score": 0.9,
+            "retrieval_source": "message_emotions",
+            "dimension": "wellbeing",
+        }
+    ]
+    for label, n, avg_conf in rows[:3]:
+        items.append(
+            {
+                "topic": f"emotion:{label}",
+                "summary_text": f"Emotion signal {label}: {int(n)} messages"
+                + (
+                    f" (avg confidence {float(avg_conf):.2f})"
+                    if isinstance(avg_conf, (int, float))
+                    else ""
+                ),
+                "emotion_label": str(label),
+                "emotion_count": int(n or 0),
+                "relevance_score": 0.82,
+                "retrieval_source": "message_emotions",
+                "dimension": "wellbeing",
+            }
+        )
+    return items
 
 
 def _load_complexity_summary_items(conn: Optional[Any]) -> List[Dict[str, Any]]:
@@ -2638,6 +2737,18 @@ def _build_summary_items_unfiltered(
         brief_dims.append("Profile")
     brief_items = _load_brief_summary_items(brief_dims, conn=bundle_conn)
 
+    # D1.8: role-filtered message_emotions for mood/emotion asks. Declared on
+    # messages:read signal_objects; also answers health:read mood questions
+    # (journals alone cannot probe the emotions table — see PRV-E1 note).
+    emotion_items: List[Dict[str, Any]] = []
+    mood_ask = _mood_emotion_intent(query_text)
+    emotions_in_scope = (
+        "message_emotions" in (manifest.signal_objects or [])
+        or manifest.scope_id in ("messages:read", "health:read")
+    )
+    if mood_ask and emotions_in_scope and bundle_conn is not None:
+        emotion_items = _load_emotion_summary_items(bundle_conn)
+
     # Legacy work-scope employer heuristic (scheduled for deletion once the
     # query planner covers it); contributes ordered items, not fake scores.
     if manifest.scope_id == "work_context:read" and query_text:
@@ -2882,12 +2993,16 @@ def _build_summary_items_unfiltered(
         # Work / goal-intent asks need authored goals above ambient lanes;
         # modest lift (floor still pins ≥2) for dense "working on" quality.
         goals_weight = 1.4 if goal_items and (work_scope or goal_intent) else 1.0
+        emotions_weight = 1.8 if emotion_items and mood_ask else 1.0
         # Diversity floors: goals stay pinned on goal-intent; ai_conversations
         # also pins the chat lane so extracted user_goals / Work-dimension stats
         # cannot occupy every slot when the ask is for conversations (C26).
         min_per: Optional[Dict[str, int]] = None
         if goal_items and goal_intent:
             min_per = {"goals": 2}
+        if emotion_items and mood_ask:
+            min_per = dict(min_per or {})
+            min_per["emotions"] = max(int(min_per.get("emotions") or 0), 1)
         if ai_scope and canonical_items:
             min_per = dict(min_per or {})
             min_per["canonical"] = max(int(min_per.get("canonical") or 0), 3)
@@ -2901,6 +3016,7 @@ def _build_summary_items_unfiltered(
                 ("facts_store", 1.5, fact_store_items),
                 ("entities", 1.5, entity_items),
                 ("goals", goals_weight, goal_items),
+                ("emotions", emotions_weight, emotion_items),
                 ("canonical", canonical_weight, canonical_items),
                 ("contacts", 1.2, interaction_items),
                 ("briefs", brief_weight, brief_items),
@@ -2922,7 +3038,20 @@ def _build_summary_items_unfiltered(
     # Legacy path (TOPOS_FUSION_RRF=off): incomparable absolute scores.
     for item in entity_items + fact_store_items + stat_items:
         item.setdefault("relevance_score", 0.9)
-    items = stat_items + fact_store_items + entity_items + goal_items + canonical_items + interaction_items + brief_items + cluster_items + vector_items + vector_context_items + fact_items
+    items = (
+        stat_items
+        + fact_store_items
+        + entity_items
+        + goal_items
+        + emotion_items
+        + canonical_items
+        + interaction_items
+        + brief_items
+        + cluster_items
+        + vector_items
+        + vector_context_items
+        + fact_items
+    )
     if work_scope:
         for item in items:
             if str(item.get("retrieval_source") or "").startswith("canonical:profile_records"):
@@ -3307,14 +3436,8 @@ class DefaultSignalRetrievalAdapter:
                 packet["semantic_hits"] = semantic_hits
             if ranked_clusters and not abstained:
                 packet["topic_clusters"] = ranked_clusters
-            if manifest.scope_id in ("relationship_context:read", "messages:read") and not abstained:
-                graph = self._adapters.graph.list_graph(limit_nodes=50, limit_edges=100)
-                if graph.get("edges") or graph.get("nodes"):
-                    touched.append("graph")
-                    packet["graph"] = {
-                        "nodes": graph.get("nodes") or [],
-                        "edges": graph.get("edges") or [],
-                    }
+            # D1.8: do not attach legacy graph_nodes/graph_edges furniture.
+            # Product graph answers use entity_edges; dual-graph store is GC-deprecated.
         elif mode == "inference":
             scores: List[Dict[str, Any]] = []
             inference_rare: List[str] = []
@@ -3385,13 +3508,7 @@ class DefaultSignalRetrievalAdapter:
                     for hit in semantic_hits
                 ]
                 counts["semantic_hits"] = len(semantic_hits)
-            graph = self._adapters.graph.list_graph(limit_nodes=50, limit_edges=100)
-            if graph.get("edges") or graph.get("nodes"):
-                touched.append("graph")
-                packet["graph"] = {
-                    "nodes": graph.get("nodes") or [],
-                    "edges": graph.get("edges") or [],
-                }
+            # D1.8: legacy graph_nodes/graph_edges furniture removed (GC-deprecated).
             meta = self._adapters.vector.list_metadata(limit=20, offset=0)
             if meta.total:
                 touched.append("vector")
