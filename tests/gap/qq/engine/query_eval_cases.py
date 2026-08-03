@@ -74,7 +74,10 @@ EvalFn = Callable[[Dict[str, Any]], Tuple[bool, str]]
 # qq-catalog-15 (D1.7 / Wave B2): GEN lane qq-gen-1→qq-gen-2 — 15 answerable + 15
 # unanswerable probes (was 3+2 decorative); G1 re-scoped ai_conversations→messages
 # (Q2 lesson). Comparability break on GEN composite by design; other lanes untouched.
-QUERY_CATALOG_VERSION = "qq-catalog-15"
+# qq-catalog-16 (Wave B8): +IMBG1–IMBG10 GEN-judged IMB phrasing lane (qq-imb-gen-1)
+# on the IMB scratch corpus; attribution IdealBadPair + poison-in-answer checks.
+# Existing lane composites comparable to qq-catalog-15 via shared case_ids.
+QUERY_CATALOG_VERSION = "qq-catalog-16"
 
 _DEFAULT_LATENCY_MS = {
     "summary": int(os.environ.get("TOPOS_QQ_LATENCY_SUMMARY_MS", "10000")),

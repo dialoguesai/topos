@@ -29,7 +29,8 @@ mechanism must land against a case that was red before it and green after.
 Returning others' messages for a belief question is not automatically wrong (they are
 evidence when attributed) — this deterministic v1 grades the detectable failures
 (poison presence, non-authored evidence for first-person asks, missing abstention);
-attributed-answer phrasing quality belongs to a later judged (GEN-style) variant.
+attributed-answer phrasing quality is graded by the IMBG lane
+(imb_generative_eval_cases.py, qq-imb-gen-1 / Wave B8).
 """
 
 from __future__ import annotations

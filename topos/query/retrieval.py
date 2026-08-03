@@ -1129,6 +1129,7 @@ def _load_canonical_summary_items(
                 continue
             if belief_intent and owner is True and table in _MESSAGE_TABLES and _belief_about_other(text):
                 continue  # owner-authored but about a third party — not the owner's belief
+            speaker = ""
             if first_person and owner is False:
                 if table == "ai_chat_messages":
                     speaker = str(row.get("sender_type") or "assistant").strip() or "assistant"
@@ -1149,6 +1150,11 @@ def _load_canonical_summary_items(
                 "relevance_score": round(_canonical_relevance(text, query_text), 4),
                 "retrieval_source": f"canonical:{table}",
             }
+            # B8 / GEN-judged IMB: speaker_label + owner_authored survive inference
+            # stripping of topic/summary_text so the generative answer can attribute
+            # non-owner evidence without a raw-content side channel.
+            if speaker:
+                item["speaker_label"] = speaker
             # Per-table event-time column (same keys the recency sort in
             # _list_canonical_rows uses); without it canonical rows can neither
             # decay in fusion nor answer a date-scoped ask.
@@ -3496,6 +3502,9 @@ class DefaultSignalRetrievalAdapter:
                 _exp_visible = _exposure_visible(getattr(self._adapters.signal, "_conn", None))
             except Exception:
                 _exp_visible = True
+            # B8: pass plan so first_person / belief filters and owner_authored +
+            # speaker_label metadata land on inference scores (summary path already
+            # threaded plan; inference previously dropped it → attribution-blind).
             canon_items = _load_canonical_summary_items(
                 manifest=manifest,
                 adapters=self._adapters,
@@ -3504,6 +3513,7 @@ class DefaultSignalRetrievalAdapter:
                 disclosure_tier=request.disclosure_tier,
                 rare_query_tokens=inference_rare,
                 browse_fallback=True,
+                plan=plan,
                 conn=getattr(self._adapters.signal, "_conn", None),
                 exposure_visible=_exp_visible,
             )

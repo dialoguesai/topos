@@ -858,7 +858,20 @@ class SQLiteVectorIndex:
         total = int(total_row[0]) if total_row else 0
         query += " ORDER BY embedding_id LIMIT ? OFFSET ?"
         params.extend([limit, offset])
-        items = [json.loads(r[0]) for r in self._conn.execute(query, params).fetchall()]
+        # search_text-only FTS rows (IMB/PRV corpora) leave provenance_json NULL —
+        # treat as empty provenance rather than crashing inference list_metadata.
+        items: List[Any] = []
+        for (raw,) in self._conn.execute(query, params).fetchall():
+            if raw is None:
+                items.append({})
+            elif isinstance(raw, (bytes, bytearray)):
+                items.append(json.loads(raw.decode("utf-8")))
+            elif isinstance(raw, str):
+                items.append(json.loads(raw))
+            elif isinstance(raw, dict):
+                items.append(raw)
+            else:
+                items.append({})
         return ListPage(items=items, total=total, offset=offset, limit=limit)
 
     def search_similar(
