@@ -88,19 +88,37 @@ def _resolve_accessible_entity_cohorts(cohorts: List[str]) -> List[str]:
     return resolved
 
 
+def _entity_selector_policy_keys_present(filter_manifest: Optional[Dict[str, Any]]) -> bool:
+    """True when the grant explicitly configured entity selector policy (even if empty).
+
+    Missing keys = legacy unrestricted. Present empty list = deny named people.
+    """
+    if not filter_manifest or not isinstance(filter_manifest, dict):
+        return False
+    nested = filter_manifest.get("filter_manifest")
+    nested_dict = nested if isinstance(nested, dict) else {}
+    for key in ("accessible_entity_ids", "accessible_entity_cohorts"):
+        if key in filter_manifest or key in nested_dict:
+            return True
+    return False
+
+
 def _read_accessible_entity_policy(
     filter_manifest: Optional[Dict[str, Any]],
-) -> tuple[List[str], List[str]]:
+) -> tuple[List[str], List[str], bool]:
     """Read grant siblings accessible_entity_ids / accessible_entity_cohorts (D-002).
 
     Stored on uma_permissions.filters next to filter_manifest (not inside pydantic
     FilterManifest — that strips unknown keys). Accept top-level on the filters blob
     or, for test convenience, nested under filter_manifest.
+
+    Returns (merged_ids, cohorts, policy_active).
     """
     if not filter_manifest or not isinstance(filter_manifest, dict):
-        return [], []
+        return [], [], False
     nested = filter_manifest.get("filter_manifest")
     nested_dict = nested if isinstance(nested, dict) else {}
+    policy_active = _entity_selector_policy_keys_present(filter_manifest)
 
     def _get(key: str) -> Any:
         if key in filter_manifest:
@@ -111,7 +129,7 @@ def _read_accessible_entity_policy(
     cohorts = _normalize_id_list(_get("accessible_entity_cohorts"))
     from_cohorts = _resolve_accessible_entity_cohorts(cohorts)
     merged = _normalize_id_list([*explicit, *from_cohorts])
-    return merged, cohorts
+    return merged, cohorts, policy_active
 
 
 def manifest_from_scope_entry(entry: Dict[str, Any]) -> ScopeResolutionManifest:
@@ -168,12 +186,13 @@ def resolve_scope_manifest(
         manifest = replace(manifest, canonical_tables=filtered)
     if filter_manifest is not None:
         manifest = replace(manifest, filter_manifest=filter_manifest)
-    entity_ids, entity_cohorts = _read_accessible_entity_policy(filter_manifest)
-    if entity_ids or entity_cohorts:
+    entity_ids, entity_cohorts, policy_active = _read_accessible_entity_policy(filter_manifest)
+    if policy_active:
         manifest = replace(
             manifest,
             accessible_entity_ids=entity_ids,
             accessible_entity_cohorts=entity_cohorts,
+            entity_selector_policy_active=True,
         )
 
     if client_manifest:

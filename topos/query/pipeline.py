@@ -48,26 +48,32 @@ def _minimizer_enabled() -> bool:
 
 
 def _selector_enforcement_enabled() -> bool:
-    """Selector-aware disclosure enforcement (plan A2). Default OFF: the safe-floor policy
-    (deny a grantee ANY named person) over-blocks legitimate flows where a person is named
-    incidentally within an authorized task ("prep the launch meeting with Alex"). Turning it
-    on by default awaits the A2.1 grant-schema, which will carry per-grant
-    accessible_entity_ids so authorized people pass while unauthorized selection is denied.
-    The mechanism is proven by the SEL eval lane, which sets this flag."""
-    return str(os.environ.get("TOPOS_SELECTOR_ENFORCEMENT") or "").strip().lower() in ("1", "true", "yes", "on")
+    """Selector-aware disclosure enforcement (plan A2 / A2.1 finish).
+
+    Default ON. Safe because missing entity-policy keys on a grant leave
+    `entity_selector_policy_active=False` (legacy unrestricted). Explicit empty
+    allow-list denies named people. Set TOPOS_SELECTOR_ENFORCEMENT=0|false|off to disable.
+    """
+    raw = str(os.environ.get("TOPOS_SELECTOR_ENFORCEMENT") or "").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    return True
 
 
 def _selector_unauthorized(db_conn, query_text: str, manifest) -> bool:
     """Selector-aware disclosure (plan A2, the Maya problem): True when a GRANTEE query
     names a real third-party PERSON entity the grant does not authorize selecting.
 
-    Default-deny floor: with no entity-level grant (manifest.accessible_entity_ids empty),
-    a grantee may not select ANY named person — because when the requester supplies the
-    selector, response-side redaction is meaningless (they conditioned the whole answer on
-    that person). Topic/place entities are NOT selectors and pass through. Fabricated names
-    don't link, so they never trigger this — which is exactly what makes the real-person
-    refusal indistinguishable from an absent-person query (both yield an empty result)."""
+    When entity_selector_policy_active is False (legacy grant — keys missing), do not
+    suppress. When active and allow-list empty, deny ANY named person — because when the
+    requester supplies the selector, response-side redaction is meaningless. Topic/place
+    entities are NOT selectors. Fabricated names don't link, so refusal ≡ absence.
+    """
     if not query_text or db_conn is None:
+        return False
+    if not bool(getattr(manifest, "entity_selector_policy_active", False)):
         return False
     try:
         from ..features.entities.linking import link_query_entities
