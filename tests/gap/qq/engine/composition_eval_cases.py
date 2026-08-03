@@ -478,6 +478,7 @@ LIVE_COMPOSITION_CASES: List[CompositionCase] = [
     CompositionCase(
         "C9", "live", "What was I doing last week?", "messages:read", "summary",
         oracle_c9_temporal, temporal_days=7, layer="planner:time_window",
+        query_class="recency",
         description="Relative time window actually constrains results"),
     CompositionCase(
         "C10", "live", "What do I know about the Zorblatt-9 submarine project?",
@@ -938,5 +939,6 @@ LIVE_COMPOSITION_CASES.extend([
     CompositionCase(
         "C30", "live", "What was I doing this past month?", "messages:read", "summary",
         oracle_c30_temporal_month, temporal_days=30, layer="planner:time_window",
+        query_class="recency",
         description="30-day relative window actually constrains results"),
 ])
