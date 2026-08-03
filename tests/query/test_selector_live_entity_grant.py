@@ -102,6 +102,72 @@ def test_seeded_grant_allow_list_denial_equals_absence(tmp_path: Path, monkeypat
         conn.close()
 
 
+def test_seeded_admission_refusal_f1_zero_false_permit(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A2.E2 / C4: labeled refuse+permit suite → F1=1.0, false_permit_rate=0.0."""
+    import sys
+
+    qq_engine = Path(__file__).resolve().parents[1] / "gap" / "qq" / "engine"
+    sys.path.insert(0, str(qq_engine))
+    from selector_eval_cases import (  # type: ignore[import-not-found]
+        SELECTOR_CASES,
+        annotate_admission_decision,
+        build_permit_cases,
+        refusal_f1_metrics,
+        score_permit_admission,
+        score_selector,
+    )
+
+    monkeypatch.delenv("TOPOS_SELECTOR_ENFORCEMENT", raising=False)
+    db = tmp_path / "sel_f1.db"
+    _seed_entities_db(db)
+    conn = sqlite3.connect(db)
+    try:
+        grant = {
+            "filter_manifest": {"access_mode_ceiling": "summary"},
+            "accessible_entity_ids": ["ent_maya_live"],
+        }
+        manifest = resolve_scope_manifest("relationship_context:read", filter_manifest=grant)
+        empty = {"public_result": {"summaries": []}, "turn_outcome": "ok"}
+        rows = []
+        # Unauthorized names (SEL offsets map to Maya/Alex/Jordan in seed order).
+        for case, name in (
+            (SELECTOR_CASES[0], "Maya Chen"),  # will be re-labeled: Maya is ON list
+            (SELECTOR_CASES[1], "Alex Rivera"),
+            (SELECTOR_CASES[2], "Jordan Lee"),
+        ):
+            # For F1 we use the seed grant where Maya is allowed — so only Alex/Jordan
+            # are should_refuse. Skip Maya as unauthorized.
+            if name == "Maya Chen":
+                continue
+            q = f"Tell me everything about {name}"
+            scored = score_selector(case, name, empty, empty)
+            scored["should_refuse"] = True
+            scored = annotate_admission_decision(
+                scored,
+                observed_refuse=_selector_unauthorized(conn, q, manifest),
+            )
+            rows.append(scored)
+        for case in build_permit_cases("Maya Chen"):
+            q, name = case.query(conn)
+            rows.append(
+                score_permit_admission(
+                    case,
+                    name,
+                    observed_refuse=_selector_unauthorized(conn, q, manifest),
+                )
+            )
+        m = refusal_f1_metrics(rows)
+        assert m["false_permit_rate"] == 0.0, m
+        assert m["refusal_f1"] == 1.0, m
+        assert m["confusion"]["FN"] == 0
+        assert m["confusion"]["TN"] >= 1
+        assert m["n_should_refuse"] >= 2
+    finally:
+        conn.close()
+
+
 @pytest.mark.asyncio
 async def test_seeded_pipeline_suppresses_off_list_person(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
