@@ -57,7 +57,9 @@ def _windowed_insight(
 ) -> Dict[str, Any] | None:
     state = engine.read_state(defn["stat_id"], group_key=group_key, window=window)
     n = int(state.get("n") or 0)
-    if n < _MIN_N:
+    # Match all-time path: sum aggregates (e.g. financial.spend.by_category) are
+    # meaningful at n=1–2; do not drop windowed variants under the count floor.
+    if n < _MIN_N and defn.get("stat_kind") not in _LOW_N_KINDS:
         return None
     summary = _summary_with_payload(defn, summarize(defn["stat_kind"], state))
     text = _render_text(defn["stat_id"], defn["stat_kind"], group_key, summary, defn, label_map or {})

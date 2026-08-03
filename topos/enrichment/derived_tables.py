@@ -126,6 +126,7 @@ class DerivedTablesManager(BaseObject):
                     confidence REAL,
                     model_name TEXT,
                     all_emotions_json TEXT,
+                    role TEXT,
                     created_at TEXT NOT NULL,
                     PRIMARY KEY (message_id, model_name)
                 )
@@ -144,27 +145,39 @@ class DerivedTablesManager(BaseObject):
                 )
             """)
             
-            # Add source_id column if it doesn't exist (migration for existing tables)
-            try:
-                self.conn.execute("ALTER TABLE message_emotions ADD COLUMN source_id TEXT")
-            except sqlite3.OperationalError:
-                # Column already exists, ignore
-                pass
-            
-            self.conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_message_emotions_message 
-                ON message_emotions(message_id)
-            """)
-            
-            self.conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_message_emotions_label 
-                ON message_emotions(emotion_label)
-            """)
-            
-            self.conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_message_emotions_source 
-                ON message_emotions(source_id)
-            """)
+            # Additive columns for existing tables (idempotent)
+            for alter_sql in (
+                "ALTER TABLE message_emotions ADD COLUMN source_id TEXT",
+                "ALTER TABLE message_emotions ADD COLUMN role TEXT",
+            ):
+                try:
+                    self.conn.execute(alter_sql)
+                except sqlite3.OperationalError:
+                    pass
+
+            emo_cols = {
+                row[1] for row in self.conn.execute("PRAGMA table_info(message_emotions)").fetchall()
+            }
+            if "message_id" in emo_cols:
+                self.conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_message_emotions_message 
+                    ON message_emotions(message_id)
+                """)
+            if "emotion_label" in emo_cols:
+                self.conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_message_emotions_label 
+                    ON message_emotions(emotion_label)
+                """)
+            if "source_id" in emo_cols:
+                self.conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_message_emotions_source 
+                    ON message_emotions(source_id)
+                """)
+            if "role" in emo_cols:
+                self.conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_message_emotions_role
+                    ON message_emotions(role) WHERE role IS NOT NULL
+                """)
             
             commit_connection(self.conn)
             _ENSURED_CONNECTIONS.add(conn_key)
@@ -256,6 +269,7 @@ class DerivedTablesManager(BaseObject):
                             "confidence": record.get("confidence"),
                             "model_name": record.get("model_name") or record.get("model"),
                             "all_emotions_json": all_emotions_str,
+                            "role": record.get("role"),
                             "created_at": extracted_at,
                             "spec_version": _record_spec_version(record, "emo_27"),
                         }
