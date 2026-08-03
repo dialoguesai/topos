@@ -119,22 +119,43 @@ _JUNK_SURFACE_WORDS = frozenset(
     }
 )
 
+# Plan C4: reject ≤3-char mint surfaces by default, but keep known short orgs /
+# places / nicknames that are real entities (and alphanumeric codes like C3).
+_SHORT_SURFACE_ALLOWLIST = frozenset(
+    {
+        "al", "bo", "ed", "jo", "li", "ty", "aj", "jd", "jp", "tj",
+        "aws", "ibm", "ups", "att", "bbc", "cnn", "nba", "nfl", "nhl",
+        "nyc", "la", "sf", "uk", "us", "eu", "un", "mit", "cmu",
+        "max", "sam", "ben", "amy", "zoe", "mia", "leo", "eva", "ava",
+    }
+)
+
 
 def is_valid_entity_surface(text: str) -> bool:
     """Reject NER artifacts before they become entities.
 
     BERT-style NER emits sub-word fragments ('##dy', '##ccelerator') when an
-    entity spans wordpieces; those, digit/punctuation-only surfaces, and
-    all-stopword surfaces ('IS', 'Go', 'The One') must never enter the registry.
+    entity spans wordpieces; those, digit/punctuation-only surfaces, ≤3-char
+    junk (plan C4), and all-stopword surfaces ('IS', 'Go', 'The One') must never
+    enter the registry.
     """
     surface = str(text or "").strip()
     if not surface or "##" in surface:
         return False
     normalized = normalize_name(surface)
-    if len(normalized) < 2:
+    if not normalized:
         return False
     if not any(c.isalpha() for c in normalized):
         return False
+    # C4: ≤3-char surfaces are almost always NER crumbs ("dy", "is", "the").
+    # Allow short allowlisted names/orgs and alphanumeric codes (C3, H2).
+    if len(normalized) <= 3:
+        compact = normalized.replace(" ", "")
+        has_digit = any(c.isdigit() for c in compact)
+        if compact not in _SHORT_SURFACE_ALLOWLIST and not (
+            has_digit and any(c.isalpha() for c in compact)
+        ):
+            return False
     # All-stopword surface → junk. Keep names where at least one token is a
     # real word ('Hotel Juliett', 'The Weeknd', 'LA Fitness').
     alpha_tokens = [t for t in normalized.split() if any(c.isalpha() for c in t)]
