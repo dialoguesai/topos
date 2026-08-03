@@ -53,6 +53,9 @@ _FAST_INBOUND_MESSAGE_TYPES = frozenset(
         # while a version upgrade reprocess is walking sources.
         "get_runtime_bootstrap",
         "get_upgrade_status",
+        # Settings → General owner display name (must not sit behind ingest saturation)
+        "get_user_identity",
+        "put_user_identity",
     }
 )
 
