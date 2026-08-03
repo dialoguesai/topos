@@ -6,7 +6,10 @@ import sqlite3
 
 import pytest
 
-from topos.enrichment.derived_tables import DerivedTablesManager
+from topos.enrichment.derived_tables import (
+    DerivedTablesManager,
+    reset_ensured_tables_cache,
+)
 from topos.storage.db.migrations import apply_all_migrations
 from topos.storage.db.migrations.message_emotions_role_v1 import (
     MIGRATION_ID,
@@ -24,6 +27,9 @@ def conn(tmp_path):
     # the derived (message_id, model_name) shape — rebuild for this unit test.
     c.execute("DROP TABLE IF EXISTS message_emotions")
     c.commit()
+    # Prior suite order can leave ``id(conn)`` in ``_ENSURED_CONNECTIONS`` after
+    # GC reuses the pointer; clear so DROP + recreate is not skipped.
+    reset_ensured_tables_cache()
     DerivedTablesManager(conn=c)._ensure_tables()
     apply_message_emotions_role_v1_up(c)
     yield c
