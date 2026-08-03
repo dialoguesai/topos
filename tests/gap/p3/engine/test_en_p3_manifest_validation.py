@@ -66,7 +66,7 @@ def test_resolve_manifest_maps_accessible_entity_ids_from_grant_filters() -> Non
 
 @pytest.mark.check("C-quality-selector-entity-grant")
 def test_resolve_manifest_unknown_cohort_does_not_widen_access() -> None:
-    """v1 cohorts are accepted for audit but do not add entity ids until implemented."""
+    """Cohorts are accepted for audit / A8 aggregate permit but do not add entity ids (C1)."""
     manifest = resolve_scope_manifest(
         "messages:read",
         filter_manifest={"accessible_entity_cohorts": ["contacts", "calendar_attendees"]},

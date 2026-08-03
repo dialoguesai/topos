@@ -2935,6 +2935,50 @@ def _build_summary_items_unfiltered(
     return items[:_SUMMARY_ITEM_CAP]
 
 
+def _count_non_self_persons(db_conn) -> Optional[int]:
+    """Thin A8 stub: distinct non-self person count, never names. None if unavailable."""
+    if db_conn is None:
+        return None
+    try:
+        row = db_conn.execute(
+            "SELECT COUNT(*) FROM entities "
+            "WHERE lower(entity_type)='person' AND COALESCE(is_self, 0)=0"
+        ).fetchone()
+        return int(row[0] or 0) if row else 0
+    except Exception:
+        return None
+
+
+def _build_cohort_aggregate_summary(
+    *,
+    person_count: Optional[int],
+    scope_id: str,
+) -> Dict[str, Any]:
+    """Non-entity-specific aggregate text — no person names, no per-entity rows."""
+    if person_count is None:
+        body = (
+            "Cohort aggregate (non-entity-specific): messaging and contact activity "
+            "can be summarized across people without naming individuals. "
+            "Individual people are not selectable under this grant."
+        )
+    else:
+        body = (
+            f"Cohort aggregate (non-entity-specific): about {person_count} people "
+            "appear in the contact graph. Individual people are not disclosed "
+            "under this grant."
+        )
+    return {
+        "summary_text": body,
+        "topic": "cohort_aggregate",
+        "retrieval_source": "cohort_aggregate",
+        "scope_id": scope_id,
+        "relevance_score": 1.0,
+        # Explicit: this rollup must never carry entity selectors.
+        "entity_ids": [],
+        "aggregate_only": True,
+    }
+
+
 class DefaultSignalRetrievalAdapter:
     """Retrieve minimum necessary data per access mode and manifest."""
 
@@ -2948,6 +2992,60 @@ class DefaultSignalRetrievalAdapter:
 
     def stores_touched(self) -> List[str]:
         return list(self._last_stores)
+
+    def _cohort_aggregate_bundle(
+        self,
+        request: RetrievalRequest,
+        packet: Dict[str, Any],
+        retrieval_meta: Dict[str, Any],
+    ) -> RetrievalBundle:
+        """A8: mode-appropriate non-entity-specific aggregate (no named-person data)."""
+        from ..core.state import get_db_connection
+
+        try:
+            db_conn = get_db_connection()
+        except Exception:
+            db_conn = None
+        person_count = _count_non_self_persons(db_conn)
+        summary = _build_cohort_aggregate_summary(
+            person_count=person_count,
+            scope_id=str(getattr(request.manifest, "scope_id", "") or ""),
+        )
+        mode = request.access_mode
+        if mode == "raw":
+            # Raw still must not expose entity rows — same aggregate fact as a row-shaped shell.
+            packet["rows"] = [
+                {
+                    "record_id": "cohort_aggregate",
+                    "summary_text": summary["summary_text"],
+                    "retrieval_source": "cohort_aggregate",
+                    "aggregate_only": True,
+                }
+            ]
+        elif mode == "inference":
+            packet["scores"] = [
+                {
+                    "label": "cohort_aggregate",
+                    "score": 1.0,
+                    "summary_text": summary["summary_text"],
+                    "retrieval_source": "cohort_aggregate",
+                    "aggregate_only": True,
+                }
+            ]
+        else:
+            packet["answer_type"] = "summary"
+            packet["summaries"] = [summary]
+        retrieval_meta["retrieval_strategy"] = "cohort_aggregate"
+        retrieval_meta["aggregate_only"] = True
+        if person_count is not None:
+            retrieval_meta["cohort_person_count"] = person_count
+        self._last_stores = ["entities"] if person_count is not None else []
+        return RetrievalBundle(
+            context_packet=packet,
+            stores_touched=list(self._last_stores),
+            record_counts={"cohort_aggregate": 1},
+            retrieval_metadata=retrieval_meta,
+        )
 
     def retrieve(self, request: RetrievalRequest) -> RetrievalBundle:
         self.retrieve_call_count += 1
@@ -2988,6 +3086,12 @@ class DefaultSignalRetrievalAdapter:
                 context_packet=packet, stores_touched=[], record_counts={},
                 retrieval_metadata=retrieval_meta,
             )
+
+        # A2.3 / A8 refuse-vs-aggregate: aggregate-only ask under active selector / cohort
+        # grant → non-entity-specific rollup. No named-person rows; no full retrieve.
+        # Cohort → entity-id resolvers remain Wave C1 (thin count stub here).
+        if request.cohort_aggregate:
+            return self._cohort_aggregate_bundle(request, packet, retrieval_meta)
 
         source_filter = manifest.default_source_id
         source_ids = _resolve_source_ids(manifest, request.installed_source_ids)

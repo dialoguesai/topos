@@ -73,10 +73,11 @@ def _normalize_id_list(raw: Any) -> List[str]:
 
 
 def _resolve_accessible_entity_cohorts(cohorts: List[str]) -> List[str]:
-    """D-002 v1: cohorts are accepted on the grant but only none/empty resolve.
+    """D-002 v1: cohorts are accepted on the grant but only none/empty resolve to ids.
 
-    Unknown cohort ids are ignored (fail closed — they do not widen access). Future
-    resolvers (e.g. contacts, calendar attendees) land here and union into the allow-list.
+    Cohort tokens do not widen `accessible_entity_ids` here (fail closed until Wave C1
+    resolvers). Recognized tokens (contacts, message_peers, …) still unlock the A2.3 / A8
+    non-entity-specific aggregate path via `manifest.accessible_entity_cohorts` audit.
     """
     resolved: List[str] = []
     for raw in cohorts:
