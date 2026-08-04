@@ -24,12 +24,21 @@ class ScopeResolutionManifest:
     default_source_ids: List[str] = field(default_factory=list)
     filter_manifest: Optional[Dict[str, Any]] = None
     must_not_retrieve: List[str] = field(default_factory=list)
-    # Selector-aware disclosure (plan A2): entity_ids a GRANTEE is authorized to select by
-    # name. Empty = default-deny (a grantee may not select any named third party — the safe
-    # floor until the grant layer populates this). The owner tier ignores it entirely.
-    # A2.1 (grant-schema) will populate this per grant; today it stays empty ⇒ grantees who
-    # name a real person are answered as if that person is absent (indistinguishability).
+    # Selector-aware disclosure (plan A2 / D-002): entity_ids a GRANTEE is authorized to
+    # select by name. Populated from grant filters siblings `accessible_entity_ids` ∪
+    # resolve(`accessible_entity_cohorts`) (D-002: both; v1 enums-first).
+    # Semantics (A2.1 finish):
+    #   entity_selector_policy_active=False → legacy / unrestricted (keys missing on grant)
+    #   entity_selector_policy_active=True + empty ids → deny any named person
+    #   entity_selector_policy_active=True + non-empty ids → allow-list
+    # Owner tier ignores this entirely.
     accessible_entity_ids: List[str] = field(default_factory=list)
+    # Cohort rule ids from the grant (audit / A2.3 / C1). Membership tokens
+    # (`contacts`, `message_peers`, `calendar_attendees`) widen
+    # `accessible_entity_ids` via cohort_resolvers; `stats_aggregate` / `none`
+    # are aggregate-permit only. See `_cohort_aggregate_permitted`.
+    accessible_entity_cohorts: List[str] = field(default_factory=list)
+    entity_selector_policy_active: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -49,4 +58,6 @@ class ScopeResolutionManifest:
             filter_manifest=data.get("filter_manifest"),
             must_not_retrieve=list(data.get("must_not_retrieve") or []),
             accessible_entity_ids=list(data.get("accessible_entity_ids") or []),
+            accessible_entity_cohorts=list(data.get("accessible_entity_cohorts") or []),
+            entity_selector_policy_active=bool(data.get("entity_selector_policy_active")),
         )

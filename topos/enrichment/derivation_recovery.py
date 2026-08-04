@@ -1,0 +1,323 @@
+"""Durable retry records for signal-derivation jobs that failed mid-batch.
+
+A derivation job used to fail like this:
+
+    ERROR job facts failed: cannot commit - no transaction is active
+    DEBUG complete source_id=github_activity jobs_run=8 deferred=[]
+
+The exception was caught, appended to an in-memory ``results["errors"]`` list,
+and dropped on the floor. The completion line printed ``jobs_run`` and
+``deferred`` but never ``errors``, so a batch that lost data read as clean. The
+facts for 88 GitHub commits were simply gone, with nothing anywhere recording
+that they should exist.
+
+The raw payloads survive — ingest writes those before derivation runs — so the
+loss is recoverable in principle. It just needs something durable to point at.
+That is this module: every failed derivation is written to ``pipeline_jobs``
+(the existing leased, idempotent, recovery-indexed queue) so it can be found and
+re-run later, by a person or by the worker.
+
+Everything here is fail-soft. Recording a failure must never turn a partial
+batch into a crashed one.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import sqlite3
+from typing import Any, Dict, List, Optional, Sequence
+
+logger = logging.getLogger(__name__)
+
+#: pipeline_jobs.kind for a derivation that must be re-run.
+SIGNAL_DERIVE_RETRY_KIND = "signal_derive_retry"
+
+#: Record ids kept per retry record. Enough to re-run a batch or to tell a human
+#: exactly what is missing, without turning the queue row into a data store.
+_MAX_RECORD_IDS = 500
+
+
+def retry_idempotency_key(sync_batch_id: str, job_name: str) -> str:
+    """One retry record per (batch, job) — a job that fails twice is one debt."""
+    return f"{sync_batch_id or 'unknown'}:{job_name}:signal_derive_retry"
+
+
+def record_failed_derivation(
+    conn: Optional[sqlite3.Connection],
+    *,
+    source_id: str,
+    sync_batch_id: str,
+    job_name: str,
+    error: str,
+    record_ids: Optional[Sequence[str]] = None,
+    record_count: int = 0,
+) -> Optional[str]:
+    """Persist a failed derivation so it can be re-run. Returns job_id or None.
+
+    Idempotent per (batch, job): ``enqueue_job`` re-queues an existing failed
+    row rather than accumulating duplicates.
+    """
+    if conn is None:
+        logger.warning(
+            "[DERIVE:RETRY] no connection; derivation loss NOT recorded "
+            "source=%s batch=%s job=%s",
+            source_id,
+            sync_batch_id,
+            job_name,
+        )
+        return None
+    ids = [str(r) for r in (record_ids or []) if r][:_MAX_RECORD_IDS]
+    try:
+        from ..pipeline.job_store import enqueue_job
+
+        job_id = enqueue_job(
+            conn,
+            kind=SIGNAL_DERIVE_RETRY_KIND,
+            payload={
+                "source_id": source_id,
+                "sync_batch_id": sync_batch_id,
+                "job_name": job_name,
+                "error": str(error)[:2000],
+                "record_ids": ids,
+                "record_count": int(record_count or len(ids)),
+            },
+            source_id=source_id,
+            sync_batch_id=sync_batch_id,
+            idempotency_key=retry_idempotency_key(sync_batch_id, job_name),
+        )
+        logger.warning(
+            "[DERIVE:RETRY] recorded failed derivation job=%s source=%s batch=%s "
+            "records=%d job_id=%s — data is MISSING until this is re-run",
+            job_name,
+            source_id,
+            sync_batch_id,
+            int(record_count or len(ids)),
+            job_id,
+        )
+        return job_id
+    except Exception as exc:  # noqa: BLE001 — recording must never break the batch
+        # Last resort: if even the durable record cannot be written, say so as
+        # loudly as possible. Silence here is what caused the original loss.
+        logger.error(
+            "[DERIVE:RETRY] FAILED TO RECORD derivation loss source=%s batch=%s "
+            "job=%s records=%d original_error=%s recording_error=%s",
+            source_id,
+            sync_batch_id,
+            job_name,
+            int(record_count or len(ids)),
+            str(error)[:200],
+            exc,
+        )
+        return None
+
+
+def clear_derivation_retry(
+    conn: Optional[sqlite3.Connection],
+    *,
+    sync_batch_id: str,
+    job_name: str,
+) -> bool:
+    """Mark a (batch, job) debt settled after a later run succeeded."""
+    if conn is None:
+        return False
+    key = retry_idempotency_key(sync_batch_id, job_name)
+    try:
+        from ..storage.db.write_gate import commit_connection, with_db_write
+
+        with with_db_write():
+            cur = conn.execute(
+                """
+                UPDATE pipeline_jobs
+                SET status='done', finished_at=datetime('now'), updated_at=datetime('now')
+                WHERE idempotency_key=? AND status != 'done'
+                """,
+                (key,),
+            )
+            changed = int(cur.rowcount or 0)
+            if changed:
+                commit_connection(conn)
+        if changed:
+            logger.info(
+                "[DERIVE:RETRY] cleared derivation debt job=%s batch=%s",
+                job_name,
+                sync_batch_id,
+            )
+        return bool(changed)
+    except Exception as exc:  # noqa: BLE001 — never break a successful batch
+        logger.debug("[DERIVE:RETRY] clear failed batch=%s job=%s: %s", sync_batch_id, job_name, exc)
+        return False
+
+
+def list_pending_derivation_retries(
+    conn: Optional[sqlite3.Connection],
+    *,
+    source_id: Optional[str] = None,
+    limit: int = 100,
+) -> List[Dict[str, Any]]:
+    """Outstanding derivation debts, newest first — what data is still missing."""
+    if conn is None:
+        return []
+    try:
+        from ..pipeline.job_store import ensure_pipeline_jobs_schema
+
+        ensure_pipeline_jobs_schema(conn)
+        sql = (
+            "SELECT job_id, source_id, sync_batch_id, payload_json, status, created_at, updated_at "
+            "FROM pipeline_jobs WHERE kind=? AND status IN ('queued','running','failed')"
+        )
+        params: List[Any] = [SIGNAL_DERIVE_RETRY_KIND]
+        if source_id:
+            sql += " AND source_id=?"
+            params.append(source_id)
+        sql += " ORDER BY created_at DESC LIMIT ?"
+        params.append(int(limit))
+        rows = conn.execute(sql, params).fetchall()
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[DERIVE:RETRY] listing failed: %s", exc)
+        return []
+
+    out: List[Dict[str, Any]] = []
+    for row in rows:
+        try:
+            payload = json.loads(str(row[3] or "{}"))
+        except (ValueError, TypeError):
+            payload = {}
+        out.append(
+            {
+                "job_id": str(row[0]),
+                "source_id": str(row[1] or payload.get("source_id") or ""),
+                "sync_batch_id": str(row[2] or payload.get("sync_batch_id") or ""),
+                "job_name": str(payload.get("job_name") or ""),
+                "record_count": int(payload.get("record_count") or 0),
+                "record_ids": list(payload.get("record_ids") or []),
+                "error": str(payload.get("error") or ""),
+                "status": str(row[4] or ""),
+                "created_at": str(row[5] or ""),
+                "updated_at": str(row[6] or ""),
+            }
+        )
+    return out
+
+
+async def retry_pending_derivations(
+    conn: Optional[sqlite3.Connection] = None,
+    *,
+    source_id: Optional[str] = None,
+    limit: int = 20,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Re-run derivation jobs that previously failed, clearing settled debts.
+
+    Reloads each debt's canonical records and re-runs ONLY the job that failed,
+    so a retry cannot disturb jobs that already succeeded. Jobs are idempotent
+    per (batch, job) at the ledger level; a retry that fails again simply leaves
+    the debt in place for the next attempt.
+
+    ``dry_run`` reports what would run without touching anything.
+    """
+    from ..core.state import get_db_connection
+
+    conn = conn if conn is not None else get_db_connection()
+    pending = list_pending_derivation_retries(conn, source_id=source_id, limit=limit)
+    outcome: Dict[str, Any] = {
+        "attempted": 0,
+        "recovered": [],
+        "still_failing": [],
+        "skipped": [],
+        "dry_run": bool(dry_run),
+        "pending_before": len(pending),
+    }
+    if not pending or conn is None:
+        return outcome
+
+    if dry_run:
+        outcome["skipped"] = [
+            {"job_name": p["job_name"], "source_id": p["source_id"], "batch": p["sync_batch_id"]}
+            for p in pending
+        ]
+        return outcome
+
+    from ..ingestion.canonical_pipeline import load_canonical_records_for_signal
+    # Reuses reprocess's resolver so a runtime-installed source rehydrates the
+    # same way it does for a manual reprocess.
+    from ..ingestion.reprocess import _resolve_source_def
+
+    for debt in pending:
+        job_name = debt["job_name"]
+        src = debt["source_id"]
+        batch = debt["sync_batch_id"]
+        if not job_name or not src:
+            outcome["skipped"].append({**debt, "reason": "incomplete record"})
+            continue
+        try:
+            try:
+                source_def = _resolve_source_def(src)
+            except ValueError:
+                outcome["skipped"].append({"job_name": job_name, "source_id": src, "reason": "unknown source"})
+                continue
+            records = load_canonical_records_for_signal(conn, source_def)
+            wanted = set(debt.get("record_ids") or [])
+            if wanted:
+                scoped = [
+                    r
+                    for r in records
+                    if str(r.get("message_id") or r.get("record_id") or "") in wanted
+                ]
+                records = scoped or records
+            if not records:
+                outcome["skipped"].append({"job_name": job_name, "source_id": src, "reason": "no records"})
+                continue
+
+            from .orchestrator import SignalDerivationOrchestrator
+
+            outcome["attempted"] += 1
+            result = await SignalDerivationOrchestrator().run_signal_derivation(
+                records, src, job_names=[job_name], sync_batch_id=batch
+            )
+            if result.get("errors"):
+                outcome["still_failing"].append(
+                    {"job_name": job_name, "source_id": src, "error": result["errors"][0].get("error")}
+                )
+            else:
+                # run_signal_derivation clears the debt itself on success.
+                outcome["recovered"].append(
+                    {
+                        "job_name": job_name,
+                        "source_id": src,
+                        "batch": batch,
+                        "records": len(records),
+                        "created": result.get("records_created", {}).get(job_name, 0),
+                    }
+                )
+        except Exception as exc:  # noqa: BLE001 — one bad debt must not stop the rest
+            logger.warning("[DERIVE:RETRY] retry failed job=%s source=%s: %s", job_name, src, exc)
+            outcome["still_failing"].append({"job_name": job_name, "source_id": src, "error": str(exc)})
+
+    outcome["pending_after"] = len(list_pending_derivation_retries(conn, source_id=source_id, limit=1000))
+    logger.info(
+        "[DERIVE:RETRY] retry pass: attempted=%d recovered=%d still_failing=%d",
+        outcome["attempted"],
+        len(outcome["recovered"]),
+        len(outcome["still_failing"]),
+    )
+    return outcome
+
+
+def pending_derivation_summary(conn: Optional[sqlite3.Connection]) -> Dict[str, Any]:
+    """Counts for health surfaces: is this node currently missing derived data?"""
+    pending = list_pending_derivation_retries(conn, limit=1000)
+    by_job: Dict[str, int] = {}
+    by_source: Dict[str, int] = {}
+    records = 0
+    for item in pending:
+        by_job[item["job_name"]] = by_job.get(item["job_name"], 0) + 1
+        by_source[item["source_id"]] = by_source.get(item["source_id"], 0) + 1
+        records += int(item.get("record_count") or 0)
+    return {
+        "pending_derivations": len(pending),
+        "affected_records": records,
+        "by_job": by_job,
+        "by_source": by_source,
+        "healthy": not pending,
+    }

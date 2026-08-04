@@ -1164,6 +1164,47 @@ def _weighted_cohesion(clusters: List[Dict[str, Any]]) -> Optional[float]:
     return weighted_sum / weighted_n
 
 
+def _rebuild_context_centroids(conn) -> Dict[str, Any]:
+    """Refresh person mention-context centroids on the cluster rebuild's cadence.
+
+    PLAN_GRAPH_QUERY_AND_LATENT_EDGES D2: nightly, alongside this rebuild, not
+    per enrichment pass — a centroid is a whole-corpus average, so recomputing
+    it per batch is cost without movement. It shares the cadence only; it does
+    not depend on the clusters, which is why it also runs when clustering is
+    skipped for want of records. Non-fatal: the clusters are the job.
+    """
+    try:
+        from ..entities.context_vectors import rebuild_entity_context_vectors
+
+        return rebuild_entity_context_vectors(conn)
+    except Exception as exc:  # noqa: BLE001 — a derived rider must not fail the rebuild
+        logger.warning("entity context centroid rebuild skipped: %s", exc)
+        return {"status": "error", "error": str(exc)}
+
+
+def _rebuild_affinity_edges(conn) -> Dict[str, Any]:
+    """Recompute latent affinity edges from the centroids just rebuilt.
+
+    Same nightly cadence (D2) and same non-fatal contract as the centroids, but
+    strictly after them: an affinity edge is a snapshot of the current centroid
+    set, so running it against yesterday's centroids would write a set that
+    matches neither night.
+    """
+    try:
+        from ..entities.affinity import rebuild_affinity_edges
+
+        return rebuild_affinity_edges(conn)
+    except Exception as exc:  # noqa: BLE001 — a derived rider must not fail the rebuild
+        logger.warning("semantic affinity edge rebuild skipped: %s", exc)
+        return {"status": "error", "error": str(exc)}
+
+
+def _rebuild_affinity_lane(conn) -> Dict[str, Any]:
+    """The centroid build and the affinity rebuild that reads it, in order."""
+    centroids = _rebuild_context_centroids(conn)
+    return {"context_centroids": centroids, "affinity_edges": _rebuild_affinity_edges(conn)}
+
+
 def recompute_topic_clusters(
     conn,
     *,
@@ -1180,6 +1221,7 @@ def recompute_topic_clusters(
             "records_loaded": len(records),
             "clusters_written": 0,
             "members_written": 0,
+            **_rebuild_affinity_lane(conn),
         }
     clusters = cluster_records_by_facet(records, k=k)
     clusters = _enrich_all_clusters(conn, clusters)
@@ -1241,6 +1283,7 @@ def recompute_topic_clusters(
         "ids_preserved": ids_preserved,
         "cluster_labels": [c.get("label") for c in clusters],
         "metrics": metrics,
+        **_rebuild_affinity_lane(conn),
     }
 
 

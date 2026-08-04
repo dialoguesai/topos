@@ -26,13 +26,42 @@ def conn(tmp_path):
 
 class TestWordpieceFilter:
     @pytest.mark.parametrize(
-        "surface", ["##dy", "##ccelerator", "x ##b y", "##2", "42", "7.5", "!!", "", " ", "a"]
+        "surface",
+        [
+            "##dy",
+            "##ccelerator",
+            "x ##b y",
+            "##2",
+            "42",
+            "7.5",
+            "!!",
+            "",
+            " ",
+            "a",
+            # C4: ≤3-char junk crumbs (not allowlisted)
+            "ab",
+            "xy",
+            "zzz",
+            "dy",
+            "is",
+        ],
     )
     def test_invalid_surfaces_rejected(self, surface) -> None:
         assert not is_valid_entity_surface(surface)
 
     @pytest.mark.parametrize(
-        "surface", ["Maya Chen", "Google", "AWS", "Dr. Patel", "Austin Barbaro", "C3"]
+        "surface",
+        [
+            "Maya Chen",
+            "Google",
+            "AWS",
+            "Dr. Patel",
+            "Austin Barbaro",
+            "C3",
+            "Hotel Juliett",
+            "LA Fitness",
+            "Max",
+        ],
     )
     def test_valid_surfaces_accepted(self, surface) -> None:
         assert is_valid_entity_surface(surface)

@@ -78,6 +78,81 @@ RELATION_STRENGTH: Dict[str, float] = {
 DEFAULT_RELATION_STRENGTH = 0.3
 GENERIC_RELATIONS = {"mentions", "co_occurrence", "relates_to"}
 
+# -- edge-type allow-list ---------------------------------------------------
+#
+# `edges()` below is the only door between `entity_edges` and the Complexity
+# influence graph (influence.py:_add_entity_edges feeds every row it returns
+# straight into PageRank). Until this list existed that door was open: the read
+# carried no `edge_type` filter, so ANY writer minting a new edge type anywhere
+# in the codebase silently joined the influence graph and moved live readings,
+# with no change under features/complexity/ and nothing to review.
+#
+# This is an ALLOW-list and NOT a deny-list on purpose. A deny-list defaults to
+# "included", which leaves the trap exactly where it was — the next new type
+# still lands in the graph and nobody finds out until a reading looks wrong. An
+# allow-list defaults to "excluded", so silence is the safe outcome and a new
+# edge type has to opt IN deliberately: add it here, give it a
+# RELATION_STRENGTH, and show the before/after comparison that the golden test
+# in tests/features/test_complexity_edge_allowlist.py produces. That is the
+# whole point — a visible diff instead of a silent shift.
+#
+# Seeded from the types writers actually mint today, so landing this guard is
+# behaviour-preserving; it constrains the future, not the present.
+
+# features/entities/edges.py:27 — the typed edge core.
+_CORE_EDGE_TYPES = frozenset(
+    {
+        "co_occurrence",
+        "communicates_with",
+        "discusses",
+        "located_at",
+        "part_of",
+    }
+)
+
+# features/entities/graph_enrichers.py — goal and conversation scaffolding.
+_ENRICHER_EDGE_TYPES = frozenset(
+    {
+        "mentions",
+        "participates_in",
+        "pursues",
+        "relates_to",
+    }
+)
+
+# features/entities/declared_mappings.py, minted as self-edges by
+# enrichment/jobs/canonical/entities_job.py.
+_DECLARED_EDGE_TYPES = frozenset({"worked_on"})
+
+# features/facts/store.py predicates that features/entities/fact_materializer.py
+# projects onto the graph verbatim. Place predicates are deliberately absent:
+# fact_materializer rewrites all of them to `located_at`. Free-form predicates
+# outside this vocabulary are excluded — that uncontrolled channel into the
+# influence graph is precisely what this list closes.
+_FACT_PREDICATE_EDGE_TYPES = frozenset(
+    {
+        "advises",
+        "certified_in",
+        "member_of",
+        "practices",
+        "prefers",
+        "role_is",
+        "skilled_in",
+        "studied_at",
+        "training_for",
+        "worked_at",
+        "works_at",
+        "works_on",
+    }
+)
+
+ALLOWED_EDGE_TYPES = (
+    _CORE_EDGE_TYPES
+    | _ENRICHER_EDGE_TYPES
+    | _DECLARED_EDGE_TYPES
+    | _FACT_PREDICATE_EDGE_TYPES
+)
+
 
 @dataclass(frozen=True)
 class ProjectionConfig:
@@ -318,19 +393,26 @@ class EvidenceCache:
                 )
 
         if _table_exists(conn, "entity_edges"):
+            # Types not on ALLOWED_EDGE_TYPES never reach the influence graph;
+            # opting one in is a deliberate edit up top, not a side effect of
+            # someone adding a writer elsewhere.
+            allowed = sorted(ALLOWED_EDGE_TYPES)
+            placeholders = ", ".join("?" * len(allowed))
             for row in conn.execute(
-                """
+                f"""
                 SELECT src_entity_id, dst_entity_id, edge_type, weight, evidence_count,
                        COALESCE(last_event_at, valid_from, created_at) AS event_at
                 FROM entity_edges
                 WHERE valid_to IS NULL
-                """
+                  AND LOWER(TRIM(edge_type)) IN ({placeholders})
+                """,
+                allowed,
             ):
                 self.edges.append(
                     _RawEdge(
                         src=str(row["src_entity_id"]),
                         dst=str(row["dst_entity_id"]),
-                        edge_type=str(row["edge_type"] or "").lower(),
+                        edge_type=str(row["edge_type"] or "").strip().lower(),
                         weight=float(row["weight"] or 1.0),
                         evidence_count=int(row["evidence_count"] or 0),
                         event_at=parse_ts(row["event_at"]),

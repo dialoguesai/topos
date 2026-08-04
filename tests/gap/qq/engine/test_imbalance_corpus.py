@@ -245,6 +245,80 @@ def test_odile_is_mention_only(corpus_conn):
         ) == 1
 
 
+def test_odile_mentions_not_owner_authored(corpus_conn):
+    """P3.1 / B6 IMB wire: mention-only Odile rows must carry authored_by_owner=0.
+
+    Catches write-path / seed regressions that would stamp observed-speech
+    mentions as owner-authored (misattribution expansion failure mode).
+    """
+    assert _one(
+        corpus_conn,
+        """SELECT COUNT(*) FROM pragma_table_info('entity_mentions')
+           WHERE name = 'authored_by_owner'""",
+    ) == 1
+    assert _one(
+        corpus_conn,
+        """SELECT COUNT(*) FROM entity_mentions
+           WHERE entity_id = 'imb-ent-odile' AND authored_by_owner = 0""",
+    ) == 6
+    assert _one(
+        corpus_conn,
+        """SELECT COUNT(*) FROM entity_mentions
+           WHERE entity_id = 'imb-ent-odile'
+             AND (authored_by_owner IS NULL OR authored_by_owner = 1)""",
+    ) == 0
+    # Parent messages are observed (is_from_self=0) — join consistency.
+    assert _one(
+        corpus_conn,
+        """SELECT COUNT(*) FROM entity_mentions m
+           JOIN conversation_messages c ON c.message_id = m.record_id
+           WHERE m.entity_id = 'imb-ent-odile' AND c.is_from_self = 1""",
+    ) == 0
+
+
+def test_imb7_hardened_odile_not_communicates_with(corpus_conn):
+    """P3.2 / B7: mention-only Odile must not mint communicates_with edges.
+
+    BEFORE hole: rebuild linked each gossiping sender → Odile (talked-to
+    pollution). Hardened: co-participation only binds real thread senders.
+    """
+    from topos.features.entities.maintenance import rebuild_evidence_edges
+
+    stats = rebuild_evidence_edges(corpus_conn)
+    assert stats["communicates_with"] >= 1
+    assert _one(
+        corpus_conn,
+        """SELECT COUNT(*) FROM entity_edges
+           WHERE edge_type='communicates_with' AND valid_to IS NULL
+             AND (src_entity_id='imb-ent-odile' OR dst_entity_id='imb-ent-odile')""",
+    ) == 0
+    # Owner talks with each of the 3 real participants.
+    for sender in SENDERS:
+        assert _one(
+            corpus_conn,
+            """SELECT COUNT(*) FROM entity_edges
+               WHERE edge_type='communicates_with' AND valid_to IS NULL
+                 AND (
+                   (src_entity_id='imb-self-1' AND dst_entity_id=?)
+                   OR (src_entity_id=? AND dst_entity_id='imb-self-1')
+                 )""",
+            sender["entity_id"],
+            sender["entity_id"],
+        ) >= 1
+    # Participants are seeded into conversation_participants (membership wire).
+    assert _one(
+        corpus_conn,
+        "SELECT COUNT(*) FROM conversation_participants WHERE conversation_id = ?",
+        "imb-groupchat-1",
+    ) == 4
+    assert _one(
+        corpus_conn,
+        """SELECT COUNT(*) FROM conversation_participants cp
+           JOIN contacts c ON c.contact_id = cp.contact_id
+           WHERE c.display_name LIKE '%Odile%'""",
+    ) == 0
+
+
 def test_fts_index_carries_honest_df_statistics(corpus_conn):
     """search_text-only signal_embeddings rows (no vectors) must have populated the
     FTS index via triggers: ambient tokens common, authored needles rare — the

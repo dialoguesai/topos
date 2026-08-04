@@ -33,7 +33,7 @@ from topos.storage.db.migrations import apply_all_migrations
 
 # Bump when the corpus changes — resets comparability of scorecards across runs,
 # same discipline as CORPUS_VERSION in the privacy corpus.
-CORPUS_VERSION = "blackhole-corpus-1"
+CORPUS_VERSION = "blackhole-corpus-2"
 
 # Rare enough that a substring scan cannot false-positive on ordinary prose,
 # name-shaped enough that it exercises the real normalizer.
@@ -75,6 +75,8 @@ TOKENS: Dict[str, str] = {
     "goal_text": "BHGOALqx13",
     "edge_statement": "BHEDGEqx14",
     "top_topics_related": "BHTOPICqx15",
+    "affinity_edge": "BHAFFINqx16",
+    "context_vector": "BHCTXqx17",
 }
 
 # Control tokens — these must SURVIVE for every non-owner caller.
@@ -215,6 +217,39 @@ def build_blackhole_corpus(db_path: str, *, rebuild_complete: bool = True) -> Bl
             json.dumps({"statement": f"works with {BH_CANONICAL} {t['edge_statement']}"}),
         ),
     )
+    # Latent affinity is a separate edge type with a cosine weight — the generic
+    # edges reader must cover it too, not only co_mention / co_occurrence.
+    conn.execute(
+        """
+        INSERT INTO entity_edges
+            (edge_id, src_entity_id, dst_entity_id, edge_type, weight, metadata_json)
+        VALUES (?, ?, ?, 'semantic_affinity', 0.82, ?)
+        """,
+        (
+            f"e_{uuid.uuid4().hex[:8]}",
+            OK_ID,
+            BH_ID,
+            json.dumps(
+                {
+                    "kind": "affinity",
+                    "statement": f"{BH_CANONICAL} {t['affinity_edge']}",
+                }
+            ),
+        ),
+    )
+
+    # Mention-context centroid for the protected person. Nothing serves the
+    # blob today, but the surface must stay under the gate so a future reader
+    # cannot regress silently.
+    conn.execute(
+        """
+        INSERT INTO entity_context_vectors
+            (entity_id, centroid_blob, mention_sample, source_sample,
+             model_name, computed_at)
+        VALUES (?, ?, 5, 3, ?, datetime('now'))
+        """,
+        (BH_ID, t["context_vector"].encode("utf-8"), "test-centroid"),
+    )
 
     # ------------------------------------------ facts: subject and object
     _obj(
@@ -266,6 +301,14 @@ def build_blackhole_corpus(db_path: str, *, rebuild_complete: bool = True) -> Bl
             "summary_text": f"{OK_CANONICAL} works closely with {BH_CANONICAL}"
             f" {t['dossier_neighbour']}",
             "top_connections": [{"entity_id": BH_ID, "canonical_name": BH_CANONICAL}],
+            "affinity_connections": [
+                {
+                    "entity_id": BH_ID,
+                    "canonical_name": BH_CANONICAL,
+                    "edge_type": "semantic_affinity",
+                    "weight": 0.82,
+                }
+            ],
         },
     )
 

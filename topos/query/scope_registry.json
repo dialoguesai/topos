@@ -188,7 +188,7 @@
     },
     {
       "scope_id": "health:read",
-      "description": "Wellbeing signals from journal entries: moods, wellness summaries, and wellness scores.",
+      "description": "Wellbeing signals from journal entries and role-filtered message emotions: moods, wellness summaries, and wellness scores.",
       "example_questions": [
         "How has my mood trended this month?"
       ],
@@ -198,7 +198,9 @@
       "raw_tables": [
         "journal_entries"
       ],
-      "signal_objects": [],
+      "signal_objects": [
+        "message_emotions"
+      ],
       "summary_objects": [
         "wellness_summary"
       ],
@@ -213,10 +215,11 @@
     },
     {
       "scope_id": "messages:read",
-      "description": "Person-to-person messages (iMessage, Signal, messenger imports): message text, excerpts, entities, and emotion signals.",
+      "description": "Person-to-person messages (iMessage, Signal, messenger imports): message text, excerpts, entities, emotion signals, and authored goals extracted from owner-sent messages.",
       "example_questions": [
         "Find the messages where we planned the trip.",
-        "Who do I message most?"
+        "Who do I message most?",
+        "What goals have I mentioned in my messages?"
       ],
       "primary_dimensions": [
         "Relationships",
@@ -227,7 +230,8 @@
       ],
       "signal_objects": [
         "message_entities",
-        "message_emotions"
+        "message_emotions",
+        "user_goals"
       ],
       "summary_objects": [
         "message_excerpts_summary"
@@ -369,7 +373,7 @@
     },
     {
       "scope_id": "work_context:read",
-      "description": "Work goals and context extracted from AI conversations.",
+      "description": "Work goals and context extracted from AI conversations and owner journals.",
       "example_questions": [
         "What am I working on right now?"
       ],
@@ -389,7 +393,10 @@
         "chatgpt_ingestion",
         "chatgpt_file_ingestion",
         "chatgpt_ui_conversation",
-        "demo_resume_file"
+        "demo_resume_file",
+        "demo_journal_file",
+        "grow_journal",
+        "grow_data_file"
       ],
       "implementation_status": "live"
     }

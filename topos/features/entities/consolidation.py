@@ -22,7 +22,7 @@ import json
 import logging
 import sqlite3
 import uuid
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from .resolver import AUTO_MERGE_SCORE, REVIEW_SCORE, token_set_similarity
 
@@ -163,19 +163,21 @@ def _merge_direction(a: Dict[str, Any], b: Dict[str, Any]) -> Tuple[Dict[str, An
     return a, b
 
 
-def propose_merges(conn: sqlite3.Connection, *, use_embeddings: bool = True) -> Dict[str, int]:
-    """Scan for likely duplicates and queue merge-review rows."""
+def _scan_candidate_pairs(
+    entities: List[Dict[str, Any]], *, use_embeddings: bool = True
+) -> Iterator[Tuple[Dict[str, Any], Dict[str, Any], float, str]]:
+    """Every pair the sweep's three rules flag, with its score and reason.
+
+    The scan is separated from the queueing so the same rules can answer a
+    second question: "would consolidation call these two the same person?".
+    Affinity needs that answer (§3.1a defect B) but must not write review rows,
+    load a model, or drift into its own private name-similarity heuristic.
+
+    Yields the FULL fuzzy range, not just the review band — a subset pair like
+    "jonny" ⊂ "jonny johnson" scores 1.0 and so is never queued for review, yet
+    it is exactly the alias an affinity edge must not be built on.
+    """
     from ..signal.vector_math import cosine_similarity
-
-    if use_embeddings:
-        try:
-            embedded = ensure_name_embeddings(conn)
-            logger.debug("name embeddings ensured: %d", embedded)
-        except Exception as exc:  # noqa: BLE001 — sweep must work without models
-            logger.debug("name embedding skipped: %s", exc)
-
-    entities = _load_sweep_entities(conn)
-    seen_pairs = _existing_pairs(conn)
 
     # Block by shared 3-char token prefix to bound comparisons. Must be short
     # enough that nickname pairs share a block ("jon" vs "jonathan" -> "jon").
@@ -184,25 +186,6 @@ def propose_merges(conn: sqlite3.Connection, *, use_embeddings: bool = True) -> 
         for token in set(entity["normalized"].split()):
             if len(token) >= 3:
                 blocks.setdefault(token[:3], []).append(idx)
-
-    proposed = {"prefix": 0, "fuzzy": 0, "embedding": 0}
-    queued_now: set = set()
-
-    def consider(a: Dict[str, Any], b: Dict[str, Any], score: float, reason: str) -> None:
-        subject, candidate = _merge_direction(a, b)
-        key = (subject["entity_id"], candidate["entity_id"])
-        if key in seen_pairs or key in queued_now or (key[1], key[0]) in queued_now:
-            return
-        _queue_merge(
-            conn,
-            subject_entity_id=subject["entity_id"],
-            candidate_entity_id=candidate["entity_id"],
-            subject_name=subject["name"],
-            score=score,
-            reason=reason,
-        )
-        queued_now.add(key)
-        proposed[reason.split(":")[0]] += 1
 
     for indices in blocks.values():
         if len(indices) < 2 or len(indices) > 200:
@@ -229,23 +212,92 @@ def propose_merges(conn: sqlite3.Connection, *, use_embeddings: bool = True) -> 
                         and long_first.startswith(short_tok)
                         and long_first != short_tok
                     ):
-                        consider(a, b, 0.85, "prefix:nickname_short_form")
+                        yield a, b, 0.85, "prefix:nickname_short_form"
                         continue
 
                 sim = token_set_similarity(a["normalized"], b["normalized"])
-                if REVIEW_SCORE <= sim < AUTO_MERGE_SCORE:
-                    consider(a, b, sim, f"fuzzy:token_set_{sim:.2f}")
+                if sim >= REVIEW_SCORE:
+                    yield a, b, sim, f"fuzzy:token_set_{sim:.2f}"
                     continue
 
-                if (
-                    use_embeddings
-                    and a["vector"] is not None
-                    and b["vector"] is not None
-                    and sim < REVIEW_SCORE
-                ):
+                if use_embeddings and a["vector"] is not None and b["vector"] is not None:
                     cos = cosine_similarity(a["vector"], b["vector"])
                     if cos >= EMBED_MERGE_SCORE:
-                        consider(a, b, cos, f"embedding:name_cosine_{cos:.2f}")
+                        yield a, b, cos, f"embedding:name_cosine_{cos:.2f}"
+
+
+def merge_candidate_pairs(conn: sqlite3.Connection) -> set:
+    """Canonically-ordered entity pairs consolidation considers the same person.
+
+    Read-only and model-free: it reuses the sweep's own rules over the name
+    embeddings already stored, so a nightly rebuild can consult it without
+    queueing reviews or paying for inference.
+
+    Two sources, because neither alone is complete. Queued ``entity_review``
+    rows carry pairs a past sweep found and the owner has not acted on; the
+    live scan carries pairs the sweep would find now, including the subset
+    names it deliberately never queues. ``dismissed`` rows are excluded on
+    purpose — the owner saying "these are two different people" is exactly the
+    statement that makes an affinity edge between them legitimate.
+    """
+    pairs: set = set()
+    try:
+        rows = conn.execute(
+            """
+            SELECT subject_entity_id, candidate_entity_id FROM entity_review
+            WHERE kind = 'merge' AND status != 'dismissed'
+            """
+        ).fetchall()
+    except sqlite3.OperationalError:
+        rows = []
+    for a, b in rows:
+        if a and b:
+            left, right = str(a), str(b)
+            pairs.add((left, right) if left < right else (right, left))
+
+    for a, b, _score, _reason in _scan_candidate_pairs(_load_sweep_entities(conn)):
+        left, right = a["entity_id"], b["entity_id"]
+        pairs.add((left, right) if left < right else (right, left))
+    return pairs
+
+
+def propose_merges(conn: sqlite3.Connection, *, use_embeddings: bool = True) -> Dict[str, int]:
+    """Scan for likely duplicates and queue merge-review rows."""
+    if use_embeddings:
+        try:
+            embedded = ensure_name_embeddings(conn)
+            logger.debug("name embeddings ensured: %d", embedded)
+        except Exception as exc:  # noqa: BLE001 — sweep must work without models
+            logger.debug("name embedding skipped: %s", exc)
+
+    entities = _load_sweep_entities(conn)
+    seen_pairs = _existing_pairs(conn)
+
+    proposed = {"prefix": 0, "fuzzy": 0, "embedding": 0}
+    queued_now: set = set()
+
+    def consider(a: Dict[str, Any], b: Dict[str, Any], score: float, reason: str) -> None:
+        subject, candidate = _merge_direction(a, b)
+        key = (subject["entity_id"], candidate["entity_id"])
+        if key in seen_pairs or key in queued_now or (key[1], key[0]) in queued_now:
+            return
+        _queue_merge(
+            conn,
+            subject_entity_id=subject["entity_id"],
+            candidate_entity_id=candidate["entity_id"],
+            subject_name=subject["name"],
+            score=score,
+            reason=reason,
+        )
+        queued_now.add(key)
+        proposed[reason.split(":")[0]] += 1
+
+    for a, b, score, reason in _scan_candidate_pairs(entities, use_embeddings=use_embeddings):
+        # At or above AUTO_MERGE_SCORE the resolver merges without asking, so
+        # there is nothing left here for the owner to confirm.
+        if reason.startswith("fuzzy:") and score >= AUTO_MERGE_SCORE:
+            continue
+        consider(a, b, score, reason)
 
     conn.commit()
     total = sum(proposed.values())

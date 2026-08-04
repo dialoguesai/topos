@@ -63,7 +63,22 @@ EvalFn = Callable[[Dict[str, Any]], Tuple[bool, str]]
 # retrieval; skipped under --no-mcp). Own non-gating lanes (present/absent/guard/boundary),
 # red-first; promote I-C1 + the absent lane to gates once the intercept is deployed.
 # Existing lanes untouched — composite comparable to qq-catalog-10 via shared case_ids.
-QUERY_CATALOG_VERSION = "qq-catalog-11"
+# qq-catalog-12 (D1.2–D1.5 hole-punchers): +D12/D13/D14/D15 cases in d1_hole_puncher_cases.py
+# (own non-gating d1_hole_punchers lane; D1.1 remains NH* in negative_hard). CompositionCase
+# gains optional family_id/variant_index for D1.4 paraphrase variance. Existing lane
+# composites comparable to qq-catalog-11 via shared case_ids.
+# qq-catalog-13 (Prov authored-goals path lock): D3 re-scoped ai_conversations→work_context
+# and requires ≥1 user_goal in fused sources (product "working on lately" path).
+# qq-catalog-14 (A7 D1.3 grantee×tier): +D13-GT-* grantee denial≡absence cells at
+# summary/inference/raw; leak_delta_by_tier on d1_hole_punchers. Owner D13-1..3 unchanged.
+# qq-catalog-15 (D1.7 / Wave B2): GEN lane qq-gen-1→qq-gen-2 — 15 answerable + 15
+# unanswerable probes (was 3+2 decorative); G1 re-scoped ai_conversations→messages
+# (Q2 lesson). Comparability break on GEN composite by design; other lanes untouched.
+# qq-catalog-16 (Wave B8): +IMBG1–IMBG10 GEN-judged IMB phrasing lane (qq-imb-gen-1)
+# on the IMB scratch corpus; attribution IdealBadPair + poison-in-answer checks.
+# qq-catalog-17 (Wave B11): +D3M messenger authored-goals path (messages:read + user_goal).
+# Existing lane composites comparable to qq-catalog-15 via shared case_ids.
+QUERY_CATALOG_VERSION = "qq-catalog-17"
 
 _DEFAULT_LATENCY_MS = {
     "summary": int(os.environ.get("TOPOS_QQ_LATENCY_SUMMARY_MS", "10000")),
@@ -230,7 +245,34 @@ def eval_d3_retrieval_diversity(response: Dict[str, Any]) -> Tuple[bool, str]:
     # carries discriminative content tokens, which this deliberately does not).
     if len(sources) < 3:
         return False, f"low retrieval diversity: {sorted(sources)}"
+    # qq-catalog-13: "working on lately" must surface authored goals on the
+    # work_context path — diversity alone greenwashed ai_conversations runs.
+    if "user_goal" not in sources:
+        return False, f"no user_goal in fused sources: {sorted(sources)}"
     return True, f"{len(items)} items from {len(sources)} sources: {sorted(sources)}"
+
+
+def eval_d3m_messenger_goals(response: Dict[str, Any]) -> Tuple[bool, str]:
+    """B11 D3-like: messages:read must fuse authored user_goal from messenger."""
+    ok, msg = _not_denied(response)
+    if not ok:
+        return ok, msg
+    items = _summary_items(response)
+    sources = _sources(items)
+    goals = [i for i in items if i.get("retrieval_source") == "user_goal"]
+    if not goals:
+        return False, f"no user_goal in messages:read fuse: {sorted(sources)}"
+    messenger_ids = {"imessage", "signal", "demo_messenger_file"}
+    messenger_goals = [
+        g for g in goals if str(g.get("source_id") or "") in messenger_ids
+    ]
+    if not messenger_goals:
+        return (
+            False,
+            "user_goal present but none from messenger sources "
+            f"(source_ids={[g.get('source_id') for g in goals]})",
+        )
+    return True, f"{len(messenger_goals)} messenger user_goal items"
 
 
 def eval_d4_person_dossier(response: Dict[str, Any]) -> Tuple[bool, str]:
@@ -245,10 +287,10 @@ def eval_d4_person_dossier(response: Dict[str, Any]) -> Tuple[bool, str]:
     )
     mentions = sum(1 for i in items if i.get("retrieval_source") == "entity_mention" and "marcus" in _blob(i))
     if not dossier:
-        return False, f"no Luc dossier item (sources: {_sources(items)})"
+        return False, f"no Marcus dossier item (sources: {_sources(items)})"
     if mentions < 1:
         return False, "dossier present but no supporting mentions"
-    return True, f"Luc dossier + {mentions} mentions"
+    return True, f"Marcus dossier + {mentions} mentions"
 
 
 def eval_no_forbidden_inference_keys(response: Dict[str, Any]) -> Tuple[bool, str]:
@@ -341,8 +383,16 @@ QUALITY_CASES: List[QueryQualityCase] = [
                      description="Entity spine surfaces the Topos dossier + mentions"),
     QueryQualityCase("D2", "Which places do I visit most often?", "places:read", "summary", eval_d2_stat_insight,
                      description="Aggregate intent routes to stat insights (place visits, live scope)"),
-    QueryQualityCase("D3", "What have I been working on lately?", "ai_conversations:read", "summary", eval_d3_retrieval_diversity,
-                     description="Broad query fuses >=4 retrieval sources, >=10 items"),
+    QueryQualityCase("D3", "What have I been working on lately?", "work_context:read", "summary", eval_d3_retrieval_diversity,
+                     description="Work-context working-on ask fuses >=3 sources incl. authored user_goal"),
+    QueryQualityCase(
+        "D3M",
+        "What goals have I mentioned in my messages?",
+        "messages:read",
+        "summary",
+        eval_d3m_messenger_goals,
+        description="B11: messages:read fuses authored user_goal from messenger corpus",
+    ),
     QueryQualityCase("D4", "Who is Marcus?", "relationship_context:read", "summary", eval_d4_person_dossier,
                      description="Person query returns dossier + supporting mentions (Marcus: real mention evidence)"),
 ]

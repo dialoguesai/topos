@@ -4,6 +4,7 @@ import logging
 from typing import Any, Callable, Dict, List, Optional
 
 from ..utils.base_object import BaseObject
+from .derivation_recovery import clear_derivation_retry, record_failed_derivation
 from .derived_tables import DerivedTablesManager
 from .jobs import CANONICAL_JOBS, RAW_JOBS
 from .jobs.base import BaseEnrichmentJob
@@ -285,9 +286,38 @@ class SignalDerivationOrchestrator(EnrichmentOrchestrator):
     ) -> Dict[str, Any]:
         from ..core.state import get_db_connection
         from ..enrichment.job_writer import write_signal_records
+        from ..enrichment.pipeline_activity import derivation_in_flight
         from ..pipeline.envelope import JobEnvelope
         from ..pipeline.stages import PipelineStage
 
+        # Tell background rebuilds (entity graph) to hold off until this batch
+        # is done, rather than contending with it for the write gate.
+        with derivation_in_flight():
+            return await self._run_signal_derivation_inner(
+                canonical_messages,
+                source_id,
+                job_names=job_names,
+                sync_batch_id=sync_batch_id,
+                progress_callback=progress_callback,
+                get_db_connection=get_db_connection,
+                write_signal_records=write_signal_records,
+                JobEnvelope=JobEnvelope,
+                PipelineStage=PipelineStage,
+            )
+
+    async def _run_signal_derivation_inner(
+        self,
+        canonical_messages: List[Dict[str, Any]],
+        source_id: str,
+        *,
+        job_names: Optional[List[str]] = None,
+        sync_batch_id: Optional[str] = None,
+        progress_callback: Optional[Callable[[int, int, str, float, float], None]] = None,
+        get_db_connection: Any,
+        write_signal_records: Any,
+        JobEnvelope: Any,
+        PipelineStage: Any,
+    ) -> Dict[str, Any]:
         resolved = self._resolve_job_names(source_id, job_names)
         adapters = self._get_adapters()
         conn = get_db_connection()
@@ -361,11 +391,31 @@ class SignalDerivationOrchestrator(EnrichmentOrchestrator):
                 )
                 results["envelopes"].append(env.to_dict())
                 results["jobs_run"] += 1
+                # This job's output is in. If an earlier run left a debt for the
+                # same (batch, job), it is settled.
+                clear_derivation_retry(
+                    conn, sync_batch_id=sync_batch_id or "unknown", job_name=job_name
+                )
                 if progress_callback:
                     progress_callback(0, len(canonical_messages), job_name, (job_idx / total_jobs) * 100, 100.0)
             except Exception as exc:
                 logger.error("[PIPELINE:SIGNAL_DERIVE] job %s failed: %s", job_name, exc)
                 results["errors"].append({"job": job_name, "error": str(exc)})
+                # Durable debt. Catching this exception used to be the whole
+                # response, which is how 88 records' facts were lost with the
+                # batch still reporting clean.
+                record_failed_derivation(
+                    conn,
+                    source_id=source_id,
+                    sync_batch_id=sync_batch_id or "unknown",
+                    job_name=job_name,
+                    error=str(exc),
+                    record_ids=[
+                        str(m.get("message_id") or m.get("record_id") or "")
+                        for m in canonical_messages[:500]
+                    ],
+                    record_count=len(canonical_messages),
+                )
 
         try:
             from ..features.signal.dimension_profiles import DimensionProfileUpdater
@@ -374,13 +424,29 @@ class SignalDerivationOrchestrator(EnrichmentOrchestrator):
         except Exception as exc:
             logger.debug("[PIPELINE:SIGNAL_DERIVE] dimension profile update skipped: %s", exc)
 
-        logger.debug(
-            "[PIPELINE:SIGNAL_DERIVE] complete source_id=%s batch_id=%s jobs_run=%d deferred=%s",
-            source_id,
-            sync_batch_id,
-            results["jobs_run"],
-            results["deferred_jobs"],
-        )
+        # A batch that lost a job is NOT complete. The old line printed only
+        # jobs_run and deferred, so a broken batch was indistinguishable from a
+        # clean one in the logs.
+        failed_jobs = [str(e.get("job") or "") for e in results["errors"]]
+        results["status"] = "degraded" if failed_jobs else "ok"
+        if failed_jobs:
+            logger.error(
+                "[PIPELINE:SIGNAL_DERIVE] DEGRADED source_id=%s batch_id=%s jobs_run=%d "
+                "failed=%s deferred=%s — derived data is MISSING and queued for retry",
+                source_id,
+                sync_batch_id,
+                results["jobs_run"],
+                failed_jobs,
+                results["deferred_jobs"],
+            )
+        else:
+            logger.debug(
+                "[PIPELINE:SIGNAL_DERIVE] complete source_id=%s batch_id=%s jobs_run=%d deferred=%s",
+                source_id,
+                sync_batch_id,
+                results["jobs_run"],
+                results["deferred_jobs"],
+            )
         from ..engine.pipeline_memory import flush_engine_model_cache_after_pipeline
 
         flush_engine_model_cache_after_pipeline()

@@ -13,10 +13,40 @@ import json
 import sqlite3
 from typing import Any, Dict, List, Optional
 
-from .edges import top_edges
+from .edges import EDGE_SEMANTIC_AFFINITY, top_edges
 
 SIGNIFICANT_MENTIONS = 3
 MAX_DOSSIERS = 50
+
+
+def format_connection_label(connection: Any) -> str:
+    """Render a top_connections entry for prose/retrieval (string or structured)."""
+    if isinstance(connection, str):
+        return connection
+    if not isinstance(connection, dict):
+        return str(connection)
+    name = (
+        connection.get("canonical_name")
+        or connection.get("entity_name")
+        or connection.get("entity_id")
+        or "?"
+    )
+    edge_type = connection.get("edge_type")
+    weight = connection.get("weight")
+    if edge_type and weight is not None:
+        return f"{name} ({edge_type}, w={weight})"
+    if edge_type:
+        return f"{name} ({edge_type})"
+    return str(name)
+
+
+def _structured_connection(edge: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "entity_id": edge["entity_id"],
+        "canonical_name": edge["entity_name"],
+        "edge_type": edge["edge_type"],
+        "weight": edge["weight"],
+    }
 
 
 def significant_entities(conn: sqlite3.Connection, *, limit: int = MAX_DOSSIERS) -> List[Dict[str, Any]]:
@@ -89,14 +119,21 @@ def _stat_lines_for_entity(conn: sqlite3.Connection, entity: Dict[str, Any]) -> 
 
 def build_dossier(conn: sqlite3.Connection, entity: Dict[str, Any]) -> Dict[str, Any]:
     entity_id = str(entity["entity_id"])
-    edges = top_edges(conn, entity_id, limit=8)
+    # Observed edges and latent affinity use incompatible weight scales; keep
+    # them as separate structured lists so BlackholeGuard can filter by id and
+    # readers never rank a cosine against a decayed evidence count.
+    observed = [
+        e
+        for e in top_edges(conn, entity_id, limit=12)
+        if e.get("edge_type") != EDGE_SEMANTIC_AFFINITY
+    ][:5]
+    affinity = top_edges(
+        conn, entity_id, edge_type=EDGE_SEMANTIC_AFFINITY, limit=5
+    )
     mentions = _recent_mentions(conn, entity_id)
     tables = sorted(
         {str(m.get("canonical_table") or "") for m in mentions if m.get("canonical_table")}
     )
-    connections = [
-        f"{e['entity_name']} ({e['edge_type']}, w={e['weight']})" for e in edges[:5]
-    ]
     summary_bits = [
         f"{entity['canonical_name']} — {entity['entity_type']}",
         f"{entity['mention_count']} mentions"
@@ -111,7 +148,8 @@ def build_dossier(conn: sqlite3.Connection, entity: Dict[str, Any]) -> Dict[str,
         "entity_type": entity["entity_type"],
         "canonical_name": entity["canonical_name"],
         "summary_text": "; ".join(summary_bits) + ".",
-        "top_connections": connections,
+        "top_connections": [_structured_connection(e) for e in observed],
+        "affinity_connections": [_structured_connection(e) for e in affinity],
         "recent_activity": [
             f"{str(m.get('event_at') or '')[:10]} {m.get('canonical_table')}: {m.get('surface_text')}"
             for m in mentions
@@ -122,6 +160,32 @@ def build_dossier(conn: sqlite3.Connection, entity: Dict[str, Any]) -> Dict[str,
     }
 
 
+def _upsert_dossier(
+    conn: sqlite3.Connection,
+    entity: Dict[str, Any],
+    *,
+    store: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Build + upsert one entity dossier. Caller commits when batching."""
+    from ..signal.signal_object_store import SignalObjectStore
+
+    store = store or SignalObjectStore(conn)
+    payload = build_dossier(conn, entity)
+    mention_count = int(entity.get("mention_count") or 0)
+    store.upsert_object(
+        "relationships",
+        "entity_dossier",
+        f"dossier:{entity['entity_id']}",
+        payload,
+        source_refs=[
+            {"table": "entity_mentions", "record_id": entity["entity_id"]},
+        ],
+        confidence=min(1.0, mention_count / 20.0),
+        extractor_version="dossier_rules_v1",
+    )
+    return payload
+
+
 def refresh_dossiers(conn: sqlite3.Connection) -> int:
     """Upsert dossiers for significant entities. Stable object_key = entity_id."""
     from ..signal.signal_object_store import SignalObjectStore
@@ -129,22 +193,48 @@ def refresh_dossiers(conn: sqlite3.Connection) -> int:
     store = SignalObjectStore(conn)
     written = 0
     for entity in significant_entities(conn):
-        payload = build_dossier(conn, entity)
-        source_refs = [
-            {"table": "entity_mentions", "record_id": entity["entity_id"]},
-        ]
-        store.upsert_object(
-            "relationships",
-            "entity_dossier",
-            f"dossier:{entity['entity_id']}",
-            payload,
-            source_refs=source_refs,
-            confidence=min(1.0, entity["mention_count"] / 20.0),
-            extractor_version="dossier_rules_v1",
-        )
+        _upsert_dossier(conn, entity, store=store)
         written += 1
     conn.commit()
     return written
+
+
+def ensure_dossier(conn: sqlite3.Connection, entity: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Return an active dossier for ``entity``, materializing one if missing.
+
+    Query-time self-heal for named asks: refresh only covers significant
+    entities, and supersede-without-rewrite can leave a linked person with
+    mentions but no live dossier row (entity_graph fallback). Persist so the
+    next load hits the store.
+    """
+    entity_id = str(entity.get("entity_id") or "").strip()
+    if not entity_id:
+        return None
+    existing = load_dossier_for_entity(conn, entity_id)
+    if existing is not None:
+        return existing
+    # Fill fields build_dossier expects when the linker only passed a stub.
+    enriched = dict(entity)
+    if "last_seen" not in enriched or "mention_count" not in enriched:
+        row = conn.execute(
+            """
+            SELECT entity_type, canonical_name, mention_count, first_seen, last_seen
+            FROM entities WHERE entity_id=?
+            """,
+            (entity_id,),
+        ).fetchone()
+        if row:
+            enriched.setdefault("entity_type", row[0])
+            enriched.setdefault("canonical_name", row[1])
+            enriched.setdefault("mention_count", int(row[2] or 0))
+            enriched.setdefault("first_seen", row[3])
+            enriched.setdefault("last_seen", row[4])
+    enriched.setdefault("canonical_name", entity_id)
+    enriched.setdefault("entity_type", "person")
+    enriched.setdefault("mention_count", 0)
+    payload = _upsert_dossier(conn, enriched)
+    conn.commit()
+    return payload
 
 
 def load_dossier_for_entity(conn: sqlite3.Connection, entity_id: str) -> Optional[Dict[str, Any]]:

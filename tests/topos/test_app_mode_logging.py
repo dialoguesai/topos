@@ -90,11 +90,16 @@ class TestShowLogsMenu:
         items = self._tray(None)._menu_labels()
         assert "Show Logs" not in items
 
-    def test_open_log_viewer_darwin_uses_console(self, tmp_path, monkeypatch):
+    def test_open_log_viewer_darwin_uses_terminal_tail(self, tmp_path, monkeypatch):
         calls = []
         monkeypatch.setattr(tray.sys, "platform", "darwin")
         monkeypatch.setattr(tray.subprocess, "Popen", lambda cmd: calls.append(cmd))
         log_path = tmp_path / "logs" / "node.log"
         tray.open_log_viewer(log_path)
-        assert log_path.exists()  # touched so Console.app can open it
-        assert calls == [["open", "-a", "Console", str(log_path)]]
+        assert log_path.exists()
+        assert len(calls) == 1
+        assert calls[0][:2] == ["/usr/bin/osascript", "-e"]
+        script = calls[0][2]
+        assert 'tell application "Terminal"' in script
+        assert "tail -n 200 -F" in script
+        assert str(log_path) in script

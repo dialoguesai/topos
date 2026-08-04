@@ -264,6 +264,15 @@ def _seed_messages(conn: sqlite3.Connection, rng: random.Random) -> None:
            VALUES (?, ?, 'demo_messenger_file')""",
         (CONVERSATION_ID, DATASET_ID),
     )
+    # P3.2 / B7: membership rows for real participants (not Odile). Edge
+    # co-participation can use these even when a sender never appears in NER.
+    for contact_id in (OWNER_CONTACT_ID, *(s["contact_id"] for s in SENDERS)):
+        conn.execute(
+            """INSERT INTO conversation_participants
+               (conversation_id, dataset_id, source_id, contact_id, role)
+               VALUES (?, ?, 'demo_messenger_file', ?, 'member')""",
+            (CONVERSATION_ID, DATASET_ID, contact_id),
+        )
 
     insert_sql = """INSERT INTO conversation_messages
         (message_id, conversation_id, dataset_id, sender_type, sender_id, content,
@@ -371,12 +380,20 @@ def _seed_identities(conn: sqlite3.Connection) -> None:
     conn.execute(
         """INSERT INTO entities
            (entity_id, entity_type, canonical_name, normalized_name, mention_count,
-            first_seen, last_seen, is_self)
-           VALUES (?, 'person', 'Owner', 'owner', 1, ?, ?, 1)""",
-        (OWNER_ENTITY_ID, _iso(120), _iso(1)),
+            first_seen, last_seen, is_self, contact_id, identifiers_json)
+           VALUES (?, 'person', 'Owner', 'owner', 1, ?, ?, 1, ?, ?)""",
+        (
+            OWNER_ENTITY_ID,
+            _iso(120),
+            _iso(1),
+            OWNER_CONTACT_ID,
+            json.dumps(["self"]),
+        ),
     )
 
     # The 3 ambient senders: contacts (is_self=0) + person entities + dossiers.
+    # P3.2 / B7: identifiers_json carries messenger sender_id so co-participation
+    # rebuild can bind senders → entities without minting junk (bram-7 etc.).
     for n, sender in enumerate(SENDERS):
         conn.execute(
             """INSERT INTO contacts (contact_id, dataset_id, source_id, display_name, is_self)
@@ -386,8 +403,8 @@ def _seed_identities(conn: sqlite3.Connection) -> None:
         conn.execute(
             """INSERT INTO entities
                (entity_id, entity_type, canonical_name, normalized_name, mention_count,
-                first_seen, last_seen, is_self, contact_id)
-               VALUES (?, 'person', ?, ?, ?, ?, ?, 0, ?)""",
+                first_seen, last_seen, is_self, contact_id, identifiers_json)
+               VALUES (?, 'person', ?, ?, ?, ?, ?, 0, ?, ?)""",
             (
                 sender["entity_id"],
                 sender["name"],
@@ -396,6 +413,7 @@ def _seed_identities(conn: sqlite3.Connection) -> None:
                 _iso(120),
                 _iso(1),
                 sender["contact_id"],
+                json.dumps([sender["sender_id"]]),
             ),
         )
         conn.execute(
@@ -430,12 +448,15 @@ def _seed_identities(conn: sqlite3.Connection) -> None:
     mention_n = 0
     for sender in SENDERS:
         for slot_idx, i in enumerate(_ODILE_SLOTS):
+            # P3.1 / B6: Odile mentions are always on *others'* speech
+            # (SENDERS' observed rows) — authored_by_owner=0 by construction.
+            # Eval tripwire: test_odile_mentions_not_owner_authored.
             conn.execute(
                 """INSERT INTO entity_mentions
                    (mention_id, entity_id, record_id, canonical_table, surface_text,
-                    event_at, source_id)
+                    event_at, source_id, authored_by_owner)
                    VALUES (?, 'imb-ent-odile', ?, 'conversation_messages', ?, ?,
-                           'demo_messenger_file')""",
+                           'demo_messenger_file', 0)""",
                 (
                     f"imb-mention-odile-{mention_n}",
                     f"imb-{sender['key']}-{i:04d}",

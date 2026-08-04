@@ -125,10 +125,45 @@ async def _execute_enrichment_process_source(payload: Dict[str, Any]) -> Dict[st
     )
 
 
+async def _execute_topic_consolidation(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Full topic-cluster recompute, deferred out of the ingest path.
+
+    Queued by ``topic_clusters_job`` when consolidation comes due. Running it
+    inline cost 44s inside an 88-record batch while holding the write gate; here
+    it runs alone, and only after the batch that triggered it has finished.
+    """
+    from ..core.state import get_db_connection
+    from ..enrichment.pipeline_activity import is_derivation_in_flight
+    from ..features.signal.topic_clustering import (
+        _resolved_topic_cluster_source_ids,
+        recompute_topic_clusters,
+    )
+
+    if is_derivation_in_flight():
+        # Re-queued rather than run: a consolidation during a batch is exactly
+        # what this executor exists to avoid.
+        return {"status": "error", "error": "derivation in flight; will retry"}
+
+    conn = get_db_connection()
+    if conn is None:
+        return {"status": "error", "error": "no database connection"}
+
+    result = await asyncio.to_thread(
+        recompute_topic_clusters,
+        conn,
+        source_ids=list(_resolved_topic_cluster_source_ids()),
+        sync_batch_id=None,
+        min_records=3,
+    )
+    logger.info("topic consolidation complete: %s", result)
+    return {"status": "ok", "result": result}
+
+
 EXECUTORS: Dict[str, ExecutorFn] = {
     "inbox_deferred_enrichment": _execute_inbox_deferred_enrichment,
     "file_ingestion": _execute_file_ingestion,
     "enrichment_process_source": _execute_enrichment_process_source,
+    "topic_consolidation": _execute_topic_consolidation,
 }
 
 
@@ -183,7 +218,16 @@ async def process_job(conn, job: Dict[str, Any]) -> None:
         update_job_progress(conn, job_id, {"status": "failed", "error": str(exc)})
 
 
+#: Idle poll interval. Every tick claims against SQLite, so this is also how
+#: often the worker competes for the write gate.
+_IDLE_POLL_SECONDS = 0.25
+#: Backoff ceiling once the queue has been empty for a while. An idle node has
+#: no reason to hit the database four times a second.
+_MAX_POLL_SECONDS = 5.0
+
+
 async def _worker_loop(conn_factory: Callable[[], Any]) -> None:
+    idle_delay = _IDLE_POLL_SECONDS
     while True:
         if not _enabled():
             await asyncio.sleep(1.0)
@@ -192,10 +236,31 @@ async def _worker_loop(conn_factory: Callable[[], Any]) -> None:
         if conn is None:
             await asyncio.sleep(1.0)
             continue
-        job = claim_next_job(conn, lease_owner=_lease_owner)
+
+        # claim_next_job takes the process-wide write gate — a BLOCKING
+        # threading lock. Called directly it ran on the event loop, so every
+        # 250ms the loop could stall behind whatever writer held the gate (a
+        # batch write, or a 77s graph rebuild), taking the control-plane
+        # keepalive down with it.
+        #
+        # The factory is re-invoked INSIDE the worker thread rather than
+        # capturing the connection above. get_db_connection is thread-local, so
+        # this hands the thread its own handle; passing the loop thread's
+        # connection across would silently reinstate the cross-thread sharing
+        # that caused the 2026-07-30 transaction corruption in the first place.
+        def _claim() -> Optional[Dict[str, Any]]:
+            own = conn_factory()
+            if own is None:
+                return None
+            return claim_next_job(own, lease_owner=_lease_owner)
+
+        job = await asyncio.to_thread(_claim)
         if job is None:
-            await asyncio.sleep(0.25)
+            await asyncio.sleep(idle_delay)
+            # Ease off while nothing is queued; snap back the moment work lands.
+            idle_delay = min(idle_delay * 1.5, _MAX_POLL_SECONDS)
             continue
+        idle_delay = _IDLE_POLL_SECONDS
         try:
             await process_job(conn, job)
         except Exception as exc:  # noqa: BLE001

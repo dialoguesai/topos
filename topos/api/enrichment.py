@@ -415,9 +415,9 @@ def _delete_enrichment_data_core(source_id: str, job_name: str) -> Dict[str, Any
                 ]
                 cur = conn.execute(f"DELETE FROM signal_embeddings WHERE {where}", params)
                 try:
-                    from ..storage.adapters.sqlite.vector_search import delete_vec_rows
+                    from ..storage.adapters.sqlite.stores import SQLiteVectorIndex
 
-                    delete_vec_rows(conn, ids)
+                    SQLiteVectorIndex(conn).delete_embeddings(ids)
                 except Exception as exc:
                     logger.warning("Vector companion cleanup failed: %s", exc)
             else:

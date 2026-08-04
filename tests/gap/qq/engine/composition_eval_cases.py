@@ -83,6 +83,10 @@ class CompositionCase:
     # Defaults keep every existing case byte-identical (the query_class precedent).
     poison_groups: Tuple[Tuple[str, ...], ...] = ()
     authored_only: bool = False
+    # D1 hole-punchers: optional paraphrase family (D1.4). Same oracle/grading;
+    # runner reports variance across family_id. Empty = not in a family.
+    family_id: str = ""
+    variant_index: int = 0
 
     def __post_init__(self) -> None:
         if self.max_latency_ms <= 0:
@@ -206,7 +210,7 @@ def score_composition(
 
 
 def _pack(case, scores, composite, reasons, items, observed, oracle, denied) -> Dict[str, Any]:
-    return {
+    packed = {
         "case_id": case.id,
         "lane": case.lane,
         "layer": case.layer,
@@ -221,6 +225,11 @@ def _pack(case, scores, composite, reasons, items, observed, oracle, denied) -> 
         "oracle_note": oracle.note,
         "reason": "; ".join(reasons)[:300],
     }
+    family_id = getattr(case, "family_id", "") or ""
+    if family_id:
+        packed["family_id"] = family_id
+        packed["variant_index"] = int(getattr(case, "variant_index", 0) or 0)
+    return packed
 
 
 # --- Live-lane oracles (SQL against the node's own database) -------------------------
@@ -478,6 +487,7 @@ LIVE_COMPOSITION_CASES: List[CompositionCase] = [
     CompositionCase(
         "C9", "live", "What was I doing last week?", "messages:read", "summary",
         oracle_c9_temporal, temporal_days=7, layer="planner:time_window",
+        query_class="recency",
         description="Relative time window actually constrains results"),
     CompositionCase(
         "C10", "live", "What do I know about the Zorblatt-9 submarine project?",
@@ -938,5 +948,6 @@ LIVE_COMPOSITION_CASES.extend([
     CompositionCase(
         "C30", "live", "What was I doing this past month?", "messages:read", "summary",
         oracle_c30_temporal_month, temporal_days=30, layer="planner:time_window",
+        query_class="recency",
         description="30-day relative window actually constrains results"),
 ])

@@ -30,7 +30,6 @@ STATUS_COLORS = {
     "starting": (255, 210, 0, 255),  # yellow
     "healthy": (170, 255, 0, 255),  # green (original topos-cli green)
     "down": (255, 59, 48, 255),  # red
-    "update": (255, 165, 0, 255),  # orange
 }
 
 HEALTH_POLL_SECONDS = 5.0
@@ -70,11 +69,19 @@ def should_enable_tray(cli_flag: bool | None = None) -> bool:
 
 
 def open_log_viewer(log_path: Path) -> None:
-    """Open the log file in the platform's live-ish viewer (Console.app on macOS)."""
+    """Open a live streaming view of the node log (Terminal + tail -F on macOS)."""
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_path.touch(exist_ok=True)  # Console.app errors on a missing file
+    log_path.touch(exist_ok=True)
     if sys.platform == "darwin":
-        subprocess.Popen(["open", "-a", "Console", str(log_path)])
+        # Single-quote the path for the shell; AppleScript wraps the command in "".
+        quoted = "'" + str(log_path).replace("'", "'\\''") + "'"
+        command = (
+            "clear; echo 'Topos Node logs — Ctrl-C stops following (node keeps running)'; "
+            f"echo; tail -n 200 -F {quoted}"
+        )
+        escaped = command.replace("\\", "\\\\").replace('"', '\\"')
+        script = f'tell application "Terminal"\nactivate\ndo script "{escaped}"\nend tell'
+        subprocess.Popen(["/usr/bin/osascript", "-e", script])
     elif sys.platform == "win32":
         os.startfile(str(log_path))  # noqa: S606 — user-initiated menu action
     else:
@@ -99,7 +106,11 @@ def _glyph_filename() -> str:
 
 
 def create_status_image(status: str, glyph: str | None = None):
-    """Topos glyph with a status dot composited bottom-right (original layout)."""
+    """Topos glyph with a status badge composited bottom-right.
+
+    Healthy/starting/down use a colored dot. ``update`` uses a download glyph
+    (filled circle + down arrow) instead of an orange connection dot.
+    """
     from PIL import Image, ImageDraw
 
     glyph_path = ASSETS_DIR / (glyph or _glyph_filename())
@@ -108,8 +119,36 @@ def create_status_image(status: str, glyph: str | None = None):
 
     overlay = Image.new("RGBA", (ICON_SIZE, ICON_SIZE), (255, 255, 255, 0))
     dc = ImageDraw.Draw(overlay)
-    dc.ellipse((22, 22, 32, 32), fill=STATUS_COLORS.get(status, STATUS_COLORS["starting"]))
+    if status == "update":
+        _draw_download_badge(dc, ink=_badge_ink_for_glyph(glyph or _glyph_filename()))
+    else:
+        dc.ellipse((22, 22, 32, 32), fill=STATUS_COLORS.get(status, STATUS_COLORS["starting"]))
     return Image.alpha_composite(base, overlay)
+
+
+def _badge_ink_for_glyph(glyph: str) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int]]:
+    """Return (circle_fill, arrow_fill) contrast for the active glyph."""
+    if "white" in glyph:
+        return (255, 255, 255, 255), (0, 0, 0, 255)
+    return (0, 0, 0, 255), (255, 255, 255, 255)
+
+
+def _draw_download_badge(dc, ink: tuple[tuple[int, int, int, int], tuple[int, int, int, int]]) -> None:
+    circle, arrow = ink
+    # Slightly larger than the status dot so the arrow reads at tray scale.
+    left, top, right, bottom = 20, 20, 33, 33
+    dc.ellipse((left, top, right, bottom), fill=circle)
+    cx = (left + right) / 2
+    shaft_top = top + 3
+    shaft_bot = top + 7
+    head_top = top + 6.5
+    head_bot = bottom - 3
+    head_half = 3.5
+    dc.line([(cx, shaft_top), (cx, shaft_bot)], fill=arrow, width=2)
+    dc.polygon(
+        [(cx - head_half, head_top), (cx + head_half, head_top), (cx, head_bot)],
+        fill=arrow,
+    )
 
 
 class ToposTray:

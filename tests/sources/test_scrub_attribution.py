@@ -95,7 +95,7 @@ def test_scrub_attributed_rows_deletes_vec_sidecar_rows(conn: sqlite3.Connection
 
     assert conn.execute("SELECT COUNT(*) FROM signal_embeddings WHERE source_id='browser_visits'").fetchone()[0] == 0
     assert conn.execute("SELECT COUNT(*) FROM signal_embeddings_vec WHERE embedding_id='emb-1'").fetchone()[0] == 0
-    vec_action = next((item for item in result.tables if item.table == "signal_embeddings_vec"), None)
+    vec_action = next((item for item in result.tables if item.table == "vector_index"), None)
     assert vec_action is not None
     assert vec_action.action == "vec_rows_deleted"
     assert vec_action.count == 1

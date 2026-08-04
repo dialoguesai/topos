@@ -365,6 +365,37 @@ class TestLowCountSumStatsSurviveRefold:
             for i in insights
         )
 
+    def test_windowed_sum_survives_below_floor(self, conn) -> None:
+        """Prov residual: _windowed_insight must also exempt sum from _MIN_N."""
+        from topos.features.stats import definitions as defs
+        from topos.features.stats.insights import _windowed_insight
+
+        engine = StatsEngine(conn)
+        engine.fold_batch(
+            [
+                {
+                    "record_id": "f1",
+                    "_table": "financial_transactions",
+                    "occurred_at": "2025-02-01T12:00:00Z",
+                    "category": "dining",
+                    "amount": 30.0,
+                },
+            ]
+        )
+        defn = next(
+            d for d in defs.load_enabled_definitions(conn)
+            if d["stat_id"] == "financial.spend.by_category"
+        )
+        # Direct unit: windowed path used to return None at n=1 before the exemption.
+        recent = _windowed_insight(
+            engine, defn, group_key="dining", window="d30", label_map={}
+        )
+        assert recent is not None
+        assert recent.get("window") == "d30"
+        assert "dining" in str(recent.get("text") or "").lower() or "30" in str(
+            recent.get("text") or ""
+        )
+
 
 class TestDisclosureGate:
     def _manifest(self, signal_objects):

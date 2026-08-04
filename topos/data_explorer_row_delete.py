@@ -50,7 +50,6 @@ _ENRICHMENT_SIGNAL_TABLES = frozenset(
         "signal_scores",
         "signal_embeddings",
         "relationship_edges",
-        "signal_summaries",
         "graph_nodes",
         "graph_edges",
         "data_health_dimension",
@@ -594,7 +593,7 @@ def delete_database_rows(
 
     vec_deleted = _delete_vec_rows_batched(conn, embedding_ids)
     if vec_deleted > 0:
-        actions.append(TableAction(table="signal_embeddings_vec", action="vec_rows_deleted", count=vec_deleted))
+        actions.append(TableAction(table="vector_index", action="vec_rows_deleted", count=vec_deleted))
 
     if isinstance(conn, sqlite3.Connection):
         conn.commit()
