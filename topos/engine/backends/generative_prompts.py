@@ -108,6 +108,9 @@ def build_generative_prompt(subtype: str, payload: Dict[str, Any]) -> str:
         # Typed answers, not forced booleans: the old "yes|no|unknown" template
         # made every who/what/list question structurally unanswerable (the
         # model replied "yes" at confidence 1.0 to "Who do I message most?").
+        # B8 attribution: do NOT claim every scored record is the owner's —
+        # owner_authored/speaker_label mark others' evidence that must be
+        # attributed or ignored for first-person asks.
         ctx = payload.get("context") or ""
         q = payload.get("query") or text
         return (
@@ -122,13 +125,20 @@ def build_generative_prompt(subtype: str, payload: Dict[str, Any]) -> str:
             '"no" for whether the context contains relevant material, with '
             "confidence reflecting how strong that material is.\n"
             "- The context is privacy-filtered: records appear as relevance/"
-            "similarity scores without their text. Scored records ARE the "
-            "owner's matching data. Decision rule for topic queries: if any "
-            'record has relevance_score or similarity >= 0.6, answer "yes" with '
-            "confidence = the highest such score. Only when NO record scores "
-            '>= 0.6 may you answer "no" or "unknown".\n'
-            '- If the context does not contain the information, answer "unknown" '
-            "with confidence 0.0. Never guess beyond the context.\n\n"
+            "similarity scores without raw message text. Attribution metadata "
+            "may still be present:\n"
+            "  * owner_authored=true (or missing on derived facts/stats): may "
+            "support a first-person claim about the owner.\n"
+            "  * owner_authored=false / speaker_label set: another person's "
+            "speech or an assistant reply — NEVER present as the owner's "
+            "opinion, interest, identity, or preference. Attribute by "
+            "speaker_label or ignore for first-person asks.\n"
+            "- Decision rule for topic queries: if any OWNER-authored (or "
+            "unmarked derived) record has relevance_score or similarity >= 0.6, "
+            'answer "yes" with confidence = the highest such score. Scores that '
+            "are only other-authored do NOT justify a first-person yes.\n"
+            '- If the context does not contain owner-grounded information, answer '
+            '"unknown" with confidence 0.0. Never guess beyond the context.\n\n'
             f"Query: {q}\n\nContext: {ctx[:3500]}"
         )
     return str(payload) if payload else ""

@@ -97,6 +97,32 @@ def test_rebuild_removes_stat_insights_grouped_by_the_entity(pending):
     assert BH_CANONICAL not in " ".join(str(r[0]) for r in rows)
 
 
+def test_rebuild_removes_the_entity_context_vector(pending):
+    """Centroids feed affinity production — withdraw them with the blackhole."""
+    before = pending.conn.execute(
+        "SELECT COUNT(*) FROM entity_context_vectors WHERE entity_id=?",
+        (BH_ID,),
+    ).fetchone()[0]
+    assert before == 1
+
+    report = rebuild_for_blackhole(pending.conn, BH_ID)
+
+    assert report.context_vectors_removed == 1
+    after = pending.conn.execute(
+        "SELECT COUNT(*) FROM entity_context_vectors WHERE entity_id=?",
+        (BH_ID,),
+    ).fetchone()[0]
+    assert after == 0
+    # Affinity edges stay (id-joinable; owner keeps them, guard hides them).
+    affinity = pending.conn.execute(
+        "SELECT COUNT(*) FROM entity_edges "
+        "WHERE edge_type='semantic_affinity' AND valid_to IS NULL "
+        "AND (src_entity_id=? OR dst_entity_id=?)",
+        (BH_ID, BH_ID),
+    ).fetchone()[0]
+    assert affinity >= 1
+
+
 def test_withdrawal_not_redaction(pending):
     """D3 — a body with a name-shaped hole still says someone was there."""
     rebuild_for_blackhole(pending.conn, BH_ID)

@@ -305,9 +305,15 @@ class TestEntityContextPastShift:
 
         self._seed_closed_edge(conn)
         items = entity_context_items(conn, self._linked(), temporal_shift="past")
-        graph_items = [i for i in items if i["retrieval_source"] == "entity_graph"]
-        assert graph_items, "closed edge did not surface for a past-tense shift"
-        text = graph_items[0]["summary_text"]
+        # Query-time ensure_dossier prefers entity_dossier; closed edges still
+        # render with the T7 staleness marker on that path.
+        spine = [
+            i
+            for i in items
+            if i["retrieval_source"] in ("entity_graph", "entity_dossier")
+        ]
+        assert spine, "closed edge did not surface for a past-tense shift"
+        text = spine[0]["summary_text"]
         assert "Brindle Cassavetes" in text
         # T7's oracle greps the exact literal; the form mirrors the fact lane.
         assert re.search(r"no longer current — superseded \d{4}-\d{2}-\d{2}", text)
@@ -329,9 +335,13 @@ class TestEntityContextPastShift:
         update_edge(conn, src_entity_id="ent-a", dst_entity_id="ent-b", edge_type="worked_with")
         conn.commit()
         items = entity_context_items(conn, self._linked(), temporal_shift="past")
-        graph_items = [i for i in items if i["retrieval_source"] == "entity_graph"]
-        assert graph_items and "Brindle Cassavetes" in graph_items[0]["summary_text"]
-        assert "no longer current" not in graph_items[0]["summary_text"]
+        spine = [
+            i
+            for i in items
+            if i["retrieval_source"] in ("entity_graph", "entity_dossier")
+        ]
+        assert spine and "Brindle Cassavetes" in spine[0]["summary_text"]
+        assert "no longer current" not in spine[0]["summary_text"]
 
 
 # ------------------------------------------------------------------ B2.3

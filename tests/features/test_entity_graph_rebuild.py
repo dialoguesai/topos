@@ -63,24 +63,58 @@ def test_co_occurrence_rebuilt_from_mentions(conn):
 
 
 def test_communicates_with_is_rebuilt_not_dropped(conn):
-    """The bug: rebuild must (re)create communicates_with, not just delete it."""
-    a, b = _seed_two_entities_one_record(conn)
+    """P3.2: rebuild recreates communicates_with from thread co-participants."""
+    r = EntityResolver(conn)
+    owner = r._create_entity("Owner", "person")
+    peer = r._create_entity("Carol", "person")
+    conn.execute(
+        "UPDATE entities SET is_self=1, contact_id='c-owner', "
+        "identifiers_json=? WHERE entity_id=?",
+        ('["self"]', owner),
+    )
+    conn.execute(
+        "UPDATE entities SET contact_id='c-carol', identifiers_json=? WHERE entity_id=?",
+        ('["carol-1"]', peer),
+    )
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS conversation_messages ("
+        "message_id TEXT PRIMARY KEY, conversation_id TEXT, sender_type TEXT, "
+        "sender_id TEXT, is_from_self INTEGER, actor_role TEXT, event_at TEXT)"
+    )
+    conn.execute(
+        "INSERT INTO conversation_messages "
+        "(message_id, conversation_id, sender_type, sender_id, is_from_self, actor_role, event_at) "
+        "VALUES ('m-owner', 'c1', 'human', 'self', 1, 'authored', '2026-01-01T00:00:00Z')"
+    )
+    conn.execute(
+        "INSERT INTO conversation_messages "
+        "(message_id, conversation_id, sender_type, sender_id, is_from_self, actor_role, event_at) "
+        "VALUES ('m-carol', 'c1', 'contact', 'carol-1', 0, 'participated', '2026-01-01T00:01:00Z')"
+    )
+    conn.commit()
     conn.execute("DELETE FROM entity_edges")
     conn.commit()
-    # rec1 was authored by a sender; the rebuild resolves it and links sender→entity.
-    stats = rebuild_evidence_edges(conn, sender_lookup=lambda _c, _t: {"rec1": "Carol"})
+    stats = rebuild_evidence_edges(conn)
     assert stats["communicates_with"] >= 1
     types = {e["edge_type"] for e in graph_snapshot(conn)["edges"]}
     assert "communicates_with" in types
+    pair = conn.execute(
+        """SELECT COUNT(*) FROM entity_edges
+           WHERE edge_type='communicates_with' AND valid_to IS NULL
+             AND ((src_entity_id=? AND dst_entity_id=?)
+               OR (src_entity_id=? AND dst_entity_id=?))""",
+        (owner, peer, peer, owner),
+    ).fetchone()[0]
+    assert pair >= 1
 
 
 def test_rebuild_is_idempotent(conn):
     _seed_two_entities_one_record(conn)
-    first = rebuild_evidence_edges(conn, sender_lookup=lambda _c, _t: {"rec1": "Carol"})
+    first = rebuild_evidence_edges(conn)
     active_after_first = conn.execute(
         "SELECT COUNT(*) FROM entity_edges WHERE valid_to IS NULL"
     ).fetchone()[0]
-    second = rebuild_evidence_edges(conn, sender_lookup=lambda _c, _t: {"rec1": "Carol"})
+    second = rebuild_evidence_edges(conn)
     active_after_second = conn.execute(
         "SELECT COUNT(*) FROM entity_edges WHERE valid_to IS NULL"
     ).fetchone()[0]

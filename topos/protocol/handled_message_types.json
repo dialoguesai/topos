@@ -77,6 +77,7 @@
   "get_ui_config",
   "get_upgrade_status",
   "get_user_identity",
+  "graph_cypher_query",
   "healthcheck",
   "import_apple_contacts",
   "import_contacts_apple_global",
@@ -141,6 +142,11 @@
   "replay_projection_preview",
   "routine_has_active_run",
   "set_device_name",
+  "signal_affinity_config",
+  "signal_affinity_label",
+  "signal_affinity_pairs",
+  "signal_affinity_recompute",
+  "signal_affinity_status",
   "signal_attention_dashboard",
   "signal_blackhole_entity",
   "signal_data_health",
@@ -204,5 +210,11 @@
   "update_routine_run",
   "upsert_home_chat_session",
   "verify_claim"
+ ],
+ "owner_only_message_types": [
+  "delete_database_rows",
+  "delete_database_table",
+  "get_database_explorer_summary",
+  "graph_cypher_query"
  ]
 }

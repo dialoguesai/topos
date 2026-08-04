@@ -58,6 +58,83 @@ def _read_scope_table_allowlist(filter_manifest: Optional[Dict[str, Any]], scope
     return [str(t).strip() for t in tables if str(t).strip()]
 
 
+def _normalize_id_list(raw: Any) -> List[str]:
+    if not isinstance(raw, list):
+        return []
+    out: List[str] = []
+    seen: set[str] = set()
+    for item in raw:
+        sid = str(item or "").strip()
+        if not sid or sid in seen:
+            continue
+        seen.add(sid)
+        out.append(sid)
+    return out
+
+
+def _resolve_accessible_entity_cohorts(
+    cohorts: List[str],
+    db_conn: Optional[Any] = None,
+) -> List[str]:
+    """D-002 / C1: resolve membership cohort tokens → person entity ids.
+
+    Without ``db_conn``, membership cohorts fail closed to ``[]`` (A8 aggregate
+    permit still uses the audit ``accessible_entity_cohorts`` list). Pipeline
+    re-applies resolvers with a live connection before selector checks.
+    """
+    from .cohort_resolvers import resolve_accessible_entity_cohorts
+
+    return resolve_accessible_entity_cohorts(cohorts, db_conn)
+
+
+def _entity_selector_policy_keys_present(filter_manifest: Optional[Dict[str, Any]]) -> bool:
+    """True when the grant explicitly configured entity selector policy (even if empty).
+
+    Missing keys = legacy unrestricted. Present empty list = deny named people.
+    """
+    if not filter_manifest or not isinstance(filter_manifest, dict):
+        return False
+    nested = filter_manifest.get("filter_manifest")
+    nested_dict = nested if isinstance(nested, dict) else {}
+    for key in ("accessible_entity_ids", "accessible_entity_cohorts"):
+        if key in filter_manifest or key in nested_dict:
+            return True
+    return False
+
+
+def _read_accessible_entity_policy(
+    filter_manifest: Optional[Dict[str, Any]],
+    db_conn: Optional[Any] = None,
+) -> tuple[List[str], List[str], bool]:
+    """Read grant siblings accessible_entity_ids / accessible_entity_cohorts (D-002).
+
+    Stored on uma_permissions.filters next to filter_manifest (not inside pydantic
+    FilterManifest — that strips unknown keys). Accept top-level on the filters blob
+    or, for test convenience, nested under filter_manifest.
+
+    Returns (merged_ids, cohorts, policy_active). Merged ids = enums ∪ resolve(cohorts)
+    when ``db_conn`` is available (C1); otherwise enums only (fail closed).
+    """
+    if not filter_manifest or not isinstance(filter_manifest, dict):
+        return [], [], False
+    nested = filter_manifest.get("filter_manifest")
+    nested_dict = nested if isinstance(nested, dict) else {}
+    policy_active = _entity_selector_policy_keys_present(filter_manifest)
+
+    def _get(key: str) -> Any:
+        if key in filter_manifest:
+            return filter_manifest.get(key)
+        return nested_dict.get(key)
+
+    explicit = _normalize_id_list(_get("accessible_entity_ids"))
+    cohorts = _normalize_id_list(_get("accessible_entity_cohorts"))
+    # Fail closed without an explicit db_conn; pipeline.apply_cohort_membership
+    # widens at grant-apply time with the live connection.
+    from_cohorts = _resolve_accessible_entity_cohorts(cohorts, db_conn)
+    merged = _normalize_id_list([*explicit, *from_cohorts])
+    return merged, cohorts, policy_active
+
+
 def manifest_from_scope_entry(entry: Dict[str, Any]) -> ScopeResolutionManifest:
     source_ids = list(entry.get("default_source_ids") or [])
     single = entry.get("default_source_id")
@@ -86,10 +163,14 @@ def resolve_scope_manifest(
     *,
     client_manifest: Optional[Dict[str, Any]] = None,
     filter_manifest: Optional[Dict[str, Any]] = None,
+    db_conn: Optional[Any] = None,
 ) -> ScopeResolutionManifest:
     """
     Build authoritative manifest from engine scope registry.
     Client-supplied manifest fields that affect retrieval boundaries are ignored.
+
+    Optional ``db_conn`` enables C1 cohort → entity-id resolution at grant-resolve
+    time. Pipeline also re-applies resolvers before selector checks.
     """
     sid = (scope_id or "").strip()
     if not sid:
@@ -112,6 +193,16 @@ def resolve_scope_manifest(
         manifest = replace(manifest, canonical_tables=filtered)
     if filter_manifest is not None:
         manifest = replace(manifest, filter_manifest=filter_manifest)
+    entity_ids, entity_cohorts, policy_active = _read_accessible_entity_policy(
+        filter_manifest, db_conn=db_conn
+    )
+    if policy_active:
+        manifest = replace(
+            manifest,
+            accessible_entity_ids=entity_ids,
+            accessible_entity_cohorts=entity_cohorts,
+            entity_selector_policy_active=True,
+        )
 
     if client_manifest:
         client_sid = str(client_manifest.get("scope_id") or "").strip()

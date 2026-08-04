@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
@@ -48,26 +49,139 @@ def _minimizer_enabled() -> bool:
 
 
 def _selector_enforcement_enabled() -> bool:
-    """Selector-aware disclosure enforcement (plan A2). Default OFF: the safe-floor policy
-    (deny a grantee ANY named person) over-blocks legitimate flows where a person is named
-    incidentally within an authorized task ("prep the launch meeting with Alex"). Turning it
-    on by default awaits the A2.1 grant-schema, which will carry per-grant
-    accessible_entity_ids so authorized people pass while unauthorized selection is denied.
-    The mechanism is proven by the SEL eval lane, which sets this flag."""
-    return str(os.environ.get("TOPOS_SELECTOR_ENFORCEMENT") or "").strip().lower() in ("1", "true", "yes", "on")
+    """Selector-aware disclosure enforcement (plan A2 / A2.1 finish).
+
+    Default ON. Safe because missing entity-policy keys on a grant leave
+    `entity_selector_policy_active=False` (legacy unrestricted). Explicit empty
+    allow-list denies named people. Set TOPOS_SELECTOR_ENFORCEMENT=0|false|off to disable.
+    """
+    raw = str(os.environ.get("TOPOS_SELECTOR_ENFORCEMENT") or "").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    return True
+
+
+def _looks_like_named_person_ask(query_text: str) -> bool:
+    """True when the query appears to select a named person (First Last + ask verbs).
+
+    Used so fabricated / unlinked person asks suppress under an active entity
+    allow-list — otherwise raw dumps return content for absent names while
+    unauthorized reals return empty (existence-channel leak; D1.3 / A7).
+    """
+    q = str(query_text or "").strip()
+    if not q:
+        return False
+    # Multi-token proper-name shape; single Capitalized tokens are too ambiguous.
+    if not re.search(r"\b[A-Z][a-zA-Z'.\-]+(?:\s+[A-Z][a-zA-Z'.\-]+)+\b", q):
+        return False
+    return bool(
+        re.search(
+            r"(?i)\b("
+            r"about|with|from|said|messages?|meeting|prep with|what has|tell me"
+            r")\b",
+            q,
+        )
+    )
+
+
+# Thin A8 / A2.3 cohort vocabulary: permit non-entity-specific aggregate answers.
+# Does NOT resolve to entity ids (Wave C1). Keep in sync with grant UX copy.
+_COHORT_AGGREGATE_PERMIT_TOKENS = frozenset(
+    {
+        "contacts",
+        "message_peers",
+        "calendar_attendees",
+        "stats_aggregate",
+    }
+)
+
+# Mirror planner aggregate cues so pipeline can decide refuse-vs-aggregate without
+# requiring the full query planner (and without importing planner regex privately).
+_AGGREGATE_ASK_RE = re.compile(
+    r"\b(how often|how much|how many|how long|average|avg|typically|usually|"
+    r"most active|per (?:day|week|month)|trend|total spend|spend on|rhythm|habit|"
+    r"people (?:do i|i)|across (?:my )?contacts|message(?:s|ing)? volume)\b",
+    re.I,
+)
+
+
+def _looks_like_aggregate_ask(query_text: str) -> bool:
+    """True for aggregate-shaped asks (how many / how often / typically…)."""
+    return bool(_AGGREGATE_ASK_RE.search(str(query_text or "")))
+
+
+def _cohort_aggregate_permitted(manifest) -> bool:
+    """True when the grant lists a recognized cohort token (A8 aggregate permit).
+
+    Membership tokens (`contacts`, `message_peers`, `calendar_attendees`) also
+    widen `accessible_entity_ids` via C1 resolvers; `stats_aggregate` stays
+    aggregate-only (no named-person widen).
+    """
+    for raw in getattr(manifest, "accessible_entity_cohorts", None) or []:
+        key = str(raw or "").strip().lower()
+        if key in _COHORT_AGGREGATE_PERMIT_TOKENS:
+            return True
+    return False
+
+
+def _is_aggregate_only_ask(db_conn, query_text: str) -> bool:
+    """Aggregate intent with no named-person selector (linked or person-shaped)."""
+    if not _looks_like_aggregate_ask(query_text):
+        return False
+    if _looks_like_named_person_ask(query_text):
+        return False
+    if db_conn is None:
+        return True
+    try:
+        from ..features.entities.linking import link_query_entities
+
+        linked = link_query_entities(db_conn, query_text)
+    except Exception:
+        return True
+    return not any(str(e.get("entity_type") or "").lower() == "person" for e in linked)
+
+
+def _selector_cohort_aggregate_allowed(db_conn, query_text: str, manifest) -> bool:
+    """A2.3 / A8: allow a non-entity-specific aggregate under an active selector.
+
+    Triggers (either — both require aggregate-only + active policy):
+      1. grant lists a recognized cohort token (`_cohort_aggregate_permitted`), or
+      2. ask is clearly aggregate-only under an active entity-selector policy
+         (enums-first / stats-style under enums; C1 widens membership separately).
+
+    Named-person / person-shaped asks must NOT use this path (caller enforces
+    `_selector_unauthorized` first → denial≡absence).
+    """
+    if not bool(getattr(manifest, "entity_selector_policy_active", False)):
+        return False
+    if not _is_aggregate_only_ask(db_conn, query_text):
+        return False
+    # Preferred grant signal is a recognized cohort token; active selector alone
+    # still permits the non-entity-specific aggregate path.
+    return True
 
 
 def _selector_unauthorized(db_conn, query_text: str, manifest) -> bool:
     """Selector-aware disclosure (plan A2, the Maya problem): True when a GRANTEE query
     names a real third-party PERSON entity the grant does not authorize selecting.
 
-    Default-deny floor: with no entity-level grant (manifest.accessible_entity_ids empty),
-    a grantee may not select ANY named person — because when the requester supplies the
-    selector, response-side redaction is meaningless (they conditioned the whole answer on
-    that person). Topic/place entities are NOT selectors and pass through. Fabricated names
-    don't link, so they never trigger this — which is exactly what makes the real-person
-    refusal indistinguishable from an absent-person query (both yield an empty result)."""
+    When entity_selector_policy_active is False (legacy grant — keys missing), do not
+    suppress. When active and allow-list empty, deny ANY named person — because when the
+    requester supplies the selector, response-side redaction is meaningless. Topic/place
+    entities are NOT selectors.
+
+    When active and the ask is person-shaped but links to no person (fabricated name),
+    also suppress — denial≡absence vs unauthorized reals (CQE; closes raw-dump
+    distinguishability on D13-GT-R*).
+
+    Aggregate-only asks are not unauthorized here — A2.3 / A8 may answer them via the
+    cohort-aggregate path instead of empty denial.
+    """
     if not query_text or db_conn is None:
+        return False
+    if not bool(getattr(manifest, "entity_selector_policy_active", False)):
         return False
     try:
         from ..features.entities.linking import link_query_entities
@@ -76,10 +190,11 @@ def _selector_unauthorized(db_conn, query_text: str, manifest) -> bool:
     except Exception:
         return False
     persons = [e for e in linked if str(e.get("entity_type") or "").lower() == "person"]
-    if not persons:
-        return False
     accessible = {str(x).strip() for x in (getattr(manifest, "accessible_entity_ids", None) or [])}
-    return any(str(e.get("entity_id") or "").strip() not in accessible for e in persons)
+    if persons:
+        return any(str(e.get("entity_id") or "").strip() not in accessible for e in persons)
+    # Unlinked person-shaped ask: suppress so fabricated ≡ unauthorized empty.
+    return _looks_like_named_person_ask(query_text)
 
 
 def _persist_negotiation_round(store, session_id, requester_id, session_data, neg_round) -> None:
@@ -302,8 +417,12 @@ class QueryPipelineOrchestrator:
         )
 
         from ..core.state import get_db_connection
+        from .cohort_resolvers import apply_cohort_membership
 
         db_conn = _db_conn_from_adapters(self._adapters) or get_db_connection()
+        # C1: widen allow-list from grant cohorts at grant-apply time (before
+        # selector / refuse-vs-aggregate). Fail closed when DB missing.
+        manifest = apply_cohort_membership(manifest, db_conn)
         installed_source_ids = list_installed_source_ids(db_conn)
         resolved_source_ids = resolve_retrieval_source_ids(manifest, installed_source_ids or None)
         data_health_version = get_data_health_version(scope_id, resolved_source_ids, db_conn)
@@ -388,14 +507,18 @@ class QueryPipelineOrchestrator:
                     "audit": audit,
                 }
 
-        # Selector-aware disclosure (plan A2): a grantee naming an unauthorized third-party
-        # person is answered as if that person is absent — empty, mode-appropriate, and
-        # byte-identical to a fabricated-name query. Owner requests are never suppressed.
-        suppress_selectors = (
-            _selector_enforcement_enabled()
-            and bool(is_grantee_request)
-            and _selector_unauthorized(db_conn, query_text, manifest)
-        )
+        # Selector-aware disclosure (plan A2 / A2.3):
+        #   * unauthorized named person → empty denial≡absence (suppress)
+        #   * aggregate-only under active selector / cohort grant → non-entity-specific
+        #     aggregate (A8); never rewrite a named-person ask into an aggregate
+        # Owner requests are never suppressed or forced onto the aggregate path.
+        suppress_selectors = False
+        cohort_aggregate = False
+        if _selector_enforcement_enabled() and bool(is_grantee_request):
+            if _selector_unauthorized(db_conn, query_text, manifest):
+                suppress_selectors = True
+            elif _selector_cohort_aggregate_allowed(db_conn, query_text, manifest):
+                cohort_aggregate = True
 
         timings = StageTimings()
         _t0 = now_ms()
@@ -412,6 +535,7 @@ class QueryPipelineOrchestrator:
                     disclosure_tier=disclosure_tier,
                     requester_id=requester_id,
                     suppress_selectors=suppress_selectors,
+                    cohort_aggregate=cohort_aggregate,
                     # Wall clock by default; eval harnesses inject a fixed now so
                     # the planner's month/as-of arithmetic is reproducible.
                     now=now,

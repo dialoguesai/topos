@@ -50,6 +50,7 @@ class RebuildReport:
     objects_closed: int = 0
     briefs_invalidated: int = 0
     stat_insights_removed: int = 0
+    context_vectors_removed: int = 0
     details: Dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> Dict[str, Any]:
@@ -58,6 +59,7 @@ class RebuildReport:
             "objects_closed": self.objects_closed,
             "briefs_invalidated": self.briefs_invalidated,
             "stat_insights_removed": self.stat_insights_removed,
+            "context_vectors_removed": self.context_vectors_removed,
             **self.details,
         }
 
@@ -154,6 +156,29 @@ def _remove_stat_insights(conn: sqlite3.Connection, terms: Set[str]) -> int:
     return removed
 
 
+def _remove_context_vector(conn: sqlite3.Connection, entity_id: str) -> int:
+    """Drop the mention-context centroid for a protected entity.
+
+    Affinity edges that already name the entity stay (id-joinable; owner keeps
+    them, ``BlackholeGuard`` hides them from everyone else). The centroid is
+    the producer input for *new* latent edges, so it must not survive the
+    blackhole rebuild — the next nightly affinity pass freezes any remaining
+    edges and will not invent fresh ones from a missing centroid.
+    """
+    if not entity_id:
+        return 0
+    try:
+        return int(
+            conn.execute(
+                "DELETE FROM entity_context_vectors WHERE entity_id=?",
+                (entity_id,),
+            ).rowcount
+            or 0
+        )
+    except sqlite3.OperationalError:
+        return 0
+
+
 def rebuild_for_blackhole(conn: sqlite3.Connection, entity_ref: str) -> RebuildReport:
     """Withdraw every prose artifact naming this entity, then mark the flag ready.
 
@@ -177,6 +202,9 @@ def rebuild_for_blackhole(conn: sqlite3.Connection, entity_ref: str) -> RebuildR
         report.objects_closed = _close_prose_objects(conn, terms, record["entity_id"])
         report.briefs_invalidated = _invalidate_briefs(conn, terms)
         report.stat_insights_removed = _remove_stat_insights(conn, terms)
+        report.context_vectors_removed = _remove_context_vector(
+            conn, str(record.get("entity_id") or "")
+        )
         conn.commit()
     except Exception as exc:  # noqa: BLE001
         conn.rollback()
@@ -190,10 +218,12 @@ def rebuild_for_blackhole(conn: sqlite3.Connection, entity_ref: str) -> RebuildR
     store.mark_rebuild_complete(entity_ref)
     report.details["status"] = "complete"
     logger.info(
-        "blackhole rebuild complete: %s objects closed, %s briefs blanked, %s insights removed",
+        "blackhole rebuild complete: %s objects closed, %s briefs blanked, "
+        "%s insights removed, %s context vectors removed",
         report.objects_closed,
         report.briefs_invalidated,
         report.stat_insights_removed,
+        report.context_vectors_removed,
     )
     return report
 

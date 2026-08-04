@@ -35,6 +35,10 @@ dependencies = [
   "sentence-transformers~=5.6.0",
   "networkx>=3.2.1,<3.7",
   "python-louvain>=0.16,<0.17",
+  # openCypher over the materialised entity graph, owner-only
+  # (topos.features.entities.cypher; PLAN_GRAPH_QUERY_AND_LATENT_EDGES §4).
+  # Pure-Python parser (lark) + matcher over networkx — no graph database.
+  "grand-cypher>=0.12,<0.13",
   # Complexity readings (topos.features.complexity): entropy/MI + graph math.
   "numpy>=1.26,<3",
   "scipy>=1.11,<2",
@@ -66,6 +70,7 @@ engine = [
   "sentence-transformers~=5.6.0",
   "networkx>=3.2.1,<3.7",
   "python-louvain>=0.16,<0.17",
+  "grand-cypher>=0.12,<0.13",
   "numpy>=1.26,<3",
   "scipy>=1.11,<2",
   "scikit-learn>=1.4,<2",
@@ -106,6 +111,8 @@ filterwarnings = [
   "ignore:on_event is deprecated.*:DeprecationWarning:fastapi.*",
 ]
 markers = [
+  "journey: binds this test to a J-* journey note in topos-ops-wiki (the id is the marker arg)",
+  "check: binds this test to a C-* check note in topos-ops-wiki (the id is the marker arg)",
   "gap: gap verification test (sprint pack); must pass after sprint lands",
   "qq_eval: live query quality/latency eval against owner database",
   "acceptance: Wiki MVP acceptance test (AT-1 through AT-8)",

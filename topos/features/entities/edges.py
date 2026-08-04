@@ -30,6 +30,18 @@ EDGE_DISCUSSES = "discusses"
 EDGE_LOCATED_AT = "located_at"
 EDGE_PART_OF = "part_of"  # directed: product/sub-unit -> parent org
 
+#: Latent affinity between two entities occupying the same role-shape in the
+#: owner's life (PLAN_GRAPH_QUERY_AND_LATENT_EDGES §3.2). Written ONLY by
+#: features/entities/affinity.py:rebuild_affinity_edges, never by ``update_edge``
+#: — its weight is a bounded cosine snapshot, not folded evidence.
+EDGE_SEMANTIC_AFFINITY = "semantic_affinity"
+
+#: Edge types for which (A,B) and (B,A) are the same fact and must share a row.
+#: ``semantic_affinity`` belongs here because cosine is symmetric: without a
+#: canonical order one rebuild would write A->B where the last wrote B->A, so
+#: the earlier row would never be superseded and duplicate pairs would pile up.
+_SYMMETRIC_EDGE_TYPES = (EDGE_CO_OCCURRENCE, EDGE_COMMUNICATES, EDGE_SEMANTIC_AFFINITY)
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -37,7 +49,7 @@ def _now_iso() -> str:
 
 def _canonical_order(src_entity_id: str, dst_entity_id: str, edge_type: str):
     """Undirected edge types get a canonical order so A-B and B-A share a row."""
-    if edge_type in (EDGE_CO_OCCURRENCE, EDGE_COMMUNICATES) and dst_entity_id < src_entity_id:
+    if edge_type in _SYMMETRIC_EDGE_TYPES and dst_entity_id < src_entity_id:
         return dst_entity_id, src_entity_id
     return src_entity_id, dst_entity_id
 
@@ -350,7 +362,11 @@ def graph_snapshot(
     lim_e = max(1, int(limit_edges))
     lim_n = max(1, int(limit_nodes))
 
-    where_params: List[Any] = [min_weight]
+    # Affinity weights are cosines in [0, 1] (see affinity.py); the caller's
+    # min_weight is calibrated for accumulating-count spine edges. Applying the
+    # same floor would hide every latent edge. Quality is already gated at write
+    # time (AFFINITY_FLOOR_ABS), so semantic_affinity is exempt from this filter.
+    where_params: List[Any] = [EDGE_SEMANTIC_AFFINITY, min_weight]
     if as_of:
         clause = (
             " AND (valid_from IS NULL OR valid_from <= ?)"
@@ -362,7 +378,9 @@ def graph_snapshot(
     else:
         clause = " AND valid_to IS NULL"
 
-    where_sql = f"FROM entity_edges WHERE weight >= ?{clause}"
+    where_sql = (
+        f"FROM entity_edges WHERE (edge_type = ? OR weight >= ?){clause}"
+    )
     total_edges_matching = int(
         conn.execute(f"SELECT COUNT(*) {where_sql}", tuple(where_params)).fetchone()[0]
     )

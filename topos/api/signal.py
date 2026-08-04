@@ -147,7 +147,48 @@ async def list_signal_dimensions(_api_key: str = Depends(require_api_key)):
 @router.get("/data-health")
 async def get_signal_data_health(_api_key: str = Depends(require_api_key)):
     service = get_signal_service()
-    return service.get_data_health()
+    health = service.get_data_health()
+    # Derived data that a failed job still owes. Surfaced on the health route
+    # because "a batch silently lost its facts" is exactly the condition this
+    # endpoint exists to catch, and it was invisible until now.
+    try:
+        from ..core.state import get_db_connection
+        from ..enrichment.derivation_recovery import pending_derivation_summary
+
+        if isinstance(health, dict):
+            health["derivation_debt"] = pending_derivation_summary(get_db_connection())
+    except Exception as exc:  # noqa: BLE001 — health must never 500
+        logger.debug("derivation debt summary skipped: %s", exc)
+    return health
+
+
+@router.get("/derivation-debt")
+async def get_derivation_debt(_api_key: str = Depends(require_api_key)):
+    """Derivation jobs that failed and still owe their output."""
+    from ..core.state import get_db_connection
+    from ..enrichment.derivation_recovery import (
+        list_pending_derivation_retries,
+        pending_derivation_summary,
+    )
+
+    conn = get_db_connection()
+    return {
+        "summary": pending_derivation_summary(conn),
+        "pending": list_pending_derivation_retries(conn, limit=200),
+    }
+
+
+@router.post("/derivation-debt/retry")
+async def retry_derivation_debt(
+    dry_run: bool = Query(default=False),
+    source_id: Optional[str] = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=200),
+    _api_key: str = Depends(require_api_key),
+):
+    """Re-run failed derivations. ``dry_run`` reports without writing."""
+    from ..enrichment.derivation_recovery import retry_pending_derivations
+
+    return await retry_pending_derivations(source_id=source_id, limit=limit, dry_run=dry_run)
 
 
 @router.get("/topic-clusters")
@@ -402,6 +443,90 @@ async def dismiss_entity_review(review_id: str, _api_key: str = Depends(require_
         return resolve_review(_entities_conn(), review_id, action="dismiss")
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+# ---------------------------------------------------------------- affinity
+
+
+class AffinityConfigBody(BaseModel):
+    percentile: Optional[float] = Field(default=None, ge=90.0, le=99.9)
+    nudge: Optional[str] = Field(default=None, pattern="^(fewer|more|ok)$")
+
+
+class AffinityLabelBody(BaseModel):
+    a: str = Field(..., min_length=1, max_length=80)
+    b: str = Field(..., min_length=1, max_length=80)
+    label: str = Field(..., pattern="^(useful|obvious|wrong|same_person)$")
+    note: Optional[str] = Field(default=None, max_length=500)
+    cosine: Optional[float] = Field(default=None, ge=0.0, le=1.0)
+
+
+@router.get("/affinity/status")
+async def get_affinity_status_api(_api_key: str = Depends(require_api_key)):
+    """Last rebuild + current percentile + plain-language verdict."""
+    from ..features.entities.affinity_owner import get_affinity_status
+
+    return get_affinity_status(_entities_conn())
+
+
+@router.put("/affinity/config")
+async def put_affinity_config(
+    body: AffinityConfigBody,
+    _api_key: str = Depends(require_api_key),
+):
+    """Set P directly or nudge via too-few / looks-good / too-many."""
+    from ..features.entities.affinity_owner import apply_affinity_config
+
+    if body.percentile is None and body.nudge is None:
+        raise HTTPException(
+            status_code=400, detail="provide percentile or nudge (fewer|more|ok)"
+        )
+    return apply_affinity_config(
+        _entities_conn(),
+        percentile=body.percentile,
+        nudge=body.nudge,  # type: ignore[arg-type]
+    )
+
+
+@router.post("/affinity/recompute")
+async def post_affinity_recompute(_api_key: str = Depends(require_api_key)):
+    """Rebuild context centroids then affinity edges now."""
+    import asyncio
+
+    from ..features.entities.affinity_owner import recompute_affinity_now
+
+    return await asyncio.to_thread(recompute_affinity_now, _entities_conn())
+
+
+@router.get("/affinity/pairs")
+async def list_affinity_pairs(
+    limit: int = Query(default=50, ge=1, le=200),
+    _api_key: str = Depends(require_api_key),
+):
+    """Active unlabeled affinity edges + suppressed near-misses for review."""
+    from ..features.entities.affinity_owner import list_affinity_pairs_for_review
+
+    return list_affinity_pairs_for_review(_entities_conn(), limit=limit)
+
+
+@router.post("/affinity/pairs/label")
+async def post_affinity_pair_label(
+    body: AffinityLabelBody,
+    _api_key: str = Depends(require_api_key),
+):
+    from ..features.entities.affinity_owner import label_affinity_pair
+
+    try:
+        return label_affinity_pair(
+            _entities_conn(),
+            entity_a=body.a,
+            entity_b=body.b,
+            label=body.label,
+            note=body.note,
+            cosine=body.cosine,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
 

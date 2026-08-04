@@ -791,6 +791,8 @@ def extract_owner_facts_llm(
     extractor: Optional[Callable[[str, Dict[str, Any]], List[Dict[str, Any]]]] = None,
     model: Optional[str] = None,
     settings: Any = None,
+    concurrency: Optional[int] = None,
+    resume: bool = True,
 ) -> int:
     """Additive LLM fact pass over a canonical batch. Returns facts written.
 
@@ -804,6 +806,15 @@ def extract_owner_facts_llm(
     ``extractor``: injectable ``(prompt, row) -> list[triple]`` for tests /
     offline (NO network). When None, the real Ollama model is used (built
     lazily so importing this module never touches the network).
+
+    ``concurrency``: optional fan-out bound (B10 / P4.3). Defaults to
+    ``FACTS_LLM_CONCURRENCY`` / ``TOPOS_FACTS_LLM_CONCURRENCY`` (default 4).
+    Bulk re-enrichment CLIs pass an explicit bound so a single process can
+    A/B serial vs concurrent without reloading the module.
+
+    ``resume``: when True (default), skip records already marked
+    ``fact_llm_pass``. Ops timing / re-extract passes set False to re-pay
+    Ollama even for previously marked rows.
     """
     from ...runtime_shutdown import is_shutdown_requested
 
@@ -890,17 +901,18 @@ def extract_owner_facts_llm(
         return 0
 
     # Resume: skip records whose LLM pass already finished (incl. empty).
-    already = _already_processed_record_ids(conn, eligible)
-    if already:
-        before = len(eligible)
-        eligible = [item for item in eligible if str(item["record_id"]) not in already]
-        skipped = before - len(eligible)
-        if skipped:
-            logger.info(
-                "LLM fact pass resuming: skipped %d already-processed record(s), %d remaining",
-                skipped,
-                len(eligible),
-            )
+    if resume:
+        already = _already_processed_record_ids(conn, eligible)
+        if already:
+            before = len(eligible)
+            eligible = [item for item in eligible if str(item["record_id"]) not in already]
+            skipped = before - len(eligible)
+            if skipped:
+                logger.info(
+                    "LLM fact pass resuming: skipped %d already-processed record(s), %d remaining",
+                    skipped,
+                    len(eligible),
+                )
     if not eligible:
         return 0
 
@@ -909,7 +921,8 @@ def extract_owner_facts_llm(
     # Stop scheduling on shutdown / unreachable; still apply in-flight results
     # that already returned. ------------------------------------------------------
     tasks = [(i, item["prompt"], item["row"]) for i, item in enumerate(eligible)]
-    concurrency = max(1, min(FACTS_LLM_CONCURRENCY, len(tasks)))
+    bound = FACTS_LLM_CONCURRENCY if concurrency is None else int(concurrency)
+    fanout = max(1, min(bound, len(tasks)))
 
     def _apply_row(
         index: int,
@@ -952,7 +965,7 @@ def extract_owner_facts_llm(
 
     try:
         written = _run_coro_blocking(
-            _extract_and_apply(active_extractor, tasks, concurrency, _apply_row)
+            _extract_and_apply(active_extractor, tasks, fanout, _apply_row)
         )
     except InterruptedError:
         logger.info("LLM fact pass interrupted during shutdown")

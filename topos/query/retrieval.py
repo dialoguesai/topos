@@ -32,6 +32,9 @@ _INFERENCE_SEMANTIC_EXCLUDED_KEYS = frozenset(
     {"content", "text", "body", "content_preview", "text_preview", "title"}
 )
 _SUMMARY_ITEM_CAP = 25
+# Work "working on lately" asks: keep authored goals visible without letting a
+# dense user_goals corpus monopolize the summary cap (D3 diversity floor).
+_WORK_GOAL_FUSION_CAP = 8
 _SEMANTIC_HIT_LIMIT = 20
 _CLUSTER_LIMIT = 5
 _GOAL_SUMMARY_BOOST = 0.88
@@ -76,7 +79,20 @@ _SURFACE_INTENT_TERMS: Dict[str, Tuple[str, ...]] = {
     ),
 }
 # Non-canonical surfaces that participate in the same routing decision.
-_EXTRA_SURFACE_TERMS: Tuple[str, ...] = ("goal", "objective", "priorit", "working on")
+# Keep this ≥ the work_context router lexicon for paraphrases that never say
+# "goal" ("working toward", "projects", "roadmap") — otherwise goals load but
+# fail the keep/floor gates and drown under vector/recent lanes.
+_EXTRA_SURFACE_TERMS: Tuple[str, ...] = (
+    "goal",
+    "objective",
+    "priorit",
+    "working on",
+    "working toward",
+    "working towards",
+    "working",
+    "project",
+    "roadmap",
+)
 _RECENCY_TERMS = frozenset(
     {"recent", "recently", "latest", "newest", "last", "today", "yesterday",
      "now", "current", "currently",
@@ -228,8 +244,37 @@ _FIRST_PERSON_SHAPE_TOKENS = frozenset(
         "goal", "goals", "think", "feel", "believe",
         "people", "talk", "talked", "talking", "interact", "interacted",
         "interaction", "interactions",
+        # Work-context answer shape ("what am I working toward / which projects")
+        "project", "projects", "working", "toward", "towards",
+        "focused", "focus", "roadmap", "priority", "priorities",
+        # Mood / emotion ask shape (D1.8 — message_emotions contributor)
+        "mood", "moods", "emotion", "emotions", "feeling", "feelings",
+        "emotional", "wellbeing", "well-being",
     }
 )
+
+# Lexical cues that should load the role-filtered message_emotions aggregate.
+_MOOD_EMOTION_TERMS: Tuple[str, ...] = (
+    "mood",
+    "moods",
+    "emotion",
+    "emotions",
+    "feeling",
+    "feelings",
+    "felt",
+    "emotional",
+    "anxious",
+    "anxiety",
+    "stress",
+    "stressed",
+    "wellbeing",
+    "well-being",
+)
+
+
+def _mood_emotion_intent(query_text: str) -> bool:
+    q = (query_text or "").lower()
+    return any(term in q for term in _MOOD_EMOTION_TERMS)
 
 
 def _roles_owner_authored(table: str, row: Dict[str, Any]) -> Optional[bool]:
@@ -563,6 +608,8 @@ def resolve_retrieval_source_ids(
     manifest: ScopeResolutionManifest,
     installed_source_ids: Optional[List[str]] = None,
 ) -> List[str]:
+    from ..sources.definitions import CANONICAL_ADDRESS_BOOK_SOURCE_ID
+
     ids = [str(s).strip() for s in (manifest.default_source_ids or []) if str(s).strip()]
     if not ids and manifest.default_source_id:
         ids = [str(manifest.default_source_id)]
@@ -572,6 +619,15 @@ def resolve_retrieval_source_ids(
     if not installed:
         return ids
     filtered = [sid for sid in ids if sid in installed]
+    # Derived address-book rows are not runtime-installed connectors. When the
+    # scope's manifest includes them, keep them even if only a demo/connector
+    # contact source is installed — otherwise live contacts:resolve returns
+    # empty while contact_identifiers still hold the needles (C7/C14).
+    if (
+        CANONICAL_ADDRESS_BOOK_SOURCE_ID in ids
+        and CANONICAL_ADDRESS_BOOK_SOURCE_ID not in filtered
+    ):
+        filtered.append(CANONICAL_ADDRESS_BOOK_SOURCE_ID)
     if filtered:
         return filtered
     logger.debug(
@@ -1076,6 +1132,7 @@ def _load_canonical_summary_items(
                 continue
             if belief_intent and owner is True and table in _MESSAGE_TABLES and _belief_about_other(text):
                 continue  # owner-authored but about a third party — not the owner's belief
+            speaker = ""
             if first_person and owner is False:
                 if table == "ai_chat_messages":
                     speaker = str(row.get("sender_type") or "assistant").strip() or "assistant"
@@ -1096,6 +1153,11 @@ def _load_canonical_summary_items(
                 "relevance_score": round(_canonical_relevance(text, query_text), 4),
                 "retrieval_source": f"canonical:{table}",
             }
+            # B8 / GEN-judged IMB: speaker_label + owner_authored survive inference
+            # stripping of topic/summary_text so the generative answer can attribute
+            # non-owner evidence without a raw-content side channel.
+            if speaker:
+                item["speaker_label"] = speaker
             # Per-table event-time column (same keys the recency sort in
             # _list_canonical_rows uses); without it canonical rows can neither
             # decay in fusion nor answer a date-scoped ask.
@@ -1113,6 +1175,79 @@ def _load_canonical_summary_items(
         # (non-message) rows keep relative order, other-authored rows last.
         items.sort(key=lambda item: _owner_rank(item.get("owner_authored")))
     return items[:_SUMMARY_ITEM_CAP]
+
+
+def _load_emotion_summary_items(
+    conn: Optional[Any],
+    *,
+    limit: int = 8,
+) -> List[Dict[str, Any]]:
+    """Role-filtered emotion aggregate for mood/emotion asks (D1.8 wire).
+
+    Same authorship filter as MCP message joins: keep ``authored`` /
+    ``addressed`` / legacy NULL; drop ``observed`` (other people's affect).
+    Returns at most one summary item plus optional per-label detail rows.
+    """
+    if conn is None:
+        return []
+    try:
+        rows = conn.execute(
+            """
+            SELECT emotion_label, COUNT(*) AS n, AVG(confidence) AS avg_conf
+            FROM message_emotions
+            WHERE emotion_label IS NOT NULL
+              AND TRIM(emotion_label) != ''
+              AND (role IS NULL OR role IN ('authored', 'addressed'))
+            GROUP BY emotion_label
+            ORDER BY n DESC
+            LIMIT ?
+            """,
+            (max(1, int(limit)),),
+        ).fetchall()
+    except Exception as exc:
+        logger.debug("message_emotions load skipped: %s", exc)
+        return []
+    if not rows:
+        return []
+    parts = [
+        f"{str(label)} ({int(n)})"
+        for label, n, _avg in rows
+        if label is not None
+    ]
+    if not parts:
+        return []
+    body = "Owner authored/addressed emotion signals: " + ", ".join(parts) + "."
+    top_label = str(rows[0][0])
+    top_n = int(rows[0][1] or 0)
+    items: List[Dict[str, Any]] = [
+        {
+            "topic": "owner emotion signals",
+            "summary_text": body,
+            "emotion_label": top_label,
+            "emotion_count": top_n,
+            "relevance_score": 0.9,
+            "retrieval_source": "message_emotions",
+            "dimension": "wellbeing",
+        }
+    ]
+    for label, n, avg_conf in rows[:3]:
+        items.append(
+            {
+                "topic": f"emotion:{label}",
+                "summary_text": f"Emotion signal {label}: {int(n)} messages"
+                + (
+                    f" (avg confidence {float(avg_conf):.2f})"
+                    if isinstance(avg_conf, (int, float))
+                    else ""
+                ),
+                "emotion_label": str(label),
+                "emotion_count": int(n or 0),
+                "relevance_score": 0.82,
+                "retrieval_source": "message_emotions",
+                "dimension": "wellbeing",
+            }
+        )
+    return items
 
 
 def _load_complexity_summary_items(conn: Optional[Any]) -> List[Dict[str, Any]]:
@@ -1579,6 +1714,12 @@ def _query_tokens(query_text: str) -> List[str]:
             "reading",
             "read",
             "reads",
+            # Work-phrasing leftovers after surface strip ("working toward",
+            # "projects I'm focused on") — answer shape, never goal text.
+            "toward",
+            "towards",
+            "focused",
+            "focus",
         }
     )
     return [
@@ -1826,11 +1967,19 @@ def _strip_vector_keys(item: Dict[str, Any]) -> Dict[str, Any]:
     Even a null centroid_vector is a contract violation on the cross-user
     surface — the no-raw-vectors gate scans for vector-shaped keys, not just
     populated arrays.
+
+    ``centroid_blob`` and any ``*_centroid`` are covered because entity
+    mention-context centroids (PLAN_GRAPH_QUERY_AND_LATENT_EDGES §3.6) are
+    vector-shaped under names that matched none of the older patterns.
     """
     return {
         k: v
         for k, v in item.items()
-        if not (k.endswith("_vector") or k in ("embedding", "vector", "embedding_blob"))
+        if not (
+            k.endswith("_vector")
+            or k.endswith("_centroid")
+            or k in ("embedding", "vector", "embedding_blob", "centroid", "centroid_blob")
+        )
     }
 
 
@@ -2191,12 +2340,29 @@ def _load_recent_summary_items(
 
 def _fusion_item_key(item: Dict[str, Any]) -> str:
     record_id = str(item.get("record_id") or "")
+    retrieval = str(item.get("retrieval_source") or "")
+    # contact_identifiers alias contact_id as record_id (same as the contacts
+    # row). Collapsing them under one fusion key lets a token-heavier email/phone
+    # summary replace the display-name row — C15 "contact John" then misses
+    # "John Ludlow". Keep identifier rows distinct from the contact + each other.
+    if record_id and retrieval.startswith("canonical:contact_identifiers"):
+        ident = str(item.get("summary_text") or item.get("topic") or "")[:80]
+        return f"rec:{record_id}|ident:{ident}"
+    # user_goals.record_id is the source ai_chat / message id. Collapsing the
+    # extracted goal with the full chat row under rec:{id} lets the shorter
+    # goal_text win (goals lane is fused first) and drops needle fragments that
+    # only live in the message — C26 "goals extraction personal" then misses
+    # "coverage, and pursue edtech". Keep each goal distinct from the message
+    # and from sibling goals on the same source record.
+    if record_id and retrieval == "user_goal":
+        goal_id = str(item.get("goal_id") or item.get("summary_text") or "")[:80]
+        return f"rec:{record_id}|goal:{goal_id}"
     if record_id:
         return f"rec:{record_id}"
     cluster_id = str(item.get("cluster_id") or "")
     if cluster_id:
         return f"cluster:{cluster_id}"
-    return f"txt:{str(item.get('retrieval_source') or '')}:{str(item.get('topic') or '')[:80]}"
+    return f"txt:{retrieval}:{str(item.get('topic') or '')[:80]}"
 
 
 # Contributors whose items describe *current state* rather than events in
@@ -2469,6 +2635,7 @@ def _build_summary_items_unfiltered(
     hit_record_ids = {str(h.get("record_id")) for h in semantic_hits if h.get("record_id")}
     prefer_goals = "user_goals" in (manifest.signal_objects or [])
     work_scope = manifest.scope_id == "work_context:read"
+    ai_scope = manifest.scope_id == "ai_conversations:read"
     source_ids = _resolve_source_ids(manifest, installed_source_ids)
 
     first_person = bool(getattr(plan, "first_person_intent", False)) if plan else False
@@ -2543,11 +2710,14 @@ def _build_summary_items_unfiltered(
         canonical_items, getattr(plan, "time_range", None) if plan else None
     )
 
-    # Interaction browse ("who do I talk to"): the contact registry is the
-    # ground truth of interaction partners — mention-only names (someone the
-    # senders gossip about) have no contact row and cannot pollute it (IMB7).
+    # Interaction browse ("who do I talk to"): contacts + co-participation
+    # edges. Contacts alone greened IMB7 as a workaround (mention-only names
+    # have no contact row). P3.2 adds communicates_with neighbors of self so
+    # talked-to answers survive without the contacts lane and still exclude
+    # mention-only third parties (Odile).
     interaction_items: List[Dict[str, Any]] = []
     if first_person and interaction_browse:
+        seen_names: set[str] = set()
         try:
             contact_rows = _list_canonical_rows(
                 adapters, "contacts", source_ids=source_ids, limit=30,
@@ -2562,6 +2732,10 @@ def _build_summary_items_unfiltered(
             name = str(row.get("display_name") or "").strip()
             if not name:
                 continue
+            key = name.lower()
+            if key in seen_names:
+                continue
+            seen_names.add(key)
             interaction_items.append(
                 {
                     "topic": name,
@@ -2572,12 +2746,58 @@ def _build_summary_items_unfiltered(
                     "retrieval_source": "canonical:contacts",
                 }
             )
+        if bundle_conn is not None:
+            try:
+                from ..features.entities.edges import EDGE_COMMUNICATES, top_edges
+
+                self_row = bundle_conn.execute(
+                    "SELECT entity_id FROM entities WHERE is_self=1 LIMIT 1"
+                ).fetchone()
+                if self_row:
+                    for edge in top_edges(
+                        bundle_conn,
+                        str(self_row[0]),
+                        edge_type=EDGE_COMMUNICATES,
+                        limit=20,
+                    ):
+                        name = str(edge.get("entity_name") or "").strip()
+                        if not name:
+                            continue
+                        key = name.lower()
+                        if key in seen_names:
+                            continue
+                        seen_names.add(key)
+                        interaction_items.append(
+                            {
+                                "topic": name,
+                                "summary_text": f"Talked with: {name}",
+                                "record_id": edge.get("entity_id"),
+                                "relevance_score": min(
+                                    0.85, 0.55 + float(edge.get("weight") or 0.0) * 0.05
+                                ),
+                                "retrieval_source": "entity_edge:communicates_with",
+                            }
+                        )
+            except Exception as exc:
+                logger.debug("interaction edge browse skipped: %s", exc)
         interaction_items = interaction_items[:15]
 
     brief_dims = list(manifest.primary_dimensions)
     if manifest.scope_id == "activity:read":
         brief_dims.append("Profile")
     brief_items = _load_brief_summary_items(brief_dims, conn=bundle_conn)
+
+    # D1.8: role-filtered message_emotions for mood/emotion asks. Declared on
+    # messages:read signal_objects; also answers health:read mood questions
+    # (journals alone cannot probe the emotions table — see PRV-E1 note).
+    emotion_items: List[Dict[str, Any]] = []
+    mood_ask = _mood_emotion_intent(query_text)
+    emotions_in_scope = (
+        "message_emotions" in (manifest.signal_objects or [])
+        or manifest.scope_id in ("messages:read", "health:read")
+    )
+    if mood_ask and emotions_in_scope and bundle_conn is not None:
+        emotion_items = _load_emotion_summary_items(bundle_conn)
 
     # Legacy work-scope employer heuristic (scheduled for deletion once the
     # query planner covers it); contributes ordered items, not fake scores.
@@ -2802,7 +3022,10 @@ def _build_summary_items_unfiltered(
                 is not False
             ]
         recency_intent = any(t in (query_text or "").lower() for t in _RECENCY_TERMS)
-        canonical_weight = 2.0 if work_scope else 1.0
+        # ai_conversations:read's primary evidence is the chat row itself; lift it
+        # like work_context so goal/stat lanes (also on that manifest) cannot bury
+        # known-item needles when the ask literally contains "goal".
+        canonical_weight = 2.0 if (work_scope or ai_scope) else 1.0
         vector_weight = 0.6 if work_scope else 1.0
         # Interest/identity asks ("what are my interests/values/beliefs") want the
         # lanes that SUMMARIZE the owner — dimension briefs, topic clusters, facts —
@@ -2814,6 +3037,40 @@ def _build_summary_items_unfiltered(
         recent_weight = 0.4 if identity_ask else 1.0
         brief_weight = 1.6 if identity_ask else 0.8
         cluster_weight = 1.2 if identity_ask else 0.8
+        goal_intent = any(
+            t in (query_text or "").lower() for t in _EXTRA_SURFACE_TERMS
+        )
+        # Work / goal-intent asks need authored goals above ambient lanes;
+        # modest lift (floor still pins ≥2) for dense "working on" quality.
+        goals_weight = 1.4 if goal_items and (work_scope or goal_intent) else 1.0
+        emotions_weight = 1.8 if emotion_items and mood_ask else 1.0
+        # Cap goals on work "working on" asks so a dense authored-goals corpus
+        # cannot monopolize the summary cap (D3: need ≥3 retrieval_sources).
+        # Floor below still guarantees ≥2 user_goal items.
+        goals_for_fuse = goal_items
+        if work_scope and goal_intent and len(goal_items) > _WORK_GOAL_FUSION_CAP:
+            goals_for_fuse = goal_items[:_WORK_GOAL_FUSION_CAP]
+        # Diversity floors: goals stay pinned on goal-intent; ai_conversations
+        # also pins the chat lane so extracted user_goals / Work-dimension stats
+        # cannot occupy every slot when the ask is for conversations (C26).
+        min_per: Optional[Dict[str, int]] = None
+        if goal_items and goal_intent:
+            min_per = {"goals": 2}
+        if (
+            work_scope
+            and goal_intent
+            and recency_intent
+            and recent_items
+        ):
+            # "lately" / "recently" work asks: keep a recency spine beside goals.
+            min_per = dict(min_per or {})
+            min_per["recent"] = max(int(min_per.get("recent") or 0), 2)
+        if emotion_items and mood_ask:
+            min_per = dict(min_per or {})
+            min_per["emotions"] = max(int(min_per.get("emotions") or 0), 1)
+        if ai_scope and canonical_items:
+            min_per = dict(min_per or {})
+            min_per["canonical"] = max(int(min_per.get("canonical") or 0), 3)
         # NOTE: cosine similarity must NOT waive the zero-df gate — a strong hit
         # on the generic half of a query ("compiler rewrite") cannot evidence a
         # name the corpus does not contain ("Threnody-7"). The N-lane found
@@ -2823,7 +3080,8 @@ def _build_summary_items_unfiltered(
                 ("stat_insights", 2.0, stat_items),
                 ("facts_store", 1.5, fact_store_items),
                 ("entities", 1.5, entity_items),
-                ("goals", 1.0, goal_items),
+                ("goals", goals_weight, goals_for_fuse),
+                ("emotions", emotions_weight, emotion_items),
                 ("canonical", canonical_weight, canonical_items),
                 ("contacts", 1.2, interaction_items),
                 ("briefs", brief_weight, brief_items),
@@ -2839,22 +3097,26 @@ def _build_summary_items_unfiltered(
             ),
             rare_tokens=rare_query_tokens,
             now=now,
-            # A goal-intent query ("what have I been working on", "my goals")
-            # must surface the owner's authored goals even when high-volume
-            # lanes would otherwise crowd them out — but only if goals loaded
-            # (an empty lane guarantees nothing).
-            min_per_source=(
-                {"goals": 2}
-                if goal_items
-                and any(t in (query_text or "").lower() for t in _EXTRA_SURFACE_TERMS)
-                else None
-            ),
+            min_per_source=min_per,
         )
 
     # Legacy path (TOPOS_FUSION_RRF=off): incomparable absolute scores.
     for item in entity_items + fact_store_items + stat_items:
         item.setdefault("relevance_score", 0.9)
-    items = stat_items + fact_store_items + entity_items + goal_items + canonical_items + interaction_items + brief_items + cluster_items + vector_items + vector_context_items + fact_items
+    items = (
+        stat_items
+        + fact_store_items
+        + entity_items
+        + goal_items
+        + emotion_items
+        + canonical_items
+        + interaction_items
+        + brief_items
+        + cluster_items
+        + vector_items
+        + vector_context_items
+        + fact_items
+    )
     if work_scope:
         for item in items:
             if str(item.get("retrieval_source") or "").startswith("canonical:profile_records"):
@@ -2865,6 +3127,59 @@ def _build_summary_items_unfiltered(
                 )
     items.sort(key=lambda item: float(item.get("relevance_score") or 0.0), reverse=True)
     return items[:_SUMMARY_ITEM_CAP]
+
+
+def _count_non_self_persons(db_conn) -> Optional[int]:
+    """Thin A8 stub: distinct non-self person count, never names. None if unavailable."""
+    if db_conn is None:
+        return None
+    try:
+        row = db_conn.execute(
+            "SELECT COUNT(*) FROM entities "
+            "WHERE lower(entity_type)='person' AND COALESCE(is_self, 0)=0"
+        ).fetchone()
+        return int(row[0] or 0) if row else 0
+    except Exception:
+        return None
+
+
+def _build_cohort_aggregate_summary(
+    *,
+    person_count: Optional[int],
+    scope_id: str,
+    cohort_labels: Optional[List[str]] = None,
+    peer_count: Optional[int] = None,
+) -> Dict[str, Any]:
+    """Non-entity-specific aggregate text — no person names, no per-entity rows."""
+    labels = [str(x).strip().lower() for x in (cohort_labels or []) if str(x).strip()]
+    label_hint = ", ".join(labels[:3]) if labels else "granted cohort"
+    if person_count is None and peer_count is None:
+        body = (
+            "Cohort aggregate (non-entity-specific): messaging and contact activity "
+            f"can be summarized across the {label_hint} without naming individuals. "
+            "Individual people are not listed in this rollup."
+        )
+    else:
+        parts = []
+        if person_count is not None:
+            parts.append(f"about {person_count} people in the granted cohort membership")
+        if peer_count is not None and peer_count != person_count:
+            parts.append(f"about {peer_count} active message peers")
+        detail = "; ".join(parts) if parts else "cohort activity"
+        body = (
+            f"Cohort aggregate (non-entity-specific): {detail} "
+            f"({label_hint}). Individual people are not disclosed in this rollup."
+        )
+    return {
+        "summary_text": body,
+        "topic": "cohort_aggregate",
+        "retrieval_source": "cohort_aggregate",
+        "scope_id": scope_id,
+        "relevance_score": 1.0,
+        # Explicit: this rollup must never carry entity selectors.
+        "entity_ids": [],
+        "aggregate_only": True,
+    }
 
 
 class DefaultSignalRetrievalAdapter:
@@ -2880,6 +3195,78 @@ class DefaultSignalRetrievalAdapter:
 
     def stores_touched(self) -> List[str]:
         return list(self._last_stores)
+
+    def _cohort_aggregate_bundle(
+        self,
+        request: RetrievalRequest,
+        packet: Dict[str, Any],
+        retrieval_meta: Dict[str, Any],
+    ) -> RetrievalBundle:
+        """A8/C1: mode-appropriate non-entity-specific aggregate (no named-person data)."""
+        from ..core.state import get_db_connection
+        from .cohort_resolvers import resolve_accessible_entity_cohorts
+
+        try:
+            db_conn = get_db_connection()
+        except Exception:
+            db_conn = None
+        cohorts = list(getattr(request.manifest, "accessible_entity_cohorts", None) or [])
+        # Prefer resolved membership size (C1) over whole-graph person count.
+        membership = resolve_accessible_entity_cohorts(cohorts, db_conn) if db_conn else []
+        person_count: Optional[int]
+        if membership:
+            person_count = len(membership)
+        else:
+            person_count = _count_non_self_persons(db_conn)
+        peer_count: Optional[int] = None
+        if db_conn is not None and any(
+            str(c).strip().lower() == "message_peers" for c in cohorts
+        ):
+            peers = resolve_accessible_entity_cohorts(["message_peers"], db_conn)
+            peer_count = len(peers) if peers else None
+        summary = _build_cohort_aggregate_summary(
+            person_count=person_count,
+            scope_id=str(getattr(request.manifest, "scope_id", "") or ""),
+            cohort_labels=cohorts,
+            peer_count=peer_count,
+        )
+        mode = request.access_mode
+        if mode == "raw":
+            # Raw still must not expose entity rows — same aggregate fact as a row-shaped shell.
+            packet["rows"] = [
+                {
+                    "record_id": "cohort_aggregate",
+                    "summary_text": summary["summary_text"],
+                    "retrieval_source": "cohort_aggregate",
+                    "aggregate_only": True,
+                }
+            ]
+        elif mode == "inference":
+            packet["scores"] = [
+                {
+                    "label": "cohort_aggregate",
+                    "score": 1.0,
+                    "summary_text": summary["summary_text"],
+                    "retrieval_source": "cohort_aggregate",
+                    "aggregate_only": True,
+                }
+            ]
+        else:
+            packet["answer_type"] = "summary"
+            packet["summaries"] = [summary]
+        retrieval_meta["retrieval_strategy"] = "cohort_aggregate"
+        retrieval_meta["aggregate_only"] = True
+        if person_count is not None:
+            retrieval_meta["cohort_person_count"] = person_count
+        if peer_count is not None:
+            retrieval_meta["cohort_peer_count"] = peer_count
+        self._last_stores = ["entities"] if person_count is not None else []
+        return RetrievalBundle(
+            context_packet=packet,
+            stores_touched=list(self._last_stores),
+            record_counts={"cohort_aggregate": 1},
+            retrieval_metadata=retrieval_meta,
+        )
 
     def retrieve(self, request: RetrievalRequest) -> RetrievalBundle:
         self.retrieve_call_count += 1
@@ -2920,6 +3307,12 @@ class DefaultSignalRetrievalAdapter:
                 context_packet=packet, stores_touched=[], record_counts={},
                 retrieval_metadata=retrieval_meta,
             )
+
+        # A2.3 / A8 refuse-vs-aggregate: aggregate-only ask under active selector / cohort
+        # grant → non-entity-specific rollup. No named-person rows; no full retrieve.
+        # C1 membership resolvers widen named allow-list separately; this path stays nameless.
+        if request.cohort_aggregate:
+            return self._cohort_aggregate_bundle(request, packet, retrieval_meta)
 
         source_filter = manifest.default_source_id
         source_ids = _resolve_source_ids(manifest, request.installed_source_ids)
@@ -3135,14 +3528,8 @@ class DefaultSignalRetrievalAdapter:
                 packet["semantic_hits"] = semantic_hits
             if ranked_clusters and not abstained:
                 packet["topic_clusters"] = ranked_clusters
-            if manifest.scope_id in ("relationship_context:read", "messages:read") and not abstained:
-                graph = self._adapters.graph.list_graph(limit_nodes=50, limit_edges=100)
-                if graph.get("edges") or graph.get("nodes"):
-                    touched.append("graph")
-                    packet["graph"] = {
-                        "nodes": graph.get("nodes") or [],
-                        "edges": graph.get("edges") or [],
-                    }
+            # D1.8: do not attach legacy graph_nodes/graph_edges furniture.
+            # Product graph answers use entity_edges; dual-graph store is GC-deprecated.
         elif mode == "inference":
             scores: List[Dict[str, Any]] = []
             inference_rare: List[str] = []
@@ -3160,6 +3547,9 @@ class DefaultSignalRetrievalAdapter:
                 _exp_visible = _exposure_visible(getattr(self._adapters.signal, "_conn", None))
             except Exception:
                 _exp_visible = True
+            # B8: pass plan so first_person / belief filters and owner_authored +
+            # speaker_label metadata land on inference scores (summary path already
+            # threaded plan; inference previously dropped it → attribution-blind).
             canon_items = _load_canonical_summary_items(
                 manifest=manifest,
                 adapters=self._adapters,
@@ -3168,6 +3558,7 @@ class DefaultSignalRetrievalAdapter:
                 disclosure_tier=request.disclosure_tier,
                 rare_query_tokens=inference_rare,
                 browse_fallback=True,
+                plan=plan,
                 conn=getattr(self._adapters.signal, "_conn", None),
                 exposure_visible=_exp_visible,
             )
@@ -3213,13 +3604,7 @@ class DefaultSignalRetrievalAdapter:
                     for hit in semantic_hits
                 ]
                 counts["semantic_hits"] = len(semantic_hits)
-            graph = self._adapters.graph.list_graph(limit_nodes=50, limit_edges=100)
-            if graph.get("edges") or graph.get("nodes"):
-                touched.append("graph")
-                packet["graph"] = {
-                    "nodes": graph.get("nodes") or [],
-                    "edges": graph.get("edges") or [],
-                }
+            # D1.8: legacy graph_nodes/graph_edges furniture removed (GC-deprecated).
             meta = self._adapters.vector.list_metadata(limit=20, offset=0)
             if meta.total:
                 touched.append("vector")

@@ -162,6 +162,38 @@ from .enrichment_spec_version_v1 import (
     MIGRATION_ID as ENRICHMENT_SPEC_VERSION_V1_ID,
     apply_enrichment_spec_version_v1_up,
 )
+from .entity_context_vectors_v1 import (
+    MIGRATION_ID as ENTITY_CONTEXT_VECTORS_V1_ID,
+    apply_entity_context_vectors_v1_up,
+)
+from .entity_affinity_v1 import (
+    MIGRATION_ID as ENTITY_AFFINITY_V1_ID,
+    apply_entity_affinity_v1_up,
+)
+from .entity_context_vectors_v2 import (
+    MIGRATION_ID as ENTITY_CONTEXT_VECTORS_V2_ID,
+    apply_entity_context_vectors_v2_up,
+)
+from .affinity_pair_labels_v1 import (
+    MIGRATION_ID as AFFINITY_PAIR_LABELS_V1_ID,
+    apply_affinity_pair_labels_v1_up,
+)
+from .message_emotions_role_v1 import (
+    MIGRATION_ID as MESSAGE_EMOTIONS_ROLE_V1_ID,
+    apply_message_emotions_role_v1_up,
+)
+from .signal_summaries_drop_v1 import (
+    MIGRATION_ID as SIGNAL_SUMMARIES_DROP_V1_ID,
+    apply_signal_summaries_drop_v1_up,
+)
+from .message_emotions_role_backfill_v1 import (
+    MIGRATION_ID as MESSAGE_EMOTIONS_ROLE_BACKFILL_V1_ID,
+    apply_message_emotions_role_backfill_v1_up,
+)
+from .entity_mentions_authored_v1 import (
+    MIGRATION_ID as ENTITY_MENTIONS_AUTHORED_V1_ID,
+    apply_entity_mentions_authored_v1_up,
+)
 
 ApplyFn = Callable[[sqlite3.Connection], object]
 
@@ -261,6 +293,19 @@ MIGRATIONS: List[MigrationSpec] = [
     _spec(46, ENTITY_BLACKHOLE_V1_ID, apply_entity_blackhole_v1_up),
     _spec(47, COMPLEXITY_V1_ID, apply_complexity_v1_up),
     _spec(48, ENRICHMENT_SPEC_VERSION_V1_ID, apply_enrichment_spec_version_v1_up),
+    _spec(49, ENTITY_CONTEXT_VECTORS_V1_ID, apply_entity_context_vectors_v1_up),
+    _spec(50, ENTITY_AFFINITY_V1_ID, apply_entity_affinity_v1_up),
+    _spec(51, ENTITY_CONTEXT_VECTORS_V2_ID, apply_entity_context_vectors_v2_up),
+    _spec(52, AFFINITY_PAIR_LABELS_V1_ID, apply_affinity_pair_labels_v1_up),
+    _spec(53, MESSAGE_EMOTIONS_ROLE_V1_ID, apply_message_emotions_role_v1_up, always_run=True),
+    _spec(54, SIGNAL_SUMMARIES_DROP_V1_ID, apply_signal_summaries_drop_v1_up),
+    _spec(55, MESSAGE_EMOTIONS_ROLE_BACKFILL_V1_ID, apply_message_emotions_role_backfill_v1_up),
+    _spec(
+        56,
+        ENTITY_MENTIONS_AUTHORED_V1_ID,
+        apply_entity_mentions_authored_v1_up,
+        always_run=True,
+    ),
 ]
 
 
@@ -321,4 +366,7 @@ __all__ = [
     "ENTITY_BLACKHOLE_V1_ID",
     "COMPLEXITY_V1_ID",
     "ENRICHMENT_SPEC_VERSION_V1_ID",
+    "ENTITY_CONTEXT_VECTORS_V1_ID",
+    "ENTITY_AFFINITY_V1_ID",
+    "ENTITY_CONTEXT_VECTORS_V2_ID",
 ]

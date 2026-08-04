@@ -396,8 +396,10 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
                                 INNER JOIN (
                                     SELECT message_id, MAX(confidence) as max_confidence
                                     FROM message_emotions
+                                    WHERE role IS NULL OR role IN ('authored', 'addressed')
                                     GROUP BY message_id
                                 ) e2 ON e1.message_id = e2.message_id AND e1.confidence = e2.max_confidence
+                                WHERE e1.role IS NULL OR e1.role IN ('authored', 'addressed')
                             ) e ON m.message_id = e.message_id
                             WHERE c.owner_user_id = ?
                             """ + filter_where_m + """
@@ -436,8 +438,10 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
                                 INNER JOIN (
                                     SELECT message_id, MAX(confidence) as max_confidence
                                     FROM message_emotions
+                                    WHERE role IS NULL OR role IN ('authored', 'addressed')
                                     GROUP BY message_id
                                 ) e2 ON e1.message_id = e2.message_id AND e1.confidence = e2.max_confidence
+                                WHERE e1.role IS NULL OR e1.role IN ('authored', 'addressed')
                             ) e ON m.message_id = e.message_id
                             """ + ("WHERE 1=1" + filter_where_m if filter_where_m else "") + """
                             ORDER BY m.event_at DESC

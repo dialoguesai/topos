@@ -135,8 +135,8 @@ def entity_context_items(
     read to CLOSED revisions: ended relationships render with the
     "no longer current" marker instead of being invisible (B2.2/T7).
     """
-    from .dossier import load_dossier_for_entity
-    from .edges import top_edges
+    from .dossier import ensure_dossier, format_connection_label, load_dossier_for_entity
+    from .edges import EDGE_SEMANTIC_AFFINITY, top_edges
 
     include_closed = temporal_shift == "past"
     items: List[Dict[str, Any]] = []
@@ -145,13 +145,33 @@ def entity_context_items(
         closed_edges: List[Dict[str, Any]] = []
         if include_closed:
             widened = top_edges(conn, entity_id, limit=6, include_closed=True)
-            closed_edges = [e for e in widened if e.get("valid_to")]
+            closed_edges = [
+                e
+                for e in widened
+                if e.get("valid_to") and e.get("edge_type") != EDGE_SEMANTIC_AFFINITY
+            ]
+        # Prefer the live store row; if refresh skipped this entity (below
+        # SIGNIFICANT_MENTIONS) or supersede left no active revision, materialize
+        # so named person asks stay on entity_dossier rather than thin graph.
         dossier = load_dossier_for_entity(conn, entity_id)
+        if dossier is None:
+            try:
+                dossier = ensure_dossier(conn, entity)
+            except Exception:
+                dossier = None
         if dossier:
             text = dossier.get("summary_text") or ""
             connections = dossier.get("top_connections") or []
             if connections:
-                text += " Top connections: " + "; ".join(connections[:3])
+                labels = [format_connection_label(c) for c in connections[:3]]
+                text += " Top connections: " + "; ".join(labels)
+            affinity = dossier.get("affinity_connections") or []
+            if affinity:
+                labels = [format_connection_label(c) for c in affinity[:3]]
+                text += (
+                    " Similar role-shape (latent affinity, not co-mentioned): "
+                    + "; ".join(labels)
+                )
             for stat_line in dossier.get("stat_lines") or []:
                 text += f" {stat_line}"
             if closed_edges:
@@ -169,15 +189,30 @@ def entity_context_items(
                 }
             )
         else:
-            active_edges = top_edges(conn, entity_id, limit=3)
-            names = [e["entity_name"] for e in active_edges]
+            active_edges = top_edges(conn, entity_id, limit=6)
+            observed = [
+                e for e in active_edges if e.get("edge_type") != EDGE_SEMANTIC_AFFINITY
+            ][:3]
+            affinity = [
+                e for e in active_edges if e.get("edge_type") == EDGE_SEMANTIC_AFFINITY
+            ][:3]
+            names = [e["entity_name"] for e in observed]
             names += [_closed_edge_label(e) for e in closed_edges[:3]]
+            text_bits = []
             if names:
-                text = f"{entity['canonical_name']}: connected to " + ", ".join(names)
+                text_bits.append(
+                    f"{entity['canonical_name']}: connected to " + ", ".join(names)
+                )
+            if affinity:
+                text_bits.append(
+                    "similar role-shape (latent affinity): "
+                    + ", ".join(e["entity_name"] for e in affinity)
+                )
+            if text_bits:
                 items.append(
                     {
                         "topic": entity["canonical_name"],
-                        "summary_text": text,
+                        "summary_text": ". ".join(text_bits),
                         "entity_id": entity_id,
                         "retrieval_source": "entity_graph",
                         "object_type": "entity_dossier",

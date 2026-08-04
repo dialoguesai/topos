@@ -491,3 +491,53 @@ class TestInteractionBrowse:
         blob = " ".join(str(s.get("summary_text")) for s in summaries)
         assert "Bram Holloway" in blob and "Saskia Vreeland" in blob
         assert "Owner" not in blob  # is_self contact excluded
+
+    def test_edges_answer_without_contacts_lane(self, conn, monkeypatch) -> None:
+        """P3.2 / B7: co-participation edges answer IMB7 without contacts."""
+        import topos.core.state as state_mod
+
+        from topos.features.entities.edges import EDGE_COMMUNICATES, update_edge
+
+        conn.execute(
+            """INSERT INTO entities
+               (entity_id, entity_type, canonical_name, normalized_name, mention_count, is_self)
+               VALUES ('e-self', 'person', 'Owner', 'owner', 1, 1)"""
+        )
+        for eid, name in (
+            ("e-bram", "Bram Holloway"),
+            ("e-saskia", "Saskia Vreeland"),
+            ("e-odile", "Odile Ferrant"),
+        ):
+            conn.execute(
+                """INSERT INTO entities
+                   (entity_id, entity_type, canonical_name, normalized_name, mention_count, is_self)
+                   VALUES (?, 'person', ?, ?, 1, 0)""",
+                (eid, name, name.lower()),
+            )
+        # Real partners via communicates_with; Odile only via co_occurrence (mention).
+        update_edge(conn, src_entity_id="e-self", dst_entity_id="e-bram",
+                    edge_type=EDGE_COMMUNICATES, event_at="2026-01-01T00:00:00Z")
+        update_edge(conn, src_entity_id="e-self", dst_entity_id="e-saskia",
+                    edge_type=EDGE_COMMUNICATES, event_at="2026-01-01T00:00:00Z")
+        update_edge(conn, src_entity_id="e-bram", dst_entity_id="e-odile",
+                    edge_type="co_occurrence", event_at="2026-01-01T00:00:00Z")
+        conn.commit()
+        monkeypatch.setattr(state_mod, "get_db_connection", lambda: conn)
+        bundle = AdapterFactory.create("local_database", conn=conn)
+        adapter = DefaultSignalRetrievalAdapter(bundle)
+        manifest = resolve_scope_manifest("relationship_context:read")
+        result = adapter.retrieve(
+            RetrievalRequest(
+                manifest=manifest, access_mode="summary",
+                query_text="Who are the people I talk to and interact with?",
+                disclosure_tier="owner_raw",
+            )
+        )
+        summaries = result.context_packet.get("summaries") or []
+        blob = " ".join(str(s.get("summary_text")) for s in summaries)
+        assert "Bram Holloway" in blob and "Saskia Vreeland" in blob
+        assert "Odile Ferrant" not in blob
+        assert any(
+            str(s.get("retrieval_source") or "").startswith("entity_edge:communicates_with")
+            for s in summaries
+        )
