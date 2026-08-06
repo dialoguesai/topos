@@ -163,6 +163,15 @@
       ]
     },
     {
+      "version": "1.3.5",
+      "summary": "Pin torch<2.13; no schema or data change.",
+      "steps": [],
+      "notes": [
+        "Dependency-only. No migration, no reprocessing, no consent prompt: nothing on disk changes shape, so `steps` is deliberately empty.",
+        "torch 2.13.0 segfaulted the node under concurrent MPS use (embedder + privacy filter + NSFW classifier), which is what a first chat query triggers. Upgrading is safe from any prior version and needs no user action beyond the restart the upgrade already performs."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],

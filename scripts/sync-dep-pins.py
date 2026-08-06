@@ -85,7 +85,11 @@ SECTIONS = (
 
 # Packages where ~= from lock is too loose or lock version is not portable.
 CUSTOM_SPECS: dict[str, str] = {
-    "torch": ">=2.8.0,<3",
+    # <2.13: torch 2.13.0 segfaults (SIGSEGV in mps copy_cast) under the node's
+    # concurrent first-query load — every fresh install crashed on its first
+    # chat turn (2026-08-06). Reproduced with 2 encode threads + a pipeline
+    # load on MPS; 2.11.0 survives the identical race.
+    "torch": ">=2.8.0,<2.13",
     "networkx": ">=3.2.1,<3.7",
 }
 

@@ -9,6 +9,19 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.5] — 2026-08-06
+
+### Fixed
+
+- `[D]` Pin `torch<2.13`. torch 2.13.0 — a fresh resolve inside the previous
+  `>=2.8,<3` range — segfaults (`SIGSEGV` in `mps copy_cast_kernel`) when the
+  embedder, privacy filter and NSFW classifier touch MPS concurrently, which is
+  exactly what a node does while answering its first query. Every new install on
+  Apple silicon crashed on its first chat message; nothing before that point
+  failed, so boot and control-plane checks all passed first. Reproduced with two
+  encode threads plus a pipeline load (exit 139 on 2.13.0, clean on 2.11.0) and
+  guarded by the `a8b` check in the `topos-install-qa` skill.
+
 ## [1.3.4] — 2026-07-29
 
 - `[S1] [O]` Coverage `spec_version` columns + catalog `JOB_SPEC_VERSIONS`

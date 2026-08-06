@@ -185,7 +185,7 @@ async def test_review_api_flow(api_app) -> None:
 @pytest.mark.asyncio
 async def test_entity_exclude_api(api_app) -> None:
     app, conn = api_app
-    entity_id = _mk_entity(conn, "LL", "topic", mentions=59)
+    entity_id = _mk_entity(conn, "Longform Learning", "topic", mentions=59)
     resp = await _req(app, "POST", f"/v1/signal/entities/{entity_id}/exclude")
     assert resp.status_code == 200
     body = resp.json()
@@ -197,7 +197,7 @@ async def test_entity_exclude_api(api_app) -> None:
     from topos.features.entities.resolver import EntityResolver
 
     with pytest.raises(ValueError, match="excluded by owner"):
-        EntityResolver(conn).resolve("LL", entity_type="topic")
+        EntityResolver(conn).resolve("Longform Learning", entity_type="topic")
 
 
 class TestResolutionReviewApproval:
