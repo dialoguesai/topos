@@ -37,6 +37,43 @@ SIGNAL_DERIVE_RETRY_KIND = "signal_derive_retry"
 #: exactly what is missing, without turning the queue row into a data store.
 _MAX_RECORD_IDS = 500
 
+#: engine_config key stamped the first time this node is able to record a
+#: derivation failure. Everything BEFORE it is invisible to this mechanism —
+#: the 2026-07-30 loss that motivated the module has no record of its own,
+#: because the code did not exist yet.
+RECORDING_SINCE_KEY = "derivation_debt.recording_since"
+
+#: What a clean report actually covers. Surfaced verbatim so no caller has to
+#: infer the scope, and so "no known gaps" is never read as "nothing is missing".
+DEBT_COVERAGE = "signal derivation jobs (not ingestion, sync, or connector fetches)"
+
+
+def ensure_recording_since(conn: Optional[sqlite3.Connection]) -> Optional[str]:
+    """Stamp (once) when this node became able to record derivation failures.
+
+    Returns the ISO timestamp, or None if it could not be established. Written
+    on first read rather than by a migration so an existing node stamps the
+    moment it upgrades — which is the honest answer to "since when have you
+    been watching?", and is NOT the date this code was written.
+    """
+    if conn is None:
+        return None
+    try:
+        from ..core.state import get_engine_config_value, set_engine_config_value
+
+        existing = get_engine_config_value(conn, RECORDING_SINCE_KEY)
+        if existing:
+            return str(existing)
+        from datetime import datetime, timezone
+
+        stamp = datetime.now(timezone.utc).isoformat()
+        set_engine_config_value(conn, RECORDING_SINCE_KEY, stamp)
+        logger.info("[DERIVE:RETRY] derivation-debt recording starts %s", stamp)
+        return stamp
+    except Exception as exc:  # noqa: BLE001 — a missing stamp must not break the report
+        logger.debug("[DERIVE:RETRY] could not establish recording_since: %s", exc)
+        return None
+
 
 def retry_idempotency_key(sync_batch_id: str, job_name: str) -> str:
     """One retry record per (batch, job) — a job that fails twice is one debt."""
@@ -305,7 +342,23 @@ async def retry_pending_derivations(
 
 
 def pending_derivation_summary(conn: Optional[sqlite3.Connection]) -> Dict[str, Any]:
-    """Counts for health surfaces: is this node currently missing derived data?"""
+    """What derived data this node KNOWS it is missing, and since when it knew.
+
+    Deliberately not a health score. An earlier version of this returned
+    ``healthy: not pending``, which claims far more than the data supports: it
+    reads as "your data is complete" when it only means "nothing failed while
+    this mechanism was watching". The loss that motivated this whole module has
+    no record here at all, because the recording did not exist when it happened.
+
+    So the contract is narrow and every caller gets the caveats inline:
+
+      known_gaps       failures actually recorded — never "you have everything"
+      recording_since  before this, failures were invisible (None = unknown)
+      covers           which stage this speaks for, and which it does not
+
+    A UI that renders `known_gaps: false` as a green tick is misreading it; the
+    fields are named so that misreading takes effort.
+    """
     pending = list_pending_derivation_retries(conn, limit=1000)
     by_job: Dict[str, int] = {}
     by_source: Dict[str, int] = {}
@@ -319,5 +372,7 @@ def pending_derivation_summary(conn: Optional[sqlite3.Connection]) -> Dict[str, 
         "affected_records": records,
         "by_job": by_job,
         "by_source": by_source,
-        "healthy": not pending,
+        "known_gaps": bool(pending),
+        "recording_since": ensure_recording_since(conn),
+        "covers": DEBT_COVERAGE,
     }
