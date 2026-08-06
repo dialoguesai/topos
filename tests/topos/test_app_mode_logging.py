@@ -60,7 +60,26 @@ class TestConfigureLoggingToFile:
         content = log_file.read_text(encoding="utf-8")
         assert "hello from app mode" in content
         assert "topos.test" in content
-        assert "\x1b[" not in content  # no ANSI colors in files
+        # Default (color) format writes ANSI so Show Logs → Terminal looks like CLI.
+        assert "\x1b[" in content
+        assert isinstance(handler.formatter, topos_logging.ColorFormatter)
+        handler.close()
+
+    def test_file_handler_json_stays_plain(
+        self, tmp_path, monkeypatch, restore_root_logging
+    ):
+        log_file = tmp_path / "logs" / "node.log"
+        monkeypatch.setenv("TOPOS_LOG_FILE", str(log_file))
+        monkeypatch.setattr(topos_logging.settings, "log_format", "json")
+        topos_logging.configure_logging()
+
+        handler = logging.getLogger().handlers[0]
+        logging.getLogger("topos.test").info("json line")
+        handler.flush()
+        content = log_file.read_text(encoding="utf-8")
+        assert "json line" in content
+        assert "\x1b[" not in content
+        assert isinstance(handler.formatter, topos_logging.JsonFormatter)
         handler.close()
 
     def test_stdout_handler_when_env_unset(self, monkeypatch, restore_root_logging):

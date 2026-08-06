@@ -66,6 +66,16 @@ run-bare *args:
 run-local host="127.0.0.1" port="9000":
     HOST="{{host}}" PORT="{{port}}" bash scripts/local/run-local-engine-with-ollama.sh
 
+# Fresh-install a node in an isolated HOME (never touches ~/.topos). See
+# scripts/local/fresh-node-sandbox.sh --help for --name/--version/--reset.
+sandbox *args:
+    bash scripts/local/fresh-node-sandbox.sh {{args}}
+
+# Prepare/restore THIS account for a from-scratch install test (the .app path,
+# which cannot be HOME-sandboxed). `status` | `prepare --yes` | `restore --yes`.
+app-install-test *args="status":
+    bash scripts/local/app-install-test.sh {{args}}
+
 # Run test suites.
 test:
     uv run pytest tests -m "public and not e2e and not live and not qq_eval" -q

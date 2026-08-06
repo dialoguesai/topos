@@ -7,7 +7,14 @@ from types import SimpleNamespace
 
 import pytest
 
-from topos_eval.protocols.target import Request
+# Same guard as the sibling QQ tests (test_pii_relevance_judge_parse,
+# test_en_qq_privacy_probe_corpus): topos-eval lives in another repo and is not
+# installed in the release environment. Without this the module fails to import
+# at collection, which aborts the whole run — `just gate` cannot even reach the
+# public lane, so a release is blocked by a test the gate never meant to run.
+pytest.importorskip("topos_eval", reason="topos-eval (sibling repo) not on PYTHONPATH")
+
+from topos_eval.protocols.target import Request  # noqa: E402
 
 from sql_oracle import SqlOracle, _recency_on_topic
 

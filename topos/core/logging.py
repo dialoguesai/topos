@@ -85,8 +85,11 @@ def _build_file_handler(path: Path, log_format: str) -> logging.Handler:
     )
     if log_format == "json":
         handler.setFormatter(JsonFormatter())
+    elif log_format == "color":
+        # App-mode logs are primarily viewed via Show Logs → Terminal
+        # `tail -F`, so keep the same ANSI colors as the interactive CLI.
+        handler.setFormatter(ColorFormatter())
     else:
-        # No ANSI colors in files — plain timestamped lines.
         handler.setFormatter(
             logging.Formatter("%(asctime)s | %(levelname)s | %(name)s: %(message)s")
         )
