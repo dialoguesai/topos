@@ -208,7 +208,7 @@ def test_failed_derivation_is_recorded_and_listed():
     assert "no transaction is active" in entry["error"]
 
     summary = pending_derivation_summary(conn)
-    assert summary["healthy"] is False
+    assert summary["known_gaps"] is True
     assert summary["pending_derivations"] == 1
     assert summary["affected_records"] == 88
     assert summary["by_job"] == {"facts": 1}
@@ -254,7 +254,7 @@ def test_success_clears_the_debt():
     )
     assert clear_derivation_retry(conn, sync_batch_id="batch-1", job_name="facts") is True
     assert list_pending_derivation_retries(conn) == []
-    assert pending_derivation_summary(conn)["healthy"] is True
+    assert pending_derivation_summary(conn)["known_gaps"] is False
     conn.close()
 
 
@@ -272,7 +272,7 @@ def test_recording_never_raises_without_a_connection():
     ) is None
     assert clear_derivation_retry(None, sync_batch_id="b", job_name="j") is False
     assert list_pending_derivation_retries(None) == []
-    assert pending_derivation_summary(None)["healthy"] is True
+    assert pending_derivation_summary(None)["known_gaps"] is False
 
 
 # --- pipeline coordination ---------------------------------------------------
@@ -518,3 +518,88 @@ def test_worker_loop_claims_off_the_event_loop():
     )
     # And it should ease off when there is nothing to do.
     assert "_MAX_POLL_SECONDS" in src
+
+
+# --- the summary must not overstate what it knows -----------------------------
+
+
+def test_clean_summary_never_claims_completeness():
+    """`known_gaps: false` means "nothing failed while watching", NOT "you have
+    everything". The field names exist so a UI cannot casually misread it."""
+    from topos.enrichment.derivation_recovery import (
+        DEBT_COVERAGE,
+        pending_derivation_summary,
+    )
+
+    conn = _memory_db()
+    try:
+        summary = pending_derivation_summary(conn)
+        assert summary["known_gaps"] is False
+        assert summary["pending_derivations"] == 0
+        # The caveats travel WITH the clean answer, not just the dirty one.
+        assert summary["recording_since"], "a clean report must say since when"
+        assert summary["covers"] == DEBT_COVERAGE
+        assert "not ingestion" in summary["covers"]
+        # And the old overstating field is gone for good.
+        assert "healthy" not in summary
+    finally:
+        conn.close()
+
+
+def test_recording_since_is_stamped_once_and_is_stable():
+    """It answers "since when have you been watching?" — so it must be the
+    upgrade moment, not a moving timestamp, and not the date the code shipped."""
+    from topos.enrichment.derivation_recovery import (
+        RECORDING_SINCE_KEY,
+        ensure_recording_since,
+    )
+    from topos.core.state import get_engine_config_value
+
+    conn = _memory_db()
+    try:
+        first = ensure_recording_since(conn)
+        assert first
+        assert ensure_recording_since(conn) == first, "must not move on re-read"
+        assert get_engine_config_value(conn, RECORDING_SINCE_KEY) == first
+    finally:
+        conn.close()
+
+
+def test_recording_since_degrades_to_none_without_a_database():
+    """No connection means we genuinely do not know — say None, do not guess."""
+    from topos.enrichment.derivation_recovery import (
+        ensure_recording_since,
+        pending_derivation_summary,
+    )
+
+    assert ensure_recording_since(None) is None
+    summary = pending_derivation_summary(None)
+    assert summary["recording_since"] is None
+    assert summary["known_gaps"] is False
+
+
+def test_summary_reports_gaps_with_their_scope():
+    from topos.enrichment.derivation_recovery import (
+        pending_derivation_summary,
+        record_failed_derivation,
+    )
+
+    conn = _memory_db()
+    try:
+        record_failed_derivation(
+            conn,
+            source_id="github_activity",
+            sync_batch_id="b1",
+            job_name="facts",
+            error="cannot commit - no transaction is active",
+            record_count=88,
+        )
+        summary = pending_derivation_summary(conn)
+        assert summary["known_gaps"] is True
+        assert summary["affected_records"] == 88
+        assert summary["by_source"] == {"github_activity": 1}
+        # Caveats still present when there ARE gaps — a UI renders one component.
+        assert summary["recording_since"]
+        assert summary["covers"]
+    finally:
+        conn.close()
