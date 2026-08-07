@@ -45,6 +45,12 @@ on:
   push:
     tags:
       - "v*"
+  # Runs on every PR so upgrade-step breakage is caught BEFORE a release is
+  # cut, not by the tag build afterwards. Deliberately NOT path-filtered: this
+  # is a required check, and GitHub treats a required check that never reports
+  # as permanently pending, so a `paths:` filter would block merges on exactly
+  # the PRs it skipped. Keep it unfiltered unless it stops being required.
+  pull_request:
 
 permissions:
   contents: read
