@@ -11,6 +11,12 @@ Two modes:
       and stamps ``engine.upgrade.baseline`` to ``--version``. The result is an
       "as if upgraded from X.Y.Z" database that current code can open and catch up.
 
+Both modes seed real canonical conversation rows for a registry source plus the
+matching ``timeline`` rows. That seed is load-bearing, not decoration: the
+upgrade runner discovers work through ``_real_source_ids()`` (which reads
+``timeline``), so a fixture without it makes every enrichment step a silent
+no-op that still ledgers "done". See ``seed_canonical_source`` below.
+
   (default / PyPI mode)
       Creates a venv, ``pip install topos-node==VERSION``, and boots enough of
       that package to apply migrations. Prefer this for nightly when old wheels
@@ -60,6 +66,119 @@ INSERT OR REPLACE INTO entities (
     'fixture-ent1', 'person', 'Alice', 'alice', 0
 );
 """
+
+
+# A fixture with no canonical rows is worse than no fixture: the upgrade
+# runner's enrichment executor walks _real_source_ids(), which reads
+# `timeline`. An empty timeline means every enrichment_reprocess step ledgers
+# "done" with {"sources": {}} — steps_run counts up, the matrix goes green, and
+# nothing was exercised (observed 2026-08-07). So seed a REAL registry source
+# with canonical messages plus the timeline rows that advertise it.
+#
+# voxterm_transcripts is chosen deliberately: it is in topos.sources.registry
+# (so _process_enrichment_core resolves it instead of raising ValueError ->
+# "unknown_source_skipped") and its id does not start with any prefix that
+# _real_source_ids skips (demo_/enrichment_lab/sanity/test/manual_enrichment).
+_FIXTURE_SOURCE_ID = "voxterm_transcripts"
+_FIXTURE_CONVERSATION_ID = "upgrade-fixture-c1"
+
+# Content carries unambiguous PERSON/ORG/GPE surfaces so the NER pass has
+# something to find; an extraction that returns nothing would be
+# indistinguishable from an extraction that never ran.
+_FIXTURE_MESSAGES = (
+    (
+        "upgrade-fixture-m1", "user", "self", 1,
+        "Met Alice Johnson at the Berlin office to plan the Q3 migration.",
+        "2026-05-01T10:00:00+00:00",
+    ),
+    (
+        "upgrade-fixture-m2", "contact", "alice", 0,
+        "Bob Carter from Acme Corp will join us in Munich next Tuesday.",
+        "2026-05-01T10:05:00+00:00",
+    ),
+    (
+        "upgrade-fixture-m3", "user", "self", 1,
+        "I told Carol Nguyen that Topos ships the graph rebuild this week.",
+        "2026-05-02T09:00:00+00:00",
+    ),
+)
+
+# Minimal shapes matching topos.storage.canonical.conversations_tables. Written
+# as plain SQL so both build modes (current checkout AND an old PyPI wheel) can
+# seed identically; the migration chain then evolves them (actor_role_v1 adds
+# and backfills actor_role over these rows, which is itself worth covering).
+_CANONICAL_DDL = """
+CREATE TABLE IF NOT EXISTS conversations (
+    conversation_id TEXT NOT NULL,
+    dataset_id TEXT NOT NULL,
+    source_id TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    updated_at TEXT DEFAULT (datetime('now')),
+    PRIMARY KEY (conversation_id, dataset_id)
+);
+CREATE TABLE IF NOT EXISTS conversation_messages (
+    message_id TEXT NOT NULL PRIMARY KEY,
+    conversation_id TEXT NOT NULL,
+    dataset_id TEXT NOT NULL,
+    sender_type TEXT,
+    sender_id TEXT,
+    reply_to_message_id TEXT,
+    message_type TEXT,
+    event_type TEXT,
+    content TEXT,
+    event_at TEXT NOT NULL,
+    source_id TEXT NOT NULL,
+    metadata_json TEXT,
+    created_at TEXT DEFAULT (datetime('now')),
+    is_from_self INTEGER DEFAULT 0,
+    owner_user_id TEXT
+);
+"""
+
+
+def seed_canonical_source(conn: sqlite3.Connection) -> None:
+    """Create + populate canonical conversation rows for the fixture source.
+
+    Runs BEFORE the migration chain so the fixture mirrors a real pre-1.2.0
+    node: canonical data already on disk, schema evolved underneath it.
+    """
+    conn.executescript(_CANONICAL_DDL)
+    conn.execute(
+        "INSERT OR REPLACE INTO conversations (conversation_id, dataset_id, source_id) "
+        "VALUES (?, 'default', ?)",
+        (_FIXTURE_CONVERSATION_ID, _FIXTURE_SOURCE_ID),
+    )
+    for message_id, sender_type, sender_id, is_from_self, content, event_at in _FIXTURE_MESSAGES:
+        conn.execute(
+            "INSERT OR REPLACE INTO conversation_messages "
+            "(message_id, conversation_id, dataset_id, sender_type, sender_id, "
+            " content, event_at, source_id, is_from_self, message_type) "
+            "VALUES (?, ?, 'default', ?, ?, ?, ?, ?, ?, 'text')",
+            (
+                message_id, _FIXTURE_CONVERSATION_ID, sender_type, sender_id,
+                content, event_at, _FIXTURE_SOURCE_ID, is_from_self,
+            ),
+        )
+    conn.commit()
+
+
+def seed_timeline(conn: sqlite3.Connection) -> None:
+    """Advertise the fixture source in `timeline` (post-migration: it creates it).
+
+    _real_source_ids() reads ONLY this table — without these rows the enrichment
+    executors have no source list to walk.
+    """
+    for message_id, _st, _sid, _self, _content, event_at in _FIXTURE_MESSAGES:
+        try:
+            conn.execute(
+                "INSERT OR REPLACE INTO timeline "
+                "(event_at, record_id, source_id, canonical_table, record_type) "
+                "VALUES (?, ?, ?, 'conversation_messages', 'message')",
+                (event_at, message_id, _FIXTURE_SOURCE_ID),
+            )
+        except sqlite3.Error as exc:
+            print(f"timeline seed skipped ({exc}) for {message_id}", flush=True)
+    conn.commit()
 
 
 def _run(cmd: list[str], *, env: dict[str, str] | None = None) -> None:
@@ -126,15 +245,21 @@ def build_from_current(version: str, out: Path) -> None:
 
     conn = sqlite3.connect(str(out))
     try:
+        # Canonical data first: a real pre-1.2.0 node has rows on disk before
+        # the chain runs, and actor_role_v1's backfill then has something to
+        # walk instead of an empty table.
+        seed_canonical_source(conn)
         apply_all_migrations(conn)
         _seed_coverage(conn)
+        seed_timeline(conn)  # `timeline` is created by the chain, so seed after
         _stamp_baseline(conn, version)
     finally:
         conn.close()
 
     print(
         f"from-current fixture written: {out} "
-        f"(baseline={version}; schema=current; coverage rows spec_version=NULL)",
+        f"(baseline={version}; schema=current; coverage rows spec_version=NULL; "
+        f"{len(_FIXTURE_MESSAGES)} canonical rows for {_FIXTURE_SOURCE_ID})",
         flush=True,
     )
     print(
@@ -228,7 +353,22 @@ def build_from_pypi(version: str, out: Path) -> None:
         )
         shutil.copy2(db_tmp, out)
 
-    print(f"pypi fixture written: {out} (topos-node=={version})", flush=True)
+    # Seed with the CURRENT checkout's SQL rather than the old wheel's helpers
+    # (their module paths differ across versions). actor_role and any other
+    # missing columns are added by ensure_migrations_applied when the matrix
+    # opens this fixture, so post-hoc seeding is equivalent here.
+    conn = sqlite3.connect(str(out))
+    try:
+        seed_canonical_source(conn)
+        seed_timeline(conn)
+    finally:
+        conn.close()
+
+    print(
+        f"pypi fixture written: {out} (topos-node=={version}; "
+        f"{len(_FIXTURE_MESSAGES)} canonical rows for {_FIXTURE_SOURCE_ID})",
+        flush=True,
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
