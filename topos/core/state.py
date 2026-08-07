@@ -719,8 +719,10 @@ def _migrate_legacy_browser_plugin_app_ids(conn: sqlite3.Connection) -> int:
             f"UPDATE {UMA_ACCESS_REQUESTS_TABLE} SET app_id = ? WHERE app_id = ?",
             (BROWSER_HISTORY_PLUGIN_APP_ID, LEGACY_BROWSER_PLUGIN_APP_ID),
         )
+        # Commit even for 0 rows: the UPDATE opened an implicit transaction
+        # either way, and this runs at startup on the owner connection.
+        conn.commit()
         if cursor.rowcount:
-            conn.commit()
             logger.info(
                 "Migrated %s uma_access_requests rows: %s → %s",
                 cursor.rowcount,

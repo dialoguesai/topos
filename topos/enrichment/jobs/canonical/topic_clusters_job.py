@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Any, Callable, Dict, List, Optional
@@ -135,6 +136,21 @@ class TopicClusterJob(BaseEnrichmentJob):
         return bool(canonical_messages)
 
     async def enrich(
+        self,
+        canonical_messages: List[Dict[str, Any]],
+        progress_callback: Optional[Callable[[int, int], None]] = None,
+    ) -> List[Dict[str, Any]]:
+        # The clustering path blocks for seconds at a time (k-means, the
+        # label-pool wait, persist under the write gate); on the event loop
+        # that starves every coroutine including the control-plane keepalive.
+        # get_db_connection is thread-local, so the worker thread gets its own
+        # handle — passing the loop thread's connection across would reinstate
+        # the cross-thread sharing behind the 2026-07-30 corruption.
+        return await asyncio.to_thread(
+            self._enrich_sync, canonical_messages, progress_callback
+        )
+
+    def _enrich_sync(
         self,
         canonical_messages: List[Dict[str, Any]],
         progress_callback: Optional[Callable[[int, int], None]] = None,

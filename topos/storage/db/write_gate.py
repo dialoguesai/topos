@@ -169,6 +169,25 @@ def sqlite_retry_busy(
     raise last
 
 
+def begin_immediate(conn: sqlite3.Connection) -> None:
+    """``BEGIN IMMEDIATE`` with busy retry, clearing any leaked implicit transaction.
+
+    In Python's legacy isolation mode even a 0-row UPDATE opens an implicit
+    transaction, so one writer that returns without committing leaves the
+    connection in-transaction and every later ``BEGIN`` on it fails with
+    "cannot start a transaction within a transaction" (which is how every
+    topic_clusters batch died on 2026-08-06). The rollback here contains that
+    class of leak to a warning instead of a poisoned connection.
+    """
+    if getattr(conn, "in_transaction", False):
+        logger.warning(
+            "begin_immediate: connection carried an open transaction — a writer "
+            "returned without commit/rollback; rolling it back"
+        )
+        conn.rollback()
+    sqlite_retry_busy(lambda: conn.execute("BEGIN IMMEDIATE"))
+
+
 def commit_connection(conn: sqlite3.Connection) -> None:
     """Commit under the write gate + busy retry, or no-op inside :func:`batched_writes`."""
     if _defer_commit.get():

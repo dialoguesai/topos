@@ -349,8 +349,9 @@ async def run_privacy_disclosure_layer(
                 ):
                     nsfw_tagged += 1
 
-    if updated or nsfw_tagged:
-        conn.commit()
+    # Commit unconditionally: 0-row updates still opened an implicit
+    # transaction, which must not outlive this call.
+    conn.commit()
 
     duration_ms = int((time.perf_counter() - started) * 1000)
     logger.debug(

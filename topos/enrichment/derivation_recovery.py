@@ -172,8 +172,11 @@ def clear_derivation_retry(
                 (key,),
             )
             changed = int(cur.rowcount or 0)
-            if changed:
-                commit_connection(conn)
+            # Commit even when 0 rows matched: the UPDATE opened an implicit
+            # transaction regardless, and leaving it open makes the next
+            # BEGIN IMMEDIATE on this connection fail — which broke every
+            # topic_clusters batch (this runs after each successful job).
+            commit_connection(conn)
         if changed:
             logger.info(
                 "[DERIVE:RETRY] cleared derivation debt job=%s batch=%s",

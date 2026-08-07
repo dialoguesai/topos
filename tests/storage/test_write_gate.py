@@ -20,6 +20,7 @@ from topos.pipeline.job_store import (
 from topos.storage.db.connection_tuning import tune_connection
 from topos.storage.db.migrations.pipeline_jobs_v1 import apply_pipeline_jobs_v1_up
 from topos.storage.db.write_gate import (
+    begin_immediate,
     commit_connection,
     sqlite_retry_busy,
     with_db_write,
@@ -63,6 +64,28 @@ def test_write_gate_serializes_concurrent_writers(file_conn: sqlite3.Connection)
     assert not errors
     count = int(file_conn.execute("SELECT COUNT(*) FROM t").fetchone()[0])
     assert count == 2
+
+
+def test_begin_immediate_recovers_leaked_implicit_transaction(
+    file_conn: sqlite3.Connection,
+) -> None:
+    # A 0-row UPDATE opens an implicit transaction; a writer that returns
+    # without committing used to make every later BEGIN IMMEDIATE fail with
+    # "cannot start a transaction within a transaction".
+    file_conn.execute("UPDATE t SET v='x' WHERE id=-1")
+    assert file_conn.in_transaction
+    begin_immediate(file_conn)
+    assert file_conn.in_transaction
+    file_conn.execute("ROLLBACK")
+    assert not file_conn.in_transaction
+
+
+def test_begin_immediate_plain_path(file_conn: sqlite3.Connection) -> None:
+    begin_immediate(file_conn)
+    file_conn.execute("INSERT INTO t (v) VALUES ('y')")
+    file_conn.commit()
+    assert not file_conn.in_transaction
+    assert int(file_conn.execute("SELECT COUNT(*) FROM t").fetchone()[0]) == 1
 
 
 def test_sqlite_retry_busy_retries_then_succeeds() -> None:

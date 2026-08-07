@@ -123,6 +123,7 @@ class PiiRedactionJob(BaseEnrichmentJob):
             if progress_callback:
                 progress_callback(idx + 1, total)
 
-        if updated:
-            conn.commit()
+        # Commit unconditionally: a no-change pass may still have opened an
+        # implicit transaction, which must not outlive this job.
+        conn.commit()
         return [{"records_updated": updated}] if updated else []
