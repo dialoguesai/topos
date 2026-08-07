@@ -3,6 +3,39 @@ name: Upgrade matrix
 # PLAN_NODE_RELEASE_MIGRATIONS M4 — catch-up from a floored baseline fixture.
 # Default path uses --from-current (cheap, stable). Nightly may switch to PyPI
 # wheels when older topos-node==VERSION installs remain reliable.
+#
+# WHAT THIS JOB COVERS
+#   Boots a fixture stamped at the support floor (1.1.0) with real canonical
+#   rows on disk, then drives the shipped code's catch-up path:
+#     - the full schema migration chain (incl. actor_role_v1 backfilling over
+#       real rows, and the spec_version column assert)
+#     - upgrade planning: steps_between(baseline, shipped), dependency order
+#     - the derivation ledger state machine: pending -> running -> done, and
+#       the baseline advancing only when every step for the target completes
+#     - the enrichment_reprocess executor really walking sources and the NER
+#       extraction writing message_entities / entity_mentions
+#     - the engine_endpoint executor rebuilding the entity graph (edges > 0)
+#
+# WHAT IT DOES NOT COVER
+#   - backfill-attention-triage. That step is a no-op on real nodes too, not
+#     just here: attention_triage lives in SIGNAL_DERIVATION_JOBS, but the
+#     1.3.0 manifest runs it with include_signal=false, so run_canonical()
+#     filters it out and it ledgers "done" with jobs_run=0. Tracked in
+#     KNOWN_NO_OP_STEPS in scripts/run_upgrade_matrix.py, which prints a
+#     KNOWN GAP line every run. Delete that entry when the step is fixed.
+#   - Anything needing a reachable control plane. Nothing here does: the
+#     executors dispatch to engine internals rather than HTTP self-calls, so
+#     TOPOS_KEY below is a placeholder that only satisfies Settings
+#     construction. Do NOT put a real key here — it would add no coverage.
+#
+# HISTORY / WHY THE ASSERTIONS LOOK PARANOID
+#   This job was red on every run from 1.3.4 to 1.3.6 because TOPOS_KEY was
+#   unset, so Settings validation failed every step before it began
+#   (steps_run=0, steps_failed=3). Supplying the key alone would have turned it
+#   green while testing nothing: the fixture had no `timeline` rows, so every
+#   enrichment step walked zero sources and still ledgered "done". The runner
+#   therefore asserts on EFFECT (rows written, edges built), not on the absence
+#   of failures.
 
 on:
   schedule:
@@ -38,6 +71,17 @@ jobs:
       - name: Install dependencies
         run: uv sync --extra dev --extra local
 
+      # The extraction step runs a real NER pass, so the weights are now on the
+      # critical path (before, every step died at Settings validation and no
+      # model was ever fetched). Cache them so a Hugging Face outage or a slow
+      # download does not reintroduce a red-by-default job.
+      - name: Cache NER model weights
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: hf-ner-${{ hashFiles('topos/engine/backends/huggingface.py') }}
+          restore-keys: hf-ner-
+
       - name: Restore cached fixture
         id: cache-fixture
         uses: actions/cache@v4
@@ -62,6 +106,12 @@ jobs:
           cp "${FIXTURE}" /tmp/upgrade-fixture.db
 
       - name: Run upgrade matrix
+        env:
+          # Placeholder ONLY — satisfies the Settings validator, which rejects
+          # construction without a key and so aborted every step before this.
+          # Never transmitted (see "WHAT IT DOES NOT COVER" above). A real key
+          # here would add zero coverage and leak a live credential.
+          TOPOS_KEY: ci-upgrade-matrix-dummy-key
         run: uv run python scripts/run_upgrade_matrix.py --db /tmp/upgrade-fixture.db
 
       - name: Upload fixture artifact
