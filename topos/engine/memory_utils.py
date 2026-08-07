@@ -4,15 +4,21 @@ from __future__ import annotations
 
 import gc
 import logging
-import resource
 import sys
 from typing import Optional
+
+try:
+    import resource
+except ImportError:  # Windows has no resource module; RSS reporting degrades to None.
+    resource = None  # type: ignore[assignment]
 
 logger = logging.getLogger("topos.engine.memory")
 
 
 def get_process_rss_mb() -> Optional[float]:
     """Return current process RSS in megabytes, or None if unavailable."""
+    if resource is None:
+        return None
     try:
         usage = resource.getrusage(resource.RUSAGE_SELF)
         rss = usage.ru_maxrss
