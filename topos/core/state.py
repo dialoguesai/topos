@@ -5,6 +5,7 @@ import asyncio
 import os
 import platform
 import shutil
+import subprocess
 import sqlite3
 import sys
 import threading
@@ -1084,6 +1085,53 @@ def get_total_memory_bytes() -> Optional[int]:
     return None
 
 
+# Resolved at most once per process.
+#
+# get_device_info calls get_system_info twice per request (services/local.py,
+# for engine_name and for the system dict), the control plane hits it on every
+# websocket connect, and these are async handlers — an uncached subprocess.run
+# blocks the event loop for its full timeout every time. Failures are cached
+# too, deliberately: a Mac with ComputerName unset, or a slow configd, would
+# otherwise stall EVERY request by up to the timeout, forever. One stall is a
+# blip; a permanent per-request stall is an outage. The cost of caching a miss
+# is a Topos named after the hostname instead, which is exactly the fallback
+# that already exists.
+_UNRESOLVED = object()
+_computer_name_cache: Any = _UNRESOLVED
+
+
+def _macos_computer_name() -> Optional[str]:
+    """The name a Mac owner actually recognises — "Jonny's MacBook Pro".
+
+    `platform.node()` returns the network hostname, which on macOS is a mangled
+    form of the same thing ("jonnys-macbook-pro.local") or, on many networks,
+    something meaningless from DHCP. A Topos named after it reads like a server.
+
+    Read via scutil rather than a new dependency: pyobjc/SystemConfiguration
+    would be a wheel added to every install for one string. Absolute path,
+    bounded timeout, and every failure swallowed — a nicer label is never worth
+    risking node startup. (Measured at 8ms, but a 1s bound proved tight enough to
+    trip under load, and the first boot is the one call that has to answer.)
+    """
+    global _computer_name_cache
+    if _computer_name_cache is not _UNRESOLVED:
+        return _computer_name_cache
+    if platform.system() != "Darwin":
+        _computer_name_cache = None
+        return None
+    try:
+        out = subprocess.run(
+            ["/usr/sbin/scutil", "--get", "ComputerName"],
+            capture_output=True,
+            text=True,
+            timeout=2.0,
+        )
+        _computer_name_cache = (out.stdout or "").strip() or None
+    except Exception:  # noqa: BLE001
+        _computer_name_cache = None
+    return _computer_name_cache
+
+
 def get_system_info() -> Dict[str, Any]:
     disk_total = None
     disk_free = None
@@ -1099,6 +1147,10 @@ def get_system_info() -> Dict[str, Any]:
         disk_free = None
     return {
         "hostname": platform.node() or None,
+        # Free-form dict (api_models.py types `system` as Dict[str, Any]) and the
+        # control plane forwards it verbatim, so this reaches fleet status as
+        # system_info.computer_name with no CP change at all.
+        "computer_name": _macos_computer_name(),
         "os": platform.system() or None,
         "os_version": platform.version() or None,
         "platform": platform.platform() or None,

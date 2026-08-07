@@ -44,6 +44,8 @@ def _client_is_local(request: Request) -> bool:
 
 @router.get("/status")
 async def shell_status() -> dict:
+    from ..sanitization.prewarm import prewarm_status
+
     info = get_update_info()
     log_file = get_log_file_path()
     return {
@@ -59,6 +61,11 @@ async def shell_status() -> dict:
             "applying": _apply_state["applying"],
             "last_result": _apply_state["last_result"],
         },
+        # Additive: existing shells decode a fixed set of keys and ignore this.
+        # The tray cannot show it until the Swift ShellStatus struct adds the
+        # field (its CodingKeys are explicit), which needs its own signed build —
+        # shipping the data first means that release is a display change only.
+        "models": prewarm_status(),
     }
 
 

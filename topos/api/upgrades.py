@@ -19,11 +19,17 @@ router = APIRouter()
 def _status_payload() -> Dict[str, Any]:
     from ..core.state import get_db_connection
     from ..features.entities.graph_refresh import status as refresh_status
+    from ..sanitization.prewarm import prewarm_status
     from ..upgrades.runner import runner_status
 
     conn = get_db_connection()
     upgrade = runner_status(conn) if conn is not None else {"enabled": False, "error": "no database"}
-    return {"upgrade": upgrade, "graph_refresh": refresh_status()}
+    # `models` rides this existing read because the control plane already
+    # proxies it verbatim (engine_config.py returns `result.get("payload")`),
+    # `get_upgrade_status` is already allowlisted, and it is in the node's
+    # fast-inbound set — so it answers in milliseconds even while the prewarm
+    # thread is saturated downloading. No control-plane change, no CP deploy.
+    return {"upgrade": upgrade, "graph_refresh": refresh_status(), "models": prewarm_status()}
 
 
 @router.get("/v1/upgrade/status", dependencies=[Depends(require_api_key)])
