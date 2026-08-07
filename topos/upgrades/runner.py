@@ -257,24 +257,56 @@ def _exec_enrichment_reprocess(step: Dict[str, Any], conn: sqlite3.Connection) -
     """Walk real sources through the enrichment core with force_reprocess.
 
     Upgrade manifests declare specific ``job_names`` (e.g. attention_triage).
-    Unless a step explicitly sets ``include_signal: true``, we keep the signal /
-    LLM derivation lane OFF — otherwise every source fans out into embeddings,
-    cluster labeling, dimension briefs, and conversation-context LLM calls and
-    starves the UI during first boot after an upgrade.
+    Unless a step explicitly sets ``include_signal: true``, we keep the FULL
+    signal / LLM derivation fan-out OFF — otherwise every source fans out into
+    embeddings, cluster labeling, dimension briefs, and conversation-context LLM
+    calls and starves the UI during first boot after an upgrade.
+
+    Declared jobs are routed by the registry that actually owns them. A job in
+    SIGNAL_JOB_REGISTRY but not CANONICAL_JOBS (attention_triage,
+    topic_clusters, dimension_summary, ...) is invisible to
+    ``EnrichmentOrchestrator.run_canonical``, which filters ``job_names``
+    against its canonical list — so routing it down the canonical lane ran
+    nothing while still ledgering ``done``. Such jobs go through the signal
+    lane as a narrow ``signal_job_names`` list, which keeps them off the
+    fan-out that ``include_signal`` guards.
     """
     import asyncio
 
     from ..api.enrichment import _process_enrichment_core
+    from ..enrichment.jobs import CANONICAL_JOBS, SIGNAL_JOB_REGISTRY
     from ..enrichment.progress_bar import ProgressBar
 
     params = step.get("params") or {}
     job_names = params.get("job_names") or None
     include_signal = bool(params.get("include_signal", False))
+
+    # Split declared jobs by owning registry. Canonical wins when a name is in
+    # both (entities, embeddings, ...) — those already worked via run_canonical.
+    canonical_names = {job.get_job_name() for job in CANONICAL_JOBS}
+    declared = [str(n) for n in (job_names or [])]
+    canonical_jobs = [n for n in declared if n in canonical_names]
+    signal_jobs = [n for n in declared if n not in canonical_names and n in SIGNAL_JOB_REGISTRY]
+    unknown_jobs = [
+        n for n in declared if n not in canonical_names and n not in SIGNAL_JOB_REGISTRY
+    ]
+
     source_ids = _real_source_ids(conn)
     step_id = str(step.get("id") or "enrichment_reprocess")
     step_index = int(step.get("_runner_step_index") or 0)
     steps_total = int(step.get("_runner_steps_total") or 1)
     detail: Dict[str, Any] = {"sources": {}, "include_signal": include_signal}
+    if signal_jobs:
+        detail["signal_jobs"] = list(signal_jobs)
+    if unknown_jobs:
+        # A manifest naming a job no registry owns would otherwise no-op in
+        # silence — exactly the failure mode this routing split exists to end.
+        detail["unknown_jobs"] = list(unknown_jobs)
+        logger.warning(
+            "upgrade step %s declares unknown enrichment job(s) %s — nothing will run for them",
+            step_id,
+            unknown_jobs,
+        )
     def _run_sources(pbar: Optional[ProgressBar] = None) -> None:
         for idx, source_id in enumerate(source_ids):
             _set_runner_state(
@@ -294,11 +326,16 @@ def _exec_enrichment_reprocess(step: Dict[str, Any], conn: sqlite3.Connection) -
                 out = asyncio.run(
                     _process_enrichment_core(
                         source_id=source_id,
-                        job_names=list(job_names) if job_names else None,
+                        job_names=(canonical_jobs if declared else None),
                         # Default False: stale-predicate (spec_version) resumes;
                         # manifests may still set force_reprocess=true for wipes.
                         force_reprocess=bool(params.get("force_reprocess", False)),
                         include_signal=include_signal,
+                        # A list (even empty) whenever the manifest declared
+                        # jobs, so the core treats the canonical split as
+                        # authoritative instead of widening [] back out to the
+                        # source's full default job set.
+                        signal_job_names=(signal_jobs if declared else None),
                     )
                 )
                 detail["sources"][source_id] = str(out.get("status") or "ok")
