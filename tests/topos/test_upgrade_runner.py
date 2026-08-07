@@ -141,8 +141,8 @@ def test_kill_switch(conn, monkeypatch):
     assert read_baseline(conn) is None  # nothing stamped; retries when re-enabled
 
 
-def test_enrichment_reprocess_keeps_signal_lane_off(conn, monkeypatch):
-    """Upgrade steps must not fan into embeddings/cluster LLM/dimension briefs."""
+def _reprocess_calls(conn, monkeypatch, params, step_id="step"):
+    """Run _exec_enrichment_reprocess with the enrichment core stubbed out."""
     from topos.upgrades import runner as upgrade_runner
 
     conn.execute(
@@ -159,17 +159,80 @@ def test_enrichment_reprocess_keeps_signal_lane_off(conn, monkeypatch):
 
     monkeypatch.setattr("topos.api.enrichment._process_enrichment_core", fake_core)
     step = {
-        "id": "backfill-attention-triage",
+        "id": step_id,
         "kind": "enrichment_reprocess",
-        "params": {"job_names": ["attention_triage"], "force_reprocess": True},
+        "params": params,
         "_runner_step_index": 0,
         "_runner_steps_total": 1,
     }
     detail = upgrade_runner._exec_enrichment_reprocess(step, conn)
+    return calls, detail
+
+
+def test_enrichment_reprocess_keeps_signal_lane_off(conn, monkeypatch):
+    """Upgrade steps must not fan into embeddings/cluster LLM/dimension briefs."""
+    calls, detail = _reprocess_calls(
+        conn,
+        monkeypatch,
+        {"job_names": ["attention_triage"], "force_reprocess": True},
+        step_id="backfill-attention-triage",
+    )
     assert calls, "enrichment core should have been invoked"
+    # include_signal stays off: that flag guards the FULL fan-out, which is what
+    # starves startup UI traffic. The narrow list below is not that fan-out.
     assert calls[0]["include_signal"] is False
-    assert calls[0]["job_names"] == ["attention_triage"]
     assert detail["include_signal"] is False
+
+
+def test_signal_jobs_route_to_signal_lane_not_run_canonical(conn, monkeypatch):
+    """attention_triage is a SIGNAL job; run_canonical() would silently drop it.
+
+    Regression for the 1.3.0–1.3.6 defect: the step ledgered 'done' with
+    jobs_run=0 and wrote zero triage_verdicts on every real node, because the
+    runner handed a SIGNAL_JOB_REGISTRY name to the canonical lane, which
+    filters job_names against CANONICAL_JOBS.
+    """
+    from topos.enrichment.jobs import CANONICAL_JOBS, SIGNAL_JOB_REGISTRY
+
+    assert "attention_triage" in SIGNAL_JOB_REGISTRY
+    assert "attention_triage" not in {j.get_job_name() for j in CANONICAL_JOBS}
+
+    calls, detail = _reprocess_calls(
+        conn,
+        monkeypatch,
+        {"job_names": ["attention_triage"], "force_reprocess": True},
+        step_id="backfill-attention-triage",
+    )
+    assert calls[0]["signal_job_names"] == ["attention_triage"]
+    # Empty, NOT None: None would widen back out to the source's full default
+    # canonical job set.
+    assert calls[0]["job_names"] == []
+    assert detail["signal_jobs"] == ["attention_triage"]
+
+
+def test_canonical_jobs_still_route_to_canonical_lane(conn, monkeypatch):
+    calls, _ = _reprocess_calls(
+        conn, monkeypatch, {"job_names": ["entities"], "force_reprocess": True}
+    )
+    assert calls[0]["job_names"] == ["entities"]
+    assert not calls[0]["signal_job_names"]
+
+
+def test_unknown_job_name_runs_nothing_instead_of_everything(conn, monkeypatch):
+    """A manifest typo must not silently widen into the full default job set."""
+    calls, detail = _reprocess_calls(
+        conn, monkeypatch, {"job_names": ["not_a_real_job"], "force_reprocess": True}
+    )
+    assert calls[0]["job_names"] == []
+    assert calls[0]["signal_job_names"] == []
+    assert detail["unknown_jobs"] == ["not_a_real_job"]
+
+
+def test_no_declared_jobs_preserves_source_defaults(conn, monkeypatch):
+    """Steps that declare no job_names still fall back to the source's defaults."""
+    calls, _ = _reprocess_calls(conn, monkeypatch, {"force_reprocess": True})
+    assert calls[0]["job_names"] is None
+    assert calls[0]["signal_job_names"] is None
 
 
 def test_start_background_waits_for_ready_event(conn, monkeypatch):

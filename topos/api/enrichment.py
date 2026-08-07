@@ -1042,15 +1042,25 @@ async def _process_enrichment_core(
     force_reprocess: bool = False,
     include_signal: bool = True,
     progress_updater: Optional[Any] = None,
+    signal_job_names: Optional[List[str]] = None,
 ) -> Dict[str, Any]:
     """Core logic for processing enrichment (reusable from HTTP and WebSocket).
-    
+
     Args:
         source_id: Source identifier
         dataset_id: Optional dataset ID to filter by
         job_names: Optional list of specific enrichment jobs to run
         force_reprocess: If True, reprocess even if already enriched
-        
+        include_signal: Run the FULL signal fan-out (embeddings, clusters,
+            dimension briefs, ...) after the canonical lane.
+        signal_job_names: Run ONLY these signal-lane jobs, independent of
+            ``include_signal``. Signal jobs (attention_triage, topic_clusters,
+            ...) live in SIGNAL_JOB_REGISTRY and are invisible to
+            ``run_canonical``, so naming one in ``job_names`` alone silently
+            runs nothing. When this is passed, ``job_names`` is authoritative
+            for the canonical lane and ``[]`` legitimately means "no canonical
+            work" rather than "fall back to the source defaults".
+
     Returns:
         Processing results
     """
@@ -1063,14 +1073,18 @@ async def _process_enrichment_core(
 
     # Determine which jobs to run
     jobs_to_run = job_names or effective_canonical_enrichment_jobs(source_def)
-    if not jobs_to_run:
+    if signal_job_names is not None:
+        # Explicit split routing: never widen an empty canonical list into the
+        # source's full default job set.
+        jobs_to_run = list(job_names or [])
+    if not jobs_to_run and not signal_job_names:
         return {
             "status": "ok",
             "message": "No enrichment jobs configured for this source",
             "messages_processed": 0,
             "records_created": {},
         }
-    
+
     # Get database connection
     db_conn = get_db_connection()
     if not db_conn:
@@ -1174,11 +1188,16 @@ async def _process_enrichment_core(
             }
         )
 
-    enrichment_result = await orchestrator.run_canonical(
-        unprocessed_messages,
-        job_names=jobs_to_run,
-        progress_callback=progress_callback,
-    )
+    if jobs_to_run:
+        enrichment_result = await orchestrator.run_canonical(
+            unprocessed_messages,
+            job_names=jobs_to_run,
+            progress_callback=progress_callback,
+        )
+    else:
+        # Signal-only invocation. run_canonical() treats a falsy job_names as
+        # "run every canonical job", so it must not be called at all here.
+        enrichment_result = {"jobs_run": 0, "records_created": {}, "errors": []}
 
     # Canonical jobs changed the derived layers even when the signal lane is
     # skipped below — mark the graph for a debounced rebuild either way.
@@ -1193,19 +1212,23 @@ async def _process_enrichment_core(
     # path, so it must also run the signal-derivation lane (embeddings,
     # clusters, facts, ...) that the ingest path skips for manual sources.
     signal_result: Dict[str, Any] = {}
-    if include_signal:
+    if signal_job_names or include_signal:
         try:
             import uuid as _uuid
 
             from ..ingestion.canonical_pipeline import run_post_canonical_pipeline
             from ..sources.canonical_signal_defaults import resolved_signal_derivation_jobs
 
-            if resolved_signal_derivation_jobs(source_def):
+            # A narrow list runs exactly those jobs; otherwise fall back to the
+            # source's resolved fan-out (the include_signal path).
+            explicit = list(signal_job_names) if signal_job_names else None
+            if explicit or resolved_signal_derivation_jobs(source_def):
                 pipeline_outcome = await run_post_canonical_pipeline(
                     source_def=source_def,
                     canonical_records=unprocessed_messages,
                     sync_batch_id=f"manual_enrichment_{_uuid.uuid4().hex[:12]}",
                     tables_manager=tables_manager,
+                    job_names=explicit,
                     run_enrichment=False,
                     force_signal=True,
                 )
