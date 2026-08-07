@@ -884,8 +884,9 @@ class ConversationsTablesManager:
             )
             if int(cursor.rowcount or 0) > 0:
                 updated += 1
-        if updated:
-            self.conn.commit()
+        # Commit unconditionally: 0-row updates still opened an implicit
+        # transaction, which must not outlive this call.
+        self.conn.commit()
         return updated
 
     def import_contacts_batch(

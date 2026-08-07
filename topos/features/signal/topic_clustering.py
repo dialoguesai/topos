@@ -1250,11 +1250,11 @@ def recompute_topic_clusters(
     )
 
     _strip_member_vectors(clusters)
-    from ...storage.db.write_gate import sqlite_retry_busy, with_db_write
+    from ...storage.db.write_gate import begin_immediate, sqlite_retry_busy, with_db_write
 
     with with_db_write():
         try:
-            sqlite_retry_busy(lambda: conn.execute("BEGIN IMMEDIATE"))
+            begin_immediate(conn)
             _clear_all_topic_clusters(conn)
             persist_result = persist_topic_clusters(
                 conn,

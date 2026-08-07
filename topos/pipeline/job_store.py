@@ -8,7 +8,7 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional
 
-from ..storage.db.write_gate import commit_connection, sqlite_retry_busy, with_db_write
+from ..storage.db.write_gate import begin_immediate, commit_connection, sqlite_retry_busy, with_db_write
 
 JOB_STATUSES = frozenset({"queued", "running", "done", "failed"})
 DEFAULT_LEASE_SECONDS = 300
@@ -145,7 +145,7 @@ def claim_next_job(
     expires = (datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)).isoformat()
 
     with with_db_write():
-        sqlite_retry_busy(lambda: conn.execute("BEGIN IMMEDIATE"))
+        begin_immediate(conn)
         try:
             query = "SELECT job_id FROM pipeline_jobs WHERE status='queued'"
             params: list[Any] = []
@@ -177,6 +177,58 @@ def claim_next_job(
             conn.execute("ROLLBACK")
             raise
     return get_job(conn, job_id)
+
+
+def claim_matching_queued_jobs(
+    conn: sqlite3.Connection,
+    *,
+    lease_owner: str,
+    kind: str,
+    source_id: Optional[str],
+    lease_seconds: int = DEFAULT_LEASE_SECONDS,
+    limit: int = 100,
+) -> List[Dict[str, Any]]:
+    """Claim every queued job of ``kind`` for ``source_id``, oldest first.
+
+    Lets the worker coalesce a backlog — e.g. 40 one-record inbox deliveries —
+    into a single derive batch so the per-batch jobs (dimension briefs, topic
+    work) run once instead of once per delivery.
+    """
+    ensure_pipeline_jobs_schema(conn)
+    expires = (datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)).isoformat()
+    claimed_ids: List[str] = []
+
+    with with_db_write():
+        begin_immediate(conn)
+        try:
+            query = "SELECT job_id FROM pipeline_jobs WHERE status='queued' AND kind=?"
+            params: list[Any] = [kind]
+            if source_id is None:
+                query += " AND source_id IS NULL"
+            else:
+                query += " AND source_id=?"
+                params.append(source_id)
+            query += " ORDER BY created_at ASC LIMIT ?"
+            params.append(int(limit))
+            rows = conn.execute(query, tuple(params)).fetchall()
+            for row in rows:
+                updated = conn.execute(
+                    """
+                    UPDATE pipeline_jobs
+                    SET status='running', lease_owner=?, lease_expires_at=?,
+                        started_at=COALESCE(started_at, datetime('now')),
+                        updated_at=datetime('now')
+                    WHERE job_id=? AND status='queued'
+                    """,
+                    (lease_owner, expires, str(row[0])),
+                )
+                if int(updated.rowcount or 0):
+                    claimed_ids.append(str(row[0]))
+            sqlite_retry_busy(conn.commit)
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
+    return [job for job in (get_job(conn, jid) for jid in claimed_ids) if job is not None]
 
 
 def complete_job(

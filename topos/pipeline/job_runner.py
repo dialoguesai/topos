@@ -11,6 +11,7 @@ import uuid
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 from .job_store import (
+    claim_matching_queued_jobs,
     claim_next_job,
     complete_job,
     fail_job,
@@ -144,17 +145,23 @@ async def _execute_topic_consolidation(payload: Dict[str, Any]) -> Dict[str, Any
         # what this executor exists to avoid.
         return {"status": "error", "error": "derivation in flight; will retry"}
 
-    conn = get_db_connection()
-    if conn is None:
-        return {"status": "error", "error": "no database connection"}
+    def _run() -> Dict[str, Any]:
+        # Fetched INSIDE the worker thread: get_db_connection is thread-local,
+        # and handing the loop thread's connection across threads is the
+        # sharing that caused the 2026-07-30 transaction corruption.
+        own = get_db_connection()
+        if own is None:
+            return {"status": "error", "error": "no database connection"}
+        return recompute_topic_clusters(
+            own,
+            source_ids=list(_resolved_topic_cluster_source_ids()),
+            sync_batch_id=None,
+            min_records=3,
+        )
 
-    result = await asyncio.to_thread(
-        recompute_topic_clusters,
-        conn,
-        source_ids=list(_resolved_topic_cluster_source_ids()),
-        sync_batch_id=None,
-        min_records=3,
-    )
+    result = await asyncio.to_thread(_run)
+    if str(result.get("status") or "") == "error":
+        return result
     logger.info("topic consolidation complete: %s", result)
     return {"status": "ok", "result": result}
 
@@ -167,13 +174,43 @@ EXECUTORS: Dict[str, ExecutorFn] = {
 }
 
 
+#: Upper bound on inbox jobs merged into one derive batch. A CP backlog after
+#: downtime arrives as one job per delivery (usually one record each); merging
+#: them runs the per-batch jobs (dimension briefs, topic work) once instead of
+#: once per delivery. Leftovers beyond the cap stay queued for the next cycle.
+_COALESCE_MAX_JOBS = 100
+
+
+def _coalesce_inbox_jobs(
+    conn, job: Dict[str, Any], payload: Dict[str, Any]
+) -> tuple[list[Dict[str, Any]], Dict[str, Any]]:
+    """Merge queued inbox jobs for the same source into this job's batch."""
+    siblings = claim_matching_queued_jobs(
+        conn,
+        lease_owner=_lease_owner,
+        kind=str(job["kind"]),
+        source_id=job.get("source_id"),
+        limit=_COALESCE_MAX_JOBS,
+    )
+    if not siblings:
+        return [job], payload
+    merged_records = list(payload.get("canonical_records") or [])
+    for sibling in siblings:
+        merged_records.extend((sibling.get("payload") or {}).get("canonical_records") or [])
+    merged_payload = {**payload, "canonical_records": merged_records}
+    logger.info(
+        "coalesced %d inbox jobs into one derive batch: source=%s records=%d",
+        len(siblings) + 1,
+        job.get("source_id"),
+        len(merged_records),
+    )
+    return [job, *siblings], merged_payload
+
+
 async def process_job(conn, job: Dict[str, Any]) -> None:
-    """Run one claimed job to completion."""
+    """Run one claimed job (plus any coalesced siblings) to completion."""
     job_id = str(job["job_id"])
     kind = str(job["kind"])
-    write_id = job.get("write_id")
-    source_id = job.get("source_id")
-    sync_batch_id = job.get("sync_batch_id")
 
     executor = EXECUTORS.get(kind)
     if executor is None:
@@ -184,38 +221,46 @@ async def process_job(conn, job: Dict[str, Any]) -> None:
         update_job_progress(conn, job_id, progress)
 
     payload = dict(job.get("payload") or {})
+    jobs = [job]
+    if kind == "inbox_deferred_enrichment":
+        jobs, payload = _coalesce_inbox_jobs(conn, job, payload)
     if kind == "enrichment_process_source":
         payload["_progress_updater"] = _progress_updater
 
     try:
         result = await executor(payload)
         if str(result.get("status") or "ok") == "error":
-            fail_job(conn, job_id, error=str(result.get("error") or result.get("message") or "failed"))
-            update_job_progress(conn, job_id, {"status": "failed", "result": result})
+            error = str(result.get("error") or result.get("message") or "failed")
+            for entry in jobs:
+                fail_job(conn, str(entry["job_id"]), error=error)
+                update_job_progress(conn, str(entry["job_id"]), {"status": "failed", "result": result})
             return
-        complete_job(conn, job_id, detail=result)
-        update_job_progress(
-            conn,
-            job_id,
-            {
-                "status": "completed",
-                "messages_processed": result.get("messages_processed", 0),
-                "records_created": result.get("records_created", {}),
-                "errors": result.get("errors", []),
-            },
-        )
-        if kind == "inbox_deferred_enrichment" and write_id:
-            record_derivation_completion(
+        for entry in jobs:
+            entry_id = str(entry["job_id"])
+            complete_job(conn, entry_id, detail=result)
+            update_job_progress(
                 conn,
-                write_id=str(write_id),
-                job_id=job_id,
-                source_id=source_id,
-                sync_batch_id=sync_batch_id,
+                entry_id,
+                {
+                    "status": "completed",
+                    "messages_processed": result.get("messages_processed", 0),
+                    "records_created": result.get("records_created", {}),
+                    "errors": result.get("errors", []),
+                },
             )
+            if kind == "inbox_deferred_enrichment" and entry.get("write_id"):
+                record_derivation_completion(
+                    conn,
+                    write_id=str(entry["write_id"]),
+                    job_id=entry_id,
+                    source_id=entry.get("source_id"),
+                    sync_batch_id=entry.get("sync_batch_id"),
+                )
     except Exception as exc:  # noqa: BLE001
         logger.warning("pipeline job failed job_id=%s kind=%s: %s", job_id, kind, exc, exc_info=exc)
-        fail_job(conn, job_id, error=str(exc))
-        update_job_progress(conn, job_id, {"status": "failed", "error": str(exc)})
+        for entry in jobs:
+            fail_job(conn, str(entry["job_id"]), error=str(exc))
+            update_job_progress(conn, str(entry["job_id"]), {"status": "failed", "error": str(exc)})
 
 
 #: Idle poll interval. Every tick claims against SQLite, so this is also how
