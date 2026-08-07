@@ -9,6 +9,30 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.6] — 2026-08-06
+
+### Fixed
+
+- `[O]` Never leave a SQLite transaction open after 0-row UPDATEs in legacy
+  isolation mode (derivation retry, privacy layer, contact-name resolve, PII
+  redaction, startup app_id migration). An open transaction was poisoning the
+  writer so topic clustering `BEGIN IMMEDIATE` failed every batch and derived
+  topics never landed.
+- `[O]` Coalesce queued `inbox_deferred_enrichment` jobs for the same source
+  into one derive batch (cap 100), so a post-downtime backlog pays per-batch
+  work once.
+- `[O]` Run `TopicClusterJob.enrich` off the event loop so control-plane
+  keepalive stays responsive during k-means / label-pool work.
+
+### Added
+
+- `[O] [P]` Sanitization prewarm reports download/load progress (`phase`,
+  `cached_bytes`, `first_run`, per-model status) on `/v1/upgrade/status` and
+  `/v1/shell/status`, so a first install's ~2.9GB Hugging Face fetch is visible
+  instead of looking hung.
+- `[O] [P]` `system.computer_name` from macOS `ComputerName` (cached once per
+  process) so fleet/UI can name a node after the machine the owner recognises.
+
 ## [1.3.5] — 2026-08-06
 
 ### Fixed
