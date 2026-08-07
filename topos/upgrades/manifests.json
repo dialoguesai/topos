@@ -172,6 +172,12 @@
       ]
     },
     {
+      "version": "1.3.6",
+      "summary": "Inbox txn hygiene + coalesce deferred enrichment; topic clustering off-loop; sanitization prewarm progress on upgrade/shell status; macOS computer_name in system_info. Code-only / protocol-additive.",
+      "steps": [],
+      "notes": []
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
