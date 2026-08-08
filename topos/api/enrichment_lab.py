@@ -14,6 +14,7 @@ from ..enrichment_lab import bundles as bundles_mod
 from ..enrichment_lab import model_resolve
 from ..enrichment_lab import service as lab_service
 from ..enrichment_lab import store
+from ..storage.db.write_gate import commit_connection, with_db_write
 
 logger = logging.getLogger("topos.api.enrichment_lab")
 
@@ -169,8 +170,9 @@ async def enrichment_lab_patch_run(
     if "user_liked" in body:
         v = body.get("user_liked")
         if v is None:
-            conn.execute("UPDATE enrichment_lab_run SET user_liked = NULL WHERE id = ?", (run_id,))
-            conn.commit()
+            with with_db_write():
+                conn.execute("UPDATE enrichment_lab_run SET user_liked = NULL WHERE id = ?", (run_id,))
+                commit_connection(conn)
         else:
             store.patch_run(conn, run_id, user_liked=bool(v))
     if "user_note" in body:

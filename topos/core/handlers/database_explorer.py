@@ -27,6 +27,7 @@ from .common import (
     uuid,
 )
 from .registry import handles
+from ...storage.db.write_gate import batched_writes, commit_connection, with_db_write
 
 
 def _safe_sql_identifier(name: str) -> bool:
@@ -214,63 +215,66 @@ def _pooled_scope_backfill_apply(
 ) -> Dict[str, Any]:
     migration_id = str(uuid.uuid4())
     created_at = datetime.now(timezone.utc).isoformat()
-    _ensure_pooled_scope_journal_table(conn)
     tables_applied: List[Dict[str, Any]] = []
-    for table_name in _pooled_scope_tables(conn, requested_tables):
-        scope_columns = _pooled_scope_columns_for_table(conn, table_name)
-        if not scope_columns:
-            continue
-        missing_pred = _pooled_scope_missing_predicate(scope_columns)
-        backup_table = f'pooled_scope_backup_{table_name}_{int(time_module.time() * 1000)}_{uuid.uuid4().hex[:8]}'
-        scoped_column_select = ", ".join([f'"{c}"' for c in scope_columns])
-        conn.execute(
-            f'CREATE TABLE "{backup_table}" AS SELECT rowid AS _rowid, {scoped_column_select} FROM "{table_name}" WHERE {missing_pred}'
-        )
-        missing_row = conn.execute(f'SELECT COUNT(*) AS count FROM "{backup_table}"').fetchone()
-        missing_count = int(missing_row["count"] if isinstance(missing_row, dict) else missing_row[0])
-        if missing_count <= 0:
-            conn.execute(f'DROP TABLE IF EXISTS "{backup_table}"')
-            continue
-        set_clauses: List[str] = []
-        params: List[Any] = []
-        replacements = {
-            "dataset_id": dataset_id,
-            "owner_user_id": owner_user_id,
-            "tenant_id": tenant_id,
-        }
-        for scope_col in scope_columns:
-            replacement = replacements.get(scope_col)
-            if replacement is None:
+    # Backup/UPDATE/journal writes take SQLite's write lock at execute time —
+    # hold the gate for the whole migration batch (single commit at exit).
+    # Callers guarantee a sqlite conn (_is_sqlite_conn checked in handlers).
+    with batched_writes(conn):
+        _ensure_pooled_scope_journal_table(conn)
+        for table_name in _pooled_scope_tables(conn, requested_tables):
+            scope_columns = _pooled_scope_columns_for_table(conn, table_name)
+            if not scope_columns:
                 continue
-            set_clauses.append(
-                f'''"{scope_col}" = CASE WHEN "{scope_col}" IS NULL OR TRIM(CAST("{scope_col}" AS TEXT)) = '' THEN ? ELSE "{scope_col}" END'''
+            missing_pred = _pooled_scope_missing_predicate(scope_columns)
+            backup_table = f'pooled_scope_backup_{table_name}_{int(time_module.time() * 1000)}_{uuid.uuid4().hex[:8]}'
+            scoped_column_select = ", ".join([f'"{c}"' for c in scope_columns])
+            conn.execute(
+                f'CREATE TABLE "{backup_table}" AS SELECT rowid AS _rowid, {scoped_column_select} FROM "{table_name}" WHERE {missing_pred}'
             )
-            params.append(replacement)
-        if not set_clauses:
-            conn.execute(f'DROP TABLE IF EXISTS "{backup_table}"')
-            continue
-        params.extend([migration_id, table_name, backup_table, json.dumps(scope_columns), created_at])
-        conn.execute(
-            f'UPDATE "{table_name}" SET {", ".join(set_clauses)} WHERE rowid IN (SELECT _rowid FROM "{backup_table}")',
-            tuple(params[: len(set_clauses)]),
-        )
-        conn.execute(
-            """
-            INSERT INTO pooled_scope_backfill_journal
-            (migration_id, table_name, backup_table, scope_columns_json, created_at)
-            VALUES (?, ?, ?, ?, ?)
-            """,
-            tuple(params[len(set_clauses) :]),
-        )
-        tables_applied.append(
-            {
-                "table_name": table_name,
-                "scope_columns": scope_columns,
-                "rows_backfilled": missing_count,
-                "backup_table": backup_table,
+            missing_row = conn.execute(f'SELECT COUNT(*) AS count FROM "{backup_table}"').fetchone()
+            missing_count = int(missing_row["count"] if isinstance(missing_row, dict) else missing_row[0])
+            if missing_count <= 0:
+                conn.execute(f'DROP TABLE IF EXISTS "{backup_table}"')
+                continue
+            set_clauses: List[str] = []
+            params: List[Any] = []
+            replacements = {
+                "dataset_id": dataset_id,
+                "owner_user_id": owner_user_id,
+                "tenant_id": tenant_id,
             }
-        )
-    conn.commit()
+            for scope_col in scope_columns:
+                replacement = replacements.get(scope_col)
+                if replacement is None:
+                    continue
+                set_clauses.append(
+                    f'''"{scope_col}" = CASE WHEN "{scope_col}" IS NULL OR TRIM(CAST("{scope_col}" AS TEXT)) = '' THEN ? ELSE "{scope_col}" END'''
+                )
+                params.append(replacement)
+            if not set_clauses:
+                conn.execute(f'DROP TABLE IF EXISTS "{backup_table}"')
+                continue
+            params.extend([migration_id, table_name, backup_table, json.dumps(scope_columns), created_at])
+            conn.execute(
+                f'UPDATE "{table_name}" SET {", ".join(set_clauses)} WHERE rowid IN (SELECT _rowid FROM "{backup_table}")',
+                tuple(params[: len(set_clauses)]),
+            )
+            conn.execute(
+                """
+                INSERT INTO pooled_scope_backfill_journal
+                (migration_id, table_name, backup_table, scope_columns_json, created_at)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                tuple(params[len(set_clauses) :]),
+            )
+            tables_applied.append(
+                {
+                    "table_name": table_name,
+                    "scope_columns": scope_columns,
+                    "rows_backfilled": missing_count,
+                    "backup_table": backup_table,
+                }
+            )
     return {
         "migration_id": migration_id,
         "created_at": created_at,
@@ -278,49 +282,52 @@ def _pooled_scope_backfill_apply(
     }
 
 def _pooled_scope_backfill_rollback(conn: Any, migration_id: str) -> Dict[str, Any]:
-    _ensure_pooled_scope_journal_table(conn)
-    rows = conn.execute(
-        """
-        SELECT table_name, backup_table, scope_columns_json
-        FROM pooled_scope_backfill_journal
-        WHERE migration_id = ?
-        ORDER BY table_name
-        """,
-        (migration_id,),
-    ).fetchall()
     restored: List[Dict[str, Any]] = []
-    for row in rows:
-        table_name = str(row["table_name"] if isinstance(row, dict) else row[0])
-        backup_table = str(row["backup_table"] if isinstance(row, dict) else row[1])
-        columns_json = row["scope_columns_json"] if isinstance(row, dict) else row[2]
-        try:
-            scope_columns = json.loads(columns_json) if isinstance(columns_json, str) else []
-        except Exception:
-            scope_columns = []
-        if not scope_columns:
-            continue
-        set_clauses = []
-        for scope_col in scope_columns:
-            set_clauses.append(
-                f'''"{scope_col}" = (SELECT "{scope_col}" FROM "{backup_table}" b WHERE b._rowid = "{table_name}".rowid)'''
+    # Restore/DROP/journal writes take SQLite's write lock at execute time —
+    # hold the gate for the whole rollback batch (single commit at exit).
+    # Callers guarantee a sqlite conn (_is_sqlite_conn checked in handlers).
+    with batched_writes(conn):
+        _ensure_pooled_scope_journal_table(conn)
+        rows = conn.execute(
+            """
+            SELECT table_name, backup_table, scope_columns_json
+            FROM pooled_scope_backfill_journal
+            WHERE migration_id = ?
+            ORDER BY table_name
+            """,
+            (migration_id,),
+        ).fetchall()
+        for row in rows:
+            table_name = str(row["table_name"] if isinstance(row, dict) else row[0])
+            backup_table = str(row["backup_table"] if isinstance(row, dict) else row[1])
+            columns_json = row["scope_columns_json"] if isinstance(row, dict) else row[2]
+            try:
+                scope_columns = json.loads(columns_json) if isinstance(columns_json, str) else []
+            except Exception:
+                scope_columns = []
+            if not scope_columns:
+                continue
+            set_clauses = []
+            for scope_col in scope_columns:
+                set_clauses.append(
+                    f'''"{scope_col}" = (SELECT "{scope_col}" FROM "{backup_table}" b WHERE b._rowid = "{table_name}".rowid)'''
+                )
+            conn.execute(
+                f'UPDATE "{table_name}" SET {", ".join(set_clauses)} WHERE rowid IN (SELECT _rowid FROM "{backup_table}")'
             )
-        conn.execute(
-            f'UPDATE "{table_name}" SET {", ".join(set_clauses)} WHERE rowid IN (SELECT _rowid FROM "{backup_table}")'
-        )
-        restored_count_row = conn.execute(f'SELECT COUNT(*) AS count FROM "{backup_table}"').fetchone()
-        restored_count = int(
-            restored_count_row["count"] if isinstance(restored_count_row, dict) else restored_count_row[0]
-        )
-        conn.execute(f'DROP TABLE IF EXISTS "{backup_table}"')
-        restored.append(
-            {
-                "table_name": table_name,
-                "backup_table": backup_table,
-                "rows_restored": restored_count,
-            }
-        )
-    conn.execute("DELETE FROM pooled_scope_backfill_journal WHERE migration_id = ?", (migration_id,))
-    conn.commit()
+            restored_count_row = conn.execute(f'SELECT COUNT(*) AS count FROM "{backup_table}"').fetchone()
+            restored_count = int(
+                restored_count_row["count"] if isinstance(restored_count_row, dict) else restored_count_row[0]
+            )
+            conn.execute(f'DROP TABLE IF EXISTS "{backup_table}"')
+            restored.append(
+                {
+                    "table_name": table_name,
+                    "backup_table": backup_table,
+                    "rows_restored": restored_count,
+                }
+            )
+        conn.execute("DELETE FROM pooled_scope_backfill_journal WHERE migration_id = ?", (migration_id,))
     return {
         "migration_id": migration_id,
         "tables_restored": restored,
@@ -1230,17 +1237,26 @@ async def handle_delete_database_table(message: Dict[str, Any]) -> Optional[Dict
             rows_before = int(count_row.get("count") or 0)
         else:
             rows_before = int(count_row[0] or 0)
-        conn.execute(f'DELETE FROM "{table_name}"')
-        conn.commit()
+        if _is_sqlite_conn(conn):
+            # DELETE takes SQLite's write lock at execute time — gate it with
+            # the commit (write_gate lock-order inversion).
+            with with_db_write():
+                conn.execute(f'DELETE FROM "{table_name}"')
+                commit_connection(conn)
+        else:
+            conn.execute(f'DELETE FROM "{table_name}"')
+            conn.commit()
         return rows_before
 
     def _drop_table_or_view(conn: Any, *, table_name: str, obj_type: str, is_sqlite: bool) -> None:
         if is_sqlite:
-            conn.execute(f'DROP {obj_type} IF EXISTS "{table_name}"')
+            with with_db_write():
+                conn.execute(f'DROP {obj_type} IF EXISTS "{table_name}"')
+                commit_connection(conn)
         else:
             drop_type = "VIEW" if obj_type == "view" else "TABLE"
             conn.execute(f'DROP {drop_type} IF EXISTS "{table_name}"')
-        conn.commit()
+            conn.commit()
 
     try:
         payload = message.get("payload") or {}

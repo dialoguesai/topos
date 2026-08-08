@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from .schema import ensure_enrichment_lab_schema
+from ..storage.db.write_gate import batched_writes, commit_connection, with_db_write
 
 
 def utc_now_iso() -> str:
@@ -37,38 +38,38 @@ def insert_group(
     at creation time so node-sampled dry-runs are stable and reproducible."""
     ensure_schema(conn)
     gid = str(uuid.uuid4())
-    conn.execute(
-        """
-        INSERT INTO enrichment_lab_job_group (
-            id, created_at, job_id, dataset_kind, bundle_id, bundle_version,
-            source_id, sample_limit, status, models_json, options_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            gid,
-            utc_now_iso(),
-            job_id,
-            dataset_kind,
-            bundle_id,
-            bundle_version,
-            source_id,
-            sample_limit,
-            "pending",
-            json.dumps(models),
-            json.dumps(options or {}),
-        ),
-    )
-    for model_tag in models:
-        for rid, record in record_inputs.items():
-            conn.execute(
-                """
-                INSERT INTO enrichment_lab_run (
-                    id, group_id, model_tag, record_id, status, input_json
-                ) VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (str(uuid.uuid4()), gid, model_tag, rid, "queued", json.dumps(record)),
-            )
-    conn.commit()
+    with batched_writes(conn):
+        conn.execute(
+            """
+            INSERT INTO enrichment_lab_job_group (
+                id, created_at, job_id, dataset_kind, bundle_id, bundle_version,
+                source_id, sample_limit, status, models_json, options_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                gid,
+                utc_now_iso(),
+                job_id,
+                dataset_kind,
+                bundle_id,
+                bundle_version,
+                source_id,
+                sample_limit,
+                "pending",
+                json.dumps(models),
+                json.dumps(options or {}),
+            ),
+        )
+        for model_tag in models:
+            for rid, record in record_inputs.items():
+                conn.execute(
+                    """
+                    INSERT INTO enrichment_lab_run (
+                        id, group_id, model_tag, record_id, status, input_json
+                    ) VALUES (?, ?, ?, ?, ?, ?)
+                    """,
+                    (str(uuid.uuid4()), gid, model_tag, rid, "queued", json.dumps(record)),
+                )
     return gid
 
 
@@ -91,10 +92,11 @@ def list_runs(conn: sqlite3.Connection, group_id: str) -> List[sqlite3.Row]:
 
 def update_group_status(conn: sqlite3.Connection, group_id: str, status: str) -> None:
     ensure_schema(conn)
-    conn.execute(
-        "UPDATE enrichment_lab_job_group SET status = ? WHERE id = ?", (status, group_id)
-    )
-    conn.commit()
+    with with_db_write():
+        conn.execute(
+            "UPDATE enrichment_lab_job_group SET status = ? WHERE id = ?", (status, group_id)
+        )
+        commit_connection(conn)
 
 
 def update_run(
@@ -120,8 +122,9 @@ def update_run(
     if not sets:
         return
     vals.append(run_id)
-    conn.execute(f"UPDATE enrichment_lab_run SET {', '.join(sets)} WHERE id = ?", vals)
-    conn.commit()
+    with with_db_write():
+        conn.execute(f"UPDATE enrichment_lab_run SET {', '.join(sets)} WHERE id = ?", vals)
+        commit_connection(conn)
 
 
 def patch_group(
@@ -147,10 +150,11 @@ def patch_group(
     if not fields:
         return
     vals.append(group_id)
-    conn.execute(
-        f"UPDATE enrichment_lab_job_group SET {', '.join(fields)} WHERE id = ?", vals
-    )
-    conn.commit()
+    with with_db_write():
+        conn.execute(
+            f"UPDATE enrichment_lab_job_group SET {', '.join(fields)} WHERE id = ?", vals
+        )
+        commit_connection(conn)
 
 
 def patch_run(
@@ -178,8 +182,9 @@ def patch_run(
     fields.append("rated_at = ?")
     vals.append(utc_now_iso())
     vals.append(run_id)
-    conn.execute(f"UPDATE enrichment_lab_run SET {', '.join(fields)} WHERE id = ?", vals)
-    conn.commit()
+    with with_db_write():
+        conn.execute(f"UPDATE enrichment_lab_run SET {', '.join(fields)} WHERE id = ?", vals)
+        commit_connection(conn)
 
 
 def list_groups(
@@ -246,9 +251,10 @@ def history_summaries_for_group_ids(
 def delete_group(conn: sqlite3.Connection, group_id: str) -> None:
     ensure_schema(conn)
     conn.execute("PRAGMA foreign_keys = ON")
-    conn.execute("DELETE FROM enrichment_lab_run WHERE group_id = ?", (group_id,))
-    conn.execute("DELETE FROM enrichment_lab_job_group WHERE id = ?", (group_id,))
-    conn.commit()
+    with with_db_write():
+        conn.execute("DELETE FROM enrichment_lab_run WHERE group_id = ?", (group_id,))
+        conn.execute("DELETE FROM enrichment_lab_job_group WHERE id = ?", (group_id,))
+        commit_connection(conn)
 
 
 def prune_old_groups(conn: sqlite3.Connection, *, max_age_days: int = 30) -> int:

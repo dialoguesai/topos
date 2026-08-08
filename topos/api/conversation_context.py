@@ -13,6 +13,7 @@ from fastapi import APIRouter, Body, Depends, HTTPException
 from ..auth import require_api_key
 from ..core.state import get_db_connection
 from ..storage.db.migrations.conversation_context_v1 import CONTEXT_TAG_VALUES
+from ..storage.db.write_gate import commit_connection, with_db_write
 
 router = APIRouter()
 
@@ -56,12 +57,13 @@ def write_conversation_context(conn, conversation_id: str, dataset_id: str, raw_
         raise LookupError("Unknown conversation")
     # Owner decisions always win: stamped 'owner' even when clearing, so the
     # auto-classifier never refills a conversation the owner chose to untag.
-    conn.execute(
-        "UPDATE conversations SET context_tag=?, context_tag_source='owner', "
-        "updated_at=datetime('now') WHERE conversation_id=? AND dataset_id=?",
-        (tag, conversation_id, dataset_id),
-    )
-    conn.commit()
+    with with_db_write():
+        conn.execute(
+            "UPDATE conversations SET context_tag=?, context_tag_source='owner', "
+            "updated_at=datetime('now') WHERE conversation_id=? AND dataset_id=?",
+            (tag, conversation_id, dataset_id),
+        )
+        commit_connection(conn)
     return {
         "status": "ok",
         "conversation_id": conversation_id,

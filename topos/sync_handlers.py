@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict
 
 from .core import state
+from .storage.db.write_gate import commit_connection, with_db_write
 
 logger = logging.getLogger("topos.sync_handlers")
 
@@ -38,26 +39,27 @@ async def handle_sync_op(op: Dict[str, Any]) -> None:
         ciphertext = ciphertext_b64
 
     try:
-        state.db_conn.execute(
-            """
-            INSERT OR IGNORE INTO oplog (
-                op_id, dataset_id, actor_id, hlc_ts,
-                protocol_version, op_type, payload_version, crypto_version, ciphertext
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                op.get("op_id"),
-                op.get("dataset_id"),
-                op.get("actor_id"),
-                op.get("hlc_ts"),
-                op.get("protocol_version", 1),
-                op.get("op_type"),
-                op.get("payload_version", 1),
-                op.get("crypto_version", 1),
-                ciphertext,
-            ),
-        )
-        state.db_conn.commit()
+        with with_db_write():
+            state.db_conn.execute(
+                """
+                INSERT OR IGNORE INTO oplog (
+                    op_id, dataset_id, actor_id, hlc_ts,
+                    protocol_version, op_type, payload_version, crypto_version, ciphertext
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    op.get("op_id"),
+                    op.get("dataset_id"),
+                    op.get("actor_id"),
+                    op.get("hlc_ts"),
+                    op.get("protocol_version", 1),
+                    op.get("op_type"),
+                    op.get("payload_version", 1),
+                    op.get("crypto_version", 1),
+                    ciphertext,
+                ),
+            )
+            commit_connection(state.db_conn)
 
         decrypted_op = state.oplog_manager.get_op(op_id) if state.oplog_manager else None
         if decrypted_op and state.projection_manager:
