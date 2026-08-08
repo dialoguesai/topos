@@ -54,7 +54,7 @@ def _enabled() -> bool:
 def _default_rebuild() -> None:
     from ...core.state import close_thread_db_connection, get_db_connection
     from ...enrichment.pipeline_activity import is_derivation_in_flight
-    from ...storage.db.write_gate import with_db_write
+    from ...storage.db.write_gate import WriteGateDeferred, with_db_write
     from .maintenance import rebuild_entity_graph
 
     conn = get_db_connection()
@@ -62,15 +62,17 @@ def _default_rebuild() -> None:
         logger.debug("graph refresh skipped: no database connection")
         return
     try:
-        # A derivation batch is still writing the entities this rebuild would
-        # index, and even the phase-chunked gate holds would contend with its
-        # commits. Step aside; _fire / reconcile re-arm the debounce.
+        # No outer gate hold: the rebuild gates its own write phases (M2.2) —
+        # the gate is reentrant, so wrapping it here would silently reinstate
+        # the whole-rebuild exclusive hold (120s observed 2026-08-07) that
+        # starved every other writer. The cooperative contract survives as a
+        # pre-check: never START against an in-flight derivation batch
+        # (WriteGateDeferred re-arms the debounce in _fire). A batch that
+        # starts mid-rebuild now waits at most one short phase hold, and
+        # enrichment completion re-marks the graph dirty, so a premature
+        # result is rebuilt rather than defended against here.
         if is_derivation_in_flight():
             raise WriteGateDeferred("derivation batch in flight")
-        # No outer with_db_write: the rebuild gates its own write phases
-        # (M2.2). The gate is reentrant, so wrapping it here would silently
-        # reinstate the whole-rebuild exclusive hold (120s observed
-        # 2026-08-07) that starved every other writer.
         report = rebuild_entity_graph(conn)
         try:
             with with_db_write():
