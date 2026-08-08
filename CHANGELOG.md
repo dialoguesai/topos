@@ -9,6 +9,24 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+
+- `[O]` The 1.3.0 `backfill-attention-triage` upgrade step was a guaranteed
+  no-op on every node: `attention_triage` lives in `SIGNAL_DERIVATION_JOBS`,
+  but the runner routed it through `run_canonical()`, which filters
+  `job_names` against `CANONICAL_JOBS` — so the step ledgered `done` with
+  `jobs_run=0` and wrote zero `triage_verdicts`. The runner now splits
+  manifest-declared jobs by owning registry and routes signal-registry jobs
+  through the narrow signal lane (`signal_job_names` →
+  `run_post_canonical_pipeline(job_names=..., run_enrichment=False)`),
+  without the full `include_signal` LLM fan-out. Unknown job names are
+  logged and recorded in the ledger detail instead of silently no-opping.
+  A `backfill-attention-triage-redo` manifest step heals nodes that already
+  upgraded through 1.3.0–1.3.6 with the bogus green ledger row (measured
+  ~0.7s per day of history; no LLM, no network; idempotent upserts). The
+  upgrade-matrix CI job now asserts `triage_verdicts > 0` instead of
+  carrying the step in `KNOWN_NO_OP_STEPS`.
+
 ## [1.3.6] — 2026-08-06
 
 ### Fixed
