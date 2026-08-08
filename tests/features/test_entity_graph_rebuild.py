@@ -243,3 +243,64 @@ def test_rebuild_entity_graph_reports_before_after(conn):
     assert report["edges_before"] == 0
     assert report["edges_after"] >= 1
     assert "co_occurrence" in report and "communicates_with" in report
+
+
+def test_rebuild_holds_gate_only_for_write_phases(conn, monkeypatch):
+    """M2.2: read phases run with the write gate FREE (another thread can take
+    it) and the edge rewrite runs with it HELD. A regression here reinstates
+    the whole-rebuild exclusive hold that starved every writer for ~120s and
+    took the healthcheck dark on 2026-08-07."""
+    import threading
+
+    from topos.features.entities import maintenance
+    from topos.storage.db.write_gate import db_write_lock
+
+    _seed_two_entities_one_record(conn)
+
+    def _other_thread_can_take_gate(timeout: float) -> bool:
+        got: dict[str, bool] = {}
+
+        def attempt() -> None:
+            lock = db_write_lock()
+            acquired = lock.acquire(timeout=timeout)
+            got["ok"] = acquired
+            if acquired:
+                lock.release()
+
+        t = threading.Thread(target=attempt)
+        t.start()
+        t.join(timeout=timeout + 5)
+        return bool(got.get("ok"))
+
+    observed: dict[str, bool] = {}
+
+    orig_load = maintenance._load_conversation_participation
+
+    def probe_read_phase(c, *args, **kwargs):
+        observed["gate_free_during_read"] = _other_thread_can_take_gate(2.0)
+        return orig_load(c, *args, **kwargs)
+
+    monkeypatch.setattr(maintenance, "_load_conversation_participation", probe_read_phase)
+
+    class _ProbeConn:
+        """Delegating wrapper: the rebuild's only executemany is the edge swap."""
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def executemany(self, *args, **kwargs):
+            observed["gate_held_during_write"] = not _other_thread_can_take_gate(0.3)
+            return self._inner.executemany(*args, **kwargs)
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+    rebuild_entity_graph(_ProbeConn(conn), materialize_facts=False, refresh=False)
+
+    assert observed.get("gate_free_during_read") is True, (
+        "participation load ran with the write gate held — the read phase "
+        "has reacquired the whole-rebuild exclusive hold"
+    )
+    assert observed.get("gate_held_during_write") is True, (
+        "edge rewrite ran without the write gate — writes must stay serialized"
+    )
