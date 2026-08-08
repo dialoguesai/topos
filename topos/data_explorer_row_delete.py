@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import sqlite3
+from contextlib import contextmanager
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
 from .data_explorer_tables import is_canonical_schema_table
 from .sources.scrub_attribution import (
@@ -18,8 +19,19 @@ from .sources.scrub_attribution import (
 )
 from .storage.adapters.sqlite.stores import _NATIVE_ID_COL
 from .storage.db.postgres import execute_query, fetch_all, fetch_one
+from .storage.db.write_gate import batched_writes
 
 VALID_DELETE_SCOPES = frozenset({"row_only", "with_downstream", "with_upstream", "full_lineage"})
+
+
+@contextmanager
+def _sqlite_delete_gate(conn: Any) -> Iterator[None]:
+    """batched_writes (gate + single commit at exit) for SQLite; no-op otherwise."""
+    if isinstance(conn, sqlite3.Connection):
+        with batched_writes(conn):
+            yield
+    else:
+        yield
 
 _PROTECTED_TABLES = frozenset(
     {
@@ -526,77 +538,78 @@ def delete_database_rows(
     include_downstream = normalized_scope in {"with_downstream", "full_lineage"}
     include_upstream = normalized_scope in {"with_upstream", "full_lineage"}
 
-    for row_id in unique_row_ids:
-        row = _fetch_row(conn, table, pk_column, row_id)
-        if row is None:
-            raise ValueError(f"Row not found: {row_id}")
-        lineage = _resolve_lineage(conn, table_name=table, pk_column=pk_column, row_id=row_id, row=row)
-        skip_tables: Set[str] = {table}
+    # Lineage deletes take SQLite's write lock at execute time — hold the gate
+    # for the batch AND the commit (write_gate lock-order inversion); no-op for
+    # a postgres conn (the gate is SQLite-only).
+    with _sqlite_delete_gate(conn):
+        for row_id in unique_row_ids:
+            row = _fetch_row(conn, table, pk_column, row_id)
+            if row is None:
+                raise ValueError(f"Row not found: {row_id}")
+            lineage = _resolve_lineage(conn, table_name=table, pk_column=pk_column, row_id=row_id, row=row)
+            skip_tables: Set[str] = {table}
 
-        if include_downstream and lineage.canonical_id:
-            if lineage.anchor_table != lineage.canonical_table:
-                _delete_canonical_row(
+            if include_downstream and lineage.canonical_id:
+                if lineage.anchor_table != lineage.canonical_table:
+                    _delete_canonical_row(
+                        conn,
+                        canonical_table=str(lineage.canonical_table),
+                        canonical_id=str(lineage.canonical_id),
+                        actions=actions,
+                        embedding_ids=embedding_ids,
+                    )
+                    if lineage.canonical_table:
+                        skip_tables.add(str(lineage.canonical_table))
+                _delete_downstream_for_canonical(
                     conn,
-                    canonical_table=str(lineage.canonical_table),
                     canonical_id=str(lineage.canonical_id),
+                    skip_tables=skip_tables,
                     actions=actions,
                     embedding_ids=embedding_ids,
                 )
-                if lineage.canonical_table:
-                    skip_tables.add(str(lineage.canonical_table))
-            _delete_downstream_for_canonical(
+
+            if include_upstream:
+                if lineage.source_id and lineage.source_record_id:
+                    _delete_upstream_rows(
+                        conn,
+                        source_id=str(lineage.source_id),
+                        source_record_id=str(lineage.source_record_id),
+                        skip_tables=skip_tables,
+                        actions=actions,
+                    )
+                if (
+                    lineage.canonical_table
+                    and lineage.canonical_id
+                    and lineage.anchor_table != lineage.canonical_table
+                ):
+                    _delete_canonical_row(
+                        conn,
+                        canonical_table=str(lineage.canonical_table),
+                        canonical_id=str(lineage.canonical_id),
+                        actions=actions,
+                        embedding_ids=embedding_ids,
+                    )
+                _delete_mapping_rows(
+                    conn,
+                    source_id=lineage.source_id,
+                    source_record_id=lineage.source_record_id,
+                    canonical_table=lineage.canonical_table,
+                    canonical_id=lineage.canonical_id,
+                    actions=actions,
+                )
+
+            result.rows_deleted += _delete_anchor_row(
                 conn,
-                canonical_id=str(lineage.canonical_id),
-                skip_tables=skip_tables,
+                table_name=table,
+                pk_column=pk_column,
+                row_id=row_id,
                 actions=actions,
                 embedding_ids=embedding_ids,
             )
 
-        if include_upstream:
-            if lineage.source_id and lineage.source_record_id:
-                _delete_upstream_rows(
-                    conn,
-                    source_id=str(lineage.source_id),
-                    source_record_id=str(lineage.source_record_id),
-                    skip_tables=skip_tables,
-                    actions=actions,
-                )
-            if (
-                lineage.canonical_table
-                and lineage.canonical_id
-                and lineage.anchor_table != lineage.canonical_table
-            ):
-                _delete_canonical_row(
-                    conn,
-                    canonical_table=str(lineage.canonical_table),
-                    canonical_id=str(lineage.canonical_id),
-                    actions=actions,
-                    embedding_ids=embedding_ids,
-                )
-            _delete_mapping_rows(
-                conn,
-                source_id=lineage.source_id,
-                source_record_id=lineage.source_record_id,
-                canonical_table=lineage.canonical_table,
-                canonical_id=lineage.canonical_id,
-                actions=actions,
-            )
-
-        result.rows_deleted += _delete_anchor_row(
-            conn,
-            table_name=table,
-            pk_column=pk_column,
-            row_id=row_id,
-            actions=actions,
-            embedding_ids=embedding_ids,
-        )
-
-    vec_deleted = _delete_vec_rows_batched(conn, embedding_ids)
-    if vec_deleted > 0:
-        actions.append(TableAction(table="vector_index", action="vec_rows_deleted", count=vec_deleted))
-
-    if isinstance(conn, sqlite3.Connection):
-        conn.commit()
+        vec_deleted = _delete_vec_rows_batched(conn, embedding_ids)
+        if vec_deleted > 0:
+            actions.append(TableAction(table="vector_index", action="vec_rows_deleted", count=vec_deleted))
 
     result.table_actions = actions
     return result

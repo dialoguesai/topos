@@ -10,6 +10,7 @@ from collections import defaultdict
 from typing import Any, Dict, List, Optional
 
 from .schema import ensure_filter_lab_schema
+from ..storage.db.write_gate import batched_writes, commit_connection, with_db_write
 
 
 def _now() -> str:
@@ -39,37 +40,37 @@ def insert_group(
     ensure_schema(conn)
     gid = str(uuid.uuid4())
     created = _now()
-    conn.execute(
-        """
-        INSERT INTO filter_lab_job_group (
-            id, created_at, filter_id, bundle_id, bundle_version, status,
-            baseline_models_json, pulled_models_json, options_json
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            gid,
-            created,
-            filter_id,
-            bundle_id,
-            bundle_version,
-            "pending",
-            json.dumps(baseline_models),
-            json.dumps([]),
-            json.dumps(options or {}),
-        ),
-    )
-    for model_tag in models:
-        for rid in record_ids:
-            run_id = str(uuid.uuid4())
-            conn.execute(
-                """
-                INSERT INTO filter_lab_run (
-                    id, group_id, model_tag, record_id, status
-                ) VALUES (?, ?, ?, ?, ?)
-                """,
-                (run_id, gid, model_tag, rid, "queued"),
-            )
-    conn.commit()
+    with batched_writes(conn):
+        conn.execute(
+            """
+            INSERT INTO filter_lab_job_group (
+                id, created_at, filter_id, bundle_id, bundle_version, status,
+                baseline_models_json, pulled_models_json, options_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                gid,
+                created,
+                filter_id,
+                bundle_id,
+                bundle_version,
+                "pending",
+                json.dumps(baseline_models),
+                json.dumps([]),
+                json.dumps(options or {}),
+            ),
+        )
+        for model_tag in models:
+            for rid in record_ids:
+                run_id = str(uuid.uuid4())
+                conn.execute(
+                    """
+                    INSERT INTO filter_lab_run (
+                        id, group_id, model_tag, record_id, status
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (run_id, gid, model_tag, rid, "queued"),
+                )
     return gid
 
 
@@ -90,17 +91,19 @@ def list_runs(conn: sqlite3.Connection, group_id: str) -> List[sqlite3.Row]:
 
 def update_group_status(conn: sqlite3.Connection, group_id: str, status: str) -> None:
     ensure_schema(conn)
-    conn.execute("UPDATE filter_lab_job_group SET status = ? WHERE id = ?", (status, group_id))
-    conn.commit()
+    with with_db_write():
+        conn.execute("UPDATE filter_lab_job_group SET status = ? WHERE id = ?", (status, group_id))
+        commit_connection(conn)
 
 
 def set_group_pulled_models(conn: sqlite3.Connection, group_id: str, pulled: List[str]) -> None:
     ensure_schema(conn)
-    conn.execute(
-        "UPDATE filter_lab_job_group SET pulled_models_json = ? WHERE id = ?",
-        (json.dumps(pulled), group_id),
-    )
-    conn.commit()
+    with with_db_write():
+        conn.execute(
+            "UPDATE filter_lab_job_group SET pulled_models_json = ? WHERE id = ?",
+            (json.dumps(pulled), group_id),
+        )
+        commit_connection(conn)
 
 
 def update_run(
@@ -150,8 +153,9 @@ def update_run(
     if not fields:
         return
     vals.append(run_id)
-    conn.execute(f"UPDATE filter_lab_run SET {', '.join(fields)} WHERE id = ?", vals)
-    conn.commit()
+    with with_db_write():
+        conn.execute(f"UPDATE filter_lab_run SET {', '.join(fields)} WHERE id = ?", vals)
+        commit_connection(conn)
 
 
 def patch_group(
@@ -180,8 +184,9 @@ def patch_group(
     if not fields:
         return
     vals.append(group_id)
-    conn.execute(f"UPDATE filter_lab_job_group SET {', '.join(fields)} WHERE id = ?", vals)
-    conn.commit()
+    with with_db_write():
+        conn.execute(f"UPDATE filter_lab_job_group SET {', '.join(fields)} WHERE id = ?", vals)
+        commit_connection(conn)
 
 
 def patch_run(
@@ -211,8 +216,9 @@ def patch_run(
     if not fields:
         return
     vals.append(run_id)
-    conn.execute(f"UPDATE filter_lab_run SET {', '.join(fields)} WHERE id = ?", vals)
-    conn.commit()
+    with with_db_write():
+        conn.execute(f"UPDATE filter_lab_run SET {', '.join(fields)} WHERE id = ?", vals)
+        commit_connection(conn)
 
 
 def list_groups_for_filter(
@@ -342,20 +348,22 @@ def history_summaries_for_group_ids(
 
 def insert_model_event(conn: sqlite3.Connection, group_id: str, event_type: str, model_tag: str) -> None:
     ensure_schema(conn)
-    conn.execute(
-        """
-        INSERT INTO filter_lab_model_event (group_id, event_type, model_tag, created_at)
-        VALUES (?, ?, ?, ?)
-        """,
-        (group_id, event_type, model_tag, _now()),
-    )
-    conn.commit()
+    with with_db_write():
+        conn.execute(
+            """
+            INSERT INTO filter_lab_model_event (group_id, event_type, model_tag, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (group_id, event_type, model_tag, _now()),
+        )
+        commit_connection(conn)
 
 
 def delete_group(conn: sqlite3.Connection, group_id: str) -> None:
     ensure_schema(conn)
-    conn.execute("DELETE FROM filter_lab_job_group WHERE id = ?", (group_id,))
-    conn.commit()
+    with with_db_write():
+        conn.execute("DELETE FROM filter_lab_job_group WHERE id = ?", (group_id,))
+        commit_connection(conn)
 
 
 def prune_old_groups(conn: sqlite3.Connection, *, max_age_days: int = 30) -> int:
@@ -368,7 +376,7 @@ def prune_old_groups(conn: sqlite3.Connection, *, max_age_days: int = 30) -> int
     cutoff_iso = dt.fromtimestamp(cutoff, tz=timezone.utc).isoformat()
     cur = conn.execute("SELECT id FROM filter_lab_job_group WHERE created_at < ?", (cutoff_iso,))
     ids = [r[0] for r in cur.fetchall()]
-    for gid in ids:
-        conn.execute("DELETE FROM filter_lab_job_group WHERE id = ?", (gid,))
-    conn.commit()
+    with batched_writes(conn):
+        for gid in ids:
+            conn.execute("DELETE FROM filter_lab_job_group WHERE id = ?", (gid,))
     return len(ids)

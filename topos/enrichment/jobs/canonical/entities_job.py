@@ -7,6 +7,7 @@ from typing import Any, Callable, Dict, List, Optional
 from ..base import BaseEnrichmentJob
 from ._engine_runner import run_engine_task
 from ....engine import Engine
+from ....storage.db.write_gate import batched_writes
 
 logger = logging.getLogger("topos.enrichment.jobs.entities")
 
@@ -208,98 +209,102 @@ class EntitiesJob(BaseEnrichmentJob):
         msg_by_id = {record_key(m): m for m in canonical_messages if record_key(m)}
         entities_by_record: Dict[str, List[str]] = {}
 
-        for rec in ner_records:
-            declared = rec.get("provider") == "declared"
-            confidence = float(rec.get("confidence") or 0.0)
-            surface = str(rec.get("entity_text") or "").strip()
-            if not surface or confidence < _MIN_RESOLVE_CONFIDENCE:
-                continue
-            if declared:
-                # Declared types are already spine types (project/organization);
-                # map_ner_type only understands NER label vocabularies.
-                entity_type = str(rec.get("entity_type") or "").strip() or None
-            else:
-                entity_type = map_ner_type(rec.get("entity_type"))
-            if entity_type is None:
-                # Value labels (dates, money, cardinals) — not spine entities.
-                continue
-            record_id = str(rec.get("record_id") or "")
-            msg = msg_by_id.get(record_id, {})
-            try:
-                entity_id, _tier = resolver.resolve(
-                    surface,
-                    entity_type=entity_type,
+        # Resolution mints entities/mentions/edges as it goes (writes take
+        # SQLite's write lock at execute time) — the whole pass holds the gate
+        # with a single commit at exit. refresh_dossiers gates itself and must
+        # stay outside.
+        with batched_writes(conn):
+            for rec in ner_records:
+                declared = rec.get("provider") == "declared"
+                confidence = float(rec.get("confidence") or 0.0)
+                surface = str(rec.get("entity_text") or "").strip()
+                if not surface or confidence < _MIN_RESOLVE_CONFIDENCE:
+                    continue
+                if declared:
+                    # Declared types are already spine types (project/organization);
+                    # map_ner_type only understands NER label vocabularies.
+                    entity_type = str(rec.get("entity_type") or "").strip() or None
+                else:
+                    entity_type = map_ner_type(rec.get("entity_type"))
+                if entity_type is None:
+                    # Value labels (dates, money, cardinals) — not spine entities.
+                    continue
+                record_id = str(rec.get("record_id") or "")
+                msg = msg_by_id.get(record_id, {})
+                try:
+                    entity_id, _tier = resolver.resolve(
+                        surface,
+                        entity_type=entity_type,
+                        record_id=record_id,
+                    )
+                except ValueError:
+                    continue
+                authored_flag = None
+                if msg:
+                    from ....storage.db.migrations.entity_mentions_authored_v1 import (
+                        authored_flag_for_row,
+                    )
+
+                    table = str(
+                        rec.get("canonical_table")
+                        or msg.get("_table")
+                        or msg.get("canonical_table")
+                        or ""
+                    )
+                    authored_flag = authored_flag_for_row(msg, table=table)
+                resolver.record_mention(
+                    entity_id,
                     record_id=record_id,
+                    surface_text=surface,
+                    source_id=rec.get("source_id"),
+                    canonical_table=rec.get("canonical_table"),
+                    confidence=confidence,
+                    event_at=rec.get("event_at"),
+                    authored_by_owner=authored_flag,
                 )
-            except ValueError:
-                continue
-            authored_flag = None
-            if msg:
-                from ....storage.db.migrations.entity_mentions_authored_v1 import (
-                    authored_flag_for_row,
-                )
+                entities_by_record.setdefault(record_id, []).append(entity_id)
 
-                table = str(
-                    rec.get("canonical_table")
-                    or msg.get("_table")
-                    or msg.get("canonical_table")
-                    or ""
-                )
-                authored_flag = authored_flag_for_row(msg, table=table)
-            resolver.record_mention(
-                entity_id,
-                record_id=record_id,
-                surface_text=surface,
-                source_id=rec.get("source_id"),
-                canonical_table=rec.get("canonical_table"),
-                confidence=confidence,
-                event_at=rec.get("event_at"),
-                authored_by_owner=authored_flag,
-            )
-            entities_by_record.setdefault(record_id, []).append(entity_id)
+                # Declared owner edge: self -> worked_on -> entity, positioned at
+                # the record's event time so temporal views place it correctly.
+                edge_type = str(rec.get("self_edge") or "").strip()
+                if declared and edge_type:
+                    owner = self_entity_id()
+                    if owner:
+                        update_edge(
+                            conn,
+                            src_entity_id=owner,
+                            dst_entity_id=entity_id,
+                            edge_type=edge_type,
+                            event_at=rec.get("event_at"),
+                        )
 
-            # Declared owner edge: self -> worked_on -> entity, positioned at
-            # the record's event time so temporal views place it correctly.
-            edge_type = str(rec.get("self_edge") or "").strip()
-            if declared and edge_type:
-                owner = self_entity_id()
-                if owner:
-                    update_edge(
-                        conn,
-                        src_entity_id=owner,
-                        dst_entity_id=entity_id,
-                        edge_type=edge_type,
-                        event_at=rec.get("event_at"),
-                    )
+                # P3.2: do NOT write communicates_with for sender→NER-mention.
+                # Mention-only third parties (IMB7 Odile) are not talked-to partners;
+                # co-participation is folded below from conversation senders.
 
-            # P3.2: do NOT write communicates_with for sender→NER-mention.
-            # Mention-only third parties (IMB7 Odile) are not talked-to partners;
-            # co-participation is folded below from conversation senders.
+            # Co-occurrence within the same record
+            for record_id, ids in entities_by_record.items():
+                unique = list(dict.fromkeys(ids))
+                event_at = (msg_by_id.get(record_id) or {}).get("event_at")
+                for i in range(len(unique)):
+                    for j in range(i + 1, len(unique)):
+                        update_edge(
+                            conn,
+                            src_entity_id=unique[i],
+                            dst_entity_id=unique[j],
+                            edge_type=EDGE_CO_OCCURRENCE,
+                            event_at=event_at,
+                        )
 
-        # Co-occurrence within the same record
-        for record_id, ids in entities_by_record.items():
-            unique = list(dict.fromkeys(ids))
-            event_at = (msg_by_id.get(record_id) or {}).get("event_at")
-            for i in range(len(unique)):
-                for j in range(i + 1, len(unique)):
-                    update_edge(
-                        conn,
-                        src_entity_id=unique[i],
-                        dst_entity_id=unique[j],
-                        edge_type=EDGE_CO_OCCURRENCE,
-                        event_at=event_at,
-                    )
+            # Thread co-participation → communicates_with (talked-to vs mentioned).
+            conv_ids = {
+                str(m.get("conversation_id") or m.get("chat_id") or "").strip()
+                for m in msg_by_id.values()
+            }
+            conv_ids.discard("")
+            if conv_ids:
+                from ....features.entities.maintenance import fold_communicates_with_edges
 
-        # Thread co-participation → communicates_with (talked-to vs mentioned).
-        conv_ids = {
-            str(m.get("conversation_id") or m.get("chat_id") or "").strip()
-            for m in msg_by_id.values()
-        }
-        conv_ids.discard("")
-        if conv_ids:
-            from ....features.entities.maintenance import fold_communicates_with_edges
+                fold_communicates_with_edges(conn, conversation_ids=conv_ids)
 
-            fold_communicates_with_edges(conn, conversation_ids=conv_ids)
-
-        conn.commit()
         refresh_dossiers(conn)

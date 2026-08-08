@@ -20,6 +20,8 @@ import sqlite3
 import uuid
 from typing import Any, Dict, List, Optional
 
+from ...storage.db.write_gate import batched_writes, commit_connection, with_db_write
+
 ARTIFACT_TYPES = ("fact", "entity", "stat_insight", "record")
 
 
@@ -94,11 +96,12 @@ class ExclusionStore:
 
     def remove_exclusion(self, artifact_type: str, artifact_key: str) -> bool:
         key = normalize_exclusion_key(artifact_type, artifact_key)
-        cursor = self._conn.execute(
-            "DELETE FROM intelligence_exclusions WHERE artifact_type=? AND artifact_key=?",
-            (artifact_type, key),
-        )
-        self._conn.commit()
+        with with_db_write():
+            cursor = self._conn.execute(
+                "DELETE FROM intelligence_exclusions WHERE artifact_type=? AND artifact_key=?",
+                (artifact_type, key),
+            )
+            commit_connection(self._conn)
         return bool(cursor.rowcount)
 
     # -------------------------------------------------- exclusion actions
@@ -121,8 +124,8 @@ class ExclusionStore:
         key = f"{subject_entity_id}:{pred}"
         if object_value:
             key += f":{str(object_value).strip().lower()}"
-        exclusion_id = self._tombstone("fact", key, note)
 
+        # Read pass first; the tombstone and closes share one gated commit.
         pattern = f"fact:{subject_entity_id}:{pred}%"
         rows = self._conn.execute(
             """
@@ -132,26 +135,27 @@ class ExclusionStore:
             (pattern,),
         ).fetchall()
         closed = 0
-        for object_id, payload_json in rows:
-            try:
-                payload = json.loads(payload_json or "{}")
-            except json.JSONDecodeError:
-                payload = {}
-            if object_value and str(payload.get("object_value") or "").strip().lower() != str(
-                object_value
-            ).strip().lower():
-                continue
-            payload["excluded_by_owner"] = True
-            self._conn.execute(
-                """
-                UPDATE signal_objects
-                SET valid_to=datetime('now'), payload_json=?, updated_at=datetime('now')
-                WHERE object_id=?
-                """,
-                (json.dumps(payload), object_id),
-            )
-            closed += 1
-        self._conn.commit()
+        with batched_writes(self._conn):
+            exclusion_id = self._tombstone("fact", key, note)
+            for object_id, payload_json in rows:
+                try:
+                    payload = json.loads(payload_json or "{}")
+                except json.JSONDecodeError:
+                    payload = {}
+                if object_value and str(payload.get("object_value") or "").strip().lower() != str(
+                    object_value
+                ).strip().lower():
+                    continue
+                payload["excluded_by_owner"] = True
+                self._conn.execute(
+                    """
+                    UPDATE signal_objects
+                    SET valid_to=datetime('now'), payload_json=?, updated_at=datetime('now')
+                    WHERE object_id=?
+                    """,
+                    (json.dumps(payload), object_id),
+                )
+                closed += 1
         return {"exclusion_id": exclusion_id, "facts_closed": closed}
 
     def exclude_entity(self, *, entity_ref: str, note: Optional[str] = None) -> Dict[str, Any]:
@@ -172,37 +176,36 @@ class ExclusionStore:
                 "SELECT entity_id, canonical_name FROM entities WHERE normalized_name=?",
                 (normalize_name(entity_ref),),
             ).fetchone()
-        exclusion_id = self._tombstone(
-            "entity", row[1] if row else entity_ref, note
-        )
-        result: Dict[str, Any] = {"exclusion_id": exclusion_id, "entity_found": row is not None}
-        if row is None:
-            self._conn.commit()
-            return result
-        entity_id = str(row[0])
-        result["mentions_removed"] = self._conn.execute(
-            "DELETE FROM entity_mentions WHERE entity_id=?", (entity_id,)
-        ).rowcount
-        result["edges_removed"] = self._conn.execute(
-            "DELETE FROM entity_edges WHERE src_entity_id=? OR dst_entity_id=?",
-            (entity_id, entity_id),
-        ).rowcount
-        # Latent centroids are keyed only by entity_id; leave them and the next
-        # affinity rebuild can invent edges naming a deleted person.
-        try:
-            result["context_vectors_removed"] = self._conn.execute(
-                "DELETE FROM entity_context_vectors WHERE entity_id=?",
-                (entity_id,),
+        with batched_writes(self._conn):
+            exclusion_id = self._tombstone(
+                "entity", row[1] if row else entity_ref, note
+            )
+            result: Dict[str, Any] = {"exclusion_id": exclusion_id, "entity_found": row is not None}
+            if row is None:
+                return result
+            entity_id = str(row[0])
+            result["mentions_removed"] = self._conn.execute(
+                "DELETE FROM entity_mentions WHERE entity_id=?", (entity_id,)
             ).rowcount
-        except Exception:  # noqa: BLE001 — table may be absent on pre-migration DBs
-            result["context_vectors_removed"] = 0
-        self._conn.execute(
-            "UPDATE signal_objects SET valid_to=datetime('now') "
-            "WHERE object_type='entity_dossier' AND object_key=? AND valid_to IS NULL",
-            (f"dossier:{entity_id}",),
-        )
-        self._conn.execute("DELETE FROM entities WHERE entity_id=?", (entity_id,))
-        self._conn.commit()
+            result["edges_removed"] = self._conn.execute(
+                "DELETE FROM entity_edges WHERE src_entity_id=? OR dst_entity_id=?",
+                (entity_id, entity_id),
+            ).rowcount
+            # Latent centroids are keyed only by entity_id; leave them and the next
+            # affinity rebuild can invent edges naming a deleted person.
+            try:
+                result["context_vectors_removed"] = self._conn.execute(
+                    "DELETE FROM entity_context_vectors WHERE entity_id=?",
+                    (entity_id,),
+                ).rowcount
+            except Exception:  # noqa: BLE001 — table may be absent on pre-migration DBs
+                result["context_vectors_removed"] = 0
+            self._conn.execute(
+                "UPDATE signal_objects SET valid_to=datetime('now') "
+                "WHERE object_type='entity_dossier' AND object_key=? AND valid_to IS NULL",
+                (f"dossier:{entity_id}",),
+            )
+            self._conn.execute("DELETE FROM entities WHERE entity_id=?", (entity_id,))
         return result
 
     def exclude_stat_insight(
@@ -215,11 +218,12 @@ class ExclusionStore:
         is suppressed.
         """
         key = f"{stat_id}:{group_key or 'all'}"
-        exclusion_id = self._tombstone("stat_insight", key, note)
-        cursor = self._conn.execute(
-            "DELETE FROM signal_facts WHERE fact_id=?", (f"stat:{key}",)
-        )
-        self._conn.commit()
+        with with_db_write():
+            exclusion_id = self._tombstone("stat_insight", key, note)
+            cursor = self._conn.execute(
+                "DELETE FROM signal_facts WHERE fact_id=?", (f"stat:{key}",)
+            )
+            commit_connection(self._conn)
         return {"exclusion_id": exclusion_id, "insights_removed": int(cursor.rowcount or 0)}
 
     def exclude_record(self, *, record_id: str, note: Optional[str] = None) -> Dict[str, Any]:
@@ -230,8 +234,10 @@ class ExclusionStore:
         """
         from .derived_scrub import purge_derived_for_records
 
-        exclusion_id = self._tombstone("record", record_id, note)
-        self._conn.commit()
+        with with_db_write():
+            exclusion_id = self._tombstone("record", record_id, note)
+            commit_connection(self._conn)
+        # purge_derived_for_records manages the gate itself — never under a hold.
         report = purge_derived_for_records(self._conn, [record_id])
         return {"exclusion_id": exclusion_id, **report}
 

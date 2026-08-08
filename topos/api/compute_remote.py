@@ -14,6 +14,7 @@ from ..auth import require_api_key
 from ..core.state import get_db_connection
 from ..engine.engine import Engine
 from ..engine.tasks import ModelRequest, ProcessingTask
+from ..storage.db.write_gate import commit_connection, with_db_write
 
 router = APIRouter(tags=["compute-remote"])
 
@@ -23,32 +24,35 @@ def _now_iso() -> str:
 
 
 def _ensure_tables(conn) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS remote_compute_results (
-            idempotency_key TEXT PRIMARY KEY,
-            compute_task_id TEXT NOT NULL,
-            response_json TEXT NOT NULL,
-            requested_tier TEXT NOT NULL,
-            correlation_id TEXT,
-            created_at TEXT NOT NULL
+    # DDL takes SQLite's write lock at execute time — gate it with the commit
+    # (write_gate lock-order inversion).
+    with with_db_write():
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS remote_compute_results (
+                idempotency_key TEXT PRIMARY KEY,
+                compute_task_id TEXT NOT NULL,
+                response_json TEXT NOT NULL,
+                requested_tier TEXT NOT NULL,
+                correlation_id TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
         )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS remote_compute_audit (
-            audit_id TEXT PRIMARY KEY,
-            compute_task_id TEXT NOT NULL,
-            idempotency_key TEXT,
-            principal TEXT NOT NULL,
-            requested_tier TEXT NOT NULL,
-            outcome TEXT NOT NULL,
-            created_at TEXT NOT NULL
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS remote_compute_audit (
+                audit_id TEXT PRIMARY KEY,
+                compute_task_id TEXT NOT NULL,
+                idempotency_key TEXT,
+                principal TEXT NOT NULL,
+                requested_tier TEXT NOT NULL,
+                outcome TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
         )
-        """
-    )
-    conn.commit()
+        commit_connection(conn)
 
 
 class RemoteComputeTaskRequest(BaseModel):
@@ -76,23 +80,24 @@ async def remote_compute_run(body: RemoteComputeTaskRequest) -> Dict[str, Any]:
         ).fetchone()
         if row:
             cached = json.loads(str(row["response_json"]))
-            conn.execute(
-                """
-                INSERT INTO remote_compute_audit
-                (audit_id, compute_task_id, idempotency_key, principal, requested_tier, outcome, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    f"rca_{uuid.uuid4().hex}",
-                    body.compute_task_id,
-                    body.idempotency_key,
-                    principal,
-                    body.requested_tier,
-                    "idempotent_replay",
-                    _now_iso(),
-                ),
-            )
-            conn.commit()
+            with with_db_write():
+                conn.execute(
+                    """
+                    INSERT INTO remote_compute_audit
+                    (audit_id, compute_task_id, idempotency_key, principal, requested_tier, outcome, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        f"rca_{uuid.uuid4().hex}",
+                        body.compute_task_id,
+                        body.idempotency_key,
+                        principal,
+                        body.requested_tier,
+                        "idempotent_replay",
+                        _now_iso(),
+                    ),
+                )
+                commit_connection(conn)
             cached["idempotent_replay"] = True
             return cached
 
@@ -139,37 +144,38 @@ async def remote_compute_run(body: RemoteComputeTaskRequest) -> Dict[str, Any]:
             "idempotent_replay": False,
         }
 
-    if body.idempotency_key:
+    with with_db_write():
+        if body.idempotency_key:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO remote_compute_results
+                (idempotency_key, compute_task_id, response_json, requested_tier, correlation_id, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    body.idempotency_key,
+                    body.compute_task_id,
+                    json.dumps(response),
+                    body.requested_tier,
+                    body.correlation_id,
+                    _now_iso(),
+                ),
+            )
         conn.execute(
             """
-            INSERT OR REPLACE INTO remote_compute_results
-            (idempotency_key, compute_task_id, response_json, requested_tier, correlation_id, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
+            INSERT INTO remote_compute_audit
+            (audit_id, compute_task_id, idempotency_key, principal, requested_tier, outcome, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                body.idempotency_key,
+                f"rca_{uuid.uuid4().hex}",
                 body.compute_task_id,
-                json.dumps(response),
+                body.idempotency_key,
+                principal,
                 body.requested_tier,
-                body.correlation_id,
+                str(response.get("status") or "unknown"),
                 _now_iso(),
             ),
         )
-    conn.execute(
-        """
-        INSERT INTO remote_compute_audit
-        (audit_id, compute_task_id, idempotency_key, principal, requested_tier, outcome, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            f"rca_{uuid.uuid4().hex}",
-            body.compute_task_id,
-            body.idempotency_key,
-            principal,
-            body.requested_tier,
-            str(response.get("status") or "unknown"),
-            _now_iso(),
-        ),
-    )
-    conn.commit()
+        commit_connection(conn)
     return response

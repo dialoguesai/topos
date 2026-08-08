@@ -35,6 +35,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional, Sequence
 
+from ...storage.db.write_gate import batched_writes, commit_connection, with_db_write
 from .vector_codec import decode_vector, encode_f32, similarity
 
 logger = logging.getLogger("topos.features.signal.tool_index")
@@ -65,21 +66,24 @@ EmbedFn = Callable[[List[str], str], List[List[float]]]
 
 
 def ensure_table(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {_TABLE} (
-            tool_name TEXT PRIMARY KEY,
-            connector_id TEXT NOT NULL DEFAULT '',
-            description TEXT NOT NULL DEFAULT '',
-            text_hash TEXT NOT NULL,
-            model TEXT NOT NULL,
-            dims INTEGER NOT NULL,
-            vector_blob BLOB NOT NULL,
-            updated_at TEXT NOT NULL
+    # DDL takes SQLite's write lock at execute time — gate it with the commit
+    # (write_gate lock-order inversion).
+    with with_db_write():
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {_TABLE} (
+                tool_name TEXT PRIMARY KEY,
+                connector_id TEXT NOT NULL DEFAULT '',
+                description TEXT NOT NULL DEFAULT '',
+                text_hash TEXT NOT NULL,
+                model TEXT NOT NULL,
+                dims INTEGER NOT NULL,
+                vector_blob BLOB NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
         )
-        """
-    )
-    conn.commit()
+        commit_connection(conn)
 
 
 def connector_of(tool_name: str, explicit: Optional[str] = None) -> str:
@@ -177,8 +181,12 @@ def index_tools(
         pending.append((name, connector, description, text, digest))
 
     indexed = 0
-    if pending:
-        vectors = embed([text for _, _, _, text, _ in pending], "passage")
+    # Model inference stays outside the hold; the writes batch below.
+    vectors: List[List[float]] = (
+        embed([text for _, _, _, text, _ in pending], "passage") if pending else []
+    )
+    pruned = 0
+    with batched_writes(conn):
         now = _now_iso()
         for (name, connector, description, _text, digest), vector in zip(pending, vectors):
             if not vector:
@@ -202,16 +210,13 @@ def index_tools(
             )
             indexed += 1
 
-    pruned = 0
-    if prune_missing and seen_names:
-        placeholders = ",".join("?" for _ in seen_names)
-        cur = conn.execute(
-            f"DELETE FROM {_TABLE} WHERE tool_name NOT IN ({placeholders})",
-            seen_names,
-        )
-        pruned = cur.rowcount if cur.rowcount is not None and cur.rowcount > 0 else 0
-
-    conn.commit()
+        if prune_missing and seen_names:
+            placeholders = ",".join("?" for _ in seen_names)
+            cur = conn.execute(
+                f"DELETE FROM {_TABLE} WHERE tool_name NOT IN ({placeholders})",
+                seen_names,
+            )
+            pruned = cur.rowcount if cur.rowcount is not None and cur.rowcount > 0 else 0
     total = int(conn.execute(f"SELECT COUNT(*) FROM {_TABLE}").fetchone()[0])
     return {
         "indexed": indexed,

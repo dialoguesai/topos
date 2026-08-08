@@ -12,6 +12,7 @@ from .common import (
     json,
 )
 from .registry import handles
+from ...storage.db.write_gate import commit_connection, with_db_write
 
 
 @handles("get_enrichment_lab_model_resolve")
@@ -197,8 +198,9 @@ async def handle_patch_enrichment_lab_job_run(message: Dict[str, Any]) -> Option
     if "user_liked" in body:
         v = body.get("user_liked")
         if v is None:
-            conn.execute("UPDATE enrichment_lab_run SET user_liked = NULL WHERE id = ?", (run_id,))
-            conn.commit()
+            with with_db_write():
+                conn.execute("UPDATE enrichment_lab_run SET user_liked = NULL WHERE id = ?", (run_id,))
+                commit_connection(conn)
         else:
             el_store.patch_run(conn, run_id, user_liked=bool(v))
     if "user_note" in body:

@@ -24,6 +24,8 @@ import os
 import sqlite3
 from typing import Any, Dict, List
 
+from ...storage.db.write_gate import batched_writes, commit_connection, with_db_write
+
 logger = logging.getLogger("topos.features.lifecycle.gc")
 
 BRIEF_KEEP_ALL_DAYS = 7      # every revision this recent survives
@@ -71,14 +73,18 @@ def reconcile_top_topics_objects(conn: sqlite3.Connection) -> int:
     """
     if not _table_exists(conn, "signal_objects") or not _table_exists(conn, "topic_clusters"):
         return 0
-    cursor = conn.execute(
-        """
-        DELETE FROM signal_objects
-        WHERE object_type = 'top_topics'
-          AND object_key NOT IN (SELECT cluster_id FROM topic_clusters)
-        """
-    )
-    removed = int(cursor.rowcount or 0)
+    # The DELETE takes SQLite's write lock at execute time — hold the gate for
+    # the statement AND its commit (write_gate lock-order inversion).
+    with with_db_write():
+        cursor = conn.execute(
+            """
+            DELETE FROM signal_objects
+            WHERE object_type = 'top_topics'
+              AND object_key NOT IN (SELECT cluster_id FROM topic_clusters)
+            """
+        )
+        removed = int(cursor.rowcount or 0)
+        commit_connection(conn)
     if removed:
         logger.info("GC: removed %d stale top_topics signal objects", removed)
     return removed
@@ -109,8 +115,9 @@ def compact_brief_revisions(
                 " WHERE head_revision_id IS NOT NULL"
             ).fetchall()
         }
-    cursor = conn.execute(
-        """
+    with with_db_write():
+        cursor = conn.execute(
+            """
         DELETE FROM signal_dimension_brief_revisions
         WHERE revision_id NOT IN (
             -- newest revision per brief per day (recent window)
@@ -138,14 +145,15 @@ def compact_brief_revisions(
         AND created_at < datetime('now', ?)
         AND revision_number > 1
         """
-        + (
-            f" AND revision_id NOT IN ({','.join('?' for _ in protected)})"
-            if protected
-            else ""
-        ),
-        (f"-{int(daily_days)} days", f"-{int(keep_all_days)} days", *protected),
-    )
-    removed = int(cursor.rowcount or 0)
+            + (
+                f" AND revision_id NOT IN ({','.join('?' for _ in protected)})"
+                if protected
+                else ""
+            ),
+            (f"-{int(daily_days)} days", f"-{int(keep_all_days)} days", *protected),
+        )
+        removed = int(cursor.rowcount or 0)
+        commit_connection(conn)
     if removed:
         logger.info("GC: compacted %d brief revisions", removed)
     return removed
@@ -164,11 +172,13 @@ def apply_audit_retention(conn: sqlite3.Connection, *, days: int | None = None) 
         if not _table_exists(conn, table):
             continue
         try:
-            cursor = conn.execute(
-                f"DELETE FROM {table} WHERE {ts_column} < datetime('now', ?)",
-                (f"-{int(days)} days",),
-            )
-            removed[table] = int(cursor.rowcount or 0)
+            with with_db_write():
+                cursor = conn.execute(
+                    f"DELETE FROM {table} WHERE {ts_column} < datetime('now', ?)",
+                    (f"-{int(days)} days",),
+                )
+                removed[table] = int(cursor.rowcount or 0)
+                commit_connection(conn)
         except sqlite3.OperationalError as exc:
             logger.debug("GC: retention skipped for %s: %s", table, exc)
     total = sum(removed.values())
@@ -201,25 +211,29 @@ def purge_junk_embeddings(conn: sqlite3.Connection) -> int:
             junk_embedding_ids.append(str(embedding_id))
             if record_id:
                 junk_record_ids.add(str(record_id))
+    if not junk_embedding_ids:
+        return 0
+    # The preview scan above runs ungated (read-only); only the delete loops
+    # hold the gate, with one commit for the whole batch.
     index = SQLiteVectorIndex(conn)
-    for start in range(0, len(junk_embedding_ids), 200):
-        chunk = junk_embedding_ids[start : start + 200]
-        placeholders = ",".join("?" for _ in chunk)
-        conn.execute(
-            f"DELETE FROM signal_embeddings WHERE embedding_id IN ({placeholders})", chunk
-        )
-        index.delete_embeddings(chunk)
-    if junk_record_ids and _table_exists(conn, "topic_cluster_members"):
-        ids = list(junk_record_ids)
-        for start in range(0, len(ids), 200):
-            chunk = ids[start : start + 200]
+    with batched_writes(conn):
+        for start in range(0, len(junk_embedding_ids), 200):
+            chunk = junk_embedding_ids[start : start + 200]
             placeholders = ",".join("?" for _ in chunk)
             conn.execute(
-                f"DELETE FROM topic_cluster_members WHERE record_id IN ({placeholders})",
-                chunk,
+                f"DELETE FROM signal_embeddings WHERE embedding_id IN ({placeholders})", chunk
             )
-    if junk_embedding_ids:
-        logger.info("GC: purged %d junk embeddings", len(junk_embedding_ids))
+            index.delete_embeddings(chunk)
+        if junk_record_ids and _table_exists(conn, "topic_cluster_members"):
+            ids = list(junk_record_ids)
+            for start in range(0, len(ids), 200):
+                chunk = ids[start : start + 200]
+                placeholders = ",".join("?" for _ in chunk)
+                conn.execute(
+                    f"DELETE FROM topic_cluster_members WHERE record_id IN ({placeholders})",
+                    chunk,
+                )
+    logger.info("GC: purged %d junk embeddings", len(junk_embedding_ids))
     return len(junk_embedding_ids)
 
 
@@ -227,22 +241,24 @@ def mark_deprecated_tables(conn: sqlite3.Connection) -> int:
     """Record superseded tables in wiki_table_catalog (no drops — code refs remain)."""
     if not _table_exists(conn, "wiki_table_catalog"):
         return 0
-    marked = 0
-    for table, note in DEPRECATED_TABLES.items():
-        if not _table_exists(conn, table):
-            continue
-        conn.execute(
-            """
-            INSERT INTO wiki_table_catalog (table_name, authoritative_table, status, deprecation_note, updated_at)
-            VALUES (?, NULL, 'deprecated', ?, datetime('now'))
-            ON CONFLICT(table_name) DO UPDATE SET
-                status='deprecated', deprecation_note=excluded.deprecation_note,
-                updated_at=datetime('now')
-            """,
-            (table, note),
-        )
-        marked += 1
-    return marked
+    present = [
+        (table, note) for table, note in DEPRECATED_TABLES.items() if _table_exists(conn, table)
+    ]
+    if not present:
+        return 0
+    with batched_writes(conn):
+        for table, note in present:
+            conn.execute(
+                """
+                INSERT INTO wiki_table_catalog (table_name, authoritative_table, status, deprecation_note, updated_at)
+                VALUES (?, NULL, 'deprecated', ?, datetime('now'))
+                ON CONFLICT(table_name) DO UPDATE SET
+                    status='deprecated', deprecation_note=excluded.deprecation_note,
+                    updated_at=datetime('now')
+                """,
+                (table, note),
+            )
+    return len(present)
 
 
 def run_gc(conn: sqlite3.Connection) -> Dict[str, Any]:
@@ -253,6 +269,8 @@ def run_gc(conn: sqlite3.Connection) -> Dict[str, Any]:
         "junk_embeddings_purged": purge_junk_embeddings(conn),
         "deprecated_tables_marked": mark_deprecated_tables(conn),
     }
+    # Every step above commits its own gated writes; this is a gated flush for
+    # anything a future step forgets, not the primary commit.
     report["audit_rows_trimmed"] = apply_audit_retention(conn)
-    conn.commit()
+    commit_connection(conn)
     return report

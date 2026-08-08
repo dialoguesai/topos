@@ -36,6 +36,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from . import steps_between
+from ..storage.db.write_gate import commit_connection, with_db_write
 
 logger = logging.getLogger("topos.upgrades.runner")
 
@@ -152,13 +153,14 @@ def _ensure_engine_config(conn: sqlite3.Connection) -> None:
 
 
 def _stamp_baseline(conn: sqlite3.Connection, version: str) -> None:
-    _ensure_engine_config(conn)
-    conn.execute(
-        "INSERT INTO engine_config (key, value, updated_at) VALUES (?, ?, datetime('now')) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
-        (_BASELINE_KEY, version),
-    )
-    conn.commit()
+    with with_db_write():
+        _ensure_engine_config(conn)
+        conn.execute(
+            "INSERT INTO engine_config (key, value, updated_at) VALUES (?, ?, datetime('now')) "
+            "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=excluded.updated_at",
+            (_BASELINE_KEY, version),
+        )
+        commit_connection(conn)
 
 
 def _has_data(conn: sqlite3.Connection) -> bool:
@@ -201,19 +203,20 @@ def _ledger_set(
     conn: sqlite3.Connection, version: str, step_id: str, status: str,
     detail: Optional[Dict[str, Any]] = None, started: bool = False,
 ) -> None:
-    conn.execute(
-        """
-        INSERT INTO derivation_ledger (version, step_id, status, started_at, finished_at, detail_json)
-        VALUES (?, ?, ?, CASE WHEN ? THEN datetime('now') END, NULL, ?)
-        ON CONFLICT(version, step_id) DO UPDATE SET
-            status=excluded.status,
-            started_at=COALESCE(CASE WHEN ? THEN datetime('now') END, derivation_ledger.started_at),
-            finished_at=CASE WHEN excluded.status IN ('done','failed') THEN datetime('now') END,
-            detail_json=COALESCE(excluded.detail_json, derivation_ledger.detail_json)
-        """,
-        (version, step_id, status, started, json.dumps(detail) if detail else None, started),
-    )
-    conn.commit()
+    with with_db_write():
+        conn.execute(
+            """
+            INSERT INTO derivation_ledger (version, step_id, status, started_at, finished_at, detail_json)
+            VALUES (?, ?, ?, CASE WHEN ? THEN datetime('now') END, NULL, ?)
+            ON CONFLICT(version, step_id) DO UPDATE SET
+                status=excluded.status,
+                started_at=COALESCE(CASE WHEN ? THEN datetime('now') END, derivation_ledger.started_at),
+                finished_at=CASE WHEN excluded.status IN ('done','failed') THEN datetime('now') END,
+                detail_json=COALESCE(excluded.detail_json, derivation_ledger.detail_json)
+            """,
+            (version, step_id, status, started, json.dumps(detail) if detail else None, started),
+        )
+        commit_connection(conn)
 
 
 def ledger_rows(conn: sqlite3.Connection) -> List[Dict[str, Any]]:

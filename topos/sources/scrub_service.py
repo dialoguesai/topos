@@ -15,6 +15,7 @@ from ..config.settings import settings
 from ..core.state import get_db_connection
 from ..pipeline.audit import SQLiteIngestAuditStore, StageAuditRow
 from ..pipeline.stages import PipelineStage
+from ..storage.db.write_gate import commit_connection
 from . import install_service
 from .scrub_attribution import (
     TableAction,
@@ -494,14 +495,17 @@ async def scrub_source_async(
             except Exception:  # noqa: BLE001
                 scrubbed_record_ids = set()
 
-        if opts.remove_raw_and_flat:
-            table_actions.extend(remove_raw_and_flat_tables(conn, source_def, sid))
+        # Deletes take SQLite's write lock at execute time — hold the gate for
+        # the sweep AND the commit (write_gate lock-order inversion).
+        with install_service._sqlite_write_gate():
+            if opts.remove_raw_and_flat:
+                table_actions.extend(remove_raw_and_flat_tables(conn, source_def, sid))
 
-        if opts.purge_attributed_rows:
-            table_actions.extend(scrub_attributed_rows(conn, sid).tables)
+            if opts.purge_attributed_rows:
+                table_actions.extend(scrub_attributed_rows(conn, sid).tables)
 
-        if settings.topos_database_mode != "postgres":
-            conn.commit()
+            if settings.topos_database_mode != "postgres":
+                commit_connection(conn)
 
         recompute, partial = await _run_recompute_phase(
             conn,
@@ -528,7 +532,7 @@ async def scrub_source_async(
             status=scrub_status,
         )
         if settings.topos_database_mode != "postgres":
-            conn.commit()
+            commit_connection(conn)
         logger.debug(
             "[PIPELINE:SCRUB] source_id=%s scrub_id=%s status=%s duration_ms=%s totals=%s",
             sid,

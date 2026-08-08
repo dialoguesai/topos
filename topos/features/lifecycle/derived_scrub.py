@@ -27,6 +27,8 @@ import logging
 import sqlite3
 from typing import Any, Dict, List, Optional, Set
 
+from ...storage.db.write_gate import batched_writes, commit_connection, with_db_write
+
 logger = logging.getLogger("topos.features.lifecycle.derived_scrub")
 
 
@@ -189,17 +191,19 @@ def purge_junk_minted_entities(
     if dry_run or not junk:
         return report
 
-    for entity_id, _name in junk:
-        counts = _delete_entity_cascade(conn, entity_id)
-        report["junk_entities_removed"] += 1
-        report["mentions_removed"] += counts["mentions"]
-        report["edges_removed"] += counts["edges"]
+    with batched_writes(conn):
+        for entity_id, _name in junk:
+            counts = _delete_entity_cascade(conn, entity_id)
+            report["junk_entities_removed"] += 1
+            report["mentions_removed"] += counts["mentions"]
+            report["edges_removed"] += counts["edges"]
 
     from ..entities.maintenance import rebuild_evidence_edges
 
+    # rebuild_evidence_edges manages the gate itself (M2.2) — wrapping it here
+    # would reinstate a whole-rebuild exclusive hold.
     rebuilt = rebuild_evidence_edges(conn)
     report["edges_rebuilt"] = rebuilt
-    conn.commit()
     logger.info(
         "C4 scrub: removed %d junk entities (%d mentions, %d edges)",
         report["junk_entities_removed"],
@@ -245,9 +249,10 @@ def refold_statistics(conn: sqlite3.Connection) -> Dict[str, int]:
     """
     from ..stats.engine import StatsEngine
 
-    conn.execute("DELETE FROM stat_state")
-    conn.execute("DELETE FROM stat_seen")
-    conn.commit()
+    with with_db_write():
+        conn.execute("DELETE FROM stat_state")
+        conn.execute("DELETE FROM stat_seen")
+        commit_connection(conn)
 
     engine = StatsEngine(conn)
     folded = 0
@@ -297,13 +302,12 @@ def repromote_stat_insights(conn: sqlite3.Connection) -> Dict[str, int]:
     rows = conn.execute(
         "SELECT fact_id FROM signal_facts WHERE fact_id LIKE 'stat:%'"
     ).fetchall()
-    pruned = 0
-    for (fact_id,) in rows:
-        if str(fact_id) not in live_ids:
-            conn.execute("DELETE FROM signal_facts WHERE fact_id=?", (fact_id,))
-            pruned += 1
-    conn.commit()
-    return {"insights_written": written, "insights_pruned": pruned}
+    stale = [fact_id for (fact_id,) in rows if str(fact_id) not in live_ids]
+    if stale:
+        with batched_writes(conn):
+            for fact_id in stale:
+                conn.execute("DELETE FROM signal_facts WHERE fact_id=?", (fact_id,))
+    return {"insights_written": written, "insights_pruned": len(stale)}
 
 
 # ------------------------------------------------------------------ facts
@@ -374,23 +378,25 @@ def purge_facts_for_source(
 
     deleted = 0
     trimmed = 0
-    for object_id, refs in parsed:
-        if not refs:
-            continue
-        scrubbed = [r for r in refs if isinstance(r, dict) and _ref_is_scrubbed(r)]
-        if not scrubbed:
-            continue
-        surviving = [r for r in refs if not (isinstance(r, dict) and _ref_is_scrubbed(r))]
-        if surviving:
-            conn.execute(
-                "UPDATE signal_objects SET source_refs_json=?, updated_at=datetime('now') WHERE object_id=?",
-                (json.dumps(surviving), object_id),
-            )
-            trimmed += 1
-        else:
-            conn.execute("DELETE FROM signal_objects WHERE object_id=?", (object_id,))
-            deleted += 1
-    conn.commit()
+    # The per-fact judgement is in-memory (maps precomputed above), so the
+    # batch hold covers writes only.
+    with batched_writes(conn):
+        for object_id, refs in parsed:
+            if not refs:
+                continue
+            scrubbed = [r for r in refs if isinstance(r, dict) and _ref_is_scrubbed(r)]
+            if not scrubbed:
+                continue
+            surviving = [r for r in refs if not (isinstance(r, dict) and _ref_is_scrubbed(r))]
+            if surviving:
+                conn.execute(
+                    "UPDATE signal_objects SET source_refs_json=?, updated_at=datetime('now') WHERE object_id=?",
+                    (json.dumps(surviving), object_id),
+                )
+                trimmed += 1
+            else:
+                conn.execute("DELETE FROM signal_objects WHERE object_id=?", (object_id,))
+                deleted += 1
     return {"facts_deleted": deleted, "facts_trimmed": trimmed}
 
 
@@ -433,7 +439,9 @@ def close_dangling_facts(conn: sqlite3.Connection) -> int:
         WHERE object_type='fact' AND valid_to IS NULL
         """
     ).fetchall()
-    closed = 0
+    # Read pass first: the per-ref liveness checks are SELECTs, so they must
+    # not run under the gate. Writes happen in one short gated pass below.
+    to_close: List[str] = []
     for object_id, refs_json in rows:
         try:
             refs = [r for r in json.loads(refs_json or "[]") if isinstance(r, dict)]
@@ -473,14 +481,17 @@ def close_dangling_facts(conn: sqlite3.Connection) -> int:
                 any_alive = True
                 break
         if not any_alive:
+            to_close.append(str(object_id))
+    if not to_close:
+        return 0
+    with batched_writes(conn):
+        for object_id in to_close:
             conn.execute(
                 "UPDATE signal_objects SET valid_to=datetime('now'), updated_at=datetime('now') "
                 "WHERE object_id=?",
                 (object_id,),
             )
-            closed += 1
-    conn.commit()
-    return closed
+    return len(to_close)
 
 
 # ----------------------------------------------------------------- orphans
@@ -488,26 +499,28 @@ def close_dangling_facts(conn: sqlite3.Connection) -> int:
 
 def sweep_orphans(conn: sqlite3.Connection) -> Dict[str, int]:
     out: Dict[str, int] = {}
-    cursor = conn.execute(
-        """
-        DELETE FROM embedding_entities WHERE embedding_id NOT IN (
-            SELECT embedding_id FROM signal_embeddings
+    with with_db_write():
+        cursor = conn.execute(
+            """
+            DELETE FROM embedding_entities WHERE embedding_id NOT IN (
+                SELECT embedding_id FROM signal_embeddings
+            )
+            """
         )
-        """
-    )
-    out["embedding_entities"] = int(cursor.rowcount or 0)
-    cursor = conn.execute(
-        """
-        DELETE FROM fact_conflicts WHERE incumbent_object_id NOT IN (
-            SELECT object_id FROM signal_objects WHERE object_type='fact'
+        out["embedding_entities"] = int(cursor.rowcount or 0)
+        cursor = conn.execute(
+            """
+            DELETE FROM fact_conflicts WHERE incumbent_object_id NOT IN (
+                SELECT object_id FROM signal_objects WHERE object_type='fact'
+            )
+            """
         )
-        """
-    )
-    out["fact_conflicts"] = int(cursor.rowcount or 0)
-    cursor = conn.execute(
-        "DELETE FROM entity_review WHERE candidate_entity_id NOT IN (SELECT entity_id FROM entities)"
-    )
-    out["entity_review"] = int(cursor.rowcount or 0)
+        out["fact_conflicts"] = int(cursor.rowcount or 0)
+        cursor = conn.execute(
+            "DELETE FROM entity_review WHERE candidate_entity_id NOT IN (SELECT entity_id FROM entities)"
+        )
+        out["entity_review"] = int(cursor.rowcount or 0)
+        commit_connection(conn)
     return out
 
 
@@ -528,11 +541,12 @@ def purge_derived_for_source(
     """
     report: Dict[str, Any] = {"source_id": source_id}
 
-    report["entities_recounted"] = _recount_entity_mentions(conn)
-    orphans = _delete_orphan_entities(conn)
+    with batched_writes(conn):
+        report["entities_recounted"] = _recount_entity_mentions(conn)
+        orphans = _delete_orphan_entities(conn)
     report["entities_removed"] = len(orphans)
+    # Self-gating (M2.2) — must not run under a caller's hold.
     report["edges_rebuilt"] = _rebuild_entity_edges(conn)
-    conn.commit()
 
     report.update(refold_statistics(conn))
     report.update(repromote_stat_insights(conn))
@@ -549,7 +563,7 @@ def purge_derived_for_source(
         report["dossiers_refreshed"] = f"failed: {exc}"
 
     report["orphans"] = sweep_orphans(conn)
-    conn.commit()
+    commit_connection(conn)
     return report
 
 
@@ -569,6 +583,8 @@ def purge_derived_for_records(
     report: Dict[str, Any] = {"records": len(ids)}
     placeholders = ",".join("?" for _ in ids)
 
+    from ...storage.adapters.sqlite.stores import SQLiteVectorIndex
+
     embedding_ids = [
         str(r[0])
         for r in conn.execute(
@@ -576,28 +592,27 @@ def purge_derived_for_records(
             ids,
         ).fetchall()
     ]
-    conn.execute(f"DELETE FROM signal_embeddings WHERE record_id IN ({placeholders})", ids)
-    if embedding_ids:
-        from ...storage.adapters.sqlite.stores import SQLiteVectorIndex
+    with batched_writes(conn):
+        conn.execute(f"DELETE FROM signal_embeddings WHERE record_id IN ({placeholders})", ids)
+        if embedding_ids:
+            SQLiteVectorIndex(conn).delete_embeddings(embedding_ids)
 
-        SQLiteVectorIndex(conn).delete_embeddings(embedding_ids)
+        for table, column in (
+            ("entity_mentions", "record_id"),
+            ("timeline", "record_id"),
+            ("topic_cluster_members", "record_id"),
+            ("cluster_candidates", "record_id"),
+        ):
+            cursor = conn.execute(
+                f"DELETE FROM {table} WHERE {column} IN ({placeholders})", ids
+            )
+            report[table] = int(cursor.rowcount or 0)
+
+        report["entities_recounted"] = _recount_entity_mentions(conn)
+        report["entities_removed"] = len(_delete_orphan_entities(conn))
     report["embeddings_removed"] = len(embedding_ids)
-
-    for table, column in (
-        ("entity_mentions", "record_id"),
-        ("timeline", "record_id"),
-        ("topic_cluster_members", "record_id"),
-        ("cluster_candidates", "record_id"),
-    ):
-        cursor = conn.execute(
-            f"DELETE FROM {table} WHERE {column} IN ({placeholders})", ids
-        )
-        report[table] = int(cursor.rowcount or 0)
-
-    report["entities_recounted"] = _recount_entity_mentions(conn)
-    report["entities_removed"] = len(_delete_orphan_entities(conn))
+    # Self-gating (M2.2) — must not run under a caller's hold.
     report["edges_rebuilt"] = _rebuild_entity_edges(conn)
-    conn.commit()
 
     # Aggregates: same non-subtractability as source scrub -> refold.
     report.update(refold_statistics(conn))
@@ -610,28 +625,29 @@ def purge_derived_for_records(
     ).fetchall()
     facts_deleted = 0
     facts_trimmed = 0
-    for object_id, refs_json in rows:
-        try:
-            refs = json.loads(refs_json or "[]")
-        except json.JSONDecodeError:
-            refs = []
-        if not refs:
-            continue
-        surviving = [
-            r for r in refs
-            if not (isinstance(r, dict) and str(r.get("record_id") or "") in id_set)
-        ]
-        if len(surviving) == len(refs):
-            continue
-        if surviving:
-            conn.execute(
-                "UPDATE signal_objects SET source_refs_json=?, updated_at=datetime('now') WHERE object_id=?",
-                (json.dumps(surviving), str(object_id)),
-            )
-            facts_trimmed += 1
-        else:
-            conn.execute("DELETE FROM signal_objects WHERE object_id=?", (str(object_id),))
-            facts_deleted += 1
+    with batched_writes(conn):
+        for object_id, refs_json in rows:
+            try:
+                refs = json.loads(refs_json or "[]")
+            except json.JSONDecodeError:
+                refs = []
+            if not refs:
+                continue
+            surviving = [
+                r for r in refs
+                if not (isinstance(r, dict) and str(r.get("record_id") or "") in id_set)
+            ]
+            if len(surviving) == len(refs):
+                continue
+            if surviving:
+                conn.execute(
+                    "UPDATE signal_objects SET source_refs_json=?, updated_at=datetime('now') WHERE object_id=?",
+                    (json.dumps(surviving), str(object_id)),
+                )
+                facts_trimmed += 1
+            else:
+                conn.execute("DELETE FROM signal_objects WHERE object_id=?", (str(object_id),))
+                facts_deleted += 1
     report["facts_deleted"] = facts_deleted
     report["facts_trimmed"] = facts_trimmed
 
@@ -642,5 +658,5 @@ def purge_derived_for_records(
     except Exception as exc:  # noqa: BLE001
         report["dossiers_refreshed"] = f"failed: {exc}"
     report["orphans"] = sweep_orphans(conn)
-    conn.commit()
+    commit_connection(conn)
     return report

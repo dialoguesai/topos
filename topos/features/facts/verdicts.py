@@ -30,6 +30,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
+from ...storage.db.write_gate import commit_connection, with_db_write
 from .store import FactStore
 
 VERDICT_ACTIONS = ("confirm", "reject", "edit")
@@ -73,15 +74,16 @@ def _load_active_fact(conn: sqlite3.Connection, object_id: str) -> Dict[str, Any
 def _write_payload(
     conn: sqlite3.Connection, object_id: str, payload: Dict[str, Any], confidence: float
 ) -> None:
-    conn.execute(
-        """
-        UPDATE signal_objects
-        SET payload_json=?, confidence=?, updated_at=?
-        WHERE object_id=?
-        """,
-        (json.dumps(payload), float(confidence), _now_iso(), object_id),
-    )
-    conn.commit()
+    with with_db_write():
+        conn.execute(
+            """
+            UPDATE signal_objects
+            SET payload_json=?, confidence=?, updated_at=?
+            WHERE object_id=?
+            """,
+            (json.dumps(payload), float(confidence), _now_iso(), object_id),
+        )
+        commit_connection(conn)
 
 
 def confirm_fact(conn: sqlite3.Connection, object_id: str) -> Dict[str, Any]:

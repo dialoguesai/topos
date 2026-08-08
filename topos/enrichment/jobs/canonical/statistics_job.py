@@ -16,6 +16,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ..base import BaseEnrichmentJob
 from ....core.state import get_db_connection
+from ....storage.db.write_gate import commit_connection, with_db_write
 
 logger = logging.getLogger("topos.enrichment.jobs.statistics")
 
@@ -104,13 +105,14 @@ class StatisticsJob(BaseEnrichmentJob):
     def _record_promotion(self, conn) -> None:
         import json
 
-        conn.execute(
-            """
-            INSERT INTO stat_state (stat_id, group_key, bucket_date, state_json, updated_at)
-            VALUES (?, '', '', ?, datetime('now'))
-            ON CONFLICT(stat_id, group_key, bucket_date) DO UPDATE SET
-                state_json=excluded.state_json, updated_at=datetime('now')
-            """,
-            (_META_STAT_ID, json.dumps({"pending": 0})),
-        )
-        conn.commit()
+        with with_db_write():
+            conn.execute(
+                """
+                INSERT INTO stat_state (stat_id, group_key, bucket_date, state_json, updated_at)
+                VALUES (?, '', '', ?, datetime('now'))
+                ON CONFLICT(stat_id, group_key, bucket_date) DO UPDATE SET
+                    state_json=excluded.state_json, updated_at=datetime('now')
+                """,
+                (_META_STAT_ID, json.dumps({"pending": 0})),
+            )
+            commit_connection(conn)

@@ -10,6 +10,7 @@ from .common import (
     json,
 )
 from .registry import handles
+from ...storage.db.write_gate import batched_writes, commit_connection, with_db_write
 
 
 @handles("get_filter_lab_bundles")
@@ -161,8 +162,9 @@ async def handle_patch_filter_lab_job_run(message: Dict[str, Any]) -> Optional[D
     if "user_liked" in body:
         v = body.get("user_liked")
         if v is None:
-            conn.execute("UPDATE filter_lab_run SET user_liked = NULL WHERE id = ?", (run_id,))
-            conn.commit()
+            with with_db_write():
+                conn.execute("UPDATE filter_lab_run SET user_liked = NULL WHERE id = ?", (run_id,))
+                commit_connection(conn)
         else:
             fl_store.patch_run(conn, run_id, user_liked=bool(v))
         rated = True
@@ -171,11 +173,12 @@ async def handle_patch_filter_lab_job_run(message: Dict[str, Any]) -> Optional[D
         fl_store.patch_run(conn, run_id, user_note=None if note is None else str(note)[:2000])
         rated = True
     if rated:
-        conn.execute(
-            "UPDATE filter_lab_run SET rated_at = ? WHERE id = ?",
-            (fl_store.utc_now_iso(), run_id),
-        )
-        conn.commit()
+        with with_db_write():
+            conn.execute(
+                "UPDATE filter_lab_run SET rated_at = ? WHERE id = ?",
+                (fl_store.utc_now_iso(), run_id),
+            )
+            commit_connection(conn)
     try:
         data = fl_service.serialize_job_group(conn, group_id)
         return {"id": req_id, "status": "ok", "payload": data}
@@ -223,8 +226,8 @@ async def handle_delete_filter_lab_all_data(message: Dict[str, Any]) -> Optional
     if not conn:
         return {"id": req_id, "status": "error", "error": "Database not available"}
     fl_store.ensure_schema(conn)
-    conn.execute("DELETE FROM filter_lab_model_event")
-    conn.execute("DELETE FROM filter_lab_run")
-    conn.execute("DELETE FROM filter_lab_job_group")
-    conn.commit()
+    with batched_writes(conn):
+        conn.execute("DELETE FROM filter_lab_model_event")
+        conn.execute("DELETE FROM filter_lab_run")
+        conn.execute("DELETE FROM filter_lab_job_group")
     return {"id": req_id, "status": "ok", "payload": {"status": "ok", "cleared": True}}

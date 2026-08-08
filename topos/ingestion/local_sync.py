@@ -11,6 +11,7 @@ from .checkpoints.checkpoint_store import CheckpointStore, IngestionCheckpoint
 from .checkpoints.sqlite_checkpoint_store import SqliteCheckpointStore
 from .parsers import PARSER_REGISTRY
 from .sources.base import RawRecord
+from ..storage.db.write_gate import commit_connection, with_db_write
 
 logger = logging.getLogger("topos.ingestion.local_sync")
 
@@ -262,6 +263,9 @@ def _backfill_signal_reply_links_in_db(*, db_conn: Any, dataset_id: str) -> int:
         """,
         (dataset_id,),
     ).fetchall()
+    # Read-only pass first: resolve every target, then apply the updates in a
+    # short gated write pass (per-row lookups stay off the write gate).
+    pending: List[tuple[str, str]] = []
     for row in rows:
         row_message_id, conversation_id, reply_key = row
         sec = _signal_reply_source_key_to_seconds(reply_key)
@@ -285,17 +289,21 @@ def _backfill_signal_reply_links_in_db(*, db_conn: Any, dataset_id: str) -> int:
         resolved_message_id = target[0]
         if not resolved_message_id or resolved_message_id == row_message_id:
             continue
-        db_conn.execute(
-            """
-            UPDATE conversation_messages
-            SET reply_to_message_id = ?
-            WHERE message_id = ?
-            """,
-            (resolved_message_id, row_message_id),
-        )
-        updated += 1
-    if updated:
-        db_conn.commit()
+        pending.append((resolved_message_id, row_message_id))
+    if not pending:
+        return 0
+    with with_db_write():
+        for resolved_message_id, row_message_id in pending:
+            db_conn.execute(
+                """
+                UPDATE conversation_messages
+                SET reply_to_message_id = ?
+                WHERE message_id = ?
+                """,
+                (resolved_message_id, row_message_id),
+            )
+            updated += 1
+        commit_connection(db_conn)
     return updated
 
 

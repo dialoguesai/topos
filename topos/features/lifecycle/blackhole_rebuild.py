@@ -31,6 +31,7 @@ import sqlite3
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set
 
+from ...storage.db.write_gate import batched_writes
 from .blackhole import BlackholeStore, normalize_entity_name
 
 logger = logging.getLogger("topos.features.lifecycle.blackhole_rebuild")
@@ -199,13 +200,13 @@ def rebuild_for_blackhole(conn: sqlite3.Connection, entity_ref: str) -> RebuildR
 
     store.mark_rebuild_running(entity_ref)
     try:
-        report.objects_closed = _close_prose_objects(conn, terms, record["entity_id"])
-        report.briefs_invalidated = _invalidate_briefs(conn, terms)
-        report.stat_insights_removed = _remove_stat_insights(conn, terms)
-        report.context_vectors_removed = _remove_context_vector(
-            conn, str(record.get("entity_id") or "")
-        )
-        conn.commit()
+        with batched_writes(conn):
+            report.objects_closed = _close_prose_objects(conn, terms, record["entity_id"])
+            report.briefs_invalidated = _invalidate_briefs(conn, terms)
+            report.stat_insights_removed = _remove_stat_insights(conn, terms)
+            report.context_vectors_removed = _remove_context_vector(
+                conn, str(record.get("entity_id") or "")
+            )
     except Exception as exc:  # noqa: BLE001
         conn.rollback()
         # Leaves rebuild_state='failed', which keeps the withholding in force.

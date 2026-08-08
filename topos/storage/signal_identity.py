@@ -8,6 +8,8 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+from .db.write_gate import commit_connection, with_db_write
+
 logger = logging.getLogger("topos.storage.signal_identity")
 
 TABLE = "signal_identity"
@@ -15,15 +17,17 @@ TABLE = "signal_identity"
 
 def ensure_table(conn) -> None:
     """Create signal_identity table if not exists."""
-    conn.execute(f"""
-        CREATE TABLE IF NOT EXISTS {TABLE} (
-            dataset_id TEXT NOT NULL PRIMARY KEY,
-            my_phone_number TEXT,
-            my_signal_id TEXT,
-            updated_at TEXT DEFAULT (datetime('now'))
-        )
-    """)
-    conn.commit()
+    # DDL takes SQLite's write lock at execute time — gate it with the commit.
+    with with_db_write():
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {TABLE} (
+                dataset_id TEXT NOT NULL PRIMARY KEY,
+                my_phone_number TEXT,
+                my_signal_id TEXT,
+                updated_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        commit_connection(conn)
 
 
 def get_signal_identity(conn, dataset_id: str) -> Optional[dict]:
@@ -59,13 +63,14 @@ def put_signal_identity(
         existing = get_signal_identity(conn, dataset_id)
         phone = my_phone_number if my_phone_number is not None else (existing.get("my_phone_number") if existing else None)
         sid = my_signal_id if my_signal_id is not None else (existing.get("my_signal_id") if existing else None)
-        conn.execute(
-            f"""
-            INSERT OR REPLACE INTO {TABLE} (dataset_id, my_phone_number, my_signal_id, updated_at)
-            VALUES (?, ?, ?, datetime('now'))
-            """,
-            (dataset_id, phone, sid),
-        )
-        conn.commit()
+        with with_db_write():
+            conn.execute(
+                f"""
+                INSERT OR REPLACE INTO {TABLE} (dataset_id, my_phone_number, my_signal_id, updated_at)
+                VALUES (?, ?, ?, datetime('now'))
+                """,
+                (dataset_id, phone, sid),
+            )
+            commit_connection(conn)
     except Exception as e:
         logger.warning("put_signal_identity failed: %s", e)

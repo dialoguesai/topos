@@ -15,6 +15,7 @@ import sqlite3
 from typing import Any, Dict
 
 from .verify_modes import categorize, get_mode
+from ..storage.db.write_gate import commit_connection
 
 MAX_VALUE_CHARS = 60
 MAX_PREDICATE_CHARS = 40
@@ -65,7 +66,9 @@ def seed_fun_fact(
         disclosure="scoped",
         asserted_by="owner",
     )
-    conn.commit()
+    # assert_fact gates + commits its own writes; this commit only catches any
+    # residue on the shared conn — queue it through the gate, never raw.
+    commit_connection(conn)
     return {
         "accepted": fact is not None,
         "category": category,

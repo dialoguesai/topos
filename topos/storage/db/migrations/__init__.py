@@ -151,13 +151,21 @@ def ensure_migrations_applied(
     pending = pending_ledger_migrations(conn)
     backup_path: Optional[str] = None
 
+    # Migrations write DDL/DML and commit internally (raw conn.commit()), and
+    # this runner is invoked from runtime paths (AdapterFactory.create, graph
+    # refresh) — not just startup. Holding the write gate across each step
+    # keeps those internal commits gated (write_gate lock-order inversion);
+    # the gate is reentrant, so migrations that take it themselves still work.
+    from ..write_gate import with_db_write
+
     # Fast path: fully stamped DB with nothing pending — only always_run steps.
     if current >= max_order and not pending:
         for spec in MIGRATIONS:
             if not spec.always_run:
                 continue
             try:
-                spec.fn(conn)
+                with with_db_write():
+                    spec.fn(conn)
             except Exception as exc:  # noqa: BLE001
                 raise MigrationError(
                     f"always-run migration {spec.id!r} failed: {exc}"
@@ -179,12 +187,14 @@ def ensure_migrations_applied(
         if not _needs_apply(conn, spec):
             continue
         try:
-            spec.fn(conn)
+            with with_db_write():
+                spec.fn(conn)
         except Exception as exc:  # noqa: BLE001
             hint = f" Restore from {backup_path}." if backup_path else ""
             raise MigrationError(
                 f"schema migration {spec.id!r} (order={spec.order}) failed: {exc}.{hint}"
             ) from exc
 
-    _stamp_user_version(conn, max_order)
+    with with_db_write():
+        _stamp_user_version(conn, max_order)
     return backup_path
