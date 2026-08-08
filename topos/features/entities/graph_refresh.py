@@ -53,6 +53,7 @@ def _enabled() -> bool:
 
 def _default_rebuild() -> None:
     from ...core.state import close_thread_db_connection, get_db_connection
+    from ...enrichment.pipeline_activity import is_derivation_in_flight
     from ...storage.db.write_gate import with_db_write
     from .maintenance import rebuild_entity_graph
 
@@ -61,6 +62,11 @@ def _default_rebuild() -> None:
         logger.debug("graph refresh skipped: no database connection")
         return
     try:
+        # A derivation batch is still writing the entities this rebuild would
+        # index, and even the phase-chunked gate holds would contend with its
+        # commits. Step aside; _fire / reconcile re-arm the debounce.
+        if is_derivation_in_flight():
+            raise WriteGateDeferred("derivation batch in flight")
         # No outer with_db_write: the rebuild gates its own write phases
         # (M2.2). The gate is reentrant, so wrapping it here would silently
         # reinstate the whole-rebuild exclusive hold (120s observed
