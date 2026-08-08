@@ -134,6 +134,63 @@ def with_db_write() -> Iterator[None]:
                 )
 
 
+class WriteGateDeferred(Exception):
+    """A cooperative writer stepped aside instead of taking the gate."""
+
+
+#: How long one cooperative acquisition attempt blocks before re-checking
+#: ``should_defer``. Short enough that a derive starting mid-wait is noticed
+#: promptly; long enough not to spin.
+_COOPERATIVE_SLICE_S = 2.0
+
+
+@contextmanager
+def with_db_write_cooperative(
+    should_defer: Callable[[], bool],
+    *,
+    slice_s: float = _COOPERATIVE_SLICE_S,
+) -> Iterator[None]:
+    """Take the gate like :func:`with_db_write`, but as a LOW-PRIORITY writer.
+
+    For background sections that hold the gate for a long time (the entity-graph
+    rebuild held it 77–156s). Such a writer must never win the gate against an
+    in-flight derivation batch: on 2026-08-07 that interleaving left the event
+    loop blocked behind the rebuild and froze the node until SIGKILL.
+
+    The wait is polled in ``slice_s`` slices; whenever ``should_defer()`` is
+    true — before waiting, while waiting, or by the time the gate is finally
+    acquired — :class:`WriteGateDeferred` is raised (releasing the gate if
+    held) so the caller can reschedule instead of contending.
+    """
+    if _on_event_loop():
+        _warn_loop_acquisition()
+    waited_at = time.monotonic()
+    while True:
+        if should_defer():
+            raise WriteGateDeferred("higher-priority writer active")
+        if _WRITE_LOCK.acquire(timeout=max(0.05, slice_s)):
+            break
+    waited = time.monotonic() - waited_at
+    held_at = time.monotonic()
+    try:
+        # A derivation that started during the final acquire slice would now
+        # queue behind this whole section — the exact convoy this exists to
+        # prevent. Re-check with the gate held.
+        if should_defer():
+            raise WriteGateDeferred("higher-priority writer started while waiting")
+        yield
+    finally:
+        _WRITE_LOCK.release()
+        held = time.monotonic() - held_at
+        if held >= _SLOW_HOLD_WARN_S or waited >= _SLOW_HOLD_WARN_S:
+            logger.warning(
+                "[WRITE_GATE] slow section: waited=%.1fs held=%.1fs — other "
+                "writers were blocked for this long",
+                waited,
+                held,
+            )
+
+
 def is_busy_error(exc: BaseException) -> bool:
     if not isinstance(exc, sqlite3.OperationalError):
         return False

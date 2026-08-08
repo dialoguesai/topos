@@ -84,6 +84,84 @@ def test_evict_calls_release_ml_memory():
         assert release.call_count >= 1
 
 
+def test_slow_load_does_not_block_other_slots():
+    """One slow (or wedged) model load must starve only its own slot, never
+    every model user in the process — holding the cache-wide lock across a
+    hung MPS load was one arm of the 2026-08-07 deadlock."""
+    cache = ModelCache(max_resident=5)
+    slow_started = threading.Event()
+    slow_release = threading.Event()
+    slow_done = threading.Event()
+
+    def slow_loader():
+        slow_started.set()
+        assert slow_release.wait(timeout=10)
+        return "slow-model"
+
+    def run_slow():
+        cache.acquire(ModelSlot.PRIVACY_FILTER, "privacy-model", slow_loader)
+        slow_done.set()
+
+    thread = threading.Thread(target=run_slow)
+    thread.start()
+    try:
+        assert slow_started.wait(timeout=5)
+        # While the privacy-filter load is stuck, another slot must load freely.
+        handle, hit = cache.acquire(ModelSlot.EMBEDDING, "embed-model", lambda: "embed")
+        assert handle == "embed"
+        assert hit is False
+        assert not slow_done.is_set()
+    finally:
+        slow_release.set()
+        thread.join(timeout=10)
+    assert slow_done.is_set()
+    assert ModelSlot.PRIVACY_FILTER.value in cache.resident_slots()
+
+
+def test_concurrent_same_slot_acquires_load_once():
+    cache = ModelCache(max_resident=5)
+    calls = {"n": 0}
+    first_in = threading.Event()
+    release = threading.Event()
+
+    def loader():
+        calls["n"] += 1
+        first_in.set()
+        assert release.wait(timeout=10)
+        return {"model": "shared"}
+
+    results: list = []
+
+    def worker():
+        results.append(cache.acquire(ModelSlot.NER, "ner-model", loader))
+
+    t1 = threading.Thread(target=worker)
+    t2 = threading.Thread(target=worker)
+    t1.start()
+    assert first_in.wait(timeout=5)
+    t2.start()
+    release.set()
+    t1.join(timeout=10)
+    t2.join(timeout=10)
+
+    assert calls["n"] == 1, "second thread must wait for the in-flight load, not race it"
+    assert len(results) == 2
+    assert results[0][0] is results[1][0]
+    assert {hit for _, hit in results} == {True, False}
+
+
+def test_failed_load_unblocks_waiters():
+    cache = ModelCache(max_resident=5)
+
+    with pytest.raises(RuntimeError, match="load failed"):
+        cache.acquire(ModelSlot.NSFW, "nsfw-model", lambda: (_ for _ in ()).throw(RuntimeError("load failed")))
+
+    # The slot must not be stuck in 'loading': a retry runs the loader again.
+    handle, hit = cache.acquire(ModelSlot.NSFW, "nsfw-model", lambda: "recovered")
+    assert handle == "recovered"
+    assert hit is False
+
+
 def test_thread_safe_acquire():
     cache = ModelCache(max_resident=5)
     errors: list[Exception] = []

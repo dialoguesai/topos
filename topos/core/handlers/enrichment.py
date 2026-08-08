@@ -1,6 +1,8 @@
 """Source enrichment message handlers."""
 from __future__ import annotations
 
+import asyncio
+
 import topos.core.handlers as hub
 
 from .common import (
@@ -94,26 +96,34 @@ async def handle_enrichment_process_source(message: Dict[str, Any]) -> Optional[
             "job_names": jobs_to_run,
             "force_reprocess": force_reprocess,
         }
-        enqueue_job(
-            db_conn,
-            kind="enrichment_process_source",
-            payload=job_payload,
-            job_id=job_id,
-            source_id=source_id,
-            idempotency_key=f"enrichment_process_source:{job_id}",
-        )
-        update_job_progress(
-            db_conn,
-            job_id,
-            {
-                "status": "processing",
-                "progress_percent": 0.0,
-                "messages_processed": 0,
-                "messages_skipped": 0,
-                "messages_total": 0,
-                "jobs_total": len(jobs_to_run),
-            },
-        )
+        def _enqueue_and_stamp() -> None:
+            # Both calls take the write gate — a blocking OS lock — so they
+            # must not run on the event-loop thread (2026-08-07 freeze sites).
+            own = hub.get_db_connection()
+            if own is None:
+                return
+            enqueue_job(
+                own,
+                kind="enrichment_process_source",
+                payload=job_payload,
+                job_id=job_id,
+                source_id=source_id,
+                idempotency_key=f"enrichment_process_source:{job_id}",
+            )
+            update_job_progress(
+                own,
+                job_id,
+                {
+                    "status": "processing",
+                    "progress_percent": 0.0,
+                    "messages_processed": 0,
+                    "messages_skipped": 0,
+                    "messages_total": 0,
+                    "jobs_total": len(jobs_to_run),
+                },
+            )
+
+        await asyncio.to_thread(_enqueue_and_stamp)
         start_pipeline_worker(hub.get_db_connection)
 
         return {

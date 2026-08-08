@@ -20,10 +20,13 @@ from topos.pipeline.job_store import (
 from topos.storage.db.connection_tuning import tune_connection
 from topos.storage.db.migrations.pipeline_jobs_v1 import apply_pipeline_jobs_v1_up
 from topos.storage.db.write_gate import (
+    WriteGateDeferred,
     begin_immediate,
     commit_connection,
+    db_write_lock,
     sqlite_retry_busy,
     with_db_write,
+    with_db_write_cooperative,
 )
 
 
@@ -111,7 +114,7 @@ def test_sqlite_retry_busy_gives_up() -> None:
 
 @pytest.mark.asyncio
 async def test_process_job_fails_without_derivation_completion(tmp_path) -> None:
-    conn = sqlite3.connect(str(tmp_path / "pipeline.db"))
+    conn = sqlite3.connect(str(tmp_path / "pipeline.db"), check_same_thread=False)
     apply_pipeline_jobs_v1_up(conn)
     job_id = enqueue_job(
         conn,
@@ -142,12 +145,132 @@ async def test_process_job_fails_without_derivation_completion(tmp_path) -> None
         "topos.pipeline.job_runner.EXECUTORS",
         {"inbox_deferred_enrichment": fake_exec},
     ):
-        await process_job(conn, job)
+        await process_job(lambda: conn, job)
 
     updated = get_job(conn, job_id)
     assert updated is not None
     assert updated["status"] == "failed"
     assert not is_derivation_complete(conn, "w1")
+
+
+def test_cooperative_gate_defers_when_priority_writer_is_active() -> None:
+    # Derivation already running: never even try for the gate.
+    with pytest.raises(WriteGateDeferred):
+        with with_db_write_cooperative(lambda: True, slice_s=0.05):
+            pytest.fail("section must not run")
+
+
+def test_cooperative_gate_defers_when_priority_writer_starts_mid_wait() -> None:
+    # The 2026-08-07 interleaving: the rebuild is waiting for the gate when a
+    # derivation batch starts. It must step aside, not queue behind/ahead.
+    holder_has_gate = threading.Event()
+    release = threading.Event()
+
+    def holder() -> None:
+        with db_write_lock():
+            holder_has_gate.set()
+            release.wait(timeout=10)
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    try:
+        assert holder_has_gate.wait(timeout=5)
+        checks = iter([False, False, True])
+        with pytest.raises(WriteGateDeferred):
+            with with_db_write_cooperative(lambda: next(checks, True), slice_s=0.05):
+                pytest.fail("section must not run")
+    finally:
+        release.set()
+        thread.join(timeout=5)
+
+
+def test_cooperative_gate_rechecks_after_acquiring_and_releases() -> None:
+    # Gate is free, but the priority writer appears between the poll and the
+    # acquisition: the section must not run, and the gate must be released.
+    checks = iter([False, True])
+    with pytest.raises(WriteGateDeferred):
+        with with_db_write_cooperative(lambda: next(checks, True), slice_s=0.05):
+            pytest.fail("section must not run")
+
+    # The gate is reentrant, so probe from a DIFFERENT thread to prove the
+    # deferred acquisition released it.
+    acquired = {"ok": False}
+
+    def probe() -> None:
+        if db_write_lock().acquire(timeout=1):
+            acquired["ok"] = True
+            db_write_lock().release()
+
+    thread = threading.Thread(target=probe)
+    thread.start()
+    thread.join(timeout=5)
+    assert acquired["ok"], "deferred acquisition leaked the gate"
+
+
+def test_cooperative_gate_runs_when_uncontended() -> None:
+    ran = []
+    with with_db_write_cooperative(lambda: False, slice_s=0.05):
+        ran.append(1)
+    assert ran == [1]
+
+
+@pytest.mark.asyncio
+async def test_event_loop_stays_responsive_while_gate_is_held(tmp_path) -> None:
+    """Regression for the 2026-08-07 freeze: a thread holding the write gate
+    must stall job bookkeeping (which now runs on worker threads), never the
+    event loop itself."""
+    import asyncio
+
+    from topos.pipeline.job_runner import process_job
+
+    conn = sqlite3.connect(str(tmp_path / "pipeline.db"), check_same_thread=False)
+    apply_pipeline_jobs_v1_up(conn)
+    job_id = enqueue_job(conn, kind="file_ingestion", payload={}, job_id="job-resp-1")
+    conn.execute("UPDATE pipeline_jobs SET status='running' WHERE job_id=?", (job_id,))
+    conn.commit()
+    job = get_job(conn, job_id)
+    assert job is not None
+
+    holder_has_gate = threading.Event()
+    release = threading.Event()
+
+    def holder() -> None:
+        with db_write_lock():
+            holder_has_gate.set()
+            release.wait(timeout=10)
+
+    thread = threading.Thread(target=holder)
+    thread.start()
+    assert holder_has_gate.wait(timeout=5)
+
+    ticks = {"n": 0}
+
+    async def heartbeat() -> None:
+        while True:
+            ticks["n"] += 1
+            await asyncio.sleep(0.02)
+
+    async def fake_exec(_payload):
+        return {"status": "ok", "messages_processed": 0, "records_created": {}}
+
+    hb = asyncio.get_running_loop().create_task(heartbeat())
+    try:
+        with patch.dict("topos.pipeline.job_runner.EXECUTORS", {"file_ingestion": fake_exec}):
+            worker = asyncio.get_running_loop().create_task(process_job(lambda: conn, job))
+            # Bookkeeping is blocked on the gate the holder thread owns; the
+            # loop must keep scheduling coroutines the whole time.
+            await asyncio.sleep(0.6)
+            assert not worker.done(), "bookkeeping should still be waiting on the gate"
+            assert ticks["n"] >= 10, "event loop stalled while another thread held the write gate"
+            release.set()
+            await asyncio.wait_for(worker, timeout=10)
+    finally:
+        hb.cancel()
+        release.set()
+        thread.join(timeout=5)
+
+    assert get_job(conn, job_id)["status"] == "done"
+    conn.close()
 
 
 def test_enqueue_requeues_failed_job(tmp_path) -> None:

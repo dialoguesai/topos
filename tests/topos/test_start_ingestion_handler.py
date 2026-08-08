@@ -15,7 +15,7 @@ from topos.storage.db.migrations.pipeline_jobs_v1 import apply_pipeline_jobs_v1_
 
 @pytest.fixture
 def conn(tmp_path, monkeypatch):
-    db = sqlite3.connect(str(tmp_path / "ingest.db"))
+    db = sqlite3.connect(str(tmp_path / "ingest.db"), check_same_thread=False)
     apply_pipeline_jobs_v1_up(db)
     monkeypatch.setattr("topos.core.state.get_db_connection", lambda: db)
     import topos.core.handlers as handlers_module
@@ -32,7 +32,9 @@ def conn(tmp_path, monkeypatch):
         lambda factory: asyncio.create_task(_kick(factory)),
     )
     yield db
-    db.close()
+    # No close: background job bookkeeping runs on executor threads that can
+    # outlive the test's event loop; closing the shared handle under a live
+    # thread segfaults CPython's sqlite3. The tmp-path db is reaped by pytest.
 
 
 @pytest.mark.asyncio
