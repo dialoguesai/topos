@@ -200,38 +200,44 @@ def test_graph_rebuilds_on_startup_after_debounce_interrupt(tmp_path, monkeypatc
 
 
 
-def test_default_rebuild_does_not_wrap_the_rebuild_in_the_gate():
+def test_no_caller_wraps_the_rebuild_in_the_gate():
     """The rebuild gates its own write phases (M2.2). The gate is a reentrant
-    RLock, so an outer with_db_write() here would silently reinstate the
-    whole-rebuild exclusive hold (~120s observed 2026-08-07) with no test
-    failing anywhere else."""
+    RLock, so an outer with_db_write() at any caller would silently reinstate
+    the whole-rebuild exclusive hold (~120s observed 2026-08-07) with no test
+    failing anywhere else. Checked at every layer the call now passes through:
+    the refresher's rebuild fn and the subprocess dispatcher's in-process
+    fallback."""
     import ast
     import inspect
     import textwrap
 
-    src = textwrap.dedent(inspect.getsource(graph_refresh._default_rebuild))
-    tree = ast.parse(src)
+    from topos.features.entities import rebuild_subprocess
 
-    class _Finder(ast.NodeVisitor):
-        wrapped = False
+    def _gate_wraps_rebuild(fn, callee_names):
+        tree = ast.parse(textwrap.dedent(inspect.getsource(fn)))
 
-        def visit_With(self, node: ast.With) -> None:
-            gate_names = set()
-            for item in node.items:
-                expr = item.context_expr
-                if isinstance(expr, ast.Call):
-                    fn = expr.func
-                    gate_names.add(getattr(fn, "id", None) or getattr(fn, "attr", None))
-            if "with_db_write" in gate_names and "rebuild_entity_graph" in ast.dump(
-                ast.Module(body=node.body, type_ignores=[])
-            ):
-                self.wrapped = True
-            self.generic_visit(node)
+        class _Finder(ast.NodeVisitor):
+            wrapped = False
 
-    finder = _Finder()
-    finder.visit(tree)
-    assert not finder.wrapped, (
-        "_default_rebuild wraps rebuild_entity_graph in with_db_write — the "
-        "reentrant gate makes every internal phase hold a no-op and the whole "
-        "rebuild becomes one exclusive section again"
-    )
+            def visit_With(self, node: ast.With) -> None:
+                gate_names = set()
+                for item in node.items:
+                    expr = item.context_expr
+                    if isinstance(expr, ast.Call):
+                        f = expr.func
+                        gate_names.add(getattr(f, "id", None) or getattr(f, "attr", None))
+                body = ast.dump(ast.Module(body=node.body, type_ignores=[]))
+                if "with_db_write" in gate_names and any(c in body for c in callee_names):
+                    self.wrapped = True
+                self.generic_visit(node)
+
+        finder = _Finder()
+        finder.visit(tree)
+        return finder.wrapped
+
+    assert not _gate_wraps_rebuild(
+        graph_refresh._default_rebuild, ("run_graph_rebuild", "rebuild_entity_graph")
+    ), "_default_rebuild wraps the rebuild in with_db_write — reentrant gate, whole-rebuild hold returns"
+    assert not _gate_wraps_rebuild(
+        rebuild_subprocess.run_graph_rebuild, ("rebuild_entity_graph", "rebuild_in_subprocess")
+    ), "run_graph_rebuild wraps the rebuild in with_db_write — reentrant gate, whole-rebuild hold returns"
