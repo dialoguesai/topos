@@ -164,9 +164,12 @@ def with_db_write() -> Iterator[None]:
         finally:
             held = time.monotonic() - held_at
             if held >= _SLOW_HOLD_WARN_S or waited >= _SLOW_HOLD_WARN_S:
+                # Name the section: an anonymous "held=109.2s" (2026-08-08)
+                # forced a log-archaeology session to find the phase.
                 logger.warning(
-                    "[WRITE_GATE] slow section: waited=%.1fs held=%.1fs — other "
-                    "writers were blocked for this long",
+                    "[WRITE_GATE] slow section at %s: waited=%.1fs held=%.1fs — "
+                    "other writers were blocked for this long",
+                    _caller_site(),
                     waited,
                     held,
                 )
