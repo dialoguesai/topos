@@ -12,7 +12,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from topos.storage.db.write_gate import commit_connection
+from topos.storage.db.write_gate import commit_connection, with_db_write
 
 
 def _now_iso() -> str:
@@ -27,25 +27,26 @@ def ensure_complexity_tables(conn: sqlite3.Connection) -> None:
     ).fetchone()
     if row is not None:
         return
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS complexity_snapshots (
-            snapshot_id TEXT PRIMARY KEY,
-            metric_set TEXT NOT NULL,
-            week_start TEXT,
-            metrics_json TEXT NOT NULL,
-            created_at TEXT NOT NULL,
-            updated_at TEXT NOT NULL
+    with with_db_write():
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS complexity_snapshots (
+                snapshot_id TEXT PRIMARY KEY,
+                metric_set TEXT NOT NULL,
+                week_start TEXT,
+                metrics_json TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
         )
-        """
-    )
-    conn.execute(
-        """
-        CREATE INDEX IF NOT EXISTS idx_complexity_snapshots_metric_week
-        ON complexity_snapshots(metric_set, week_start)
-        """
-    )
-    commit_connection(conn)
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_complexity_snapshots_metric_week
+            ON complexity_snapshots(metric_set, week_start)
+            """
+        )
+        commit_connection(conn)
 
 
 def upsert_snapshot(
@@ -61,25 +62,27 @@ def upsert_snapshot(
     once at the end (engine writes ~16 rows per snapshot)."""
     ensure_complexity_tables(conn)
     now = _now_iso()
-    conn.execute(
-        """
-        INSERT INTO complexity_snapshots (snapshot_id, metric_set, week_start, metrics_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?)
-        ON CONFLICT(snapshot_id) DO UPDATE SET
-            metrics_json=excluded.metrics_json,
-            updated_at=excluded.updated_at
-        """,
-        (
-            snapshot_id,
-            metric_set,
-            week_start,
-            json.dumps(metrics),
-            now,
-            now,
-        ),
-    )
-    if commit:
-        commit_connection(conn)
+    # Reentrant: batch callers (engine) already hold the gate via batched_writes.
+    with with_db_write():
+        conn.execute(
+            """
+            INSERT INTO complexity_snapshots (snapshot_id, metric_set, week_start, metrics_json, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            ON CONFLICT(snapshot_id) DO UPDATE SET
+                metrics_json=excluded.metrics_json,
+                updated_at=excluded.updated_at
+            """,
+            (
+                snapshot_id,
+                metric_set,
+                week_start,
+                json.dumps(metrics),
+                now,
+                now,
+            ),
+        )
+        if commit:
+            commit_connection(conn)
 
 
 def load_snapshots(

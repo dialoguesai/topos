@@ -111,30 +111,36 @@ def ensure_browser_events_table(conn) -> None:
 
 def ensure_browser_url_classification_table(conn) -> None:
     """Create browser URL classification table for enrichment output. Stage 9: enriched_from_table."""
-    conn.execute(f"""
-        CREATE TABLE IF NOT EXISTS {BROWSER_URL_CLASSIFICATION_TABLE} (
-            enriched_from_table TEXT NOT NULL,
-            record_id TEXT NOT NULL,
-            dataset_id TEXT,
-            url TEXT NOT NULL,
-            title TEXT,
-            url_category TEXT,
-            url_confidence REAL,
-            model_name TEXT,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now')),
-            PRIMARY KEY (enriched_from_table, record_id)
-        )
-    """)
-    conn.execute(f"""
-        CREATE INDEX IF NOT EXISTS idx_{BROWSER_URL_CLASSIFICATION_TABLE}_category
-        ON {BROWSER_URL_CLASSIFICATION_TABLE}(url_category)
-    """)
-    conn.execute(f"""
-        CREATE INDEX IF NOT EXISTS idx_{BROWSER_URL_CLASSIFICATION_TABLE}_dataset
-        ON {BROWSER_URL_CLASSIFICATION_TABLE}(dataset_id)
-    """)
-    conn.commit()
+    from ..db.write_gate import commit_connection, with_db_write
+
+    # DDL takes SQLite's write lock at execute time — gate it with the commit
+    # (write_gate lock-order inversion); the enrichment writer calls this on
+    # its write path.
+    with with_db_write():
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {BROWSER_URL_CLASSIFICATION_TABLE} (
+                enriched_from_table TEXT NOT NULL,
+                record_id TEXT NOT NULL,
+                dataset_id TEXT,
+                url TEXT NOT NULL,
+                title TEXT,
+                url_category TEXT,
+                url_confidence REAL,
+                model_name TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (enriched_from_table, record_id)
+            )
+        """)
+        conn.execute(f"""
+            CREATE INDEX IF NOT EXISTS idx_{BROWSER_URL_CLASSIFICATION_TABLE}_category
+            ON {BROWSER_URL_CLASSIFICATION_TABLE}(url_category)
+        """)
+        conn.execute(f"""
+            CREATE INDEX IF NOT EXISTS idx_{BROWSER_URL_CLASSIFICATION_TABLE}_dataset
+            ON {BROWSER_URL_CLASSIFICATION_TABLE}(dataset_id)
+        """)
+        commit_connection(conn)
     logger.debug("Ensured table %s exists", BROWSER_URL_CLASSIFICATION_TABLE)
 
 

@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from topos.core.state import get_engine_config_value, set_engine_config_value
+from topos.storage.db.write_gate import commit_connection, with_db_write
 
 logger = logging.getLogger("topos.llm_integrations_storage")
 
@@ -70,6 +71,21 @@ def _row_to_dict(row: Any) -> Dict[str, Any]:
 
 def ensure_llm_integrations_tables(conn: sqlite3.Connection) -> None:
     _ensure_row_factory(conn)
+    # Existence probe first: this runs on every credentials/preferences read,
+    # and taking the write gate here would park read paths behind long-running
+    # writers (a derive batch holds the gate for seconds).
+    exists = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+        (USAGE_EVENTS_TABLE,),
+    ).fetchone()
+    if exists is None:
+        with with_db_write():
+            _create_llm_integrations_tables(conn)
+            commit_connection(conn)
+    _migrate_legacy_engine_config_storage(conn)
+
+
+def _create_llm_integrations_tables(conn: sqlite3.Connection) -> None:
     conn.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {CREDENTIALS_TABLE} (
@@ -119,16 +135,32 @@ def ensure_llm_integrations_tables(conn: sqlite3.Connection) -> None:
         ON {USAGE_EVENTS_TABLE}(topos_id, event_at DESC)
         """
     )
-    conn.commit()
-    _migrate_legacy_engine_config_storage(conn)
 
 
 def _delete_engine_config_key(conn: sqlite3.Connection, key: str) -> None:
-    conn.execute("DELETE FROM engine_config WHERE key = ?", (key,))
-    conn.commit()
+    with with_db_write():
+        conn.execute("DELETE FROM engine_config WHERE key = ?", (key,))
+        commit_connection(conn)
 
 
 def _migrate_legacy_engine_config_storage(conn: sqlite3.Connection) -> None:
+    # Steady state (post-migration) is three key reads and no gate. With legacy
+    # data present, one hold covers the whole migration: its insert bursts must
+    # not take SQLite's write lock outside the gate.
+    if not any(
+        get_engine_config_value(conn, key)
+        for key in (
+            LEGACY_CREDENTIALS_CONFIG_KEY,
+            LEGACY_PREFERENCES_CONFIG_KEY,
+            LEGACY_USAGE_EVENTS_CONFIG_KEY,
+        )
+    ):
+        return
+    with with_db_write():
+        _migrate_legacy_engine_config_storage_locked(conn)
+
+
+def _migrate_legacy_engine_config_storage_locked(conn: sqlite3.Connection) -> None:
     cred_raw = get_engine_config_value(conn, LEGACY_CREDENTIALS_CONFIG_KEY)
     if cred_raw:
         try:
@@ -221,7 +253,7 @@ def _migrate_legacy_engine_config_storage(conn: sqlite3.Connection) -> None:
                     ),
                 )
         _delete_engine_config_key(conn, LEGACY_USAGE_EVENTS_CONFIG_KEY)
-    conn.commit()
+    commit_connection(conn)
 
 
 def list_credentials(conn: sqlite3.Connection, *, topos_id: str) -> List[Dict[str, Any]]:
@@ -270,23 +302,24 @@ def upsert_credential(
         "last_validated_at": last_validated_at,
         "updated_at": _now_iso(),
     }
-    conn.execute(
-        f"""
-        INSERT OR REPLACE INTO {CREDENTIALS_TABLE}
-        (topos_id, provider, ciphertext, key_hint, default_model, last_validated_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            row["topos_id"],
-            row["provider"],
-            row["ciphertext"],
-            row["key_hint"],
-            row["default_model"],
-            row["last_validated_at"],
-            row["updated_at"],
-        ),
-    )
-    conn.commit()
+    with with_db_write():
+        conn.execute(
+            f"""
+            INSERT OR REPLACE INTO {CREDENTIALS_TABLE}
+            (topos_id, provider, ciphertext, key_hint, default_model, last_validated_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                row["topos_id"],
+                row["provider"],
+                row["ciphertext"],
+                row["key_hint"],
+                row["default_model"],
+                row["last_validated_at"],
+                row["updated_at"],
+            ),
+        )
+        commit_connection(conn)
     logger.info("llm_credential_saved provider=%s topos_id=%s", prov, tid[:12])
     return row
 
@@ -294,11 +327,12 @@ def upsert_credential(
 def delete_credential(conn: sqlite3.Connection, *, topos_id: str, provider: str) -> bool:
     ensure_llm_integrations_tables(conn)
     prov = str(provider or "").strip().lower()
-    cur = conn.execute(
-        f"DELETE FROM {CREDENTIALS_TABLE} WHERE topos_id = ? AND provider = ?",
-        (str(topos_id or "").strip(), prov),
-    )
-    conn.commit()
+    with with_db_write():
+        cur = conn.execute(
+            f"DELETE FROM {CREDENTIALS_TABLE} WHERE topos_id = ? AND provider = ?",
+            (str(topos_id or "").strip(), prov),
+        )
+        commit_connection(conn)
     deleted = cur.rowcount > 0
     if deleted:
         logger.info("llm_credential_deleted provider=%s topos_id=%s", prov, str(topos_id or "")[:12])
@@ -328,15 +362,16 @@ def upsert_preferences(
     if active and active not in ACTIVE_PROVIDERS:
         raise ValueError(f"Invalid active_provider: {active}")
     row = {"topos_id": tid, "active_provider": active, "updated_at": _now_iso()}
-    conn.execute(
-        f"""
-        INSERT OR REPLACE INTO {PREFERENCES_TABLE}
-        (topos_id, active_provider, updated_at)
-        VALUES (?, ?, ?)
-        """,
-        (row["topos_id"], row["active_provider"], row["updated_at"]),
-    )
-    conn.commit()
+    with with_db_write():
+        conn.execute(
+            f"""
+            INSERT OR REPLACE INTO {PREFERENCES_TABLE}
+            (topos_id, active_provider, updated_at)
+            VALUES (?, ?, ?)
+            """,
+            (row["topos_id"], row["active_provider"], row["updated_at"]),
+        )
+        commit_connection(conn)
     return row
 
 
@@ -350,21 +385,20 @@ def update_credential_default_model(
     ensure_llm_integrations_tables(conn)
     prov = str(provider or "").strip().lower()
     tid = str(topos_id or "").strip()
-    conn.execute(
-        f"""
-        UPDATE {CREDENTIALS_TABLE}
-        SET default_model = ?, updated_at = ?
-        WHERE topos_id = ? AND provider = ?
-        """,
-        ((default_model or "").strip() or None, _now_iso(), tid, prov),
-    )
-    conn.commit()
+    with with_db_write():
+        conn.execute(
+            f"""
+            UPDATE {CREDENTIALS_TABLE}
+            SET default_model = ?, updated_at = ?
+            WHERE topos_id = ? AND provider = ?
+            """,
+            ((default_model or "").strip() or None, _now_iso(), tid, prov),
+        )
+        commit_connection(conn)
     return get_credential(conn, topos_id=tid, provider=prov)
 
 
 def insert_usage_event(conn: sqlite3.Connection, row: Dict[str, Any]) -> Dict[str, Any]:
-    from .storage.db.write_gate import commit_connection, with_db_write
-
     ensure_llm_integrations_tables(conn)
     idem = str(row.get("idempotency_key") or "").strip()
     with with_db_write():
