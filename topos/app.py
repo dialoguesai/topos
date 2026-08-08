@@ -184,10 +184,28 @@ async def startup_event() -> None:
 
         _pipeline_conn = state.db_conn if state.db_conn is not None else _get_conn_for_pipeline()
         if _pipeline_conn is not None:
-            recovered = recover_pipeline_jobs(_pipeline_conn)
-            if recovered:
-                logger.info("Recovered stale pipeline jobs on startup: count=%s", recovered)
-            reconcile_graph_on_startup(_pipeline_conn)
+            # Recovery and the graph reconcile take the write gate — and the
+            # reconcile can run a FULL rebuild (113s on 2026-08-07, executed on
+            # the event loop, leaving the node unresponsive for the whole
+            # startup). Run both on a worker thread with that thread's own
+            # connection, off the critical startup path.
+            async def _recover_and_reconcile() -> None:
+                def _run() -> int:
+                    own = state.db_conn if state.db_conn is not None else _get_conn_for_pipeline()
+                    if own is None:
+                        return 0
+                    count = recover_pipeline_jobs(own)
+                    reconcile_graph_on_startup(own)
+                    return count
+
+                try:
+                    recovered = await asyncio.to_thread(_run)
+                    if recovered:
+                        logger.info("Recovered stale pipeline jobs on startup: count=%s", recovered)
+                except Exception as exc:  # noqa: BLE001
+                    logger.warning("Pipeline recovery/graph reconcile at startup failed (non-fatal): %s", exc)
+
+            asyncio.create_task(_recover_and_reconcile())
             start_pipeline_worker(_get_conn_for_pipeline)
     except Exception as e:
         logger.warning("Pipeline worker at startup failed (non-fatal): %s", e)

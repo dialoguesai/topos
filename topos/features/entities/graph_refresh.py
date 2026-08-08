@@ -24,11 +24,14 @@ Design constraints (all learned live):
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import threading
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
+
+from ...storage.db.write_gate import WriteGateDeferred
 
 logger = logging.getLogger("topos.features.entities.graph_refresh")
 
@@ -49,18 +52,23 @@ def _enabled() -> bool:
 
 
 def _default_rebuild() -> None:
-    from ...core.state import get_db_connection
-    from ...storage.db.write_gate import with_db_write
+    from ...core.state import close_thread_db_connection, get_db_connection
+    from ...enrichment.pipeline_activity import is_derivation_in_flight
+    from ...storage.db.write_gate import with_db_write_cooperative
     from .maintenance import rebuild_entity_graph
-
-    from ...core.state import close_thread_db_connection
 
     conn = get_db_connection()
     if conn is None:
         logger.debug("graph refresh skipped: no database connection")
         return
     try:
-        with with_db_write():
+        # The rebuild holds the gate for its whole run (77–156s observed), so
+        # it must acquire cooperatively: if a derivation batch is running — or
+        # starts while this thread is waiting for the gate — WriteGateDeferred
+        # propagates to _fire, which re-arms the debounce instead of letting
+        # the rebuild contend with the batch. That contention, with the event
+        # loop queued behind both, is what froze the node on 2026-08-07.
+        with with_db_write_cooperative(is_derivation_in_flight):
             report = rebuild_entity_graph(conn)
             try:
                 _mark_materialized(conn)
@@ -126,17 +134,24 @@ class _Refresher:
             self._running = True
             self._dirty = False
         logger.info("graph refresh: started")
+        deferred = False
         try:
             self._rebuild_fn()
             self._last_error = None
+        except WriteGateDeferred as exc:
+            # Not a failure: a derivation batch owns (or is about to take) the
+            # write gate. Step aside and retry after the next debounce window.
+            deferred = True
+            logger.info("graph refresh deferred: %s", exc)
         except Exception as exc:  # noqa: BLE001 — refresh must never die
             self._last_error = str(exc)
             logger.warning("graph refresh failed: %s", exc)
         finally:
-            self._last_run_at = datetime.now(timezone.utc).isoformat()
+            if not deferred:
+                self._last_run_at = datetime.now(timezone.utc).isoformat()
             with self._lock:
                 self._running = False
-                rerun = self._dirty_during_run
+                rerun = self._dirty_during_run or deferred
                 self._dirty_during_run = False
             if rerun:
                 self.mark()
@@ -165,6 +180,24 @@ _refresher = _Refresher()
 def mark_graph_dirty() -> None:
     """Enrichment completed for a source — schedule a debounced graph rebuild."""
     try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        loop = None
+    if loop is None:
+        _persist_dirty_generation_this_thread()
+    else:
+        # The generation bump takes the write gate — a blocking OS lock. Taken
+        # here, on the event-loop thread, it stalls every coroutine behind
+        # whatever writer currently holds it (this exact call site was one of
+        # the acquisitions in the 2026-08-07 loop freeze). Persist from the
+        # default executor instead; that thread fetches its own connection.
+        loop.run_in_executor(None, _persist_dirty_generation_this_thread)
+    _refresher.mark()
+
+
+def _persist_dirty_generation_this_thread() -> None:
+    """Bump the persisted dirty generation on THIS thread's own connection."""
+    try:
         from ...core.state import get_db_connection
 
         conn = get_db_connection()
@@ -172,7 +205,6 @@ def mark_graph_dirty() -> None:
             _persist_dirty_generation(conn)
     except Exception as exc:  # noqa: BLE001
         logger.debug("graph dirty persistence skipped: %s", exc)
-    _refresher.mark()
 
 
 def _persist_dirty_generation(conn) -> None:
@@ -203,7 +235,12 @@ def reconcile_graph_on_startup(conn) -> None:
         return
     dirty, materialized = int(row[0]), int(row[1])
     if dirty > materialized:
-        _refresher._rebuild_fn()
+        try:
+            _refresher._rebuild_fn()
+        except WriteGateDeferred as exc:
+            # A derivation is already running at startup; catch up debounced.
+            logger.info("startup graph reconcile deferred: %s", exc)
+            _refresher.mark()
 
 
 def _mark_materialized(conn) -> None:

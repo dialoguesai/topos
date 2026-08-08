@@ -83,6 +83,72 @@ def test_rebuild_errors_do_not_kill_the_refresher(monkeypatch):
     assert _wait_for(lambda: len(calls) == 2), "a failed rebuild must not disable future refreshes"
 
 
+def test_deferred_rebuild_rearms_instead_of_failing(monkeypatch):
+    """A rebuild stepping aside for a derivation batch (WriteGateDeferred) is
+    not an error: it must re-arm the debounce and run once the coast is clear."""
+    from topos.storage.db.write_gate import WriteGateDeferred
+
+    monkeypatch.setenv("TOPOS_GRAPH_REFRESH_DEBOUNCE_S", "0.05")
+    calls = []
+
+    def rebuild():
+        calls.append(1)
+        if len(calls) == 1:
+            raise WriteGateDeferred("derivation in flight")
+
+    graph_refresh.reset_for_tests(rebuild_fn=rebuild)
+    graph_refresh.mark_graph_dirty()
+    assert _wait_for(lambda: len(calls) >= 2), "deferred rebuild must retry"
+    assert graph_refresh.status()["last_error"] is None
+
+
+def test_default_rebuild_defers_while_derivation_in_flight(monkeypatch):
+    """The real rebuild path must refuse to contend with an in-flight
+    derivation for the write gate (the 2026-08-07 freeze interleaving)."""
+    import sqlite3
+
+    from topos.enrichment.pipeline_activity import derivation_in_flight, reset_for_tests
+    from topos.storage.db.write_gate import WriteGateDeferred
+
+    reset_for_tests()
+    db = sqlite3.connect(":memory:")
+    monkeypatch.setattr("topos.core.state.get_db_connection", lambda: db)
+    monkeypatch.setattr("topos.core.state.close_thread_db_connection", lambda: None)
+
+    with derivation_in_flight():
+        with pytest.raises(WriteGateDeferred):
+            graph_refresh._default_rebuild()
+
+
+@pytest.mark.asyncio
+async def test_mark_graph_dirty_persists_off_the_event_loop(monkeypatch):
+    """The dirty-generation bump takes the write gate; from async code it must
+    run on an executor thread, never on the loop (2026-08-07 freeze site)."""
+    import asyncio
+
+    monkeypatch.setenv("TOPOS_GRAPH_REFRESH_DEBOUNCE_S", "60")
+    graph_refresh.reset_for_tests(rebuild_fn=lambda: None)
+
+    seen = {}
+    monkeypatch.setattr(
+        "topos.core.state.get_db_connection", lambda: object()
+    )
+    monkeypatch.setattr(
+        graph_refresh,
+        "_persist_dirty_generation",
+        lambda conn: seen.setdefault("thread", threading.current_thread()),
+    )
+
+    loop_thread = threading.current_thread()
+    graph_refresh.mark_graph_dirty()
+    deadline = asyncio.get_running_loop().time() + 5
+    while "thread" not in seen and asyncio.get_running_loop().time() < deadline:
+        await asyncio.sleep(0.02)
+
+    assert seen.get("thread") is not None, "dirty generation was never persisted"
+    assert seen["thread"] is not loop_thread, "persistence ran on the event-loop thread"
+
+
 def test_disabled_via_env(monkeypatch):
     calls = []
     monkeypatch.setenv("TOPOS_GRAPH_REFRESH", "off")

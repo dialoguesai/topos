@@ -10,6 +10,7 @@ import threading
 import uuid
 from typing import Any, Awaitable, Callable, Dict, Optional
 
+from ..storage.db.write_gate import is_busy_error
 from .job_store import (
     claim_matching_queued_jobs,
     claim_next_job,
@@ -207,39 +208,92 @@ def _coalesce_inbox_jobs(
     return [job, *siblings], merged_payload
 
 
-async def process_job(conn, job: Dict[str, Any]) -> None:
+async def _run_db(conn_factory: Callable[[], Any], fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+    """Run one job-store write on a worker thread with that thread's own connection.
+
+    Every job-store helper takes the process-wide write gate — a blocking OS
+    lock. Run on the event loop, that stalls every coroutine behind whatever
+    writer currently holds it (on 2026-08-07: a graph rebuild holding it 156s,
+    with the control-plane keepalive in the blast radius). The factory is
+    invoked INSIDE the thread so the loop thread's connection never crosses
+    threads — handing it across is the sharing that caused the 2026-07-30
+    transaction corruption.
+    """
+
+    def _call() -> Any:
+        own = conn_factory()
+        if own is None:
+            raise RuntimeError("no database connection for pipeline job store")
+        return fn(own, *args, **kwargs)
+
+    return await asyncio.to_thread(_call)
+
+
+async def process_job(conn_factory: Callable[[], Any], job: Dict[str, Any]) -> None:
     """Run one claimed job (plus any coalesced siblings) to completion."""
     job_id = str(job["job_id"])
     kind = str(job["kind"])
 
     executor = EXECUTORS.get(kind)
     if executor is None:
-        fail_job(conn, job_id, error=f"Unknown job kind: {kind}")
+        await _run_db(conn_factory, fail_job, job_id, error=f"Unknown job kind: {kind}")
         return
 
     def _progress_updater(progress: Dict[str, Any]) -> None:
-        update_job_progress(conn, job_id, progress)
+        def _write() -> None:
+            try:
+                own = conn_factory()
+                if own is not None:
+                    update_job_progress(own, job_id, progress)
+            except Exception as exc:  # noqa: BLE001 — progress is best-effort
+                logger.debug("job progress write failed job_id=%s: %s", job_id, exc)
+
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            _write()
+        else:
+            # Called from async executor code: never take the write gate on
+            # the event-loop thread.
+            loop.run_in_executor(None, _write)
 
     payload = dict(job.get("payload") or {})
     jobs = [job]
     if kind == "inbox_deferred_enrichment":
-        jobs, payload = _coalesce_inbox_jobs(conn, job, payload)
+        jobs, payload = await _run_db(conn_factory, _coalesce_inbox_jobs, job, payload)
     if kind == "enrichment_process_source":
         payload["_progress_updater"] = _progress_updater
 
     try:
         result = await executor(payload)
-        if str(result.get("status") or "ok") == "error":
-            error = str(result.get("error") or result.get("message") or "failed")
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("pipeline job failed job_id=%s kind=%s: %s", job_id, kind, exc, exc_info=exc)
+
+        def _mark_crashed(own: Any, error: str = str(exc)) -> None:
             for entry in jobs:
-                fail_job(conn, str(entry["job_id"]), error=error)
-                update_job_progress(conn, str(entry["job_id"]), {"status": "failed", "result": result})
-            return
+                fail_job(own, str(entry["job_id"]), error=error)
+                update_job_progress(own, str(entry["job_id"]), {"status": "failed", "error": error})
+
+        await _run_db(conn_factory, _mark_crashed)
+        return
+
+    if str(result.get("status") or "ok") == "error":
+        error = str(result.get("error") or result.get("message") or "failed")
+
+        def _mark_failed(own: Any) -> None:
+            for entry in jobs:
+                fail_job(own, str(entry["job_id"]), error=error)
+                update_job_progress(own, str(entry["job_id"]), {"status": "failed", "result": result})
+
+        await _run_db(conn_factory, _mark_failed)
+        return
+
+    def _mark_done(own: Any) -> None:
         for entry in jobs:
             entry_id = str(entry["job_id"])
-            complete_job(conn, entry_id, detail=result)
+            complete_job(own, entry_id, detail=result)
             update_job_progress(
-                conn,
+                own,
                 entry_id,
                 {
                     "status": "completed",
@@ -250,17 +304,14 @@ async def process_job(conn, job: Dict[str, Any]) -> None:
             )
             if kind == "inbox_deferred_enrichment" and entry.get("write_id"):
                 record_derivation_completion(
-                    conn,
+                    own,
                     write_id=str(entry["write_id"]),
                     job_id=entry_id,
                     source_id=entry.get("source_id"),
                     sync_batch_id=entry.get("sync_batch_id"),
                 )
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("pipeline job failed job_id=%s kind=%s: %s", job_id, kind, exc, exc_info=exc)
-        for entry in jobs:
-            fail_job(conn, str(entry["job_id"]), error=str(exc))
-            update_job_progress(conn, str(entry["job_id"]), {"status": "failed", "error": str(exc)})
+
+    await _run_db(conn_factory, _mark_done)
 
 
 #: Idle poll interval. Every tick claims against SQLite, so this is also how
@@ -274,46 +325,57 @@ _MAX_POLL_SECONDS = 5.0
 async def _worker_loop(conn_factory: Callable[[], Any]) -> None:
     idle_delay = _IDLE_POLL_SECONDS
     while True:
-        if not _enabled():
-            await asyncio.sleep(1.0)
-            continue
-        conn = conn_factory()
-        if conn is None:
-            await asyncio.sleep(1.0)
-            continue
-
-        # claim_next_job takes the process-wide write gate — a BLOCKING
-        # threading lock. Called directly it ran on the event loop, so every
-        # 250ms the loop could stall behind whatever writer held the gate (a
-        # batch write, or a 77s graph rebuild), taking the control-plane
-        # keepalive down with it.
-        #
-        # The factory is re-invoked INSIDE the worker thread rather than
-        # capturing the connection above. get_db_connection is thread-local, so
-        # this hands the thread its own handle; passing the loop thread's
-        # connection across would silently reinstate the cross-thread sharing
-        # that caused the 2026-07-30 transaction corruption in the first place.
-        def _claim() -> Optional[Dict[str, Any]]:
-            own = conn_factory()
-            if own is None:
-                return None
-            return claim_next_job(own, lease_owner=_lease_owner)
-
-        job = await asyncio.to_thread(_claim)
-        if job is None:
-            await asyncio.sleep(idle_delay)
-            # Ease off while nothing is queued; snap back the moment work lands.
-            idle_delay = min(idle_delay * 1.5, _MAX_POLL_SECONDS)
-            continue
-        idle_delay = _IDLE_POLL_SECONDS
         try:
-            await process_job(conn, job)
-        except Exception as exc:  # noqa: BLE001
-            logger.warning("pipeline worker loop error: %s", exc, exc_info=exc)
+            if not _enabled():
+                await asyncio.sleep(1.0)
+                continue
+
+            # claim_next_job takes the process-wide write gate — a BLOCKING
+            # threading lock. Called directly it ran on the event loop, so every
+            # 250ms the loop could stall behind whatever writer held the gate (a
+            # batch write, or a 77s graph rebuild), taking the control-plane
+            # keepalive down with it.
+            #
+            # The factory is re-invoked INSIDE the worker thread rather than
+            # capturing the connection above. get_db_connection is thread-local, so
+            # this hands the thread its own handle; passing the loop thread's
+            # connection across would silently reinstate the cross-thread sharing
+            # that caused the 2026-07-30 transaction corruption in the first place.
+            def _claim() -> Optional[Dict[str, Any]]:
+                own = conn_factory()
+                if own is None:
+                    return None
+                return claim_next_job(own, lease_owner=_lease_owner)
+
+            job = await asyncio.to_thread(_claim)
+            if job is None:
+                await asyncio.sleep(idle_delay)
+                # Ease off while nothing is queued; snap back the moment work lands.
+                idle_delay = min(idle_delay * 1.5, _MAX_POLL_SECONDS)
+                continue
+            idle_delay = _IDLE_POLL_SECONDS
             try:
-                fail_job(conn, str(job["job_id"]), error=str(exc))
-            except Exception:
-                pass
+                await process_job(conn_factory, job)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("pipeline worker loop error: %s", exc, exc_info=exc)
+                try:
+                    await _run_db(conn_factory, fail_job, str(job["job_id"]), error=str(exc))
+                except Exception:  # noqa: BLE001
+                    pass
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            # The claim used to sit OUTSIDE any try: on 2026-08-07 a "database
+            # is locked" that outlived claim_next_job's bounded busy-retries
+            # killed this task with an unretrieved exception, and the queue
+            # silently stopped draining. Nothing that happens in one iteration
+            # is allowed to end the loop — back off and try again.
+            if is_busy_error(exc):
+                logger.info("pipeline claim found the database locked; backing off: %s", exc)
+            else:
+                logger.warning("pipeline worker loop error: %s", exc, exc_info=exc)
+            await asyncio.sleep(idle_delay)
+            idle_delay = min(idle_delay * 1.5, _MAX_POLL_SECONDS)
 
 
 def start_pipeline_worker(conn_factory: Callable[[], Any]) -> None:
@@ -340,13 +402,19 @@ def recover_pipeline_jobs(conn) -> int:
 async def process_pending_jobs_once(conn_factory: Callable[[], Any], *, limit: int = 10) -> int:
     """Process up to ``limit`` queued jobs synchronously (for tests and repair tools)."""
     processed = 0
-    conn = conn_factory()
-    if conn is None:
+    if conn_factory() is None:
         return 0
+
+    def _claim() -> Optional[Dict[str, Any]]:
+        own = conn_factory()
+        if own is None:
+            return None
+        return claim_next_job(own, lease_owner=_lease_owner)
+
     for _ in range(max(1, int(limit))):
-        job = claim_next_job(conn, lease_owner=_lease_owner)
+        job = await asyncio.to_thread(_claim)
         if job is None:
             break
-        await process_job(conn, job)
+        await process_job(conn_factory, job)
         processed += 1
     return processed

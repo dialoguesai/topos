@@ -1,6 +1,8 @@
 """Engine config, UI config, table prefs, and identity message handlers."""
 from __future__ import annotations
 
+import asyncio
+
 import topos.core.handlers as hub
 
 from .common import (
@@ -148,19 +150,28 @@ async def handle_llm_integrations_storage(message: Dict[str, Any]) -> Optional[D
     req_id = message.get("id")
     from ...llm_integrations_storage import handle_storage_op
 
-    conn = hub.get_db_connection()
-    if not conn:
-        return {"id": req_id, "status": "error", "error": "Database not available"}
     payload = message.get("payload") or {}
     op = str(payload.get("op") or "").strip()
     args = payload.get("args") if isinstance(payload.get("args"), dict) else {}
     if not op:
         return {"id": req_id, "status": "error", "error": "op is required"}
-    try:
-        result = handle_storage_op(conn, op=op, args=args)
-    except ValueError as exc:
-        return {"id": req_id, "status": "error", "error": str(exc)}
-    return {"id": req_id, "status": "ok", "payload": {"result": result}}
+
+    def _run() -> Optional[Dict[str, Any]]:
+        # Write ops (insert_usage_event, upsert_*) take the process-wide write
+        # gate — a blocking OS lock. On the event-loop thread that stalls every
+        # coroutine behind the current holder (one of the acquisitions in the
+        # 2026-08-07 loop freeze), so the op runs here on a worker thread with
+        # this thread's own connection.
+        conn = hub.get_db_connection()
+        if not conn:
+            return {"id": req_id, "status": "error", "error": "Database not available"}
+        try:
+            result = handle_storage_op(conn, op=op, args=args)
+        except ValueError as exc:
+            return {"id": req_id, "status": "error", "error": str(exc)}
+        return {"id": req_id, "status": "ok", "payload": {"result": result}}
+
+    return await asyncio.to_thread(_run)
 
 @handles("get_user_identity")
 async def handle_get_user_identity(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
