@@ -196,6 +196,11 @@ def commit_connection(conn: sqlite3.Connection) -> None:
     def _commit() -> None:
         conn.commit()
 
+    # Same diagnostic as with_db_write: this path takes the same blocking lock,
+    # and during the 2026-08-07 rebuild stall the caller queuing here was
+    # invisible precisely because only with_db_write was instrumented.
+    if _on_event_loop():
+        _warn_loop_acquisition()
     with _WRITE_LOCK:
         sqlite_retry_busy(_commit)
 
@@ -203,6 +208,8 @@ def commit_connection(conn: sqlite3.Connection) -> None:
 @contextmanager
 def batched_writes(conn: sqlite3.Connection) -> Iterator[None]:
     """Hold the write gate for a batch of mutations; single commit at the end."""
+    if _on_event_loop():
+        _warn_loop_acquisition()
     with _WRITE_LOCK:
         token = _defer_commit.set(True)
         try:
