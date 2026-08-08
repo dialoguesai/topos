@@ -134,6 +134,9 @@ Implemented, uncommitted. **The node must be restarted to pick any of this up.**
 | M0.4 repair the 2026-07-30 loss | **blocked on node restart** | see below |
 | M1 connection per thread | done | `core/state.py` |
 | M2.1 write-gate loop/slow-hold warnings | done | `storage/db/write_gate.py` |
+| M2.1b instrument `commit_connection`/`batched_writes` (the uninstrumented gate paths) + flag ungated write transactions (WAL lock-order inversion) | done 2026-08-08 | `storage/db/write_gate.py` |
+| M2.2 rebuild endpoint off the loop | done 2026-08-08 | `api/signal.py` |
+| M2.3 rebuild holds the gate only for write phases; edge fold runs in memory, swap is one DELETE + batched INSERT (smoke: worst concurrent-writer wait 0.115s vs full-rebuild wait before) | done 2026-08-08 | `features/entities/maintenance.py`, `features/entities/edges.py`, `features/entities/graph_refresh.py` |
 | M3.1 graph refresh defers to batches | done | `enrichment/pipeline_activity.py`, `features/entities/graph_refresh.py` |
 | M3.2 DDL once per connection | done | `enrichment/derived_tables.py` |
 | M3.3 defer global recompute | done | `enrichment/jobs/canonical/topic_clusters_job.py`, `pipeline/job_runner.py` |
