@@ -85,15 +85,7 @@ def _failed_ledger(conn: sqlite3.Connection) -> list[tuple]:
 # permanently red for a defect it cannot fix on its own — but printed loudly on
 # every run so the gap stays visible instead of decaying into background noise.
 # Remove an entry the moment the underlying defect is fixed.
-KNOWN_NO_OP_STEPS = {
-    "backfill-attention-triage": (
-        "attention_triage is registered in SIGNAL_DERIVATION_JOBS only, never in "
-        "CANONICAL_JOBS, but the 1.3.0 manifest runs it with include_signal=false. "
-        "EnrichmentOrchestrator.run_canonical() filters job_names against "
-        "canonical_jobs, so the step ledgers done with jobs_run=0 and writes zero "
-        "triage_verdicts — on real nodes as well as CI."
-    ),
-}
+KNOWN_NO_OP_STEPS: dict[str, str] = {}
 
 
 def _table_count(conn: sqlite3.Connection, table: str, where: str = "", params: tuple = ()) -> int:
@@ -221,6 +213,23 @@ def _assert_steps_did_work(
         )
     mentions = _table_count(conn, "entity_mentions")
     print(f"ok: extraction wrote {extracted} message_entities, {mentions} entity_mentions")
+
+    # backfill-attention-triage: attention_triage is a SIGNAL job, so the step
+    # only does anything if the runner routes it down the signal lane. It spent
+    # 1.3.0–1.3.6 ledgering "done" with jobs_run=0 and zero verdicts, which is
+    # why this asserts on the verdict rows and not on the step's status.
+    triage_detail = _ledger_detail(conn, "backfill-attention-triage")
+    if triage_detail:
+        verdicts = _table_count(conn, "triage_verdicts")
+        if verdicts <= 0:
+            raise AssertionError(
+                f"backfill-attention-triage wrote 0 triage_verdicts "
+                f"(detail={triage_detail}) — the step ledgered 'done' without "
+                f"running the triage job. Check that the runner routes "
+                f"SIGNAL_JOB_REGISTRY jobs through signal_job_names; "
+                f"run_canonical() silently drops them."
+            )
+        print(f"ok: backfill-attention-triage wrote {verdicts} triage_verdicts")
 
     graph_detail = _ledger_detail(conn, "rebuild-entity-graph")
     if graph_detail:

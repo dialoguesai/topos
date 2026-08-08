@@ -180,7 +180,27 @@
     {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
-      "steps": [],
+      "steps": [
+        {
+          "id": "backfill-attention-triage-redo",
+          "kind": "enrichment_reprocess",
+          "title": "Re-run the attention triage backfill (1.3.0 step was a routing no-op)",
+          "why": "The 1.3.0 backfill-attention-triage step ledgered 'done' on every node without writing a single verdict: attention_triage lives in SIGNAL_DERIVATION_JOBS, but the runner routed it through run_canonical(), which filters job_names against CANONICAL_JOBS and silently dropped it. Nodes that upgraded through 1.3.0–1.3.6 therefore have a green ledger row and zero backfilled triage history. The runner now routes signal-registry jobs down the narrow signal lane; this step re-declares the backfill so already-upgraded nodes are healed too. Days triaged organically since 1.3.0 no-op via the (day, record_id) upserts.",
+          "params": {
+            "job_names": [
+              "attention_triage"
+            ],
+            "force_reprocess": true,
+            "include_signal": false,
+            "per_source": true,
+            "source_filter": "sources with canonical message/journal/activity records"
+          },
+          "progress": "TUI progress bar on the node + GET /v1/upgrade/status",
+          "idempotent": "verdicts are (day, record_id) upserts; signal objects no-op when unchanged",
+          "estimated_duration": "measured ~0.7s per day of history on a real node (no LLM, no network); minutes at worst for multi-year nodes",
+          "order": 1
+        }
+      ],
       "notes": []
     }
   ]
