@@ -25,6 +25,7 @@ from urllib.parse import urlparse
 
 import numpy as np
 
+from ...storage.db.write_gate import batched_writes, commit_connection, with_db_write
 from ..entities.declared_mappings import own_project_for_host, own_project_for_terms
 from ..signal.signal_object_store import SignalObjectStore
 from . import instruments, intents as intents_mod
@@ -253,12 +254,13 @@ def resolve_token_labels(conn, tokens: List[str]) -> Dict[str, str]:
 
 def set_user_label(conn, day_iso: str, record_id: str, label: str) -> None:
     """WS2: ground-truth label from the verdict-review loop (owner-only)."""
-    conn.execute(
-        "UPDATE triage_verdicts SET user_label=?, user_labeled_at=datetime('now') "
-        "WHERE day=? AND record_id=?",
-        (label, day_iso, record_id),
-    )
-    conn.commit()
+    with with_db_write():
+        conn.execute(
+            "UPDATE triage_verdicts SET user_label=?, user_labeled_at=datetime('now') "
+            "WHERE day=? AND record_id=?",
+            (label, day_iso, record_id),
+        )
+        commit_connection(conn)
 
 
 def _aggregate_visits(day_items: List[TriageItem]) -> List[TriageItem]:
@@ -424,31 +426,31 @@ def run_daily_triage(conn: sqlite3.Connection, day_iso: str, *,
     _assign_verdicts(day_items, pi_counts, top_mass, ranks)
     seeds = _pick_seeds(day_items, ranks, conn)
 
-    for it in day_items:
-        conn.execute(
-            "INSERT INTO triage_verdicts "
-            "(day, record_id, canonical_table, source_id, verdict, aligned, experienced, "
-            " engagement_kind, floor_reason, comp_novelty, knn_surprisal, item_kl, attachment, "
-            " gen_score, align_mass, visit_count, grounds_json, routine_version, "
-            " comp_resid, junk) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
-            "ON CONFLICT(day, record_id) DO UPDATE SET "
-            " canonical_table=excluded.canonical_table, source_id=excluded.source_id, "
-            " verdict=excluded.verdict, aligned=excluded.aligned, "
-            " experienced=excluded.experienced, engagement_kind=excluded.engagement_kind, "
-            " floor_reason=excluded.floor_reason, comp_novelty=excluded.comp_novelty, "
-            " knn_surprisal=excluded.knn_surprisal, item_kl=excluded.item_kl, "
-            " attachment=excluded.attachment, gen_score=excluded.gen_score, "
-            " align_mass=excluded.align_mass, visit_count=excluded.visit_count, "
-            " grounds_json=excluded.grounds_json, routine_version=excluded.routine_version, "
-            " comp_resid=excluded.comp_resid, junk=excluded.junk",
-            (day_iso, it.record_id, it.table, it.source_id, it.verdict, int(it.aligned),
-             int(it.experienced), it.engagement_kind, it.floor_reason, it.comp_novelty,
-             it.knn_surprisal, it.item_kl, it.attachment, it.gen_score, it.align_mass,
-             it.visit_count, json.dumps(it.grounds), ROUTINE_VERSION,
-             it.comp_resid, int(it.junk)),
-        )
-    conn.commit()
+    with batched_writes(conn):
+        for it in day_items:
+            conn.execute(
+                "INSERT INTO triage_verdicts "
+                "(day, record_id, canonical_table, source_id, verdict, aligned, experienced, "
+                " engagement_kind, floor_reason, comp_novelty, knn_surprisal, item_kl, attachment, "
+                " gen_score, align_mass, visit_count, grounds_json, routine_version, "
+                " comp_resid, junk) "
+                "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) "
+                "ON CONFLICT(day, record_id) DO UPDATE SET "
+                " canonical_table=excluded.canonical_table, source_id=excluded.source_id, "
+                " verdict=excluded.verdict, aligned=excluded.aligned, "
+                " experienced=excluded.experienced, engagement_kind=excluded.engagement_kind, "
+                " floor_reason=excluded.floor_reason, comp_novelty=excluded.comp_novelty, "
+                " knn_surprisal=excluded.knn_surprisal, item_kl=excluded.item_kl, "
+                " attachment=excluded.attachment, gen_score=excluded.gen_score, "
+                " align_mass=excluded.align_mass, visit_count=excluded.visit_count, "
+                " grounds_json=excluded.grounds_json, routine_version=excluded.routine_version, "
+                " comp_resid=excluded.comp_resid, junk=excluded.junk",
+                (day_iso, it.record_id, it.table, it.source_id, it.verdict, int(it.aligned),
+                 int(it.experienced), it.engagement_kind, it.floor_reason, it.comp_novelty,
+                 it.knn_surprisal, it.item_kl, it.attachment, it.gen_score, it.align_mass,
+                 it.visit_count, json.dumps(it.grounds), ROUTINE_VERSION,
+                 it.comp_resid, int(it.junk)),
+            )
 
     quadrants = dict(Counter(i.verdict for i in day_items))
     _write_signal_objects(conn, day_iso, day_items, seeds, day_kl, movers,

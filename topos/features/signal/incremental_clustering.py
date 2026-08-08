@@ -16,6 +16,7 @@ import sqlite3
 import uuid
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
+from ...storage.db.write_gate import batched_writes
 from .vector_codec import decode_vector
 from .vector_math import cosine_similarity
 from .topic_clustering import _normalize
@@ -90,55 +91,57 @@ def assign_embeddings(
     clusters = load_cluster_centroids(conn)
     assigned = 0
     pooled = 0
-    for row in embedding_rows:
-        vector = row.get("vector")
-        if not isinstance(vector, list) or not vector:
-            continue
-        vector = _normalize([float(x) for x in vector])
-        best_cluster, best_sim = None, 0.0
-        for cluster in clusters:
-            if len(cluster["centroid"]) != len(vector):
+    # Per-row work under the hold is a handful of in-memory cosines against
+    # the (small) centroid set; the batch is one ingest's embeddings.
+    with batched_writes(conn):
+        for row in embedding_rows:
+            vector = row.get("vector")
+            if not isinstance(vector, list) or not vector:
                 continue
-            sim = cosine_similarity(vector, cluster["centroid"])
-            if sim > best_sim:
-                best_cluster, best_sim = cluster, sim
-        if best_cluster is not None and best_sim >= threshold:
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO topic_cluster_members (
-                    member_id, cluster_id, record_id, source_id, record_type,
-                    text_preview, weight, metadata_json
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, '{}')
-                """,
-                (
-                    f"tcm_{uuid.uuid4().hex[:16]}",
-                    best_cluster["cluster_id"],
-                    row.get("record_id"),
-                    row.get("source_id"),
-                    row.get("record_type") or "unknown",
-                    row.get("text_preview"),
-                    round(float(best_sim), 4),
-                ),
-            )
-            best_cluster["member_count"] += 1
-            conn.execute(
-                """
-                UPDATE topic_clusters
-                SET member_count = member_count + 1,
-                    updated_at = datetime('now')
-                WHERE cluster_id = ?
-                """,
-                (best_cluster["cluster_id"],),
-            )
-            _set_embedding_cluster(conn, row.get("embedding_id"), best_cluster["cluster_id"])
-            assigned += 1
-        else:
-            conn.execute(
-                "INSERT OR IGNORE INTO cluster_candidates (embedding_id, record_id, source_id) VALUES (?, ?, ?)",
-                (row.get("embedding_id"), row.get("record_id"), row.get("source_id")),
-            )
-            pooled += 1
-    conn.commit()
+            vector = _normalize([float(x) for x in vector])
+            best_cluster, best_sim = None, 0.0
+            for cluster in clusters:
+                if len(cluster["centroid"]) != len(vector):
+                    continue
+                sim = cosine_similarity(vector, cluster["centroid"])
+                if sim > best_sim:
+                    best_cluster, best_sim = cluster, sim
+            if best_cluster is not None and best_sim >= threshold:
+                conn.execute(
+                    """
+                    INSERT OR REPLACE INTO topic_cluster_members (
+                        member_id, cluster_id, record_id, source_id, record_type,
+                        text_preview, weight, metadata_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, '{}')
+                    """,
+                    (
+                        f"tcm_{uuid.uuid4().hex[:16]}",
+                        best_cluster["cluster_id"],
+                        row.get("record_id"),
+                        row.get("source_id"),
+                        row.get("record_type") or "unknown",
+                        row.get("text_preview"),
+                        round(float(best_sim), 4),
+                    ),
+                )
+                best_cluster["member_count"] += 1
+                conn.execute(
+                    """
+                    UPDATE topic_clusters
+                    SET member_count = member_count + 1,
+                        updated_at = datetime('now')
+                    WHERE cluster_id = ?
+                    """,
+                    (best_cluster["cluster_id"],),
+                )
+                _set_embedding_cluster(conn, row.get("embedding_id"), best_cluster["cluster_id"])
+                assigned += 1
+            else:
+                conn.execute(
+                    "INSERT OR IGNORE INTO cluster_candidates (embedding_id, record_id, source_id) VALUES (?, ?, ?)",
+                    (row.get("embedding_id"), row.get("record_id"), row.get("source_id")),
+                )
+                pooled += 1
     return {"assigned": assigned, "pooled": pooled}
 
 

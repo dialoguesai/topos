@@ -18,6 +18,7 @@ import sqlite3
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+from ...storage.db.write_gate import batched_writes
 from . import definitions as defs
 from .fold import fold, init_state, merge, parse_ts, summarize, window_state
 
@@ -99,26 +100,30 @@ class StatsEngine:
 
         folded = 0
         skipped_seen = 0
-        for defn in defs.load_enabled_definitions(self._conn):
-            table_rows = by_table.get(defn["canonical_table"]) or []
-            if not table_rows:
-                continue
-            # intervals require event-time order per group
-            if defn["stat_kind"] == "intervals":
-                table_rows = sorted(
-                    table_rows, key=lambda r: (defs.row_event_ts(r) or datetime.min.replace(tzinfo=timezone.utc))
-                )
-            for row in table_rows:
-                record_id = _record_id(row)
-                if record_id and self._already_seen(defn["stat_id"], record_id):
-                    skipped_seen += 1
+        definitions = defs.load_enabled_definitions(self._conn)
+        # The fold interleaves per-row writes with quick indexed lookups
+        # (_already_seen/_load_state) and callers batch at ≤500 rows, so one
+        # gated batch covers the loop; the reads above stay outside the hold.
+        with batched_writes(self._conn):
+            for defn in definitions:
+                table_rows = by_table.get(defn["canonical_table"]) or []
+                if not table_rows:
                     continue
-                if self._fold_row(defn, row):
-                    folded += 1
-                    if record_id:
-                        self._mark_seen(defn["stat_id"], record_id)
-        self._prune_seen()
-        self._conn.commit()
+                # intervals require event-time order per group
+                if defn["stat_kind"] == "intervals":
+                    table_rows = sorted(
+                        table_rows, key=lambda r: (defs.row_event_ts(r) or datetime.min.replace(tzinfo=timezone.utc))
+                    )
+                for row in table_rows:
+                    record_id = _record_id(row)
+                    if record_id and self._already_seen(defn["stat_id"], record_id):
+                        skipped_seen += 1
+                        continue
+                    if self._fold_row(defn, row):
+                        folded += 1
+                        if record_id:
+                            self._mark_seen(defn["stat_id"], record_id)
+            self._prune_seen()
         return {"rows_folded": folded, "rows_skipped_seen": skipped_seen}
 
     def _fold_row(self, defn: Dict[str, Any], row: Dict[str, Any]) -> bool:

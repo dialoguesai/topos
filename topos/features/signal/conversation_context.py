@@ -20,6 +20,8 @@ import logging
 import sqlite3
 from typing import Any, Dict, List, Optional, Tuple
 
+from ...storage.db.write_gate import batched_writes
+
 logger = logging.getLogger("topos.features.signal.conversation_context")
 
 _MAX_CONVERSATIONS_PER_PASS = 20
@@ -142,6 +144,9 @@ def classify_untagged_conversations(
         def classify(excerpts: List[str]) -> Optional[str]:  # noqa: F811
             return _classify_with_model(model, excerpts, conn)
 
+    # Classification is a model call per conversation — collect the labels
+    # first, then land the tags in one short gated write pass.
+    labeled: List[Tuple[str, str, str]] = []
     for conversation_id, dataset_id in candidates:
         excerpts = _first_messages(conn, conversation_id)
         if not excerpts:
@@ -150,13 +155,15 @@ def classify_untagged_conversations(
         label = classify(excerpts)
         if label not in ("work", "personal"):
             continue
-        conn.execute(
-            "UPDATE conversations SET context_tag=?, context_tag_source=?, "
-            "updated_at=datetime('now') "
-            "WHERE conversation_id=? AND dataset_id=? "
-            "AND context_tag IS NULL AND (context_tag_source IS NULL OR context_tag_source='')",
-            (label, f"auto:{model or 'injected'}", conversation_id, dataset_id),
-        )
-        tagged += 1
-    conn.commit()
+        labeled.append((label, conversation_id, dataset_id))
+    with batched_writes(conn):
+        for label, conversation_id, dataset_id in labeled:
+            conn.execute(
+                "UPDATE conversations SET context_tag=?, context_tag_source=?, "
+                "updated_at=datetime('now') "
+                "WHERE conversation_id=? AND dataset_id=? "
+                "AND context_tag IS NULL AND (context_tag_source IS NULL OR context_tag_source='')",
+                (label, f"auto:{model or 'injected'}", conversation_id, dataset_id),
+            )
+            tagged += 1
     return {"examined": examined, "tagged": tagged}

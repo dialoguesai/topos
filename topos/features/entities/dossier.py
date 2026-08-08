@@ -13,6 +13,7 @@ import json
 import sqlite3
 from typing import Any, Dict, List, Optional
 
+from ...storage.db.write_gate import commit_connection, with_db_write
 from .edges import EDGE_SEMANTIC_AFFINITY, top_edges
 
 SIGNIFICANT_MENTIONS = 3
@@ -166,7 +167,10 @@ def _upsert_dossier(
     *,
     store: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    """Build + upsert one entity dossier. Caller commits when batching."""
+    """Build + upsert one entity dossier.
+
+    upsert_object commits under its own (reentrant) hold — deferred to the
+    batch commit when the caller is inside batched_writes."""
     from ..signal.signal_object_store import SignalObjectStore
 
     store = store or SignalObjectStore(conn)
@@ -193,7 +197,6 @@ def refresh_dossiers(conn: sqlite3.Connection) -> int:
     a full refresh walks every significant entity and a blanket hold blocks
     every other writer for the whole walk (M2.2).
     """
-    from ...storage.db.write_gate import with_db_write
     from ..signal.signal_object_store import SignalObjectStore
 
     store = SignalObjectStore(conn)
@@ -202,8 +205,9 @@ def refresh_dossiers(conn: sqlite3.Connection) -> int:
         with with_db_write():
             _upsert_dossier(conn, entity, store=store)
         written += 1
-    with with_db_write():
-        conn.commit()
+    # Each per-entity hold committed its own upsert; this catches any stray
+    # implicit transaction so the connection never leaves here mid-write.
+    commit_connection(conn)
     return written
 
 
@@ -241,7 +245,7 @@ def ensure_dossier(conn: sqlite3.Connection, entity: Dict[str, Any]) -> Optional
     enriched.setdefault("entity_type", "person")
     enriched.setdefault("mention_count", 0)
     payload = _upsert_dossier(conn, enriched)
-    conn.commit()
+    commit_connection(conn)
     return payload
 
 

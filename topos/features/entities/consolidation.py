@@ -24,6 +24,7 @@ import sqlite3
 import uuid
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
+from ...storage.db.write_gate import batched_writes, commit_connection, with_db_write
 from .resolver import AUTO_MERGE_SCORE, REVIEW_SCORE, token_set_similarity
 
 logger = logging.getLogger("topos.features.entities.consolidation")
@@ -93,6 +94,7 @@ def ensure_name_embeddings(conn: sqlite3.Connection, *, limit: int = 2000) -> in
     from ..signal.vector_codec import encode_f32
 
     written = 0
+    updates: List[Tuple[bytes, str]] = []
     for start in range(0, len(rows), 64):
         batch = rows[start : start + 64]
         out = adapter.run_inference(
@@ -102,12 +104,15 @@ def ensure_name_embeddings(conn: sqlite3.Connection, *, limit: int = 2000) -> in
         if len(vectors) != len(batch):
             continue
         for (entity_id, _name), vector in zip(batch, vectors):
+            updates.append((encode_f32([float(x) for x in vector]), entity_id))
+    # Model inference stays outside the hold; one short gated pass lands blobs.
+    with batched_writes(conn):
+        for blob, entity_id in updates:
             conn.execute(
                 "UPDATE entities SET embedding_blob=? WHERE entity_id=?",
-                (encode_f32([float(x) for x in vector]), entity_id),
+                (blob, entity_id),
             )
             written += 1
-    conn.commit()
     return written
 
 
@@ -275,19 +280,21 @@ def propose_merges(conn: sqlite3.Connection, *, use_embeddings: bool = True) -> 
 
     proposed = {"prefix": 0, "fuzzy": 0, "embedding": 0}
     queued_now: set = set()
+    to_queue: List[Dict[str, Any]] = []
 
     def consider(a: Dict[str, Any], b: Dict[str, Any], score: float, reason: str) -> None:
         subject, candidate = _merge_direction(a, b)
         key = (subject["entity_id"], candidate["entity_id"])
         if key in seen_pairs or key in queued_now or (key[1], key[0]) in queued_now:
             return
-        _queue_merge(
-            conn,
-            subject_entity_id=subject["entity_id"],
-            candidate_entity_id=candidate["entity_id"],
-            subject_name=subject["name"],
-            score=score,
-            reason=reason,
+        to_queue.append(
+            {
+                "subject_entity_id": subject["entity_id"],
+                "candidate_entity_id": candidate["entity_id"],
+                "subject_name": subject["name"],
+                "score": score,
+                "reason": reason,
+            }
         )
         queued_now.add(key)
         proposed[reason.split(":")[0]] += 1
@@ -299,7 +306,11 @@ def propose_merges(conn: sqlite3.Connection, *, use_embeddings: bool = True) -> 
             continue
         consider(a, b, score, reason)
 
-    conn.commit()
+    # The pairwise scan above is pure compute — collected first so the gate
+    # only covers this short insert pass.
+    with batched_writes(conn):
+        for item in to_queue:
+            _queue_merge(conn, **item)
     total = sum(proposed.values())
     return {**proposed, "total": total}
 
@@ -379,10 +390,11 @@ def resolve_review(
         raise ValueError(f"review already {status}")
 
     if action == "dismiss":
-        conn.execute(
-            "UPDATE entity_review SET status='dismissed' WHERE review_id=?", (review_id,)
-        )
-        conn.commit()
+        with with_db_write():
+            conn.execute(
+                "UPDATE entity_review SET status='dismissed' WHERE review_id=?", (review_id,)
+            )
+            commit_connection(conn)
         return {"review_id": review_id, "status": "dismissed"}
 
     if action != "approve":
@@ -408,11 +420,13 @@ def resolve_review(
         subject_id = hit[0] if hit else None
         if subject_id is None:
             # No separate entity — the confirmation is just an alias.
-            resolver._add_alias(str(candidate_id), surface)
-            conn.execute(
-                "UPDATE entity_review SET status='approved' WHERE review_id=?", (review_id,)
-            )
-            conn.commit()
+            with with_db_write():
+                resolver._add_alias(str(candidate_id), surface)
+                conn.execute(
+                    "UPDATE entity_review SET status='approved' WHERE review_id=?", (review_id,)
+                )
+                commit_connection(conn)
+            # Self-gating — must not run under this hold.
             refresh_dossiers(conn)
             return {
                 "review_id": review_id,
@@ -423,20 +437,22 @@ def resolve_review(
     elif kind != "merge" or not subject_id:
         raise ValueError("only merge/resolution reviews can be approved")
 
-    resolver.merge_entities(str(candidate_id), str(subject_id))
-    conn.execute(
-        "UPDATE entity_review SET status='approved' WHERE review_id=?", (review_id,)
-    )
-    # Any other pending reviews touching the absorbed entity are now stale.
-    conn.execute(
-        """
-        UPDATE entity_review SET status='stale'
-        WHERE status='pending'
-          AND (subject_entity_id=? OR candidate_entity_id=?)
-        """,
-        (subject_id, subject_id),
-    )
-    conn.commit()
+    with with_db_write():
+        resolver.merge_entities(str(candidate_id), str(subject_id))
+        conn.execute(
+            "UPDATE entity_review SET status='approved' WHERE review_id=?", (review_id,)
+        )
+        # Any other pending reviews touching the absorbed entity are now stale.
+        conn.execute(
+            """
+            UPDATE entity_review SET status='stale'
+            WHERE status='pending'
+              AND (subject_entity_id=? OR candidate_entity_id=?)
+            """,
+            (subject_id, subject_id),
+        )
+        commit_connection(conn)
+    # Self-gating — must not run under this hold.
     refresh_dossiers(conn)
     return {"review_id": review_id, "status": "approved", "kept": str(candidate_id), "absorbed": str(subject_id)}
 
@@ -485,49 +501,49 @@ def split_surface(conn: sqlite3.Connection, entity_id: str, surface: str) -> Dic
     ]
 
     new_entity_id: Optional[str] = None
-    if moved_ids:
-        resolver = EntityResolver(conn)
-        new_entity_id = resolver._create_entity(str(surface).strip(), str(entity_type))
-        placeholders = ",".join("?" for _ in moved_ids)
+    with batched_writes(conn):
+        if moved_ids:
+            resolver = EntityResolver(conn)
+            new_entity_id = resolver._create_entity(str(surface).strip(), str(entity_type))
+            placeholders = ",".join("?" for _ in moved_ids)
+            conn.execute(
+                f"UPDATE entity_mentions SET entity_id=? WHERE mention_id IN ({placeholders})",
+                (new_entity_id, *moved_ids),
+            )
+
+        # Remove a matching alias from the source entity.
+        alias_removed = False
+        try:
+            aliases = [a for a in (json.loads(aliases_json or "[]")) if isinstance(a, str)]
+        except json.JSONDecodeError:
+            aliases = []
+        kept_aliases = [a for a in aliases if normalize_name(a) != normalized]
+        if len(kept_aliases) != len(aliases):
+            alias_removed = True
+            conn.execute(
+                "UPDATE entities SET aliases_json=?, updated_at=datetime('now') WHERE entity_id=?",
+                (json.dumps(kept_aliases), str(entity_id)),
+            )
+
+        # Permanent guard: this surface never binds to the source entity again.
         conn.execute(
-            f"UPDATE entity_mentions SET entity_id=? WHERE mention_id IN ({placeholders})",
-            (new_entity_id, *moved_ids),
+            """
+            INSERT INTO entity_review
+                (review_id, surface_text, candidate_entity_id, score, record_id,
+                 status, created_at, kind, subject_entity_id, reason)
+            VALUES (?, ?, ?, 1.0, NULL, 'approved', datetime('now'), 'no_bind', ?, 'owner split')
+            """,
+            (f"rev_{uuid.uuid4().hex[:16]}", normalized, str(entity_id), new_entity_id),
         )
 
-    # Remove a matching alias from the source entity.
-    alias_removed = False
-    try:
-        aliases = [a for a in (json.loads(aliases_json or "[]")) if isinstance(a, str)]
-    except json.JSONDecodeError:
-        aliases = []
-    kept_aliases = [a for a in aliases if normalize_name(a) != normalized]
-    if len(kept_aliases) != len(aliases):
-        alias_removed = True
-        conn.execute(
-            "UPDATE entities SET aliases_json=?, updated_at=datetime('now') WHERE entity_id=?",
-            (json.dumps(kept_aliases), str(entity_id)),
-        )
-
-    # Permanent guard: this surface never binds to the source entity again.
-    conn.execute(
-        """
-        INSERT INTO entity_review
-            (review_id, surface_text, candidate_entity_id, score, record_id,
-             status, created_at, kind, subject_entity_id, reason)
-        VALUES (?, ?, ?, 1.0, NULL, 'approved', datetime('now'), 'no_bind', ?, 'owner split')
-        """,
-        (f"rev_{uuid.uuid4().hex[:16]}", normalized, str(entity_id), new_entity_id),
-    )
-
-    # Recount both sides.
-    for eid in filter(None, [str(entity_id), new_entity_id]):
-        conn.execute(
-            "UPDATE entities SET mention_count = ("
-            " SELECT COUNT(*) FROM entity_mentions m WHERE m.entity_id = entities.entity_id"
-            "), updated_at=datetime('now') WHERE entity_id=?",
-            (eid,),
-        )
-    conn.commit()
+        # Recount both sides.
+        for eid in filter(None, [str(entity_id), new_entity_id]):
+            conn.execute(
+                "UPDATE entities SET mention_count = ("
+                " SELECT COUNT(*) FROM entity_mentions m WHERE m.entity_id = entities.entity_id"
+                "), updated_at=datetime('now') WHERE entity_id=?",
+                (eid,),
+            )
 
     return {
         "entity_id": str(entity_id),
@@ -582,39 +598,41 @@ def merge_entity_pair(
     )
     absorb_name = str(absorb_row[1] or "")
 
-    # Clear no_bind guards between this pair (either direction) so the owner
-    # can reverse a prior Unlink by explicitly linking again.
-    conn.execute(
-        """
-        DELETE FROM entity_review
-        WHERE kind='no_bind'
-          AND (
-            (candidate_entity_id=? AND subject_entity_id=?)
-            OR (candidate_entity_id=? AND subject_entity_id=?)
-          )
-        """,
-        (keep_id, absorb_id, absorb_id, keep_id),
-    )
-    # Pending reviews that referenced the absorbed entity are now stale.
-    conn.execute(
-        """
-        UPDATE entity_review SET status='stale'
-        WHERE status='pending'
-          AND (subject_entity_id=? OR candidate_entity_id=?)
-        """,
-        (absorb_id, absorb_id),
-    )
+    with with_db_write():
+        # Clear no_bind guards between this pair (either direction) so the owner
+        # can reverse a prior Unlink by explicitly linking again.
+        conn.execute(
+            """
+            DELETE FROM entity_review
+            WHERE kind='no_bind'
+              AND (
+                (candidate_entity_id=? AND subject_entity_id=?)
+                OR (candidate_entity_id=? AND subject_entity_id=?)
+              )
+            """,
+            (keep_id, absorb_id, absorb_id, keep_id),
+        )
+        # Pending reviews that referenced the absorbed entity are now stale.
+        conn.execute(
+            """
+            UPDATE entity_review SET status='stale'
+            WHERE status='pending'
+              AND (subject_entity_id=? OR candidate_entity_id=?)
+            """,
+            (absorb_id, absorb_id),
+        )
 
-    resolver = EntityResolver(conn)
-    resolver.merge_entities(keep_id, absorb_id)
+        resolver = EntityResolver(conn)
+        resolver.merge_entities(keep_id, absorb_id)
 
-    # Also drop any leftover no_bind rows that still point at the deleted
-    # absorb id as the blocked candidate (surface → absorb).
-    conn.execute(
-        "DELETE FROM entity_review WHERE kind='no_bind' AND candidate_entity_id=?",
-        (absorb_id,),
-    )
-    conn.commit()
+        # Also drop any leftover no_bind rows that still point at the deleted
+        # absorb id as the blocked candidate (surface → absorb).
+        conn.execute(
+            "DELETE FROM entity_review WHERE kind='no_bind' AND candidate_entity_id=?",
+            (absorb_id,),
+        )
+        commit_connection(conn)
+    # Self-gating — must not run under this hold.
     refresh_dossiers(conn)
 
     return {

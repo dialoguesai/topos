@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from contextlib import nullcontext
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from typing import Any, Dict, Iterable, Optional
 
+from ..storage.db.write_gate import batched_writes, commit_connection
 from .lifecycle.exclusions import excluded_record_ids
 from .stats.definitions import row_event_ts
 from .stats.engine import _record_id, _table_for_row
@@ -95,104 +97,107 @@ def project_timeline_rows(
             signal_dimension=COALESCE(excluded.signal_dimension, timeline.signal_dimension)
     """
 
-    for row in rows:
-        result.candidates += 1
-        record_id = _record_id(row)
-        if not record_id:
-            result.missing_record_id += 1
-            continue
-        if record_id in excluded:
-            result.excluded += 1
-            continue
-        event_at = row_event_ts(row)
-        if event_at is None:
-            result.missing_timestamp += 1
-            continue
-
-        values = (
-            event_at.isoformat(),
-            record_id,
-            row.get("source_id"),
-            _table_for_row(row) or None,
-            row.get("record_type"),
-            json.dumps(row.get("entity_ids") or []),
-            row.get("signal_dimension"),
-        )
-        identity_row = conn.execute(
-            """
-            SELECT event_at, record_type, entity_ids_json, signal_dimension
-            FROM timeline
-            WHERE record_id=? AND canonical_table IS ? AND source_id IS ?
-            ORDER BY created_at DESC
-            LIMIT 1
-            """,
-            (record_id, values[3], values[2]),
-        ).fetchone()
-        if identity_row is not None:
-            existing_event_at = str(identity_row[0])
-            existing_ts = parse_ts(existing_event_at)
-            timestamp_changed = (
-                existing_ts != event_at if existing_ts is not None else existing_event_at != values[0]
-            )
-            if timestamp_changed:
-                result.timestamp_mismatch += 1
-                if dry_run or missing_only:
-                    result.existing += 1
-                    continue
-                preserved_record_type = values[4] or identity_row[1]
-                preserved_entities = (
-                    values[5] if values[5] != "[]" else str(identity_row[2] or "[]")
-                )
-                preserved_dimension = values[6] or identity_row[3]
-                values = (*values[:4], preserved_record_type, preserved_entities, preserved_dimension)
-                conn.execute(
-                    """
-                    DELETE FROM timeline
-                    WHERE record_id=? AND canonical_table IS ? AND source_id IS ?
-                    """,
-                    (record_id, values[3], values[2]),
-                )
-            elif dry_run or missing_only:
-                result.existing += 1
+    # dry_run performs no writes and needs no gate. Live runs hold the gate for
+    # the batch and commit at exit: per-batch commits replace the caller's
+    # single end commit, because an open write transaction must never span a
+    # gate release (write_gate lock-order inversion).
+    with nullcontext() if dry_run else batched_writes(conn):
+        for row in rows:
+            result.candidates += 1
+            record_id = _record_id(row)
+            if not record_id:
+                result.missing_record_id += 1
                 continue
-        else:
-            conflicting_row = conn.execute(
+            if record_id in excluded:
+                result.excluded += 1
+                continue
+            event_at = row_event_ts(row)
+            if event_at is None:
+                result.missing_timestamp += 1
+                continue
+
+            values = (
+                event_at.isoformat(),
+                record_id,
+                row.get("source_id"),
+                _table_for_row(row) or None,
+                row.get("record_type"),
+                json.dumps(row.get("entity_ids") or []),
+                row.get("signal_dimension"),
+            )
+            identity_row = conn.execute(
                 """
-                SELECT source_id, canonical_table
+                SELECT event_at, record_type, entity_ids_json, signal_dimension
                 FROM timeline
-                WHERE event_at=? AND record_id=?
+                WHERE record_id=? AND canonical_table IS ? AND source_id IS ?
+                ORDER BY created_at DESC
                 LIMIT 1
                 """,
-                values[:2],
+                (record_id, values[3], values[2]),
             ).fetchone()
-            if conflicting_row is not None:
-                result.identity_mismatch += 1
+            if identity_row is not None:
+                existing_event_at = str(identity_row[0])
+                existing_ts = parse_ts(existing_event_at)
+                timestamp_changed = (
+                    existing_ts != event_at if existing_ts is not None else existing_event_at != values[0]
+                )
+                if timestamp_changed:
+                    result.timestamp_mismatch += 1
+                    if dry_run or missing_only:
+                        result.existing += 1
+                        continue
+                    preserved_record_type = values[4] or identity_row[1]
+                    preserved_entities = (
+                        values[5] if values[5] != "[]" else str(identity_row[2] or "[]")
+                    )
+                    preserved_dimension = values[6] or identity_row[3]
+                    values = (*values[:4], preserved_record_type, preserved_entities, preserved_dimension)
+                    conn.execute(
+                        """
+                        DELETE FROM timeline
+                        WHERE record_id=? AND canonical_table IS ? AND source_id IS ?
+                        """,
+                        (record_id, values[3], values[2]),
+                    )
+                elif dry_run or missing_only:
+                    result.existing += 1
+                    continue
+            else:
+                conflicting_row = conn.execute(
+                    """
+                    SELECT source_id, canonical_table
+                    FROM timeline
+                    WHERE event_at=? AND record_id=?
+                    LIMIT 1
+                    """,
+                    values[:2],
+                ).fetchone()
+                if conflicting_row is not None:
+                    result.identity_mismatch += 1
+                    if dry_run:
+                        result.written += 1
+                        continue
+                    conn.execute(
+                        """
+                        UPDATE timeline
+                        SET source_id=?, canonical_table=?,
+                            record_type=COALESCE(?, record_type)
+                        WHERE event_at=? AND record_id=?
+                        """,
+                        (values[2], values[3], values[4], values[0], values[1]),
+                    )
+                    result.written += 1
+                    continue
                 if dry_run:
                     result.written += 1
                     continue
-                conn.execute(
-                    """
-                    UPDATE timeline
-                    SET source_id=?, canonical_table=?,
-                        record_type=COALESCE(?, record_type)
-                    WHERE event_at=? AND record_id=?
-                    """,
-                    (values[2], values[3], values[4], values[0], values[1]),
-                )
+            before = conn.total_changes
+            conn.execute(insert_missing_sql if missing_only else upsert_sql, values)
+            if conn.total_changes > before:
                 result.written += 1
-                continue
-            if dry_run:
-                result.written += 1
-                continue
-        before = conn.total_changes
-        conn.execute(insert_missing_sql if missing_only else upsert_sql, values)
-        if conn.total_changes > before:
-            result.written += 1
-        else:
-            result.existing += 1
+            else:
+                result.existing += 1
 
-    if commit and not dry_run:
-        conn.commit()
     return result
 
 
@@ -256,7 +261,9 @@ def project_canonical_timeline(
         conn.row_factory = previous_factory
 
     if commit and not dry_run:
-        conn.commit()
+        # Each batch already committed inside project_timeline_rows; this only
+        # catches a stray implicit transaction.
+        commit_connection(conn)
     orphaned_total = 0
     orphaned_by_table_source: Dict[str, int] = {}
     orphaned_samples = []
