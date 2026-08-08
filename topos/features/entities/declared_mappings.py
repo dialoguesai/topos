@@ -17,6 +17,8 @@ from __future__ import annotations
 import json
 from typing import Any, Dict, List, Optional
 
+from ...storage.db.write_gate import commit_connection, with_db_write
+
 # Edge type for "the owner worked on this project at this time".
 EDGE_WORKED_ON = "worked_on"
 
@@ -206,6 +208,7 @@ WHERE entity_type='person'
 def reclassify_misdeclared_entities(conn: Any) -> int:
     """One-time repair: repo-shaped person entities minted by NER from github
     records become project entities (idempotent)."""
-    cur = conn.execute(RECLASSIFY_MIGRATION_SQL)
-    conn.commit()
+    with with_db_write():
+        cur = conn.execute(RECLASSIFY_MIGRATION_SQL)
+        commit_connection(conn)
     return int(cur.rowcount or 0)

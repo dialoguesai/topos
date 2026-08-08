@@ -39,6 +39,8 @@ import sqlite3
 import uuid
 from typing import Any, Dict, List, Optional, Sequence, Set
 
+from ...storage.db.write_gate import commit_connection, with_db_write
+
 PROCESSING_TIERS = ("secure", "local_only")
 REBUILD_STATES = ("pending", "running", "complete", "failed")
 NOTIFICATION_KINDS = (
@@ -255,59 +257,61 @@ class BlackholeStore:
         if existing:
             # Idempotent: already protected. Refresh the mutable bits, do not
             # restart a rebuild that may already have completed.
-            self._conn.execute(
-                """
-                UPDATE entity_blackholes
-                SET processing_tier=?, note=COALESCE(?, note), entity_id=?,
-                    canonical_name=COALESCE(?, canonical_name),
-                    aliases_json=?, updated_at=datetime('now')
-                WHERE normalized_name=?
-                """,
-                (
-                    processing_tier,
-                    note,
-                    entity_id or existing["entity_id"],
-                    canonical_name,
-                    aliases_json,
-                    normalized,
-                ),
-            )
-            self._conn.commit()
+            with with_db_write():
+                self._conn.execute(
+                    """
+                    UPDATE entity_blackholes
+                    SET processing_tier=?, note=COALESCE(?, note), entity_id=?,
+                        canonical_name=COALESCE(?, canonical_name),
+                        aliases_json=?, updated_at=datetime('now')
+                    WHERE normalized_name=?
+                    """,
+                    (
+                        processing_tier,
+                        note,
+                        entity_id or existing["entity_id"],
+                        canonical_name,
+                        aliases_json,
+                        normalized,
+                    ),
+                )
+                commit_connection(self._conn)
             record = self.get(normalized) or {}
             return {**record, "already_blackholed": True, "notification_id": None}
 
         blackhole_id = _new_id("bh")
-        self._conn.execute(
-            """
-            INSERT INTO entity_blackholes
-                (blackhole_id, entity_id, normalized_name, canonical_name,
-                 aliases_json, processing_tier, rebuild_state, note)
-            VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
-            """,
-            (
-                blackhole_id,
-                entity_id,
-                normalized,
-                canonical_name,
-                aliases_json,
-                processing_tier,
-                note,
-            ),
-        )
-        # D4: the notification is raised *before* the rebuild, so the owner knows
-        # the hide is not yet complete across derived artifacts.
-        notification_id = self._notify(
-            blackhole_id=blackhole_id,
-            entity_id=entity_id,
-            normalized_name=normalized,
-            kind="rebuild_needed",
-            message=(
-                f"'{canonical_name or ref}' is now off-limits. A rebuild is needed before it "
-                "disappears from summaries, briefs and digests; until then those are withheld "
-                "from everyone but you."
-            ),
-        )
-        self._conn.commit()
+        with with_db_write():
+            self._conn.execute(
+                """
+                INSERT INTO entity_blackholes
+                    (blackhole_id, entity_id, normalized_name, canonical_name,
+                     aliases_json, processing_tier, rebuild_state, note)
+                VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+                """,
+                (
+                    blackhole_id,
+                    entity_id,
+                    normalized,
+                    canonical_name,
+                    aliases_json,
+                    processing_tier,
+                    note,
+                ),
+            )
+            # D4: the notification is raised *before* the rebuild, so the owner
+            # knows the hide is not yet complete across derived artifacts.
+            notification_id = self._notify(
+                blackhole_id=blackhole_id,
+                entity_id=entity_id,
+                normalized_name=normalized,
+                kind="rebuild_needed",
+                message=(
+                    f"'{canonical_name or ref}' is now off-limits. A rebuild is needed before it "
+                    "disappears from summaries, briefs and digests; until then those are withheld "
+                    "from everyone but you."
+                ),
+            )
+            commit_connection(self._conn)
         record = self.get(normalized) or {}
         return {**record, "already_blackholed": False, "notification_id": notification_id}
 
@@ -316,31 +320,33 @@ class BlackholeStore:
         record = self.get(entity_ref)
         if record is None:
             return {"removed": False}
-        self._conn.execute(
-            "DELETE FROM entity_blackholes WHERE blackhole_id=?", (record["blackhole_id"],)
-        )
-        self._resolve_notifications(record["blackhole_id"])
-        notification_id = self._notify(
-            blackhole_id=record["blackhole_id"],
-            entity_id=record["entity_id"],
-            normalized_name=record["normalized_name"],
-            kind="reinclude_needed",
-            message=(
-                f"'{record['canonical_name'] or record['normalized_name']}' is no longer "
-                "off-limits. A rebuild is needed before it reappears in summaries and digests."
-            ),
-        )
-        self._conn.commit()
+        with with_db_write():
+            self._conn.execute(
+                "DELETE FROM entity_blackholes WHERE blackhole_id=?", (record["blackhole_id"],)
+            )
+            self._resolve_notifications(record["blackhole_id"])
+            notification_id = self._notify(
+                blackhole_id=record["blackhole_id"],
+                entity_id=record["entity_id"],
+                normalized_name=record["normalized_name"],
+                kind="reinclude_needed",
+                message=(
+                    f"'{record['canonical_name'] or record['normalized_name']}' is no longer "
+                    "off-limits. A rebuild is needed before it reappears in summaries and digests."
+                ),
+            )
+            commit_connection(self._conn)
         return {"removed": True, "blackhole_id": record["blackhole_id"], "notification_id": notification_id}
 
     def bind_entity_id(self, *, normalized_name: str, entity_id: str) -> bool:
         """Attach a freshly-minted entity_id to a name that was protected pre-emptively."""
-        cursor = self._conn.execute(
-            "UPDATE entity_blackholes SET entity_id=?, updated_at=datetime('now') "
-            "WHERE normalized_name=? AND entity_id=''",
-            (str(entity_id), normalize_entity_name(normalized_name)),
-        )
-        self._conn.commit()
+        with with_db_write():
+            cursor = self._conn.execute(
+                "UPDATE entity_blackholes SET entity_id=?, updated_at=datetime('now') "
+                "WHERE normalized_name=? AND entity_id=''",
+                (str(entity_id), normalize_entity_name(normalized_name)),
+            )
+            commit_connection(self._conn)
         return bool(cursor.rowcount)
 
     # ------------------------------------------------------ rebuild state
@@ -351,12 +357,13 @@ class BlackholeStore:
         record = self.get(entity_ref)
         if record is None:
             return False
-        self._conn.execute(
-            "UPDATE entity_blackholes SET rebuild_state=?, updated_at=datetime('now') "
-            "WHERE blackhole_id=?",
-            (state, record["blackhole_id"]),
-        )
-        self._conn.commit()
+        with with_db_write():
+            self._conn.execute(
+                "UPDATE entity_blackholes SET rebuild_state=?, updated_at=datetime('now') "
+                "WHERE blackhole_id=?",
+                (state, record["blackhole_id"]),
+            )
+            commit_connection(self._conn)
         return True
 
     def mark_rebuild_running(self, entity_ref: str) -> bool:
@@ -367,18 +374,19 @@ class BlackholeStore:
         if record is None:
             return False
         self._set_rebuild_state(entity_ref, "complete")
-        self._resolve_notifications(record["blackhole_id"], kinds=("rebuild_needed",))
-        self._notify(
-            blackhole_id=record["blackhole_id"],
-            entity_id=record["entity_id"],
-            normalized_name=record["normalized_name"],
-            kind="rebuild_complete",
-            message=(
-                f"'{record['canonical_name'] or record['normalized_name']}' is now fully hidden "
-                "everywhere outside your own view."
-            ),
-        )
-        self._conn.commit()
+        with with_db_write():
+            self._resolve_notifications(record["blackhole_id"], kinds=("rebuild_needed",))
+            self._notify(
+                blackhole_id=record["blackhole_id"],
+                entity_id=record["entity_id"],
+                normalized_name=record["normalized_name"],
+                kind="rebuild_complete",
+                message=(
+                    f"'{record['canonical_name'] or record['normalized_name']}' is now fully hidden "
+                    "everywhere outside your own view."
+                ),
+            )
+            commit_connection(self._conn)
         return True
 
     def mark_rebuild_failed(self, entity_ref: str, *, reason: str = "") -> bool:
@@ -388,18 +396,19 @@ class BlackholeStore:
         # The rebuild_needed notification stays open on purpose: the hide is
         # still incomplete, and the fail-closed withholding stays in force.
         self._set_rebuild_state(entity_ref, "failed")
-        self._notify(
-            blackhole_id=record["blackhole_id"],
-            entity_id=record["entity_id"],
-            normalized_name=record["normalized_name"],
-            kind="rebuild_failed",
-            message=(
-                f"Rebuild failed for '{record['canonical_name'] or record['normalized_name']}'"
-                f"{(': ' + reason) if reason else ''}. It stays withheld from others until this "
-                "succeeds."
-            ),
-        )
-        self._conn.commit()
+        with with_db_write():
+            self._notify(
+                blackhole_id=record["blackhole_id"],
+                entity_id=record["entity_id"],
+                normalized_name=record["normalized_name"],
+                kind="rebuild_failed",
+                message=(
+                    f"Rebuild failed for '{record['canonical_name'] or record['normalized_name']}'"
+                    f"{(': ' + reason) if reason else ''}. It stays withheld from others until this "
+                    "succeeds."
+                ),
+            )
+            commit_connection(self._conn)
         return True
 
     # ------------------------------------------------------ notifications
@@ -472,12 +481,13 @@ class BlackholeStore:
         ]
 
     def dismiss_notification(self, notification_id: str) -> bool:
-        cursor = self._conn.execute(
-            "UPDATE blackhole_notifications SET state='resolved', resolved_at=datetime('now') "
-            "WHERE notification_id=? AND state='open'",
-            (notification_id,),
-        )
-        self._conn.commit()
+        with with_db_write():
+            cursor = self._conn.execute(
+                "UPDATE blackhole_notifications SET state='resolved', resolved_at=datetime('now') "
+                "WHERE notification_id=? AND state='open'",
+                (notification_id,),
+            )
+            commit_connection(self._conn)
         return bool(cursor.rowcount)
 
     # ------------------------------------------------------------ helpers

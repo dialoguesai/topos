@@ -870,6 +870,32 @@ def persist_topic_clusters(
     if conn is None or not clusters:
         return {"clusters_written": 0, "members_written": 0}
 
+    from ...storage.db.write_gate import commit_connection, with_db_write
+
+    # Reentrant: the full-recompute caller already holds the gate around this
+    # whole swap (commit=False); a commit=True caller gets the same discipline.
+    with with_db_write():
+        result = _persist_topic_clusters_gated(
+            conn,
+            clusters,
+            sync_batch_id=sync_batch_id,
+            model=model,
+            provider=provider,
+        )
+        if commit:
+            commit_connection(conn)
+    return result
+
+
+def _persist_topic_clusters_gated(
+    conn,
+    clusters: List[Dict[str, Any]],
+    *,
+    sync_batch_id: Optional[str],
+    model: str,
+    provider: str,
+) -> Dict[str, int]:
+    """Write phase of persist_topic_clusters. Caller holds the write gate."""
     cluster_ids = [c["cluster_id"] for c in clusters if c.get("cluster_id")]
     if cluster_ids:
         placeholders = ",".join("?" for _ in cluster_ids)
@@ -1011,8 +1037,6 @@ def persist_topic_clusters(
                 ),
             )
             members_written += 1
-    if commit:
-        conn.commit()
     return {"clusters_written": clusters_written, "members_written": members_written}
 
 

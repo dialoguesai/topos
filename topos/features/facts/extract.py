@@ -12,6 +12,7 @@ import re
 import sqlite3
 from typing import Any, Dict, List, Optional
 
+from ...storage.db.write_gate import commit_connection, with_db_write
 from ..provenance.roles import owner_authored
 from .store import FactStore
 
@@ -35,8 +36,9 @@ def _owner_entity_id(conn: sqlite3.Connection) -> str:
     from ..entities.resolver import EntityResolver
 
     resolver = EntityResolver(conn)
-    entity_id = resolver._create_entity("Owner", "person", is_self=True)
-    conn.commit()
+    with with_db_write():
+        entity_id = resolver._create_entity("Owner", "person", is_self=True)
+        commit_connection(conn)
     return entity_id
 
 

@@ -24,6 +24,8 @@ from datetime import datetime, timezone
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Tuple
 
+from ...storage.db.write_gate import batched_writes, commit_connection, with_db_write
+
 logger = logging.getLogger("topos.features.entities.resolver")
 
 AUTO_MERGE_SCORE = 0.92
@@ -179,44 +181,46 @@ class EntityResolver:
             ).fetchall()
         except sqlite3.OperationalError:
             return 0
-        for contact_id, display_name, usernames_json, is_self in contacts:
-            name = str(display_name or "").strip()
-            if not name:
-                continue
-            existing = self._conn.execute(
-                "SELECT entity_id FROM entities WHERE contact_id=?",
-                (contact_id,),
-            ).fetchone()
-            identifiers: List[str] = []
-            try:
-                rows = self._conn.execute(
-                    "SELECT identifier FROM contact_identifiers WHERE contact_id=?",
+        # Per-contact lookups are quick indexed reads and the contact list is
+        # personal-scale, so one gated batch covers the whole seed.
+        with batched_writes(self._conn):
+            for contact_id, display_name, usernames_json, is_self in contacts:
+                name = str(display_name or "").strip()
+                if not name:
+                    continue
+                existing = self._conn.execute(
+                    "SELECT entity_id FROM entities WHERE contact_id=?",
                     (contact_id,),
-                ).fetchall()
-                identifiers = [str(r[0]).strip().lower() for r in rows if r[0]]
-            except sqlite3.OperationalError:
-                pass
-            try:
-                for username in json.loads(usernames_json or "[]"):
-                    if str(username).strip():
-                        identifiers.append(str(username).strip().lower())
-            except (json.JSONDecodeError, TypeError):
-                pass
-            if existing:
-                self._conn.execute(
-                    "UPDATE entities SET identifiers_json=?, updated_at=datetime('now') WHERE entity_id=?",
-                    (json.dumps(sorted(set(identifiers))), existing[0]),
+                ).fetchone()
+                identifiers: List[str] = []
+                try:
+                    rows = self._conn.execute(
+                        "SELECT identifier FROM contact_identifiers WHERE contact_id=?",
+                        (contact_id,),
+                    ).fetchall()
+                    identifiers = [str(r[0]).strip().lower() for r in rows if r[0]]
+                except sqlite3.OperationalError:
+                    pass
+                try:
+                    for username in json.loads(usernames_json or "[]"):
+                        if str(username).strip():
+                            identifiers.append(str(username).strip().lower())
+                except (json.JSONDecodeError, TypeError):
+                    pass
+                if existing:
+                    self._conn.execute(
+                        "UPDATE entities SET identifiers_json=?, updated_at=datetime('now') WHERE entity_id=?",
+                        (json.dumps(sorted(set(identifiers))), existing[0]),
+                    )
+                    continue
+                self._create_entity(
+                    name,
+                    "person",
+                    identifiers=sorted(set(identifiers)),
+                    contact_id=str(contact_id),
+                    is_self=bool(is_self),
                 )
-                continue
-            self._create_entity(
-                name,
-                "person",
-                identifiers=sorted(set(identifiers)),
-                contact_id=str(contact_id),
-                is_self=bool(is_self),
-            )
-            created += 1
-        self._conn.commit()
+                created += 1
         return created
 
     # ---------------------------------------------------------- resolution
@@ -597,23 +601,25 @@ class EntityResolver:
         identifiers = sorted(
             set(json.loads(keep[1] or "[]")) | set(json.loads(gone[2] or "[]"))
         )
-        self._conn.execute(
-            "UPDATE entities SET aliases_json=?, identifiers_json=?, updated_at=datetime('now') WHERE entity_id=?",
-            (json.dumps(aliases), json.dumps(identifiers), keep_id),
-        )
-        self._conn.execute(
-            "UPDATE entity_mentions SET entity_id=? WHERE entity_id=?", (keep_id, absorb_id)
-        )
-        # Fold-and-rewrite edges: a blanket UPDATE of src/dst would violate the
-        # active-row partial unique index when both entities hold an active edge
-        # of the same type to the same third entity (edges.merge_entity_edges
-        # folds those collisions into the surviving row).
         from .edges import merge_entity_edges
 
-        merge_entity_edges(self._conn, keep_id=keep_id, absorb_id=absorb_id)
-        self._conn.execute(
-            "UPDATE entities SET mention_count = (SELECT COUNT(*) FROM entity_mentions WHERE entity_id=?) WHERE entity_id=?",
-            (keep_id, keep_id),
-        )
-        self._conn.execute("DELETE FROM entities WHERE entity_id=?", (absorb_id,))
-        self._conn.commit()
+        with with_db_write():
+            self._conn.execute(
+                "UPDATE entities SET aliases_json=?, identifiers_json=?, updated_at=datetime('now') WHERE entity_id=?",
+                (json.dumps(aliases), json.dumps(identifiers), keep_id),
+            )
+            self._conn.execute(
+                "UPDATE entity_mentions SET entity_id=? WHERE entity_id=?", (keep_id, absorb_id)
+            )
+            # Fold-and-rewrite edges: a blanket UPDATE of src/dst would violate
+            # the active-row partial unique index when both entities hold an
+            # active edge of the same type to the same third entity
+            # (edges.merge_entity_edges folds those collisions into the
+            # surviving row).
+            merge_entity_edges(self._conn, keep_id=keep_id, absorb_id=absorb_id)
+            self._conn.execute(
+                "UPDATE entities SET mention_count = (SELECT COUNT(*) FROM entity_mentions WHERE entity_id=?) WHERE entity_id=?",
+                (keep_id, keep_id),
+            )
+            self._conn.execute("DELETE FROM entities WHERE entity_id=?", (absorb_id,))
+            commit_connection(self._conn)

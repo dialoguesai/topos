@@ -9,6 +9,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from ....storage.db.write_gate import commit_connection, with_db_write
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -50,39 +52,41 @@ class ExtractionArtifactStore:
         ).fetchone()
 
         if existing:
-            self._conn.execute(
-                """
-                UPDATE extraction_artifacts
-                SET payload_json=?, dimension_affinity_json=?, source_refs_json=?,
-                    confidence=?, extracted_at=?, extractor_version=?
-                WHERE artifact_id=?
-                """,
-                (payload_json, affinity_json, refs_json, confidence, now, extractor_version, existing[0]),
-            )
-            self._conn.commit()
+            with with_db_write():
+                self._conn.execute(
+                    """
+                    UPDATE extraction_artifacts
+                    SET payload_json=?, dimension_affinity_json=?, source_refs_json=?,
+                        confidence=?, extracted_at=?, extractor_version=?
+                    WHERE artifact_id=?
+                    """,
+                    (payload_json, affinity_json, refs_json, confidence, now, extractor_version, existing[0]),
+                )
+                commit_connection(self._conn)
             return self.get_artifact(str(existing[0]))
 
         artifact_id = str(uuid.uuid4())
-        self._conn.execute(
-            """
-            INSERT INTO extraction_artifacts (
-                artifact_id, artifact_type, payload_json, dimension_affinity_json,
-                source_refs_json, source_ref_hash, confidence, extracted_at, extractor_version
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                artifact_id,
-                atype,
-                payload_json,
-                affinity_json,
-                refs_json,
-                ref_hash,
-                confidence,
-                now,
-                extractor_version,
-            ),
-        )
-        self._conn.commit()
+        with with_db_write():
+            self._conn.execute(
+                """
+                INSERT INTO extraction_artifacts (
+                    artifact_id, artifact_type, payload_json, dimension_affinity_json,
+                    source_refs_json, source_ref_hash, confidence, extracted_at, extractor_version
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    artifact_id,
+                    atype,
+                    payload_json,
+                    affinity_json,
+                    refs_json,
+                    ref_hash,
+                    confidence,
+                    now,
+                    extractor_version,
+                ),
+            )
+            commit_connection(self._conn)
         return self.get_artifact(artifact_id)
 
     def list_artifacts(

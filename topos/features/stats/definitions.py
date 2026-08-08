@@ -10,6 +10,7 @@ import json
 from datetime import datetime
 from typing import Any, Callable, Dict, List, Optional
 
+from ...storage.db.write_gate import batched_writes
 from ..provenance.roles import owner_authored
 from ..provenance.posture import make_posture_resolver
 from .fold import parse_ts
@@ -350,35 +351,35 @@ def histogram_value(row: Dict[str, Any], value_expr: str) -> Optional[str]:
 
 def seed_definitions(conn) -> int:
     written = 0
-    for defn in SEED_DEFINITIONS:
-        conn.execute(
-            """
-            INSERT INTO stat_definitions (
-                stat_id, canonical_table, group_by, stat_kind, value_expr,
-                dimension, decay_half_life_days, windows_json, enabled
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
-            ON CONFLICT(stat_id) DO UPDATE SET
-                canonical_table=excluded.canonical_table,
-                group_by=excluded.group_by,
-                stat_kind=excluded.stat_kind,
-                value_expr=excluded.value_expr,
-                dimension=excluded.dimension,
-                decay_half_life_days=excluded.decay_half_life_days,
-                windows_json=excluded.windows_json
-            """,
-            (
-                defn["stat_id"],
-                defn["canonical_table"],
-                defn.get("group_by", "none"),
-                defn["stat_kind"],
-                defn.get("value_expr"),
-                defn.get("dimension", "memory"),
-                defn.get("decay_half_life_days"),
-                defn.get("windows_json", '["all"]'),
-            ),
-        )
-        written += 1
-    conn.commit()
+    with batched_writes(conn):
+        for defn in SEED_DEFINITIONS:
+            conn.execute(
+                """
+                INSERT INTO stat_definitions (
+                    stat_id, canonical_table, group_by, stat_kind, value_expr,
+                    dimension, decay_half_life_days, windows_json, enabled
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1)
+                ON CONFLICT(stat_id) DO UPDATE SET
+                    canonical_table=excluded.canonical_table,
+                    group_by=excluded.group_by,
+                    stat_kind=excluded.stat_kind,
+                    value_expr=excluded.value_expr,
+                    dimension=excluded.dimension,
+                    decay_half_life_days=excluded.decay_half_life_days,
+                    windows_json=excluded.windows_json
+                """,
+                (
+                    defn["stat_id"],
+                    defn["canonical_table"],
+                    defn.get("group_by", "none"),
+                    defn["stat_kind"],
+                    defn.get("value_expr"),
+                    defn.get("dimension", "memory"),
+                    defn.get("decay_half_life_days"),
+                    defn.get("windows_json", '["all"]'),
+                ),
+            )
+            written += 1
     return written
 
 

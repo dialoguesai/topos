@@ -29,6 +29,7 @@ import sqlite3
 import uuid
 from typing import Dict, Optional
 
+from ...storage.db.write_gate import commit_connection, with_db_write
 from .fact_materializer import (
     _MZ_WEIGHT_FLOOR,
     _plausible_event_at,
@@ -201,8 +202,6 @@ def _materialize_goals(
     # scope coverage work" become ONE node with the variants listed on it.
     clusters = _cluster_goal_keys(grouped, goal_embed_fn)
 
-    from ...storage.db.write_gate import with_db_write
-
     edges = 0
     # Only the edge/node writes hold the gate — the goal read + embedding
     # cluster above ran ungated (that cluster held the gate 104.9s on
@@ -263,6 +262,9 @@ def _materialize_goals(
                     source_object_id=rep["goal_id"], actor_role="authored",
                 )
                 edges += 1
+        # Commit before releasing: an open write transaction that outlives the
+        # hold inverts lock order against the next gate holder.
+        commit_connection(conn)
     return edges
 
 
@@ -281,8 +283,6 @@ def _materialize_places(conn: sqlite3.Connection, owner: Optional[str]) -> int:
         GROUP BY place_name
         """
     ).fetchall()
-    from ...storage.db.write_gate import with_db_write
-
     with with_db_write():
         for place_name, visits, first_at, last_at in rows:
             name = str(place_name).strip()
@@ -311,6 +311,7 @@ def _materialize_places(conn: sqlite3.Connection, owner: Optional[str]) -> int:
                 (last_at, f'{{"visit_count": {int(visits)}}}', owner, place_id),
             )
             edges += 1
+        commit_connection(conn)
     return edges
 
 
@@ -329,8 +330,6 @@ def _materialize_conversations(conn: sqlite3.Connection) -> int:
         """
     ).fetchall()
     conv_ids = {str(r[0]) for r in rows}
-    from ...storage.db.write_gate import with_db_write
-
     with with_db_write():
         for conv_id in conv_ids:
             label = conv_id if len(conv_id) <= 40 else conv_id[:37] + "…"
@@ -363,6 +362,7 @@ def _materialize_conversations(conn: sqlite3.Connection) -> int:
                     source_object_id=f"conv:{conv_id}", actor_role="participated",
                 )
                 edges += 1
+        commit_connection(conn)
     return edges
 
 
@@ -380,8 +380,7 @@ def materialize_graph_enrichments(
         "place_edges": _materialize_places(conn, owner),
         "conversation_edges": _materialize_conversations(conn),
     }
-    from ...storage.db.write_gate import with_db_write
-
-    with with_db_write():
-        conn.commit()
+    # Each phase committed inside its own hold; this only catches a stray
+    # implicit transaction.
+    commit_connection(conn)
     return out

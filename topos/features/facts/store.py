@@ -21,6 +21,8 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from ...storage.db.write_gate import commit_connection, with_db_write
+
 CONFLICT_CONFIDENCE_MARGIN = 0.10
 
 # Small controlled predicate vocabulary; free-form predicates are allowed but
@@ -129,7 +131,7 @@ class FactStore:
             if float(confidence) < float(payload.get("confidence") or 0.0) - CONFLICT_CONFIDENCE_MARGIN:
                 self._queue_conflict(subject_entity_id, pred, incumbent["object_id"], object_value, confidence)
                 return incumbent
-            self._close(incumbent["object_id"], valid_to=valid_from)
+            # Supersede: the close joins the INSERT below in one gated commit.
 
         object_id = str(uuid.uuid4())
         payload = {
@@ -160,38 +162,41 @@ class FactStore:
             now,
             now,
         ]
-        try:
-            # B2.1: real-world period stamped into the indexed event-time
-            # columns alongside the payload keys.
-            self._conn.execute(
-                """
-                INSERT INTO signal_objects (
-                    object_id, signal_dimension, object_type, object_key,
-                    payload_json, confidence, source_refs_json,
-                    valid_from, valid_to, extractor_version,
-                    created_at, updated_at, created_by, period_start, period_end
-                ) VALUES (?, ?, 'fact', ?, ?, ?, ?, ?, NULL, 'fact_store_v1', ?, ?, 'system', ?, ?)
-                """,
-                (
-                    *insert_params,
-                    str(period_start) if period_start else None,
-                    str(period_end) if period_end else None,
-                ),
-            )
-        except sqlite3.OperationalError:
-            # Pre-B2.1 schema (migration not run): legacy column set.
-            self._conn.execute(
-                """
-                INSERT INTO signal_objects (
-                    object_id, signal_dimension, object_type, object_key,
-                    payload_json, confidence, source_refs_json,
-                    valid_from, valid_to, extractor_version,
-                    created_at, updated_at, created_by
-                ) VALUES (?, ?, 'fact', ?, ?, ?, ?, ?, NULL, 'fact_store_v1', ?, ?, 'system')
-                """,
-                insert_params,
-            )
-        self._conn.commit()
+        with with_db_write():
+            if incumbent is not None:
+                self._close(incumbent["object_id"], valid_to=valid_from)
+            try:
+                # B2.1: real-world period stamped into the indexed event-time
+                # columns alongside the payload keys.
+                self._conn.execute(
+                    """
+                    INSERT INTO signal_objects (
+                        object_id, signal_dimension, object_type, object_key,
+                        payload_json, confidence, source_refs_json,
+                        valid_from, valid_to, extractor_version,
+                        created_at, updated_at, created_by, period_start, period_end
+                    ) VALUES (?, ?, 'fact', ?, ?, ?, ?, ?, NULL, 'fact_store_v1', ?, ?, 'system', ?, ?)
+                    """,
+                    (
+                        *insert_params,
+                        str(period_start) if period_start else None,
+                        str(period_end) if period_end else None,
+                    ),
+                )
+            except sqlite3.OperationalError:
+                # Pre-B2.1 schema (migration not run): legacy column set.
+                self._conn.execute(
+                    """
+                    INSERT INTO signal_objects (
+                        object_id, signal_dimension, object_type, object_key,
+                        payload_json, confidence, source_refs_json,
+                        valid_from, valid_to, extractor_version,
+                        created_at, updated_at, created_by
+                    ) VALUES (?, ?, 'fact', ?, ?, ?, ?, ?, NULL, 'fact_store_v1', ?, ?, 'system')
+                    """,
+                    insert_params,
+                )
+            commit_connection(self._conn)
         return self._row_to_fact(self._get_row(object_id))
 
     def _refresh(
@@ -206,21 +211,22 @@ class FactStore:
                 refs.append(ref)
         payload = dict(incumbent["payload"])
         payload["confidence"] = round(max(float(payload.get("confidence") or 0.0), float(confidence)), 3)
-        self._conn.execute(
-            """
-            UPDATE signal_objects
-            SET payload_json=?, confidence=?, source_refs_json=?, updated_at=?
-            WHERE object_id=?
-            """,
-            (
-                json.dumps(payload),
-                payload["confidence"],
-                json.dumps(refs),
-                _now_iso(),
-                incumbent["object_id"],
-            ),
-        )
-        self._conn.commit()
+        with with_db_write():
+            self._conn.execute(
+                """
+                UPDATE signal_objects
+                SET payload_json=?, confidence=?, source_refs_json=?, updated_at=?
+                WHERE object_id=?
+                """,
+                (
+                    json.dumps(payload),
+                    payload["confidence"],
+                    json.dumps(refs),
+                    _now_iso(),
+                    incumbent["object_id"],
+                ),
+            )
+            commit_connection(self._conn)
         return self._row_to_fact(self._get_row(incumbent["object_id"]))
 
     def _close(self, object_id: str, *, valid_to: str) -> None:
@@ -237,23 +243,24 @@ class FactStore:
         challenger_value: str,
         challenger_confidence: float,
     ) -> None:
-        self._conn.execute(
-            """
-            INSERT INTO fact_conflicts (
-                conflict_id, subject_entity_id, predicate,
-                incumbent_object_id, challenger_value, challenger_confidence
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                f"cfl_{uuid.uuid4().hex[:12]}",
-                subject_entity_id,
-                predicate,
-                incumbent_object_id,
-                str(challenger_value),
-                float(challenger_confidence),
-            ),
-        )
-        self._conn.commit()
+        with with_db_write():
+            self._conn.execute(
+                """
+                INSERT INTO fact_conflicts (
+                    conflict_id, subject_entity_id, predicate,
+                    incumbent_object_id, challenger_value, challenger_confidence
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"cfl_{uuid.uuid4().hex[:12]}",
+                    subject_entity_id,
+                    predicate,
+                    incumbent_object_id,
+                    str(challenger_value),
+                    float(challenger_confidence),
+                ),
+            )
+            commit_connection(self._conn)
 
     # ------------------------------------------------------------- reads
 
