@@ -8,6 +8,17 @@ MIGRATION_ID = "pipeline_jobs_v1"
 
 
 def apply_pipeline_jobs_v1_up(conn: sqlite3.Connection) -> None:
+    # Callers invoke this ahead of their own gated sections; the INSERT OR
+    # IGNORE below takes SQLite's write lock every call, so gate it here with
+    # its commit (write_gate lock-order inversion).
+    from ..write_gate import commit_connection, with_db_write
+
+    with with_db_write():
+        _apply_pipeline_jobs_v1_up_locked(conn)
+        commit_connection(conn)
+
+
+def _apply_pipeline_jobs_v1_up_locked(conn: sqlite3.Connection) -> None:
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS wiki_schema_migrations (
@@ -72,4 +83,3 @@ def apply_pipeline_jobs_v1_up(conn: sqlite3.Connection) -> None:
         "INSERT OR IGNORE INTO wiki_schema_migrations (migration_id) VALUES (?)",
         (MIGRATION_ID,),
     )
-    conn.commit()

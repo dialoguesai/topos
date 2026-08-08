@@ -8,7 +8,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
-from ..storage.db.write_gate import commit_connection
+from ..storage.db.write_gate import batched_writes, commit_connection, with_db_write
 from ..utils.base_object import BaseObject
 
 logger = logging.getLogger("topos.enrichment.derived_tables")
@@ -117,69 +117,9 @@ class DerivedTablesManager(BaseObject):
             return
 
         try:
-            # Create message_emotions table (Stage 9: model_name, all_emotions_json)
-            self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS message_emotions (
-                    message_id TEXT NOT NULL,
-                    source_id TEXT,
-                    emotion_label TEXT,
-                    confidence REAL,
-                    model_name TEXT,
-                    all_emotions_json TEXT,
-                    role TEXT,
-                    created_at TEXT NOT NULL,
-                    PRIMARY KEY (message_id, model_name)
-                )
-            """)
-            self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS message_embeddings (
-                    embedding_id TEXT PRIMARY KEY,
-                    record_id TEXT NOT NULL,
-                    message_id TEXT,
-                    source_id TEXT,
-                    model TEXT,
-                    provider TEXT,
-                    dims INTEGER,
-                    vector_json TEXT,
-                    payload_json TEXT
-                )
-            """)
-            
-            # Additive columns for existing tables (idempotent)
-            for alter_sql in (
-                "ALTER TABLE message_emotions ADD COLUMN source_id TEXT",
-                "ALTER TABLE message_emotions ADD COLUMN role TEXT",
-            ):
-                try:
-                    self.conn.execute(alter_sql)
-                except sqlite3.OperationalError:
-                    pass
-
-            emo_cols = {
-                row[1] for row in self.conn.execute("PRAGMA table_info(message_emotions)").fetchall()
-            }
-            if "message_id" in emo_cols:
-                self.conn.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_message_emotions_message 
-                    ON message_emotions(message_id)
-                """)
-            if "emotion_label" in emo_cols:
-                self.conn.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_message_emotions_label 
-                    ON message_emotions(emotion_label)
-                """)
-            if "source_id" in emo_cols:
-                self.conn.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_message_emotions_source 
-                    ON message_emotions(source_id)
-                """)
-            if "role" in emo_cols:
-                self.conn.execute("""
-                    CREATE INDEX IF NOT EXISTS idx_message_emotions_role
-                    ON message_emotions(role) WHERE role IS NOT NULL
-                """)
-            
-            commit_connection(self.conn)
+            with with_db_write():
+                self._apply_enrichment_ddl()
+                commit_connection(self.conn)
             _ENSURED_CONNECTIONS.add(conn_key)
             logger.debug("%s: Ensured message_emotions table exists", self)
         except Exception as e:
@@ -187,6 +127,69 @@ class DerivedTablesManager(BaseObject):
             logger.error("%s: Failed to ensure enrichment tables: %s", self, e)
             if self.conn:
                 self.conn.rollback()
+
+    def _apply_enrichment_ddl(self) -> None:
+        # Create message_emotions table (Stage 9: model_name, all_emotions_json)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS message_emotions (
+                message_id TEXT NOT NULL,
+                source_id TEXT,
+                emotion_label TEXT,
+                confidence REAL,
+                model_name TEXT,
+                all_emotions_json TEXT,
+                role TEXT,
+                created_at TEXT NOT NULL,
+                PRIMARY KEY (message_id, model_name)
+            )
+        """)
+        self.conn.execute("""
+            CREATE TABLE IF NOT EXISTS message_embeddings (
+                embedding_id TEXT PRIMARY KEY,
+                record_id TEXT NOT NULL,
+                message_id TEXT,
+                source_id TEXT,
+                model TEXT,
+                provider TEXT,
+                dims INTEGER,
+                vector_json TEXT,
+                payload_json TEXT
+            )
+        """)
+
+        # Additive columns for existing tables (idempotent)
+        for alter_sql in (
+            "ALTER TABLE message_emotions ADD COLUMN source_id TEXT",
+            "ALTER TABLE message_emotions ADD COLUMN role TEXT",
+        ):
+            try:
+                self.conn.execute(alter_sql)
+            except sqlite3.OperationalError:
+                pass
+
+        emo_cols = {
+            row[1] for row in self.conn.execute("PRAGMA table_info(message_emotions)").fetchall()
+        }
+        if "message_id" in emo_cols:
+            self.conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_message_emotions_message
+                ON message_emotions(message_id)
+            """)
+        if "emotion_label" in emo_cols:
+            self.conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_message_emotions_label
+                ON message_emotions(emotion_label)
+            """)
+        if "source_id" in emo_cols:
+            self.conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_message_emotions_source
+                ON message_emotions(source_id)
+            """)
+        if "role" in emo_cols:
+            self.conn.execute("""
+                CREATE INDEX IF NOT EXISTS idx_message_emotions_role
+                ON message_emotions(role) WHERE role IS NOT NULL
+            """)
 
     def write_enrichment_batch(
         self,
@@ -249,56 +252,55 @@ class DerivedTablesManager(BaseObject):
             use_derived = "message_id" in cols and "model_name" in cols
             use_wiki = "emotion_id" in cols and not use_derived
 
+            if not use_derived and not use_wiki:
+                logger.warning("%s: message_emotions schema not recognized", self)
+                return 0
             for i in range(0, len(records), batch_size):
                 batch = records[i:i + batch_size]
-                if use_derived:
-                    values = []
-                    for record in batch:
+                # Hold the gate for the whole batch: each INSERT takes SQLite's
+                # write lock at execute time, so writes and commit must share
+                # one hold (write_gate lock-order inversion).
+                with batched_writes(self.conn):
+                    if use_derived:
+                        for record in batch:
+                            import json
+
+                            all_emotions_val = record.get("all_emotions_json") or record.get("all_emotions") or []
+                            all_emotions_str = (
+                                json.dumps(all_emotions_val)
+                                if isinstance(all_emotions_val, list)
+                                else (all_emotions_val if isinstance(all_emotions_val, str) else "[]")
+                            )
+                            row = {
+                                "message_id": record.get("message_id"),
+                                "source_id": record.get("source_id"),
+                                "emotion_label": record.get("emotion_label"),
+                                "confidence": record.get("confidence"),
+                                "model_name": record.get("model_name") or record.get("model"),
+                                "all_emotions_json": all_emotions_str,
+                                "role": record.get("role"),
+                                "created_at": extracted_at,
+                                "spec_version": _record_spec_version(record, "emo_27"),
+                            }
+                            _insert_matching_columns(self.conn, "message_emotions", cols, row)
+                    else:
                         import json
+                        import uuid
 
-                        all_emotions_val = record.get("all_emotions_json") or record.get("all_emotions") or []
-                        all_emotions_str = (
-                            json.dumps(all_emotions_val)
-                            if isinstance(all_emotions_val, list)
-                            else (all_emotions_val if isinstance(all_emotions_val, str) else "[]")
-                        )
-                        row = {
-                            "message_id": record.get("message_id"),
-                            "source_id": record.get("source_id"),
-                            "emotion_label": record.get("emotion_label"),
-                            "confidence": record.get("confidence"),
-                            "model_name": record.get("model_name") or record.get("model"),
-                            "all_emotions_json": all_emotions_str,
-                            "role": record.get("role"),
-                            "created_at": extracted_at,
-                            "spec_version": _record_spec_version(record, "emo_27"),
-                        }
-                        _insert_matching_columns(self.conn, "message_emotions", cols, row)
-                        values.append(1)
-                elif use_wiki:
-                    import json
-                    import uuid
-
-                    for record in batch:
-                        message_id = record.get("message_id") or record.get("record_id")
-                        emotion_id = str(record.get("emotion_id") or uuid.uuid4())
-                        payload = json.dumps({**record, "message_id": message_id})
-                        row = {
-                            "emotion_id": emotion_id,
-                            "record_id": message_id,
-                            "source_id": record.get("source_id"),
-                            "model": record.get("model_name") or record.get("model"),
-                            "provider": record.get("provider"),
-                            "payload_json": payload,
-                            "spec_version": _record_spec_version(record, "emo_27"),
-                        }
-                        _insert_matching_columns(self.conn, "message_emotions", cols, row)
-                        values = [1]  # noqa: F841 — keep written accounting below
-                else:
-                    logger.warning("%s: message_emotions schema not recognized", self)
-                    return 0
-
-                commit_connection(self.conn)
+                        for record in batch:
+                            message_id = record.get("message_id") or record.get("record_id")
+                            emotion_id = str(record.get("emotion_id") or uuid.uuid4())
+                            payload = json.dumps({**record, "message_id": message_id})
+                            row = {
+                                "emotion_id": emotion_id,
+                                "record_id": message_id,
+                                "source_id": record.get("source_id"),
+                                "model": record.get("model_name") or record.get("model"),
+                                "provider": record.get("provider"),
+                                "payload_json": payload,
+                                "spec_version": _record_spec_version(record, "emo_27"),
+                            }
+                            _insert_matching_columns(self.conn, "message_emotions", cols, row)
                 written += len(batch)
         except Exception as e:
             if self.conn:
@@ -325,39 +327,39 @@ class DerivedTablesManager(BaseObject):
         extracted_at = datetime.now(timezone.utc).isoformat()
         for i in range(0, len(records), batch_size):
             batch = records[i:i + batch_size]
-            for record in batch:
-                record_id = record.get("record_id") or record.get("message_id")
-                entity_text = record.get("entity_text") or record.get("text")
-                if not record_id or not entity_text:
-                    continue
-                entity_id = str(record.get("entity_id") or uuid.uuid4())
-                payload = json.dumps({**record, "record_id": record_id, "entity_id": entity_id})
-                if "payload_json" in cols:
-                    _insert_matching_columns(
-                        self.conn,
-                        "message_entities",
-                        cols,
-                        {
-                            "entity_id": entity_id,
-                            "record_id": record_id,
-                            "source_id": record.get("source_id"),
-                            "entity_text": entity_text,
-                            "model": record.get("model"),
-                            "provider": record.get("provider"),
-                            "payload_json": payload,
-                            "spec_version": _record_spec_version(record, "entities"),
-                        },
-                    )
-                if "message_id" in cols:
-                    try:
-                        self.conn.execute(
-                            "UPDATE message_entities SET message_id=? WHERE entity_id=?",
-                            (record_id, entity_id),
+            with batched_writes(self.conn):
+                for record in batch:
+                    record_id = record.get("record_id") or record.get("message_id")
+                    entity_text = record.get("entity_text") or record.get("text")
+                    if not record_id or not entity_text:
+                        continue
+                    entity_id = str(record.get("entity_id") or uuid.uuid4())
+                    payload = json.dumps({**record, "record_id": record_id, "entity_id": entity_id})
+                    if "payload_json" in cols:
+                        _insert_matching_columns(
+                            self.conn,
+                            "message_entities",
+                            cols,
+                            {
+                                "entity_id": entity_id,
+                                "record_id": record_id,
+                                "source_id": record.get("source_id"),
+                                "entity_text": entity_text,
+                                "model": record.get("model"),
+                                "provider": record.get("provider"),
+                                "payload_json": payload,
+                                "spec_version": _record_spec_version(record, "entities"),
+                            },
                         )
-                    except sqlite3.OperationalError:
-                        pass
-                written += 1
-            commit_connection(self.conn)
+                    if "message_id" in cols:
+                        try:
+                            self.conn.execute(
+                                "UPDATE message_entities SET message_id=? WHERE entity_id=?",
+                                (record_id, entity_id),
+                            )
+                        except sqlite3.OperationalError:
+                            pass
+                    written += 1
         return written
 
     def _write_goals_batch(
@@ -375,29 +377,29 @@ class DerivedTablesManager(BaseObject):
         written = 0
         for i in range(0, len(records), batch_size):
             batch = records[i:i + batch_size]
-            for record in batch:
-                record_id = record.get("record_id") or record.get("message_id")
-                goal_text = record.get("goal_text") or record.get("text")
-                if not goal_text:
-                    continue
-                goal_id = str(record.get("goal_id") or uuid.uuid4())
-                _insert_matching_columns(
-                    self.conn,
-                    "user_goals",
-                    cols,
-                    {
-                        "goal_id": goal_id,
-                        "record_id": record_id,
-                        "source_id": record.get("source_id"),
-                        "goal_text": goal_text,
-                        "model": record.get("model"),
-                        "provider": record.get("provider"),
-                        "payload_json": json.dumps({**record, "goal_id": goal_id}),
-                        "spec_version": _record_spec_version(record, "goal_extraction"),
-                    },
-                )
-                written += 1
-            commit_connection(self.conn)
+            with batched_writes(self.conn):
+                for record in batch:
+                    record_id = record.get("record_id") or record.get("message_id")
+                    goal_text = record.get("goal_text") or record.get("text")
+                    if not goal_text:
+                        continue
+                    goal_id = str(record.get("goal_id") or uuid.uuid4())
+                    _insert_matching_columns(
+                        self.conn,
+                        "user_goals",
+                        cols,
+                        {
+                            "goal_id": goal_id,
+                            "record_id": record_id,
+                            "source_id": record.get("source_id"),
+                            "goal_text": goal_text,
+                            "model": record.get("model"),
+                            "provider": record.get("provider"),
+                            "payload_json": json.dumps({**record, "goal_id": goal_id}),
+                            "spec_version": _record_spec_version(record, "goal_extraction"),
+                        },
+                    )
+                    written += 1
         return written
 
     def _write_batch_by_columns(
@@ -415,13 +417,13 @@ class DerivedTablesManager(BaseObject):
         written = 0
         for i in range(0, len(records), batch_size):
             batch = records[i : i + batch_size]
-            for record in batch:
-                values = build_values(record, cols)
-                if values is None:
-                    continue
-                _insert_matching_columns(self.conn, table, cols, values)
-                written += 1
-            commit_connection(self.conn)
+            with batched_writes(self.conn):
+                for record in batch:
+                    values = build_values(record, cols)
+                    if values is None:
+                        continue
+                    _insert_matching_columns(self.conn, table, cols, values)
+                    written += 1
         return written
 
     def _write_topics_batch(
@@ -530,70 +532,68 @@ class DerivedTablesManager(BaseObject):
                 batch = records[i : i + batch_size]
                 values = []
                 cols = _table_columns(self.conn, "browser_url_classification")
-                for record in batch:
-                    record_id = record.get("record_id") or record.get("event_id")
-                    if not record_id:
-                        continue
-                    row = {
-                        "enriched_from_table": record.get("enriched_from_table") or "activity_events",
-                        "record_id": record_id,
-                        "dataset_id": record.get("dataset_id"),
-                        "url": record.get("url"),
-                        "title": record.get("title"),
-                        "url_category": record.get("url_category") or record.get("category"),
-                        "url_confidence": (
-                            record.get("url_confidence")
-                            if record.get("url_confidence") is not None
-                            else record.get("confidence")
-                        ),
-                        "model_name": record.get("model_name") or record.get("model"),
-                        "updated_at": "datetime('now')",
-                        "spec_version": _record_spec_version(record, "url_classification"),
-                    }
-                    # updated_at uses SQL datetime — keep prior executemany path for that col
-                    if "spec_version" in cols:
-                        self.conn.execute(
-                            """
-                            INSERT OR REPLACE INTO browser_url_classification
-                            (enriched_from_table, record_id, dataset_id, url, title,
-                             url_category, url_confidence, model_name, updated_at, spec_version)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
-                            """,
-                            (
-                                row["enriched_from_table"],
-                                row["record_id"],
-                                row["dataset_id"],
-                                row["url"],
-                                row["title"],
-                                row["url_category"],
-                                row["url_confidence"],
-                                row["model_name"],
-                                row["spec_version"],
+                with batched_writes(self.conn):
+                    for record in batch:
+                        record_id = record.get("record_id") or record.get("event_id")
+                        if not record_id:
+                            continue
+                        row = {
+                            "enriched_from_table": record.get("enriched_from_table") or "activity_events",
+                            "record_id": record_id,
+                            "dataset_id": record.get("dataset_id"),
+                            "url": record.get("url"),
+                            "title": record.get("title"),
+                            "url_category": record.get("url_category") or record.get("category"),
+                            "url_confidence": (
+                                record.get("url_confidence")
+                                if record.get("url_confidence") is not None
+                                else record.get("confidence")
                             ),
-                        )
-                    else:
-                        self.conn.execute(
-                            """
-                            INSERT OR REPLACE INTO browser_url_classification
-                            (enriched_from_table, record_id, dataset_id, url, title,
-                             url_category, url_confidence, model_name, updated_at)
-                            VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-                            """,
-                            (
-                                row["enriched_from_table"],
-                                row["record_id"],
-                                row["dataset_id"],
-                                row["url"],
-                                row["title"],
-                                row["url_category"],
-                                row["url_confidence"],
-                                row["model_name"],
-                            ),
-                        )
-                    values.append(1)
-                if not values:
-                    continue
-                commit_connection(self.conn)
+                            "model_name": record.get("model_name") or record.get("model"),
+                            "updated_at": "datetime('now')",
+                            "spec_version": _record_spec_version(record, "url_classification"),
+                        }
+                        # updated_at uses SQL datetime — keep prior executemany path for that col
+                        if "spec_version" in cols:
+                            self.conn.execute(
+                                """
+                                INSERT OR REPLACE INTO browser_url_classification
+                                (enriched_from_table, record_id, dataset_id, url, title,
+                                 url_category, url_confidence, model_name, updated_at, spec_version)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
+                                """,
+                                (
+                                    row["enriched_from_table"],
+                                    row["record_id"],
+                                    row["dataset_id"],
+                                    row["url"],
+                                    row["title"],
+                                    row["url_category"],
+                                    row["url_confidence"],
+                                    row["model_name"],
+                                    row["spec_version"],
+                                ),
+                            )
+                        else:
+                            self.conn.execute(
+                                """
+                                INSERT OR REPLACE INTO browser_url_classification
+                                (enriched_from_table, record_id, dataset_id, url, title,
+                                 url_category, url_confidence, model_name, updated_at)
+                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                                """,
+                                (
+                                    row["enriched_from_table"],
+                                    row["record_id"],
+                                    row["dataset_id"],
+                                    row["url"],
+                                    row["title"],
+                                    row["url_category"],
+                                    row["url_confidence"],
+                                    row["model_name"],
+                                ),
+                            )
+                        values.append(1)
                 written += len(values)
         except Exception as exc:
             logger.error("%s: Failed to write browser_url_classification batch: %s", self, exc)

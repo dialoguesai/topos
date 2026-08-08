@@ -113,22 +113,26 @@ def _aggregate_uma_access_attribution(
 
 def _ensure_uma_access_requests_indexes(conn: sqlite3.Connection) -> None:
     try:
-        conn.execute(
-            f"CREATE INDEX IF NOT EXISTS idx_uma_access_requests_owner_created "
-            f"ON {UMA_ACCESS_REQUESTS_TABLE}(owner_user_id, created_at)"
-        )
-        conn.commit()
+        # DDL takes SQLite's write lock at execute time — gate it with the
+        # commit like every other writer (write_gate lock-order inversion).
+        with with_db_write():
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_uma_access_requests_owner_created "
+                f"ON {UMA_ACCESS_REQUESTS_TABLE}(owner_user_id, created_at)"
+            )
+            commit_connection(conn)
     except Exception as exc:
         logger.debug("Failed to ensure uma_access_requests indexes: %s", exc)
 
 
 def _ensure_mcp_request_log_indexes(conn: sqlite3.Connection) -> None:
     try:
-        conn.execute(
-            f"CREATE INDEX IF NOT EXISTS idx_mcp_request_log_requested_at "
-            f"ON {MCP_REQUEST_LOG_TABLE}(requested_at)"
-        )
-        conn.commit()
+        with with_db_write():
+            conn.execute(
+                f"CREATE INDEX IF NOT EXISTS idx_mcp_request_log_requested_at "
+                f"ON {MCP_REQUEST_LOG_TABLE}(requested_at)"
+            )
+            commit_connection(conn)
     except Exception as exc:
         logger.debug("Failed to ensure mcp_request_log indexes: %s", exc)
 
@@ -475,11 +479,12 @@ def get_or_create_user_id(conn: sqlite3.Connection) -> str:
         if row:
             return row["value"]
         user_id = str(uuid.uuid4())
-        conn.execute(
-            "INSERT INTO engine_config (key, value) VALUES (?, ?)",
-            ("user_id", user_id),
-        )
-        conn.commit()
+        with with_db_write():
+            conn.execute(
+                "INSERT INTO engine_config (key, value) VALUES (?, ?)",
+                ("user_id", user_id),
+            )
+            commit_connection(conn)
         return user_id
     except Exception as exc:
         logger.error("Failed to get or create user_id: %s", exc, exc_info=True)
@@ -493,11 +498,12 @@ def store_user_id(conn: sqlite3.Connection, user_id: str) -> None:
     """
     try:
         _ensure_engine_config_table(conn)
-        conn.execute(
-            "INSERT OR REPLACE INTO engine_config (key, value) VALUES (?, ?)",
-            ("user_id", user_id),
-        )
-        conn.commit()
+        with with_db_write():
+            conn.execute(
+                "INSERT OR REPLACE INTO engine_config (key, value) VALUES (?, ?)",
+                ("user_id", user_id),
+            )
+            commit_connection(conn)
     except Exception as exc:
         logger.error("Failed to store user_id: %s", exc, exc_info=True)
         raise
@@ -532,14 +538,15 @@ def _ensure_engine_config_table(conn: sqlite3.Connection) -> None:
         if not cursor.fetchone():
             # Create table if it doesn't exist
             logger.debug("Creating engine_config table...")
-            conn.execute("""
-                CREATE TABLE IF NOT EXISTS engine_config (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL,
-                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-                )
-            """)
-            conn.commit()
+            with with_db_write():
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS engine_config (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL,
+                        updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                    )
+                """)
+                commit_connection(conn)
             logger.debug("engine_config table created successfully")
     except Exception as exc:
         logger.warning("Failed to ensure engine_config table exists: %s", exc)
@@ -576,11 +583,12 @@ def set_engine_config_value(conn: sqlite3.Connection, key: str, value: str) -> N
     """
     try:
         _ensure_engine_config_table(conn)
-        conn.execute(
-            "INSERT OR REPLACE INTO engine_config (key, value) VALUES (?, ?)",
-            (key, value),
-        )
-        conn.commit()
+        with with_db_write():
+            conn.execute(
+                "INSERT OR REPLACE INTO engine_config (key, value) VALUES (?, ?)",
+                (key, value),
+            )
+            commit_connection(conn)
     except Exception as exc:
         logger.error("Failed to set engine_config[%s]: %s", key, exc, exc_info=True)
         raise
@@ -594,32 +602,32 @@ def _ensure_mcp_request_log_table(conn: sqlite3.Connection) -> None:
             (MCP_REQUEST_LOG_TABLE,),
         )
         if not cursor.fetchone():
-            conn.execute(f"""
-                CREATE TABLE IF NOT EXISTS {MCP_REQUEST_LOG_TABLE} (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    tool_name TEXT NOT NULL,
-                    requested_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    source TEXT,
-                    requester_id TEXT,
-                    access_context TEXT
-                )
-            """)
-            conn.commit()
+            with with_db_write():
+                conn.execute(f"""
+                    CREATE TABLE IF NOT EXISTS {MCP_REQUEST_LOG_TABLE} (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        tool_name TEXT NOT NULL,
+                        requested_at TEXT NOT NULL DEFAULT (datetime('now')),
+                        source TEXT,
+                        requester_id TEXT,
+                        access_context TEXT
+                    )
+                """)
+                commit_connection(conn)
             logger.debug("mcp_request_log table created successfully")
             _ensure_mcp_request_log_indexes(conn)
             return
         # Add source/requester_id columns if missing (migration for existing DBs)
         cursor = conn.execute(f"PRAGMA table_info({MCP_REQUEST_LOG_TABLE})")
         columns = [row[1] for row in cursor.fetchall()]
-        if "source" not in columns:
-            conn.execute(f"ALTER TABLE {MCP_REQUEST_LOG_TABLE} ADD COLUMN source TEXT")
-            conn.commit()
-        if "requester_id" not in columns:
-            conn.execute(f"ALTER TABLE {MCP_REQUEST_LOG_TABLE} ADD COLUMN requester_id TEXT")
-            conn.commit()
-        if "access_context" not in columns:
-            conn.execute(f"ALTER TABLE {MCP_REQUEST_LOG_TABLE} ADD COLUMN access_context TEXT")
-            conn.commit()
+        missing = [
+            col for col in ("source", "requester_id", "access_context") if col not in columns
+        ]
+        if missing:
+            with with_db_write():
+                for col in missing:
+                    conn.execute(f"ALTER TABLE {MCP_REQUEST_LOG_TABLE} ADD COLUMN {col} TEXT")
+                commit_connection(conn)
         _ensure_mcp_request_log_indexes(conn)
     except Exception as exc:
         logger.warning("Failed to ensure mcp_request_log table exists: %s", exc)
@@ -648,11 +656,12 @@ def record_mcp_request(
         access_ctx = derive_mcp_access_context(resource_owner_user_id, requester_id)
         if is_routine_mcp_source(source):
             access_ctx = ROUTINE_ACCESS_CONTEXT
-        conn.execute(
-            f"INSERT INTO {MCP_REQUEST_LOG_TABLE} (tool_name, requested_at, source, requester_id, access_context) VALUES (?, ?, ?, ?, ?)",
-            (tool_name, requested_at, source or None, requester_id or None, access_ctx),
-        )
-        conn.commit()
+        with with_db_write():
+            conn.execute(
+                f"INSERT INTO {MCP_REQUEST_LOG_TABLE} (tool_name, requested_at, source, requester_id, access_context) VALUES (?, ?, ?, ?, ?)",
+                (tool_name, requested_at, source or None, requester_id or None, access_ctx),
+            )
+            commit_connection(conn)
         if is_routine_mcp_source(source) and resource_owner_user_id:
             record_uma_request(
                 conn,
@@ -677,35 +686,42 @@ def _ensure_uma_access_requests_table(conn: sqlite3.Connection) -> None:
             (UMA_ACCESS_REQUESTS_TABLE,),
         )
         if not cursor.fetchone():
-            conn.execute(f"""
-                CREATE TABLE IF NOT EXISTS {UMA_ACCESS_REQUESTS_TABLE} (
-                    id TEXT PRIMARY KEY,
-                    owner_user_id TEXT NOT NULL,
-                    requesting_user_id TEXT,
-                    requesting_user_email TEXT,
-                    app_id TEXT,
-                    resource_id TEXT NOT NULL,
-                    request_type TEXT NOT NULL,
-                    endpoint TEXT NOT NULL,
-                    access_channel TEXT,
-                    access_context TEXT,
-                    created_at TEXT NOT NULL
-                )
-            """)
-            conn.commit()
+            with with_db_write():
+                conn.execute(f"""
+                    CREATE TABLE IF NOT EXISTS {UMA_ACCESS_REQUESTS_TABLE} (
+                        id TEXT PRIMARY KEY,
+                        owner_user_id TEXT NOT NULL,
+                        requesting_user_id TEXT,
+                        requesting_user_email TEXT,
+                        app_id TEXT,
+                        resource_id TEXT NOT NULL,
+                        request_type TEXT NOT NULL,
+                        endpoint TEXT NOT NULL,
+                        access_channel TEXT,
+                        access_context TEXT,
+                        created_at TEXT NOT NULL
+                    )
+                """)
+                commit_connection(conn)
             logger.debug("uma_access_requests table created successfully")
             _ensure_uma_access_requests_indexes(conn)
             return
         cursor = conn.execute(f"PRAGMA table_info({UMA_ACCESS_REQUESTS_TABLE})")
         columns = [row[1] for row in cursor.fetchall()]
-        for col, ddl in (
-            ("requesting_user_email", "TEXT"),
-            ("access_channel", "TEXT"),
-            ("access_context", "TEXT"),
-        ):
-            if col not in columns:
-                conn.execute(f"ALTER TABLE {UMA_ACCESS_REQUESTS_TABLE} ADD COLUMN {col} {ddl}")
-                conn.commit()
+        missing = [
+            (col, ddl)
+            for col, ddl in (
+                ("requesting_user_email", "TEXT"),
+                ("access_channel", "TEXT"),
+                ("access_context", "TEXT"),
+            )
+            if col not in columns
+        ]
+        if missing:
+            with with_db_write():
+                for col, ddl in missing:
+                    conn.execute(f"ALTER TABLE {UMA_ACCESS_REQUESTS_TABLE} ADD COLUMN {col} {ddl}")
+                commit_connection(conn)
     except Exception as exc:
         logger.warning("Failed to ensure uma_access_requests table exists: %s", exc)
     else:
@@ -716,13 +732,14 @@ def _ensure_uma_access_requests_table(conn: sqlite3.Connection) -> None:
 def _migrate_legacy_browser_plugin_app_ids(conn: sqlite3.Connection) -> int:
     """Rewrite engine Activity counts from browser-plugin → browser-history-plugin (idempotent)."""
     try:
-        cursor = conn.execute(
-            f"UPDATE {UMA_ACCESS_REQUESTS_TABLE} SET app_id = ? WHERE app_id = ?",
-            (BROWSER_HISTORY_PLUGIN_APP_ID, LEGACY_BROWSER_PLUGIN_APP_ID),
-        )
-        # Commit even for 0 rows: the UPDATE opened an implicit transaction
-        # either way, and this runs at startup on the owner connection.
-        conn.commit()
+        with with_db_write():
+            cursor = conn.execute(
+                f"UPDATE {UMA_ACCESS_REQUESTS_TABLE} SET app_id = ? WHERE app_id = ?",
+                (BROWSER_HISTORY_PLUGIN_APP_ID, LEGACY_BROWSER_PLUGIN_APP_ID),
+            )
+            # Commit even for 0 rows: the UPDATE opened an implicit transaction
+            # either way, and this runs at startup on the owner connection.
+            commit_connection(conn)
         if cursor.rowcount:
             logger.info(
                 "Migrated %s uma_access_requests rows: %s → %s",
@@ -762,25 +779,26 @@ def record_uma_request(
         ctx = access_context or derive_uma_access_context(owner_user_id, requesting_user_id)
         ch = (access_channel or "").strip() or None
         email = (requesting_user_email or "").strip() or None
-        conn.execute(
-            f"""INSERT INTO {UMA_ACCESS_REQUESTS_TABLE}
-                (id, owner_user_id, requesting_user_id, requesting_user_email, app_id, resource_id, request_type, endpoint, access_channel, access_context, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                row_id,
-                owner_user_id,
-                (requesting_user_id or "").strip() or None,
-                email,
-                app_id or None,
-                resource_id,
-                request_type,
-                endpoint,
-                ch,
-                ctx,
-                created_at,
-            ),
-        )
-        conn.commit()
+        with with_db_write():
+            conn.execute(
+                f"""INSERT INTO {UMA_ACCESS_REQUESTS_TABLE}
+                    (id, owner_user_id, requesting_user_id, requesting_user_email, app_id, resource_id, request_type, endpoint, access_channel, access_context, created_at)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    row_id,
+                    owner_user_id,
+                    (requesting_user_id or "").strip() or None,
+                    email,
+                    app_id or None,
+                    resource_id,
+                    request_type,
+                    endpoint,
+                    ch,
+                    ctx,
+                    created_at,
+                ),
+            )
+            commit_connection(conn)
     except Exception as exc:
         logger.debug("Failed to record UMA request (non-critical): %s", exc)
 

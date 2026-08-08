@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 
 from ..protocols import ListPage
 from ...canonical.canonical_store import SQLiteCanonicalStore as TypedSQLiteCanonicalStore
-from ...db.write_gate import commit_connection
+from ...db.write_gate import commit_connection, with_db_write
 
 _NATIVE_TABLES = frozenset(
     {
@@ -467,18 +467,22 @@ class SQLiteCanonicalStore:
             return ref.record_id
         record_id = str(record.get("record_id") or record.get("id") or idempotency_key or uuid.uuid4())
         payload = json.dumps({**record, "record_id": record_id})
-        self._conn.execute(
-            """
-            INSERT INTO wiki_canonical_records (record_id, table_name, source_id, payload_json)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(record_id) DO UPDATE SET
-                table_name=excluded.table_name,
-                source_id=excluded.source_id,
-                payload_json=excluded.payload_json
-            """,
-            (record_id, table, record.get("source_id"), payload),
-        )
-        commit_connection(self._conn)
+        # INSERT takes SQLite's write lock at execute time — it must run under
+        # the same gate hold as the commit or it inverts lock order against the
+        # gate holder (see write_gate._warn_ungated_transaction).
+        with with_db_write():
+            self._conn.execute(
+                """
+                INSERT INTO wiki_canonical_records (record_id, table_name, source_id, payload_json)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(record_id) DO UPDATE SET
+                    table_name=excluded.table_name,
+                    source_id=excluded.source_id,
+                    payload_json=excluded.payload_json
+                """,
+                (record_id, table, record.get("source_id"), payload),
+            )
+            commit_connection(self._conn)
         return record_id
 
     def get(self, table: str, record_id: str) -> Optional[Dict[str, Any]]:
@@ -534,14 +538,15 @@ class SQLiteCanonicalStore:
 
     def delete(self, table: str, record_id: str) -> bool:
         id_col = _NATIVE_ID_COL.get(table)
-        if id_col:
-            cur = self._conn.execute(f"DELETE FROM {table} WHERE {id_col}=?", (record_id,))
-        else:
-            cur = self._conn.execute(
-                "DELETE FROM wiki_canonical_records WHERE record_id=? AND table_name=?",
-                (record_id, table),
-            )
-        commit_connection(self._conn)
+        with with_db_write():
+            if id_col:
+                cur = self._conn.execute(f"DELETE FROM {table} WHERE {id_col}=?", (record_id,))
+            else:
+                cur = self._conn.execute(
+                    "DELETE FROM wiki_canonical_records WHERE record_id=? AND table_name=?",
+                    (record_id, table),
+                )
+            commit_connection(self._conn)
         return cur.rowcount > 0
 
     def count(self, table: str, *, source_id: Optional[str] = None) -> int:
@@ -554,40 +559,42 @@ class SQLiteSignalFeatureStore:
 
     def put_fact(self, fact: Dict[str, Any]) -> str:
         fact_id = str(fact.get("fact_id") or uuid.uuid4())
-        self._conn.execute(
-            """
-            INSERT INTO signal_facts (fact_id, dimension, source_id, record_id, payload_json)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(fact_id) DO UPDATE SET payload_json=excluded.payload_json
-            """,
-            (
-                fact_id,
-                fact.get("dimension"),
-                fact.get("source_id"),
-                fact.get("record_id"),
-                json.dumps({**fact, "fact_id": fact_id}),
-            ),
-        )
-        commit_connection(self._conn)
+        with with_db_write():
+            self._conn.execute(
+                """
+                INSERT INTO signal_facts (fact_id, dimension, source_id, record_id, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(fact_id) DO UPDATE SET payload_json=excluded.payload_json
+                """,
+                (
+                    fact_id,
+                    fact.get("dimension"),
+                    fact.get("source_id"),
+                    fact.get("record_id"),
+                    json.dumps({**fact, "fact_id": fact_id}),
+                ),
+            )
+            commit_connection(self._conn)
         return fact_id
 
     def put_score(self, score: Dict[str, Any]) -> str:
         score_id = str(score.get("score_id") or uuid.uuid4())
-        self._conn.execute(
-            """
-            INSERT INTO signal_scores (score_id, dimension, source_id, record_id, payload_json)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(score_id) DO UPDATE SET payload_json=excluded.payload_json
-            """,
-            (
-                score_id,
-                score.get("dimension"),
-                score.get("source_id"),
-                score.get("record_id"),
-                json.dumps({**score, "score_id": score_id}),
-            ),
-        )
-        commit_connection(self._conn)
+        with with_db_write():
+            self._conn.execute(
+                """
+                INSERT INTO signal_scores (score_id, dimension, source_id, record_id, payload_json)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(score_id) DO UPDATE SET payload_json=excluded.payload_json
+                """,
+                (
+                    score_id,
+                    score.get("dimension"),
+                    score.get("source_id"),
+                    score.get("record_id"),
+                    json.dumps({**score, "score_id": score_id}),
+                ),
+            )
+            commit_connection(self._conn)
         return score_id
 
     def put_summary(self, summary: Dict[str, Any]) -> str:
@@ -672,39 +679,42 @@ class SQLiteVectorIndex:
     ) -> int:
         from .vector_search import delete_vec_rows
 
-        if keep_indices is not None:
-            placeholders = ",".join("?" for _ in keep_indices)
-            ids = [
-                str(row[0])
-                for row in self._conn.execute(
+        # The per-record id lookups stay under the gate with the deletes so the
+        # vec companion rows removed match exactly the rows deleted here.
+        with with_db_write():
+            if keep_indices is not None:
+                placeholders = ",".join("?" for _ in keep_indices)
+                ids = [
+                    str(row[0])
+                    for row in self._conn.execute(
+                        f"""
+                        SELECT embedding_id FROM signal_embeddings
+                        WHERE record_id=? AND model=? AND chunk_index NOT IN ({placeholders})
+                        """,
+                        (record_id, model, *keep_indices),
+                    ).fetchall()
+                ]
+                cur = self._conn.execute(
                     f"""
-                    SELECT embedding_id FROM signal_embeddings
+                    DELETE FROM signal_embeddings
                     WHERE record_id=? AND model=? AND chunk_index NOT IN ({placeholders})
                     """,
                     (record_id, model, *keep_indices),
-                ).fetchall()
-            ]
-            cur = self._conn.execute(
-                f"""
-                DELETE FROM signal_embeddings
-                WHERE record_id=? AND model=? AND chunk_index NOT IN ({placeholders})
-                """,
-                (record_id, model, *keep_indices),
-            )
-        else:
-            ids = [
-                str(row[0])
-                for row in self._conn.execute(
-                    "SELECT embedding_id FROM signal_embeddings WHERE record_id=? AND model=?",
+                )
+            else:
+                ids = [
+                    str(row[0])
+                    for row in self._conn.execute(
+                        "SELECT embedding_id FROM signal_embeddings WHERE record_id=? AND model=?",
+                        (record_id, model),
+                    ).fetchall()
+                ]
+                cur = self._conn.execute(
+                    "DELETE FROM signal_embeddings WHERE record_id=? AND model=?",
                     (record_id, model),
-                ).fetchall()
-            ]
-            cur = self._conn.execute(
-                "DELETE FROM signal_embeddings WHERE record_id=? AND model=?",
-                (record_id, model),
-            )
-        delete_vec_rows(self._conn, ids)
-        commit_connection(self._conn)
+                )
+            delete_vec_rows(self._conn, ids)
+            commit_connection(self._conn)
         return cur.rowcount
 
     def upsert(self, metadata: Dict[str, Any], *, vector: Optional[List[float]] = None) -> str:
@@ -731,100 +741,101 @@ class SQLiteVectorIndex:
 
             spec_version = job_spec_version("embeddings")
 
-        if "spec_version" in emb_cols:
-            self._conn.execute(
-                """
-                INSERT INTO signal_embeddings (
-                    embedding_id, record_id, source_id, signal_dimension, model, provider,
-                    dims, text_preview, provenance_json, vector_blob, vector_format,
-                    content_hash, chunk_index, event_at, conversation_id, record_type,
-                    search_text, spec_version
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(record_id, model, chunk_index) DO UPDATE SET
-                    embedding_id=excluded.embedding_id,
-                    source_id=excluded.source_id,
-                    signal_dimension=excluded.signal_dimension,
-                    provider=excluded.provider,
-                    dims=excluded.dims,
-                    text_preview=excluded.text_preview,
-                    provenance_json=excluded.provenance_json,
-                    vector_blob=excluded.vector_blob,
-                    vector_format=excluded.vector_format,
-                    content_hash=excluded.content_hash,
-                    event_at=excluded.event_at,
-                    conversation_id=excluded.conversation_id,
-                    record_type=excluded.record_type,
-                    search_text=excluded.search_text,
-                    spec_version=excluded.spec_version
-                """,
-                (
-                    embedding_id,
-                    record_id,
-                    metadata.get("source_id"),
-                    metadata.get("signal_dimension"),
-                    model,
-                    metadata.get("provider"),
-                    metadata.get("dims"),
-                    metadata.get("text_preview"),
-                    json.dumps(provenance),
-                    vector_blob,
-                    fmt if vector is not None else metadata.get("vector_format", "json"),
-                    metadata.get("content_hash"),
-                    chunk_index,
-                    metadata.get("event_at"),
-                    metadata.get("conversation_id"),
-                    metadata.get("record_type"),
-                    search_text,
-                    int(spec_version) if spec_version is not None else None,
-                ),
-            )
-        else:
-            self._conn.execute(
-                """
-                INSERT INTO signal_embeddings (
-                    embedding_id, record_id, source_id, signal_dimension, model, provider,
-                    dims, text_preview, provenance_json, vector_blob, vector_format,
-                    content_hash, chunk_index, event_at, conversation_id, record_type, search_text
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(record_id, model, chunk_index) DO UPDATE SET
-                    embedding_id=excluded.embedding_id,
-                    source_id=excluded.source_id,
-                    signal_dimension=excluded.signal_dimension,
-                    provider=excluded.provider,
-                    dims=excluded.dims,
-                    text_preview=excluded.text_preview,
-                    provenance_json=excluded.provenance_json,
-                    vector_blob=excluded.vector_blob,
-                    vector_format=excluded.vector_format,
-                    content_hash=excluded.content_hash,
-                    event_at=excluded.event_at,
-                    conversation_id=excluded.conversation_id,
-                    record_type=excluded.record_type,
-                    search_text=excluded.search_text
-                """,
-                (
-                    embedding_id,
-                    record_id,
-                    metadata.get("source_id"),
-                    metadata.get("signal_dimension"),
-                    model,
-                    metadata.get("provider"),
-                    metadata.get("dims"),
-                    metadata.get("text_preview"),
-                    json.dumps(provenance),
-                    vector_blob,
-                    fmt if vector is not None else metadata.get("vector_format", "json"),
-                    metadata.get("content_hash"),
-                    chunk_index,
-                    metadata.get("event_at"),
-                    metadata.get("conversation_id"),
-                    metadata.get("record_type"),
-                    search_text,
-                ),
-            )
-        if vector is not None:
-            sync_vec_row(self._conn, embedding_id=embedding_id, vector=[float(x) for x in vector])
-        commit_connection(self._conn)
+        with with_db_write():
+            if "spec_version" in emb_cols:
+                self._conn.execute(
+                    """
+                    INSERT INTO signal_embeddings (
+                        embedding_id, record_id, source_id, signal_dimension, model, provider,
+                        dims, text_preview, provenance_json, vector_blob, vector_format,
+                        content_hash, chunk_index, event_at, conversation_id, record_type,
+                        search_text, spec_version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(record_id, model, chunk_index) DO UPDATE SET
+                        embedding_id=excluded.embedding_id,
+                        source_id=excluded.source_id,
+                        signal_dimension=excluded.signal_dimension,
+                        provider=excluded.provider,
+                        dims=excluded.dims,
+                        text_preview=excluded.text_preview,
+                        provenance_json=excluded.provenance_json,
+                        vector_blob=excluded.vector_blob,
+                        vector_format=excluded.vector_format,
+                        content_hash=excluded.content_hash,
+                        event_at=excluded.event_at,
+                        conversation_id=excluded.conversation_id,
+                        record_type=excluded.record_type,
+                        search_text=excluded.search_text,
+                        spec_version=excluded.spec_version
+                    """,
+                    (
+                        embedding_id,
+                        record_id,
+                        metadata.get("source_id"),
+                        metadata.get("signal_dimension"),
+                        model,
+                        metadata.get("provider"),
+                        metadata.get("dims"),
+                        metadata.get("text_preview"),
+                        json.dumps(provenance),
+                        vector_blob,
+                        fmt if vector is not None else metadata.get("vector_format", "json"),
+                        metadata.get("content_hash"),
+                        chunk_index,
+                        metadata.get("event_at"),
+                        metadata.get("conversation_id"),
+                        metadata.get("record_type"),
+                        search_text,
+                        int(spec_version) if spec_version is not None else None,
+                    ),
+                )
+            else:
+                self._conn.execute(
+                    """
+                    INSERT INTO signal_embeddings (
+                        embedding_id, record_id, source_id, signal_dimension, model, provider,
+                        dims, text_preview, provenance_json, vector_blob, vector_format,
+                        content_hash, chunk_index, event_at, conversation_id, record_type, search_text
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ON CONFLICT(record_id, model, chunk_index) DO UPDATE SET
+                        embedding_id=excluded.embedding_id,
+                        source_id=excluded.source_id,
+                        signal_dimension=excluded.signal_dimension,
+                        provider=excluded.provider,
+                        dims=excluded.dims,
+                        text_preview=excluded.text_preview,
+                        provenance_json=excluded.provenance_json,
+                        vector_blob=excluded.vector_blob,
+                        vector_format=excluded.vector_format,
+                        content_hash=excluded.content_hash,
+                        event_at=excluded.event_at,
+                        conversation_id=excluded.conversation_id,
+                        record_type=excluded.record_type,
+                        search_text=excluded.search_text
+                    """,
+                    (
+                        embedding_id,
+                        record_id,
+                        metadata.get("source_id"),
+                        metadata.get("signal_dimension"),
+                        model,
+                        metadata.get("provider"),
+                        metadata.get("dims"),
+                        metadata.get("text_preview"),
+                        json.dumps(provenance),
+                        vector_blob,
+                        fmt if vector is not None else metadata.get("vector_format", "json"),
+                        metadata.get("content_hash"),
+                        chunk_index,
+                        metadata.get("event_at"),
+                        metadata.get("conversation_id"),
+                        metadata.get("record_type"),
+                        search_text,
+                    ),
+                )
+            if vector is not None:
+                sync_vec_row(self._conn, embedding_id=embedding_id, vector=[float(x) for x in vector])
+            commit_connection(self._conn)
         return embedding_id
 
     def get_metadata(self, embedding_id: str) -> Optional[Dict[str, Any]]:
@@ -905,16 +916,17 @@ class SQLiteVectorIndex:
     def delete_by_record(self, record_id: str) -> int:
         from .vector_search import delete_vec_rows
 
-        ids = [
-            str(row[0])
-            for row in self._conn.execute(
-                "SELECT embedding_id FROM signal_embeddings WHERE record_id=?",
-                (record_id,),
-            ).fetchall()
-        ]
-        cur = self._conn.execute("DELETE FROM signal_embeddings WHERE record_id=?", (record_id,))
-        delete_vec_rows(self._conn, ids)
-        commit_connection(self._conn)
+        with with_db_write():
+            ids = [
+                str(row[0])
+                for row in self._conn.execute(
+                    "SELECT embedding_id FROM signal_embeddings WHERE record_id=?",
+                    (record_id,),
+                ).fetchall()
+            ]
+            cur = self._conn.execute("DELETE FROM signal_embeddings WHERE record_id=?", (record_id,))
+            delete_vec_rows(self._conn, ids)
+            commit_connection(self._conn)
         return cur.rowcount
 
     def delete_embeddings(self, embedding_ids: List[str]) -> int:
@@ -939,43 +951,45 @@ class SQLiteGraphEdgeStore:
 
     def upsert_node(self, node: Dict[str, Any]) -> str:
         node_id = str(node.get("node_id") or uuid.uuid4())
-        self._conn.execute(
-            """
-            INSERT INTO graph_nodes (node_id, node_type, label, metadata_json, source_id)
-            VALUES (?, ?, ?, ?, ?)
-            ON CONFLICT(node_id) DO UPDATE SET metadata_json=excluded.metadata_json
-            """,
-            (
-                node_id,
-                node.get("node_type"),
-                node.get("label"),
-                json.dumps({**node, "node_id": node_id}),
-                node.get("source_id"),
-            ),
-        )
-        commit_connection(self._conn)
+        with with_db_write():
+            self._conn.execute(
+                """
+                INSERT INTO graph_nodes (node_id, node_type, label, metadata_json, source_id)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(node_id) DO UPDATE SET metadata_json=excluded.metadata_json
+                """,
+                (
+                    node_id,
+                    node.get("node_type"),
+                    node.get("label"),
+                    json.dumps({**node, "node_id": node_id}),
+                    node.get("source_id"),
+                ),
+            )
+            commit_connection(self._conn)
         return node_id
 
     def upsert_edge(self, edge: Dict[str, Any]) -> str:
         edge_id = str(edge.get("edge_id") or uuid.uuid4())
-        self._conn.execute(
-            """
-            INSERT INTO graph_edges (
-                edge_id, src_node_id, dst_node_id, edge_type, weight, metadata_json, source_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(edge_id) DO UPDATE SET metadata_json=excluded.metadata_json
-            """,
-            (
-                edge_id,
-                edge.get("src_node_id"),
-                edge.get("dst_node_id"),
-                edge.get("edge_type"),
-                edge.get("weight"),
-                json.dumps({**edge, "edge_id": edge_id}),
-                edge.get("source_id"),
-            ),
-        )
-        commit_connection(self._conn)
+        with with_db_write():
+            self._conn.execute(
+                """
+                INSERT INTO graph_edges (
+                    edge_id, src_node_id, dst_node_id, edge_type, weight, metadata_json, source_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(edge_id) DO UPDATE SET metadata_json=excluded.metadata_json
+                """,
+                (
+                    edge_id,
+                    edge.get("src_node_id"),
+                    edge.get("dst_node_id"),
+                    edge.get("edge_type"),
+                    edge.get("weight"),
+                    json.dumps({**edge, "edge_id": edge_id}),
+                    edge.get("source_id"),
+                ),
+            )
+            commit_connection(self._conn)
         return edge_id
 
     def list_graph(
@@ -1020,14 +1034,15 @@ class SQLiteAuditLogStore:
 
     def append(self, event: Dict[str, Any]) -> str:
         event_id = str(event.get("event_id") or uuid.uuid4())
-        self._conn.execute(
-            """
-            INSERT INTO query_audit_events (event_id, session_id, event_type, payload_json)
-            VALUES (?, ?, ?, ?)
-            """,
-            (event_id, event.get("session_id"), event.get("event_type"), json.dumps({**event, "event_id": event_id})),
-        )
-        commit_connection(self._conn)
+        with with_db_write():
+            self._conn.execute(
+                """
+                INSERT INTO query_audit_events (event_id, session_id, event_type, payload_json)
+                VALUES (?, ?, ?, ?)
+                """,
+                (event_id, event.get("session_id"), event.get("event_type"), json.dumps({**event, "event_id": event_id})),
+            )
+            commit_connection(self._conn)
         return event_id
 
     def query(
@@ -1102,26 +1117,27 @@ class SQLiteQuerySessionStore:
         envelope = session.get("envelope_json") or {}
         if not isinstance(envelope, dict):
             envelope = {}
-        self._conn.execute(
-            """
-            INSERT INTO query_sessions (session_id, requester_id, intent_hash, envelope_json, ttl_expires_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, datetime('now'))
-            ON CONFLICT(session_id) DO UPDATE SET
-                requester_id=excluded.requester_id,
-                intent_hash=excluded.intent_hash,
-                envelope_json=excluded.envelope_json,
-                ttl_expires_at=excluded.ttl_expires_at,
-                updated_at=datetime('now')
-            """,
-            (
-                session_id,
-                session.get("requester_id"),
-                session.get("intent_hash"),
-                json.dumps(envelope),
-                session.get("ttl_expires_at") or session.get("expires_at"),
-            ),
-        )
-        commit_connection(self._conn)
+        with with_db_write():
+            self._conn.execute(
+                """
+                INSERT INTO query_sessions (session_id, requester_id, intent_hash, envelope_json, ttl_expires_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, datetime('now'))
+                ON CONFLICT(session_id) DO UPDATE SET
+                    requester_id=excluded.requester_id,
+                    intent_hash=excluded.intent_hash,
+                    envelope_json=excluded.envelope_json,
+                    ttl_expires_at=excluded.ttl_expires_at,
+                    updated_at=datetime('now')
+                """,
+                (
+                    session_id,
+                    session.get("requester_id"),
+                    session.get("intent_hash"),
+                    json.dumps(envelope),
+                    session.get("ttl_expires_at") or session.get("expires_at"),
+                ),
+            )
+            commit_connection(self._conn)
         return session_id
 
     def append_artifact(self, session_id: str, artifact: Dict[str, Any]) -> str:
@@ -1134,34 +1150,36 @@ class SQLiteQuerySessionStore:
         artifact_id = str(artifact.get("artifact_id") or uuid.uuid4())
         if public_result is not None and not isinstance(public_result, str):
             public_result = json.dumps(public_result)
-        self._conn.execute(
-            """
-            INSERT INTO query_artifacts (
-                artifact_id, session_id, cache_key, public_result_json,
-                retrieval_fingerprint, game_layer_strategy
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                artifact_id,
-                session_id,
-                artifact.get("cache_key"),
-                public_result,
-                artifact.get("retrieval_fingerprint"),
-                artifact.get("game_layer_strategy"),
-            ),
-        )
-        commit_connection(self._conn)
+        with with_db_write():
+            self._conn.execute(
+                """
+                INSERT INTO query_artifacts (
+                    artifact_id, session_id, cache_key, public_result_json,
+                    retrieval_fingerprint, game_layer_strategy
+                ) VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    artifact_id,
+                    session_id,
+                    artifact.get("cache_key"),
+                    public_result,
+                    artifact.get("retrieval_fingerprint"),
+                    artifact.get("game_layer_strategy"),
+                ),
+            )
+            commit_connection(self._conn)
         return artifact_id
 
     def invalidate(self, session_id: str, *, cache_key: Optional[str] = None) -> int:
-        if cache_key is None:
-            cur = self._conn.execute("DELETE FROM query_artifacts WHERE session_id=?", (session_id,))
-        else:
-            cur = self._conn.execute(
-                "DELETE FROM query_artifacts WHERE session_id=? AND cache_key=?",
-                (session_id, cache_key),
-            )
-        commit_connection(self._conn)
+        with with_db_write():
+            if cache_key is None:
+                cur = self._conn.execute("DELETE FROM query_artifacts WHERE session_id=?", (session_id,))
+            else:
+                cur = self._conn.execute(
+                    "DELETE FROM query_artifacts WHERE session_id=? AND cache_key=?",
+                    (session_id, cache_key),
+                )
+            commit_connection(self._conn)
         return cur.rowcount
 
     def purge_expired(self) -> int:
@@ -1169,11 +1187,12 @@ class SQLiteQuerySessionStore:
             "SELECT session_id FROM query_sessions WHERE ttl_expires_at IS NOT NULL AND ttl_expires_at < datetime('now')"
         ).fetchall()
         count = 0
-        for (session_id,) in expired:
-            self._conn.execute("DELETE FROM query_artifacts WHERE session_id=?", (session_id,))
-            count += 1
-        cur = self._conn.execute(
-            "DELETE FROM query_sessions WHERE ttl_expires_at IS NOT NULL AND ttl_expires_at < datetime('now')"
-        )
-        commit_connection(self._conn)
+        with with_db_write():
+            for (session_id,) in expired:
+                self._conn.execute("DELETE FROM query_artifacts WHERE session_id=?", (session_id,))
+                count += 1
+            cur = self._conn.execute(
+                "DELETE FROM query_sessions WHERE ttl_expires_at IS NOT NULL AND ttl_expires_at < datetime('now')"
+            )
+            commit_connection(self._conn)
         return count + cur.rowcount

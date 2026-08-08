@@ -8,7 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from ..db.write_gate import commit_connection
+from ..db.write_gate import commit_connection, with_db_write
 
 
 def _utc_now() -> str:
@@ -47,6 +47,15 @@ class SQLiteCanonicalStore(CanonicalStore):
         ensure_migrations_applied(conn)
 
     def upsert(self, table: str, record: Dict[str, Any], *, sync_batch_id: Optional[str] = None) -> CanonicalRef:
+        # The _upsert_* INSERT takes SQLite's write lock at execute time, so it
+        # must run under the same gate hold as the commit (write_gate lock-order
+        # inversion). Reentrant, so batch callers already holding the gate nest.
+        with with_db_write():
+            ref = self._dispatch_upsert(table, record, sync_batch_id=sync_batch_id)
+            self._maybe_commit()
+        return ref
+
+    def _dispatch_upsert(self, table: str, record: Dict[str, Any], *, sync_batch_id: Optional[str]) -> CanonicalRef:
         if table == "ai_chat_messages":
             ref = self._upsert_ai_chat_message(record, sync_batch_id=sync_batch_id)
         elif table == "ai_chat_conversations":
@@ -69,7 +78,6 @@ class SQLiteCanonicalStore(CanonicalStore):
             ref = self._upsert_document(record, sync_batch_id=sync_batch_id)
         else:
             raise ValueError(f"Unsupported canonical table: {table}")
-        self._maybe_commit()
         return ref
 
     def upsert_batch(
@@ -82,11 +90,15 @@ class SQLiteCanonicalStore(CanonicalStore):
         if not records:
             return []
         self._defer_commit = True
-        try:
-            return [self.upsert(table, record, sync_batch_id=sync_batch_id) for record in records]
-        finally:
-            self._defer_commit = False
-            commit_connection(self._conn)
+        # Hold the gate across the whole batch: every upsert takes SQLite's
+        # write lock, and the deferred commit at the end must happen under the
+        # same hold to avoid queuing on the gate with the lock already taken.
+        with with_db_write():
+            try:
+                return [self.upsert(table, record, sync_batch_id=sync_batch_id) for record in records]
+            finally:
+                self._defer_commit = False
+                commit_connection(self._conn)
 
     def _maybe_commit(self) -> None:
         if not self._defer_commit:
