@@ -8,6 +8,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
 from ..core.state import get_db_connection
+from ..storage.db.write_gate import commit_connection, with_db_write
 
 logger = logging.getLogger("topos.ingestion.usage_inbox_dedupe")
 
@@ -16,22 +17,24 @@ _RETENTION_DAYS = 30
 
 
 def _ensure_schema(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {DEDUPE_TABLE} (
-            write_id TEXT PRIMARY KEY,
-            records_processed INTEGER NOT NULL,
-            records_total INTEGER NOT NULL,
-            delivered_at TEXT NOT NULL
+    # DDL takes SQLite's write lock at execute time — gate it.
+    with with_db_write():
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {DEDUPE_TABLE} (
+                write_id TEXT PRIMARY KEY,
+                records_processed INTEGER NOT NULL,
+                records_total INTEGER NOT NULL,
+                delivered_at TEXT NOT NULL
+            )
+            """
         )
-        """
-    )
-    conn.execute(
-        f"""
-        CREATE INDEX IF NOT EXISTS idx_{DEDUPE_TABLE}_delivered_at
-        ON {DEDUPE_TABLE}(delivered_at)
-        """
-    )
+        conn.execute(
+            f"""
+            CREATE INDEX IF NOT EXISTS idx_{DEDUPE_TABLE}_delivered_at
+            ON {DEDUPE_TABLE}(delivered_at)
+            """
+        )
 
 
 def is_derivation_complete(write_id: str) -> bool:
@@ -118,18 +121,19 @@ def record_delivery(write_id: str, *, records_processed: int, records_total: int
     try:
         _ensure_schema(conn)
         now = datetime.now(timezone.utc).isoformat()
-        conn.execute(
-            f"""
-            INSERT INTO {DEDUPE_TABLE} (write_id, records_processed, records_total, delivered_at)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(write_id) DO UPDATE SET
-                records_processed = excluded.records_processed,
-                records_total = excluded.records_total,
-                delivered_at = excluded.delivered_at
-            """,
-            (wid, int(records_processed), int(records_total), now),
-        )
-        _purge_old(conn)
-        conn.commit()
+        with with_db_write():
+            conn.execute(
+                f"""
+                INSERT INTO {DEDUPE_TABLE} (write_id, records_processed, records_total, delivered_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(write_id) DO UPDATE SET
+                    records_processed = excluded.records_processed,
+                    records_total = excluded.records_total,
+                    delivered_at = excluded.delivered_at
+                """,
+                (wid, int(records_processed), int(records_total), now),
+            )
+            _purge_old(conn)
+            commit_connection(conn)
     except Exception as exc:
         logger.debug("usage_inbox dedupe record failed: %s", exc)

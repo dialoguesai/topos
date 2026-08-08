@@ -7,6 +7,7 @@ import logging
 from typing import Optional
 
 from .checkpoint_store import CheckpointStore, IngestionCheckpoint
+from ...storage.db.write_gate import commit_connection, with_db_write
 
 logger = logging.getLogger("topos.ingestion.checkpoints.sqlite")
 
@@ -15,17 +16,19 @@ TABLE = "ingestion_checkpoints"
 
 def ensure_table(conn) -> None:
     """Create ingestion_checkpoints table if not exists."""
-    conn.execute(f"""
-        CREATE TABLE IF NOT EXISTS {TABLE} (
-            dataset_id TEXT NOT NULL,
-            schema_id TEXT NOT NULL,
-            last_record_id TEXT NOT NULL,
-            metadata_json TEXT,
-            updated_at TEXT DEFAULT (datetime('now')),
-            PRIMARY KEY (dataset_id, schema_id)
-        )
-    """)
-    conn.commit()
+    # DDL takes SQLite's write lock at execute time — gate it with the commit.
+    with with_db_write():
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {TABLE} (
+                dataset_id TEXT NOT NULL,
+                schema_id TEXT NOT NULL,
+                last_record_id TEXT NOT NULL,
+                metadata_json TEXT,
+                updated_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (dataset_id, schema_id)
+            )
+        """)
+        commit_connection(conn)
 
 
 class SqliteCheckpointStore(CheckpointStore):
@@ -70,13 +73,14 @@ class SqliteCheckpointStore(CheckpointStore):
         try:
             ensure_table(self.conn)
             metadata_json = json.dumps(checkpoint.metadata, ensure_ascii=False) if checkpoint.metadata else None
-            self.conn.execute(
-                f"""
-                INSERT OR REPLACE INTO {TABLE} (dataset_id, schema_id, last_record_id, metadata_json, updated_at)
-                VALUES (?, ?, ?, ?, datetime('now'))
-                """,
-                (checkpoint.dataset_id, checkpoint.schema_id, checkpoint.last_record_id, metadata_json),
-            )
-            self.conn.commit()
+            with with_db_write():
+                self.conn.execute(
+                    f"""
+                    INSERT OR REPLACE INTO {TABLE} (dataset_id, schema_id, last_record_id, metadata_json, updated_at)
+                    VALUES (?, ?, ?, ?, datetime('now'))
+                    """,
+                    (checkpoint.dataset_id, checkpoint.schema_id, checkpoint.last_record_id, metadata_json),
+                )
+                commit_connection(self.conn)
         except Exception as e:
             logger.warning("save_checkpoint failed: %s", e)
