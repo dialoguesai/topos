@@ -162,10 +162,13 @@ class TestTrayConsumesContract:
         assert t.version == "1.3.2"
         assert t.log_path == Path("/tmp/logs/node.log")
 
-    def test_attached_menu_quit_leaves_node_running(self):
+    def test_attached_menu_offers_quit_and_tray_only_exit(self):
+        # Quit means quit, attached or not (design of record, 0.2.11 — see
+        # TestQuitSemantics in tests/topos/test_cli_tray.py); the tray-only
+        # exit is the secondary item and only exists when attached.
         items = self._tray(attached=True)._menu_labels()
-        assert "Close Tray (node keeps running)" in items
-        assert "Quit Topos Node" not in items
+        assert "Quit Topos Node" in items
+        assert "Close Tray Only (node keeps running)" in items
 
     def test_update_menu_states(self):
         t = self._tray()
