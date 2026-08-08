@@ -85,7 +85,19 @@ class ControlPlaneClient:
         self._last_failure_reason: str = ""
         self._attempt = 0
         self._consecutive_failures = 0
-        self._ready = asyncio.Event()
+        # threading.Event, not asyncio.Event: readiness is signalled from the
+        # client thread and awaited from the app loop.
+        self._ready = threading.Event()
+        # Dedicated-thread mode (production): the connection lives on its own
+        # event loop so protocol pings are answered no matter how long the app
+        # loop stalls. First-run model prewarm starved the app loop for
+        # minutes; the node missed the control plane's pong deadline (120s)
+        # and was executed as dead ~150s after registering — every time, on
+        # every fresh install. The node never noticed: it was still stalled.
+        self._thread: threading.Thread | None = None
+        self._loop: asyncio.AbstractEventLoop | None = None
+        self._handler_loop: asyncio.AbstractEventLoop | None = None
+        self._stop_requested = False
 
         self._inbound_concurrency_limit = max(1, int(settings.control_plane_inbound_concurrency_limit))
         self._inbound_max_pending = max(
@@ -133,14 +145,55 @@ class ControlPlaneClient:
         return snapshot.to_dict()
 
     def start(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
         if self._task and not self._task.done():
             return
-        self._stop.clear()
-        self._task = asyncio.create_task(self._run())
+        self._stop_requested = False
+        try:
+            # Engine handlers run here — the loop the app lives on.
+            self._handler_loop = asyncio.get_running_loop()
+        except RuntimeError:
+            self._handler_loop = None
+        self._thread = threading.Thread(
+            target=self._thread_main, name="control-plane-client", daemon=True
+        )
+        self._thread.start()
         logger.info("Control plane client starting: %s", self.control_plane_url)
+
+    def _thread_main(self) -> None:
+        loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(loop)
+        self._loop = loop
+        # Fresh, bound to this loop: the one from __init__ may already be bound
+        # to the app loop by an earlier legacy run.
+        self._stop = asyncio.Event()
+        try:
+            loop.run_until_complete(self._run())
+        except Exception:  # noqa: BLE001
+            logger.exception("Control plane client thread crashed")
+        finally:
+            try:
+                loop.run_until_complete(loop.shutdown_asyncgens())
+            except Exception:  # noqa: BLE001
+                pass
+            loop.close()
+            self._loop = None
 
     def _restart_if_task_stopped(self) -> None:
         # Self-heal if the reconnect loop exited unexpectedly while the app is still running.
+        if self._stop_requested:
+            return
+        if self._thread is not None:
+            if self._thread.is_alive():
+                return
+            logger.warning(
+                "Control plane client thread stopped unexpectedly; restarting endpoint=%s",
+                self.control_plane_url,
+            )
+            self._thread = None
+            self.start()
+            return
         if self._stop.is_set() or not self._task or not self._task.done():
             return
         reason = "unknown"
@@ -159,31 +212,50 @@ class ControlPlaneClient:
 
     async def wait_until_connected(self, timeout_s: float | None = None) -> bool:
         timeout = float(timeout_s) if timeout_s is not None else float(settings.connection_readiness_timeout_seconds)
-        try:
-            await asyncio.wait_for(self._ready.wait(), timeout=max(0.1, timeout))
+        if self._ready.is_set():
             return True
-        except (TimeoutError, asyncio.TimeoutError):
-            # Py3.10: asyncio.TimeoutError is not builtins.TimeoutError.
-            return False
+        # threading.Event.wait in a worker so neither loop is blocked.
+        return await asyncio.to_thread(self._ready.wait, max(0.1, timeout))
 
     async def stop(self) -> None:
         self._set_state("stopping")
+        self._stop_requested = True
+        loop = self._loop
+        if self._thread is not None and self._thread.is_alive() and loop is not None:
+            try:
+                fut = asyncio.run_coroutine_threadsafe(self._shutdown_on_client_loop(), loop)
+                await asyncio.wait_for(asyncio.wrap_future(fut), timeout=10.0)
+            except Exception:  # noqa: BLE001
+                logger.warning("Control plane client shutdown did not complete cleanly", exc_info=True)
+            await asyncio.to_thread(self._thread.join, 10.0)
+            self._thread = None
+        else:
+            self._stop.set()
+            if self._ws:
+                try:
+                    await self._ws.close(code=1000)
+                except Exception:
+                    pass
+            if self._task:
+                self._task.cancel()
+                try:
+                    await self._task
+                except asyncio.CancelledError:
+                    pass
+            await self._cancel_inbound_tasks()
+        self._ws = None
+        self._ready.clear()
+        self._set_state("idle")
+
+    async def _shutdown_on_client_loop(self) -> None:
+        """Runs on the client thread's loop; unblocks _run so the thread exits."""
         self._stop.set()
         if self._ws:
             try:
                 await self._ws.close(code=1000)
             except Exception:
                 pass
-        if self._task:
-            self._task.cancel()
-            try:
-                await self._task
-            except asyncio.CancelledError:
-                pass
         await self._cancel_inbound_tasks()
-        self._ws = None
-        self._ready.clear()
-        self._set_state("idle")
 
     async def _cancel_inbound_tasks(self) -> None:
         async with self._inbound_lock:
@@ -357,13 +429,15 @@ class ControlPlaneClient:
                 )
             self._sync_outbox.append(dict(message))
 
-        client_task = self._task
-        if client_task is None:
-            return
-        try:
-            loop = client_task.get_loop()
-        except Exception:
-            return
+        loop = self._loop
+        if loop is None:
+            client_task = self._task
+            if client_task is None:
+                return
+            try:
+                loop = client_task.get_loop()
+            except Exception:
+                return
         if not loop.is_running():
             return
         try:
@@ -391,7 +465,18 @@ class ControlPlaneClient:
             await self._send_ws_json(ws, pong)
             return
         try:
-            resp = await self.handler(data)
+            handler_loop = self._handler_loop
+            running = asyncio.get_running_loop()
+            if handler_loop is not None and handler_loop is not running and handler_loop.is_running():
+                # Engine handlers belong on the app loop. This await parks on
+                # the CLIENT loop while the app loop is busy — which is the
+                # entire point: a stalled app queues work but never costs the
+                # connection, because pings keep being answered here.
+                resp = await asyncio.wrap_future(
+                    asyncio.run_coroutine_threadsafe(self.handler(data), handler_loop)
+                )
+            else:
+                resp = await self.handler(data)
         except Exception as exc:  # noqa: BLE001
             logger.error("Handler raised exception: %s", exc, exc_info=True)
             resp = {"id": data.get("id"), "status": "error", "error": str(exc)}
@@ -401,6 +486,18 @@ class ControlPlaneClient:
 
     async def send_message(self, message: Dict[str, Any]) -> None:
         """Send an unsolicited message to the control plane (e.g., progress updates)."""
+        loop = self._loop
+        if loop is not None and self._thread is not None and self._thread.is_alive():
+            running = asyncio.get_running_loop()
+            if loop is not running:
+                # The websocket lives on the client thread's loop; writing to
+                # it from another loop is not safe. Marshal, then await.
+                fut = asyncio.run_coroutine_threadsafe(self._send_message_on_loop(message), loop)
+                await asyncio.wrap_future(fut)
+                return
+        await self._send_message_on_loop(message)
+
+    async def _send_message_on_loop(self, message: Dict[str, Any]) -> None:
         if not self._ws:
             self._restart_if_task_stopped()
             await self._enqueue_presence_message(message)
