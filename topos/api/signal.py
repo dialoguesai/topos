@@ -334,24 +334,32 @@ async def rebuild_graph(
     """
     import asyncio
 
-    from ..features.entities.maintenance import rebuild_entity_graph
+    from ..features.entities.rebuild_subprocess import run_graph_rebuild
+    from ..storage.db.write_gate import WriteGateDeferred
 
     _entities_conn()  # fail fast with 503 before spawning the worker
 
     def _rebuild():
-        # Run on the worker's OWN thread-local connection: the rebuild both
-        # writes (gate-chunked, minutes at scale) and must not share the loop
-        # thread's connection across threads. Running it inline on the loop
-        # froze every coroutine — healthcheck included — for the whole run.
+        # run_graph_rebuild sends a file-backed rebuild to a SUBPROCESS: even
+        # off the loop in to_thread, the in-process compute (goal embeddings,
+        # role map, Louvain) monopolized the GIL and starved the event loop
+        # for ~103s (2026-08-08). This worker thread only waits on the child.
+        # It still uses its OWN thread-local connection for the in-memory
+        # fallback, never the loop thread's.
         from ..core.state import close_thread_db_connection
 
         try:
-            return rebuild_entity_graph(_entities_conn())
+            return run_graph_rebuild(_entities_conn())
         finally:
             # to_thread reuses pooled threads; don't leak a connection per run.
             close_thread_db_connection()
 
-    return await asyncio.to_thread(_rebuild)
+    try:
+        return await asyncio.to_thread(_rebuild)
+    except WriteGateDeferred as exc:
+        # Another rebuild (timer- or endpoint-triggered) holds the advisory
+        # lock; interleaving two full rebuilds helps nobody.
+        raise HTTPException(status_code=409, detail=f"graph rebuild already running: {exc}")
 
 
 @router.get("/entities/graph/search")
