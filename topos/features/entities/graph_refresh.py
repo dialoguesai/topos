@@ -53,8 +53,7 @@ def _enabled() -> bool:
 
 def _default_rebuild() -> None:
     from ...core.state import close_thread_db_connection, get_db_connection
-    from ...enrichment.pipeline_activity import is_derivation_in_flight
-    from ...storage.db.write_gate import with_db_write_cooperative
+    from ...storage.db.write_gate import with_db_write
     from .maintenance import rebuild_entity_graph
 
     conn = get_db_connection()
@@ -62,18 +61,16 @@ def _default_rebuild() -> None:
         logger.debug("graph refresh skipped: no database connection")
         return
     try:
-        # The rebuild holds the gate for its whole run (77–156s observed), so
-        # it must acquire cooperatively: if a derivation batch is running — or
-        # starts while this thread is waiting for the gate — WriteGateDeferred
-        # propagates to _fire, which re-arms the debounce instead of letting
-        # the rebuild contend with the batch. That contention, with the event
-        # loop queued behind both, is what froze the node on 2026-08-07.
-        with with_db_write_cooperative(is_derivation_in_flight):
-            report = rebuild_entity_graph(conn)
-            try:
+        # No outer with_db_write: the rebuild gates its own write phases
+        # (M2.2). The gate is reentrant, so wrapping it here would silently
+        # reinstate the whole-rebuild exclusive hold (120s observed
+        # 2026-08-07) that starved every other writer.
+        report = rebuild_entity_graph(conn)
+        try:
+            with with_db_write():
                 _mark_materialized(conn)
-            except Exception as exc:  # noqa: BLE001
-                logger.debug("graph materialization stamp failed: %s", exc)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("graph materialization stamp failed: %s", exc)
         logger.info("graph refresh: %s", report)
     finally:
         # This runs on a short-lived Timer thread, which now gets its own
@@ -110,9 +107,9 @@ class _Refresher:
     def _fire(self) -> None:
         # A full rebuild during a derivation batch is both contended and
         # premature: the batch is still writing the entities this would index,
-        # and the rebuild holds the process-wide write gate for its whole run
-        # (77s observed on 2026-07-30). Re-arm instead and rebuild once the
-        # batch is done.
+        # and even with the M2.2 phase-chunked gate holds the rebuild's write
+        # phases contend with every batch commit. Re-arm instead and rebuild
+        # once the batch is done.
         try:
             from ...enrichment.pipeline_activity import is_derivation_in_flight
 

@@ -54,6 +54,31 @@ def _canonical_order(src_entity_id: str, dst_entity_id: str, edge_type: str):
     return src_entity_id, dst_entity_id
 
 
+def fold_edge_observation(
+    weight: Any,
+    evidence_count: Any,
+    last_event_at: Optional[str],
+    event_at: Optional[str],
+    *,
+    increment: float = 1.0,
+    half_life_days: float = DEFAULT_HALF_LIFE_DAYS,
+) -> tuple[float, int, Optional[str]]:
+    """Fold one observation into an edge's (weight, evidence_count, last_event_at).
+
+    The single source of the decay-then-add rule, shared by :func:`update_edge`
+    (row-at-a-time ingest) and the rebuild's in-memory accumulator — the two
+    must converge on identical weights or a rebuild would silently rescale the
+    graph.
+    """
+    decayed = float(weight or 0.0)
+    prev_ts, new_ts = parse_ts(last_event_at), parse_ts(event_at)
+    if prev_ts is not None and new_ts is not None and new_ts > prev_ts:
+        dt_days = (new_ts - prev_ts).total_seconds() / 86400.0
+        decayed *= math.pow(0.5, dt_days / half_life_days)
+    latest = max(filter(None, [last_event_at, event_at]), default=None)
+    return decayed + float(increment), int(evidence_count or 0) + 1, latest
+
+
 def update_edge(
     conn: sqlite3.Connection,
     *,
@@ -98,18 +123,20 @@ def update_edge(
         return
 
     edge_id, weight, evidence_count, last_event_at = row
-    decayed = float(weight or 0.0)
-    prev_ts, new_ts = parse_ts(last_event_at), parse_ts(event_at)
-    if prev_ts is not None and new_ts is not None and new_ts > prev_ts:
-        dt_days = (new_ts - prev_ts).total_seconds() / 86400.0
-        decayed *= math.pow(0.5, dt_days / half_life_days)
-    latest = max(filter(None, [last_event_at, event_at]), default=None)
+    new_weight, new_count, latest = fold_edge_observation(
+        weight,
+        evidence_count,
+        last_event_at,
+        event_at,
+        increment=increment,
+        half_life_days=half_life_days,
+    )
     conn.execute(
         """
         UPDATE entity_edges SET weight=?, evidence_count=?, last_event_at=?, updated_at=datetime('now')
         WHERE edge_id=?
         """,
-        (decayed + float(increment), int(evidence_count or 0) + 1, latest, edge_id),
+        (new_weight, new_count, latest, edge_id),
     )
 
 

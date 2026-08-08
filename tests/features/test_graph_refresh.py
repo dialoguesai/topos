@@ -198,3 +198,40 @@ def test_graph_rebuilds_on_startup_after_debounce_interrupt(tmp_path, monkeypatc
     assert row[0] == row[1]
     db.close()
 
+
+
+def test_default_rebuild_does_not_wrap_the_rebuild_in_the_gate():
+    """The rebuild gates its own write phases (M2.2). The gate is a reentrant
+    RLock, so an outer with_db_write() here would silently reinstate the
+    whole-rebuild exclusive hold (~120s observed 2026-08-07) with no test
+    failing anywhere else."""
+    import ast
+    import inspect
+    import textwrap
+
+    src = textwrap.dedent(inspect.getsource(graph_refresh._default_rebuild))
+    tree = ast.parse(src)
+
+    class _Finder(ast.NodeVisitor):
+        wrapped = False
+
+        def visit_With(self, node: ast.With) -> None:
+            gate_names = set()
+            for item in node.items:
+                expr = item.context_expr
+                if isinstance(expr, ast.Call):
+                    fn = expr.func
+                    gate_names.add(getattr(fn, "id", None) or getattr(fn, "attr", None))
+            if "with_db_write" in gate_names and "rebuild_entity_graph" in ast.dump(
+                ast.Module(body=node.body, type_ignores=[])
+            ):
+                self.wrapped = True
+            self.generic_visit(node)
+
+    finder = _Finder()
+    finder.visit(tree)
+    assert not finder.wrapped, (
+        "_default_rebuild wraps rebuild_entity_graph in with_db_write — the "
+        "reentrant gate makes every internal phase hold a no-op and the whole "
+        "rebuild becomes one exclusive section again"
+    )

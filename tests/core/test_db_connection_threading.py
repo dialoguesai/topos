@@ -497,6 +497,184 @@ def test_distinct_call_sites_each_get_warned():
     assert any("site_two" in m for m in warned)
 
 
+def test_commit_connection_warns_on_the_event_loop():
+    """commit_connection takes the same blocking lock as with_db_write but
+    bypassed its instrument — during the 2026-08-07 rebuild stall the caller
+    queuing behind the 120s gate hold was invisible for exactly this reason."""
+    import asyncio
+    import logging
+    import sqlite3
+
+    from topos.storage.db import write_gate
+
+    write_gate.reset_loop_warning_state()
+    messages: list[str] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    handler = _Capture()
+    write_gate.logger.addHandler(handler)
+    conn = sqlite3.connect(":memory:")
+    try:
+
+        async def commit_site() -> None:
+            write_gate.commit_connection(conn)
+
+        asyncio.run(commit_site())
+    finally:
+        write_gate.logger.removeHandler(handler)
+        write_gate.reset_loop_warning_state()
+        conn.close()
+
+    warned = [m for m in messages if "acquired on the event-loop thread" in m]
+    assert len(warned) == 1, f"expected commit_connection to warn, got {warned}"
+    assert "in commit_site" in warned[0], warned[0]
+
+
+def test_batched_writes_warns_on_the_event_loop():
+    import asyncio
+    import logging
+    import sqlite3
+
+    from topos.storage.db import write_gate
+
+    write_gate.reset_loop_warning_state()
+    messages: list[str] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    handler = _Capture()
+    write_gate.logger.addHandler(handler)
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE t (v TEXT)")
+    try:
+
+        async def batch_site() -> None:
+            with write_gate.batched_writes(conn):
+                conn.execute("INSERT INTO t (v) VALUES ('x')")
+
+        asyncio.run(batch_site())
+    finally:
+        write_gate.logger.removeHandler(handler)
+        write_gate.reset_loop_warning_state()
+        conn.close()
+
+    warned = [m for m in messages if "acquired on the event-loop thread" in m]
+    assert len(warned) == 1, f"expected batched_writes to warn, got {warned}"
+    assert "in batch_site" in warned[0], warned[0]
+
+
+def test_commit_connection_defer_path_stays_silent_off_the_lock():
+    """Inside batched_writes the commit is deferred and no lock is taken, so
+    the nested commit_connection call must not double-warn for the same site."""
+    import asyncio
+    import logging
+    import sqlite3
+
+    from topos.storage.db import write_gate
+
+    write_gate.reset_loop_warning_state()
+    messages: list[str] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    handler = _Capture()
+    write_gate.logger.addHandler(handler)
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE t (v TEXT)")
+    try:
+
+        async def batch_then_commit() -> None:
+            with write_gate.batched_writes(conn):
+                conn.execute("INSERT INTO t (v) VALUES ('x')")
+                write_gate.commit_connection(conn)  # deferred: no lock, no warn
+
+        asyncio.run(batch_then_commit())
+    finally:
+        write_gate.logger.removeHandler(handler)
+        write_gate.reset_loop_warning_state()
+        conn.close()
+
+    warned = [m for m in messages if "acquired on the event-loop thread" in m]
+    assert len(warned) == 1, f"only batched_writes should warn, got {warned}"
+
+
+def test_commit_connection_flags_writes_executed_outside_the_gate():
+    """In WAL an ungated INSERT takes SQLite's write lock at execute time; the
+    caller then queues on the gate holding it, and the gate holder blocks on
+    SQLite until busy_timeout — the lock-order inversion behind the stretched
+    2026-08-07 rebuild holds. commit_connection is the chokepoint that can see
+    the pattern: open transaction + gate not held by this thread."""
+    import logging
+    import sqlite3
+
+    from topos.storage.db import write_gate
+
+    write_gate.reset_loop_warning_state()
+    messages: list[str] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    handler = _Capture()
+    write_gate.logger.addHandler(handler)
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE t (v TEXT)")
+    conn.commit()
+    try:
+        conn.execute("INSERT INTO t (v) VALUES ('ungated')")  # opens the txn
+        assert conn.in_transaction
+        write_gate.commit_connection(conn)
+    finally:
+        write_gate.logger.removeHandler(handler)
+        write_gate.reset_loop_warning_state()
+        conn.close()
+
+    warned = [m for m in messages if "open write transaction" in m]
+    assert len(warned) == 1, f"expected the ungated-transaction warning, got {messages}"
+    assert "test_commit_connection_flags_writes_executed_outside_the_gate" in warned[0]
+
+
+def test_commit_connection_stays_silent_when_gate_held_around_writes():
+    """The correct pattern (with_db_write around execute AND commit) must not
+    trip the ungated-transaction diagnostic."""
+    import logging
+    import sqlite3
+
+    from topos.storage.db import write_gate
+
+    write_gate.reset_loop_warning_state()
+    messages: list[str] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    handler = _Capture()
+    write_gate.logger.addHandler(handler)
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE t (v TEXT)")
+    conn.commit()
+    try:
+        with write_gate.with_db_write():
+            conn.execute("INSERT INTO t (v) VALUES ('gated')")
+            write_gate.commit_connection(conn)
+    finally:
+        write_gate.logger.removeHandler(handler)
+        write_gate.reset_loop_warning_state()
+        conn.close()
+
+    warned = [m for m in messages if "open write transaction" in m]
+    assert not warned, f"gated write pattern must not warn: {warned}"
+
+
 def test_worker_loop_claims_off_the_event_loop():
     """claim_next_job takes the blocking write gate; it must not run on the loop."""
     import inspect
