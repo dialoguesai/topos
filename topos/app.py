@@ -167,23 +167,16 @@ async def startup_event() -> None:
         from .core.state import db_conn, get_db_connection
         from .storage.db.migrations.stage9_column_renames import run_stage9_migrations
         from .storage.db.write_gate import with_db_write
-
-        def _run_stage9_migrations() -> dict:
-            # Respect pre-injected test connections; avoid replacing test DB handles during startup.
-            conn = db_conn if db_conn is not None else get_db_connection()
-            if not conn:
-                return {}
+        # Respect pre-injected test connections; avoid replacing test DB handles during startup.
+        conn = db_conn if db_conn is not None else get_db_connection()
+        if conn:
             # run_stage9_migrations executes + commits ALTERs without managing
             # the gate — hold it around the whole call (write_gate lock-order
             # inversion; migration entry point outside the gated runner).
             with with_db_write():
-                return run_stage9_migrations(conn)
-
-        # Gate acquisition on the loop thread stalls every coroutine while
-        # held — run on a worker thread (which gets its own connection).
-        result = await asyncio.to_thread(_run_stage9_migrations)
-        if result.get("applied"):
-            logger.info("Stage 9 migrations applied at startup: %d renames", len(result["applied"]))
+                result = run_stage9_migrations(conn)
+            if result.get("applied"):
+                logger.info("Stage 9 migrations applied at startup: %d renames", len(result["applied"]))
     except Exception as e:
         logger.debug("Stage 9 migrations at startup (non-fatal): %s", e)
     # Upgrade runner is armed later — after control-plane / local readiness —
@@ -224,9 +217,7 @@ async def startup_event() -> None:
     try:
         from .sources import install_service
 
-        # Rehydration takes the write gate (ensure_install_schema + supersede
-        # writes) — keep it off the loop thread.
-        summary = await asyncio.to_thread(install_service.rehydrate_active_installs_runtime)
+        summary = install_service.rehydrate_active_installs_runtime()
         if summary.get("rehydrated"):
             logger.info(
                 "Rehydrated active source installs at startup: active=%s rehydrated=%s failed=%s",
