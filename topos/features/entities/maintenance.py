@@ -279,11 +279,17 @@ def fold_communicates_with_edges(
     *,
     conversation_ids: Optional[Iterable[str]] = None,
     clear_active: bool = False,
+    participation: Optional[Dict[str, List[Dict[str, object]]]] = None,
 ) -> Tuple[int, Dict[tuple, Dict[str, int]]]:
     """Write communicates_with edges from thread co-participation.
 
     When ``clear_active`` is True (rebuild path), deletes active
     communicates_with rows first. Returns (update_count, edge_role_mix).
+
+    ``participation`` accepts a precomputed
+    :func:`_load_conversation_participation` result so the full rebuild can run
+    that load — a per-message entity resolution scan, the expensive part —
+    outside the write gate. When omitted it is loaded here (incremental path).
     """
     from .edges import EDGE_COMMUNICATES, _canonical_order, update_edge
 
@@ -293,8 +299,10 @@ def fold_communicates_with_edges(
             "WHERE edge_type='communicates_with' AND valid_to IS NULL"
         )
 
-    by_conv = _load_conversation_participation(
-        conn, conversation_ids=conversation_ids
+    by_conv = (
+        participation
+        if participation is not None
+        else _load_conversation_participation(conn, conversation_ids=conversation_ids)
     )
     edge_roles: Dict[tuple, Dict[str, int]] = {}
     comm = 0
@@ -417,19 +425,27 @@ def rebuild_evidence_edges(
     ``sender_lookup`` is retained for API compatibility with older tests but is
     no longer used for communicates_with (P3.2 co-participation replaces
     sender→mention linking).
+
+    Gate discipline (M2.2): the mention scan, role-map computation, and
+    participation load dominate the rebuild's runtime and are pure reads — they
+    run OUTSIDE the write gate. Only contact seeding and the delete+rewrite of
+    edges hold it, each committing before release, so other writers stall for
+    bounded write phases instead of the whole rebuild (120s observed
+    2026-08-07). The delete and rewrite share one hold, so readers on other
+    connections never observe the edge-less gap between them.
     """
     del sender_lookup  # unused — kept for call-site compatibility
+    from ...storage.db.write_gate import with_db_write
     from .edges import EDGE_CO_OCCURRENCE, _canonical_order, update_edge
     from .resolver import EntityResolver
 
-    resolver = EntityResolver(conn)
-    resolver.seed_from_contacts()
+    # Seeding mints person entities the participation load resolves against,
+    # so it must land (it commits internally) before the read phase.
+    with with_db_write():
+        resolver = EntityResolver(conn)
+        resolver.seed_from_contacts()
 
-    conn.execute(
-        "DELETE FROM entity_edges "
-        "WHERE edge_type IN ('co_occurrence', 'communicates_with') AND valid_to IS NULL"
-    )
-
+    # -- read phase: gate released --------------------------------------------
     rows = conn.execute(
         """
         SELECT record_id, entity_id, canonical_table, event_at, source_id
@@ -448,6 +464,7 @@ def rebuild_evidence_edges(
         rec["ents"].append(str(entity_id))
 
     role_by_record = _record_role_map(conn, by_record)
+    participation = _load_conversation_participation(conn)
 
     co = 0
     # (src, dst, type) -> {role: evidence_count}; stamped onto edges afterwards.
@@ -458,43 +475,52 @@ def rebuild_evidence_edges(
         mix = edge_roles.setdefault(key, {})
         mix[role] = mix.get(role, 0) + 1
 
-    for record_id, rec in by_record.items():
-        # Cap per-record fan-out (mirrors the ingest path) so a giant record
-        # doesn't create O(n^2) edges.
-        unique = list(dict.fromkeys(rec["ents"]))[:8]
-        event_at = rec["event_at"]
-        role = role_by_record.get(record_id, "ambient")
-        for i in range(len(unique)):
-            for j in range(i + 1, len(unique)):
-                update_edge(
-                    conn,
-                    src_entity_id=unique[i],
-                    dst_entity_id=unique[j],
-                    edge_type=EDGE_CO_OCCURRENCE,
-                    event_at=event_at,
-                )
-                _tally(unique[i], unique[j], EDGE_CO_OCCURRENCE, role)
-                co += 1
-
-    # P3.2: talked-to edges from thread co-participants only.
-    comm, comm_roles = fold_communicates_with_edges(
-        conn, clear_active=False  # already cleared above with co_occurrence
-    )
-    for key, mix in comm_roles.items():
-        edge_roles[key] = mix
-
-    # Stamp the aggregated provenance onto each active edge's metadata.
-    for (src, dst, edge_type), mix in edge_roles.items():
+    # -- write phase: delete + rewrite + stamp under one bounded hold ---------
+    with with_db_write():
         conn.execute(
-            """
-            UPDATE entity_edges
-            SET metadata_json = json_patch(COALESCE(metadata_json, '{}'), ?)
-            WHERE src_entity_id=? AND dst_entity_id=? AND edge_type=? AND valid_to IS NULL
-            """,
-            (json.dumps({"actor_role": _dominant_role(mix), "role_mix": mix}), src, dst, edge_type),
+            "DELETE FROM entity_edges "
+            "WHERE edge_type IN ('co_occurrence', 'communicates_with') AND valid_to IS NULL"
         )
 
-    conn.commit()
+        for record_id, rec in by_record.items():
+            # Cap per-record fan-out (mirrors the ingest path) so a giant record
+            # doesn't create O(n^2) edges.
+            unique = list(dict.fromkeys(rec["ents"]))[:8]
+            event_at = rec["event_at"]
+            role = role_by_record.get(record_id, "ambient")
+            for i in range(len(unique)):
+                for j in range(i + 1, len(unique)):
+                    update_edge(
+                        conn,
+                        src_entity_id=unique[i],
+                        dst_entity_id=unique[j],
+                        edge_type=EDGE_CO_OCCURRENCE,
+                        event_at=event_at,
+                    )
+                    _tally(unique[i], unique[j], EDGE_CO_OCCURRENCE, role)
+                    co += 1
+
+        # P3.2: talked-to edges from thread co-participants only.
+        comm, comm_roles = fold_communicates_with_edges(
+            conn,
+            clear_active=False,  # already cleared above with co_occurrence
+            participation=participation,
+        )
+        for key, mix in comm_roles.items():
+            edge_roles[key] = mix
+
+        # Stamp the aggregated provenance onto each active edge's metadata.
+        for (src, dst, edge_type), mix in edge_roles.items():
+            conn.execute(
+                """
+                UPDATE entity_edges
+                SET metadata_json = json_patch(COALESCE(metadata_json, '{}'), ?)
+                WHERE src_entity_id=? AND dst_entity_id=? AND edge_type=? AND valid_to IS NULL
+                """,
+                (json.dumps({"actor_role": _dominant_role(mix), "role_mix": mix}), src, dst, edge_type),
+            )
+
+        conn.commit()
     return {"co_occurrence": co, "communicates_with": comm}
 
 
@@ -529,6 +555,8 @@ def compute_communities(conn: sqlite3.Connection) -> Dict[str, int]:
     if G.number_of_nodes() == 0:
         return {"communities": 0, "nodes_labeled": 0}
 
+    # Louvain is pure CPU over the in-memory graph — no reason to hold the
+    # write gate (or even a transaction) while it runs.
     community_sets = nx.community.louvain_communities(G, weight="weight", seed=42)
     partition: Dict[str, int] = {}
     sizes: Dict[int, int] = {}
@@ -541,22 +569,25 @@ def compute_communities(conn: sqlite3.Connection) -> Dict[str, int]:
         for i, (comm, _n) in enumerate(sorted(sizes.items(), key=lambda kv: (-kv[1], kv[0])))
     }
 
-    for entity_id, comm in partition.items():
+    from ...storage.db.write_gate import with_db_write
+
+    with with_db_write():
+        for entity_id, comm in partition.items():
+            conn.execute(
+                "UPDATE entities SET metadata_json=json_patch(COALESCE(metadata_json,'{}'), ?) "
+                "WHERE entity_id=?",
+                (json.dumps({"community_id": rank[comm]}), entity_id),
+            )
+        # Drop stale labels from entities that left the graph.
+        placeholders = ",".join("?" for _ in partition) or "''"
         conn.execute(
-            "UPDATE entities SET metadata_json=json_patch(COALESCE(metadata_json,'{}'), ?) "
-            "WHERE entity_id=?",
-            (json.dumps({"community_id": rank[comm]}), entity_id),
+            f"UPDATE entities SET metadata_json=json_remove(metadata_json, '$.community_id') "
+            f"WHERE metadata_json IS NOT NULL "
+            f"AND json_extract(metadata_json, '$.community_id') IS NOT NULL "
+            f"AND entity_id NOT IN ({placeholders})",
+            tuple(partition.keys()),
         )
-    # Drop stale labels from entities that left the graph.
-    placeholders = ",".join("?" for _ in partition) or "''"
-    conn.execute(
-        f"UPDATE entities SET metadata_json=json_remove(metadata_json, '$.community_id') "
-        f"WHERE metadata_json IS NOT NULL "
-        f"AND json_extract(metadata_json, '$.community_id') IS NOT NULL "
-        f"AND entity_id NOT IN ({placeholders})",
-        tuple(partition.keys()),
-    )
-    conn.commit()
+        conn.commit()
     return {"communities": len(sizes), "nodes_labeled": len(partition)}
 
 
@@ -584,20 +615,33 @@ def rebuild_entity_graph(
     No NER re-run — bounded by the current `entity_mentions` + message
     senders / `conversation_participants` + `signal_objects`. To grow the
     mention set, re-run the `entities` enrichment job (force_reprocess).
+
+    Gate discipline (M2.2): each write phase takes the process-wide write gate
+    itself and commits before releasing it; the heavy read/compute work
+    (mention scan, role map, participation load, Louvain) runs between holds.
+    Callers must NOT wrap this function in ``with_db_write`` — the gate is
+    reentrant, so an outer hold silently reinstates the whole-rebuild
+    exclusive section (120s observed 2026-08-07) this structure removes.
     """
+    from ...storage.db.write_gate import with_db_write
     from ..lifecycle.derived_scrub import _delete_orphan_entities, _recount_entity_mentions
 
     edges_before = _count_active_edges(conn)
 
-    _recount_entity_mentions(conn)
-    orphaned = _delete_orphan_entities(conn) if prune_orphans else []
+    with with_db_write():
+        _recount_entity_mentions(conn)
+        orphaned = _delete_orphan_entities(conn) if prune_orphans else []
+        conn.commit()
+
+    # Gates its own phases; reads run outside the gate.
     edge_counts = rebuild_evidence_edges(conn)
 
     # Close facts whose provenance is entirely gone BEFORE materializing, so a
     # dead fact can't re-enter the graph as an edge (the AWS-cert leak).
     from ..lifecycle.derived_scrub import close_dangling_facts
 
-    facts_closed = close_dangling_facts(conn)
+    with with_db_write():
+        facts_closed = close_dangling_facts(conn)  # commits internally
 
     mz = {"topic_edges": 0, "fact_edges": 0}
     enrich = {"goal_edges": 0, "place_edges": 0, "conversation_edges": 0}
@@ -605,7 +649,8 @@ def rebuild_entity_graph(
         try:
             from .fact_materializer import materialize_signal_objects_to_graph
 
-            mz = materialize_signal_objects_to_graph(conn)
+            with with_db_write():
+                mz = materialize_signal_objects_to_graph(conn)  # commits internally
         except Exception as exc:  # materialization is best-effort
             logger.warning("fact materialization during rebuild failed: %s", exc)
         try:
@@ -613,11 +658,13 @@ def rebuild_entity_graph(
 
             # After the facts refresh (which drops ALL mz edges) so enricher
             # edges live in the same lifecycle.
-            enrich = materialize_graph_enrichments(conn)
+            with with_db_write():
+                enrich = materialize_graph_enrichments(conn)  # commits internally
         except Exception as exc:
             logger.warning("graph enrichment during rebuild failed: %s", exc)
 
     # Neighborhoods over the final edge set (evidence + materialized).
+    # Gates only its label-write phase; Louvain runs outside the gate.
     communities = compute_communities(conn)
 
     dossiers = 0
@@ -625,10 +672,10 @@ def rebuild_entity_graph(
         try:
             from .dossier import refresh_dossiers
 
-            dossiers = refresh_dossiers(conn)
+            with with_db_write():
+                dossiers = refresh_dossiers(conn)  # commits internally
         except Exception as exc:  # dossier refresh is best-effort
             logger.warning("dossier refresh during rebuild failed: %s", exc)
-    conn.commit()
 
     edges_after = _count_active_edges(conn)
     return {
