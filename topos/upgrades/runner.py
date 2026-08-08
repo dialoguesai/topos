@@ -331,9 +331,11 @@ def _exec_engine_endpoint(step: Dict[str, Any], conn: sqlite3.Connection) -> Dic
     """Dispatch declared endpoints to engine internals — no HTTP self-call."""
     path = str((step.get("params") or {}).get("path") or "")
     if path == "/v1/signal/entities/graph/rebuild":
-        from ..features.entities.maintenance import rebuild_entity_graph
+        # Subprocess when file-backed: the rebuild's compute starves the GIL
+        # (2026-08-08), and upgrades run inside the live node process.
+        from ..features.entities.rebuild_subprocess import run_graph_rebuild
 
-        return dict(rebuild_entity_graph(conn))
+        return dict(run_graph_rebuild(conn))
     raise ValueError(f"no internal dispatch for endpoint step: {path!r}")
 
 
@@ -376,9 +378,9 @@ def _exec_derived_rebuild(step: Dict[str, Any], conn: sqlite3.Connection) -> Dic
         name = str(target)
         try:
             if name in ("entity_graph", "graph", "entities_graph"):
-                from ..features.entities.maintenance import rebuild_entity_graph
+                from ..features.entities.rebuild_subprocess import run_graph_rebuild
 
-                detail["targets"][name] = dict(rebuild_entity_graph(conn))
+                detail["targets"][name] = dict(run_graph_rebuild(conn))
             elif name in ("topic_clusters", "clusters"):
                 from ..features.signal.topic_clustering import recompute_topic_clusters
 
