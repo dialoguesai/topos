@@ -261,6 +261,23 @@ async def startup_event() -> None:
             verify_ssl=settings.control_plane_verify_ssl,
         )
         state.control_plane_client.start()
+
+        async def _seed_device_info_snapshot() -> None:
+            # Answered from the client thread when the app loop cannot answer:
+            # first-run model prewarm freezes the loop for minutes, every
+            # relayed get_device_info 504s, and setup cannot learn the machine
+            # name. Seed the snapshot NOW, while the loop is still healthy.
+            try:
+                from .services.container import get_services
+
+                payload = await get_services().device.get_device_info(context=None)
+                if isinstance(payload, dict) and state.control_plane_client is not None:
+                    state.control_plane_client.set_device_info_snapshot(payload)
+                    logger.info("Device-info snapshot seeded for stall fallback")
+            except Exception as seed_exc:  # noqa: BLE001
+                logger.warning("Device-info snapshot seed failed (non-fatal): %s", seed_exc)
+
+        asyncio.create_task(_seed_device_info_snapshot())
         if settings.wait_for_control_plane_on_startup:
             connected = await state.control_plane_client.wait_until_connected(
                 timeout_s=settings.connection_readiness_timeout_seconds

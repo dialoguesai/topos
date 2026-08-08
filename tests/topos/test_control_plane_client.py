@@ -489,3 +489,78 @@ async def test_threaded_client_stop_joins_the_thread(monkeypatch):
     await client.stop()
     assert not thread.is_alive(), "client thread failed to exit on stop()"
     assert client.get_connection_status()["state"] == "idle"
+
+
+@pytest.mark.asyncio
+async def test_get_device_info_answered_from_snapshot_when_app_loop_stalls(monkeypatch):
+    """First-run model prewarm freezes the app loop for minutes; the relayed
+    get_device_info must still answer — from the seeded snapshot — or setup
+    cannot learn the machine name."""
+    request = {"id": "di-1", "type": "get_device_info", "payload": {}}
+    ws = StayOpenWebSocket([json.dumps(request)])
+    connect = FakeConnect(ws)
+    monkeypatch.setattr(control_plane_client, "connect", connect)
+    monkeypatch.setattr(ControlPlaneClient, "_SNAPSHOT_ANSWER_DEADLINE_S", 0.5)
+
+    stall = asyncio.Event()
+
+    async def stalled_handler(message):
+        await stall.wait()  # the app loop "never" answers
+        return {"id": message["id"], "status": "ok", "payload": {"system": {"computer_name": "fresh"}}}
+
+    client = ControlPlaneClient(
+        control_plane_url="wss://cp.example/ws/engine",
+        api_key="test-key",
+        handler=stalled_handler,
+        verify_ssl=True,
+    )
+    client.set_device_info_snapshot({"system": {"computer_name": "q4"}, "dataset_id": "d1"})
+    client.start()
+    try:
+        assert await client.wait_until_connected(timeout_s=5.0)
+        for _ in range(80):
+            if ws.sent:
+                break
+            await asyncio.sleep(0.1)
+        assert ws.sent, "no snapshot answer while the handler was stalled"
+        resp = json.loads(ws.sent[0])
+        assert resp["id"] == "di-1"
+        assert resp["status"] == "ok"
+        assert resp["payload"]["system"]["computer_name"] == "q4"
+        assert resp["payload"]["snapshot_stale"] is True
+    finally:
+        stall.set()
+        await client.stop()
+
+
+@pytest.mark.asyncio
+async def test_get_device_info_prefers_the_real_answer_when_the_loop_is_healthy(monkeypatch):
+    request = {"id": "di-2", "type": "get_device_info", "payload": {}}
+    ws = StayOpenWebSocket([json.dumps(request)])
+    connect = FakeConnect(ws)
+    monkeypatch.setattr(control_plane_client, "connect", connect)
+
+    async def healthy_handler(message):
+        return {"id": message["id"], "status": "ok", "payload": {"system": {"computer_name": "fresh"}}}
+
+    client = ControlPlaneClient(
+        control_plane_url="wss://cp.example/ws/engine",
+        api_key="test-key",
+        handler=healthy_handler,
+        verify_ssl=True,
+    )
+    client.set_device_info_snapshot({"system": {"computer_name": "stale"}})
+    client.start()
+    try:
+        assert await client.wait_until_connected(timeout_s=5.0)
+        for _ in range(80):
+            if ws.sent:
+                break
+            await asyncio.sleep(0.1)
+        resp = json.loads(ws.sent[0])
+        assert resp["payload"]["system"]["computer_name"] == "fresh"
+        assert "snapshot_stale" not in resp["payload"]
+        # And the fresh answer refreshed the snapshot.
+        assert client._device_info_snapshot["system"]["computer_name"] == "fresh"
+    finally:
+        await client.stop()
