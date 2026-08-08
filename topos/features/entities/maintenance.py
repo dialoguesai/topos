@@ -29,7 +29,8 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
-from typing import Callable, Dict, Iterable, List, Optional, Set, Tuple
+import uuid
+from typing import Callable, Dict, Iterable, Iterator, List, Optional, Set, Tuple
 
 logger = logging.getLogger("topos.features.entities.maintenance")
 
@@ -274,6 +275,71 @@ def _load_conversation_participation(
     return by_conv
 
 
+def _participation_edge_events(
+    by_conv: Dict[str, List[Dict[str, object]]],
+) -> Iterator[Tuple[str, str, Optional[str], str]]:
+    """Yield (src, dst, event_at, role) communicates_with evidence tuples.
+
+    One tuple per message event × co-participant — the shared pair expansion
+    for both the incremental fold (update_edge per tuple) and the rebuild's
+    in-memory accumulator, so the two paths cannot drift.
+    """
+    for _conv_id, events in by_conv.items():
+        # Distinct participants in this thread.
+        participants = list(dict.fromkeys(str(e["entity_id"]) for e in events))
+        if len(participants) < 2:
+            continue
+        # Evidence: each message event links its sender to every other
+        # co-participant (talked-to), never to mention-only third parties.
+        for ev in events:
+            src = str(ev["entity_id"])
+            role = str(ev.get("role") or "participated")
+            event_at = ev.get("event_at")
+            for dst in participants:
+                if dst == src:
+                    continue
+                yield src, dst, (str(event_at) if event_at else None), role
+
+
+class _EdgeAccumulator:
+    """In-memory replay of ``update_edge``'s fold for a from-scratch rebuild.
+
+    The rebuild deletes every active evidence edge before rewriting, so each
+    replayed observation lands on an edge whose state this dict fully owns —
+    the whole fold can run in Python OUTSIDE the write gate, shrinking the
+    write phase to one DELETE plus one batched INSERT. Delegates the
+    decay-then-add rule to :func:`edges.fold_edge_observation`, the same code
+    ingest uses, so a rebuild converges on identical weights.
+    """
+
+    def __init__(self) -> None:
+        from .edges import _canonical_order, fold_edge_observation
+
+        self._canon = _canonical_order
+        self._fold = fold_edge_observation
+        self.edges: Dict[tuple, Dict[str, object]] = {}
+
+    def add(self, src: str, dst: str, edge_type: str, event_at: Optional[str]) -> None:
+        if not src or not dst or src == dst:
+            return  # same guards as update_edge
+        src, dst = self._canon(src, dst, edge_type)
+        state = self.edges.get((src, dst, edge_type))
+        if state is None:
+            # update_edge's fresh-row branch: weight=increment, count=1.
+            self.edges[(src, dst, edge_type)] = {
+                "weight": 1.0,
+                "count": 1,
+                "last": event_at,
+            }
+            return
+        weight, count, last = self._fold(
+            state["weight"], state["count"], state["last"], event_at
+        )
+        state["weight"] = weight
+        state["count"] = count
+        state["last"] = last
+
+
 def fold_communicates_with_edges(
     conn: sqlite3.Connection,
     *,
@@ -312,29 +378,16 @@ def fold_communicates_with_edges(
         mix = edge_roles.setdefault(key, {})
         mix[role] = mix.get(role, 0) + 1
 
-    for _conv_id, events in by_conv.items():
-        # Distinct participants in this thread.
-        participants = list(dict.fromkeys(str(e["entity_id"]) for e in events))
-        if len(participants) < 2:
-            continue
-        # Evidence: each message event links its sender to every other
-        # co-participant (talked-to), never to mention-only third parties.
-        for ev in events:
-            src = str(ev["entity_id"])
-            role = str(ev.get("role") or "participated")
-            event_at = ev.get("event_at")
-            for dst in participants:
-                if dst == src:
-                    continue
-                update_edge(
-                    conn,
-                    src_entity_id=src,
-                    dst_entity_id=dst,
-                    edge_type=EDGE_COMMUNICATES,
-                    event_at=str(event_at) if event_at else None,
-                )
-                _tally(src, dst, role)
-                comm += 1
+    for src, dst, event_at, role in _participation_edge_events(by_conv):
+        update_edge(
+            conn,
+            src_entity_id=src,
+            dst_entity_id=dst,
+            edge_type=EDGE_COMMUNICATES,
+            event_at=event_at,
+        )
+        _tally(src, dst, role)
+        comm += 1
 
     return comm, edge_roles
 
@@ -426,17 +479,17 @@ def rebuild_evidence_edges(
     no longer used for communicates_with (P3.2 co-participation replaces
     sender→mention linking).
 
-    Gate discipline (M2.2): the mention scan, role-map computation, and
-    participation load dominate the rebuild's runtime and are pure reads — they
-    run OUTSIDE the write gate. Only contact seeding and the delete+rewrite of
-    edges hold it, each committing before release, so other writers stall for
-    bounded write phases instead of the whole rebuild (120s observed
-    2026-08-07). The delete and rewrite share one hold, so readers on other
-    connections never observe the edge-less gap between them.
+    Gate discipline (M2.2): everything expensive — the mention scan, role-map
+    computation, participation load, AND the edge fold itself (in-memory via
+    :class:`_EdgeAccumulator`) — runs OUTSIDE the write gate. The gate is held
+    only for contact seeding and for one DELETE + batched INSERT swap, so
+    other writers stall for a bounded swap instead of the whole rebuild (120s
+    observed 2026-08-07). The delete and insert share one hold, so readers on
+    other connections never observe the edge-less gap between them.
     """
     del sender_lookup  # unused — kept for call-site compatibility
     from ...storage.db.write_gate import with_db_write
-    from .edges import EDGE_CO_OCCURRENCE, _canonical_order, update_edge
+    from .edges import EDGE_CO_OCCURRENCE, EDGE_COMMUNICATES, _canonical_order, _now_iso
     from .resolver import EntityResolver
 
     # Seeding mints person entities the participation load resolves against,
@@ -467,7 +520,7 @@ def rebuild_evidence_edges(
     participation = _load_conversation_participation(conn)
 
     co = 0
-    # (src, dst, type) -> {role: evidence_count}; stamped onto edges afterwards.
+    # (src, dst, type) -> {role: evidence_count}; folded into metadata below.
     edge_roles: Dict[tuple, Dict[str, int]] = {}
 
     def _tally(src: str, dst: str, edge_type: str, role: str) -> None:
@@ -475,51 +528,66 @@ def rebuild_evidence_edges(
         mix = edge_roles.setdefault(key, {})
         mix[role] = mix.get(role, 0) + 1
 
-    # -- write phase: delete + rewrite + stamp under one bounded hold ---------
+    # -- fold phase: replay every observation in memory, still no gate --------
+    acc = _EdgeAccumulator()
+
+    for record_id, rec in by_record.items():
+        # Cap per-record fan-out (mirrors the ingest path) so a giant record
+        # doesn't create O(n^2) edges.
+        unique = list(dict.fromkeys(rec["ents"]))[:8]
+        event_at = rec["event_at"]
+        role = role_by_record.get(record_id, "ambient")
+        for i in range(len(unique)):
+            for j in range(i + 1, len(unique)):
+                acc.add(unique[i], unique[j], EDGE_CO_OCCURRENCE, event_at)
+                _tally(unique[i], unique[j], EDGE_CO_OCCURRENCE, role)
+                co += 1
+
+    # P3.2: talked-to edges from thread co-participants only.
+    comm = 0
+    for src, dst, event_at, role in _participation_edge_events(participation):
+        acc.add(src, dst, EDGE_COMMUNICATES, event_at)
+        _tally(src, dst, EDGE_COMMUNICATES, role)
+        comm += 1
+
+    # -- write phase: swap the folded edge set in under one bounded hold ------
+    valid_from = _now_iso()
+    payload = []
+    for (src, dst, edge_type), state in acc.edges.items():
+        mix = edge_roles.get((src, dst, edge_type))
+        metadata = (
+            json.dumps({"actor_role": _dominant_role(mix), "role_mix": mix})
+            if mix
+            else None
+        )
+        payload.append(
+            (
+                f"edg_{uuid.uuid4().hex[:16]}",
+                src,
+                dst,
+                edge_type,
+                float(state["weight"]),
+                int(state["count"]),
+                state["last"],
+                valid_from,
+                metadata,
+            )
+        )
+
     with with_db_write():
         conn.execute(
             "DELETE FROM entity_edges "
             "WHERE edge_type IN ('co_occurrence', 'communicates_with') AND valid_to IS NULL"
         )
-
-        for record_id, rec in by_record.items():
-            # Cap per-record fan-out (mirrors the ingest path) so a giant record
-            # doesn't create O(n^2) edges.
-            unique = list(dict.fromkeys(rec["ents"]))[:8]
-            event_at = rec["event_at"]
-            role = role_by_record.get(record_id, "ambient")
-            for i in range(len(unique)):
-                for j in range(i + 1, len(unique)):
-                    update_edge(
-                        conn,
-                        src_entity_id=unique[i],
-                        dst_entity_id=unique[j],
-                        edge_type=EDGE_CO_OCCURRENCE,
-                        event_at=event_at,
-                    )
-                    _tally(unique[i], unique[j], EDGE_CO_OCCURRENCE, role)
-                    co += 1
-
-        # P3.2: talked-to edges from thread co-participants only.
-        comm, comm_roles = fold_communicates_with_edges(
-            conn,
-            clear_active=False,  # already cleared above with co_occurrence
-            participation=participation,
+        conn.executemany(
+            """
+            INSERT INTO entity_edges (
+                edge_id, src_entity_id, dst_entity_id, edge_type,
+                weight, evidence_count, last_event_at, valid_from, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            payload,
         )
-        for key, mix in comm_roles.items():
-            edge_roles[key] = mix
-
-        # Stamp the aggregated provenance onto each active edge's metadata.
-        for (src, dst, edge_type), mix in edge_roles.items():
-            conn.execute(
-                """
-                UPDATE entity_edges
-                SET metadata_json = json_patch(COALESCE(metadata_json, '{}'), ?)
-                WHERE src_entity_id=? AND dst_entity_id=? AND edge_type=? AND valid_to IS NULL
-                """,
-                (json.dumps({"actor_role": _dominant_role(mix), "role_mix": mix}), src, dst, edge_type),
-            )
-
         conn.commit()
     return {"co_occurrence": co, "communicates_with": comm}
 
