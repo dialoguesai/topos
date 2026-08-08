@@ -55,7 +55,7 @@ def _default_rebuild() -> None:
     from ...core.state import close_thread_db_connection, get_db_connection
     from ...enrichment.pipeline_activity import is_derivation_in_flight
     from ...storage.db.write_gate import WriteGateDeferred, with_db_write
-    from .maintenance import rebuild_entity_graph
+    from .rebuild_subprocess import run_graph_rebuild
 
     conn = get_db_connection()
     if conn is None:
@@ -71,9 +71,15 @@ def _default_rebuild() -> None:
         # starts mid-rebuild now waits at most one short phase hold, and
         # enrichment completion re-marks the graph dirty, so a premature
         # result is rebuilt rather than defended against here.
+        #
+        # run_graph_rebuild sends the compute to a SUBPROCESS when the database
+        # is file-backed: even fully gate-disciplined, the in-process rebuild's
+        # CPU work (goal embeddings, role map, Louvain) held the GIL so hard
+        # the event loop served nothing for ~103s (2026-08-08, zero WRITE_GATE
+        # warnings). This thread then just waits on the child, GIL-free.
         if is_derivation_in_flight():
             raise WriteGateDeferred("derivation batch in flight")
-        report = rebuild_entity_graph(conn)
+        report = run_graph_rebuild(conn)
         try:
             with with_db_write():
                 _mark_materialized(conn)
