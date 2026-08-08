@@ -68,6 +68,10 @@ class ModelCache:
         self._rss_soft_limit_mb = max(0.0, float(rss_soft_limit_mb))
         self._entries: Dict[ModelSlot, _CacheEntry] = {}
         self._lock = threading.Lock()
+        #: Signals load completion; shares ``_lock``. Slots with a load in
+        #: flight (marked in ``_loading``) are absent from ``_entries``.
+        self._load_done = threading.Condition(self._lock)
+        self._loading: Dict[ModelSlot, str] = {}
         self._evictions_total = 0
 
     def acquire(
@@ -78,17 +82,42 @@ class ModelCache:
     ) -> Tuple[Any, bool]:
         """Return (handle, cache_hit). Loads via loader when missing or model_id changed."""
         model_id = (model_id or "").strip() or slot.value
-        with self._lock:
-            entry = self._entries.get(slot)
-            if entry is not None and entry.model_id == model_id:
-                entry.last_used = time.monotonic()
-                return entry.handle, True
+        with self._load_done:
+            while True:
+                entry = self._entries.get(slot)
+                if entry is not None and entry.model_id == model_id:
+                    entry.last_used = time.monotonic()
+                    return entry.handle, True
+                if slot not in self._loading:
+                    break
+                # Another thread is loading this slot: wait for its result
+                # instead of racing a second load of the same model (the
+                # duplicate "Loading privacy-filter" of 2026-08-07).
+                self._load_done.wait()
             if entry is not None:
+                self._entries.pop(slot, None)
                 self._evict_unlocked(slot, entry)
+            # Capacity counts resident entries only; a slot mid-load is in
+            # neither map, so residency can briefly overshoot by the number of
+            # concurrent loads. Acceptable: the alternative is the pre-fix
+            # behaviour of serializing every load behind one cache-wide lock.
             self._ensure_capacity_unlocked(exclude=slot)
+            self._loading[slot] = model_id
+        # Load OUTSIDE the lock. Holding the cache-wide lock across a slow (or
+        # wedged — hung MPS load, 2026-08-07) loader starves every model user
+        # in the process, not just this slot's.
+        try:
             handle = loader()
+        except BaseException:
+            with self._load_done:
+                self._loading.pop(slot, None)
+                self._load_done.notify_all()
+            raise
+        with self._load_done:
+            self._loading.pop(slot, None)
             self._entries[slot] = _CacheEntry(handle, model_id, loader)
-            return handle, False
+            self._load_done.notify_all()
+        return handle, False
 
     def evict_slot(self, slot: ModelSlot) -> None:
         with self._lock:

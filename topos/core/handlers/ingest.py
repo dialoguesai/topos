@@ -1,6 +1,8 @@
 """App ingest and ingestion lifecycle message handlers."""
 from __future__ import annotations
 
+import asyncio
+
 import topos.core.handlers as hub
 
 from .common import (
@@ -247,15 +249,26 @@ async def handle_app_ingest(message: Dict[str, Any]) -> Optional[Dict[str, Any]]
                     "write_id": write_id,
                 }
                 idempotency = f"inbox_derivation:{write_id}" if write_id else f"inbox:{source_id}:{sync_batch_id}"
-                enqueue_job(
-                    db_conn,
-                    kind="inbox_deferred_enrichment",
-                    payload=job_payload,
-                    source_id=source_id,
-                    write_id=write_id,
-                    sync_batch_id=str(sync_batch_id) if sync_batch_id else None,
-                    idempotency_key=idempotency,
-                )
+
+                def _enqueue_inbox_job() -> None:
+                    # enqueue_job takes the write gate — a blocking OS lock —
+                    # so it must not run on the event-loop thread (one of the
+                    # 2026-08-07 freeze acquisition sites). Own connection:
+                    # get_db_connection is thread-local.
+                    own = hub.get_db_connection()
+                    if own is None:
+                        return
+                    enqueue_job(
+                        own,
+                        kind="inbox_deferred_enrichment",
+                        payload=job_payload,
+                        source_id=source_id,
+                        write_id=write_id,
+                        sync_batch_id=str(sync_batch_id) if sync_batch_id else None,
+                        idempotency_key=idempotency,
+                    )
+
+                await asyncio.to_thread(_enqueue_inbox_job)
                 start_pipeline_worker(hub.get_db_connection)
         if write_id and processed > 0:
             from ...ingestion.usage_inbox_dedupe import record_delivery
@@ -394,14 +407,21 @@ async def handle_start_ingestion(message: Dict[str, Any]) -> Optional[Dict[str, 
         else:
             job_payload["file_path"] = file_path
 
-        enqueue_job(
-            db_conn,
-            kind="file_ingestion",
-            payload=job_payload,
-            job_id=str(job_id),
-            source_id=source_id,
-            idempotency_key=f"file_ingestion:{job_id}",
-        )
+        def _enqueue_file_job() -> None:
+            # Write-gate acquisition: keep it off the event-loop thread.
+            own = hub.get_db_connection()
+            if own is None:
+                return
+            enqueue_job(
+                own,
+                kind="file_ingestion",
+                payload=job_payload,
+                job_id=str(job_id),
+                source_id=source_id,
+                idempotency_key=f"file_ingestion:{job_id}",
+            )
+
+        await asyncio.to_thread(_enqueue_file_job)
         start_pipeline_worker(hub.get_db_connection)
 
         return {"id": req_id, "status": "ok", "payload": {"job_id": job_id, "status": "processing"}}
