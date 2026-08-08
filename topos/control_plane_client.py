@@ -32,6 +32,12 @@ logger = logging.getLogger("topos.control_plane_client")
 _FAST_INBOUND_MESSAGE_TYPES = frozenset(
     {
         "healthcheck",
+        # Answerable from the client-thread snapshot even while the app loop
+        # is frozen — behind the saturation gate it got rejected with "Engine
+        # is busy" the moment 128 stalled handlers piled up, which turned into
+        # 502s at the control plane for the exact request first-run setup
+        # needs (the machine name).
+        "get_device_info",
         "connection_info",
         "check_inbox_write",
         "list_waiting_routine_runs",
