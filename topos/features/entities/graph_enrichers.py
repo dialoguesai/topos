@@ -201,62 +201,68 @@ def _materialize_goals(
     # scope coverage work" become ONE node with the variants listed on it.
     clusters = _cluster_goal_keys(grouped, goal_embed_fn)
 
+    from ...storage.db.write_gate import with_db_write
+
     edges = 0
-    for root_key, member_keys in clusters.items():
-        members = [grouped[k] for k in member_keys]
-        # Representative: the variant with the most occurrences, tie → longest
-        # (most informative) text. Node id keys off the lexically-smallest
-        # member so it stays stable as new variants join the cluster.
-        rep = max(members, key=lambda m: (len(m["records"]), len(m["text"])))
-        node_key = min(member_keys)
-        node_id = f"goal_{hashlib.sha1(node_key.encode('utf-8')).hexdigest()[:16]}"
+    # Only the edge/node writes hold the gate — the goal read + embedding
+    # cluster above ran ungated (that cluster held the gate 104.9s on
+    # 2026-08-08 when this whole function sat inside one caller-side hold).
+    with with_db_write():
+        for root_key, member_keys in clusters.items():
+            members = [grouped[k] for k in member_keys]
+            # Representative: the variant with the most occurrences, tie → longest
+            # (most informative) text. Node id keys off the lexically-smallest
+            # member so it stays stable as new variants join the cluster.
+            rep = max(members, key=lambda m: (len(m["records"]), len(m["text"])))
+            node_key = min(member_keys)
+            node_id = f"goal_{hashlib.sha1(node_key.encode('utf-8')).hexdigest()[:16]}"
 
-        events = sorted(e for m in members for e in m["events"])
-        records = [(rid, ev) for m in members for (rid, ev) in m["records"]]
-        occurrences = max(len(records), 1)
-        variants = [m["text"] for m in members]
+            events = sorted(e for m in members for e in m["events"])
+            records = [(rid, ev) for m in members for (rid, ev) in m["records"]]
+            occurrences = max(len(records), 1)
+            variants = [m["text"] for m in members]
 
-        _ensure_node(
-            conn, node_id, rep["text"], "goal",
-            metadata={
-                "goal_variants": variants[:_MAX_GOAL_VARIANTS_LISTED],
-                "variant_count": len(variants),
-                "occurrences": occurrences,
-            } if len(variants) > 1 else {"occurrences": occurrences},
-        )
-        first_at = events[0] if events else None
-        last_at = events[-1] if events else None
-        if owner:
-            _upsert_materialized_edge(
-                conn, src=owner, dst=node_id, edge_type=EDGE_PURSUES,
-                weight=min(_MZ_WEIGHT_FLOOR + 0.25 * (occurrences - 1), 6.0),
-                valid_from=first_at, valid_to=None, last_event_at=last_at,
-                statement=f"pursues: {rep['text'][:80]}" + (f" (×{occurrences})" if occurrences > 1 else ""),
-                source_object_id=rep["goal_id"], actor_role="authored",
+            _ensure_node(
+                conn, node_id, rep["text"], "goal",
+                metadata={
+                    "goal_variants": variants[:_MAX_GOAL_VARIANTS_LISTED],
+                    "variant_count": len(variants),
+                    "occurrences": occurrences,
+                } if len(variants) > 1 else {"occurrences": occurrences},
             )
-            edges += 1
-        # Entities mentioned on the goal's provenance records relate to the goal.
-        seen_entities: Dict[str, str] = {}
-        for record_id, event_at in records:
-            for (ent_id,) in conn.execute(
-                "SELECT DISTINCT entity_id FROM entity_mentions WHERE record_id=?",
-                (record_id,),
-            ):
-                if str(ent_id) == owner or str(ent_id) == node_id:
-                    continue
-                prev = seen_entities.get(str(ent_id))
-                if event_at and (prev is None or event_at > prev):
-                    seen_entities[str(ent_id)] = event_at
-                elif prev is None:
-                    seen_entities.setdefault(str(ent_id), "")
-        for ent_id, ev in seen_entities.items():
-            _upsert_materialized_edge(
-                conn, src=node_id, dst=ent_id, edge_type=EDGE_RELATES_TO,
-                weight=_MZ_WEIGHT_FLOOR, valid_from=ev or first_at, valid_to=None,
-                statement="goal relates to (from its source record)",
-                source_object_id=rep["goal_id"], actor_role="authored",
-            )
-            edges += 1
+            first_at = events[0] if events else None
+            last_at = events[-1] if events else None
+            if owner:
+                _upsert_materialized_edge(
+                    conn, src=owner, dst=node_id, edge_type=EDGE_PURSUES,
+                    weight=min(_MZ_WEIGHT_FLOOR + 0.25 * (occurrences - 1), 6.0),
+                    valid_from=first_at, valid_to=None, last_event_at=last_at,
+                    statement=f"pursues: {rep['text'][:80]}" + (f" (×{occurrences})" if occurrences > 1 else ""),
+                    source_object_id=rep["goal_id"], actor_role="authored",
+                )
+                edges += 1
+            # Entities mentioned on the goal's provenance records relate to the goal.
+            seen_entities: Dict[str, str] = {}
+            for record_id, event_at in records:
+                for (ent_id,) in conn.execute(
+                    "SELECT DISTINCT entity_id FROM entity_mentions WHERE record_id=?",
+                    (record_id,),
+                ):
+                    if str(ent_id) == owner or str(ent_id) == node_id:
+                        continue
+                    prev = seen_entities.get(str(ent_id))
+                    if event_at and (prev is None or event_at > prev):
+                        seen_entities[str(ent_id)] = event_at
+                    elif prev is None:
+                        seen_entities.setdefault(str(ent_id), "")
+            for ent_id, ev in seen_entities.items():
+                _upsert_materialized_edge(
+                    conn, src=node_id, dst=ent_id, edge_type=EDGE_RELATES_TO,
+                    weight=_MZ_WEIGHT_FLOOR, valid_from=ev or first_at, valid_to=None,
+                    statement="goal relates to (from its source record)",
+                    source_object_id=rep["goal_id"], actor_role="authored",
+                )
+                edges += 1
     return edges
 
 
@@ -275,33 +281,36 @@ def _materialize_places(conn: sqlite3.Connection, owner: Optional[str]) -> int:
         GROUP BY place_name
         """
     ).fetchall()
-    for place_name, visits, first_at, last_at in rows:
-        name = str(place_name).strip()
-        if not is_valid_entity_surface(name):
-            continue
-        try:
-            place_id, _tier = resolver.resolve(name, entity_type="place")
-        except ValueError:
-            continue
-        if place_id == owner:
-            continue
-        # Repeat presence outweighs a single text mention: scale with visits.
-        weight = min(_MZ_WEIGHT_FLOOR + float(visits) * 0.25, 10.0)
-        _upsert_materialized_edge(
-            conn, src=owner, dst=place_id, edge_type="located_at",
-            weight=weight, valid_from=first_at, valid_to=None,
-            statement=f"visited {name} ×{visits}", source_object_id=f"loc:{name[:40]}",
-            actor_role="participated",
-        )
-        conn.execute(
-            """
-            UPDATE entity_edges
-            SET last_event_at=?, metadata_json=json_patch(COALESCE(metadata_json,'{}'), ?)
-            WHERE src_entity_id=? AND dst_entity_id=? AND edge_type='located_at' AND valid_to IS NULL
-            """,
-            (last_at, f'{{"visit_count": {int(visits)}}}', owner, place_id),
-        )
-        edges += 1
+    from ...storage.db.write_gate import with_db_write
+
+    with with_db_write():
+        for place_name, visits, first_at, last_at in rows:
+            name = str(place_name).strip()
+            if not is_valid_entity_surface(name):
+                continue
+            try:
+                place_id, _tier = resolver.resolve(name, entity_type="place")
+            except ValueError:
+                continue
+            if place_id == owner:
+                continue
+            # Repeat presence outweighs a single text mention: scale with visits.
+            weight = min(_MZ_WEIGHT_FLOOR + float(visits) * 0.25, 10.0)
+            _upsert_materialized_edge(
+                conn, src=owner, dst=place_id, edge_type="located_at",
+                weight=weight, valid_from=first_at, valid_to=None,
+                statement=f"visited {name} ×{visits}", source_object_id=f"loc:{name[:40]}",
+                actor_role="participated",
+            )
+            conn.execute(
+                """
+                UPDATE entity_edges
+                SET last_event_at=?, metadata_json=json_patch(COALESCE(metadata_json,'{}'), ?)
+                WHERE src_entity_id=? AND dst_entity_id=? AND edge_type='located_at' AND valid_to IS NULL
+                """,
+                (last_at, f'{{"visit_count": {int(visits)}}}', owner, place_id),
+            )
+            edges += 1
     return edges
 
 
@@ -320,37 +329,40 @@ def _materialize_conversations(conn: sqlite3.Connection) -> int:
         """
     ).fetchall()
     conv_ids = {str(r[0]) for r in rows}
-    for conv_id in conv_ids:
-        label = conv_id if len(conv_id) <= 40 else conv_id[:37] + "…"
-        _ensure_node(conn, f"conv_{conv_id}", label, "conversation")
-    for conv_id, entity_id, count, last_at in rows:
-        _upsert_materialized_edge(
-            conn, src=f"conv_{conv_id}", dst=str(entity_id), edge_type=EDGE_MENTIONS,
-            weight=min(_MZ_WEIGHT_FLOOR + float(count) * 0.25, 8.0),
-            valid_from=last_at, valid_to=None,
-            statement=f"mentioned in conversation ×{count}",
-            source_object_id=f"conv:{conv_id}", actor_role="observed",
-        )
-        edges += 1
-    if _table_exists(conn, "conversation_participants"):
-        for conv_id, contact_id in conn.execute(
-            "SELECT conversation_id, contact_id FROM conversation_participants "
-            "WHERE contact_id IS NOT NULL"
-        ).fetchall():
-            if str(conv_id) not in conv_ids:
-                continue
-            ent = conn.execute(
-                "SELECT entity_id FROM entities WHERE contact_id=? LIMIT 1", (str(contact_id),)
-            ).fetchone()
-            if not ent:
-                continue
+    from ...storage.db.write_gate import with_db_write
+
+    with with_db_write():
+        for conv_id in conv_ids:
+            label = conv_id if len(conv_id) <= 40 else conv_id[:37] + "…"
+            _ensure_node(conn, f"conv_{conv_id}", label, "conversation")
+        for conv_id, entity_id, count, last_at in rows:
             _upsert_materialized_edge(
-                conn, src=str(ent[0]), dst=f"conv_{conv_id}", edge_type=EDGE_PARTICIPATES,
-                weight=_MZ_WEIGHT_FLOOR, valid_from=None, valid_to=None,
-                statement="participated in conversation",
-                source_object_id=f"conv:{conv_id}", actor_role="participated",
+                conn, src=f"conv_{conv_id}", dst=str(entity_id), edge_type=EDGE_MENTIONS,
+                weight=min(_MZ_WEIGHT_FLOOR + float(count) * 0.25, 8.0),
+                valid_from=last_at, valid_to=None,
+                statement=f"mentioned in conversation ×{count}",
+                source_object_id=f"conv:{conv_id}", actor_role="observed",
             )
             edges += 1
+        if _table_exists(conn, "conversation_participants"):
+            for conv_id, contact_id in conn.execute(
+                "SELECT conversation_id, contact_id FROM conversation_participants "
+                "WHERE contact_id IS NOT NULL"
+            ).fetchall():
+                if str(conv_id) not in conv_ids:
+                    continue
+                ent = conn.execute(
+                    "SELECT entity_id FROM entities WHERE contact_id=? LIMIT 1", (str(contact_id),)
+                ).fetchone()
+                if not ent:
+                    continue
+                _upsert_materialized_edge(
+                    conn, src=str(ent[0]), dst=f"conv_{conv_id}", edge_type=EDGE_PARTICIPATES,
+                    weight=_MZ_WEIGHT_FLOOR, valid_from=None, valid_to=None,
+                    statement="participated in conversation",
+                    source_object_id=f"conv:{conv_id}", actor_role="participated",
+                )
+                edges += 1
     return edges
 
 
@@ -368,5 +380,8 @@ def materialize_graph_enrichments(
         "place_edges": _materialize_places(conn, owner),
         "conversation_edges": _materialize_conversations(conn),
     }
-    conn.commit()
+    from ...storage.db.write_gate import with_db_write
+
+    with with_db_write():
+        conn.commit()
     return out

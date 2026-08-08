@@ -725,9 +725,10 @@ def rebuild_entity_graph(
             from .graph_enrichers import materialize_graph_enrichments
 
             # After the facts refresh (which drops ALL mz edges) so enricher
-            # edges live in the same lifecycle.
-            with with_db_write():
-                enrich = materialize_graph_enrichments(conn)  # commits internally
+            # edges live in the same lifecycle. Gates its own write sections —
+            # wrapping it here put the goal-clustering EMBEDDING compute under
+            # the gate (104.9s hold observed 2026-08-08).
+            enrich = materialize_graph_enrichments(conn)
         except Exception as exc:
             logger.warning("graph enrichment during rebuild failed: %s", exc)
 
