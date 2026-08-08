@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+from .db.write_gate import commit_connection, with_db_write
+
 logger = logging.getLogger("topos.storage.source_settings")
 
 TABLE = "user_ingestion_sources"
@@ -42,25 +44,27 @@ def _has_posture_column(conn) -> bool:
 
 
 def ensure_table(conn) -> None:
-    conn.execute(f"""
-        CREATE TABLE IF NOT EXISTS {TABLE} (
-            dataset_id TEXT NOT NULL,
-            source_id TEXT NOT NULL,
-            enabled INTEGER NOT NULL DEFAULT 1,
-            last_sync_at TEXT,
-            last_error TEXT,
-            posture TEXT,
-            updated_at TEXT DEFAULT (datetime('now')),
-            PRIMARY KEY (dataset_id, source_id)
-        )
-    """)
-    # Idempotent, PRAGMA-guarded add for tables created before P1.4.
-    if not _has_posture_column(conn):
-        try:
-            conn.execute(f"ALTER TABLE {TABLE} ADD COLUMN posture TEXT")
-        except Exception as e:  # noqa: BLE001
-            logger.warning("posture column add skipped: %s", e)
-    conn.commit()
+    # DDL takes SQLite's write lock at execute time — gate it with the commit.
+    with with_db_write():
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {TABLE} (
+                dataset_id TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                last_sync_at TEXT,
+                last_error TEXT,
+                posture TEXT,
+                updated_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (dataset_id, source_id)
+            )
+        """)
+        # Idempotent, PRAGMA-guarded add for tables created before P1.4.
+        if not _has_posture_column(conn):
+            try:
+                conn.execute(f"ALTER TABLE {TABLE} ADD COLUMN posture TEXT")
+            except Exception as e:  # noqa: BLE001
+                logger.warning("posture column add skipped: %s", e)
+        commit_connection(conn)
 
 
 def get_source_settings(conn, dataset_id: str, source_id: str) -> Optional[dict]:
@@ -129,26 +133,27 @@ def put_source_settings(
         if posture_provided:
             set_clauses.append("posture = ?")
             params.append(normalized_posture)
-        if cur:
-            set_clauses.append("updated_at = datetime('now')")
-            params.extend([dataset_id, source_id])
-            conn.execute(
-                f"UPDATE {TABLE} SET {', '.join(set_clauses)} WHERE dataset_id = ? AND source_id = ?",
-                params,
-            )
-        else:
-            # New row: default enabled=1 when only posture was set.
-            conn.execute(
-                f"INSERT INTO {TABLE} (dataset_id, source_id, enabled, posture, updated_at) "
-                f"VALUES (?, ?, ?, ?, datetime('now'))",
-                (
-                    dataset_id,
-                    source_id,
-                    1 if (enabled is None or enabled) else 0,
-                    normalized_posture if posture_provided else None,
-                ),
-            )
-        conn.commit()
+        with with_db_write():
+            if cur:
+                set_clauses.append("updated_at = datetime('now')")
+                params.extend([dataset_id, source_id])
+                conn.execute(
+                    f"UPDATE {TABLE} SET {', '.join(set_clauses)} WHERE dataset_id = ? AND source_id = ?",
+                    params,
+                )
+            else:
+                # New row: default enabled=1 when only posture was set.
+                conn.execute(
+                    f"INSERT INTO {TABLE} (dataset_id, source_id, enabled, posture, updated_at) "
+                    f"VALUES (?, ?, ?, ?, datetime('now'))",
+                    (
+                        dataset_id,
+                        source_id,
+                        1 if (enabled is None or enabled) else 0,
+                        normalized_posture if posture_provided else None,
+                    ),
+                )
+            commit_connection(conn)
     except ValueError:
         raise
     except Exception as e:
@@ -169,29 +174,30 @@ def update_sync_result(
         return
     try:
         ensure_table(conn)
-        if success:
-            conn.execute(
-                f"""
-                INSERT INTO {TABLE} (dataset_id, source_id, enabled, last_sync_at, last_error, updated_at)
-                VALUES (?, ?, 1, ?, NULL, datetime('now'))
-                ON CONFLICT(dataset_id, source_id) DO UPDATE SET
-                    last_sync_at = ?,
-                    last_error = NULL,
-                    updated_at = datetime('now')
-                """,
-                (dataset_id, source_id, last_sync_at or "", last_sync_at or ""),
-            )
-        else:
-            conn.execute(
-                f"""
-                INSERT INTO {TABLE} (dataset_id, source_id, enabled, last_sync_at, last_error, updated_at)
-                VALUES (?, ?, 1, NULL, ?, datetime('now'))
-                ON CONFLICT(dataset_id, source_id) DO UPDATE SET
-                    last_error = ?,
-                    updated_at = datetime('now')
-                """,
-                (dataset_id, source_id, last_error or "", last_error or ""),
-            )
-        conn.commit()
+        with with_db_write():
+            if success:
+                conn.execute(
+                    f"""
+                    INSERT INTO {TABLE} (dataset_id, source_id, enabled, last_sync_at, last_error, updated_at)
+                    VALUES (?, ?, 1, ?, NULL, datetime('now'))
+                    ON CONFLICT(dataset_id, source_id) DO UPDATE SET
+                        last_sync_at = ?,
+                        last_error = NULL,
+                        updated_at = datetime('now')
+                    """,
+                    (dataset_id, source_id, last_sync_at or "", last_sync_at or ""),
+                )
+            else:
+                conn.execute(
+                    f"""
+                    INSERT INTO {TABLE} (dataset_id, source_id, enabled, last_sync_at, last_error, updated_at)
+                    VALUES (?, ?, 1, NULL, ?, datetime('now'))
+                    ON CONFLICT(dataset_id, source_id) DO UPDATE SET
+                        last_error = ?,
+                        updated_at = datetime('now')
+                    """,
+                    (dataset_id, source_id, last_error or "", last_error or ""),
+                )
+            commit_connection(conn)
     except Exception as e:
         logger.warning("update_sync_result failed: %s", e)

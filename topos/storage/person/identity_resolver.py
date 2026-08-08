@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Optional, Tuple
 
 from ..db.migrations.remediation_person_model import apply_remediation_person_model_up
+from ..db.write_gate import commit_connection, with_db_write
 
 
 @dataclass(frozen=True)
@@ -24,7 +25,10 @@ class IdentityResolver:
     def __init__(self, conn, *, owner_user_id: str) -> None:
         self._conn = conn
         self._owner_user_id = str(owner_user_id or "").strip()
-        apply_remediation_person_model_up(conn)
+        # The migration's DDL takes SQLite's write lock at execute time and it
+        # commits internally — gate the whole call.
+        with with_db_write():
+            apply_remediation_person_model_up(conn)
 
     def ensure_owner_person(self, *, display_name: str = "Owner") -> str:
         row = self._conn.execute(
@@ -38,14 +42,15 @@ class IdentityResolver:
         if row:
             return str(row[0])
         person_id = f"person-owner-{self._owner_user_id[:8]}"
-        self._conn.execute(
-            """
-            INSERT OR IGNORE INTO persons (person_id, owner_user_id, display_name, is_owner)
-            VALUES (?, ?, ?, 1)
-            """,
-            (person_id, self._owner_user_id, display_name),
-        )
-        self._conn.commit()
+        with with_db_write():
+            self._conn.execute(
+                """
+                INSERT OR IGNORE INTO persons (person_id, owner_user_id, display_name, is_owner)
+                VALUES (?, ?, ?, 1)
+                """,
+                (person_id, self._owner_user_id, display_name),
+            )
+            commit_connection(self._conn)
         return person_id
 
     def resolve(
@@ -74,24 +79,25 @@ class IdentityResolver:
             return ResolvedPerson(person_id=str(row[0]), confidence=float(row[1]), created=False)
 
         person_id = self.ensure_owner_person() if is_owner else str(uuid.uuid4())
-        if not is_owner:
+        alias_id = str(uuid.uuid4())
+        with with_db_write():
+            if not is_owner:
+                self._conn.execute(
+                    """
+                    INSERT INTO persons (person_id, owner_user_id, display_name, is_owner)
+                    VALUES (?, ?, ?, 0)
+                    """,
+                    (person_id, self._owner_user_id, display_name or alias_value),
+                )
             self._conn.execute(
                 """
-                INSERT INTO persons (person_id, owner_user_id, display_name, is_owner)
-                VALUES (?, ?, ?, 0)
+                INSERT INTO person_aliases (
+                    alias_id, person_id, owner_user_id, alias_type, alias_value, confidence
+                ) VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (person_id, self._owner_user_id, display_name or alias_value),
+                (alias_id, person_id, self._owner_user_id, alias_type, alias_value, 1.0),
             )
-        alias_id = str(uuid.uuid4())
-        self._conn.execute(
-            """
-            INSERT INTO person_aliases (
-                alias_id, person_id, owner_user_id, alias_type, alias_value, confidence
-            ) VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (alias_id, person_id, self._owner_user_id, alias_type, alias_value, 1.0),
-        )
-        self._conn.commit()
+            commit_connection(self._conn)
         return ResolvedPerson(person_id=person_id, confidence=1.0, created=True)
 
     def resolve_sender(

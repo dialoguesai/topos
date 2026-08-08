@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+from .db.write_gate import commit_connection, with_db_write
+
 logger = logging.getLogger("topos.storage.user_identity")
 
 TABLE = "user_identity"
@@ -12,16 +14,18 @@ TABLE = "user_identity"
 
 def ensure_table(conn) -> None:
     """Create ``user_identity`` table if it does not exist."""
-    conn.execute(
-        f"""
-        CREATE TABLE IF NOT EXISTS {TABLE} (
-            dataset_id TEXT NOT NULL PRIMARY KEY,
-            display_name TEXT,
-            updated_at TEXT DEFAULT (datetime('now'))
+    # DDL takes SQLite's write lock at execute time — gate it with the commit.
+    with with_db_write():
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {TABLE} (
+                dataset_id TEXT NOT NULL PRIMARY KEY,
+                display_name TEXT,
+                updated_at TEXT DEFAULT (datetime('now'))
+            )
+            """
         )
-        """
-    )
-    conn.commit()
+        commit_connection(conn)
 
 
 def get_user_identity(conn, dataset_id: str) -> Optional[dict]:
@@ -57,13 +61,14 @@ def put_user_identity(
         next_display_name = (
             display_name if display_name is not None else (existing.get("display_name") if existing else None)
         )
-        conn.execute(
-            f"""
-            INSERT OR REPLACE INTO {TABLE} (dataset_id, display_name, updated_at)
-            VALUES (?, ?, datetime('now'))
-            """,
-            (dataset_id, next_display_name),
-        )
-        conn.commit()
+        with with_db_write():
+            conn.execute(
+                f"""
+                INSERT OR REPLACE INTO {TABLE} (dataset_id, display_name, updated_at)
+                VALUES (?, ?, datetime('now'))
+                """,
+                (dataset_id, next_display_name),
+            )
+            commit_connection(conn)
     except Exception as e:
         logger.warning("put_user_identity failed: %s", e)

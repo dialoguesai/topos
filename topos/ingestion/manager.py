@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import sqlite3
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -24,6 +25,7 @@ from ..enrichment.progress_bar import ProgressBar
 from ..engine.usage_observation import emit_usage_observation
 from ..sources.registry import REGISTRY
 from ..storage.db.postgres import connect_postgres
+from ..storage.db.write_gate import commit_connection, with_db_write
 from ..storage.raw.file_store import RawFileStore
 from ..utils.base_object import BaseObject
 
@@ -406,134 +408,141 @@ def _persist_source_data_tables_on_connection(
         {"name": "tenant_id", "type": "text"},
     ]
 
-    for table in tables:
-        if not isinstance(table, dict):
-            continue
-        table_id = str(table.get("table_id") or "").strip()
-        columns = table.get("columns")
-        if not table_id or not _is_valid_sql_identifier(table_id):
-            logger.warning("[PIPELINE:DATA_TABLE] Skipping invalid table_id=%r", table_id)
-            continue
-        if not isinstance(columns, list) or not columns:
-            continue
-
-        valid_columns: List[Dict[str, Any]] = []
-        for column in columns:
-            if not isinstance(column, dict):
+    is_sqlite = "sqlite" in db_conn.__class__.__module__.lower()
+    # The DDL and inserts below take SQLite's write lock at execute time and
+    # stay uncommitted until the end — hold the gate across them and the
+    # commit. The gate is SQLite-only; Postgres connections skip it.
+    with with_db_write() if is_sqlite else nullcontext():
+        for table in tables:
+            if not isinstance(table, dict):
                 continue
-            col_name = str(column.get("name") or "").strip()
-            if not col_name or not _is_valid_sql_identifier(col_name):
+            table_id = str(table.get("table_id") or "").strip()
+            columns = table.get("columns")
+            if not table_id or not _is_valid_sql_identifier(table_id):
+                logger.warning("[PIPELINE:DATA_TABLE] Skipping invalid table_id=%r", table_id)
                 continue
-            valid_columns.append(column)
-        existing_names = {str(col.get("name") or "").strip() for col in valid_columns}
-        for pooled_col in pooled_scope_columns:
-            pooled_name = str(pooled_col["name"])
-            if pooled_name in existing_names:
+            if not isinstance(columns, list) or not columns:
                 continue
-            valid_columns.append(dict(pooled_col))
-            existing_names.add(pooled_name)
 
-        if not valid_columns:
-            continue
+            valid_columns: List[Dict[str, Any]] = []
+            for column in columns:
+                if not isinstance(column, dict):
+                    continue
+                col_name = str(column.get("name") or "").strip()
+                if not col_name or not _is_valid_sql_identifier(col_name):
+                    continue
+                valid_columns.append(column)
+            existing_names = {str(col.get("name") or "").strip() for col in valid_columns}
+            for pooled_col in pooled_scope_columns:
+                pooled_name = str(pooled_col["name"])
+                if pooled_name in existing_names:
+                    continue
+                valid_columns.append(dict(pooled_col))
+                existing_names.add(pooled_name)
 
-        defs: List[str] = []
-        pk_cols: List[str] = []
-        for column in valid_columns:
-            col_name = str(column.get("name")).strip()
-            col_type = _sql_type_for_source_column(str(column.get("type") or "text"))
-            defs.append(f'"{col_name}" {col_type}')
-            if bool(column.get("primary_key")):
-                pk_cols.append(col_name)
-        if pk_cols:
-            pk_sql = ", ".join([f'"{name}"' for name in pk_cols])
-            defs.append(f"PRIMARY KEY ({pk_sql})")
-
-        db_conn.execute(f'CREATE TABLE IF NOT EXISTS "{table_id}" ({", ".join(defs)})')
-
-        is_sqlite = "sqlite" in db_conn.__class__.__module__.lower()
-        try:
-            if is_sqlite:
-                existing_col_rows = db_conn.execute(f'PRAGMA table_info("{table_id}")').fetchall()
-                persisted_columns = {
-                    str(row["name"]) if isinstance(row, dict) else str(row[1])
-                    for row in existing_col_rows
-                }
-            else:
-                existing_col_rows = db_conn.execute(
-                    """
-                    SELECT column_name
-                    FROM information_schema.columns
-                    WHERE table_schema='public' AND table_name=%s
-                    """,
-                    (table_id,),
-                ).fetchall()
-                persisted_columns = {str(row[0]) for row in existing_col_rows}
-        except Exception:
-            persisted_columns = set()
-
-        for pooled_col in ("dataset_id", "owner_user_id", "tenant_id"):
-            if pooled_col in persisted_columns:
+            if not valid_columns:
                 continue
-            db_conn.execute(f'ALTER TABLE "{table_id}" ADD COLUMN "{pooled_col}" TEXT')
-            persisted_columns.add(pooled_col)
 
-        for column in valid_columns:
-            col_name = str(column.get("name") or "").strip()
-            if not col_name or col_name in persisted_columns:
-                continue
-            col_type = _sql_type_for_source_column(str(column.get("type") or "text"))
-            db_conn.execute(f'ALTER TABLE "{table_id}" ADD COLUMN "{col_name}" {col_type}')
-            persisted_columns.add(col_name)
-
-        column_names = [str(column.get("name")).strip() for column in valid_columns]
-        quoted_columns = ", ".join([f'"{name}"' for name in column_names])
-        placeholder_token = "?" if is_sqlite else "%s"
-        placeholders = ", ".join([placeholder_token] * len(column_names))
-        if is_sqlite:
-            sql = f'INSERT OR REPLACE INTO "{table_id}" ({quoted_columns}) VALUES ({placeholders})'
-        else:
-            conflict_cols = [name for name in pk_cols if name in column_names]
-            non_pk_cols = [name for name in column_names if name not in conflict_cols]
-            if conflict_cols:
-                conflict_sql = ", ".join([f'"{name}"' for name in conflict_cols])
-                if non_pk_cols:
-                    update_sql = ", ".join(
-                        [f'"{name}" = EXCLUDED."{name}"' for name in non_pk_cols]
-                    )
-                    sql = (
-                        f'INSERT INTO "{table_id}" ({quoted_columns}) VALUES ({placeholders}) '
-                        f'ON CONFLICT ({conflict_sql}) DO UPDATE SET {update_sql}'
-                    )
-                else:
-                    sql = (
-                        f'INSERT INTO "{table_id}" ({quoted_columns}) VALUES ({placeholders}) '
-                        f'ON CONFLICT ({conflict_sql}) DO NOTHING'
-                    )
-            else:
-                sql = f'INSERT INTO "{table_id}" ({quoted_columns}) VALUES ({placeholders})'
-
-        for normalized in normalized_records:
-            payload = normalized.payload if hasattr(normalized, "payload") else {}
-            if not isinstance(payload, dict):
-                continue
-            row_values: List[Any] = []
+            defs: List[str] = []
+            pk_cols: List[str] = []
             for column in valid_columns:
                 col_name = str(column.get("name")).strip()
-                raw_value = payload.get(col_name)
-                if raw_value is None and col_name == "dataset_id":
-                    raw_value = dataset_id
-                if raw_value is None and col_name == "owner_user_id":
-                    raw_value = owner_user_id
-                if raw_value is None and col_name == "tenant_id":
-                    raw_value = tenant_id
-                if raw_value is None and col_name == "source_id":
-                    raw_value = str(getattr(source_def, "source_id", None) or "").strip() or None
-                if raw_value is None and col_name == "record_id":
-                    raw_value = payload.get("id") or payload.get("message_id")
-                row_values.append(_coerce_table_value(raw_value, declared_type=str(column.get("type") or "")))
-            db_conn.execute(sql, tuple(row_values))
+                col_type = _sql_type_for_source_column(str(column.get("type") or "text"))
+                defs.append(f'"{col_name}" {col_type}')
+                if bool(column.get("primary_key")):
+                    pk_cols.append(col_name)
+            if pk_cols:
+                pk_sql = ", ".join([f'"{name}"' for name in pk_cols])
+                defs.append(f"PRIMARY KEY ({pk_sql})")
 
-    db_conn.commit()
+            db_conn.execute(f'CREATE TABLE IF NOT EXISTS "{table_id}" ({", ".join(defs)})')
+
+            try:
+                if is_sqlite:
+                    existing_col_rows = db_conn.execute(f'PRAGMA table_info("{table_id}")').fetchall()
+                    persisted_columns = {
+                        str(row["name"]) if isinstance(row, dict) else str(row[1])
+                        for row in existing_col_rows
+                    }
+                else:
+                    existing_col_rows = db_conn.execute(
+                        """
+                        SELECT column_name
+                        FROM information_schema.columns
+                        WHERE table_schema='public' AND table_name=%s
+                        """,
+                        (table_id,),
+                    ).fetchall()
+                    persisted_columns = {str(row[0]) for row in existing_col_rows}
+            except Exception:
+                persisted_columns = set()
+
+            for pooled_col in ("dataset_id", "owner_user_id", "tenant_id"):
+                if pooled_col in persisted_columns:
+                    continue
+                db_conn.execute(f'ALTER TABLE "{table_id}" ADD COLUMN "{pooled_col}" TEXT')
+                persisted_columns.add(pooled_col)
+
+            for column in valid_columns:
+                col_name = str(column.get("name") or "").strip()
+                if not col_name or col_name in persisted_columns:
+                    continue
+                col_type = _sql_type_for_source_column(str(column.get("type") or "text"))
+                db_conn.execute(f'ALTER TABLE "{table_id}" ADD COLUMN "{col_name}" {col_type}')
+                persisted_columns.add(col_name)
+
+            column_names = [str(column.get("name")).strip() for column in valid_columns]
+            quoted_columns = ", ".join([f'"{name}"' for name in column_names])
+            placeholder_token = "?" if is_sqlite else "%s"
+            placeholders = ", ".join([placeholder_token] * len(column_names))
+            if is_sqlite:
+                sql = f'INSERT OR REPLACE INTO "{table_id}" ({quoted_columns}) VALUES ({placeholders})'
+            else:
+                conflict_cols = [name for name in pk_cols if name in column_names]
+                non_pk_cols = [name for name in column_names if name not in conflict_cols]
+                if conflict_cols:
+                    conflict_sql = ", ".join([f'"{name}"' for name in conflict_cols])
+                    if non_pk_cols:
+                        update_sql = ", ".join(
+                            [f'"{name}" = EXCLUDED."{name}"' for name in non_pk_cols]
+                        )
+                        sql = (
+                            f'INSERT INTO "{table_id}" ({quoted_columns}) VALUES ({placeholders}) '
+                            f'ON CONFLICT ({conflict_sql}) DO UPDATE SET {update_sql}'
+                        )
+                    else:
+                        sql = (
+                            f'INSERT INTO "{table_id}" ({quoted_columns}) VALUES ({placeholders}) '
+                            f'ON CONFLICT ({conflict_sql}) DO NOTHING'
+                        )
+                else:
+                    sql = f'INSERT INTO "{table_id}" ({quoted_columns}) VALUES ({placeholders})'
+
+            for normalized in normalized_records:
+                payload = normalized.payload if hasattr(normalized, "payload") else {}
+                if not isinstance(payload, dict):
+                    continue
+                row_values: List[Any] = []
+                for column in valid_columns:
+                    col_name = str(column.get("name")).strip()
+                    raw_value = payload.get(col_name)
+                    if raw_value is None and col_name == "dataset_id":
+                        raw_value = dataset_id
+                    if raw_value is None and col_name == "owner_user_id":
+                        raw_value = owner_user_id
+                    if raw_value is None and col_name == "tenant_id":
+                        raw_value = tenant_id
+                    if raw_value is None and col_name == "source_id":
+                        raw_value = str(getattr(source_def, "source_id", None) or "").strip() or None
+                    if raw_value is None and col_name == "record_id":
+                        raw_value = payload.get("id") or payload.get("message_id")
+                    row_values.append(_coerce_table_value(raw_value, declared_type=str(column.get("type") or "")))
+                db_conn.execute(sql, tuple(row_values))
+
+        if is_sqlite:
+            commit_connection(db_conn)
+        else:
+            db_conn.commit()
 
 
 async def _try_install_runtime_source_definition_from_control_plane(

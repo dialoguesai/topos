@@ -6,6 +6,8 @@ import sqlite3
 from dataclasses import dataclass
 from typing import Dict, Iterable, Optional
 
+from ..db.write_gate import batched_writes, commit_connection, with_db_write
+
 
 @dataclass(frozen=True)
 class MappingRecord:
@@ -26,7 +28,6 @@ class MappingStore:
 class SQLiteMappingStore(MappingStore):
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
-        self._defer_commit = False
         from ..db.migrations import ensure_migrations_applied
 
         ensure_migrations_applied(conn)
@@ -49,30 +50,28 @@ class SQLiteMappingStore(MappingStore):
         )
 
     def save_mapping(self, record: MappingRecord) -> None:
-        self._conn.execute(
-            """
-            INSERT INTO canonical_source_mappings (source_id, source_record_id, canonical_table, canonical_id)
-            VALUES (?, ?, ?, ?)
-            ON CONFLICT(source_id, source_record_id) DO UPDATE SET
-                canonical_id=excluded.canonical_id,
-                canonical_table=excluded.canonical_table
-            """,
-            (record.source_id, record.source_record_id, record.canonical_table, record.canonical_id),
-        )
-        if not self._defer_commit:
-            self._conn.commit()
+        # commit_connection no-ops inside save_mappings_batch's batched_writes;
+        # the batch commits once at exit.
+        with with_db_write():
+            self._conn.execute(
+                """
+                INSERT INTO canonical_source_mappings (source_id, source_record_id, canonical_table, canonical_id)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT(source_id, source_record_id) DO UPDATE SET
+                    canonical_id=excluded.canonical_id,
+                    canonical_table=excluded.canonical_table
+                """,
+                (record.source_id, record.source_record_id, record.canonical_table, record.canonical_id),
+            )
+            commit_connection(self._conn)
 
     def save_mappings_batch(self, records: Iterable[MappingRecord]) -> None:
         batch = list(records)
         if not batch:
             return
-        self._defer_commit = True
-        try:
+        with batched_writes(self._conn):
             for record in batch:
                 self.save_mapping(record)
-        finally:
-            self._defer_commit = False
-            self._conn.commit()
 
 
 class InMemoryMappingStore(MappingStore):
