@@ -94,3 +94,64 @@ class TestToposTray:
             host="192.168.1.5", port=9100, version="1.0.0", package_name="topos-node", on_quit=lambda: None
         )
         assert t.health_url == "http://192.168.1.5:9100/healthcheck"
+
+
+class TestQuitSemantics:
+    """Quit means quit, attached or not — the design of record shared with the
+    macOS shell (0.2.11). "Close Tray (node keeps running)" as the only exit
+    stranded users whose tray attached after a crash or update restart."""
+
+    def _tray(self, *, attached: bool) -> tray.ToposTray:
+        return tray.ToposTray(
+            host="127.0.0.1",
+            port=9000,
+            version="1.0.0",
+            package_name="topos-node",
+            on_quit=lambda: None,
+            attached=attached,
+        )
+
+    def test_quit_is_always_the_primary_exit(self):
+        for attached in (False, True):
+            labels = self._tray(attached=attached)._menu_labels()
+            assert "Quit Topos Node" in labels
+            assert "Close Tray (node keeps running)" not in labels
+
+    def test_tray_only_exit_appears_only_when_attached(self):
+        assert "Close Tray Only (node keeps running)" in self._tray(attached=True)._menu_labels()
+        assert (
+            "Close Tray Only (node keeps running)"
+            not in self._tray(attached=False)._menu_labels()
+        )
+
+    def test_quit_comes_before_the_tray_only_exit(self):
+        labels = self._tray(attached=True)._menu_labels()
+        assert labels.index("Quit Topos Node") < labels.index("Close Tray Only (node keeps running)")
+
+    def test_attached_quit_stops_the_node_by_pid(self, monkeypatch):
+        t = self._tray(attached=True)
+        t.node_pid = 4242
+        stopped = {}
+        monkeypatch.setattr(tray.ToposTray, "_stop_node_by_pid", staticmethod(lambda pid: stopped.setdefault("pid", pid)))
+        t._quit()
+        assert stopped["pid"] == 4242
+
+    def test_close_tray_only_never_touches_the_node(self, monkeypatch):
+        t = self._tray(attached=True)
+        t.node_pid = 4242
+        monkeypatch.setattr(
+            tray.ToposTray,
+            "_stop_node_by_pid",
+            staticmethod(lambda pid: (_ for _ in ()).throw(AssertionError("node was stopped"))),
+        )
+        t._close_tray_only()
+
+
+class TestToposNameRow:
+    def test_named_topos_gets_its_row(self):
+        t = tray.ToposTray(
+            host="127.0.0.1", port=9000, version="1.0.0", package_name="topos-node", on_quit=lambda: None
+        )
+        assert not any(l.startswith("Topos: ") for l in t._menu_labels())
+        t.topos_name = "PersonalDB"
+        assert "Topos: PersonalDB" in t._menu_labels()
