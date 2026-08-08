@@ -187,6 +187,15 @@ class ToposTray:
         self.status = "starting"
         self.update = {"available": False, "latest": None, "applying": False, "last_result": None}
         self._icon = None
+        # From /v1/shell/status: lets Quit stop a node this process did not
+        # start (the attached case — an app crash or update restart leaves a
+        # user here, and the tray used to offer them no way out).
+        self.node_pid: int | None = None
+        # The user-chosen name of the bound Topos ("PersonalDB"). Known to the
+        # CONTROL PLANE, not the node — same lesson as the macOS shell 0.2.10:
+        # asking the node renders nothing, ever.
+        self.topos_name: str | None = None
+        self._topos_name_tick = 0
 
     # -- status ------------------------------------------------------------
 
@@ -201,6 +210,7 @@ class ToposTray:
                 healthy = False
             if healthy:
                 self._fetch_shell_status()
+                self._maybe_fetch_topos_name()
             self._set_status("healthy" if healthy else "down")
             time.sleep(HEALTH_POLL_SECONDS)
 
@@ -214,6 +224,8 @@ class ToposTray:
         update = payload.get("update") or {}
         changed = update != self.update
         self.update = update
+        if isinstance(payload.get("pid"), int):
+            self.node_pid = payload["pid"]
         if payload.get("version"):
             self.version = payload["version"]
         if self.log_path is None and payload.get("log_file"):
@@ -221,6 +233,39 @@ class ToposTray:
             changed = True
         if changed:
             self._refresh()
+
+    def _maybe_fetch_topos_name(self) -> None:
+        """Ask the control plane for the bound Topos's name, once a minute.
+
+        Best effort on every edge: no key, no network, or an unenriched control
+        plane all just leave the row out of the menu.
+        """
+        self._topos_name_tick += 1
+        if self.topos_name is not None and self._topos_name_tick % 12 != 1:
+            return
+        try:
+            import httpx
+
+            key = ""
+            env_file = Path.home() / ".topos" / ".env"
+            for line in env_file.read_text().splitlines():
+                if line.startswith("TOPOS_KEY="):
+                    key = line.split("=", 1)[1].strip().strip("\"'")
+                    break
+            if not key:
+                return
+            base = os.environ.get("TOPOS_CP_URL", "https://cp.logu3s.com").rstrip("/")
+            payload = httpx.get(
+                f"{base}/device_info",
+                headers={"Authorization": f"Bearer {key}"},
+                timeout=15.0,
+            ).json()
+            name = str(payload.get("bound_topos_name") or "").strip()
+            if name and name != self.topos_name:
+                self.topos_name = name
+                self._refresh()
+        except Exception:  # noqa: BLE001 — a nameless menu beats a crashed tray
+            pass
 
     def _set_status(self, status: str) -> None:
         if self.status == status:
@@ -252,6 +297,10 @@ class ToposTray:
         }
         items = [
             f"Topos Node v{self.version} — {labels.get(self.status, self.status)}",
+        ]
+        if self.topos_name:
+            items.append(f"Topos: {self.topos_name}")
+        items += [
             "Open Topos",
             "Open Docs",
         ]
@@ -263,9 +312,13 @@ class ToposTray:
             items.append("Update installed — restart to finish")
         elif self.update.get("available"):
             items.append(f"Update to v{self.update.get('latest')}")
-        items.append(
-            "Close Tray (node keeps running)" if self.attached else "Quit Topos Node"
-        )
+        # Quit means quit, attached or not — "Close Tray (node keeps running)"
+        # as the ONLY exit stranded anyone whose tray attached after an app
+        # crash or update restart, with no way to ever stop the node. The
+        # tray-only exit stays available, explicitly and second.
+        items.append("Quit Topos Node")
+        if self.attached:
+            items.append("Close Tray Only (node keeps running)")
         return items
 
     def _build_menu(self):
@@ -282,6 +335,10 @@ class ToposTray:
                 None,
                 enabled=False,
             ),
+        ]
+        if self.topos_name:
+            items.append(pystray.MenuItem(f"Topos: {self.topos_name}", None, enabled=False))
+        items += [
             pystray.Menu.SEPARATOR,
             pystray.MenuItem("Open Topos", self._open_app),
             pystray.MenuItem("Open Docs", self._open_docs),
@@ -296,8 +353,13 @@ class ToposTray:
             items.append(
                 pystray.MenuItem(f"Update to v{self.update.get('latest')}", self._apply_update)
             )
-        quit_label = "Close Tray (node keeps running)" if self.attached else "Quit Topos Node"
-        items.extend([pystray.Menu.SEPARATOR, pystray.MenuItem(quit_label, self._quit)])
+        items.extend([pystray.Menu.SEPARATOR, pystray.MenuItem("Quit Topos Node", self._quit)])
+        if self.attached:
+            # pystray has no Option-key alternate; on Windows both exits are
+            # simply visible, quit first and honest about the difference.
+            items.append(
+                pystray.MenuItem("Close Tray Only (node keeps running)", self._close_tray_only)
+            )
         return pystray.Menu(*items)
 
     def _open_docs(self, icon=None, item=None) -> None:
@@ -335,9 +397,39 @@ class ToposTray:
             pass
 
     def _quit(self, icon=None, item=None) -> None:
+        # Attached: stop the node this process did not start, escalating past
+        # a wedged SIGTERM. In-process mode the node IS this process — closing
+        # the tray ends run(), whose caller shuts the server down.
+        if self.attached and self.node_pid and self.node_pid > 1:
+            self._stop_node_by_pid(self.node_pid)
+        self._close_tray_only()
+
+    def _close_tray_only(self, icon=None, item=None) -> None:
         if self._icon is not None:
             self._icon.visible = False
             self._icon.stop()
+
+    @staticmethod
+    def _stop_node_by_pid(pid: int) -> None:
+        import signal
+
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except OSError:
+            return  # already gone
+        # ~5s of grace, then the hard signal. SIGKILL does not exist on
+        # Windows, where os.kill(SIGTERM) already terminates unconditionally.
+        for _ in range(20):
+            time.sleep(0.25)
+            try:
+                os.kill(pid, 0)
+            except OSError:
+                return
+        hard = getattr(signal, "SIGKILL", signal.SIGTERM)
+        try:
+            os.kill(pid, hard)
+        except OSError:
+            pass
 
     # -- lifecycle ---------------------------------------------------------
 
