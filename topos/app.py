@@ -187,7 +187,28 @@ async def startup_event() -> None:
             recovered = recover_pipeline_jobs(_pipeline_conn)
             if recovered:
                 logger.info("Recovered stale pipeline jobs on startup: count=%s", recovered)
-            reconcile_graph_on_startup(_pipeline_conn)
+
+            def _reconcile_graph_bg() -> None:
+                # The reconcile can run a FULL graph rebuild (dirty generation
+                # ahead after a crash). Inline here it ran on the event loop and
+                # kept the node dark for the whole rebuild (~104s observed
+                # 2026-08-08 09:45–09:47) — the loop must only schedule it.
+                from .core.state import close_thread_db_connection, get_db_connection
+
+                try:
+                    conn = get_db_connection()
+                    if conn is not None:
+                        reconcile_graph_on_startup(conn)
+                except Exception as exc:  # noqa: BLE001 — reconcile is best-effort
+                    logger.warning("graph reconcile at startup failed (non-fatal): %s", exc)
+                finally:
+                    close_thread_db_connection()
+
+            import threading as _threading
+
+            _threading.Thread(
+                target=_reconcile_graph_bg, name="graph-reconcile", daemon=True
+            ).start()
             start_pipeline_worker(_get_conn_for_pipeline)
     except Exception as e:
         logger.warning("Pipeline worker at startup failed (non-fatal): %s", e)

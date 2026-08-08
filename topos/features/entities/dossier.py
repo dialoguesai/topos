@@ -187,15 +187,23 @@ def _upsert_dossier(
 
 
 def refresh_dossiers(conn: sqlite3.Connection) -> int:
-    """Upsert dossiers for significant entities. Stable object_key = entity_id."""
+    """Upsert dossiers for significant entities. Stable object_key = entity_id.
+
+    Gate discipline: one short hold per entity, not one hold for the sweep —
+    a full refresh walks every significant entity and a blanket hold blocks
+    every other writer for the whole walk (M2.2).
+    """
+    from ...storage.db.write_gate import with_db_write
     from ..signal.signal_object_store import SignalObjectStore
 
     store = SignalObjectStore(conn)
     written = 0
     for entity in significant_entities(conn):
-        _upsert_dossier(conn, entity, store=store)
+        with with_db_write():
+            _upsert_dossier(conn, entity, store=store)
         written += 1
-    conn.commit()
+    with with_db_write():
+        conn.commit()
     return written
 
 
