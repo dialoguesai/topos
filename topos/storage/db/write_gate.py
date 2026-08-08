@@ -70,36 +70,74 @@ _loop_warn_seen: dict[str, float] = {}
 _loop_warn_lock = threading.Lock()
 
 
+def _caller_site() -> str:
+    """Nearest stack frame outside this module (and contextlib).
+
+    `with_db_write` is a @contextmanager, so contextlib's __enter__ sits
+    between us and the real caller; reporting "contextlib.py:135" would make
+    a warning unactionable.
+    """
+    stack = traceback.extract_stack(limit=12)[:-2]
+    for frame in reversed(stack):
+        name = frame.filename.rsplit("/", 1)[-1]
+        if name in ("write_gate.py", "contextlib.py"):
+            continue
+        return f"{name}:{frame.lineno} in {frame.name}"
+    return "unknown"
+
+
+def _rate_limited(key: str) -> Optional[bool]:
+    """True on a site's first report, False on a due repeat, None to suppress."""
+    now = time.monotonic()
+    with _loop_warn_lock:
+        last = _loop_warn_seen.get(key)
+        if last is not None and (now - last) < _LOOP_WARN_INTERVAL_S:
+            return None
+        _loop_warn_seen[key] = now
+        return last is None
+
+
 def _warn_loop_acquisition() -> None:
     """Report a gate acquisition on the event-loop thread, at most periodically.
 
     Not raised: failing a write to punish a bad call site is worse than the
     stall it warns about.
     """
-    # Skip this module AND contextlib: `with_db_write` is a @contextmanager, so
-    # contextlib's __enter__ sits between us and the real caller. Reporting
-    # "contextlib.py:135" would make the warning unactionable.
-    stack = traceback.extract_stack(limit=12)[:-2]
-    site = "unknown"
-    for frame in reversed(stack):
-        name = frame.filename.rsplit("/", 1)[-1]
-        if name in ("write_gate.py", "contextlib.py"):
-            continue
-        site = f"{name}:{frame.lineno} in {frame.name}"
-        break
-
-    now = time.monotonic()
-    with _loop_warn_lock:
-        last = _loop_warn_seen.get(site)
-        if last is not None and (now - last) < _LOOP_WARN_INTERVAL_S:
-            return
-        first_time = last is None
-        _loop_warn_seen[site] = now
+    site = _caller_site()
+    first_time = _rate_limited(f"loop:{site}")
+    if first_time is None:
+        return
 
     logger.warning(
         "[WRITE_GATE] acquired on the event-loop thread from %s — this blocks "
         "every coroutine including the control-plane keepalive; move this DB "
         "work into asyncio.to_thread%s",
+        site,
+        "" if first_time else f" (repeats suppressed for {int(_LOOP_WARN_INTERVAL_S)}s)",
+        stack_info=first_time,
+    )
+
+
+def _warn_ungated_transaction() -> None:
+    """Report a commit whose writes ran OUTSIDE the gate, at most periodically.
+
+    In WAL the first write statement takes SQLite's process-wide write lock at
+    execute time. A caller that executes ungated and only enters the gate here
+    holds that lock while queuing — and whoever holds the gate now blocks on
+    SQLite until busy_timeout. That lock-order inversion stretched every
+    rebuild write into a 30s busy wait on 2026-08-07; the fix at the call site
+    is with_db_write around the writes AND the commit.
+    """
+    site = _caller_site()
+    first_time = _rate_limited(f"ungated:{site}")
+    if first_time is None:
+        return
+
+    logger.warning(
+        "[WRITE_GATE] commit from %s arrived with an open write transaction "
+        "but without holding the gate — its statements took SQLite's write "
+        "lock ungated, which can deadlock-until-busy_timeout against the "
+        "gate holder; wrap the writes AND the commit in with_db_write%s",
         site,
         "" if first_time else f" (repeats suppressed for {int(_LOOP_WARN_INTERVAL_S)}s)",
         stack_info=first_time,
@@ -201,6 +239,15 @@ def commit_connection(conn: sqlite3.Connection) -> None:
     # invisible precisely because only with_db_write was instrumented.
     if _on_event_loop():
         _warn_loop_acquisition()
+    # Checked BEFORE acquiring: an open write transaction here means the
+    # caller's statements took SQLite's write lock outside the gate — the
+    # lock-order inversion that turns a queued commit into a busy_timeout
+    # standoff with whoever holds the gate.
+    try:
+        if getattr(conn, "in_transaction", False) and not _WRITE_LOCK._is_owned():
+            _warn_ungated_transaction()
+    except Exception:  # noqa: BLE001 — diagnostics must never break a write
+        pass
     with _WRITE_LOCK:
         sqlite_retry_busy(_commit)
 
