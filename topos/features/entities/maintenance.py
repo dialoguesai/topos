@@ -740,8 +740,9 @@ def rebuild_entity_graph(
         try:
             from .dossier import refresh_dossiers
 
-            with with_db_write():
-                dossiers = refresh_dossiers(conn)  # commits internally
+            # Gates itself per entity — wrapping it here would turn the whole
+            # dossier walk into one blanket hold again.
+            dossiers = refresh_dossiers(conn)
         except Exception as exc:  # dossier refresh is best-effort
             logger.warning("dossier refresh during rebuild failed: %s", exc)
 
