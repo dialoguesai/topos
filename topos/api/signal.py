@@ -332,9 +332,26 @@ async def rebuild_graph(
     enrichment job via ``POST /enrichment/process`` with ``force_reprocess=true``.
     ``reextract`` is accepted for forward-compatibility.
     """
+    import asyncio
+
     from ..features.entities.maintenance import rebuild_entity_graph
 
-    return rebuild_entity_graph(_entities_conn())
+    _entities_conn()  # fail fast with 503 before spawning the worker
+
+    def _rebuild():
+        # Run on the worker's OWN thread-local connection: the rebuild both
+        # writes (gate-chunked, minutes at scale) and must not share the loop
+        # thread's connection across threads. Running it inline on the loop
+        # froze every coroutine — healthcheck included — for the whole run.
+        from ..core.state import close_thread_db_connection
+
+        try:
+            return rebuild_entity_graph(_entities_conn())
+        finally:
+            # to_thread reuses pooled threads; don't leak a connection per run.
+            close_thread_db_connection()
+
+    return await asyncio.to_thread(_rebuild)
 
 
 @router.get("/entities/graph/search")
