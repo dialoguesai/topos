@@ -5,6 +5,8 @@ from __future__ import annotations
 import logging
 import sqlite3
 
+from ..storage.db.write_gate import commit_connection, with_db_write
+
 logger = logging.getLogger("topos.home_chat.schema")
 
 
@@ -12,31 +14,34 @@ def ensure_home_chat_schema(conn: sqlite3.Connection) -> None:
     """Create home chat session table and indices if missing."""
     try:
         conn.execute("PRAGMA foreign_keys = ON")
-        conn.execute(
-            """
-            CREATE TABLE IF NOT EXISTS home_chat_sessions (
-                id TEXT PRIMARY KEY,
-                user_id TEXT NOT NULL,
-                engine_id TEXT NOT NULL,
-                title TEXT NOT NULL DEFAULT 'New chat',
-                trace_session_id TEXT NOT NULL DEFAULT '',
-                history_json TEXT NOT NULL DEFAULT '{}',
-                participants_json TEXT NOT NULL DEFAULT '[]',
-                revision INTEGER NOT NULL DEFAULT 1,
-                created_at_ms INTEGER NOT NULL DEFAULT 0,
-                updated_at_ms INTEGER NOT NULL DEFAULT 0,
-                updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+        # DDL takes SQLite's write lock at execute time — gate it with the
+        # commit (write_gate lock-order inversion); store calls this per request.
+        with with_db_write():
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS home_chat_sessions (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    engine_id TEXT NOT NULL,
+                    title TEXT NOT NULL DEFAULT 'New chat',
+                    trace_session_id TEXT NOT NULL DEFAULT '',
+                    history_json TEXT NOT NULL DEFAULT '{}',
+                    participants_json TEXT NOT NULL DEFAULT '[]',
+                    revision INTEGER NOT NULL DEFAULT 1,
+                    created_at_ms INTEGER NOT NULL DEFAULT 0,
+                    updated_at_ms INTEGER NOT NULL DEFAULT 0,
+                    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+                """
             )
-            """
-        )
-        conn.execute(
-            """
-            CREATE INDEX IF NOT EXISTS idx_home_chat_sessions_user_engine_updated
-            ON home_chat_sessions (user_id, engine_id, updated_at_ms DESC)
-            """
-        )
-        _ensure_participants_column(conn)
-        conn.commit()
+            conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_home_chat_sessions_user_engine_updated
+                ON home_chat_sessions (user_id, engine_id, updated_at_ms DESC)
+                """
+            )
+            _ensure_participants_column(conn)
+            commit_connection(conn)
     except Exception as exc:  # noqa: BLE001
         logger.warning("ensure_home_chat_schema failed: %s", exc)
         raise

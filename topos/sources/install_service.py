@@ -15,6 +15,7 @@ from ..core.state import get_db_connection
 from ..enrichment.jobs import CANONICAL_JOBS, RAW_JOBS
 from ..ingestion.parsers import PARSER_REGISTRY
 from ..storage.db.postgres import connect_postgres, execute_query, fetch_all, fetch_one
+from ..storage.db.write_gate import commit_connection, with_db_write
 from .bundled_canonical_triples import bundled_lane_conflict
 from .runtime_install import RuntimeInstallHandle, install_source_definition
 from .scrub_attribution import scrub_attributed_rows
@@ -358,36 +359,51 @@ def _db_conn() -> Iterator[Any]:
     yield conn
 
 
+@contextmanager
+def _sqlite_write_gate() -> Iterator[None]:
+    """Hold the SQLite write gate around writes + commit; no-op in postgres mode.
+
+    Statements here take SQLite's write lock at execute time — running them
+    ungated inverts lock order against the gate holder (write_gate deadlock).
+    """
+    if settings.topos_database_mode == "postgres":
+        yield
+        return
+    with with_db_write():
+        yield
+
+
 def ensure_install_schema() -> None:
     with _db_conn() as conn:
-        execute_query(
-            conn,
-            f"""
-            CREATE TABLE IF NOT EXISTS {INSTALL_TABLE} (
-                install_id TEXT PRIMARY KEY,
-                scope_key TEXT NOT NULL,
-                source_id TEXT NOT NULL,
-                version_id TEXT,
-                status TEXT NOT NULL,
-                is_active INTEGER NOT NULL DEFAULT 0,
-                source_definition_json TEXT NOT NULL,
-                source_version_row_json TEXT,
-                failure_reason TEXT,
-                created_at TEXT NOT NULL,
-                updated_at TEXT NOT NULL
+        with _sqlite_write_gate():
+            execute_query(
+                conn,
+                f"""
+                CREATE TABLE IF NOT EXISTS {INSTALL_TABLE} (
+                    install_id TEXT PRIMARY KEY,
+                    scope_key TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    version_id TEXT,
+                    status TEXT NOT NULL,
+                    is_active INTEGER NOT NULL DEFAULT 0,
+                    source_definition_json TEXT NOT NULL,
+                    source_version_row_json TEXT,
+                    failure_reason TEXT,
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """,
             )
-            """,
-        )
-        execute_query(
-            conn,
-            f"""
-            CREATE INDEX IF NOT EXISTS idx_{INSTALL_TABLE}_scope_source
-            ON {INSTALL_TABLE}(scope_key, source_id, updated_at)
-            """,
-        )
-        _migrate_scope_keys_to_topos_id(conn)
-        if settings.topos_database_mode != "postgres":
-            conn.commit()
+            execute_query(
+                conn,
+                f"""
+                CREATE INDEX IF NOT EXISTS idx_{INSTALL_TABLE}_scope_source
+                ON {INSTALL_TABLE}(scope_key, source_id, updated_at)
+                """,
+            )
+            _migrate_scope_keys_to_topos_id(conn)
+            if settings.topos_database_mode != "postgres":
+                commit_connection(conn)
 
 
 def _row_to_record(row: Any) -> InstallRecord:
@@ -519,6 +535,45 @@ def install_source(
             try:
                 handle = install_source_definition(source_def)
             except Exception as exc:
+                with _sqlite_write_gate():
+                    execute_query(
+                        conn,
+                        f"""
+                        INSERT INTO {INSTALL_TABLE} (
+                            install_id, scope_key, source_id, version_id, status, is_active,
+                            source_definition_json, source_version_row_json, failure_reason,
+                            created_at, updated_at
+                        ) VALUES (%s, %s, %s, %s, 'failed', 0, %s, %s, %s, %s, %s)
+                        """,
+                        (
+                            install_id,
+                            scope_key,
+                            source_id,
+                            requested_version_id,
+                            json.dumps(source_def, separators=(",", ":"), ensure_ascii=True),
+                            json.dumps(source_version_row_json, separators=(",", ":"), ensure_ascii=True)
+                            if isinstance(source_version_row_json, dict)
+                            else None,
+                            str(exc),
+                            now,
+                            now,
+                        ),
+                    )
+                    if settings.topos_database_mode != "postgres":
+                        commit_connection(conn)
+                raise
+
+            # Mark previous active record as installed (inactive).
+            with _sqlite_write_gate():
+                execute_query(
+                    conn,
+                    f"""
+                    UPDATE {INSTALL_TABLE}
+                    SET is_active = 0, status = 'installed', updated_at = %s
+                    WHERE scope_key = %s AND source_id = %s AND is_active = 1
+                    """,
+                    (now, scope_key, source_id),
+                )
                 execute_query(
                     conn,
                     f"""
@@ -526,7 +581,7 @@ def install_source(
                         install_id, scope_key, source_id, version_id, status, is_active,
                         source_definition_json, source_version_row_json, failure_reason,
                         created_at, updated_at
-                    ) VALUES (%s, %s, %s, %s, 'failed', 0, %s, %s, %s, %s, %s)
+                    ) VALUES (%s, %s, %s, %s, 'active', 1, %s, %s, NULL, %s, %s)
                     """,
                     (
                         install_id,
@@ -537,49 +592,12 @@ def install_source(
                         json.dumps(source_version_row_json, separators=(",", ":"), ensure_ascii=True)
                         if isinstance(source_version_row_json, dict)
                         else None,
-                        str(exc),
                         now,
                         now,
                     ),
                 )
                 if settings.topos_database_mode != "postgres":
-                    conn.commit()
-                raise
-
-            # Mark previous active record as installed (inactive).
-            execute_query(
-                conn,
-                f"""
-                UPDATE {INSTALL_TABLE}
-                SET is_active = 0, status = 'installed', updated_at = %s
-                WHERE scope_key = %s AND source_id = %s AND is_active = 1
-                """,
-                (now, scope_key, source_id),
-            )
-            execute_query(
-                conn,
-                f"""
-                INSERT INTO {INSTALL_TABLE} (
-                    install_id, scope_key, source_id, version_id, status, is_active,
-                    source_definition_json, source_version_row_json, failure_reason,
-                    created_at, updated_at
-                ) VALUES (%s, %s, %s, %s, 'active', 1, %s, %s, NULL, %s, %s)
-                """,
-                (
-                    install_id,
-                    scope_key,
-                    source_id,
-                    requested_version_id,
-                    json.dumps(source_def, separators=(",", ":"), ensure_ascii=True),
-                    json.dumps(source_version_row_json, separators=(",", ":"), ensure_ascii=True)
-                    if isinstance(source_version_row_json, dict)
-                    else None,
-                    now,
-                    now,
-                ),
-            )
-            if settings.topos_database_mode != "postgres":
-                conn.commit()
+                    commit_connection(conn)
             _ACTIVE_HANDLES[(scope_key, source_id)] = handle
             return InstallRecord(
                 install_id=install_id,
@@ -760,20 +778,21 @@ def uninstall_source(
             handle = _ACTIVE_HANDLES.pop((scope_key, sid), None)
             if handle is not None:
                 handle.uninstall()
-            execute_query(
-                conn,
-                f"""
-                UPDATE {INSTALL_TABLE}
-                SET is_active = 0, status = 'rolled_back', updated_at = %s
-                WHERE scope_key = %s AND source_id = %s AND is_active = 1
-                """,
-                (now, scope_key, sid),
-            )
-            purge_summary: Dict[str, Any] = {"tables_dropped": [], "rows_deleted": 0}
-            if delete_source_tables:
-                purge_summary = _purge_source_associated_data(conn, sid)
-            if settings.topos_database_mode != "postgres":
-                conn.commit()
+            with _sqlite_write_gate():
+                execute_query(
+                    conn,
+                    f"""
+                    UPDATE {INSTALL_TABLE}
+                    SET is_active = 0, status = 'rolled_back', updated_at = %s
+                    WHERE scope_key = %s AND source_id = %s AND is_active = 1
+                    """,
+                    (now, scope_key, sid),
+                )
+                purge_summary: Dict[str, Any] = {"tables_dropped": [], "rows_deleted": 0}
+                if delete_source_tables:
+                    purge_summary = _purge_source_associated_data(conn, sid)
+                if settings.topos_database_mode != "postgres":
+                    commit_connection(conn)
     return {
         "status": "ok",
         "source_id": sid,
@@ -853,21 +872,22 @@ def patch_source_install(
             except Exception as exc:
                 raise RuntimeError(str(exc)) from exc
 
-            execute_query(
-                conn,
-                f"""
-                UPDATE {INSTALL_TABLE}
-                SET source_definition_json = %s, updated_at = %s
-                WHERE install_id = %s
-                """,
-                (
-                    json.dumps(merged, separators=(",", ":"), ensure_ascii=True),
-                    now,
-                    active.install_id,
-                ),
-            )
-            if settings.topos_database_mode != "postgres":
-                conn.commit()
+            with _sqlite_write_gate():
+                execute_query(
+                    conn,
+                    f"""
+                    UPDATE {INSTALL_TABLE}
+                    SET source_definition_json = %s, updated_at = %s
+                    WHERE install_id = %s
+                    """,
+                    (
+                        json.dumps(merged, separators=(",", ":"), ensure_ascii=True),
+                        now,
+                        active.install_id,
+                    ),
+                )
+                if settings.topos_database_mode != "postgres":
+                    commit_connection(conn)
             _ACTIVE_HANDLES[(scope_key, sid)] = handle
             return InstallRecord(
                 install_id=active.install_id,
@@ -913,17 +933,18 @@ def _supersede_install(*, scope_key: str, source_id: str, reason: str) -> None:
     with _db_conn() as conn:
         with _LOCK:
             _ACTIVE_HANDLES.pop((scope_key, source_id), None)
-            execute_query(
-                conn,
-                f"""
-                UPDATE {INSTALL_TABLE}
-                SET is_active = 0, status = 'superseded', failure_reason = %s, updated_at = %s
-                WHERE scope_key = %s AND source_id = %s AND is_active = 1
-                """,
-                (reason, now, scope_key, source_id),
-            )
-            if settings.topos_database_mode != "postgres":
-                conn.commit()
+            with _sqlite_write_gate():
+                execute_query(
+                    conn,
+                    f"""
+                    UPDATE {INSTALL_TABLE}
+                    SET is_active = 0, status = 'superseded', failure_reason = %s, updated_at = %s
+                    WHERE scope_key = %s AND source_id = %s AND is_active = 1
+                    """,
+                    (reason, now, scope_key, source_id),
+                )
+                if settings.topos_database_mode != "postgres":
+                    commit_connection(conn)
 
 
 def rehydrate_active_installs_runtime(*, source_id: Optional[str] = None) -> Dict[str, int]:

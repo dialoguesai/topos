@@ -15,6 +15,7 @@ from typing import Any, Dict, List, Optional, Sequence, Union
 
 from ..ingestion.parsers.base import NormalizedRecord
 from ..sources.definitions import CANONICAL_ADDRESS_BOOK_SOURCE_ID
+from ..storage.db.write_gate import batched_writes, commit_connection, with_db_write
 
 logger = logging.getLogger("topos.ingestion.canonical_pipeline")
 
@@ -98,26 +99,28 @@ def _record_episode(
             None,
         )
         episode_id = f"ep_{uuid.uuid4().hex[:16]}"
-        conn.execute(
-            """
-            INSERT INTO episodes (
-                episode_id, source_id, sync_batch_id, dataset_id,
-                started_at, finished_at, n_records, posture, role_mix_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                episode_id,
-                str(getattr(source_def, "source_id", "") or "") or None,
-                str(sync_batch_id or "") or None,
-                dataset_id,
-                started_at,
-                datetime.now(timezone.utc).isoformat(),
-                len(canonical_records),
-                str(posture) if posture else None,
-                _episode_role_mix(canonical_records),
-            ),
-        )
-        conn.commit()
+        role_mix_json = _episode_role_mix(canonical_records)
+        with with_db_write():
+            conn.execute(
+                """
+                INSERT INTO episodes (
+                    episode_id, source_id, sync_batch_id, dataset_id,
+                    started_at, finished_at, n_records, posture, role_mix_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    episode_id,
+                    str(getattr(source_def, "source_id", "") or "") or None,
+                    str(sync_batch_id or "") or None,
+                    dataset_id,
+                    started_at,
+                    datetime.now(timezone.utc).isoformat(),
+                    len(canonical_records),
+                    str(posture) if posture else None,
+                    role_mix_json,
+                ),
+            )
+            commit_connection(conn)
         return episode_id
     except Exception as exc:
         logger.debug("[PIPELINE:EPISODE] episode record skipped: %s", exc)
@@ -408,6 +411,9 @@ def canonicalize_normalized_batch(
             ensure_contact_identifiers_table(db_conn)
             mapper_cls = MAPPER_REGISTRY.get(source_def.canonical_mapper_id)
             mapper = mapper_cls() if mapper_cls else None
+            # Mapping is pure compute — do it before taking the write gate,
+            # then apply the collected rows in one gated batch.
+            pending: List[tuple[str, str, str, str, str]] = []
             for payload in payloads:
                 norm = NormalizedRecord(
                     record_id=str(payload.get("contact_id") or payload.get("record_id") or ""),
@@ -421,49 +427,7 @@ def canonicalize_normalized_batch(
                 source_record_id = str(mapped.get("source_record_id") or f"{contact_id}:{identifier}")
                 if not contact_id or not identifier:
                     continue
-                db_conn.execute(
-                    """
-                    INSERT INTO contacts (
-                        contact_id, dataset_id, source_id, display_name, is_self,
-                        source_record_id, ingested_at, sync_batch_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?)
-                    ON CONFLICT(contact_id) DO UPDATE SET
-                        display_name=excluded.display_name,
-                        sync_batch_id=excluded.sync_batch_id,
-                        ingested_at=excluded.ingested_at,
-                        source_record_id=excluded.source_record_id
-                    """,
-                    (
-                        contact_id,
-                        dataset_id,
-                        CANONICAL_ADDRESS_BOOK_SOURCE_ID,
-                        display_name,
-                        1 if contact_id == "contact-self" else 0,
-                        source_record_id,
-                        sync_batch_id,
-                    ),
-                )
-                db_conn.execute(
-                    """
-                    INSERT INTO contact_identifiers (
-                        dataset_id, source_id, identifier, identifier_type, contact_id,
-                        source_record_id, ingested_at, sync_batch_id
-                    ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?)
-                    ON CONFLICT(dataset_id, source_id, identifier) DO UPDATE SET
-                        contact_id=excluded.contact_id,
-                        sync_batch_id=excluded.sync_batch_id,
-                        source_record_id=excluded.source_record_id
-                    """,
-                    (
-                        dataset_id,
-                        source_id,
-                        identifier,
-                        identifier_type,
-                        contact_id,
-                        source_record_id,
-                        sync_batch_id,
-                    ),
-                )
+                pending.append((contact_id, display_name, identifier, identifier_type, source_record_id))
                 result.canonical_records.append(
                     _prepare_signal_record(
                         {
@@ -475,7 +439,51 @@ def canonicalize_normalized_batch(
                         }
                     )
                 )
-            db_conn.commit()
+            with batched_writes(db_conn):
+                for contact_id, display_name, identifier, identifier_type, source_record_id in pending:
+                    db_conn.execute(
+                        """
+                        INSERT INTO contacts (
+                            contact_id, dataset_id, source_id, display_name, is_self,
+                            source_record_id, ingested_at, sync_batch_id
+                        ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?)
+                        ON CONFLICT(contact_id) DO UPDATE SET
+                            display_name=excluded.display_name,
+                            sync_batch_id=excluded.sync_batch_id,
+                            ingested_at=excluded.ingested_at,
+                            source_record_id=excluded.source_record_id
+                        """,
+                        (
+                            contact_id,
+                            dataset_id,
+                            CANONICAL_ADDRESS_BOOK_SOURCE_ID,
+                            display_name,
+                            1 if contact_id == "contact-self" else 0,
+                            source_record_id,
+                            sync_batch_id,
+                        ),
+                    )
+                    db_conn.execute(
+                        """
+                        INSERT INTO contact_identifiers (
+                            dataset_id, source_id, identifier, identifier_type, contact_id,
+                            source_record_id, ingested_at, sync_batch_id
+                        ) VALUES (?, ?, ?, ?, ?, ?, datetime('now'), ?)
+                        ON CONFLICT(dataset_id, source_id, identifier) DO UPDATE SET
+                            contact_id=excluded.contact_id,
+                            sync_batch_id=excluded.sync_batch_id,
+                            source_record_id=excluded.source_record_id
+                        """,
+                        (
+                            dataset_id,
+                            source_id,
+                            identifier,
+                            identifier_type,
+                            contact_id,
+                            source_record_id,
+                            sync_batch_id,
+                        ),
+                    )
             result.messages_created = len(result.canonical_records)
         except Exception as exc:
             logger.error("[PIPELINE:CANONICAL] contacts upsert failed: %s", exc, exc_info=True)

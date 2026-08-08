@@ -6,6 +6,7 @@ import sqlite3
 from typing import Any, Dict, Optional
 
 from topos.core.state import get_engine_config_value, set_engine_config_value
+from topos.storage.db.write_gate import commit_connection, with_db_write
 
 logger = logging.getLogger("topos.data_explorer_table_prefs")
 
@@ -140,8 +141,9 @@ def delete_table_prefs(
     existing = get_engine_config_value(conn, key)
     if not existing:
         return False
-    conn.execute("DELETE FROM engine_config WHERE key = ?", (key,))
-    conn.commit()
+    with with_db_write():
+        conn.execute("DELETE FROM engine_config WHERE key = ?", (key,))
+        commit_connection(conn)
     logger.info(
         "data_explorer_table_prefs_deleted user_id=%s table_name=%s",
         uid[:8],

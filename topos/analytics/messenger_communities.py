@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Sequence
 import networkx as nx
 
 from .messenger_graph import extract_messenger_graph
+from ..storage.db.write_gate import batched_writes, commit_connection, with_db_write
 
 MESSENGER_SOCIAL_EDGES_TABLE = "messenger_social_edges"
 MESSENGER_PARTICIPANT_IMPORTANCE_TABLE = "messenger_participant_importance"
@@ -28,6 +29,14 @@ def _source_scope(source_ids: Optional[Sequence[str]]) -> str:
 
 def ensure_messenger_analytics_tables(conn: Any) -> None:
     """Create Sprint 02 derived messenger analytics tables."""
+    # DDL takes SQLite's write lock at execute time — gate it with the commit
+    # (write_gate lock-order inversion).
+    with with_db_write():
+        _create_messenger_analytics_tables(conn)
+        commit_connection(conn)
+
+
+def _create_messenger_analytics_tables(conn: Any) -> None:
     conn.execute(
         f"""
         CREATE TABLE IF NOT EXISTS {MESSENGER_SOCIAL_EDGES_TABLE} (
@@ -94,7 +103,6 @@ def ensure_messenger_analytics_tables(conn: Any) -> None:
         ON {MESSENGER_COMMUNITIES_TABLE}(dataset_id, period_key, source_scope)
         """
     )
-    conn.commit()
 
 
 def build_networkx_graph(period_payload: Dict[str, Any]) -> nx.Graph:
@@ -165,28 +173,6 @@ def _persist_period_results(
     communities: Dict[str, int],
 ) -> Dict[str, int]:
     now = _utc_now()
-    conn.execute(
-        f"""
-        DELETE FROM {MESSENGER_SOCIAL_EDGES_TABLE}
-        WHERE dataset_id = ? AND period_key = ? AND source_scope = ?
-        """,
-        (dataset_id, period_key, source_scope),
-    )
-    conn.execute(
-        f"""
-        DELETE FROM {MESSENGER_PARTICIPANT_IMPORTANCE_TABLE}
-        WHERE dataset_id = ? AND period_key = ? AND source_scope = ?
-        """,
-        (dataset_id, period_key, source_scope),
-    )
-    conn.execute(
-        f"""
-        DELETE FROM {MESSENGER_COMMUNITIES_TABLE}
-        WHERE dataset_id = ? AND period_key = ? AND source_scope = ?
-        """,
-        (dataset_id, period_key, source_scope),
-    )
-
     edge_rows = []
     for edge in period_payload.get("edges", []):
         source_id = str(edge.get("source") or "").strip()
@@ -207,18 +193,6 @@ def _persist_period_results(
                 now,
             )
         )
-    if edge_rows:
-        conn.executemany(
-            f"""
-            INSERT INTO {MESSENGER_SOCIAL_EDGES_TABLE}
-            (
-                dataset_id, period_key, source_scope, source_id, target_id,
-                weight, edge_type, edge_type_counts_json, created_at, updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            edge_rows,
-        )
 
     importance_rows = []
     for participant_id, metrics in importance.items():
@@ -234,18 +208,6 @@ def _persist_period_results(
                 now,
             )
         )
-    if importance_rows:
-        conn.executemany(
-            f"""
-            INSERT INTO {MESSENGER_PARTICIPANT_IMPORTANCE_TABLE}
-            (
-                dataset_id, period_key, source_scope, participant_id,
-                centrality_degree, centrality_betweenness, created_at, updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            importance_rows,
-        )
 
     community_rows = []
     for participant_id, community_id in communities.items():
@@ -260,19 +222,66 @@ def _persist_period_results(
                 now,
             )
         )
-    if community_rows:
-        conn.executemany(
+    # Rows are built above, outside the hold; only the deletes + inserts (one
+    # commit at exit) hold the gate.
+    with batched_writes(conn):
+        conn.execute(
             f"""
-            INSERT INTO {MESSENGER_COMMUNITIES_TABLE}
-            (
-                dataset_id, period_key, source_scope, participant_id,
-                community_id, created_at, updated_at
-            )
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            DELETE FROM {MESSENGER_SOCIAL_EDGES_TABLE}
+            WHERE dataset_id = ? AND period_key = ? AND source_scope = ?
             """,
-            community_rows,
+            (dataset_id, period_key, source_scope),
         )
-    conn.commit()
+        conn.execute(
+            f"""
+            DELETE FROM {MESSENGER_PARTICIPANT_IMPORTANCE_TABLE}
+            WHERE dataset_id = ? AND period_key = ? AND source_scope = ?
+            """,
+            (dataset_id, period_key, source_scope),
+        )
+        conn.execute(
+            f"""
+            DELETE FROM {MESSENGER_COMMUNITIES_TABLE}
+            WHERE dataset_id = ? AND period_key = ? AND source_scope = ?
+            """,
+            (dataset_id, period_key, source_scope),
+        )
+        if edge_rows:
+            conn.executemany(
+                f"""
+                INSERT INTO {MESSENGER_SOCIAL_EDGES_TABLE}
+                (
+                    dataset_id, period_key, source_scope, source_id, target_id,
+                    weight, edge_type, edge_type_counts_json, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                edge_rows,
+            )
+        if importance_rows:
+            conn.executemany(
+                f"""
+                INSERT INTO {MESSENGER_PARTICIPANT_IMPORTANCE_TABLE}
+                (
+                    dataset_id, period_key, source_scope, participant_id,
+                    centrality_degree, centrality_betweenness, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                importance_rows,
+            )
+        if community_rows:
+            conn.executemany(
+                f"""
+                INSERT INTO {MESSENGER_COMMUNITIES_TABLE}
+                (
+                    dataset_id, period_key, source_scope, participant_id,
+                    community_id, created_at, updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                community_rows,
+            )
     return {
         "edges_written": len(edge_rows),
         "importance_written": len(importance_rows),

@@ -10,6 +10,7 @@ import sqlite3
 from typing import Any, Dict, List, Optional
 
 from .model import CanonicalAIChatMessage, CanonicalAIChatConversation
+from ...db.write_gate import commit_connection, with_db_write
 
 logger = logging.getLogger("topos.storage.canonical.ai_chat.tables")
 
@@ -28,51 +29,53 @@ class CanonicalTablesManager:
     def _ensure_tables(self) -> None:
         """Ensure canonical tables exist. Creates them if they don't exist."""
         try:
-            self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS ai_chat_conversations (
-                    conversation_id TEXT PRIMARY KEY,
-                    owner_user_id TEXT NOT NULL,
-                    title TEXT,
-                    source_id TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                )
-            """)
-            self.conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_ai_chat_conversations_owner
-                ON ai_chat_conversations(owner_user_id)
-            """)
-            self.conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_ai_chat_conversations_source_id
-                ON ai_chat_conversations(source_id)
-            """)
-            self.conn.execute("""
-                CREATE TABLE IF NOT EXISTS ai_chat_messages (
-                    message_id TEXT PRIMARY KEY,
-                    conversation_id TEXT NOT NULL,
-                    sender_type TEXT NOT NULL,
-                    sender_id TEXT,
-                    event_at TEXT NOT NULL,
-                    content TEXT NOT NULL,
-                    content_rendered TEXT,
-                    metadata_json TEXT,
-                    sequence INTEGER NOT NULL DEFAULT 0,
-                    source_id TEXT NOT NULL
-                )
-            """)
-            self.conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_ai_chat_messages_conversation
-                ON ai_chat_messages(conversation_id, sequence)
-            """)
-            self.conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_ai_chat_messages_event_at
-                ON ai_chat_messages(event_at)
-            """)
-            self.conn.execute("""
-                CREATE INDEX IF NOT EXISTS idx_ai_chat_messages_source
-                ON ai_chat_messages(source_id)
-            """)
-            self.conn.commit()
+            # DDL takes SQLite's write lock at execute time — gate it with the commit.
+            with with_db_write():
+                self.conn.execute("""
+                    CREATE TABLE IF NOT EXISTS ai_chat_conversations (
+                        conversation_id TEXT PRIMARY KEY,
+                        owner_user_id TEXT NOT NULL,
+                        title TEXT,
+                        source_id TEXT NOT NULL,
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT NOT NULL
+                    )
+                """)
+                self.conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_ai_chat_conversations_owner
+                    ON ai_chat_conversations(owner_user_id)
+                """)
+                self.conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_ai_chat_conversations_source_id
+                    ON ai_chat_conversations(source_id)
+                """)
+                self.conn.execute("""
+                    CREATE TABLE IF NOT EXISTS ai_chat_messages (
+                        message_id TEXT PRIMARY KEY,
+                        conversation_id TEXT NOT NULL,
+                        sender_type TEXT NOT NULL,
+                        sender_id TEXT,
+                        event_at TEXT NOT NULL,
+                        content TEXT NOT NULL,
+                        content_rendered TEXT,
+                        metadata_json TEXT,
+                        sequence INTEGER NOT NULL DEFAULT 0,
+                        source_id TEXT NOT NULL
+                    )
+                """)
+                self.conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_ai_chat_messages_conversation
+                    ON ai_chat_messages(conversation_id, sequence)
+                """)
+                self.conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_ai_chat_messages_event_at
+                    ON ai_chat_messages(event_at)
+                """)
+                self.conn.execute("""
+                    CREATE INDEX IF NOT EXISTS idx_ai_chat_messages_source
+                    ON ai_chat_messages(source_id)
+                """)
+                commit_connection(self.conn)
             logger.debug("Ensured canonical tables exist")
         except Exception as e:
             self.conn.rollback()
@@ -163,13 +166,14 @@ class CanonicalTablesManager:
                 ORDER BY event_at ASC
             """, (conversation_id,))
             messages = cursor.fetchall()
-            for seq, (message_id, _) in enumerate(messages):
-                self.conn.execute("""
-                    UPDATE ai_chat_messages
-                    SET sequence = ?
-                    WHERE message_id = ?
-                """, (seq, message_id))
-            self.conn.commit()
+            with with_db_write():
+                for seq, (message_id, _) in enumerate(messages):
+                    self.conn.execute("""
+                        UPDATE ai_chat_messages
+                        SET sequence = ?
+                        WHERE message_id = ?
+                    """, (seq, message_id))
+                commit_connection(self.conn)
             logger.debug("Updated sequences for conversation %s (%d messages)", conversation_id, len(messages))
         except Exception as e:
             self.conn.rollback()

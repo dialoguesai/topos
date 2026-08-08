@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from ...storage.db.write_gate import commit_connection, with_db_write
 from .dimension_definition_loader import get_definition_or_none
 from .dimension_registry import is_signal_dimension
 
@@ -64,42 +65,45 @@ class SignalObjectStore:
         if row:
             if row[1] == payload_json and float(row[2]) == float(confidence) and row[3] == refs_json:
                 return self.get_object(str(row[0]))
-            if otype in _SUPERSEDE_ON_CHANGE_TYPES:
+            if otype not in _SUPERSEDE_ON_CHANGE_TYPES:
+                with with_db_write():
+                    self._conn.execute(
+                        """
+                        UPDATE signal_objects
+                        SET payload_json=?, confidence=?, source_refs_json=?,
+                            extractor_version=?, updated_at=?, updated_by=?
+                        WHERE object_id=?
+                        """,
+                        (payload_json, confidence, refs_json, extractor_version, now, created_by, row[0]),
+                    )
+                    commit_connection(self._conn)
+                return self.get_object(str(row[0]))
+
+        object_id = str(uuid.uuid4())
+        with with_db_write():
+            if row:
                 # Close-and-reinsert: the previous revision stays queryable
-                # (dossier/brief history, B2.3). Falls through to the INSERT.
+                # (dossier/brief history, B2.3). Same hold/commit as the INSERT
+                # so the open transaction never spans a gate release.
                 self._conn.execute(
                     "UPDATE signal_objects SET valid_to=?, updated_at=?, updated_by=? WHERE object_id=?",
                     (now, now, created_by, row[0]),
                 )
-            else:
-                self._conn.execute(
-                    """
-                    UPDATE signal_objects
-                    SET payload_json=?, confidence=?, source_refs_json=?,
-                        extractor_version=?, updated_at=?, updated_by=?
-                    WHERE object_id=?
-                    """,
-                    (payload_json, confidence, refs_json, extractor_version, now, created_by, row[0]),
-                )
-                self._conn.commit()
-                return self.get_object(str(row[0]))
-
-        object_id = str(uuid.uuid4())
-        self._insert_object_row(
-            object_id=object_id,
-            dimension=dim,
-            object_type=otype,
-            object_key=okey,
-            payload=payload,
-            payload_json=payload_json,
-            confidence=confidence,
-            refs_json=refs_json,
-            valid_from=now,
-            extractor_version=extractor_version,
-            created_by=created_by,
-            now=now,
-        )
-        self._conn.commit()
+            self._insert_object_row(
+                object_id=object_id,
+                dimension=dim,
+                object_type=otype,
+                object_key=okey,
+                payload=payload,
+                payload_json=payload_json,
+                confidence=confidence,
+                refs_json=refs_json,
+                valid_from=now,
+                extractor_version=extractor_version,
+                created_by=created_by,
+                now=now,
+            )
+            commit_connection(self._conn)
         return self.get_object(object_id)
 
     def _insert_object_row(
@@ -240,20 +244,23 @@ class SignalObjectStore:
         if current.get("valid_to"):
             raise ValueError("Cannot supersede inactive signal object")
         now = _now_iso()
-        self._conn.execute(
-            "UPDATE signal_objects SET valid_to=?, updated_at=? WHERE object_id=?",
-            (now, now, object_id),
-        )
-        return self.upsert_object(
-            str(current["signal_dimension"]),
-            str(current["object_type"]),
-            str(current["object_key"]),
-            new_payload,
-            source_refs=source_refs if source_refs is not None else current.get("source_refs"),
-            confidence=float(confidence if confidence is not None else current.get("confidence") or 0.5),
-            extractor_version=extractor_version,
-            created_by=created_by,
-        )
+        # The close commits inside upsert_object; hold the (reentrant) gate
+        # across both so the open transaction never spans a gate release.
+        with with_db_write():
+            self._conn.execute(
+                "UPDATE signal_objects SET valid_to=?, updated_at=? WHERE object_id=?",
+                (now, now, object_id),
+            )
+            return self.upsert_object(
+                str(current["signal_dimension"]),
+                str(current["object_type"]),
+                str(current["object_key"]),
+                new_payload,
+                source_refs=source_refs if source_refs is not None else current.get("source_refs"),
+                confidence=float(confidence if confidence is not None else current.get("confidence") or 0.5),
+                extractor_version=extractor_version,
+                created_by=created_by,
+            )
 
     def owner_override(
         self,

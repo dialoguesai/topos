@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, Iterator, List, Optional
 
 from .stages import PipelineStage
+from ..storage.db.write_gate import commit_connection, with_db_write
 
 
 def _utc_now() -> str:
@@ -45,27 +46,28 @@ class SQLiteIngestAuditStore(IngestAuditStore):
         ensure_migrations_applied(conn)
 
     def append_stage(self, row: StageAuditRow) -> int:
-        cur = self._conn.execute(
-            """
-            INSERT INTO ingest_audit (
-                job_id, sync_batch_id, source_id, stage, status,
-                started_at, finished_at, records_in, records_out, error
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                row.job_id,
-                row.sync_batch_id,
-                row.source_id,
-                row.stage.value,
-                row.status,
-                row.started_at or _utc_now(),
-                row.finished_at,
-                row.records_in,
-                row.records_out,
-                row.error,
-            ),
-        )
-        self._conn.commit()
+        with with_db_write():
+            cur = self._conn.execute(
+                """
+                INSERT INTO ingest_audit (
+                    job_id, sync_batch_id, source_id, stage, status,
+                    started_at, finished_at, records_in, records_out, error
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    row.job_id,
+                    row.sync_batch_id,
+                    row.source_id,
+                    row.stage.value,
+                    row.status,
+                    row.started_at or _utc_now(),
+                    row.finished_at,
+                    row.records_in,
+                    row.records_out,
+                    row.error,
+                ),
+            )
+            commit_connection(self._conn)
         return int(cur.lastrowid or 0)
 
     def query_by_batch(self, sync_batch_id: str) -> List[Dict[str, Any]]:

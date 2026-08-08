@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
 from .schema import ensure_routines_schema
+from ..storage.db.write_gate import commit_connection, with_db_write
 
 ACTIVE_RUN_STATUSES = frozenset({"queued", "waiting_for_engine", "running"})
 MAX_ROUTINES_PER_OWNER = 10
@@ -179,24 +180,25 @@ def create_routine(
     body["created_at"] = body.get("created_at") or now
     body["updated_at"] = now
     index = _routine_index_fields(body)
-    conn.execute(
-        """
-        INSERT INTO routines (
-            id, owner_user_id, engine_id, enabled, trigger_type, next_run_at, deleted_at, payload_json, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
-        """,
-        (
-            rid,
-            uid,
-            eid,
-            index["enabled"],
-            index["trigger_type"],
-            index["next_run_at"],
-            json.dumps(body, separators=(",", ":"), default=str),
-            now,
-        ),
-    )
-    conn.commit()
+    with with_db_write():
+        conn.execute(
+            """
+            INSERT INTO routines (
+                id, owner_user_id, engine_id, enabled, trigger_type, next_run_at, deleted_at, payload_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, NULL, ?, ?)
+            """,
+            (
+                rid,
+                uid,
+                eid,
+                index["enabled"],
+                index["trigger_type"],
+                index["next_run_at"],
+                json.dumps(body, separators=(",", ":"), default=str),
+                now,
+            ),
+        )
+        commit_connection(conn)
     row = get_routine(conn, owner_user_id=uid, routine_id=rid)
     if not row:
         raise RuntimeError("Failed to persist routine")
@@ -218,41 +220,43 @@ def patch_routine(
     now = _now_iso()
     merged["updated_at"] = now
     index = _routine_index_fields(merged)
-    conn.execute(
-        """
-        UPDATE routines SET
-            enabled = ?,
-            trigger_type = ?,
-            next_run_at = ?,
-            payload_json = ?,
-            updated_at = ?
-        WHERE id = ? AND owner_user_id = ?
-        """,
-        (
-            index["enabled"],
-            index["trigger_type"],
-            index["next_run_at"],
-            json.dumps(merged, separators=(",", ":"), default=str),
-            now,
-            str(routine_id),
-            str(owner_user_id).strip(),
-        ),
-    )
-    conn.commit()
+    with with_db_write():
+        conn.execute(
+            """
+            UPDATE routines SET
+                enabled = ?,
+                trigger_type = ?,
+                next_run_at = ?,
+                payload_json = ?,
+                updated_at = ?
+            WHERE id = ? AND owner_user_id = ?
+            """,
+            (
+                index["enabled"],
+                index["trigger_type"],
+                index["next_run_at"],
+                json.dumps(merged, separators=(",", ":"), default=str),
+                now,
+                str(routine_id),
+                str(owner_user_id).strip(),
+            ),
+        )
+        commit_connection(conn)
     return get_routine(conn, owner_user_id=owner_user_id, routine_id=routine_id)
 
 
 def soft_delete_routine(conn, *, owner_user_id: str, routine_id: str) -> bool:
     ensure_routines_schema(conn)
     now = _now_iso()
-    cur = conn.execute(
-        """
-        UPDATE routines SET deleted_at = ?, enabled = 0, updated_at = ?
-        WHERE id = ? AND owner_user_id = ? AND deleted_at IS NULL
-        """,
-        (now, now, str(routine_id), str(owner_user_id).strip()),
-    )
-    conn.commit()
+    with with_db_write():
+        cur = conn.execute(
+            """
+            UPDATE routines SET deleted_at = ?, enabled = 0, updated_at = ?
+            WHERE id = ? AND owner_user_id = ? AND deleted_at IS NULL
+            """,
+            (now, now, str(routine_id), str(owner_user_id).strip()),
+        )
+        commit_connection(conn)
     return cur.rowcount > 0
 
 
@@ -285,14 +289,15 @@ def advance_next_run_at(conn, routine_id: str, *, next_run_at: str) -> None:
     payload = _json_load(row[0])
     payload["next_run_at"] = next_run_at
     payload["updated_at"] = now
-    conn.execute(
-        """
-        UPDATE routines SET next_run_at = ?, payload_json = ?, updated_at = ?
-        WHERE id = ?
-        """,
-        (next_run_at, json.dumps(payload, separators=(",", ":"), default=str), now, str(routine_id)),
-    )
-    conn.commit()
+    with with_db_write():
+        conn.execute(
+            """
+            UPDATE routines SET next_run_at = ?, payload_json = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (next_run_at, json.dumps(payload, separators=(",", ":"), default=str), now, str(routine_id)),
+        )
+        commit_connection(conn)
 
 
 def has_active_run(conn, routine_id: str) -> bool:
@@ -357,24 +362,25 @@ def create_run(
     body["created_at"] = body.get("created_at") or now
     body["updated_at"] = now
     status = str(body.get("status") or "queued")
-    conn.execute(
-        """
-        INSERT INTO routine_runs (
-            id, routine_id, owner_user_id, engine_id, status, idempotency_key, payload_json, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-        """,
-        (
-            run_id,
-            str(routine_id),
-            uid,
-            eid,
-            status,
-            idempotency_key,
-            json.dumps(body, separators=(",", ":"), default=str),
-            now,
-        ),
-    )
-    conn.commit()
+    with with_db_write():
+        conn.execute(
+            """
+            INSERT INTO routine_runs (
+                id, routine_id, owner_user_id, engine_id, status, idempotency_key, payload_json, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                str(routine_id),
+                uid,
+                eid,
+                status,
+                idempotency_key,
+                json.dumps(body, separators=(",", ":"), default=str),
+                now,
+            ),
+        )
+        commit_connection(conn)
     return _run_row_to_api(
         {
             "id": run_id,
@@ -445,14 +451,15 @@ def update_run(conn, run_id: str, patch: Dict[str, Any]) -> Optional[Dict[str, A
     now = _now_iso()
     payload["updated_at"] = now
     status = str(payload.get("status") or data.get("status") or "queued")
-    conn.execute(
-        """
-        UPDATE routine_runs SET status = ?, payload_json = ?, updated_at = ?
-        WHERE id = ?
-        """,
-        (status, json.dumps(payload, separators=(",", ":"), default=str), now, str(run_id)),
-    )
-    conn.commit()
+    with with_db_write():
+        conn.execute(
+            """
+            UPDATE routine_runs SET status = ?, payload_json = ?, updated_at = ?
+            WHERE id = ?
+            """,
+            (status, json.dumps(payload, separators=(",", ":"), default=str), now, str(run_id)),
+        )
+        commit_connection(conn)
     data["status"] = status
     data["payload_json"] = json.dumps(payload)
     data["updated_at"] = now

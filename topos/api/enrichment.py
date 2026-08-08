@@ -406,23 +406,29 @@ def _delete_enrichment_data_core(source_id: str, job_name: str) -> Dict[str, Any
             where += f" AND {extra[0]}"
             params = params + extra[1]
         try:
+            from ..storage.db.write_gate import commit_connection, with_db_write
+
             if table == "signal_embeddings":
+                # Read outside the gate; only the deletes + commit hold it.
                 ids = [
                     str(row[0])
                     for row in conn.execute(
                         f"SELECT embedding_id FROM signal_embeddings WHERE {where}", params
                     ).fetchall()
                 ]
-                cur = conn.execute(f"DELETE FROM signal_embeddings WHERE {where}", params)
-                try:
-                    from ..storage.adapters.sqlite.stores import SQLiteVectorIndex
+                with with_db_write():
+                    cur = conn.execute(f"DELETE FROM signal_embeddings WHERE {where}", params)
+                    try:
+                        from ..storage.adapters.sqlite.stores import SQLiteVectorIndex
 
-                    SQLiteVectorIndex(conn).delete_embeddings(ids)
-                except Exception as exc:
-                    logger.warning("Vector companion cleanup failed: %s", exc)
+                        SQLiteVectorIndex(conn).delete_embeddings(ids)
+                    except Exception as exc:
+                        logger.warning("Vector companion cleanup failed: %s", exc)
+                    commit_connection(conn)
             else:
-                cur = conn.execute(f"DELETE FROM {table} WHERE {where}", params)
-            conn.commit()
+                with with_db_write():
+                    cur = conn.execute(f"DELETE FROM {table} WHERE {where}", params)
+                    commit_connection(conn)
             deleted[table] = int(cur.rowcount if cur.rowcount is not None else 0)
         except Exception as exc:
             conn.rollback()

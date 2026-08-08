@@ -8,6 +8,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from ...storage.db.write_gate import commit_connection, with_db_write
 from .brief_schemas import (
     empty_structured_for_dimension as empty_structured,
     parse_markdown_sections,
@@ -169,46 +170,47 @@ class DimensionBriefStore:
         revision_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
         try:
-            self._conn.execute(
-                """
-                INSERT INTO signal_dimension_briefs (
-                    brief_id, signal_dimension, head_revision_id, structured_json,
-                    markdown_body, revision_number, updated_at, updated_by
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    brief_id,
-                    dim,
-                    revision_id,
-                    json.dumps(structured),
-                    markdown_body,
-                    1,
-                    now,
-                    "system",
-                ),
-            )
-            self._conn.execute(
-                """
-                INSERT INTO signal_dimension_brief_revisions (
-                    revision_id, brief_id, parent_revision_id, revision_number,
-                    change_kind, structured_json, markdown_body, provenance_json,
-                    created_at, created_by
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    revision_id,
-                    brief_id,
-                    None,
-                    1,
-                    "initial",
-                    json.dumps(structured),
-                    markdown_body,
-                    json.dumps({"source": "initial"}),
-                    now,
-                    "system",
-                ),
-            )
-            self._conn.commit()
+            with with_db_write():
+                self._conn.execute(
+                    """
+                    INSERT INTO signal_dimension_briefs (
+                        brief_id, signal_dimension, head_revision_id, structured_json,
+                        markdown_body, revision_number, updated_at, updated_by
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        brief_id,
+                        dim,
+                        revision_id,
+                        json.dumps(structured),
+                        markdown_body,
+                        1,
+                        now,
+                        "system",
+                    ),
+                )
+                self._conn.execute(
+                    """
+                    INSERT INTO signal_dimension_brief_revisions (
+                        revision_id, brief_id, parent_revision_id, revision_number,
+                        change_kind, structured_json, markdown_body, provenance_json,
+                        created_at, created_by
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        revision_id,
+                        brief_id,
+                        None,
+                        1,
+                        "initial",
+                        json.dumps(structured),
+                        markdown_body,
+                        json.dumps({"source": "initial"}),
+                        now,
+                        "system",
+                    ),
+                )
+                commit_connection(self._conn)
         except sqlite3.IntegrityError:
             self._conn.rollback()
             row = self._conn.execute(
@@ -239,45 +241,46 @@ class DimensionBriefStore:
         revision_number = int(head.get("revision_number") or 0) + 1
         revision_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
-        self._conn.execute(
-            """
-            INSERT INTO signal_dimension_brief_revisions (
-                revision_id, brief_id, parent_revision_id, revision_number,
-                change_kind, structured_json, markdown_body, provenance_json,
-                created_at, created_by
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                revision_id,
-                brief_id,
-                parent_revision_id,
-                revision_number,
-                change_kind,
-                json.dumps(structured),
-                markdown_body,
-                json.dumps(provenance),
-                now,
-                created_by,
-            ),
-        )
-        self._conn.execute(
-            """
-            UPDATE signal_dimension_briefs
-            SET head_revision_id=?, structured_json=?, markdown_body=?,
-                revision_number=?, updated_at=?, updated_by=?
-            WHERE brief_id=?
-            """,
-            (
-                revision_id,
-                json.dumps(structured),
-                markdown_body,
-                revision_number,
-                now,
-                created_by,
-                brief_id,
-            ),
-        )
-        self._conn.commit()
+        with with_db_write():
+            self._conn.execute(
+                """
+                INSERT INTO signal_dimension_brief_revisions (
+                    revision_id, brief_id, parent_revision_id, revision_number,
+                    change_kind, structured_json, markdown_body, provenance_json,
+                    created_at, created_by
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    revision_id,
+                    brief_id,
+                    parent_revision_id,
+                    revision_number,
+                    change_kind,
+                    json.dumps(structured),
+                    markdown_body,
+                    json.dumps(provenance),
+                    now,
+                    created_by,
+                ),
+            )
+            self._conn.execute(
+                """
+                UPDATE signal_dimension_briefs
+                SET head_revision_id=?, structured_json=?, markdown_body=?,
+                    revision_number=?, updated_at=?, updated_by=?
+                WHERE brief_id=?
+                """,
+                (
+                    revision_id,
+                    json.dumps(structured),
+                    markdown_body,
+                    revision_number,
+                    now,
+                    created_by,
+                    brief_id,
+                ),
+            )
+            commit_connection(self._conn)
         return self.get_brief(str(head["signal_dimension"]))
 
     def _row_to_head(self, row: Any) -> Dict[str, Any]:

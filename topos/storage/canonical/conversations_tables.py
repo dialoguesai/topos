@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ...sources.definitions import CANONICAL_ADDRESS_BOOK_SOURCE_ID
+from ..db.write_gate import batched_writes, commit_connection, with_db_write
 
 logger = logging.getLogger("topos.storage.canonical.conversations_tables")
 
@@ -66,77 +67,82 @@ def _message_timestamp_unix_for_sort(event_at: Optional[str], created_at: Option
 
 def ensure_conversations_table(conn) -> None:
     """Create conversations table (thread metadata) if not exists."""
-    conn.execute(f"""
-        CREATE TABLE IF NOT EXISTS {CONVERSATIONS_TABLE} (
-            conversation_id TEXT NOT NULL,
-            dataset_id TEXT NOT NULL,
-            source_id TEXT,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now')),
-            PRIMARY KEY (conversation_id, dataset_id)
-        )
-    """)
-    conn.execute(f"""
-        CREATE INDEX IF NOT EXISTS idx_{CONVERSATIONS_TABLE}_dataset_id
-        ON {CONVERSATIONS_TABLE}(dataset_id)
-    """)
-    conn.execute(f"""
-        CREATE INDEX IF NOT EXISTS idx_{CONVERSATIONS_TABLE}_source_id
-        ON {CONVERSATIONS_TABLE}(source_id)
-    """)
-    conn.commit()
+    # DDL takes SQLite's write lock at execute time — gate it with the commit.
+    with with_db_write():
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {CONVERSATIONS_TABLE} (
+                conversation_id TEXT NOT NULL,
+                dataset_id TEXT NOT NULL,
+                source_id TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (conversation_id, dataset_id)
+            )
+        """)
+        conn.execute(f"""
+            CREATE INDEX IF NOT EXISTS idx_{CONVERSATIONS_TABLE}_dataset_id
+            ON {CONVERSATIONS_TABLE}(dataset_id)
+        """)
+        conn.execute(f"""
+            CREATE INDEX IF NOT EXISTS idx_{CONVERSATIONS_TABLE}_source_id
+            ON {CONVERSATIONS_TABLE}(source_id)
+        """)
+        commit_connection(conn)
 
 
 def ensure_conversation_messages_table(conn) -> None:
     """Create conversation_messages table (message rows) if not exists. Stage 9: event_at, is_from_self."""
-    conn.execute(f"""
-        CREATE TABLE IF NOT EXISTS {CONVERSATION_MESSAGES_TABLE} (
-            message_id TEXT NOT NULL PRIMARY KEY,
-            conversation_id TEXT NOT NULL,
-            dataset_id TEXT NOT NULL,
-            sender_type TEXT,
-            sender_id TEXT,
-            reply_to_message_id TEXT,
-            message_type TEXT,
-            event_type TEXT,
-            content TEXT,
-            event_at TEXT NOT NULL,
-            source_id TEXT NOT NULL,
-            metadata_json TEXT,
-            created_at TEXT DEFAULT (datetime('now')),
-            is_from_self INTEGER DEFAULT 0,
-            owner_user_id TEXT
-        )
-    """)
-    conn.execute(f"""
-        CREATE INDEX IF NOT EXISTS idx_{CONVERSATION_MESSAGES_TABLE}_conversation_id
-        ON {CONVERSATION_MESSAGES_TABLE}(conversation_id)
-    """)
-    conn.execute(f"""
-        CREATE INDEX IF NOT EXISTS idx_{CONVERSATION_MESSAGES_TABLE}_dataset_id
-        ON {CONVERSATION_MESSAGES_TABLE}(dataset_id)
-    """)
-    conn.execute(f"""
-        CREATE INDEX IF NOT EXISTS idx_{CONVERSATION_MESSAGES_TABLE}_source_id
-        ON {CONVERSATION_MESSAGES_TABLE}(source_id)
-    """)
-    conn.execute(f"""
-        CREATE INDEX IF NOT EXISTS idx_{CONVERSATION_MESSAGES_TABLE}_event_at
-        ON {CONVERSATION_MESSAGES_TABLE}(event_at)
-    """)
-    conn.commit()
+    with with_db_write():
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {CONVERSATION_MESSAGES_TABLE} (
+                message_id TEXT NOT NULL PRIMARY KEY,
+                conversation_id TEXT NOT NULL,
+                dataset_id TEXT NOT NULL,
+                sender_type TEXT,
+                sender_id TEXT,
+                reply_to_message_id TEXT,
+                message_type TEXT,
+                event_type TEXT,
+                content TEXT,
+                event_at TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                metadata_json TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                is_from_self INTEGER DEFAULT 0,
+                owner_user_id TEXT
+            )
+        """)
+        conn.execute(f"""
+            CREATE INDEX IF NOT EXISTS idx_{CONVERSATION_MESSAGES_TABLE}_conversation_id
+            ON {CONVERSATION_MESSAGES_TABLE}(conversation_id)
+        """)
+        conn.execute(f"""
+            CREATE INDEX IF NOT EXISTS idx_{CONVERSATION_MESSAGES_TABLE}_dataset_id
+            ON {CONVERSATION_MESSAGES_TABLE}(dataset_id)
+        """)
+        conn.execute(f"""
+            CREATE INDEX IF NOT EXISTS idx_{CONVERSATION_MESSAGES_TABLE}_source_id
+            ON {CONVERSATION_MESSAGES_TABLE}(source_id)
+        """)
+        conn.execute(f"""
+            CREATE INDEX IF NOT EXISTS idx_{CONVERSATION_MESSAGES_TABLE}_event_at
+            ON {CONVERSATION_MESSAGES_TABLE}(event_at)
+        """)
+        commit_connection(conn)
 
 
 def _ensure_contact_ingest_columns(conn) -> None:
     """Add ingest provenance columns used by canonical pipeline. Idempotent."""
+    # ALTER TABLE takes SQLite's write lock at execute time — gate it with the commit.
     for col, typ in (
         ("source_record_id", "TEXT"),
         ("ingested_at", "TEXT"),
         ("sync_batch_id", "TEXT"),
     ):
         try:
-            conn.execute(f"ALTER TABLE {CONTACTS_TABLE} ADD COLUMN {col} {typ}")
-            conn.commit()
+            with with_db_write():
+                conn.execute(f"ALTER TABLE {CONTACTS_TABLE} ADD COLUMN {col} {typ}")
+                commit_connection(conn)
         except Exception as e:
             if "duplicate column" not in str(e).lower():
                 logger.debug("Contact ingest column %s: %s", col, e)
@@ -147,8 +153,9 @@ def _ensure_contact_ingest_columns(conn) -> None:
         ("sync_batch_id", "TEXT"),
     ):
         try:
-            conn.execute(f"ALTER TABLE {CONTACT_IDENTIFIERS_TABLE} ADD COLUMN {col} {typ}")
-            conn.commit()
+            with with_db_write():
+                conn.execute(f"ALTER TABLE {CONTACT_IDENTIFIERS_TABLE} ADD COLUMN {col} {typ}")
+                commit_connection(conn)
         except Exception as e:
             if "duplicate column" not in str(e).lower():
                 logger.debug("Contact identifier ingest column %s: %s", col, e)
@@ -157,33 +164,34 @@ def _ensure_contact_ingest_columns(conn) -> None:
 
 def ensure_contacts_table(conn) -> None:
     """Create canonical contacts table if not exists."""
-    conn.execute(f"""
-        CREATE TABLE IF NOT EXISTS {CONTACTS_TABLE} (
-            contact_id TEXT NOT NULL PRIMARY KEY,
-            dataset_id TEXT NOT NULL,
-            source_id TEXT NOT NULL,
-            display_name TEXT,
-            known_usernames_json TEXT,
-            is_self INTEGER NOT NULL DEFAULT 0,
-            last_import_source TEXT,
-            last_import_run_id TEXT,
-            last_imported_at TEXT,
-            source_record_id TEXT,
-            ingested_at TEXT,
-            sync_batch_id TEXT,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now'))
-        )
-    """)
-    conn.execute(f"""
-        CREATE INDEX IF NOT EXISTS idx_{CONTACTS_TABLE}_dataset_source
-        ON {CONTACTS_TABLE}(dataset_id, source_id)
-    """)
-    conn.execute(f"""
-        CREATE INDEX IF NOT EXISTS idx_{CONTACTS_TABLE}_is_self
-        ON {CONTACTS_TABLE}(is_self)
-    """)
-    conn.commit()
+    with with_db_write():
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {CONTACTS_TABLE} (
+                contact_id TEXT NOT NULL PRIMARY KEY,
+                dataset_id TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                display_name TEXT,
+                known_usernames_json TEXT,
+                is_self INTEGER NOT NULL DEFAULT 0,
+                last_import_source TEXT,
+                last_import_run_id TEXT,
+                last_imported_at TEXT,
+                source_record_id TEXT,
+                ingested_at TEXT,
+                sync_batch_id TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now'))
+            )
+        """)
+        conn.execute(f"""
+            CREATE INDEX IF NOT EXISTS idx_{CONTACTS_TABLE}_dataset_source
+            ON {CONTACTS_TABLE}(dataset_id, source_id)
+        """)
+        conn.execute(f"""
+            CREATE INDEX IF NOT EXISTS idx_{CONTACTS_TABLE}_is_self
+            ON {CONTACTS_TABLE}(is_self)
+        """)
+        commit_connection(conn)
     _ensure_contact_ingest_columns(conn)
     _ensure_contact_provenance_columns(conn)
     _ensure_contact_sharing_policy_column(conn)
@@ -191,56 +199,59 @@ def ensure_contacts_table(conn) -> None:
 
 def ensure_contact_identifiers_table(conn) -> None:
     """Create table mapping contact identifiers (phone/email/service ids)."""
-    conn.execute(f"""
-        CREATE TABLE IF NOT EXISTS {CONTACT_IDENTIFIERS_TABLE} (
-            dataset_id TEXT NOT NULL,
-            source_id TEXT NOT NULL,
-            identifier TEXT NOT NULL,
-            identifier_type TEXT NOT NULL,
-            contact_id TEXT NOT NULL,
-            source_record_id TEXT,
-            ingested_at TEXT,
-            sync_batch_id TEXT,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now')),
-            PRIMARY KEY (dataset_id, source_id, identifier)
-        )
-    """)
-    conn.execute(f"""
-        CREATE INDEX IF NOT EXISTS idx_{CONTACT_IDENTIFIERS_TABLE}_contact
-        ON {CONTACT_IDENTIFIERS_TABLE}(contact_id)
-    """)
-    conn.commit()
+    with with_db_write():
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {CONTACT_IDENTIFIERS_TABLE} (
+                dataset_id TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                identifier TEXT NOT NULL,
+                identifier_type TEXT NOT NULL,
+                contact_id TEXT NOT NULL,
+                source_record_id TEXT,
+                ingested_at TEXT,
+                sync_batch_id TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (dataset_id, source_id, identifier)
+            )
+        """)
+        conn.execute(f"""
+            CREATE INDEX IF NOT EXISTS idx_{CONTACT_IDENTIFIERS_TABLE}_contact
+            ON {CONTACT_IDENTIFIERS_TABLE}(contact_id)
+        """)
+        commit_connection(conn)
     _ensure_contact_ingest_columns(conn)
 
 
 def ensure_conversation_participants_table(conn) -> None:
     """Create conversation <-> participant relationship table."""
-    conn.execute(f"""
-        CREATE TABLE IF NOT EXISTS {CONVERSATION_PARTICIPANTS_TABLE} (
-            conversation_id TEXT NOT NULL,
-            dataset_id TEXT NOT NULL,
-            source_id TEXT NOT NULL,
-            contact_id TEXT NOT NULL,
-            role TEXT,
-            created_at TEXT DEFAULT (datetime('now')),
-            updated_at TEXT DEFAULT (datetime('now')),
-            PRIMARY KEY (conversation_id, dataset_id, source_id, contact_id)
-        )
-    """)
-    conn.execute(f"""
-        CREATE INDEX IF NOT EXISTS idx_{CONVERSATION_PARTICIPANTS_TABLE}_dataset_source
-        ON {CONVERSATION_PARTICIPANTS_TABLE}(dataset_id, source_id)
-    """)
-    conn.commit()
+    with with_db_write():
+        conn.execute(f"""
+            CREATE TABLE IF NOT EXISTS {CONVERSATION_PARTICIPANTS_TABLE} (
+                conversation_id TEXT NOT NULL,
+                dataset_id TEXT NOT NULL,
+                source_id TEXT NOT NULL,
+                contact_id TEXT NOT NULL,
+                role TEXT,
+                created_at TEXT DEFAULT (datetime('now')),
+                updated_at TEXT DEFAULT (datetime('now')),
+                PRIMARY KEY (conversation_id, dataset_id, source_id, contact_id)
+            )
+        """)
+        conn.execute(f"""
+            CREATE INDEX IF NOT EXISTS idx_{CONVERSATION_PARTICIPANTS_TABLE}_dataset_source
+            ON {CONVERSATION_PARTICIPANTS_TABLE}(dataset_id, source_id)
+        """)
+        commit_connection(conn)
 
 
 def _ensure_signal_identity_columns(conn) -> None:
     """Add is_from_self and owner_user_id for Signal identity. Stage 9: is_from_self (was from_self). Idempotent."""
     for col, typ in (("is_from_self", "INTEGER DEFAULT 0"), ("owner_user_id", "TEXT")):
         try:
-            conn.execute(f"ALTER TABLE {CONVERSATION_MESSAGES_TABLE} ADD COLUMN {col} {typ}")
-            conn.commit()
+            with with_db_write():
+                conn.execute(f"ALTER TABLE {CONVERSATION_MESSAGES_TABLE} ADD COLUMN {col} {typ}")
+                commit_connection(conn)
         except Exception as e:
             if "duplicate column" not in str(e).lower():
                 logger.debug("Signal identity column %s: %s", col, e)
@@ -255,8 +266,9 @@ def _ensure_reply_and_event_columns(conn) -> None:
         ("event_type", "TEXT"),
     ):
         try:
-            conn.execute(f"ALTER TABLE {CONVERSATION_MESSAGES_TABLE} ADD COLUMN {col} {typ}")
-            conn.commit()
+            with with_db_write():
+                conn.execute(f"ALTER TABLE {CONVERSATION_MESSAGES_TABLE} ADD COLUMN {col} {typ}")
+                commit_connection(conn)
         except Exception as e:
             if "duplicate column" not in str(e).lower():
                 logger.debug("Messenger context column %s: %s", col, e)
@@ -272,8 +284,9 @@ def _ensure_contact_provenance_columns(conn) -> None:
         ("last_imported_at", "TEXT"),
     ):
         try:
-            conn.execute(f"ALTER TABLE {CONTACTS_TABLE} ADD COLUMN {col} {typ}")
-            conn.commit()
+            with with_db_write():
+                conn.execute(f"ALTER TABLE {CONTACTS_TABLE} ADD COLUMN {col} {typ}")
+                commit_connection(conn)
         except Exception as e:
             if "duplicate column" not in str(e).lower():
                 logger.debug("Contact provenance column %s: %s", col, e)
@@ -283,8 +296,9 @@ def _ensure_contact_provenance_columns(conn) -> None:
 def _ensure_contact_sharing_policy_column(conn) -> None:
     """Stage 11: JSON policy for name_visibility / row_visibility per contact."""
     try:
-        conn.execute(f"ALTER TABLE {CONTACTS_TABLE} ADD COLUMN sharing_policy_json TEXT")
-        conn.commit()
+        with with_db_write():
+            conn.execute(f"ALTER TABLE {CONTACTS_TABLE} ADD COLUMN sharing_policy_json TEXT")
+            commit_connection(conn)
     except Exception as e:
         if "duplicate column" not in str(e).lower():
             logger.debug("Contact sharing_policy_json column: %s", e)
@@ -327,12 +341,15 @@ class ConversationsTablesManager:
         if not self.conn:
             return
         self.ensure_tables()
-        self.conn.execute(f"""
-            INSERT OR REPLACE INTO {CONVERSATIONS_TABLE}
-            (conversation_id, dataset_id, source_id, created_at, updated_at)
-            VALUES (?, ?, ?, datetime('now'), datetime('now'))
-        """, (conversation_id, dataset_id, source_id or ""))
-        self.conn.commit()
+        # commit_connection no-ops inside upsert_message_batch's batched_writes;
+        # the batch commits once at exit.
+        with with_db_write():
+            self.conn.execute(f"""
+                INSERT OR REPLACE INTO {CONVERSATIONS_TABLE}
+                (conversation_id, dataset_id, source_id, created_at, updated_at)
+                VALUES (?, ?, ?, datetime('now'), datetime('now'))
+            """, (conversation_id, dataset_id, source_id or ""))
+            commit_connection(self.conn)
 
     def upsert_message_batch(
         self,
@@ -490,37 +507,40 @@ class ConversationsTablesManager:
         messages_created = 0
         seen_conversation_ids: set[tuple[str, str]] = set()
         participants_seen: set[tuple[str, str]] = set()
-        for rec in records:
-            conversation_id = (
-                str(rec.get("conversation_id") or rec.get("thread_id") or dataset_id)
-            )
-            key = (conversation_id, dataset_id)
-            if key not in seen_conversation_ids:
-                self.upsert_conversation(conversation_id, dataset_id, source_id)
-                seen_conversation_ids.add(key)
-                conversations_created += 1
-            contact_id = _upsert_contact(rec)
-            if contact_id:
-                part_key = (conversation_id, contact_id)
-                if part_key not in participants_seen:
-                    self.conn.execute(
-                        f"""
-                        INSERT INTO {CONVERSATION_PARTICIPANTS_TABLE}
-                        (conversation_id, dataset_id, source_id, contact_id, role, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
-                        ON CONFLICT(conversation_id, dataset_id, source_id, contact_id) DO UPDATE SET
-                            role = COALESCE(excluded.role, {CONVERSATION_PARTICIPANTS_TABLE}.role),
-                            updated_at = datetime('now')
-                        """,
-                        (
-                            conversation_id,
-                            dataset_id,
-                            source_id,
-                            contact_id,
-                            "self" if (rec.get("from_self") or rec.get("is_from_self")) else "participant",
-                        ),
-                    )
-                    participants_seen.add(part_key)
+        # The per-record INSERTs take SQLite's write lock at execute time —
+        # batch them under the gate with a single commit at exit.
+        with batched_writes(self.conn):
+            for rec in records:
+                conversation_id = (
+                    str(rec.get("conversation_id") or rec.get("thread_id") or dataset_id)
+                )
+                key = (conversation_id, dataset_id)
+                if key not in seen_conversation_ids:
+                    self.upsert_conversation(conversation_id, dataset_id, source_id)
+                    seen_conversation_ids.add(key)
+                    conversations_created += 1
+                contact_id = _upsert_contact(rec)
+                if contact_id:
+                    part_key = (conversation_id, contact_id)
+                    if part_key not in participants_seen:
+                        self.conn.execute(
+                            f"""
+                            INSERT INTO {CONVERSATION_PARTICIPANTS_TABLE}
+                            (conversation_id, dataset_id, source_id, contact_id, role, created_at, updated_at)
+                            VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                            ON CONFLICT(conversation_id, dataset_id, source_id, contact_id) DO UPDATE SET
+                                role = COALESCE(excluded.role, {CONVERSATION_PARTICIPANTS_TABLE}.role),
+                                updated_at = datetime('now')
+                            """,
+                            (
+                                conversation_id,
+                                dataset_id,
+                                source_id,
+                                contact_id,
+                                "self" if (rec.get("from_self") or rec.get("is_from_self")) else "participant",
+                            ),
+                        )
+                        participants_seen.add(part_key)
         from .canonical_store import SQLiteCanonicalStore
 
         store = SQLiteCanonicalStore(self.conn)
@@ -776,15 +796,16 @@ class ConversationsTablesManager:
         """Set/clear display name for contact."""
         if not self.conn:
             return
-        self.conn.execute(
-            f"""
-            UPDATE {CONTACTS_TABLE}
-            SET display_name = ?, last_import_source = 'manual_edit', updated_at = datetime('now')
-            WHERE dataset_id = ? AND contact_id = ?
-            """,
-            ((display_name or None), dataset_id, contact_id),
-        )
-        self.conn.commit()
+        with with_db_write():
+            self.conn.execute(
+                f"""
+                UPDATE {CONTACTS_TABLE}
+                SET display_name = ?, last_import_source = 'manual_edit', updated_at = datetime('now')
+                WHERE dataset_id = ? AND contact_id = ?
+                """,
+                ((display_name or None), dataset_id, contact_id),
+            )
+            commit_connection(self.conn)
 
     def update_contact_sharing_policy(
         self,
@@ -798,15 +819,16 @@ class ConversationsTablesManager:
             return
         self.ensure_tables()
         payload = json.dumps(sharing_policy or {}) if sharing_policy else None
-        self.conn.execute(
-            f"""
-            UPDATE {CONTACTS_TABLE}
-            SET sharing_policy_json = ?, updated_at = datetime('now')
-            WHERE dataset_id = ? AND contact_id = ?
-            """,
-            (payload, dataset_id, contact_id),
-        )
-        self.conn.commit()
+        with with_db_write():
+            self.conn.execute(
+                f"""
+                UPDATE {CONTACTS_TABLE}
+                SET sharing_policy_json = ?, updated_at = datetime('now')
+                WHERE dataset_id = ? AND contact_id = ?
+                """,
+                (payload, dataset_id, contact_id),
+            )
+            commit_connection(self.conn)
 
     def auto_resolve_contact_names(
         self,
@@ -832,6 +854,9 @@ class ConversationsTablesManager:
         ).fetchall()
         updated = 0
         seen: set[str] = set()
+        # Read-only pass first: JSON parsing and per-sender lookups stay off
+        # the write gate; the collected updates apply in a short gated pass.
+        pending: List[tuple[str, str]] = []
         for sender_id, metadata_json in candidates:
             sid = str(sender_id or "").strip()
             if not sid or sid in seen:
@@ -871,22 +896,26 @@ class ConversationsTablesManager:
             ).fetchone()
             if not row or not row[0]:
                 continue
-            contact_id = str(row[0])
-            cursor = self.conn.execute(
-                f"""
-                UPDATE {CONTACTS_TABLE}
-                SET display_name = COALESCE(display_name, ?),
-                    last_import_source = CASE WHEN display_name IS NULL THEN 'auto_resolve' ELSE last_import_source END,
-                    updated_at = datetime('now')
-                WHERE dataset_id = ? AND contact_id = ?
-                """,
-                (display_name, dataset_id, contact_id),
-            )
-            if int(cursor.rowcount or 0) > 0:
-                updated += 1
-        # Commit unconditionally: 0-row updates still opened an implicit
-        # transaction, which must not outlive this call.
-        self.conn.commit()
+            pending.append((str(row[0]), display_name))
+        if not pending:
+            return 0
+        with with_db_write():
+            for contact_id, display_name in pending:
+                cursor = self.conn.execute(
+                    f"""
+                    UPDATE {CONTACTS_TABLE}
+                    SET display_name = COALESCE(display_name, ?),
+                        last_import_source = CASE WHEN display_name IS NULL THEN 'auto_resolve' ELSE last_import_source END,
+                        updated_at = datetime('now')
+                    WHERE dataset_id = ? AND contact_id = ?
+                    """,
+                    (display_name, dataset_id, contact_id),
+                )
+                if int(cursor.rowcount or 0) > 0:
+                    updated += 1
+            # Commit unconditionally: 0-row updates still opened an implicit
+            # transaction, which must not outlive this call.
+            commit_connection(self.conn)
         return updated
 
     def import_contacts_batch(
@@ -950,117 +979,120 @@ class ConversationsTablesManager:
 
         contacts_upserted = 0
         identifiers_upserted = 0
-        for rec in contacts:
-            identifiers_raw = rec.get("identifiers") or []
-            pairs: List[tuple[str, str]] = []
-            for item in identifiers_raw:
-                if isinstance(item, dict):
-                    identifier = str(item.get("identifier") or "").strip()
-                    itype = _normalize_identifier_type(identifier, item.get("type"))
-                else:
-                    identifier = str(item or "").strip()
-                    itype = _normalize_identifier_type(identifier, None)
-                if identifier:
-                    pairs.append((identifier, itype))
-            if not pairs:
-                continue
+        # Contact rows resolve against identifiers written earlier in this same
+        # batch, so the per-record SELECTs can't be hoisted out; hold the gate
+        # for the whole batch with one commit at exit.
+        with batched_writes(self.conn):
+            for rec in contacts:
+                identifiers_raw = rec.get("identifiers") or []
+                pairs: List[tuple[str, str]] = []
+                for item in identifiers_raw:
+                    if isinstance(item, dict):
+                        identifier = str(item.get("identifier") or "").strip()
+                        itype = _normalize_identifier_type(identifier, item.get("type"))
+                    else:
+                        identifier = str(item or "").strip()
+                        itype = _normalize_identifier_type(identifier, None)
+                    if identifier:
+                        pairs.append((identifier, itype))
+                if not pairs:
+                    continue
 
-            # Prefer existing contact mapping for any known identifier.
-            contact_id = None
-            for identifier, _ in pairs:
-                row = self.conn.execute(
+                # Prefer existing contact mapping for any known identifier.
+                contact_id = None
+                for identifier, _ in pairs:
+                    row = self.conn.execute(
+                        f"""
+                        SELECT contact_id FROM {CONTACT_IDENTIFIERS_TABLE}
+                        WHERE dataset_id = ? AND identifier = ?
+                        LIMIT 1
+                        """,
+                        (dataset_id, identifier),
+                    ).fetchone()
+                    if row and row[0]:
+                        contact_id = str(row[0])
+                        break
+                if not contact_id:
+                    key = "|".join(sorted({f"{t}:{i}" for i, t in pairs}))
+                    digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:20]
+                    contact_id = f"{dataset_id}:contact:import:{digest}"
+                display_name = rec.get("display_name")
+                if display_name is not None:
+                    display_name = str(display_name).strip() or None
+                username_candidates = [
+                    i for i, t in pairs
+                    if t in {"handle", "service_id"} and "@" not in i and len(i) <= 128
+                ]
+                existing_profile = self.conn.execute(
                     f"""
-                    SELECT contact_id FROM {CONTACT_IDENTIFIERS_TABLE}
-                    WHERE dataset_id = ? AND identifier = ?
+                    SELECT known_usernames_json
+                    FROM {CONTACTS_TABLE}
+                    WHERE contact_id = ?
                     LIMIT 1
                     """,
-                    (dataset_id, identifier),
+                    (contact_id,),
                 ).fetchone()
-                if row and row[0]:
-                    contact_id = str(row[0])
-                    break
-            if not contact_id:
-                key = "|".join(sorted({f"{t}:{i}" for i, t in pairs}))
-                digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:20]
-                contact_id = f"{dataset_id}:contact:import:{digest}"
-            display_name = rec.get("display_name")
-            if display_name is not None:
-                display_name = str(display_name).strip() or None
-            username_candidates = [
-                i for i, t in pairs
-                if t in {"handle", "service_id"} and "@" not in i and len(i) <= 128
-            ]
-            existing_profile = self.conn.execute(
-                f"""
-                SELECT known_usernames_json
-                FROM {CONTACTS_TABLE}
-                WHERE contact_id = ?
-                LIMIT 1
-                """,
-                (contact_id,),
-            ).fetchone()
-            usernames_json = _merge_known_usernames_json(
-                existing_profile[0] if existing_profile else None,
-                username_candidates,
-            )
-
-            self.conn.execute(
-                f"""
-                INSERT INTO {CONTACTS_TABLE}
-                (
-                    contact_id,
-                    dataset_id,
-                    source_id,
-                    display_name,
-                    known_usernames_json,
-                    is_self,
-                    last_import_source,
-                    last_import_run_id,
-                    last_imported_at,
-                    created_at,
-                    updated_at
+                usernames_json = _merge_known_usernames_json(
+                    existing_profile[0] if existing_profile else None,
+                    username_candidates,
                 )
-                VALUES (?, ?, ?, ?, ?, 0, ?, ?, CASE WHEN ? IS NOT NULL THEN datetime('now') ELSE NULL END, datetime('now'), datetime('now'))
-                ON CONFLICT(contact_id) DO UPDATE SET
-                    display_name = COALESCE({CONTACTS_TABLE}.display_name, excluded.display_name),
-                    known_usernames_json = COALESCE(excluded.known_usernames_json, {CONTACTS_TABLE}.known_usernames_json),
-                    last_import_source = COALESCE(excluded.last_import_source, {CONTACTS_TABLE}.last_import_source),
-                    last_import_run_id = COALESCE(excluded.last_import_run_id, {CONTACTS_TABLE}.last_import_run_id),
-                    last_imported_at = CASE
-                        WHEN excluded.last_import_source IS NOT NULL THEN datetime('now')
-                        ELSE {CONTACTS_TABLE}.last_imported_at
-                    END,
-                    updated_at = datetime('now')
-                """,
-                (
-                    contact_id,
-                    dataset_id,
-                    CANONICAL_ADDRESS_BOOK_SOURCE_ID,
-                    display_name,
-                    usernames_json,
-                    import_source_value,
-                    import_run_id_value,
-                    import_source_value,
-                ),
-            )
-            contacts_upserted += 1
 
-            identifier_scopes = ["*"] + scoped_sources
-            for identifier, identifier_type in pairs:
-                for scope_source_id in identifier_scopes:
-                    self.conn.execute(
-                        f"""
-                        INSERT INTO {CONTACT_IDENTIFIERS_TABLE}
-                        (dataset_id, source_id, identifier, identifier_type, contact_id, created_at, updated_at)
-                        VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
-                        ON CONFLICT(dataset_id, source_id, identifier) DO UPDATE SET
-                            identifier_type = COALESCE({CONTACT_IDENTIFIERS_TABLE}.identifier_type, excluded.identifier_type),
-                            contact_id = {CONTACT_IDENTIFIERS_TABLE}.contact_id,
-                            updated_at = datetime('now')
-                        """,
-                        (dataset_id, scope_source_id, identifier, identifier_type, contact_id),
+                self.conn.execute(
+                    f"""
+                    INSERT INTO {CONTACTS_TABLE}
+                    (
+                        contact_id,
+                        dataset_id,
+                        source_id,
+                        display_name,
+                        known_usernames_json,
+                        is_self,
+                        last_import_source,
+                        last_import_run_id,
+                        last_imported_at,
+                        created_at,
+                        updated_at
                     )
-                    identifiers_upserted += 1
+                    VALUES (?, ?, ?, ?, ?, 0, ?, ?, CASE WHEN ? IS NOT NULL THEN datetime('now') ELSE NULL END, datetime('now'), datetime('now'))
+                    ON CONFLICT(contact_id) DO UPDATE SET
+                        display_name = COALESCE({CONTACTS_TABLE}.display_name, excluded.display_name),
+                        known_usernames_json = COALESCE(excluded.known_usernames_json, {CONTACTS_TABLE}.known_usernames_json),
+                        last_import_source = COALESCE(excluded.last_import_source, {CONTACTS_TABLE}.last_import_source),
+                        last_import_run_id = COALESCE(excluded.last_import_run_id, {CONTACTS_TABLE}.last_import_run_id),
+                        last_imported_at = CASE
+                            WHEN excluded.last_import_source IS NOT NULL THEN datetime('now')
+                            ELSE {CONTACTS_TABLE}.last_imported_at
+                        END,
+                        updated_at = datetime('now')
+                    """,
+                    (
+                        contact_id,
+                        dataset_id,
+                        CANONICAL_ADDRESS_BOOK_SOURCE_ID,
+                        display_name,
+                        usernames_json,
+                        import_source_value,
+                        import_run_id_value,
+                        import_source_value,
+                    ),
+                )
+                contacts_upserted += 1
 
-        self.conn.commit()
+                identifier_scopes = ["*"] + scoped_sources
+                for identifier, identifier_type in pairs:
+                    for scope_source_id in identifier_scopes:
+                        self.conn.execute(
+                            f"""
+                            INSERT INTO {CONTACT_IDENTIFIERS_TABLE}
+                            (dataset_id, source_id, identifier, identifier_type, contact_id, created_at, updated_at)
+                            VALUES (?, ?, ?, ?, ?, datetime('now'), datetime('now'))
+                            ON CONFLICT(dataset_id, source_id, identifier) DO UPDATE SET
+                                identifier_type = COALESCE({CONTACT_IDENTIFIERS_TABLE}.identifier_type, excluded.identifier_type),
+                                contact_id = {CONTACT_IDENTIFIERS_TABLE}.contact_id,
+                                updated_at = datetime('now')
+                            """,
+                            (dataset_id, scope_source_id, identifier, identifier_type, contact_id),
+                        )
+                        identifiers_upserted += 1
+
         return {"contacts_upserted": contacts_upserted, "identifiers_upserted": identifiers_upserted}

@@ -7,6 +7,8 @@ import logging
 import sqlite3
 from typing import Any, Dict, Optional
 
+from ..db.write_gate import commit_connection, with_db_write
+
 logger = logging.getLogger("topos.storage.raw.raw_tables_manager")
 
 
@@ -76,28 +78,30 @@ class RawTablesManager:
             if table_name == "raw_chat_messages_browservisits":
                 self._ensure_browser_visits_raw_table(table_name)
                 return
-            self.conn.execute(f"""
-                CREATE TABLE IF NOT EXISTS {table_name} (
-                    source_system TEXT NOT NULL,
-                    source_record_id TEXT NOT NULL,
-                    payload_json TEXT NOT NULL,
-                    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-                    PRIMARY KEY (source_system, source_record_id)
-                )
-            """)
-            
-            # Create indexes
-            self.conn.execute(f"""
-                CREATE INDEX IF NOT EXISTS idx_{table_name}_source_system 
-                ON {table_name}(source_system)
-            """)
-            
-            self.conn.execute(f"""
-                CREATE INDEX IF NOT EXISTS idx_{table_name}_created_at 
-                ON {table_name}(created_at)
-            """)
-            
-            self.conn.commit()
+            # DDL takes SQLite's write lock at execute time — gate it with the commit.
+            with with_db_write():
+                self.conn.execute(f"""
+                    CREATE TABLE IF NOT EXISTS {table_name} (
+                        source_system TEXT NOT NULL,
+                        source_record_id TEXT NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        created_at TEXT NOT NULL DEFAULT (datetime('now')),
+                        PRIMARY KEY (source_system, source_record_id)
+                    )
+                """)
+
+                # Create indexes
+                self.conn.execute(f"""
+                    CREATE INDEX IF NOT EXISTS idx_{table_name}_source_system
+                    ON {table_name}(source_system)
+                """)
+
+                self.conn.execute(f"""
+                    CREATE INDEX IF NOT EXISTS idx_{table_name}_created_at
+                    ON {table_name}(created_at)
+                """)
+
+                commit_connection(self.conn)
         except Exception as e:
             self.conn.rollback()
             logger.error("Failed to ensure raw table %s: %s", table_name, e)
@@ -138,13 +142,17 @@ class RawTablesManager:
                 )
             """)
 
-        if not table_exists:
-            _create_schema(table_name)
-        else:
+        # Schema inspection stays outside the hold; the DDL and migration copy
+        # below take SQLite's write lock at execute time — gate them with the commit.
+        needs_migration = False
+        if table_exists:
             existing_cols_cursor = self.conn.execute(f"PRAGMA table_info({table_name})")
             existing_cols = {row[1] for row in existing_cols_cursor.fetchall()}
             needs_migration = "payload_json" in existing_cols or "url" not in existing_cols
-            if needs_migration:
+        with with_db_write():
+            if not table_exists:
+                _create_schema(table_name)
+            elif needs_migration:
                 pre_count = self.conn.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
                 tmp_table = f"{table_name}__migrated"
                 self.conn.execute(f"DROP TABLE IF EXISTS {tmp_table}")
@@ -204,23 +212,23 @@ class RawTablesManager:
                     post_count,
                 )
 
-        self.conn.execute(f"""
-            CREATE INDEX IF NOT EXISTS idx_{table_name}_source_system
-            ON {table_name}(source_system)
-        """)
-        self.conn.execute(f"""
-            CREATE INDEX IF NOT EXISTS idx_{table_name}_created_at
-            ON {table_name}(created_at)
-        """)
-        self.conn.execute(f"""
-            CREATE INDEX IF NOT EXISTS idx_{table_name}_visited_at
-            ON {table_name}(visited_at)
-        """)
-        self.conn.execute(f"""
-            CREATE INDEX IF NOT EXISTS idx_{table_name}_url
-            ON {table_name}(url)
-        """)
-        self.conn.commit()
+            self.conn.execute(f"""
+                CREATE INDEX IF NOT EXISTS idx_{table_name}_source_system
+                ON {table_name}(source_system)
+            """)
+            self.conn.execute(f"""
+                CREATE INDEX IF NOT EXISTS idx_{table_name}_created_at
+                ON {table_name}(created_at)
+            """)
+            self.conn.execute(f"""
+                CREATE INDEX IF NOT EXISTS idx_{table_name}_visited_at
+                ON {table_name}(visited_at)
+            """)
+            self.conn.execute(f"""
+                CREATE INDEX IF NOT EXISTS idx_{table_name}_url
+                ON {table_name}(url)
+            """)
+            commit_connection(self.conn)
     
     def write_raw_record(
         self,
@@ -242,48 +250,50 @@ class RawTablesManager:
         
         try:
             if table_name == "raw_chat_messages_browservisits":
-                self.conn.execute(f"""
-                    INSERT OR REPLACE INTO {table_name}
-                    (
-                        source_system, source_record_id, record_id, dataset_id, url, visited_at, title,
-                        favicon_url, hostname, device_name, tab_id, window_id, incognito, transition_type,
-                        pinned, audible, muted, opener_tab_id, referred_by, created_at
-                    )
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-                """, (
-                    source_id,
-                    source_record_id,
-                    payload.get("record_id") or source_record_id,
-                    payload.get("dataset_id"),
-                    payload.get("url"),
-                    payload.get("visited_at"),
-                    payload.get("title"),
-                    payload.get("favicon_url"),
-                    payload.get("hostname"),
-                    payload.get("device_name"),
-                    payload.get("tab_id") if isinstance(payload.get("tab_id"), int) else None,
-                    payload.get("window_id") if isinstance(payload.get("window_id"), int) else None,
-                    1 if payload.get("incognito") is True else (0 if payload.get("incognito") is False else None),
-                    payload.get("transition_type"),
-                    1 if payload.get("pinned") is True else (0 if payload.get("pinned") is False else None),
-                    1 if payload.get("audible") is True else (0 if payload.get("audible") is False else None),
-                    1 if payload.get("muted") is True else (0 if payload.get("muted") is False else None),
-                    payload.get("opener_tab_id") if isinstance(payload.get("opener_tab_id"), int) else None,
-                    payload.get("referred_by"),
-                ))
-                self.conn.commit()
+                with with_db_write():
+                    self.conn.execute(f"""
+                        INSERT OR REPLACE INTO {table_name}
+                        (
+                            source_system, source_record_id, record_id, dataset_id, url, visited_at, title,
+                            favicon_url, hostname, device_name, tab_id, window_id, incognito, transition_type,
+                            pinned, audible, muted, opener_tab_id, referred_by, created_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
+                    """, (
+                        source_id,
+                        source_record_id,
+                        payload.get("record_id") or source_record_id,
+                        payload.get("dataset_id"),
+                        payload.get("url"),
+                        payload.get("visited_at"),
+                        payload.get("title"),
+                        payload.get("favicon_url"),
+                        payload.get("hostname"),
+                        payload.get("device_name"),
+                        payload.get("tab_id") if isinstance(payload.get("tab_id"), int) else None,
+                        payload.get("window_id") if isinstance(payload.get("window_id"), int) else None,
+                        1 if payload.get("incognito") is True else (0 if payload.get("incognito") is False else None),
+                        payload.get("transition_type"),
+                        1 if payload.get("pinned") is True else (0 if payload.get("pinned") is False else None),
+                        1 if payload.get("audible") is True else (0 if payload.get("audible") is False else None),
+                        1 if payload.get("muted") is True else (0 if payload.get("muted") is False else None),
+                        payload.get("opener_tab_id") if isinstance(payload.get("opener_tab_id"), int) else None,
+                        payload.get("referred_by"),
+                    ))
+                    commit_connection(self.conn)
                 return
 
             # Store payload as JSON string
             payload_json = json.dumps(payload, ensure_ascii=False)
-            
-            self.conn.execute(f"""
-                INSERT OR REPLACE INTO {table_name} 
-                (source_system, source_record_id, payload_json, created_at)
-                VALUES (?, ?, ?, datetime('now'))
-            """, (source_id, source_record_id, payload_json))
-            
-            self.conn.commit()
+
+            with with_db_write():
+                self.conn.execute(f"""
+                    INSERT OR REPLACE INTO {table_name}
+                    (source_system, source_record_id, payload_json, created_at)
+                    VALUES (?, ?, ?, datetime('now'))
+                """, (source_id, source_record_id, payload_json))
+
+                commit_connection(self.conn)
         except Exception as e:
             self.conn.rollback()
             logger.error(

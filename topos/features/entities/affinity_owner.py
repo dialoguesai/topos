@@ -208,7 +208,10 @@ def recompute_affinity_now(conn: sqlite3.Connection) -> Dict[str, Any]:
     """Rebuild centroids then affinity edges; return status + rebuild stats."""
     from .context_vectors import rebuild_entity_context_vectors
 
-    centroids = rebuild_entity_context_vectors(conn, commit=False)
+    # Centroids commit inside their own hold: deferring their commit to the
+    # edge rebuild left the write transaction open across gate releases
+    # (write_gate lock-order inversion).
+    centroids = rebuild_entity_context_vectors(conn)
     affinity = rebuild_affinity_edges(conn, commit=True)
     status = get_affinity_status(conn)
     return {
@@ -371,7 +374,7 @@ def label_affinity_pair(
 
     label_id = f"apl_{uuid.uuid4().hex[:16]}"
     now = _now_iso()
-    from ...storage.db.write_gate import with_db_write
+    from ...storage.db.write_gate import commit_connection, with_db_write
 
     with with_db_write():
         conn.execute(
@@ -388,7 +391,7 @@ def label_affinity_pair(
             """,
             (label_id, src, dst, cosine, label, note, now),
         )
-        conn.commit()
+        commit_connection(conn)
 
     return {
         "label_id": label_id,

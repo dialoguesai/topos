@@ -11,6 +11,7 @@ from typing import Any, Callable, Dict, List, Optional
 import httpx
 
 from .canonical_writer import DISCLOSURE_MODEL_SETTING, upsert_disclosure_fields, upsert_nsfw_fields
+from ..storage.db.write_gate import batched_writes, with_db_write
 from .field_registry import (
     CANONICAL_ID_COLUMN,
     canonical_table_for_message,
@@ -181,7 +182,10 @@ async def run_privacy_disclosure_layer(
     from ..config.settings import settings
     from ..storage.db.migrations.canonical_nsfw_v1 import apply_canonical_nsfw_v1_up
 
-    apply_canonical_nsfw_v1_up(conn)
+    # Migration entry point invoked outside the gated runner; it writes and
+    # commits internally, so the whole call holds the gate.
+    with with_db_write():
+        apply_canonical_nsfw_v1_up(conn)
 
     if not getattr(settings, "platform_privacy_via_engine", True):
         logger.debug("[PIPELINE:PRIVACY] skipped: platform_privacy_via_engine=false")
@@ -199,6 +203,10 @@ async def run_privacy_disclosure_layer(
     updated = 0
     failed_batches = 0
     total = len(canonical_messages)
+    # Engine batches below stay outside the write gate; row updates are
+    # collected here and applied in one gated pass with the single commit.
+    disclosure_ops: List[tuple[str, str, Dict[str, Any], str]] = []
+    nsfw_ops: List[tuple[str, str, bool, float, Optional[str]]] = []
 
     if not nsfw_only:
         # Group pending redactions by batch
@@ -279,14 +287,7 @@ async def run_privacy_disclosure_layer(
                 msg[disclosure_column(field)] = redacted
                 msg[disclosure_hash_column(field)] = patches[disclosure_hash_column(field)]
                 msg[field] = redacted
-                if upsert_disclosure_fields(
-                    conn,
-                    table,
-                    entry["record_id"],
-                    patches,
-                    model_id=model_id,
-                ):
-                    updated += 1
+                disclosure_ops.append((table, entry["record_id"], patches, model_id))
 
     nsfw_tagged = 0
     nsfw_failed_batches = 0
@@ -339,19 +340,26 @@ async def run_privacy_disclosure_layer(
                 msg["content_nsfw_score"] = score
                 if model_id:
                     msg["content_nsfw_model"] = model_id
-                if upsert_nsfw_fields(
-                    conn,
-                    entry["table"],
-                    entry["record_id"],
-                    is_nsfw=is_nsfw,
-                    score=score,
-                    model_id=model_id or None,
-                ):
-                    nsfw_tagged += 1
+                nsfw_ops.append(
+                    (entry["table"], entry["record_id"], is_nsfw, score, model_id or None)
+                )
 
-    # Commit unconditionally: 0-row updates still opened an implicit
-    # transaction, which must not outlive this call.
-    conn.commit()
+    # Gated write pass: batch commits at exit (unconditionally, so no implicit
+    # transaction outlives this call).
+    with batched_writes(conn):
+        for table, record_id, patches, model_id in disclosure_ops:
+            if upsert_disclosure_fields(conn, table, record_id, patches, model_id=model_id):
+                updated += 1
+        for table, record_id, is_nsfw, score, model_id in nsfw_ops:
+            if upsert_nsfw_fields(
+                conn,
+                table,
+                record_id,
+                is_nsfw=is_nsfw,
+                score=score,
+                model_id=model_id,
+            ):
+                nsfw_tagged += 1
 
     duration_ms = int((time.perf_counter() - started) * 1000)
     logger.debug(
