@@ -9,6 +9,7 @@ from typing import Any, Callable, Dict, List, Optional
 
 from ..base import BaseEnrichmentJob
 from ....disclosure.canonical_writer import DISCLOSURE_MODEL_SETTING, upsert_disclosure_fields
+from ....storage.db.write_gate import batched_writes
 from ....disclosure.field_registry import (
     CANONICAL_ID_COLUMN,
     canonical_table_for_message,
@@ -66,6 +67,9 @@ class PiiRedactionJob(BaseEnrichmentJob):
 
         updated = 0
         total = len(canonical_messages)
+        # Redaction compute pass collects patches; writes happen in a short
+        # gated pass below (redaction must never run inside the write gate).
+        pending: List[tuple[str, str, Dict[str, Any]]] = []
         for idx, msg in enumerate(canonical_messages):
             if idx % 8 == 0:
                 await asyncio.sleep(0)
@@ -112,18 +116,21 @@ class PiiRedactionJob(BaseEnrichmentJob):
                 patches[disclosure_hash_column(field)] = _content_hash(raw)
                 msg[field] = redacted
 
-            if patches and upsert_disclosure_fields(
-                conn,
-                table,
-                record_id,
-                patches,
-                model_id=DISCLOSURE_MODEL_SETTING,
-            ):
-                updated += 1
+            if patches:
+                pending.append((table, record_id, patches))
             if progress_callback:
                 progress_callback(idx + 1, total)
 
-        # Commit unconditionally: a no-change pass may still have opened an
-        # implicit transaction, which must not outlive this job.
-        conn.commit()
+        # Gated write pass: batch commits at exit (unconditionally, so no
+        # implicit transaction outlives this job).
+        with batched_writes(conn):
+            for table, record_id, patches in pending:
+                if upsert_disclosure_fields(
+                    conn,
+                    table,
+                    record_id,
+                    patches,
+                    model_id=DISCLOSURE_MODEL_SETTING,
+                ):
+                    updated += 1
         return [{"records_updated": updated}] if updated else []

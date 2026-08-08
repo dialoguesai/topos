@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 
 from ..auth import require_api_key
 from ..core.state import get_db_connection
+from ..storage.db.write_gate import commit_connection, with_db_write
 
 router = APIRouter(tags=["data-commit"])
 
@@ -21,35 +22,38 @@ def _now_iso() -> str:
 
 
 def _ensure_tables(conn) -> None:
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS data_commit_artifacts (
-            commit_id TEXT PRIMARY KEY,
-            compute_task_id TEXT NOT NULL,
-            topos_id TEXT NOT NULL,
-            resource_id TEXT NOT NULL,
-            artifact_schema_version TEXT NOT NULL,
-            artifact_json TEXT NOT NULL,
-            idempotency_key TEXT UNIQUE,
-            correlation_id TEXT,
-            requested_by TEXT,
-            created_at TEXT NOT NULL
+    # DDL takes SQLite's write lock at execute time — gate it with the commit
+    # (write_gate lock-order inversion).
+    with with_db_write():
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS data_commit_artifacts (
+                commit_id TEXT PRIMARY KEY,
+                compute_task_id TEXT NOT NULL,
+                topos_id TEXT NOT NULL,
+                resource_id TEXT NOT NULL,
+                artifact_schema_version TEXT NOT NULL,
+                artifact_json TEXT NOT NULL,
+                idempotency_key TEXT UNIQUE,
+                correlation_id TEXT,
+                requested_by TEXT,
+                created_at TEXT NOT NULL
+            )
+            """
         )
-        """
-    )
-    conn.execute(
-        """
-        CREATE TABLE IF NOT EXISTS data_commit_audit (
-            audit_id TEXT PRIMARY KEY,
-            commit_id TEXT,
-            compute_task_id TEXT NOT NULL,
-            idempotency_key TEXT,
-            outcome TEXT NOT NULL,
-            created_at TEXT NOT NULL
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS data_commit_audit (
+                audit_id TEXT PRIMARY KEY,
+                commit_id TEXT,
+                compute_task_id TEXT NOT NULL,
+                idempotency_key TEXT,
+                outcome TEXT NOT NULL,
+                created_at TEXT NOT NULL
+            )
+            """
         )
-        """
-    )
-    conn.commit()
+        commit_connection(conn)
 
 
 class CommitArtifactRequest(BaseModel):
@@ -74,76 +78,80 @@ async def commit_artifact(body: CommitArtifactRequest) -> Dict[str, Any]:
     commit_id = f"commit_{uuid.uuid4().hex}"
     now = _now_iso()
     try:
-        conn.execute("BEGIN IMMEDIATE")
-        if body.idempotency_key:
-            existing = conn.execute(
-                """
-                SELECT commit_id, correlation_id FROM data_commit_artifacts
-                WHERE idempotency_key = ?
-                LIMIT 1
-                """,
-                (body.idempotency_key,),
-            ).fetchone()
-            if existing:
-                existing_commit_id = str(existing["commit_id"])
-                conn.execute(
+        # BEGIN IMMEDIATE takes SQLite's write lock at execute time — the whole
+        # transaction holds the gate with the commit (write_gate lock-order
+        # inversion). Rollback stays outside the hold.
+        with with_db_write():
+            conn.execute("BEGIN IMMEDIATE")
+            if body.idempotency_key:
+                existing = conn.execute(
                     """
-                    INSERT INTO data_commit_audit
-                    (audit_id, commit_id, compute_task_id, idempotency_key, outcome, created_at)
-                    VALUES (?, ?, ?, ?, ?, ?)
+                    SELECT commit_id, correlation_id FROM data_commit_artifacts
+                    WHERE idempotency_key = ?
+                    LIMIT 1
                     """,
-                    (
-                        f"dca_{uuid.uuid4().hex}",
-                        existing_commit_id,
-                        body.compute_task_id,
-                        body.idempotency_key,
-                        "idempotent_replay",
-                        now,
-                    ),
-                )
-                conn.commit()
-                return {
-                    "commit_id": existing_commit_id,
-                    "deduped": True,
-                    "compute_task_id": body.compute_task_id,
-                    "correlation_id": str(existing["correlation_id"] or body.correlation_id or ""),
-                }
+                    (body.idempotency_key,),
+                ).fetchone()
+                if existing:
+                    existing_commit_id = str(existing["commit_id"])
+                    conn.execute(
+                        """
+                        INSERT INTO data_commit_audit
+                        (audit_id, commit_id, compute_task_id, idempotency_key, outcome, created_at)
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        """,
+                        (
+                            f"dca_{uuid.uuid4().hex}",
+                            existing_commit_id,
+                            body.compute_task_id,
+                            body.idempotency_key,
+                            "idempotent_replay",
+                            now,
+                        ),
+                    )
+                    commit_connection(conn)
+                    return {
+                        "commit_id": existing_commit_id,
+                        "deduped": True,
+                        "compute_task_id": body.compute_task_id,
+                        "correlation_id": str(existing["correlation_id"] or body.correlation_id or ""),
+                    }
 
-        conn.execute(
-            """
-            INSERT INTO data_commit_artifacts
-            (commit_id, compute_task_id, topos_id, resource_id, artifact_schema_version, artifact_json, idempotency_key, correlation_id, requested_by, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
-                commit_id,
-                body.compute_task_id,
-                body.topos_id,
-                body.resource_id,
-                body.artifact_schema_version,
-                json.dumps(body.artifact),
-                body.idempotency_key,
-                body.correlation_id,
-                body.requested_by,
-                now,
-            ),
-        )
-        conn.execute(
-            """
-            INSERT INTO data_commit_audit
-            (audit_id, commit_id, compute_task_id, idempotency_key, outcome, created_at)
-            VALUES (?, ?, ?, ?, ?, ?)
-            """,
-            (
-                f"dca_{uuid.uuid4().hex}",
-                commit_id,
-                body.compute_task_id,
-                body.idempotency_key,
-                "committed",
-                now,
-            ),
-        )
-        conn.commit()
+            conn.execute(
+                """
+                INSERT INTO data_commit_artifacts
+                (commit_id, compute_task_id, topos_id, resource_id, artifact_schema_version, artifact_json, idempotency_key, correlation_id, requested_by, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    commit_id,
+                    body.compute_task_id,
+                    body.topos_id,
+                    body.resource_id,
+                    body.artifact_schema_version,
+                    json.dumps(body.artifact),
+                    body.idempotency_key,
+                    body.correlation_id,
+                    body.requested_by,
+                    now,
+                ),
+            )
+            conn.execute(
+                """
+                INSERT INTO data_commit_audit
+                (audit_id, commit_id, compute_task_id, idempotency_key, outcome, created_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    f"dca_{uuid.uuid4().hex}",
+                    commit_id,
+                    body.compute_task_id,
+                    body.idempotency_key,
+                    "committed",
+                    now,
+                ),
+            )
+            commit_connection(conn)
     except Exception as exc:  # noqa: BLE001
         conn.rollback()
         raise HTTPException(

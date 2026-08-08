@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional
 from uuid import UUID
 
 from .schema import ensure_home_chat_schema
+from ..storage.db.write_gate import commit_connection, with_db_write
 
 MAX_HISTORY_BYTES = 1_048_576
 
@@ -166,37 +167,38 @@ def upsert_session(conn: sqlite3.Connection, *, user_id: str, payload: Dict[str,
 
     history_json = json.dumps(history, separators=(",", ":"), default=str)
     participants_json = json.dumps(participants, separators=(",", ":"), default=str)
-    conn.execute(
-        """
-        INSERT INTO home_chat_sessions (
-            id, user_id, engine_id, title, trace_session_id, history_json, participants_json, revision,
-            created_at_ms, updated_at_ms, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-        ON CONFLICT(id) DO UPDATE SET
-            engine_id = excluded.engine_id,
-            title = excluded.title,
-            trace_session_id = excluded.trace_session_id,
-            history_json = excluded.history_json,
-            participants_json = excluded.participants_json,
-            revision = excluded.revision,
-            updated_at_ms = excluded.updated_at_ms,
-            updated_at = excluded.updated_at
-        """,
-        (
-            sid,
-            uid,
-            engine_id,
-            str(payload.get("title") or "New chat").strip() or "New chat",
-            str(payload.get("traceSessionId") or payload.get("trace_session_id") or ""),
-            history_json,
-            participants_json,
-            next_revision,
-            created_at_ms,
-            updated_at_ms,
-            now,
-        ),
-    )
-    conn.commit()
+    with with_db_write():
+        conn.execute(
+            """
+            INSERT INTO home_chat_sessions (
+                id, user_id, engine_id, title, trace_session_id, history_json, participants_json, revision,
+                created_at_ms, updated_at_ms, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(id) DO UPDATE SET
+                engine_id = excluded.engine_id,
+                title = excluded.title,
+                trace_session_id = excluded.trace_session_id,
+                history_json = excluded.history_json,
+                participants_json = excluded.participants_json,
+                revision = excluded.revision,
+                updated_at_ms = excluded.updated_at_ms,
+                updated_at = excluded.updated_at
+            """,
+            (
+                sid,
+                uid,
+                engine_id,
+                str(payload.get("title") or "New chat").strip() or "New chat",
+                str(payload.get("traceSessionId") or payload.get("trace_session_id") or ""),
+                history_json,
+                participants_json,
+                next_revision,
+                created_at_ms,
+                updated_at_ms,
+                now,
+            ),
+        )
+        commit_connection(conn)
     row = conn.execute("SELECT * FROM home_chat_sessions WHERE id = ?", (sid,)).fetchone()
     if not row:
         raise RuntimeError("Failed to persist session")
@@ -205,9 +207,10 @@ def upsert_session(conn: sqlite3.Connection, *, user_id: str, payload: Dict[str,
 
 def delete_session(conn: sqlite3.Connection, *, user_id: str, session_id: str) -> bool:
     ensure_home_chat_schema(conn)
-    cur = conn.execute(
-        "DELETE FROM home_chat_sessions WHERE id = ? AND user_id = ?",
-        (str(session_id).strip(), str(user_id).strip()),
-    )
-    conn.commit()
+    with with_db_write():
+        cur = conn.execute(
+            "DELETE FROM home_chat_sessions WHERE id = ? AND user_id = ?",
+            (str(session_id).strip(), str(user_id).strip()),
+        )
+        commit_connection(conn)
     return cur.rowcount > 0

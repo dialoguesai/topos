@@ -166,10 +166,15 @@ async def startup_event() -> None:
     try:
         from .core.state import db_conn, get_db_connection
         from .storage.db.migrations.stage9_column_renames import run_stage9_migrations
+        from .storage.db.write_gate import with_db_write
         # Respect pre-injected test connections; avoid replacing test DB handles during startup.
         conn = db_conn if db_conn is not None else get_db_connection()
         if conn:
-            result = run_stage9_migrations(conn)
+            # run_stage9_migrations executes + commits ALTERs without managing
+            # the gate — hold it around the whole call (write_gate lock-order
+            # inversion; migration entry point outside the gated runner).
+            with with_db_write():
+                result = run_stage9_migrations(conn)
             if result.get("applied"):
                 logger.info("Stage 9 migrations applied at startup: %d renames", len(result["applied"]))
     except Exception as e:

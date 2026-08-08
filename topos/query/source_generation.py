@@ -6,6 +6,8 @@ import logging
 import sqlite3
 from typing import List, Optional
 
+from ..storage.db.write_gate import batched_writes
+
 logger = logging.getLogger(__name__)
 
 GENERATION_TABLE = "scope_source_generation"
@@ -50,18 +52,18 @@ def bump_source_generation(
             pass
     if not targets:
         targets = ["*"]
-    for scope_id in targets:
-        conn.execute(
-            f"""
-            INSERT INTO {GENERATION_TABLE} (scope_id, source_id, generation, updated_at)
-            VALUES (?, ?, 1, datetime('now'))
-            ON CONFLICT(scope_id, source_id) DO UPDATE SET
-                generation = {GENERATION_TABLE}.generation + 1,
-                updated_at = datetime('now')
-            """,
-            (scope_id, sid),
-        )
-    conn.commit()
+    with batched_writes(conn):
+        for scope_id in targets:
+            conn.execute(
+                f"""
+                INSERT INTO {GENERATION_TABLE} (scope_id, source_id, generation, updated_at)
+                VALUES (?, ?, 1, datetime('now'))
+                ON CONFLICT(scope_id, source_id) DO UPDATE SET
+                    generation = {GENERATION_TABLE}.generation + 1,
+                    updated_at = datetime('now')
+                """,
+                (scope_id, sid),
+            )
 
 
 def get_data_health_version(
