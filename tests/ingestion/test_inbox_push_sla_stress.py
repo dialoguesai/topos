@@ -19,18 +19,42 @@ pytestmark = pytest.mark.asyncio
 
 @pytest.fixture
 def sqlite_conn(tmp_path, monkeypatch):
+    import threading
+
     db_path = tmp_path / "stress.db"
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    # WAL + busy timeout: the factory below hands each worker thread its own
+    # connection to this file, so concurrent readers/writers must coexist.
+    conn.execute("PRAGMA journal_mode=WAL")
+
+    # Thread-local factory, mirroring production get_db_connection: enqueue and
+    # job bookkeeping now run on executor threads, and a single connection
+    # shared across concurrently-running threads corrupts transaction state
+    # (the 2026-07-30 D1 failure mode this suite exists to prevent).
+    local = threading.local()
+
+    def _conn() -> sqlite3.Connection:
+        own = getattr(local, "conn", None)
+        if own is None:
+            own = sqlite3.connect(str(db_path), check_same_thread=False)
+            own.execute("PRAGMA busy_timeout=5000")
+            local.conn = own
+        return own
+
+    local.conn = conn
+    conn.execute("PRAGMA busy_timeout=5000")
     monkeypatch.setattr(
         "topos.ingestion.usage_inbox_dedupe.get_db_connection",
-        lambda: conn,
+        _conn,
     )
     monkeypatch.setattr(
         "topos.core.handlers.get_db_connection",
-        lambda: conn,
+        _conn,
     )
     yield conn
-    conn.close()
+    # No close: background job bookkeeping runs on executor threads that can
+    # outlive the test's event loop; closing the shared handle under a live
+    # thread segfaults CPython's sqlite3. The tmp-path db is reaped by pytest.
 
 
 def _app_ingest_message(write_id: str, *, req_id: str = "req-1") -> dict:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
@@ -319,8 +320,35 @@ class SignalDerivationOrchestrator(EnrichmentOrchestrator):
         PipelineStage: Any,
     ) -> Dict[str, Any]:
         resolved = self._resolve_job_names(source_id, job_names)
+        # Captured BEFORE _get_adapters caches a runtime bundle: injected
+        # adapters (tests) are thread-agnostic fakes whose writes may run
+        # inline; a runtime bundle binds THIS thread's sqlite connection, so
+        # its writes must be offloaded to a worker thread that builds its own.
+        runtime_bound = self._adapters is None
         adapters = self._get_adapters()
         conn = get_db_connection()
+
+        async def _offload_write(fn: Callable[[Any, Any], Any]) -> Any:
+            """Run ``fn(conn, adapters)`` without blocking the event loop.
+
+            Every write below takes the process-wide write gate — a blocking
+            OS lock. Taken here it stalls every coroutine behind whatever
+            writer currently holds it; on 2026-08-07 that writer was a 156s
+            graph rebuild and the loop froze for good. On the runtime path the
+            call runs on a worker thread against that thread's own connection
+            and adapters (the loop's connection must never cross threads —
+            2026-07-30 transaction corruption). Injected fakes run inline.
+            """
+            if not runtime_bound:
+                return fn(conn, adapters)
+
+            def _in_thread() -> Any:
+                from ..storage.adapters.factory import AdapterFactory
+
+                return fn(get_db_connection(), AdapterFactory.from_runtime())
+
+            return await asyncio.to_thread(_in_thread)
+
         results: Dict[str, Any] = {
             "jobs_run": 0,
             "records_created": {},
@@ -369,14 +397,25 @@ class SignalDerivationOrchestrator(EnrichmentOrchestrator):
                     model = records[0].get("model")
                     if model:
                         provenance["model"] = model
-                    count = write_signal_records(
-                        job_name,
-                        records,
-                        adapters=adapters,
-                        tables_manager=self.tables_manager,
-                        provenance={**provenance, "sync_batch_id": sync_batch_id, "source_id": source_id},
-                        conn=conn,
-                    )
+                    prov_full = {**provenance, "sync_batch_id": sync_batch_id, "source_id": source_id}
+
+                    def _persist_records(conn_w: Any, adapters_w: Any, *, _job: str = job_name, _records: List[Dict[str, Any]] = records, _prov: Dict[str, Any] = prov_full) -> int:
+                        tables = self.tables_manager
+                        if runtime_bound and conn_w is not None:
+                            # The orchestrator's manager is bound to the loop
+                            # thread's connection; this write runs on a worker
+                            # thread, so rebind (DDL is cached per connection).
+                            tables = DerivedTablesManager(conn_w)
+                        return write_signal_records(
+                            _job,
+                            _records,
+                            adapters=adapters_w,
+                            tables_manager=tables,
+                            provenance=_prov,
+                            conn=conn_w,
+                        )
+
+                    count = await _offload_write(_persist_records)
                     results["records_created"][job_name] = count + direct_written
                 else:
                     results["records_created"][job_name] = direct_written
@@ -393,9 +432,12 @@ class SignalDerivationOrchestrator(EnrichmentOrchestrator):
                 results["jobs_run"] += 1
                 # This job's output is in. If an earlier run left a debt for the
                 # same (batch, job), it is settled.
-                clear_derivation_retry(
-                    conn, sync_batch_id=sync_batch_id or "unknown", job_name=job_name
-                )
+                def _settle_debt(conn_w: Any, _adapters: Any, *, _job: str = job_name) -> None:
+                    clear_derivation_retry(
+                        conn_w, sync_batch_id=sync_batch_id or "unknown", job_name=_job
+                    )
+
+                await _offload_write(_settle_debt)
                 if progress_callback:
                     progress_callback(0, len(canonical_messages), job_name, (job_idx / total_jobs) * 100, 100.0)
             except Exception as exc:
@@ -404,23 +446,29 @@ class SignalDerivationOrchestrator(EnrichmentOrchestrator):
                 # Durable debt. Catching this exception used to be the whole
                 # response, which is how 88 records' facts were lost with the
                 # batch still reporting clean.
-                record_failed_derivation(
-                    conn,
-                    source_id=source_id,
-                    sync_batch_id=sync_batch_id or "unknown",
-                    job_name=job_name,
-                    error=str(exc),
-                    record_ids=[
-                        str(m.get("message_id") or m.get("record_id") or "")
-                        for m in canonical_messages[:500]
-                    ],
-                    record_count=len(canonical_messages),
-                )
+                def _record_debt(conn_w: Any, _adapters: Any, *, _job: str = job_name, _error: str = str(exc)) -> None:
+                    record_failed_derivation(
+                        conn_w,
+                        source_id=source_id,
+                        sync_batch_id=sync_batch_id or "unknown",
+                        job_name=_job,
+                        error=_error,
+                        record_ids=[
+                            str(m.get("message_id") or m.get("record_id") or "")
+                            for m in canonical_messages[:500]
+                        ],
+                        record_count=len(canonical_messages),
+                    )
+
+                await _offload_write(_record_debt)
 
         try:
             from ..features.signal.dimension_profiles import DimensionProfileUpdater
 
-            DimensionProfileUpdater(adapters, conn).upsert_all(deferred_jobs=results["deferred_jobs"])
+            def _update_profiles(conn_w: Any, adapters_w: Any) -> None:
+                DimensionProfileUpdater(adapters_w, conn_w).upsert_all(deferred_jobs=results["deferred_jobs"])
+
+            await _offload_write(_update_profiles)
         except Exception as exc:
             logger.debug("[PIPELINE:SIGNAL_DERIVE] dimension profile update skipped: %s", exc)
 

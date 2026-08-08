@@ -20,7 +20,7 @@ pytestmark = pytest.mark.asyncio
 @pytest.fixture
 def sqlite_conn(tmp_path, monkeypatch):
     db_path = tmp_path / "test.db"
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
     from topos.storage.db.migrations.pipeline_jobs_v1 import apply_pipeline_jobs_v1_up
 
     apply_pipeline_jobs_v1_up(conn)
@@ -55,7 +55,9 @@ def sqlite_conn(tmp_path, monkeypatch):
         lambda factory: asyncio.create_task(_kick_worker(factory)),
     )
     yield conn
-    conn.close()
+    # No close: background job bookkeeping runs on executor threads that can
+    # outlive the test's event loop; closing the shared handle under a live
+    # thread segfaults CPython's sqlite3. The tmp-path db is reaped by pytest.
 
 
 async def test_fast_ack_before_slow_enrichment(sqlite_conn, monkeypatch) -> None:
@@ -198,6 +200,15 @@ async def test_dedupe_hit_reenqueues_incomplete_derivation(sqlite_conn, monkeypa
     await asyncio.wait_for(completed.wait(), timeout=3.0)
     from topos.pipeline.job_store import is_derivation_complete
 
+    # The completion receipt is written on a worker thread after the executor
+    # returns (bookkeeping no longer runs on the event loop), so poll briefly
+    # instead of asserting the instant the executor finishes.
+    deadline = asyncio.get_running_loop().time() + 3.0
+    while (
+        not is_derivation_complete(sqlite_conn, "write-recover")
+        and asyncio.get_running_loop().time() < deadline
+    ):
+        await asyncio.sleep(0.02)
     assert is_derivation_complete(sqlite_conn, "write-recover") is True
 
 

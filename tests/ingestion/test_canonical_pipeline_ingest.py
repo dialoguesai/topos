@@ -20,12 +20,14 @@ from topos.storage.db.migrations import apply_all_migrations
 @pytest.fixture
 def migrated_conn(tmp_path, monkeypatch):
     db_path = tmp_path / "canonical_pipeline.db"
-    conn = sqlite3.connect(str(db_path))
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     apply_all_migrations(conn)
     monkeypatch.setattr("topos.core.state.get_db_connection", lambda: conn)
     yield conn
-    conn.close()
+    # No close: background job bookkeeping runs on executor threads that can
+    # outlive the test's event loop; closing the shared handle under a live
+    # thread segfaults CPython's sqlite3. The tmp-path db is reaped by pytest.
 
 
 def test_browser_visit_canonicalize_writes_activity_events(migrated_conn) -> None:

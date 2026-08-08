@@ -21,10 +21,15 @@ from topos.storage.db.migrations.pipeline_jobs_v1 import apply_pipeline_jobs_v1_
 
 @pytest.fixture
 def conn(tmp_path) -> sqlite3.Connection:
-    db = sqlite3.connect(str(tmp_path / "pipeline.db"))
+    # check_same_thread=False: process_job now runs its job-store bookkeeping
+    # on worker threads (via the conn factory) so the event loop never blocks
+    # on the write gate; the factory below hands every thread this handle.
+    db = sqlite3.connect(str(tmp_path / "pipeline.db"), check_same_thread=False)
     apply_pipeline_jobs_v1_up(db)
     yield db
-    db.close()
+    # No close: the cancelled-worker test can leave a claim running on an
+    # executor thread; closing the shared handle under it segfaults CPython's
+    # sqlite3. The tmp-path db is reaped by pytest.
 
 
 def test_enqueue_is_idempotent_by_key(conn: sqlite3.Connection) -> None:
@@ -154,6 +159,84 @@ async def test_coalesced_jobs_all_fail_together(conn: sqlite3.Connection) -> Non
         assert get_job(conn, job_id)["status"] == "failed"
     assert not is_derivation_complete(conn, "w0")
     assert not is_derivation_complete(conn, "w1")
+
+
+@pytest.mark.asyncio
+async def test_worker_loop_survives_locked_claim(conn: sqlite3.Connection) -> None:
+    """Regression for 2026-08-07: an OperationalError('database is locked')
+    escaping claim_next_job's bounded busy-retries killed the worker task with
+    an unretrieved exception and the queue silently stopped draining."""
+    import asyncio
+
+    from topos.pipeline import job_runner
+    from topos.pipeline.job_runner import _worker_loop
+
+    real_claim = job_runner.claim_next_job
+    failures = {"left": 2}
+
+    def flaky_claim(own, **kwargs):
+        if failures["left"] > 0:
+            failures["left"] -= 1
+            raise sqlite3.OperationalError("database is locked")
+        return real_claim(own, **kwargs)
+
+    done: list[dict] = []
+
+    async def _exec(payload: dict) -> dict:
+        done.append(payload)
+        return {"status": "ok", "messages_processed": 1, "records_created": {}}
+
+    enqueue_job(conn, kind="file_ingestion", payload={"marker": "survive"}, job_id="job-lock-1")
+
+    with patch("topos.pipeline.job_runner.claim_next_job", side_effect=flaky_claim), patch.dict(
+        "topos.pipeline.job_runner.EXECUTORS", {"file_ingestion": _exec}
+    ):
+        task = asyncio.get_running_loop().create_task(_worker_loop(lambda: conn))
+        try:
+            deadline = asyncio.get_running_loop().time() + 10
+            while not done and asyncio.get_running_loop().time() < deadline:
+                assert not task.done(), f"worker loop died: {task.exception()}"
+                await asyncio.sleep(0.05)
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+
+    assert done, "worker never recovered from the locked claim"
+    assert failures["left"] == 0
+    assert get_job(conn, "job-lock-1")["status"] == "done"
+
+
+@pytest.mark.asyncio
+async def test_job_processing_never_takes_write_gate_on_event_loop(
+    conn: sqlite3.Connection, caplog
+) -> None:
+    """The write gate is a blocking OS lock; job bookkeeping must acquire it on
+    worker threads only, or the loop freezes behind long holders (2026-08-07)."""
+    import asyncio
+    import logging
+
+    from topos.storage.db import write_gate
+
+    async def _exec(_payload: dict) -> dict:
+        return {"status": "ok", "messages_processed": 1, "records_created": {}}
+
+    # Enqueue off-loop: enqueue_job itself takes the gate and is not the
+    # code under test here.
+    await asyncio.to_thread(
+        enqueue_job, conn, kind="file_ingestion", payload={}, job_id="job-gate-1"
+    )
+
+    write_gate.reset_loop_warning_state()
+    caplog.set_level(logging.WARNING, logger="topos.storage.db.write_gate")
+    with patch.dict("topos.pipeline.job_runner.EXECUTORS", {"file_ingestion": _exec}):
+        processed = await process_pending_jobs_once(lambda: conn, limit=5)
+
+    assert processed == 1
+    loop_warnings = [
+        rec.message for rec in caplog.records if "event-loop thread" in rec.getMessage()
+    ]
+    assert not loop_warnings, f"write gate acquired on the event loop: {loop_warnings}"
 
 
 @pytest.mark.asyncio

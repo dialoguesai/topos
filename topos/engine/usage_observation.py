@@ -100,25 +100,37 @@ def _record_local_usage_best_effort(
     idempotency_key: str,
     metadata: Dict[str, Any],
 ) -> None:
-    try:
-        from ..core.state import get_db_connection
-        from ..llm_integrations_storage import record_local_llm_usage_event
+    def _write() -> None:
+        try:
+            from ..core.state import get_db_connection
+            from ..llm_integrations_storage import record_local_llm_usage_event
 
-        conn = get_db_connection()
-        if conn is None:
-            return
-        record_local_llm_usage_event(
-            conn,
-            provider=provider,
-            model=model,
-            usage=usage,
-            billing_source=_billing_source_for_provider(provider),
-            source=source,
-            idempotency_key=idempotency_key,
-            metadata=metadata,
-        )
-    except Exception:
-        logger.debug("local llm_usage_events write failed", exc_info=True)
+            conn = get_db_connection()
+            if conn is None:
+                return
+            record_local_llm_usage_event(
+                conn,
+                provider=provider,
+                model=model,
+                usage=usage,
+                billing_source=_billing_source_for_provider(provider),
+                source=source,
+                idempotency_key=idempotency_key,
+                metadata=metadata,
+            )
+        except Exception:
+            logger.debug("local llm_usage_events write failed", exc_info=True)
+
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        _write()
+        return
+    # On the event-loop thread the insert would take the write gate — a
+    # blocking OS lock (llm_integrations_storage.py was one of the acquisition
+    # sites in the 2026-08-07 loop freeze). The write is best-effort, so fire
+    # it on the default executor, which fetches its own connection.
+    loop.run_in_executor(None, _write)
 
 
 def _now_iso() -> str:
