@@ -105,11 +105,14 @@ def _glyph_filename() -> str:
     return "topos_white.png"
 
 
-def create_status_image(status: str, glyph: str | None = None):
+def create_status_image(status: str, glyph: str | None = None, phase: float | None = None):
     """Topos glyph with a status badge composited bottom-right.
 
     Healthy/starting/down use a colored dot. ``update`` uses a download glyph
-    (filled circle + down arrow) instead of an orange connection dot.
+    (filled circle + down arrow) instead of an orange connection dot. With
+    ``phase`` (0..1) the badge becomes a rotating three-quarter arc — the
+    "starting" spinner. A static dot through a multi-minute first run reads as
+    a hang; motion reads as "wait, it's working". Mirrors the macOS shell.
     """
     from PIL import Image, ImageDraw
 
@@ -121,6 +124,10 @@ def create_status_image(status: str, glyph: str | None = None):
     dc = ImageDraw.Draw(overlay)
     if status == "update":
         _draw_download_badge(dc, ink=_badge_ink_for_glyph(glyph or _glyph_filename()))
+    elif phase is not None:
+        start = (phase % 1.0) * 360
+        dc.arc((22, 22, 32, 32), start=start, end=start + 270,
+               fill=STATUS_COLORS.get(status, STATUS_COLORS["starting"]), width=2)
     else:
         dc.ellipse((22, 22, 32, 32), fill=STATUS_COLORS.get(status, STATUS_COLORS["starting"]))
     return Image.alpha_composite(base, overlay)
@@ -266,6 +273,20 @@ class ToposTray:
                 self._refresh()
         except Exception:  # noqa: BLE001 — a nameless menu beats a crashed tray
             pass
+
+    def _animate_while_starting(self) -> None:
+        """Spin the badge while the node is starting; idle otherwise."""
+        phase = 0.0
+        while self._icon is not None and self._icon.visible:
+            if self.status == "starting":
+                phase = (phase + 1.0 / 14.0) % 1.0
+                try:
+                    self._icon.icon = create_status_image("starting", glyph=self._glyph, phase=phase)
+                except Exception:  # noqa: BLE001 — a still badge beats a dead tray
+                    pass
+                time.sleep(1.0 / 12.0)
+            else:
+                time.sleep(0.5)
 
     def _set_status(self, status: str) -> None:
         if self.status == status:
@@ -448,6 +469,7 @@ class ToposTray:
         def on_setup(icon) -> None:
             icon.visible = True
             threading.Thread(target=self._poll_health, daemon=True).start()
+            threading.Thread(target=self._animate_while_starting, daemon=True).start()
 
         try:
             icon.run(setup=on_setup)

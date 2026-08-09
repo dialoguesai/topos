@@ -155,3 +155,15 @@ class TestToposNameRow:
         assert not any(l.startswith("Topos: ") for l in t._menu_labels())
         t.topos_name = "PersonalDB"
         assert "Topos: PersonalDB" in t._menu_labels()
+
+
+class TestStartingSpinner:
+    def test_phase_renders_distinct_frames(self):
+        a = tray.create_status_image("starting", glyph="topos_white.png", phase=0.0)
+        b = tray.create_status_image("starting", glyph="topos_white.png", phase=0.5)
+        assert list(a.getdata()) != list(b.getdata()), "spinner frames must differ or nothing animates"
+
+    def test_no_phase_keeps_the_static_dot(self):
+        static1 = tray.create_status_image("starting", glyph="topos_white.png")
+        static2 = tray.create_status_image("starting", glyph="topos_white.png")
+        assert list(static1.getdata()) == list(static2.getdata())
