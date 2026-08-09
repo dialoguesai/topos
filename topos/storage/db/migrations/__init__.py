@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from typing import List, Optional
+import threading
+from typing import Dict, List, Optional, Tuple
 
 from .backup import (
     InsufficientDiskForBackup,
@@ -36,8 +37,71 @@ __all__ = [
     "ensure_migrations_applied",
     "pending_ledger_migrations",
     "read_user_version",
+    "reset_ensured_connections",
     "max_migration_order",
 ]
+
+
+#: Connections this process has already migrated to the current registry head.
+#:
+#: This runner is NOT startup-only: ``AdapterFactory.create`` calls it, and that
+#: sits on the ingest hot path — once per batch, per worker thread, per
+#: connection. Each call re-applied every ``always_run`` step, and each step
+#: takes the write gate and commits, so a single ingest issued hundreds of gated
+#: write transactions only to re-assert schema that was already present. Any
+#: connection holding SQLite's write lock meanwhile turns the next one into a
+#: full 30s ``busy_timeout`` expiry — the "database is locked" that killed the
+#: statistics job's fold on repeat ingests.
+#:
+#: Keyed by ``(id(conn), database file)``. ``sqlite3.Connection`` on 3.10
+#: supports neither weak references nor attributes, so identity is the only
+#: handle available; the path pins it, because a recycled ``id`` can only
+#: collide with a cached entry naming the same file — which is by then already
+#: migrated, making the hit harmless. Databases with no file (``:memory:``) are
+#: never cached: their schema dies with the connection, so a recycled id there
+#: would skip migrations on an empty database.
+#:
+#: The value is the ``PRAGMA schema_version`` observed once the run settled, and
+#: the memo only holds while it still matches. That is what keeps skipping SAFE:
+#: the ``always_run`` steps are not merely re-assertions, they ALTER tables that
+#: legacy DDL creates *after* the first run — ``CanonicalTablesManager`` builds
+#: ``ai_chat_conversations`` without the provenance columns and
+#: ``wiki_mvp_phase1`` adds them on the next pass. SQLite bumps
+#: ``schema_version`` on exactly those events (any DDL, from any connection) and
+#: leaves it alone when a run changes nothing, so the hot path still skips while
+#: a late CREATE re-arms the runner.
+_ENSURED_CONNECTIONS: Dict[Tuple[int, str], int] = {}
+_ENSURED_LOCK = threading.Lock()
+
+
+def _ensured_key(conn: sqlite3.Connection) -> Optional[Tuple[int, str]]:
+    path = connection_db_path(conn)
+    if path is None:
+        return None
+    return (id(conn), str(path))
+
+
+def _schema_version(conn: sqlite3.Connection) -> Optional[int]:
+    try:
+        row = conn.execute("PRAGMA schema_version").fetchone()
+    except sqlite3.Error:
+        return None
+    return int(row[0]) if row is not None else None
+
+
+def _mark_ensured(conn: sqlite3.Connection) -> None:
+    key = _ensured_key(conn)
+    version = _schema_version(conn)
+    if key is None or version is None:
+        return
+    with _ENSURED_LOCK:
+        _ENSURED_CONNECTIONS[key] = version
+
+
+def reset_ensured_connections() -> None:
+    """Forget which connections have been migrated. For tests."""
+    with _ENSURED_LOCK:
+        _ENSURED_CONNECTIONS.clear()
 
 
 class MigrationError(RuntimeError):
@@ -131,12 +195,19 @@ def ensure_migrations_applied(
     conn: sqlite3.Connection,
     *,
     skip_backup: bool = False,
+    force: bool = False,
 ) -> Optional[str]:
     """Apply pending schema migrations; fail loud on error.
 
     Returns the backup path string when a pre-migration backup was written,
     otherwise None. Raises ``DowngradeGuardError`` / ``MigrationError`` on
     failure — callers must not serve a half-migrated database.
+
+    A connection already at the registry head whose database has not changed
+    shape since returns immediately (see ``_ENSURED_CONNECTIONS``): re-running
+    the ``always_run`` steps against unchanged schema bought nothing but
+    write-lock contention. Any DDL re-arms them, so the late-CREATE repairs
+    those steps exist for still happen. ``force=True`` runs unconditionally.
     """
     max_order = max_migration_order()
     current = read_user_version(conn)
@@ -147,6 +218,18 @@ def ensure_migrations_applied(
             f"upgrade the package or restore the pre-upgrade backup under "
             f"~/.topos/backups/"
         )
+
+    # Gated on the DB's own stamp and its live schema_version, not the memo
+    # alone: a recycled id naming a database this process never migrated reads
+    # back unstamped, and any DDL since the last run bumps schema_version. Both
+    # fall through to the run below.
+    if not force and current >= max_order:
+        ensured_key = _ensured_key(conn)
+        schema_version = _schema_version(conn)
+        if ensured_key is not None and schema_version is not None:
+            with _ENSURED_LOCK:
+                if _ENSURED_CONNECTIONS.get(ensured_key) == schema_version:
+                    return None
 
     pending = pending_ledger_migrations(conn)
     backup_path: Optional[str] = None
@@ -170,6 +253,7 @@ def ensure_migrations_applied(
                 raise MigrationError(
                     f"always-run migration {spec.id!r} failed: {exc}"
                 ) from exc
+        _mark_ensured(conn)
         return None
 
     if pending and not skip_backup and connection_db_path(conn) is not None:
@@ -197,4 +281,7 @@ def ensure_migrations_applied(
 
     with with_db_write():
         _stamp_user_version(conn, max_order)
+    # Keyed after the run, not before: a database with no file yet when we
+    # started has one by the time the first migration has written to it.
+    _mark_ensured(conn)
     return backup_path

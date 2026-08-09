@@ -104,10 +104,18 @@ class StatisticsJob(BaseEnrichmentJob):
         except (json.JSONDecodeError, TypeError, ValueError):
             pending = 0
         pending += rows_folded
-        conn.execute(
-            "UPDATE stat_state SET state_json=? WHERE stat_id=? AND group_key='' AND bucket_date=''",
-            (json.dumps({"pending": pending}), _META_STAT_ID),
-        )
+        # Gated AND committed. Ungated this counter update was still a write: it
+        # took SQLite's write lock at execute time on the event loop's
+        # connection and, with no commit anywhere after it, held that lock for
+        # the rest of the pipeline. Every other thread's first write then waited
+        # out the full 30s busy_timeout and failed "database is locked" — which
+        # is how this job lost its own fold on repeat ingests.
+        with with_db_write():
+            conn.execute(
+                "UPDATE stat_state SET state_json=? WHERE stat_id=? AND group_key='' AND bucket_date=''",
+                (json.dumps({"pending": pending}), _META_STAT_ID),
+            )
+            commit_connection(conn)
         if pending >= _PROMOTE_EVERY_ROWS:
             return True
         stale = conn.execute(
