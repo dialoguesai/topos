@@ -32,6 +32,26 @@ The machine-readable twin of each release is
   live 2026-08-08: wedged 25 minutes, every proxied request 503, no
   recovery without a restart. The deadline sits inside the control plane's
   own 120s eviction, so the node notices first and reconnects itself.
+- `[O]` The `statistics` signal job no longer fails repeat ingests with
+  `always-run migration 'wiki_mvp_phase1' failed: database is locked`. Two
+  faults compounded. Its debounce counter (`_should_promote`) issued an
+  `UPDATE stat_state` outside the write gate and never committed it, so the
+  event loop's connection took SQLite's write lock at execute time and held
+  it for the rest of the pipeline; every other thread's first write then
+  waited out the full 30s `busy_timeout` and failed. And
+  `ensure_migrations_applied` re-applied every `always_run` step on each
+  call — it runs from `AdapterFactory.create`, i.e. per batch, per worker
+  thread, per connection — so an ingest issued hundreds of gated write
+  transactions to re-assert schema that was already there, giving that
+  stuck lock the widest possible blast radius. The counter update is now
+  gated and committed, and the runner memoizes connections already at the
+  registry head, keyed on `PRAGMA schema_version` so that any DDL re-arms the
+  `always_run` steps — they are not just re-assertions, they ALTER tables
+  that legacy DDL creates *after* the first run (`CanonicalTablesManager`
+  builds `ai_chat_conversations` without the provenance columns and
+  `wiki_mvp_phase1` adds them on the next pass). Measured on a three-ingest
+  dev node: 14 `database is locked` → 0, two failed signal batches → 0, and
+  ingests 2–3 went from 0 signal jobs in 308s/171s to all 10 in 30s/21s.
 
 ### Changed
 
