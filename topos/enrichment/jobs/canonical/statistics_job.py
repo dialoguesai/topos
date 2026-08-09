@@ -10,6 +10,7 @@ Gated by TOPOS_STATS (default on).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Any, Callable, Dict, List, Optional
@@ -44,24 +45,37 @@ class StatisticsJob(BaseEnrichmentJob):
         canonical_messages: List[Dict[str, Any]],
         progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> List[Dict[str, Any]]:
-        conn = get_db_connection()
-        if conn is None:
+        def _fold_and_promote() -> Optional[Dict[str, Any]]:
+            # Every step here takes the write gate — a blocking OS lock:
+            # StatsEngine's constructor seeds stat definitions, fold_batch
+            # holds it for the batch, and promotion runs migrations through
+            # AdapterFactory. On the event loop that stalls every coroutine,
+            # including the control-plane keepalive, so the whole stretch runs
+            # on a worker thread against that thread's own connection.
+            conn = get_db_connection()
+            if conn is None:
+                return None
+
+            from ....features.stats.engine import StatsEngine
+
+            engine = StatsEngine(conn)
+            folded = dict(engine.fold_batch(canonical_messages))
+            folded["promoted"] = 0
+            if self._should_promote(conn, folded["rows_folded"]):
+                try:
+                    from ....storage.adapters.factory import AdapterFactory
+
+                    bundle = AdapterFactory.create("local_database", conn=conn)
+                    folded["promoted"] = engine.promote_insights(bundle)
+                    self._record_promotion(conn)
+                except Exception as exc:
+                    logger.warning("stat insight promotion failed: %s", exc)
+            return folded
+
+        result = await asyncio.to_thread(_fold_and_promote)
+        if result is None:
             return [{"_deferred": True, "error": "database_unavailable"}]
-
-        from ....features.stats.engine import StatsEngine
-
-        engine = StatsEngine(conn)
-        result = engine.fold_batch(canonical_messages)
-        promoted = 0
-        if self._should_promote(conn, result["rows_folded"]):
-            try:
-                from ....storage.adapters.factory import AdapterFactory
-
-                bundle = AdapterFactory.create("local_database", conn=conn)
-                promoted = engine.promote_insights(bundle)
-                self._record_promotion(conn)
-            except Exception as exc:
-                logger.warning("stat insight promotion failed: %s", exc)
+        promoted = result["promoted"]
 
         if progress_callback:
             progress_callback(len(canonical_messages), len(canonical_messages))
