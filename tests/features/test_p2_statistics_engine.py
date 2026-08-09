@@ -435,3 +435,65 @@ class TestDisclosureGate:
 
         fact = {"object_type": "user_goal"}
         assert _fact_disclosure_allowed(fact, "default_disclosure", self._manifest([]))
+
+
+class TestPromotionBookkeepingReleasesWriteLock:
+    """The pending-counter update must not outlive its own call.
+
+    Ungated and uncommitted it took SQLite's write lock at execute time and
+    held it for the rest of the pipeline, so every other thread's first write
+    waited out the full 30s busy_timeout and failed "database is locked" —
+    losing the statistics fold on repeat ingests.
+    """
+
+    def _job_and_conn(self, conn):
+        from topos.enrichment.jobs.canonical.statistics_job import (
+            _META_STAT_ID,
+            StatisticsJob,
+        )
+
+        conn.execute(
+            "INSERT INTO stat_state (stat_id, group_key, bucket_date, state_json, updated_at) "
+            "VALUES (?, '', '', ?, datetime('now'))",
+            (_META_STAT_ID, '{"pending": 0}'),
+        )
+        conn.commit()
+        return StatisticsJob()
+
+    def test_should_promote_leaves_no_open_transaction(self, conn) -> None:
+        job = self._job_and_conn(conn)
+
+        assert job._should_promote(conn, rows_folded=1) is False
+        assert not conn.in_transaction
+
+    def test_pending_counter_is_committed_not_just_buffered(self, conn) -> None:
+        import json
+
+        from topos.enrichment.jobs.canonical.statistics_job import _META_STAT_ID
+
+        job = self._job_and_conn(conn)
+        job._should_promote(conn, rows_folded=3)
+
+        # A second connection can only see it once the transaction closed.
+        other = sqlite3.connect(conn.execute("PRAGMA database_list").fetchone()[2])
+        try:
+            row = other.execute(
+                "SELECT state_json FROM stat_state WHERE stat_id=? AND group_key='' AND bucket_date=''",
+                (_META_STAT_ID,),
+            ).fetchone()
+        finally:
+            other.close()
+        assert json.loads(row[0])["pending"] == 3
+
+    def test_write_lock_is_free_for_another_connection(self, conn, tmp_path) -> None:
+        job = self._job_and_conn(conn)
+        job._should_promote(conn, rows_folded=1)
+
+        other = sqlite3.connect(conn.execute("PRAGMA database_list").fetchone()[2])
+        other.execute("PRAGMA busy_timeout=250")
+        try:
+            # Would raise "database is locked" if the counter update were still open.
+            other.execute("BEGIN IMMEDIATE")
+            other.execute("ROLLBACK")
+        finally:
+            other.close()
