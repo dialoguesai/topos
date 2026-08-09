@@ -167,3 +167,28 @@ class TestStartingSpinner:
         static1 = tray.create_status_image("starting", glyph="topos_white.png")
         static2 = tray.create_status_image("starting", glyph="topos_white.png")
         assert list(static1.getdata()) == list(static2.getdata())
+
+
+class TestFailedUpdateIsVisible:
+    """A failed update rendered nothing, so the menu fell back to "Update to
+    vX" — indistinguishable from a click that never registered, which is
+    exactly how the macOS bug was reported (2026-08-08)."""
+
+    def _tray(self) -> tray.ToposTray:
+        return tray.ToposTray(
+            host="127.0.0.1", port=9000, version="1.3.6", package_name="topos-node", on_quit=lambda: None
+        )
+
+    def test_failure_is_named(self):
+        t = self._tray()
+        t.update = {"available": True, "latest": "1.3.7", "applying": False, "last_result": "failed"}
+        labels = t._menu_labels()
+        assert "Update failed — click to retry" in labels
+        assert not any(l.startswith("Update to v") for l in labels)
+
+    def test_success_and_applying_are_unchanged(self):
+        t = self._tray()
+        t.update = {"available": True, "latest": "1.3.7", "applying": True, "last_result": None}
+        assert "Installing update…" in t._menu_labels()
+        t.update = {"available": True, "latest": "1.3.7", "applying": False, "last_result": "success"}
+        assert "Update installed — restart to finish" in t._menu_labels()
