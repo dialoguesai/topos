@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import functools
+import typing
 
 from asgi_lifespan import LifespanManager as _LifespanManager
 
@@ -15,8 +15,55 @@ from asgi_lifespan import LifespanManager as _LifespanManager
 # and poison every later test with "database is locked". 30s asserts "startup
 # completes", not "startup beats 5s on a loaded dev machine". Explicit
 # timeouts passed by a test still win.
-LifespanManager = functools.partial(
-    _LifespanManager, startup_timeout=30, shutdown_timeout=30
+STARTUP_TIMEOUT_SECONDS = 30
+SHUTDOWN_TIMEOUT_SECONDS = 30
+
+# 30s is not a tight fit, and a timeout here is not an argument for raising it.
+# Measured startup at every LifespanManager(app) site in tests/ is 0.08s-0.24s
+# (2026-08-09, py3.10: all 9 files that use this helper, plus 5 shuffled runs of
+# test_ingestion_sources.py) — over 120x headroom. Startup only blows the budget
+# when something *outside* it starves the event loop, so widening the budget
+# buys a longer wait for the same failure. The known culprit is the Hugging Face
+# model prewarm; tests/conftest.py disables it suite-wide, and that comment
+# carries the full history.
+#
+# asgi-lifespan signals the timeout as a bare `TimeoutError()` with no message
+# (_concurrency/asyncio.py: `except asyncio.TimeoutError: raise TimeoutError`),
+# which is what made CI run 31293718827 read as an unexplained flake. Carry the
+# diagnosis on the exception so the next one reads as what it is.
+_TIMEOUT_HINT = (
+    "App startup did not complete within {seconds}s. This budget is ~120x the "
+    "measured cost of a healthy startup (0.08s-0.24s), so treat it as event-loop "
+    "starvation, not a too-small timeout: something blocking ran on the loop or "
+    "held the GIL. First suspect is a background thread loading/downloading "
+    "models (SANITIZATION_PREWARM_ON_STARTUP is off for tests by default — check "
+    "it was not re-enabled); second is a write-gate holder or a locked guard DB."
 )
 
-__all__ = ["LifespanManager"]
+
+class LifespanManager(_LifespanManager):
+    """`asgi_lifespan.LifespanManager` with this suite's timeouts, and a startup
+    timeout that explains itself instead of raising a bare `TimeoutError`."""
+
+    def __init__(
+        self,
+        app: typing.Any,
+        startup_timeout: typing.Optional[float] = STARTUP_TIMEOUT_SECONDS,
+        shutdown_timeout: typing.Optional[float] = SHUTDOWN_TIMEOUT_SECONDS,
+    ) -> None:
+        super().__init__(
+            app, startup_timeout=startup_timeout, shutdown_timeout=shutdown_timeout
+        )
+
+    async def __aenter__(self) -> "LifespanManager":
+        try:
+            await super().__aenter__()
+        except TimeoutError as exc:
+            # The base __aenter__ already unwound its exit stack before raising.
+            raise TimeoutError(
+                _TIMEOUT_HINT.format(seconds=self.startup_timeout)
+            ) from exc
+        return self
+
+
+__all__ = ["LifespanManager", "STARTUP_TIMEOUT_SECONDS", "SHUTDOWN_TIMEOUT_SECONDS"]

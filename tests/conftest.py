@@ -11,6 +11,20 @@ os.environ.setdefault("CONTROL_PLANE_URL", "")
 # No live-model calls from unit tests: cluster recomputes would otherwise try
 # the local Ollama labeler (auto mode). Labeler tests inject `complete`.
 os.environ.setdefault("TOPOS_CLUSTER_LLM_LABELS", "off")
+# Nor live model *downloads*: app startup fires topos.sanitization.prewarm on a
+# background thread, which fetches ~2.9GB of Hugging Face weights on a cold
+# cache and — in this suite's own words — "starved the app loop for minutes"
+# (tests/topos/test_control_plane_client.py::
+# test_threaded_client_answers_ping_while_app_loop_is_stalled). CI caches uv,
+# never the HF hub (.github/workflows/ci.yml), so every app startup in the
+# public lane raced that download; whichever test's startup landed inside the
+# window died on asgi-lifespan's 30s budget with a bare TimeoutError. That is
+# CI run 31293718827 (test_ingest_source_file_propagates_guard_denial), which
+# passed on rerun off the same commit. No test needs the real weights loaded at
+# startup: tests/test_prewarm_first_run.py drives the cache-probe helpers
+# directly and never calls prewarm_sanitization_models(). setdefault, so a lane
+# that genuinely wants the prewarm can still export the variable and opt in.
+os.environ.setdefault("SANITIZATION_PREWARM_ON_STARTUP", "false")
 
 # Project root on sys.path for editable installs and `pytest` without install (development).
 ROOT = Path(__file__).resolve().parent.parent
