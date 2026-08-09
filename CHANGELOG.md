@@ -48,7 +48,12 @@ The machine-readable twin of each release is
   newer node version stays queued and visible instead of being claimed and
   failed as unknown, and an executor may return `status: "requeue"` to hand a
   claim back untouched when it declines to run — a deferral must not read as a
-  failed attempt.
+  failed attempt. Registering the executor does not revive rows already parked
+  `failed`, so this release also carries an `auto` upgrade step
+  (`retry-recorded-derivation-debt`) that sweeps them once: nothing else would
+  — a failed row is only re-queued by the next organic failure of the same
+  (batch, job), and `recover_stale_jobs` resets `running` rows, never `failed`
+  ones. Nodes with no recorded debt run it as a no-op.
 
 ### Changed
 
