@@ -675,6 +675,86 @@ def test_commit_connection_stays_silent_when_gate_held_around_writes():
     assert not warned, f"gated write pattern must not warn: {warned}"
 
 
+def test_watchdog_is_wired_to_connections_from_get_db_connection(tmp_path, monkeypatch):
+    """The never-committed write is only visible if the watchdog is actually
+    attached to the handles the engine hands out — every one of them comes from
+    get_db_connection, so that wiring is the thing worth pinning. This is the
+    StatisticsJob._should_promote shape end to end: a worker thread writes
+    ungated through its own connection, returns without committing, and exits.
+    """
+    import logging
+    import time
+
+    from topos.core import state
+    from topos.storage.db import write_gate
+
+    db = tmp_path / "watched.db"
+    monkeypatch.setattr(state, "db_conn", None, raising=False)
+    monkeypatch.setattr(state, "_db_conn_path", None, raising=False)
+    monkeypatch.setattr(state, "_conn_owner_thread", None, raising=False)
+    monkeypatch.setattr(state, "_thread_state", threading.local(), raising=False)
+    monkeypatch.setattr(state, "_resolve_database_path_from_settings", lambda: db, raising=False)
+
+    messages: list[str] = []
+
+    class _Capture(logging.Handler):
+        def emit(self, record: logging.LogRecord) -> None:
+            messages.append(record.getMessage())
+
+    handler = _Capture()
+    threshold = write_gate._watchdog_threshold_s
+    interval = write_gate._watchdog_interval_s
+    write_gate.reset_loop_warning_state()
+    # Enable BEFORE anything opens a connection: registration is what attaches.
+    write_gate.enable_txn_watchdog(interval_s=3600.0)
+    write_gate.logger.addHandler(handler)
+    owner = None
+    worker_conn: dict[str, object] = {}
+    try:
+        owner = state.get_db_connection()
+        if owner is None:
+            pytest.skip("database could not be opened in this environment")
+        owner.execute("CREATE TABLE IF NOT EXISTS watched (v TEXT)")
+        owner.commit()
+
+        def _should_promote(conn) -> bool:
+            conn.execute("UPDATE watched SET v='x' WHERE v='__nope__'")
+            return False
+
+        def worker() -> None:
+            conn = state.get_db_connection()
+            worker_conn["conn"] = conn
+            _should_promote(conn)  # ungated, never committed
+
+        t = threading.Thread(target=worker, name="stats-worker")
+        t.start()
+        t.join(10)
+
+        assert worker_conn["conn"] is not owner, "worker must have its own connection"
+        assert worker_conn["conn"].in_transaction, "the leaked transaction is the premise"
+
+        reported = write_gate._scan_open_transactions(now=time.monotonic() + 60)
+        assert reported == 1, f"expected the stuck transaction to be reported, got {messages}"
+    finally:
+        write_gate.logger.removeHandler(handler)
+        if worker_conn.get("conn") is not None:
+            worker_conn["conn"].rollback()
+            write_gate.unregister_connection(worker_conn["conn"])
+        if owner is not None:
+            write_gate.unregister_connection(owner)
+        write_gate.disable_txn_watchdog()
+        write_gate.reset_loop_warning_state()
+        write_gate._watchdog_threshold_s = threshold
+        write_gate._watchdog_interval_s = interval
+
+    # Exactly one: the migrations that just ran on the owner connection took the
+    # gate, so none of them may be reported alongside the real offender.
+    warned = [m for m in messages if "has stayed open" in m]
+    assert len(warned) == 1, f"expected exactly one report, got {warned}"
+    assert "in _should_promote" in warned[0], warned[0]
+    assert "stats-worker" in warned[0], warned[0]
+
+
 def test_worker_loop_claims_off_the_event_loop():
     """claim_next_job takes the blocking write gate; it must not run on the loop."""
     import inspect
