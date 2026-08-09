@@ -15,7 +15,10 @@ from topos.storage.raw.raw_tables_manager import RawTablesManager
 @pytest.mark.asyncio
 async def test_browser_visits_writes_flat_table(monkeypatch, tmp_path) -> None:
     db_path = tmp_path / "browser_visits.db"
-    conn = sqlite3.connect(str(db_path))
+    # The direct-ingest DB stretch runs on a worker thread (asyncio.to_thread),
+    # so the injected connection must allow cross-thread use, matching how
+    # core.state opens every real connection.
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     monkeypatch.setattr("topos.core.state.get_db_connection", lambda: conn)
 
