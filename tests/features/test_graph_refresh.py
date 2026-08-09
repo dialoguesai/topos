@@ -241,3 +241,44 @@ def test_no_caller_wraps_the_rebuild_in_the_gate():
     assert not _gate_wraps_rebuild(
         rebuild_subprocess.run_graph_rebuild, ("rebuild_entity_graph", "rebuild_in_subprocess")
     ), "run_graph_rebuild wraps the rebuild in with_db_write — reentrant gate, whole-rebuild hold returns"
+
+
+def test_persist_skips_a_connection_shared_across_threads():
+    """A worker thread must not write on a connection it does not own.
+
+    mark_graph_dirty persists from an executor thread on the promise that the
+    thread gets its OWN connection. That promise is void for an in-memory
+    database (core.state hands out the owner's, since a per-thread copy would
+    be empty) and for a handle a test injected. Writing anyway races the
+    thread already using it: one sqlite3.Connection carries one transaction
+    state, and the write gate serializes writers, not readers. That corrupted
+    the transaction state and segfaulted the CI lane from this call site.
+    """
+    import sqlite3
+    import threading
+
+    from topos.storage.db.migrations import apply_all_migrations
+
+    shared = sqlite3.connect(":memory:", check_same_thread=False)
+    apply_all_migrations(shared)
+    before = shared.execute(
+        "SELECT dirty_generation FROM graph_materialization_state WHERE id=1"
+    ).fetchone()[0]
+
+    errors: list[BaseException] = []
+
+    def _write_from_a_thread_that_does_not_own_it() -> None:
+        try:
+            graph_refresh._persist_dirty_generation(shared)
+        except BaseException as exc:  # noqa: BLE001
+            errors.append(exc)
+
+    worker = threading.Thread(target=_write_from_a_thread_that_does_not_own_it)
+    worker.start()
+    worker.join(timeout=10)
+
+    assert not errors, f"persist raised on a shared connection: {errors}"
+    after = shared.execute(
+        "SELECT dirty_generation FROM graph_materialization_state WHERE id=1"
+    ).fetchone()[0]
+    assert after == before, "persist wrote on a connection shared with another thread"

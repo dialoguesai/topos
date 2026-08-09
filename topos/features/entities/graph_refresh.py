@@ -218,9 +218,41 @@ def _persist_dirty_generation_this_thread() -> None:
         logger.debug("graph dirty persistence skipped: %s", exc)
 
 
+def _writing_thread_owns(conn) -> bool:
+    """True when this thread may write on ``conn`` without racing another.
+
+    Safe when the connection is this thread's own (``core.state`` hands every
+    thread a private one for a file-backed database), or when we ARE the owner
+    thread that holds the module-global handle.
+
+    Neither holds for a SHARED connection, and shared is what
+    ``get_db_connection`` returns whenever the database is in-memory — a
+    per-thread copy would be empty, so ``core.state`` deliberately hands out
+    the owner's — or whenever a test injected a handle of its own. Writing
+    then races the thread that is already using it: a ``sqlite3.Connection``
+    carries exactly ONE transaction state, and the write gate serializes
+    writers, not readers. That corrupts the transaction state and, on CPython
+    3.12, segfaulted the CI test lane from this very call site.
+    """
+    import threading as _threading
+
+    from ...core import state as core_state
+
+    if conn is getattr(core_state._thread_state, "conn", None):
+        return True
+    return _threading.get_ident() == core_state._conn_owner_thread
+
+
 def _persist_dirty_generation(conn) -> None:
     from ...storage.db.migrations.pipeline_jobs_v1 import apply_pipeline_jobs_v1_up
     from ...storage.db.write_gate import commit_connection, with_db_write
+
+    if not _writing_thread_owns(conn):
+        # Shared handle: skip rather than corrupt it. Only reachable off the
+        # owner thread with an in-memory or injected database, i.e. tests --
+        # a file-backed node always gets a private connection here.
+        logger.debug("graph dirty persistence skipped: connection is shared across threads")
+        return
 
     apply_pipeline_jobs_v1_up(conn)
     with with_db_write():
