@@ -202,17 +202,24 @@ def _assert_steps_did_work(
             print(f"ok: {step_id} walked {len(walked)} source(s) -> all ok")
 
     # Effect assertions: derived rows that only exist if the step really ran.
-    placeholders = ",".join("?" for _ in sources)
-    extracted = _table_count(
-        conn, "message_entities", f"source_id IN ({placeholders})", tuple(sources)
-    )
-    if extracted <= 0:
-        raise AssertionError(
-            f"reextract-entities produced no message_entities rows for {sources} "
-            f"(count={extracted}) — the NER pass did not run over the fixture"
+    # Each is gated on its step's ledger row: a from-current fixture (publish's
+    # prior-patch leg) plans only the steps between adjacent versions, so a
+    # ladder step that never ran must not be asserted on (v1.3.7's publish
+    # failed exactly this way — reextract-entities wasn't in a 1.3.6→1.3.7
+    # plan, and the assert could never pass).
+    reextract_detail = _ledger_detail(conn, "reextract-entities")
+    if reextract_detail:
+        placeholders = ",".join("?" for _ in sources)
+        extracted = _table_count(
+            conn, "message_entities", f"source_id IN ({placeholders})", tuple(sources)
         )
-    mentions = _table_count(conn, "entity_mentions")
-    print(f"ok: extraction wrote {extracted} message_entities, {mentions} entity_mentions")
+        if extracted <= 0:
+            raise AssertionError(
+                f"reextract-entities produced no message_entities rows for {sources} "
+                f"(count={extracted}) — the NER pass did not run over the fixture"
+            )
+        mentions = _table_count(conn, "entity_mentions")
+        print(f"ok: extraction wrote {extracted} message_entities, {mentions} entity_mentions")
 
     # backfill-attention-triage: attention_triage is a SIGNAL job, so the step
     # only does anything if the runner routes it down the signal lane. It spent
