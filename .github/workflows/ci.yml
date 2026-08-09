@@ -48,20 +48,25 @@ jobs:
             --glob '!.github/**' \
             .
 
-      - name: Home chat Wave A routing and retrieval gates
-        # CP-side integration (scope_query_router, adversarial privacy) runs in
-        # the control-plane repo's CI, which checks this engine out as a sibling.
-        # This workflow must stay self-contained: no ../ references.
-        run: |
-          uv run pytest tests/query/test_retrieval_calendar_compare.py tests/query/test_retrieval_messages_multi_source.py tests/query/test_resolve_source_ids_installed_filter.py tests/query/test_fingerprint_invalidation.py tests/query/test_query_multi_turn_cache.py -q
-          HARN_DB="$(mktemp /tmp/harness-ci.XXXXXX)"
-          uv run python demo/signal_dimension_harness/seed_ci_harness_db.py --db "${HARN_DB}"
-          uv run python demo/signal_dimension_harness/run_multi_turn_catalog.py --db "${HARN_DB}"
-          uv run python demo/signal_dimension_harness/run_query_catalog.py --catalog demo/signal_dimension_harness/QUERY_CATALOG.md --db "${HARN_DB}" | tee /tmp/query-catalog.out
-          grep -q "Permission: 70/70" /tmp/query-catalog.out
-          grep -q "Signal: 70/70" /tmp/query-catalog.out
-          grep -q "quality 70/70" /tmp/query-catalog.out
-          uv run python demo/signal_dimension_harness/evaluate_harness.py --db "${HARN_DB}"
+      # The Home chat Wave A retrieval-quality gates (query catalog 70/70 on
+      # permission / signal / quality, multi-turn catalog, harness evaluation)
+      # do NOT run here. They drive demo/signal_dimension_harness, whose fixture
+      # data cannot ship in this repo, so `demo/` is gitignored and the scripts
+      # never exist in a CI checkout — this step failed on every run from
+      # 2026-07-05 until it was removed, keeping main permanently red and
+      # masking real regressions in the steps after it.
+      #
+      # Run them locally instead: `just harness-gate` (see justfile).
+      #
+      # The routing/retrieval pytest files this step also ran
+      # (tests/query/test_retrieval_*, test_resolve_source_ids_installed_filter,
+      # test_fingerprint_invalidation, test_query_multi_turn_cache) are all in
+      # the public lane above, which collects the same 17 tests — no coverage
+      # is lost by dropping the duplicate invocation.
+      #
+      # CP-side integration (scope_query_router, adversarial privacy) runs in
+      # the control-plane repo's CI, which checks this engine out as a sibling.
+      # This workflow must stay self-contained: no ../ references.
 
       - name: Privacy firewall + eval gates
         # The privacy evals are marked `private` (excluded from the public lane by design), so
