@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.11] — 2026-08-09
+
 ### Fixed
 
 - `[O]` The conversation auto-classifier stops re-asking the same question
