@@ -14,7 +14,10 @@ from topos.storage.db.migrations import apply_all_migrations
 
 @pytest.fixture()
 def conn(tmp_path):
-    c = sqlite3.connect(str(tmp_path / "planner.db"))
+    # TimelineJob projects its rows on a worker thread (asyncio.to_thread), so
+    # the injected connection must allow cross-thread use, matching how
+    # core.state opens every real connection.
+    c = sqlite3.connect(str(tmp_path / "planner.db"), check_same_thread=False)
     apply_all_migrations(c)
     yield c
     c.close()

@@ -215,20 +215,30 @@ async def handle_app_ingest(message: Dict[str, Any]) -> Optional[Dict[str, Any]]
                 len(errors),
                 errors[0].get("error"),
             )
-        db_conn = hub.get_db_connection()
-        if db_conn and user_id:
+        if user_id:
             resource_id = (payload.get("resource_id") or "").strip() or f"dataset:{user_id}:{dataset_id or 'default'}"
-            hub.record_uma_request(
-                db_conn,
-                owner_user_id=user_id,
-                resource_id=resource_id,
-                request_type="write",
-                endpoint="app_ingest",
-                requesting_user_id=(payload.get("requesting_user_id") or None),
-                app_id=payload.get("app_id"),
-                requesting_user_email=(payload.get("requesting_user_email") or "").strip() or None,
-                access_channel=(payload.get("access_channel") or "internal").strip() or "internal",
-            )
+
+            def _record_app_ingest_uma() -> None:
+                # record_uma_request takes the write gate (and on first use runs
+                # the uma_access_requests ensure/migrate DDL) — keep it off the
+                # event-loop thread. Own connection: get_db_connection is
+                # thread-local.
+                own = hub.get_db_connection()
+                if own is None:
+                    return
+                hub.record_uma_request(
+                    own,
+                    owner_user_id=user_id,
+                    resource_id=resource_id,
+                    request_type="write",
+                    endpoint="app_ingest",
+                    requesting_user_id=(payload.get("requesting_user_id") or None),
+                    app_id=payload.get("app_id"),
+                    requesting_user_email=(payload.get("requesting_user_email") or "").strip() or None,
+                    access_channel=(payload.get("access_channel") or "internal").strip() or "internal",
+                )
+
+            await asyncio.to_thread(_record_app_ingest_uma)
         response_payload = {
             "records_processed": processed,
             "records_total": records_total,
