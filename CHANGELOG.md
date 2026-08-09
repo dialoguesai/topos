@@ -29,6 +29,24 @@ The machine-readable twin of each release is
 
 ### Fixed
 
+- `[O]` The graph refresher no longer bumps the dirty generation on a
+  connection another thread owns. `mark_graph_dirty` persists from a
+  default-executor thread on the stated promise that the thread "fetches its
+  own connection" — true for a file-backed database, and impossible
+  otherwise: an in-memory database hands out the OWNER's connection, because
+  a per-thread copy would be empty, and tests inject a single handle of their
+  own. Writing anyway raced whoever already held it. A `sqlite3.Connection`
+  carries exactly ONE transaction state, and `with_db_write` serializes
+  writers, not readers, so nothing excluded the other thread; on CPython 3.12
+  that took the whole test lane down with SIGSEGV — a crash, not an
+  exception, with no failing test to point at. The ownership check now lives
+  where the SQL is: the write proceeds on this thread's own connection, or on
+  the owner thread, and is skipped otherwise. A file-backed node is always
+  the first case, so the persist stays off the event loop exactly as before.
+  This had been latent since the refresher landed; moving ingest and
+  enrichment writes onto worker threads changed the timing enough to make it
+  land nearly every run.
+
 - `[O]` In-app update works for DMG installs. It never had: a GUI-launched
   app inherits `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, `uv` lives in
   `~/.local/bin`, so the update subprocess raised `FileNotFoundError`, the
