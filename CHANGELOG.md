@@ -9,6 +9,24 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+
+- `[O]` Open-transaction watchdog behind `TOPOS_DB_TXN_WATCHDOG=1`
+  (threshold via `TOPOS_DB_TXN_WATCHDOG_SECONDS`, default 5s). The existing
+  ungated-write diagnostic only fires at commit time, so a caller that
+  writes and NEVER commits was invisible — while still holding SQLite's
+  RESERVED lock, which makes every other connection's first write wait out
+  the full 30s `busy_timeout` and fail `database is locked`. That blind
+  spot hid `StatisticsJob._should_promote` (an ungated, never-committed
+  `UPDATE stat_state`) wedging the whole signal lane on repeat ingests, and
+  diagnosing it took a throwaway `sqlite3.Connection` subclass plus a
+  polling thread. Now a daemon thread reports any connection in-transaction
+  past the threshold outside the gate, naming the call site that opened it,
+  one rate-limited WARNING per site. Default off: it costs +1.6us per
+  statement on Python 3.10 (83% of that sqlite3's own trace-callback
+  trampoline), and a diagnostic that taxes the hot path becomes its own
+  outage. Off, it is one boolean test per connection open.
+
 ### Fixed
 
 - `[O]` In-app update works for DMG installs. It never had: a GUI-launched

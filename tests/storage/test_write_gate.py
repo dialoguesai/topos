@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
 import time
@@ -17,6 +18,7 @@ from topos.pipeline.job_store import (
     is_derivation_complete,
     record_derivation_completion,
 )
+from topos.storage.db import write_gate
 from topos.storage.db.connection_tuning import tune_connection
 from topos.storage.db.migrations.pipeline_jobs_v1 import apply_pipeline_jobs_v1_up
 from topos.storage.db.write_gate import (
@@ -28,6 +30,8 @@ from topos.storage.db.write_gate import (
     with_db_write,
     with_db_write_cooperative,
 )
+
+WRITE_GATE_LOGGER = "topos.storage.db.write_gate"
 
 
 @pytest.fixture()
@@ -299,3 +303,214 @@ def test_enqueue_requeues_failed_job(tmp_path) -> None:
     # Successful completion path still records derivation.
     record_derivation_completion(conn, write_id="w2", job_id=job_id)
     assert is_derivation_complete(conn, "w2")
+
+
+def test_caller_site_names_the_calling_frame() -> None:
+    # Every write_gate diagnostic is only as useful as this string, and it now
+    # runs on the watchdog's hot path too, so pin the format and the frame.
+    def opener() -> str:
+        return write_gate._caller_site()
+
+    site = opener()
+    assert site.startswith("test_write_gate.py:")
+    assert site.endswith(" in opener")
+
+
+def test_caller_site_skips_contextlib_and_write_gate_frames(
+    file_conn: sqlite3.Connection, caplog, monkeypatch
+) -> None:
+    # with_db_write is a @contextmanager living in write_gate, so its own
+    # generator frame AND contextlib's __exit__ sit between the warning and the
+    # caller. Naming either would make the warning unactionable.
+    monkeypatch.setattr(write_gate, "_SLOW_HOLD_WARN_S", 0.0)
+    write_gate.reset_loop_warning_state()
+    with caplog.at_level(logging.WARNING, logger=WRITE_GATE_LOGGER):
+        with with_db_write():
+            pass
+    # caplog.text carries the emitting module's own filename, so read the
+    # rendered message rather than the record prefix. Naming this test function
+    # is itself the proof that both intervening frames were skipped.
+    message = caplog.records[-1].getMessage()
+    assert "slow section at test_write_gate.py:" in message
+    assert " in test_caller_site_skips_contextlib_and_write_gate_frames" in message
+    assert "contextlib.py" not in message
+
+
+def test_ungated_commit_warning_names_the_caller(
+    file_conn: sqlite3.Connection, caplog
+) -> None:
+    # The commit-time half of the pair: reached from inside commit_connection,
+    # so the site must still resolve past write_gate's own frames.
+    write_gate.reset_loop_warning_state()
+    file_conn.execute("INSERT INTO t (v) VALUES ('ungated')")
+    with caplog.at_level(logging.WARNING, logger=WRITE_GATE_LOGGER):
+        commit_connection(file_conn)
+    assert "arrived with an open write transaction" in caplog.text
+    assert " in test_ungated_commit_warning_names_the_caller" in caplog.text
+
+
+# --- open-transaction watchdog ---------------------------------------------
+
+
+@pytest.fixture()
+def watched_conn(file_conn: sqlite3.Connection):
+    """``file_conn`` under the watchdog, with its background thread parked.
+
+    The real 5s threshold is kept and time is injected into the scan instead,
+    so these tests assert the shipped behaviour without sleeping. The scan
+    interval is pushed out of the way so the daemon thread cannot consume a
+    rate-limit slot mid-test.
+    """
+    threshold = write_gate._watchdog_threshold_s
+    interval = write_gate._watchdog_interval_s
+    write_gate.reset_loop_warning_state()
+    write_gate.enable_txn_watchdog(interval_s=3600.0)
+    write_gate.register_connection(file_conn)
+    try:
+        yield file_conn
+    finally:
+        write_gate.unregister_connection(file_conn)
+        write_gate.disable_txn_watchdog()
+        write_gate.reset_loop_warning_state()
+        write_gate._watchdog_threshold_s = threshold
+        write_gate._watchdog_interval_s = interval
+
+
+def _scan_in(seconds: float) -> int:
+    """Run a scan as if ``seconds`` had passed since now."""
+    return write_gate._scan_open_transactions(now=time.monotonic() + seconds)
+
+
+def test_watchdog_reports_never_committed_ungated_write(watched_conn, caplog) -> None:
+    # The blind spot _warn_ungated_transaction cannot see: this write took
+    # SQLite's RESERVED lock and no commit will ever arrive to announce it.
+    watched_conn.execute("INSERT INTO t (v) VALUES ('stuck')")
+    assert watched_conn.in_transaction
+
+    # Young transactions are ordinary; only overstaying is a symptom.
+    assert _scan_in(0.0) == 0
+
+    with caplog.at_level(logging.WARNING, logger=WRITE_GATE_LOGGER):
+        assert _scan_in(30.0) == 1
+    assert "has stayed open" in caplog.text
+    assert "test_write_gate.py" in caplog.text
+
+    # A rollback (like a commit) is what clears the record.
+    watched_conn.rollback()
+    write_gate.reset_loop_warning_state()
+    assert _scan_in(30.0) == 0
+
+
+def test_watchdog_names_the_function_that_opened_the_transaction(
+    watched_conn, caplog
+) -> None:
+    # The StatisticsJob._should_promote shape: a helper writes, returns, and
+    # the caller moves on. Naming the helper is the whole point — the thread
+    # is long gone from this frame by the time the watchdog notices.
+    def _should_promote() -> bool:
+        watched_conn.execute("UPDATE t SET v='x' WHERE id=-1")
+        return False
+
+    _should_promote()
+    assert watched_conn.in_transaction
+
+    with caplog.at_level(logging.WARNING, logger=WRITE_GATE_LOGGER):
+        assert _scan_in(30.0) == 1
+    assert "_should_promote" in caplog.text
+    watched_conn.rollback()
+
+
+def test_watchdog_ignores_gated_and_committed_write(watched_conn, caplog) -> None:
+    with caplog.at_level(logging.WARNING, logger=WRITE_GATE_LOGGER):
+        with with_db_write():
+            watched_conn.execute("INSERT INTO t (v) VALUES ('ok')")
+            commit_connection(watched_conn)
+        assert not watched_conn.in_transaction
+        assert _scan_in(3600.0) == 0
+    assert "has stayed open" not in caplog.text
+
+
+def test_watchdog_ignores_a_section_still_holding_the_gate(watched_conn) -> None:
+    # The criterion is the gate, not the commit: a gated writer's RESERVED
+    # lock is the serialization the gate exists to provide, however long the
+    # section runs (that case belongs to the slow-section warning).
+    with with_db_write():
+        watched_conn.execute("INSERT INTO t (v) VALUES ('slow')")
+        assert watched_conn.in_transaction
+        assert _scan_in(3600.0) == 0
+        commit_connection(watched_conn)
+
+
+def test_watchdog_ignores_long_read_only_section(watched_conn) -> None:
+    for _ in range(5):
+        watched_conn.execute("SELECT COUNT(*) FROM t").fetchone()
+    assert not watched_conn.in_transaction
+    assert _scan_in(3600.0) == 0
+
+
+def test_watchdog_rate_limits_repeat_reports(watched_conn) -> None:
+    # A stuck transaction is scanned every couple of seconds; warning on each
+    # pass would reproduce the log flood _LOOP_WARN_INTERVAL_S exists to stop.
+    watched_conn.execute("INSERT INTO t (v) VALUES ('noisy')")
+    assert _scan_in(30.0) == 1
+    assert _scan_in(31.0) == 0
+    assert _scan_in(32.0) == 0
+    watched_conn.rollback()
+
+
+def test_watchdog_reports_then_forgets_a_transaction_whose_thread_exited(
+    watched_conn, caplog
+) -> None:
+    def orphan() -> None:
+        watched_conn.execute("INSERT INTO t (v) VALUES ('orphan')")
+
+    thread = threading.Thread(target=orphan, name="orphan-writer")
+    thread.start()
+    thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert watched_conn.in_transaction
+
+    with caplog.at_level(logging.WARNING, logger=WRITE_GATE_LOGGER):
+        assert _scan_in(30.0) == 1
+    assert "which has since exited" in caplog.text
+
+    # No COMMIT trace can ever clear it, so the record is dropped rather than
+    # re-reported at every scan for the life of the process.
+    write_gate.reset_loop_warning_state()
+    assert _scan_in(31.0) == 0
+    watched_conn.rollback()
+
+
+def test_registration_is_a_no_op_while_disabled(file_conn: sqlite3.Connection) -> None:
+    # Production default: no trace hook, no registry entry, nothing to scan,
+    # and unregister never reaches into the sqlite3 object.
+    write_gate.disable_txn_watchdog()
+    assert not write_gate.txn_watchdog_enabled()
+    write_gate.register_connection(file_conn)
+    assert id(file_conn) not in write_gate._traced_conns
+    file_conn.execute("INSERT INTO t (v) VALUES ('unwatched')")
+    assert file_conn.in_transaction
+    assert id(file_conn) not in write_gate._open_txns
+    assert _scan_in(3600.0) == 0
+    file_conn.rollback()
+
+
+def test_enabling_starts_a_daemon_thread_on_first_registration(
+    file_conn: sqlite3.Connection,
+) -> None:
+    threshold = write_gate._watchdog_threshold_s
+    interval = write_gate._watchdog_interval_s
+    write_gate.disable_txn_watchdog()
+    try:
+        write_gate.enable_txn_watchdog(interval_s=3600.0)
+        assert write_gate._watchdog_thread is None, "thread must not start at enable"
+        write_gate.register_connection(file_conn)
+        thread = write_gate._watchdog_thread
+        assert thread is not None and thread.is_alive()
+        assert thread.daemon, "the watchdog must never hold up interpreter shutdown"
+    finally:
+        write_gate.unregister_connection(file_conn)
+        write_gate.disable_txn_watchdog()
+        write_gate._watchdog_threshold_s = threshold
+        write_gate._watchdog_interval_s = interval
+    assert not thread.is_alive(), "disable must stop the thread"
