@@ -158,7 +158,7 @@ def test_auto_classifier_tags_untagged_only() -> None:
     conn.commit()
 
     result = classify_untagged_conversations(conn, classify=lambda excerpts: "work")
-    assert result == {"examined": 1, "tagged": 1}
+    assert result == {"examined": 1, "tagged": 1, "retired": 0, "unchanged": 0}
 
     row = conn.execute(
         "SELECT context_tag, context_tag_source FROM conversations "
@@ -174,6 +174,7 @@ def test_auto_classifier_tags_untagged_only() -> None:
 
 
 def test_auto_classifier_unclear_leaves_untagged() -> None:
+    """An unclear verdict never guesses a tag — but it is recorded, not forgotten."""
     from topos.features.signal.conversation_context import classify_untagged_conversations
 
     conn = _conn()
@@ -181,12 +182,118 @@ def test_auto_classifier_unclear_leaves_untagged() -> None:
     _seed_messages(conn, "conv-vague", ["hmm", "ok"])
     conn.commit()
     result = classify_untagged_conversations(conn, classify=lambda excerpts: None)
-    assert result == {"examined": 1, "tagged": 0}
+    assert result == {"examined": 1, "tagged": 0, "retired": 1, "unchanged": 0}
     row = conn.execute(
         "SELECT context_tag, context_tag_source FROM conversations "
         "WHERE conversation_id='conv-vague'"
     ).fetchone()
+    # No guessed tag, and the marker is not `auto:` — the UI reads that prefix
+    # as "the classifier labelled this" and would badge an untagged row.
+    assert row[0] is None
+    assert row[1] == "unclear:n2:injected"
+    assert not str(row[1]).startswith("auto:")
+
+
+def test_unclear_conversation_is_not_reclassified() -> None:
+    """The regression: identical excerpts must never be re-sent to the model.
+
+    Before this, every enrichment batch re-asked the same unlabelable
+    conversations — ~20 model calls a batch, forever, for zero progress.
+    """
+    from topos.features.signal.conversation_context import classify_untagged_conversations
+
+    conn = _conn()
+    _seed_conversation(conn, "conv-vague", None)
+    _seed_messages(conn, "conv-vague", ["hmm", "ok"])
+    conn.commit()
+
+    calls: list[list[str]] = []
+
+    def classify(excerpts: list[str]) -> None:
+        calls.append(excerpts)
+        return None
+
+    assert classify_untagged_conversations(conn, classify=classify)["retired"] == 1
+    assert len(calls) == 1
+
+    second = classify_untagged_conversations(conn, classify=classify)
+    assert second == {"examined": 0, "tagged": 0, "retired": 0, "unchanged": 1}
+    assert len(calls) == 1, "the model was asked the same question twice"
+
+
+def test_unclear_conversation_retried_once_it_grows() -> None:
+    """Retiring is not burial: new excerpts make a conversation a candidate again."""
+    from topos.features.signal.conversation_context import classify_untagged_conversations
+
+    conn = _conn()
+    _seed_conversation(conn, "conv-thin", None)
+    _seed_messages(conn, "conv-thin", ["hmm"])
+    conn.commit()
+    assert classify_untagged_conversations(conn, classify=lambda e: None)["retired"] == 1
+
+    conn.execute(
+        "INSERT INTO conversation_messages "
+        "(message_id, conversation_id, dataset_id, sender_type, sender_id, "
+        "content, event_at, source_id, is_from_self) "
+        "VALUES ('conv-thin-late', 'conv-thin', 'ds-1', 'user', 'peer', "
+        "'quarterly roadmap sync', '2026-07-09T10:00:00+00:00', 'slack_activity', 0)"
+    )
+    conn.commit()
+
+    grown = classify_untagged_conversations(conn, classify=lambda e: "work")
+    assert grown == {"examined": 1, "tagged": 1, "retired": 0, "unchanged": 0}
+    row = conn.execute(
+        "SELECT context_tag, context_tag_source FROM conversations "
+        "WHERE conversation_id='conv-thin'"
+    ).fetchone()
+    assert row[0] == "work" and str(row[1]).startswith("auto:")
+
+
+def test_engine_failure_does_not_retire_conversations() -> None:
+    """An outage yields no verdict — rows must stay candidates, not be buried."""
+    from topos.features.signal import conversation_context as cc
+
+    conn = _conn()
+    _seed_conversation(conn, "conv-down", None)
+    _seed_messages(conn, "conv-down", ["quarterly roadmap sync"])
+    conn.commit()
+
+    result = cc.classify_untagged_conversations(
+        conn, classify=lambda excerpts: cc._ENGINE_UNAVAILABLE
+    )
+    assert result == {"examined": 0, "tagged": 0, "retired": 0, "unchanged": 0}
+    row = conn.execute(
+        "SELECT context_tag, context_tag_source FROM conversations "
+        "WHERE conversation_id='conv-down'"
+    ).fetchone()
     assert row[0] is None and row[1] is None
+
+    # Still a candidate once the engine is back.
+    assert cc.classify_untagged_conversations(conn, classify=lambda e: "work")["tagged"] == 1
+
+
+def test_retired_backlog_never_crowds_out_new_conversations() -> None:
+    """Unclear rows only ever fill budget left over by never-asked rows."""
+    from topos.features.signal.conversation_context import classify_untagged_conversations
+
+    conn = _conn()
+    for i in range(3):
+        _seed_conversation(conn, f"conv-old-{i}", None)
+        _seed_messages(conn, f"conv-old-{i}", ["hmm"])
+    conn.commit()
+    assert classify_untagged_conversations(conn, classify=lambda e: None)["retired"] == 3
+
+    # A newer conversation arrives; budget is 2, smaller than the retired backlog.
+    _seed_conversation(conn, "conv-new", None)
+    _seed_messages(conn, "conv-new", ["quarterly roadmap sync", "ship the release"])
+    conn.commit()
+
+    result = classify_untagged_conversations(conn, limit=2, classify=lambda e: "work")
+    assert result["tagged"] == 1
+    row = conn.execute(
+        "SELECT context_tag FROM conversations WHERE conversation_id='conv-new'"
+    ).fetchone()
+    assert row[0] == "work"
 
 
 def test_auto_classifier_no_model_is_noop(monkeypatch) -> None:
@@ -199,7 +306,27 @@ def test_auto_classifier_no_model_is_noop(monkeypatch) -> None:
     import topos.config.conversation_context_llm as cfg
 
     monkeypatch.setattr(cfg, "resolve_context_llm_model", lambda settings, conn=None: "")
-    assert cc.classify_untagged_conversations(conn) == {"examined": 0, "tagged": 0}
+    assert cc.classify_untagged_conversations(conn) == {
+        "examined": 0,
+        "tagged": 0,
+        "retired": 0,
+        "unchanged": 0,
+    }
+
+
+def test_prior_unclear_count_parsing() -> None:
+    """Model names contain ':' — the count must survive them."""
+    from topos.features.signal.conversation_context import (
+        _prior_unclear_count,
+        _unclear_marker,
+    )
+
+    assert _prior_unclear_count(_unclear_marker("qwen3.5:9b-mlx", 8)) == 8
+    assert _prior_unclear_count("unclear:n2:injected") == 2
+    assert _prior_unclear_count("auto:qwen3.5:9b-mlx") is None
+    assert _prior_unclear_count("owner") is None
+    assert _prior_unclear_count(None) is None
+    assert _prior_unclear_count("unclear:nbogus:m") == 0
 
 
 def test_parse_label_strictness() -> None:
