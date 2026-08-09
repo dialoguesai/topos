@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.9] — 2026-08-09
+
 ### Fixed
 
 - `[S1]` `public_bio:read` and `work_context:read` can reach profile data

@@ -309,7 +309,14 @@ def test_engine_endpoint_still_rejects_an_unknown_path(conn) -> None:
 
 
 def test_shipped_manifest_declares_the_debt_retry_step() -> None:
-    """The dispatch is only reachable if the manifest actually declares it."""
+    """The dispatch is only reachable if the manifest actually declares it.
+
+    Searches every release rather than `unreleased`: cut_release.py stamps the
+    staging entry with the version being cut and resets `unreleased` to empty,
+    so pinning this to `unreleased` fails the release gate the moment the step
+    ships — which is exactly what it did on the 1.3.9 cut. The step's home
+    changes at release time; that it is declared at all does not.
+    """
     import json
     from pathlib import Path
 
@@ -318,8 +325,15 @@ def test_shipped_manifest_declares_the_debt_retry_step() -> None:
     data = json.loads(
         (Path(topos.__file__).parent / "upgrades" / "manifests.json").read_text()
     )
-    unreleased = next(r for r in data["releases"] if r["version"] == "unreleased")
-    step = next(s for s in unreleased["steps"] if s["id"] == "retry-recorded-derivation-debt")
+    steps = [
+        s
+        for release in data["releases"]
+        for s in release.get("steps", [])
+        if s.get("id") == "retry-recorded-derivation-debt"
+    ]
+    assert steps, "no release declares retry-recorded-derivation-debt"
+    assert len(steps) == 1, "the debt sweep should be declared once, not re-run every release"
+    step = steps[0]
     assert step["kind"] == "engine_endpoint"
     assert step["params"]["path"] == "/v1/signal/derivation-debt/retry"
     assert step["consent"] == "auto", "repairing recorded loss should not need a prompt"

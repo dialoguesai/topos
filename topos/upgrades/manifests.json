@@ -213,8 +213,8 @@
       ]
     },
     {
-      "version": "unreleased",
-      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "version": "1.3.9",
+      "summary": "Derivation-retry repair: the signal_derive_retry executor was never registered, so every recorded derivation debt was claimed and failed as an unknown job kind \u2014 the retry meant to repair a lost derivation destroyed the record of it instead. The executor is wired, workers claim only kinds they can execute, and an executor may requeue rather than read as failed. One consent:auto step sweeps debt already parked 'failed', which nothing else would re-queue. Also: public_bio:read / work_context:read gain test cover for the restored profile_records lane, and just harness-gate scores answer quality against a ratcheting floor instead of a 70/70 bar it cannot reach on a signal-less seed DB. No schema change.",
       "steps": [
         {
           "id": "retry-recorded-derivation-debt",
@@ -234,6 +234,12 @@
           "order": 1
         }
       ],
+      "notes": []
+    },
+    {
+      "version": "unreleased",
+      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "steps": [],
       "notes": []
     }
   ]
