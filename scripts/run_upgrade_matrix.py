@@ -125,11 +125,32 @@ def _assert_steps_did_work(
     """
     steps = list(plan.get("steps") or [])
     if not steps:
-        raise AssertionError(
-            "no upgrade steps planned — the fixture baseline is not below the "
-            "shipped version, so this run proves nothing. Check the fixture's "
-            "engine.upgrade.baseline stamp against the manifest ladder."
+        # Two different empty-plan cases share this branch:
+        #   1. Fixture baseline is not below shipped → the hop is invisible and
+        #      this run proves nothing (fail).
+        #   2. Real code-only hop (baseline < shipped, steps deliberately [])
+        #      → RELEASING.md allows empty steps; runner still stamps baseline.
+        #      Effect asserts have nothing to check (ok).
+        baseline = plan.get("baseline")
+        shipped_plan = str(plan.get("shipped") or shipped)
+        from topos.upgrades import _version_key
+
+        hop_visible = (
+            baseline is not None
+            and _version_key(str(baseline)) < _version_key(shipped_plan)
         )
+        if not hop_visible:
+            raise AssertionError(
+                "no upgrade steps planned — the fixture baseline is not below "
+                "the shipped version, so this run proves nothing. Check the "
+                "fixture's engine.upgrade.baseline stamp against the manifest "
+                f"ladder (baseline={baseline!r}, shipped={shipped_plan!r})."
+            )
+        print(
+            f"note: code-only hop {baseline!r} → {shipped_plan!r} "
+            "(0 derived steps); skipping effect asserts"
+        )
+        return
 
     # Every planned step must have reached a terminal success state.
     # 'pending_consent' is a legitimate resting place (a consent-gated step
