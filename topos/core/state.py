@@ -169,6 +169,14 @@ _db_conn_path: str | None = None  # resolved path for current db_conn; invalidat
 _conn_owner_thread: int | None = None
 #: Per-thread connections keyed implicitly by thread identity.
 _thread_state = threading.local()
+#: Serializes every read/validate/close/swap of the owner globals above.
+#: Without it, one thread evicting ``db_conn`` on a settings-path change
+#: closes the connection while another thread is mid-``execute`` on it — a
+#: use-after-close on the C sqlite3 object that SIGBUSed the test process on
+#: 2026-08-08. Lock-order rule: NEVER acquire the DB write gate while holding
+#: this lock (gated writers call ``get_db_connection`` constantly, and
+#: migrations take the gate — see ``_open_owner_db_connection``).
+_owner_conn_lock = threading.RLock()
 
 # Re-export write gate so callers can `from topos.core.state import with_db_write`.
 from ..storage.db.write_gate import (  # noqa: E402
@@ -248,15 +256,19 @@ def get_db_connection() -> Optional[sqlite3.Connection]:
     if owner is None:
         return None
 
+    with _owner_conn_lock:
+        owner_path = _db_conn_path
+        owner_thread = _conn_owner_thread
+
     # In-memory databases live only inside their connection; per-thread copies
     # would be empty. Share it, as before.
-    if _db_conn_path is None:
+    if owner_path is None:
         return owner
 
-    if threading.get_ident() == _conn_owner_thread:
+    if threading.get_ident() == owner_thread:
         return owner
 
-    return _get_thread_db_connection(_db_conn_path)
+    return _get_thread_db_connection(owner_path)
 
 
 def _get_thread_db_connection(resolved_path: str) -> Optional[sqlite3.Connection]:
@@ -326,81 +338,128 @@ def close_thread_db_connection() -> None:
 
 
 def _get_owner_db_connection() -> Optional[sqlite3.Connection]:
-    """Establish/validate the owner connection (migrations run here, once)."""
+    """Establish/validate the owner connection (migrations run here, once).
+
+    Every touch of the owner globals happens under ``_owner_conn_lock``. The
+    expensive part — opening a NEW connection and bringing its schema current —
+    happens OUTSIDE the lock on a local handle (see the lock-order rule at the
+    lock's definition), then the winner is swapped in under the lock. Two
+    threads racing an initial open both build a connection; the loser's is
+    closed at the swap.
+    """
     global db_conn, _db_conn_path, _conn_owner_thread
 
     from ..config.settings import settings
 
-    # Respect injected in-memory sqlite handles used by tests, even if _db_conn_path
-    # still points to a stale file-backed connection from a prior run.
-    if db_conn is not None:
-        try:
-            row = db_conn.execute("PRAGMA database_list").fetchone()
-            if row is not None:
-                db_file = str(row[2] or "").strip()  # seq, name, file
-                if db_file in {"", ":memory:"}:
-                    _db_conn_path = None
-                    return db_conn
-                if _db_conn_path is None:
-                    _db_conn_path = str(Path(db_file).resolve())
-        except Exception:
-            pass
-
-    if db_conn is not None and settings.topos_database_path and _db_conn_path:
-        try:
-            db_conn.execute("SELECT 1")
-        except (sqlite3.ProgrammingError, sqlite3.OperationalError):
-            db_conn = None
-            _db_conn_path = None
-        else:
+    with _owner_conn_lock:
+        # Respect injected in-memory sqlite handles used by tests, even if _db_conn_path
+        # still points to a stale file-backed connection from a prior run.
+        if db_conn is not None:
             try:
-                explicit_resolved = str(Path(settings.topos_database_path).resolve())
-            except (OSError, RuntimeError):
-                explicit_resolved = None
-            if explicit_resolved and explicit_resolved == _db_conn_path:
-                return db_conn
+                row = db_conn.execute("PRAGMA database_list").fetchone()
+                if row is not None:
+                    db_file = str(row[2] or "").strip()  # seq, name, file
+                    if db_file in {"", ":memory:"}:
+                        _db_conn_path = None
+                        return db_conn
+                    if _db_conn_path is None:
+                        _db_conn_path = str(Path(db_file).resolve())
+            except Exception:
+                pass
 
-    db_path: Path | None = None
-    try:
-        db_path = _resolve_database_path_from_settings()
-    except Exception as e:
-        logger.warning("Failed to determine database path: %s", e)
-        return None
+        if db_conn is not None and settings.topos_database_path and _db_conn_path:
+            try:
+                db_conn.execute("SELECT 1")
+            except (sqlite3.ProgrammingError, sqlite3.OperationalError):
+                db_conn = None
+                _db_conn_path = None
+            else:
+                try:
+                    explicit_resolved = str(Path(settings.topos_database_path).resolve())
+                except (OSError, RuntimeError):
+                    explicit_resolved = None
+                if explicit_resolved and explicit_resolved == _db_conn_path:
+                    return db_conn
 
-    if not db_path:
-        return None
-
-    resolved = str(db_path.resolve())
-    if db_conn is not None and _db_conn_path != resolved:
+        db_path: Path | None = None
         try:
-            db_conn.close()
-        except Exception:
-            pass
-        db_conn = None
-        _db_conn_path = None
+            db_path = _resolve_database_path_from_settings()
+        except Exception as e:
+            logger.warning("Failed to determine database path: %s", e)
+            return None
 
-    if db_conn is not None:
-        try:
-            db_conn.execute("SELECT 1")
-            # Scrub/adapters may have cleared Row factory on the shared conn.
-            if getattr(db_conn, "row_factory", None) is not sqlite3.Row:
-                db_conn.row_factory = sqlite3.Row
-            return db_conn
-        except (sqlite3.ProgrammingError, sqlite3.OperationalError):
+        if not db_path:
+            return None
+
+        resolved = str(db_path.resolve())
+        if db_conn is not None and _db_conn_path != resolved:
+            # Deliberately NOT closed: the lock serializes this function, but a
+            # caller elsewhere may hold this handle mid-execute (handlers keep
+            # it across queries) — closing under them is the use-after-close
+            # that SIGBUSed on 2026-08-08. Dropping the reference lets the last
+            # user finish; the handle closes (rolling back any open
+            # transaction) when its refcount reaches zero.
             db_conn = None
             _db_conn_path = None
 
-    try:
-        db_path.parent.mkdir(parents=True, exist_ok=True)
-        db_conn = sqlite3.connect(str(db_path), check_same_thread=False)
-        db_conn.row_factory = sqlite3.Row
+        if db_conn is not None:
+            try:
+                db_conn.execute("SELECT 1")
+                # Scrub/adapters may have cleared Row factory on the shared conn.
+                if getattr(db_conn, "row_factory", None) is not sqlite3.Row:
+                    db_conn.row_factory = sqlite3.Row
+                return db_conn
+            except (sqlite3.ProgrammingError, sqlite3.OperationalError):
+                db_conn = None
+                _db_conn_path = None
+
+    new_conn = _open_owner_db_connection(db_path)
+    if new_conn is None:
+        return None
+
+    with _owner_conn_lock:
+        # Another thread may have opened (or a test injected) a connection
+        # while we were migrating. Keep theirs, discard ours — the next call
+        # re-validates path agreement.
+        if db_conn is not None:
+            try:
+                db_conn.execute("SELECT 1")
+            except Exception:
+                try:
+                    db_conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
+            else:
+                try:
+                    new_conn.close()
+                except Exception:  # noqa: BLE001
+                    pass
+                return db_conn
+        db_conn = new_conn
         _db_conn_path = resolved
         _conn_owner_thread = threading.get_ident()
+        return db_conn
+
+
+def _open_owner_db_connection(db_path: Path) -> Optional[sqlite3.Connection]:
+    """Open ``db_path``, tune it, and bring its schema current — on a LOCAL handle.
+
+    Deliberately called without ``_owner_conn_lock`` held: migrations acquire
+    the DB write gate, and gated writers call ``get_db_connection`` — holding
+    the owner lock across the gate would invert lock order and deadlock. The
+    connection only becomes ``db_conn`` after this returns, so no other thread
+    can observe a half-migrated database.
+    """
+    conn: sqlite3.Connection | None = None
+    try:
+        db_path.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(str(db_path), check_same_thread=False)
+        conn.row_factory = sqlite3.Row
         logger.debug("Created database connection: %s", db_path)
         try:
             from ..storage.db.connection_tuning import tune_connection
 
-            tuning = tune_connection(db_conn)
+            tuning = tune_connection(conn)
             logger.info(
                 "DB tuning: journal_mode=%s sqlite_vec=%s",
                 tuning.get("journal_mode"),
@@ -415,16 +474,14 @@ def _get_owner_db_connection() -> Optional[sqlite3.Connection]:
                 ensure_migrations_applied,
             )
 
-            ensure_migrations_applied(db_conn)
+            ensure_migrations_applied(conn)
         except (MigrationError, DowngradeGuardError) as migration_exc:
             # Shape migrations must fail loud — serving a half-migrated DB corrupts data.
             logger.error("Schema migration failed; refusing to open database: %s", migration_exc)
             try:
-                db_conn.close()
+                conn.close()
             except Exception:  # noqa: BLE001
                 pass
-            db_conn = None
-            _db_conn_path = None
             raise
         except Exception as migration_exc:  # noqa: BLE001
             from ..storage.db.migrations import MigrationError as _MigrationError
@@ -434,19 +491,17 @@ def _get_owner_db_connection() -> Optional[sqlite3.Connection]:
                 migration_exc,
             )
             try:
-                db_conn.close()
+                conn.close()
             except Exception:  # noqa: BLE001
                 pass
-            db_conn = None
-            _db_conn_path = None
             raise _MigrationError(str(migration_exc)) from migration_exc
         try:
             from ..storage.raw.browser_flat_tables import backfill_browser_visits_from_raw_retention
 
-            backfill_browser_visits_from_raw_retention(db_conn)
+            backfill_browser_visits_from_raw_retention(conn)
         except Exception as backfill_exc:  # noqa: BLE001
             logger.debug("browser_visits raw→flat backfill skipped: %s", backfill_exc)
-        return db_conn
+        return conn
     except Exception as e:
         # Shape-migration failures must propagate (fail loud). Only soft-fail
         # unrelated connection errors so callers can treat conn=None as "no DB".
@@ -455,8 +510,11 @@ def _get_owner_db_connection() -> Optional[sqlite3.Connection]:
         if isinstance(e, (MigrationError, DowngradeGuardError)):
             raise
         logger.warning("Failed to create database connection: %s", e)
-        db_conn = None
-        _db_conn_path = None
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
         return None
 
 

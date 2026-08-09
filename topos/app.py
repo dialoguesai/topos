@@ -162,23 +162,86 @@ async def startup_event() -> None:
     # Avoid initializing file-backed services in that case.
     if state.db_conn is None:
         _ = get_services()
-    # Run Stage 9 column renames at startup so request handlers never block the event loop on migration.
-    try:
-        from .core.state import db_conn, get_db_connection
+    # Stage 9 migrations and source-install rehydration both take the DB write
+    # gate; holding it on the event-loop thread stalls every coroutine —
+    # including the control-plane keepalive — for the whole hold ([WRITE_GATE]
+    # loop-thread diagnostic). Both sections run sequentially on ONE dedicated
+    # worker thread with that thread's own connection. Two separate
+    # asyncio.to_thread hops destabilized the suite on 2026-08-08: pool
+    # threads cached extra connections, and a cancelled await abandoned work
+    # mid-flight with no owner to clean up. The thread rolls back any open
+    # transaction and closes its connection in `finally`, so even a cancelled
+    # startup (asgi-lifespan timeout in tests) cannot strand a transaction
+    # that poisons later writers with "database is locked".
+    startup_db_done = asyncio.Event()
+    _loop = asyncio.get_running_loop()
+
+    def _startup_db_work() -> None:
+        from .core import state as _state
+        from .core.state import close_thread_db_connection, get_db_connection
         from .storage.db.migrations.stage9_column_renames import run_stage9_migrations
         from .storage.db.write_gate import with_db_write
-        # Respect pre-injected test connections; avoid replacing test DB handles during startup.
-        conn = db_conn if db_conn is not None else get_db_connection()
-        if conn:
-            # run_stage9_migrations executes + commits ALTERs without managing
-            # the gate — hold it around the whole call (write_gate lock-order
-            # inversion; migration entry point outside the gated runner).
-            with with_db_write():
-                result = run_stage9_migrations(conn)
-            if result.get("applied"):
-                logger.info("Stage 9 migrations applied at startup: %d renames", len(result["applied"]))
-    except Exception as e:
-        logger.debug("Stage 9 migrations at startup (non-fatal): %s", e)
+
+        conn: object = None
+
+        def _rollback_open_txn() -> None:
+            # Gated: on an injected shared connection (tests) an ungated
+            # rollback could interleave with another thread's writes.
+            try:
+                if conn is not None and getattr(conn, "in_transaction", False):
+                    with with_db_write():
+                        if getattr(conn, "in_transaction", False):
+                            conn.rollback()
+            except Exception:  # noqa: BLE001 — cleanup must never raise
+                pass
+
+        try:
+            try:
+                # Respect pre-injected test connections; avoid replacing test
+                # DB handles during startup.
+                conn = _state.db_conn if _state.db_conn is not None else get_db_connection()
+                if conn is not None:
+                    # run_stage9_migrations executes + commits ALTERs without
+                    # managing the gate — hold it around the whole call
+                    # (write_gate lock-order inversion; migration entry point
+                    # outside the gated runner).
+                    with with_db_write():
+                        result = run_stage9_migrations(conn)
+                    if result.get("applied"):
+                        logger.info(
+                            "Stage 9 migrations applied at startup: %d renames", len(result["applied"])
+                        )
+            except Exception as e:  # noqa: BLE001
+                _rollback_open_txn()
+                logger.debug("Stage 9 migrations at startup (non-fatal): %s", e)
+            try:
+                from .sources import install_service
+
+                # Resolves its own connection — on this thread that is the
+                # same per-thread (or injected) connection stage9 used.
+                summary = install_service.rehydrate_active_installs_runtime()
+                if summary.get("rehydrated"):
+                    logger.info(
+                        "Rehydrated active source installs at startup: active=%s rehydrated=%s failed=%s",
+                        summary.get("active_installs"),
+                        summary.get("rehydrated"),
+                        summary.get("failed"),
+                    )
+            except Exception as e:  # noqa: BLE001
+                _rollback_open_txn()
+                logger.warning("Active source install rehydration at startup failed (non-fatal): %s", e)
+        finally:
+            _rollback_open_txn()
+            # Drop this thread's cached connection (no-op for injected/owner
+            # handles); close() also rolls back anything still open on it.
+            close_thread_db_connection()
+            try:
+                _loop.call_soon_threadsafe(startup_db_done.set)
+            except RuntimeError:
+                pass  # Loop already closed (cancelled startup) — nobody is waiting.
+
+    threading.Thread(target=_startup_db_work, name="topos-startup-db", daemon=True).start()
+    await startup_db_done.wait()
     # Upgrade runner is armed later — after control-plane / local readiness —
     # so the React UI can fetch bootstrap data before enrichment reprocess
     # contends for SQLite / Ollama / MPS. See _arm_upgrade_runner below.
@@ -214,19 +277,6 @@ async def startup_event() -> None:
             start_pipeline_worker(_get_conn_for_pipeline)
     except Exception as e:
         logger.warning("Pipeline worker at startup failed (non-fatal): %s", e)
-    try:
-        from .sources import install_service
-
-        summary = install_service.rehydrate_active_installs_runtime()
-        if summary.get("rehydrated"):
-            logger.info(
-                "Rehydrated active source installs at startup: active=%s rehydrated=%s failed=%s",
-                summary.get("active_installs"),
-                summary.get("rehydrated"),
-                summary.get("failed"),
-            )
-    except Exception as e:
-        logger.warning("Active source install rehydration at startup failed (non-fatal): %s", e)
     if getattr(settings, "sanitization_prewarm_on_startup", True):
         async def _prewarm_sanitization() -> None:
             try:
