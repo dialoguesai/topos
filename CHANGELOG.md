@@ -49,6 +49,18 @@ The machine-readable twin of each release is
   failed as unknown, and an executor may return `status: "requeue"` to hand a
   claim back untouched when it declines to run — a deferral must not read as a
   failed attempt.
+### Changed
+
+- `[O]` `just harness-gate` scores answer quality against a `QUALITY_FLOOR`
+  ratchet instead of a flat 70/70. Permission and Signal stay hard 70/70 —
+  those are disclosure and retrieval-liveness checks and do not depend on how
+  derived the database is. The 70/70 quality baseline was recorded on a fully
+  derived node; the gate seeds a throwaway DB where the vector and cluster
+  layers are switched off by design, so a share of the catalog is
+  unanswerable there by construction and the gate could never go green. The
+  floor is the high-water mark on that environment (now 42/70, measured on
+  main at `39bf20b`) and the recipe says so when a run beats it.
+
 ## [1.3.8] — 2026-08-09
 
 ### Added
@@ -133,15 +145,6 @@ The machine-readable twin of each release is
 
 ### Changed
 
-- `[O]` `just harness-gate` scores answer quality against a `QUALITY_FLOOR`
-  ratchet instead of a flat 70/70. Permission and Signal stay hard 70/70 —
-  those are disclosure and retrieval-liveness checks and do not depend on how
-  derived the database is. The 70/70 quality baseline was recorded on a fully
-  derived node; the gate seeds a throwaway DB where the vector and cluster
-  layers are switched off by design, so a share of the catalog is
-  unanswerable there by construction and the gate could never go green. The
-  floor is the high-water mark on that environment (now 42/70, measured on
-  main at `39bf20b`) and the recipe says so when a run beats it.
 - `[O]` CI no longer runs the Home chat Wave A retrieval-quality harness:
   it drove scripts under the gitignored `demo/`, so it failed on every run
   from 2026-07-05 and masked the privacy-eval, package-metadata and
