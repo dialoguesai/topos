@@ -376,6 +376,25 @@ def _exec_engine_endpoint(step: Dict[str, Any], conn: sqlite3.Connection) -> Dic
         from ..features.entities.rebuild_subprocess import run_graph_rebuild
 
         return dict(run_graph_rebuild(conn))
+    if path == "/v1/signal/derivation-debt/retry":
+        # Recorded debt is not self-healing: a failed row is only re-queued by
+        # the next organic failure of the same (batch, job), and recover_stale_jobs
+        # resets 'running' rows, never 'failed' ones. So a node that recorded debt
+        # while its executor was missing keeps the gap until something sweeps it.
+        import asyncio
+
+        from ..enrichment.derivation_recovery import retry_pending_derivations
+
+        params = step.get("params") or {}
+        return dict(
+            asyncio.run(
+                retry_pending_derivations(
+                    conn,
+                    source_id=params.get("source_id"),
+                    limit=int(params.get("limit") or 200),
+                )
+            )
+        )
     raise ValueError(f"no internal dispatch for endpoint step: {path!r}")
 
 
