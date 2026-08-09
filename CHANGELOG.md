@@ -49,6 +49,7 @@ The machine-readable twin of each release is
   failed as unknown, and an executor may return `status: "requeue"` to hand a
   claim back untouched when it declines to run — a deferral must not read as a
   failed attempt.
+
 ### Changed
 
 - `[O]` `just harness-gate` scores answer quality against a `QUALITY_FLOOR`
