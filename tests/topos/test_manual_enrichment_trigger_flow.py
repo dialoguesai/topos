@@ -99,22 +99,32 @@ async def test_manual_enrichment_not_auto_then_manual_trigger(monkeypatch: pytes
         # Simulate enrichment persistence so status transitions from unprocessed -> processed.
         conn = self.tables_manager.conn if self.tables_manager else None
         if conn is not None:
+            from topos.enrichment.catalog import catalog_spec_version
+
             created_at = datetime.now(timezone.utc).isoformat()
+            # message_emotions is provenance-split: record_id + payload_json,
+            # not the message_id/emotion_label columns of the older
+            # message_emotions_derived. Coverage also gates on spec_version, so
+            # a row below the job's catalog version still reads as unprocessed.
+            spec_version = catalog_spec_version("emo_27")
             for msg in canonical_messages:
+                record_id = msg.get("message_id") or msg.get("record_id")
                 conn.execute(
                     """
                     INSERT OR REPLACE INTO message_emotions (
-                        message_id, source_id, emotion_label, confidence, model_name, all_emotions_json, created_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                        emotion_id, record_id, source_id, model, provider,
+                        payload_json, created_at, spec_version
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
-                        msg.get("message_id"),
+                        f"emo-{record_id}",
+                        record_id,
                         msg.get("source_id"),
-                        "neutral",
-                        1.0,
                         "test-model",
-                        "[]",
+                        "test",
+                        json.dumps({"label": "neutral", "confidence": 1.0}),
                         created_at,
+                        spec_version,
                     ),
                 )
             conn.commit()
