@@ -8,9 +8,28 @@ import sqlite3
 import pytest
 
 from topos.core.handlers import handle_control_plane_request
+from topos.pipeline import job_runner
 from topos.pipeline.job_runner import process_pending_jobs_once, recover_pipeline_jobs
 from topos.pipeline.job_store import get_job
 from topos.storage.db.migrations.pipeline_jobs_v1 import apply_pipeline_jobs_v1_up
+
+
+def _stub_file_ingestion(monkeypatch: pytest.MonkeyPatch, result: dict) -> list[dict]:
+    """Route file_ingestion dispatch to a stub, and record what it was called with.
+
+    EXECUTORS binds the executor functions at import time, so patching the
+    module attribute ``_execute_file_ingestion`` leaves dispatch pointing at the
+    original — the stub never runs and the real ingestion reads whatever
+    ``file_path`` says. Patch the dict entry that dispatch actually reads.
+    """
+    calls: list[dict] = []
+
+    async def _fake_ingest(payload: dict) -> dict:
+        calls.append(payload)
+        return result
+
+    monkeypatch.setitem(job_runner.EXECUTORS, "file_ingestion", _fake_ingest)
+    return calls
 
 
 @pytest.fixture
@@ -38,11 +57,10 @@ def conn(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_start_ingestion_persists_job_before_ack(conn, monkeypatch) -> None:
-    async def _fake_ingest(**kwargs):
-        return {"status": "ok", "records_processed": 3, "records_total": 3}
-
-    monkeypatch.setattr("topos.pipeline.job_runner._execute_file_ingestion", _fake_ingest)
+async def test_start_ingestion_persists_job_before_ack(conn, monkeypatch, tmp_path) -> None:
+    _stub_file_ingestion(monkeypatch, {"status": "ok", "records_processed": 3, "records_total": 3})
+    sample = tmp_path / "sample.jsonl"
+    sample.write_text("", encoding="utf-8")
 
     result = await handle_control_plane_request(
         {
@@ -52,7 +70,7 @@ async def test_start_ingestion_persists_job_before_ack(conn, monkeypatch) -> Non
                 "job_id": "cp-job-1",
                 "dataset_id": "user:dataset",
                 "schema_id": "chatgpt.conversation.v1",
-                "file_path": "/tmp/sample.jsonl",
+                "file_path": str(sample),
             },
         }
     )
@@ -64,15 +82,16 @@ async def test_start_ingestion_persists_job_before_ack(conn, monkeypatch) -> Non
 
 
 @pytest.mark.asyncio
-async def test_start_ingestion_survives_simulated_restart(conn, monkeypatch) -> None:
-    async def _fake_ingest(**kwargs):
-        return {"status": "ok", "records_processed": 1, "records_total": 1}
-
-    monkeypatch.setattr("topos.pipeline.job_runner._execute_file_ingestion", _fake_ingest)
+async def test_start_ingestion_survives_simulated_restart(conn, monkeypatch, tmp_path) -> None:
+    calls = _stub_file_ingestion(
+        monkeypatch, {"status": "ok", "records_processed": 1, "records_total": 1}
+    )
     monkeypatch.setattr(
         "topos.pipeline.job_runner.start_pipeline_worker",
         lambda _factory: None,
     )
+    sample = tmp_path / "sample.jsonl"
+    sample.write_text("", encoding="utf-8")
 
     await handle_control_plane_request(
         {
@@ -82,7 +101,7 @@ async def test_start_ingestion_survives_simulated_restart(conn, monkeypatch) -> 
                 "job_id": "cp-job-2",
                 "dataset_id": "user:dataset",
                 "schema_id": "chatgpt.conversation.v1",
-                "file_path": "/tmp/sample.jsonl",
+                "file_path": str(sample),
             },
         }
     )
@@ -97,3 +116,7 @@ async def test_start_ingestion_survives_simulated_restart(conn, monkeypatch) -> 
     job = get_job(conn, "cp-job-2")
     assert job is not None
     assert job["status"] == "done"
+    # The recovered job has to reach the executor. Without this the test passes
+    # whenever real ingestion happens to succeed, which is how a dead stub went
+    # unnoticed here.
+    assert len(calls) == 1
