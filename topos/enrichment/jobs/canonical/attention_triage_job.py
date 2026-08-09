@@ -7,6 +7,7 @@ unchanged, so re-running a day is safe and cheap.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
@@ -34,8 +35,7 @@ class AttentionTriageJob(BaseEnrichmentJob):
         canonical_messages: List[Dict[str, Any]],
         progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> List[Dict[str, Any]]:
-        conn = get_db_connection()
-        if conn is None:
+        if get_db_connection() is None:
             return [{"_deferred": True, "error": "database_unavailable"}]
         days = set()
         for row in canonical_messages:
@@ -46,17 +46,37 @@ class AttentionTriageJob(BaseEnrichmentJob):
                     break
         done = 0
         for day_iso in sorted(days):
+            # A day's re-triage holds the write gate — a blocking OS lock — for
+            # its verdict upserts and signal objects. Held on the event loop it
+            # stalls every coroutine, including the control-plane keepalive, so
+            # each day runs on a worker thread against that thread's own
+            # connection. One day per hop also keeps progress incremental.
+            def _triage(_day: str = day_iso) -> Optional[Dict[str, Any]]:
+                conn = get_db_connection()
+                if conn is None:
+                    return None
+                return run_daily_triage(conn, _day)
+
             try:
-                summary = run_daily_triage(conn, day_iso)
-                logger.info("attention_triage %s: %s", day_iso, summary.get("quadrants"))
+                summary = await asyncio.to_thread(_triage)
+                if summary is not None:
+                    logger.info("attention_triage %s: %s", day_iso, summary.get("quadrants"))
             except Exception:  # one bad day must not sink the batch
                 logger.exception("attention_triage failed for %s", day_iso)
             done += 1
             if progress_callback:
                 progress_callback(done, len(days))
-        try:
+
+        def _award() -> Optional[List[Any]]:
+            conn = get_db_connection()
+            if conn is None:
+                return None
             from ....features.triage.badges import award_badges
-            fresh = award_badges(conn)
+
+            return award_badges(conn)
+
+        try:
+            fresh = await asyncio.to_thread(_award)
             if fresh:
                 logger.info("badges awarded: %s", fresh)
         except Exception:

@@ -6,6 +6,7 @@ retention or source flat tables.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import uuid
@@ -760,16 +761,27 @@ async def run_post_canonical_pipeline(
         list(enrichment_records) if enrichment_records is not None else list(canonical_records)
     )
 
-    derived = tables_manager or DerivedTablesManager()
-    if tables_manager is None and getattr(derived, "conn", None) is None:
-        try:
-            from ..core.state import get_db_connection
+    derived = tables_manager
+    if derived is None:
 
-            conn = get_db_connection()
+        def _build_tables_manager() -> "DerivedTablesManager":
+            # Constructing the manager ensures enrichment DDL under the write
+            # gate — a blocking OS lock — so it runs on a worker thread with
+            # that thread's own connection, never on the event loop.
+            # get_db_connection (the canonical, thread-local accessor) is
+            # preferred over the bare constructor, whose state.db_conn-global
+            # fallback can resolve a stale owner handle.
+            try:
+                from ..core.state import get_db_connection
+
+                conn = get_db_connection()
+            except Exception:
+                conn = None
             if conn is not None:
-                derived = DerivedTablesManager(conn=conn)
-        except Exception:
-            pass
+                return DerivedTablesManager(conn=conn)
+            return DerivedTablesManager()
+
+        derived = await asyncio.to_thread(_build_tables_manager)
 
     # Platform Privacy Layer — mandatory, not gated by enrichment_trigger
     try:
@@ -881,7 +893,10 @@ async def run_post_canonical_pipeline(
             outcome["signal_derivation"] = {"errors": [str(exc)]}
 
     # B2.4: one episode per canonical batch (best-effort provenance record).
-    outcome["episode_id"] = _record_episode(
+    # Takes the write gate, so it runs off the event loop; with no conn passed,
+    # _record_episode resolves the worker thread's own connection.
+    outcome["episode_id"] = await asyncio.to_thread(
+        _record_episode,
         source_def=source_def,
         canonical_records=canonical_records,
         sync_batch_id=sync_batch_id,
