@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
@@ -120,26 +121,37 @@ class DimensionSummaryJob(BaseEnrichmentJob):
 
         structured_result: Dict[str, Any] = {}
         if structured_signal_enabled():
-            structured_result = enrich_structured_batch(
-                prepared,
-                source_id=str(source_id or "") or None,
-                only_dimension=only_dimension,
-            )
-            # Piggyback (badge-pass pattern): auto-tag new conversations as
-            # work/personal with the configured local model. Best-effort;
-            # owner-set tags are never touched.
-            try:
-                from ....features.signal.conversation_context import (
-                    classify_untagged_conversations,
-                )
 
-                structured_result["conversation_context"] = (
-                    classify_untagged_conversations(conn)
+            def _structured() -> Dict[str, Any]:
+                # Artifact routing, the gate aggregates and the scope
+                # materializer each take the write gate — a blocking OS lock
+                # that on the event loop stalls every coroutine, including the
+                # control-plane keepalive. enrich_structured_batch resolves its
+                # own connection, so on a worker thread it binds that thread's.
+                out = enrich_structured_batch(
+                    prepared,
+                    source_id=str(source_id or "") or None,
+                    only_dimension=only_dimension,
                 )
-            except Exception as exc:  # noqa: BLE001 — never blocks enrichment
-                logger.debug("conversation-context pass failed: %s", exc)
+                # Piggyback (badge-pass pattern): auto-tag new conversations as
+                # work/personal with the configured local model. Best-effort;
+                # owner-set tags are never touched.
+                try:
+                    from ....features.signal.conversation_context import (
+                        classify_untagged_conversations,
+                    )
 
-        store = DimensionBriefStore(conn)
+                    worker_conn = get_db_connection()
+                    if worker_conn is not None:
+                        out["conversation_context"] = classify_untagged_conversations(
+                            worker_conn
+                        )
+                except Exception as exc:  # noqa: BLE001 — never blocks enrichment
+                    logger.debug("conversation-context pass failed: %s", exc)
+                return out
+
+            structured_result = await asyncio.to_thread(_structured)
+
         updated_dims: List[str] = []
 
         for idx, dimension in enumerate(dimensions):
@@ -199,13 +211,34 @@ class DimensionSummaryJob(BaseEnrichmentJob):
                 continue
             if not any(str(v or "").strip() for v in section_updates.values()):
                 continue
-            store.merge_system_update(
-                dimension,
-                section_updates,
-                source_id=source_id,
-                model=result.output.get("model") if result.status == "completed" and result.output else None,
-                provider=provider,
-            )
+
+            def _merge(
+                _dimension: str = dimension,
+                _updates: Dict[str, Optional[str]] = section_updates,
+                _model: Optional[str] = (
+                    result.output.get("model")
+                    if result.status == "completed" and result.output
+                    else None
+                ),
+                _provider: str = provider,
+            ) -> None:
+                # merge_system_update ensures the brief head and appends a
+                # revision, both under the write gate — a blocking OS lock that
+                # on the event loop stalls every coroutine, including the
+                # control-plane keepalive. The store binds whichever connection
+                # it is built with, so build it on the worker thread.
+                worker_conn = get_db_connection()
+                if worker_conn is None:
+                    return
+                DimensionBriefStore(worker_conn).merge_system_update(
+                    _dimension,
+                    _updates,
+                    source_id=source_id,
+                    model=_model,
+                    provider=_provider,
+                )
+
+            await asyncio.to_thread(_merge)
             updated_dims.append(dimension)
             if progress_callback:
                 progress_callback(idx + 1, len(dimensions))

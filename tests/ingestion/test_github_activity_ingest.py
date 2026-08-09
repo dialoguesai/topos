@@ -19,7 +19,9 @@ from topos.sources.registry import GITHUB_ACTIVITY
 def migrated_conn(tmp_path):
     from topos.storage.db.migrations import apply_all_migrations
 
-    conn = sqlite3.connect(str(tmp_path / "github_activity.db"))
+    # The ingest DB stretch runs on a worker thread (asyncio.to_thread),
+    # so the injected connection must allow cross-thread use.
+    conn = sqlite3.connect(str(tmp_path / "github_activity.db"), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     apply_all_migrations(conn)
     yield conn
