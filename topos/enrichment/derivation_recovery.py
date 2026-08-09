@@ -240,6 +240,70 @@ def list_pending_derivation_retries(
     return out
 
 
+async def retry_single_derivation(
+    conn: sqlite3.Connection,
+    *,
+    source_id: str,
+    sync_batch_id: str,
+    job_name: str,
+    record_ids: Optional[Sequence[str]] = None,
+) -> Dict[str, Any]:
+    """Re-run exactly one recorded derivation debt.
+
+    Reloads the debt's canonical records and re-runs ONLY the job that failed,
+    so a retry cannot disturb jobs that already succeeded. Jobs are idempotent
+    per (batch, job) at the ledger level; a retry that fails again simply leaves
+    the debt in place for the next attempt.
+
+    Returns ``{"outcome": "recovered" | "still_failing" | "skipped", ...}``.
+    "skipped" means the debt cannot be re-run mechanically (unknown source, no
+    surviving records) — the caller decides whether that discharges it.
+    """
+    if not job_name or not source_id:
+        return {"outcome": "skipped", "reason": "incomplete record"}
+    try:
+        from ..ingestion.canonical_pipeline import load_canonical_records_for_signal
+        # Reuses reprocess's resolver so a runtime-installed source rehydrates
+        # the same way it does for a manual reprocess.
+        from ..ingestion.reprocess import _resolve_source_def
+
+        try:
+            source_def = _resolve_source_def(source_id)
+        except ValueError:
+            return {"outcome": "skipped", "reason": "unknown source"}
+        records = load_canonical_records_for_signal(conn, source_def)
+        wanted = {str(r) for r in (record_ids or []) if r}
+        if wanted:
+            scoped = [
+                r
+                for r in records
+                if str(r.get("message_id") or r.get("record_id") or "") in wanted
+            ]
+            records = scoped or records
+        if not records:
+            return {"outcome": "skipped", "reason": "no records"}
+
+        from .orchestrator import SignalDerivationOrchestrator
+
+        result = await SignalDerivationOrchestrator().run_signal_derivation(
+            records, source_id, job_names=[job_name], sync_batch_id=sync_batch_id
+        )
+        if result.get("errors"):
+            return {
+                "outcome": "still_failing",
+                "error": result["errors"][0].get("error"),
+            }
+        # run_signal_derivation clears the debt itself on success.
+        return {
+            "outcome": "recovered",
+            "records": len(records),
+            "created": result.get("records_created", {}).get(job_name, 0),
+        }
+    except Exception as exc:  # noqa: BLE001 — one bad debt must not stop the rest
+        logger.warning("[DERIVE:RETRY] retry failed job=%s source=%s: %s", job_name, source_id, exc)
+        return {"outcome": "still_failing", "error": str(exc)}
+
+
 async def retry_pending_derivations(
     conn: Optional[sqlite3.Connection] = None,
     *,
@@ -248,11 +312,6 @@ async def retry_pending_derivations(
     dry_run: bool = False,
 ) -> Dict[str, Any]:
     """Re-run derivation jobs that previously failed, clearing settled debts.
-
-    Reloads each debt's canonical records and re-runs ONLY the job that failed,
-    so a retry cannot disturb jobs that already succeeded. Jobs are idempotent
-    per (batch, job) at the ledger level; a retry that fails again simply leaves
-    the debt in place for the next attempt.
 
     ``dry_run`` reports what would run without touching anything.
     """
@@ -278,61 +337,27 @@ async def retry_pending_derivations(
         ]
         return outcome
 
-    from ..ingestion.canonical_pipeline import load_canonical_records_for_signal
-    # Reuses reprocess's resolver so a runtime-installed source rehydrates the
-    # same way it does for a manual reprocess.
-    from ..ingestion.reprocess import _resolve_source_def
-
     for debt in pending:
         job_name = debt["job_name"]
         src = debt["source_id"]
         batch = debt["sync_batch_id"]
-        if not job_name or not src:
-            outcome["skipped"].append({**debt, "reason": "incomplete record"})
-            continue
-        try:
-            try:
-                source_def = _resolve_source_def(src)
-            except ValueError:
-                outcome["skipped"].append({"job_name": job_name, "source_id": src, "reason": "unknown source"})
-                continue
-            records = load_canonical_records_for_signal(conn, source_def)
-            wanted = set(debt.get("record_ids") or [])
-            if wanted:
-                scoped = [
-                    r
-                    for r in records
-                    if str(r.get("message_id") or r.get("record_id") or "") in wanted
-                ]
-                records = scoped or records
-            if not records:
-                outcome["skipped"].append({"job_name": job_name, "source_id": src, "reason": "no records"})
-                continue
-
-            from .orchestrator import SignalDerivationOrchestrator
-
+        result = await retry_single_derivation(
+            conn,
+            source_id=src,
+            sync_batch_id=batch,
+            job_name=job_name,
+            record_ids=debt.get("record_ids") or [],
+        )
+        kind = result.pop("outcome")
+        entry = {"job_name": job_name, "source_id": src, **result}
+        if kind == "recovered":
             outcome["attempted"] += 1
-            result = await SignalDerivationOrchestrator().run_signal_derivation(
-                records, src, job_names=[job_name], sync_batch_id=batch
-            )
-            if result.get("errors"):
-                outcome["still_failing"].append(
-                    {"job_name": job_name, "source_id": src, "error": result["errors"][0].get("error")}
-                )
-            else:
-                # run_signal_derivation clears the debt itself on success.
-                outcome["recovered"].append(
-                    {
-                        "job_name": job_name,
-                        "source_id": src,
-                        "batch": batch,
-                        "records": len(records),
-                        "created": result.get("records_created", {}).get(job_name, 0),
-                    }
-                )
-        except Exception as exc:  # noqa: BLE001 — one bad debt must not stop the rest
-            logger.warning("[DERIVE:RETRY] retry failed job=%s source=%s: %s", job_name, src, exc)
-            outcome["still_failing"].append({"job_name": job_name, "source_id": src, "error": str(exc)})
+            outcome["recovered"].append({**entry, "batch": batch})
+        elif kind == "still_failing":
+            outcome["attempted"] += 1
+            outcome["still_failing"].append(entry)
+        else:
+            outcome["skipped"].append(entry)
 
     outcome["pending_after"] = len(list_pending_derivation_retries(conn, source_id=source_id, limit=1000))
     logger.info(
@@ -342,6 +367,67 @@ async def retry_pending_derivations(
         len(outcome["still_failing"]),
     )
     return outcome
+
+
+#: How long a worker-claimed retry waits for an active derivation batch to end
+#: before handing the job back to the queue. Debts are recorded MID-batch, and
+#: the worker claims within its poll interval — re-running immediately would
+#: re-contend for the same write gate that produced the original "database is
+#: locked". The wait doubles as the requeue backoff: while a long batch runs,
+#: the worker cycles claim → wait → requeue at this period instead of spinning.
+_IN_FLIGHT_WAIT_SECONDS = 30.0
+_IN_FLIGHT_POLL_SECONDS = 0.5
+
+
+async def run_derivation_retry_job(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Worker executor for ``SIGNAL_DERIVE_RETRY_KIND`` pipeline jobs.
+
+    This is the "by the worker" half of the module contract: the debt record IS
+    the queue row, so the worker claims it and re-runs the one derivation it
+    describes. Success marks the row done (the orchestrator clears the debt,
+    then the worker completes the job). A retry that fails again returns an
+    error status, parking the row 'failed' — still visible in every debt
+    listing, re-queued by the next organic failure of the same (batch, job), and
+    re-runnable via ``POST /signal/derivation-debt/retry``. One claim is one
+    attempt; nothing here loops.
+    """
+    import asyncio
+
+    from .pipeline_activity import is_derivation_in_flight
+
+    waited = 0.0
+    while is_derivation_in_flight():
+        if waited >= _IN_FLIGHT_WAIT_SECONDS:
+            return {"status": "requeue", "reason": "derivation in flight"}
+        await asyncio.sleep(_IN_FLIGHT_POLL_SECONDS)
+        waited += _IN_FLIGHT_POLL_SECONDS
+
+    from ..core.state import get_db_connection
+
+    conn = get_db_connection()
+    if conn is None:
+        return {"status": "error", "error": "no database connection"}
+
+    job_name = str(payload.get("job_name") or "")
+    result = await retry_single_derivation(
+        conn,
+        source_id=str(payload.get("source_id") or ""),
+        sync_batch_id=str(payload.get("sync_batch_id") or "unknown"),
+        job_name=job_name,
+        record_ids=payload.get("record_ids") or [],
+    )
+    outcome = result.pop("outcome")
+    if outcome == "recovered":
+        return {
+            "status": "ok",
+            "records_created": {job_name: result.get("created", 0)},
+            **result,
+        }
+    if outcome == "skipped":
+        # A debt that cannot be re-run is still recorded data loss. Failing the
+        # job keeps it visible for a human instead of silently discharging it.
+        return {"status": "error", "error": f"cannot retry: {result.get('reason')}"}
+    return {"status": "error", "error": str(result.get("error") or "retry failed")}
 
 
 def pending_derivation_summary(conn: Optional[sqlite3.Connection]) -> Dict[str, Any]:
