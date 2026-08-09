@@ -135,10 +135,7 @@ async def test_enrich_resolves_declared_into_spine(monkeypatch, tmp_path) -> Non
     from topos.enrichment.jobs.canonical.entities_job import EntitiesJob
     from topos.storage.db.migrations import apply_all_migrations
 
-    # Spine resolution runs on a worker thread (asyncio.to_thread), so the
-    # injected connection must allow cross-thread use, matching how core.state
-    # opens every real connection.
-    conn = sqlite3.connect(str(tmp_path / "spine.db"), check_same_thread=False)
+    conn = sqlite3.connect(str(tmp_path / "spine.db"))
     apply_all_migrations(conn)
     conn.execute(
         "INSERT INTO contacts (contact_id, dataset_id, source_id, display_name, known_usernames_json, is_self)"

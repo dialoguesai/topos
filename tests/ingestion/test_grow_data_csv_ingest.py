@@ -92,9 +92,7 @@ def _load_grow_rows() -> list[dict[str, str]]:
 
 @pytest.fixture
 def migrated_conn(tmp_path):
-    # The ingest DB stretch runs on a worker thread (asyncio.to_thread),
-    # so the injected connection must allow cross-thread use.
-    conn = sqlite3.connect(str(tmp_path / "grow_ingest.db"), check_same_thread=False)
+    conn = sqlite3.connect(str(tmp_path / "grow_ingest.db"))
     conn.row_factory = sqlite3.Row
     apply_all_migrations(conn)
     yield conn

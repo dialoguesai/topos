@@ -780,7 +780,11 @@ class IngestionManager(BaseObject):
             if mapper_cls:
                 canonical_mapper = mapper_cls()
 
+        # Initialize enrichment orchestrator with a real connection, even outside app startup.
         from ..core.state import get_db_connection
+
+        db_conn = get_db_connection()
+        tables_manager = DerivedTablesManager(conn=db_conn) if db_conn else None
 
         records_processed = 0
         errors: list[dict] = []
@@ -905,99 +909,91 @@ class IngestionManager(BaseObject):
             except Exception as exc:
                 logger.warning("Failed to send parsing complete progress: %s", exc)
 
-        # Source data tables, raw retention, canonicalization, and the canonical
-        # audit row all take the DB write gate — a blocking OS lock — so the
-        # whole stretch runs on one worker thread with that thread's own
-        # connection (get_db_connection is thread-local), never on the event
-        # loop. The DerivedTablesManager is built there too: its constructor
-        # ensures enrichment DDL under the same gate.
+        # Persist parser output into source-defined logical tables when configured.
+        if source_def and db_conn and normalized_records:
+            try:
+                _persist_source_data_tables(
+                    db_conn=db_conn,
+                    source_def=source_def,
+                    dataset_id=job.dataset_id,
+                    normalized_records=normalized_records,
+                )
+            except Exception as exc:
+                logger.error(
+                    "[PIPELINE:DATA_TABLE] %s: Failed to persist source table rows: %s",
+                    self,
+                    exc,
+                    exc_info=True,
+                )
+                errors.append({"step": "source_data_table", "errors": [str(exc)]})
+        
+        # Canonicalize normalized records via shared pipeline (activity / conversations / ai_messages).
         canonical_messages: List[Dict[str, Any]] = []
         sync_batch_id = str(getattr(job, "job_id", "unknown"))
+        if source_def and normalized_records:
+            from ..ingestion.canonical_pipeline import canonicalize_normalized_batch
 
-        def _canonical_stage_db() -> Optional[DerivedTablesManager]:
-            conn = get_db_connection()
-            tables_manager_local = DerivedTablesManager(conn=conn) if conn else None
-
-            # Persist parser output into source-defined logical tables when configured.
-            if source_def and conn and normalized_records:
+            db_conn = get_db_connection()
+            if db_conn:
                 try:
-                    _persist_source_data_tables(
-                        db_conn=conn,
-                        source_def=source_def,
-                        dataset_id=job.dataset_id,
-                        normalized_records=normalized_records,
-                    )
-                except Exception as exc:
-                    logger.error(
-                        "[PIPELINE:DATA_TABLE] %s: Failed to persist source table rows: %s",
-                        self,
-                        exc,
-                        exc_info=True,
-                    )
-                    errors.append({"step": "source_data_table", "errors": [str(exc)]})
-
-            # Canonicalize normalized records via shared pipeline (activity / conversations / ai_messages).
-            if source_def and normalized_records:
-                from ..ingestion.canonical_pipeline import canonicalize_normalized_batch
-
-                if conn:
-                    try:
-                        _persist_raw_retention(
-                            conn,
-                            source_def,
-                            normalized_records,
-                            sync_batch_id=sync_batch_id,
-                            records_in=len(normalized_records),
-                        )
-                    except Exception as exc:
-                        logger.warning(
-                            "[PIPELINE:RAW] %s: Failed raw retention (non-fatal): %s",
-                            self,
-                            exc,
-                        )
-
-                    canon_result = canonicalize_normalized_batch(
-                        conn,
+                    _persist_raw_retention(
+                        db_conn,
                         source_def,
                         normalized_records,
-                        dataset_id=job.dataset_id,
                         sync_batch_id=sync_batch_id,
+                        records_in=len(normalized_records),
                     )
-                    canonical_messages.extend(canon_result.canonical_records)
-                    if canon_result.errors:
-                        errors.extend(canon_result.errors)
-                    logger.debug(
-                        "[PIPELINE:CANONICAL] %s: canonical_records=%d messages_created=%d events_created=%d",
+                except Exception as exc:
+                    logger.warning(
+                        "[PIPELINE:RAW] %s: Failed raw retention (non-fatal): %s",
                         self,
-                        len(canonical_messages),
-                        canon_result.messages_created,
-                        canon_result.events_created,
+                        exc,
                     )
-                else:
-                    logger.warning("[PIPELINE:CANONICAL] %s: No database connection, skipping canonicalization", self)
-                    if canonical_mapper:
-                        for normalized in normalized_records:
-                            try:
-                                canonical = canonical_mapper.map(normalized)
-                                if source_def:
-                                    canonical.payload["source_id"] = source_def.source_id
-                                canonical_messages.append(canonical.payload)
-                            except Exception as exc:
-                                logger.error(
-                                    "[PIPELINE:CANONICAL] %s: Failed to canonicalize record %s: %s",
-                                    self,
-                                    normalized.record_id,
-                                    exc,
-                                )
-                                errors.append({"record_id": normalized.record_id, "errors": [str(exc)]})
 
+                canon_result = canonicalize_normalized_batch(
+                    db_conn,
+                    source_def,
+                    normalized_records,
+                    dataset_id=job.dataset_id,
+                    sync_batch_id=sync_batch_id,
+                )
+                canonical_messages.extend(canon_result.canonical_records)
+                if canon_result.errors:
+                    errors.extend(canon_result.errors)
+                logger.debug(
+                    "[PIPELINE:CANONICAL] %s: canonical_records=%d messages_created=%d events_created=%d",
+                    self,
+                    len(canonical_messages),
+                    canon_result.messages_created,
+                    canon_result.events_created,
+                )
+            else:
+                logger.warning("[PIPELINE:CANONICAL] %s: No database connection, skipping canonicalization", self)
+                if canonical_mapper:
+                    for normalized in normalized_records:
+                        try:
+                            canonical = canonical_mapper.map(normalized)
+                            if source_def:
+                                canonical.payload["source_id"] = source_def.source_id
+                            canonical_messages.append(canonical.payload)
+                        except Exception as exc:
+                            logger.error(
+                                "[PIPELINE:CANONICAL] %s: Failed to canonicalize record %s: %s",
+                                self,
+                                normalized.record_id,
+                                exc,
+                            )
+                            errors.append({"record_id": normalized.record_id, "errors": [str(exc)]})
+
+            if source_def and normalized_records:
                 try:
+                    from ..core.state import get_db_connection
                     from ..pipeline.audit import SQLiteIngestAuditStore, StageAuditRow
                     from ..pipeline.stages import PipelineStage
 
-                    audit_conn = get_db_connection()
-                    if audit_conn:
-                        audit = SQLiteIngestAuditStore(audit_conn)
+                    db_conn = get_db_connection()
+                    if db_conn:
+                        audit = SQLiteIngestAuditStore(db_conn)
                         audit.append_stage(
                             StageAuditRow(
                                 sync_batch_id=sync_batch_id,
@@ -1010,10 +1006,6 @@ class IngestionManager(BaseObject):
                         )
                 except Exception as exc:
                     logger.debug("[PIPELINE:AUDIT] %s: canonical audit skipped: %s", self, exc)
-
-            return tables_manager_local
-
-        tables_manager = await asyncio.to_thread(_canonical_stage_db)
 
         if canonical_messages and source_def:
             try:
@@ -1083,32 +1075,26 @@ class IngestionManager(BaseObject):
                 if privacy_result.get("errors"):
                     errors.append({"step": "privacy", "errors": privacy_result["errors"]})
 
-                def _append_derive_audit() -> None:
-                    # Audit append commits under the write gate — worker
-                    # thread, own connection.
-                    own = get_db_connection()
-                    if not (own and derive_result):
-                        return
-                    if derive_result.get("errors"):
-                        status = "failed"
-                    elif derive_result.get("deferred_jobs"):
-                        status = "deferred"
-                    elif derive_result.get("jobs_run"):
-                        status = "completed"
-                    else:
-                        status = "deferred"
-                    SQLiteIngestAuditStore(own).append_stage(
-                        StageAuditRow(
-                            sync_batch_id=sync_batch_id,
-                            source_id=source_def.source_id,
-                            stage=PipelineStage.SIGNAL_DERIVE,
-                            status=status,
-                            records_out=sum(derive_result.get("records_created", {}).values()),
-                        )
-                    )
-
                 try:
-                    await asyncio.to_thread(_append_derive_audit)
+                    db_conn = get_db_connection()
+                    if db_conn and derive_result:
+                        if derive_result.get("errors"):
+                            status = "failed"
+                        elif derive_result.get("deferred_jobs"):
+                            status = "deferred"
+                        elif derive_result.get("jobs_run"):
+                            status = "completed"
+                        else:
+                            status = "deferred"
+                        SQLiteIngestAuditStore(db_conn).append_stage(
+                            StageAuditRow(
+                                sync_batch_id=sync_batch_id,
+                                source_id=source_def.source_id,
+                                stage=PipelineStage.SIGNAL_DERIVE,
+                                status=status,
+                                records_out=sum(derive_result.get("records_created", {}).values()),
+                            )
+                        )
                 except Exception:
                     pass
             except Exception as exc:
@@ -1122,8 +1108,7 @@ class IngestionManager(BaseObject):
                 last_record_id=last_record_id,
                 metadata={"file_path": str(file_path)},
             )
-            # The SQLite store commits under the write gate — off the loop.
-            await asyncio.to_thread(self.checkpoint_store.save_checkpoint, checkpoint)
+            self.checkpoint_store.save_checkpoint(checkpoint)
 
         logger.debug(
             "[PIPELINE:MANAGER] %s: Job complete: job_id=%s, records_processed=%s, errors_count=%s, last_record_id=%s",

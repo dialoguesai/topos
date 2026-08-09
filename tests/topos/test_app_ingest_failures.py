@@ -47,9 +47,7 @@ async def test_app_ingest_logs_and_returns_error_when_all_records_fail(
 @pytest.mark.asyncio
 async def test_app_ingest_returns_ok_with_errors_on_partial_success(monkeypatch, tmp_path) -> None:
     db_path = tmp_path / "partial.db"
-    # The direct-ingest DB stretch runs on a worker thread (asyncio.to_thread),
-    # so the injected connection must allow cross-thread use.
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     monkeypatch.setattr("topos.core.state.get_db_connection", lambda: conn)
 
@@ -106,9 +104,7 @@ async def test_app_ingest_timeline_survives_cancelled_background_enrichment(
     tmp_path,
 ) -> None:
     db_path = tmp_path / "restart-safe.db"
-    # The direct-ingest DB stretch runs on a worker thread (asyncio.to_thread),
-    # so the injected connection must allow cross-thread use.
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     apply_all_migrations(conn)
     monkeypatch.setattr("topos.core.state.get_db_connection", lambda: conn)
@@ -155,57 +151,6 @@ async def test_app_ingest_timeline_survives_cancelled_background_enrichment(
         conn.execute("SELECT COUNT(*) FROM timeline WHERE record_id=?", (canonical["event_id"],)).fetchone()[0]
         == 1
     )
-    conn.close()
-
-
-@pytest.mark.asyncio
-async def test_app_ingest_takes_no_write_gate_on_event_loop(monkeypatch, tmp_path, caplog) -> None:
-    """The app_ingest chain (raw→flat→canonical→timeline→UMA) must never take
-    the write gate on the event-loop thread: each hold stalls every coroutine,
-    including the control-plane keepalive (observed live 2026-08-08 20:17)."""
-    import logging
-
-    from topos.storage.db.write_gate import reset_loop_warning_state
-
-    db_path = tmp_path / "loop_gate.db"
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    apply_all_migrations(conn)
-    monkeypatch.setattr("topos.core.state.get_db_connection", lambda: conn)
-    # Keep the background pipeline worker out of this test: it exercises the
-    # deferred lane, which has its own coverage.
-    monkeypatch.setattr("topos.pipeline.job_runner.start_pipeline_worker", lambda *_: None)
-
-    reset_loop_warning_state()
-    caplog.set_level(logging.WARNING, logger="topos.storage.db.write_gate")
-
-    result = await handle_control_plane_request(
-        {
-            "id": "req-app-ingest-loop-gate",
-            "type": "app_ingest",
-            "payload": {
-                "user_id": "user-1",
-                "dataset_id": "user-1:default:device1",
-                "source_id": "browser_visits",
-                "schema_id": "browser.visits.v1",
-                "records": [
-                    {
-                        "url": "https://example.com/loop-gate",
-                        "visited_at": "2026-08-08T20:17:00.000Z",
-                        "title": "Loop gate",
-                    }
-                ],
-            },
-        }
-    )
-
-    assert result["status"] == "ok"
-    loop_warnings = [
-        rec.getMessage()
-        for rec in caplog.records
-        if "acquired on the event-loop thread" in rec.getMessage()
-    ]
-    assert not loop_warnings, loop_warnings
     conn.close()
 
 

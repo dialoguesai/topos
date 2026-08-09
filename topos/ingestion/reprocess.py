@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 import sqlite3
@@ -231,39 +230,33 @@ async def _remap_records(
             continue
         normalized_records.append(parser.parse(raw))
 
-    def _canonical_stage_db() -> Dict[str, Any]:
-        # Canonicalization takes the DB write gate — a blocking OS lock — so it
-        # runs on a worker thread with that thread's own connection, never on
-        # the event loop.
-        conn = get_db_connection()
-        if not conn:
-            raise RuntimeError("Database connection not available for reprocess")
+    conn = get_db_connection()
+    if not conn:
+        raise RuntimeError("Database connection not available for reprocess")
 
-        before = _count_canonical_rows(conn, source_def)
-        canon_result = canonicalize_normalized_batch(
-            conn,
-            source_def,
-            normalized_records,
-            dataset_id=dataset_id,
-            sync_batch_id=sync_batch_id,
-        )
-        created = max(
-            canon_result.events_created,
-            canon_result.messages_created,
-            len(canon_result.canonical_records),
-        )
+    before = _count_canonical_rows(conn, source_def)
+    canon_result = canonicalize_normalized_batch(
+        conn,
+        source_def,
+        normalized_records,
+        dataset_id=dataset_id,
+        sync_batch_id=sync_batch_id,
+    )
+    created = max(
+        canon_result.events_created,
+        canon_result.messages_created,
+        len(canon_result.canonical_records),
+    )
 
-        after = _count_canonical_rows(conn, source_def)
-        net_new = max(after - before, created)
-        unchanged = max(len(records) - net_new, 0)
-        return {
-            "records_created": net_new if net_new > 0 else created,
-            "records_updated": 0,
-            "records_unchanged": unchanged,
-            "canonical_records": canon_result.canonical_records,
-        }
-
-    return await asyncio.to_thread(_canonical_stage_db)
+    after = _count_canonical_rows(conn, source_def)
+    net_new = max(after - before, created)
+    unchanged = max(len(records) - net_new, 0)
+    return {
+        "records_created": net_new if net_new > 0 else created,
+        "records_updated": 0,
+        "records_unchanged": unchanged,
+        "canonical_records": canon_result.canonical_records,
+    }
 
 
 async def reprocess_source(
