@@ -9,6 +9,39 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+
+- `[O]` In-app update works for DMG installs. It never had: a GUI-launched
+  app inherits `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, `uv` lives in
+  `~/.local/bin`, so the update subprocess raised `FileNotFoundError`, the
+  worker stamped `last_result="failed"`, nothing reached the log, and the
+  tray silently reverted to "Update to vX" — reported as "I click it and
+  nothing happens". `resolve_uv_binary()` now checks `TOPOS_UV_BIN` (set by
+  the macOS shell from 0.2.13), then PATH, then the usual install
+  locations, and finally the app's own bundled uv at
+  `/Applications/Topos.app/Contents/Resources/uv` — the only copy a user
+  who never installed uv by hand actually has. Failures log the reason and
+  the PATH searched instead of vanishing, and the tray offers "Update
+  failed — click to retry".
+- `[O]` Restore the control-plane pong deadline (20s interval, 20s
+  deadline). `ping_timeout=None` was a workaround for handlers blocking the
+  client loop; giving the client its own thread removed that reason, but
+  the workaround stayed and was strictly worse — with no deadline a
+  silently dead socket is never noticed, so the node reports "connected"
+  indefinitely while the control plane holds no socket for it. Observed
+  live 2026-08-08: wedged 25 minutes, every proxied request 503, no
+  recovery without a restart. The deadline sits inside the control plane's
+  own 120s eviction, so the node notices first and reconnects itself.
+
+### Changed
+
+- `[O]` CI no longer runs the Home chat Wave A retrieval-quality harness:
+  it drove scripts under the gitignored `demo/`, so it failed on every run
+  from 2026-07-05 and masked the privacy-eval, package-metadata and
+  fresh-install smoke steps behind it. The harness moves to
+  `just harness-gate`; no test coverage was lost (its pytest files are in
+  the public lane).
+
 ## [1.3.7] — 2026-08-08
 
 ### Fixed
