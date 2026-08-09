@@ -33,14 +33,67 @@ def suppress_ml_progress_bars() -> None:
     except Exception:
         pass
 
+# The tray, the desktop app and the healthcheck loop poll these every few
+# seconds; a 200 on them carries no information, and one line per poll buries
+# every log that does. Same practice as nginx `access_log off` on probe
+# locations or Traefik's non-2xx-only access filter: drop the successful polls,
+# never drop the failures.
+QUIET_ACCESS_PATHS: frozenset[str] = frozenset(
+    {
+        "/healthcheck",
+        "/health",
+        "/device_info",
+        "/device/info",
+        "/v1/shell/status",
+        "/v1/upgrade/status",
+        "/favicon.ico",
+    }
+)
+
+
+class QuietPollingAccessFilter(logging.Filter):
+    """Drop uvicorn access lines for *successful* polls of QUIET_ACCESS_PATHS.
+
+    Anything 4xx/5xx still logs — a failing healthcheck is the line you actually
+    want. `TOPOS_ACCESS_LOG=all` restores every line. Deliberately not keyed off
+    LOG_LEVEL: this node ships LOG_LEVEL=DEBUG in topos/.env, so a DEBUG bypass
+    would make this filter dead code in the default configuration.
+    """
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if (os.getenv("TOPOS_ACCESS_LOG") or "").strip().lower() == "all":
+            return True
+        # uvicorn access args: (client_addr, method, path?query, http_version, status)
+        args = record.args
+        if not isinstance(args, tuple) or len(args) != 5:
+            return True
+        full_path, status = args[2], args[4]
+        if not isinstance(full_path, str) or not isinstance(status, int):
+            return True
+        if status >= 400:
+            return True
+        path = full_path.split("?", 1)[0]
+        if len(path) > 1:
+            path = path.rstrip("/")
+        return path not in QUIET_ACCESS_PATHS
+
+
 # Route uvicorn loggers through the root handler configured by configure_logging().
 UVICORN_LOG_CONFIG: dict[str, object] = {
     "version": 1,
     "disable_existing_loggers": False,
+    "filters": {
+        "quiet_polling": {"()": "topos.core.logging.QuietPollingAccessFilter"},
+    },
     "loggers": {
         "uvicorn": {"handlers": [], "level": "INFO", "propagate": True},
         "uvicorn.error": {"level": "INFO", "propagate": True},
-        "uvicorn.access": {"handlers": [], "level": "INFO", "propagate": True},
+        "uvicorn.access": {
+            "handlers": [],
+            "level": "INFO",
+            "propagate": True,
+            "filters": ["quiet_polling"],
+        },
         "uvicorn.asgi": {"level": "INFO", "propagate": True},
     },
 }
@@ -57,6 +110,11 @@ def align_uvicorn_loggers() -> None:
         uvicorn_logger = logging.getLogger(name)
         uvicorn_logger.handlers.clear()
         uvicorn_logger.propagate = True
+    # A dictConfig run by another entry point (uvicorn's own default config)
+    # replaces handlers but leaves filters alone, so re-attach idempotently.
+    access_logger = logging.getLogger("uvicorn.access")
+    if not any(isinstance(f, QuietPollingAccessFilter) for f in access_logger.filters):
+        access_logger.addFilter(QuietPollingAccessFilter())
 
 
 LOG_FILE_MAX_BYTES = 10 * 1024 * 1024
