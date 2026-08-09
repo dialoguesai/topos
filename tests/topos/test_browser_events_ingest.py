@@ -19,9 +19,7 @@ def test_field_preview_handles_non_string_content() -> None:
 @pytest.mark.asyncio
 async def test_browser_events_dict_content_writes_flat_table(monkeypatch, tmp_path) -> None:
     db_path = tmp_path / "browser_events.db"
-    # The direct-ingest DB stretch runs on a worker thread (asyncio.to_thread),
-    # so the injected connection must allow cross-thread use.
-    conn = sqlite3.connect(str(db_path), check_same_thread=False)
+    conn = sqlite3.connect(str(db_path))
     conn.row_factory = sqlite3.Row
     monkeypatch.setattr("topos.core.state.get_db_connection", lambda: conn)
 

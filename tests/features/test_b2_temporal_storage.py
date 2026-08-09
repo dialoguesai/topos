@@ -30,10 +30,7 @@ from topos.storage.db.migrations.signal_objects_period_v1 import (
 
 @pytest.fixture()
 def conn(tmp_path):
-    # run_post_canonical_pipeline records episodes on a worker thread
-    # (asyncio.to_thread), so the injected connection must allow
-    # cross-thread use.
-    c = sqlite3.connect(str(tmp_path / "b2.db"), check_same_thread=False)
+    c = sqlite3.connect(str(tmp_path / "b2.db"))
     apply_all_migrations(c)
     yield c
     c.close()
