@@ -29,11 +29,23 @@ logger = logging.getLogger("topos.control_plane_client")
 
 # Lightweight CP RPCs that must stay responsive while ingest/enrichment runs.
 # UI-critical reads and scheduler ops only — no ingest/enrichment writes.
-#: Keepalive. The control plane's own uvicorn pings at 30s with a 120s
-#: deadline; the node pings faster so IT notices a dead link first and
-#: reconnects, rather than waiting to be evicted.
-PING_INTERVAL_SECONDS = 20.0
-PING_TIMEOUT_SECONDS = 20.0
+#: Keepalive. Two failure modes to stay between:
+#:
+#: * No deadline at all (ping_timeout=None) wedges forever on a silently dead
+#:   socket — the node reports "connected" while the control plane holds
+#:   nothing, and never recovers without a restart.
+#: * A tight deadline kills HEALTHY connections. 20s did exactly that in
+#:   production: pongs round-trip in ~0.2s, but the node could not always
+#:   *process* them within 20s, so the link dropped every 50 seconds
+#:   (20s to first ping + 20s deadline + 10s close handshake) and took any
+#:   in-flight request — including a user's chat message — down with it.
+#:
+#: 90s is far beyond any observed local stall while still detecting a real
+#: death inside ~2 minutes, and it lands before the control plane's own
+#: eviction (30s ping + 120s timeout), so the node still notices first and
+#: reconnects itself rather than being evicted.
+PING_INTERVAL_SECONDS = 30.0
+PING_TIMEOUT_SECONDS = 90.0
 
 _FAST_INBOUND_MESSAGE_TYPES = frozenset(
     {

@@ -602,9 +602,14 @@ async def test_connect_sets_a_real_pong_deadline(monkeypatch):
         assert captured.get("ping_timeout") is not None, "a None pong deadline wedges forever"
         assert captured["ping_timeout"] == control_plane_client.PING_TIMEOUT_SECONDS
         assert captured["ping_interval"] == control_plane_client.PING_INTERVAL_SECONDS
-        # The node must notice before the control plane's own 120s eviction.
-        assert (
+        # Between the two failure modes: long enough that a slow-but-healthy
+        # node is never killed (20s killed one every 50s in production), short
+        # enough to beat the control plane's own eviction (30s + 120s), so the
+        # node detects a real death itself instead of being evicted.
+        detection = (
             control_plane_client.PING_INTERVAL_SECONDS + control_plane_client.PING_TIMEOUT_SECONDS
-        ) < 120.0
+        )
+        assert detection >= 60.0, "a tight deadline kills healthy connections mid-request"
+        assert detection < 150.0, "must notice before the control plane evicts us"
     finally:
         await client.stop()
