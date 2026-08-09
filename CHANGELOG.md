@@ -9,8 +9,41 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.7] — 2026-08-08
+
 ### Fixed
 
+- `[O]` The write-gate / event-loop deadlock class is gone. The control-plane
+  websocket client now runs on its own thread and event loop, so a busy app
+  loop can never starve the keepalive and make a healthy node look offline;
+  `get_device_info` is answered from a snapshot when the app loop is
+  saturated. Previously one long write hold could freeze the node until
+  SIGKILL (observed 2026-08-07).
+- `[O]` The entity-graph rebuild runs in a subprocess. The 100–160s rebuild
+  used to starve the event loop through the GIL even with the gate released —
+  healthchecks went dark for ~100s per rebuild. Verified live: a full 120s
+  rebuild with zero missed healthchecks. The rebuild also folds edges in
+  memory and swaps them under one short gate hold, and the rebuild endpoint
+  itself runs off the loop.
+- `[O]` Every SQLite write+commit path in the tree (73 files, including the
+  migration runner and all enrichment/feature writers) now holds the process
+  write gate around its statements *and* its commit. Ungated writes inverted
+  lock order against gate holders and stretched writes into 30s busy-timeout
+  standoffs ("database is locked" batches). Diagnostics now warn on gate
+  acquisition from the event-loop thread and on commits whose statements ran
+  ungated, so regressions name their call site.
+- `[O]` Startup DB work (stage9 column renames + source-install rehydration)
+  runs on one dedicated worker thread, cancellation-safe, with pipeline
+  recovery armed only after it completes — startup no longer blocks the loop.
+  The owner-connection validate/evict/swap in `core.state` is serialized
+  behind a lock, fixing a cross-thread use-after-close that could crash the
+  process (SIGBUS) when the database path changed at runtime.
+- `[O]` Enricher gate holds shrunk: goal-embedding compute moved outside the
+  gate hold, dossier refresh chunked per entity, and slow holds are named in
+  the log instead of appearing as anonymous multi-second stalls.
+- `[O]` Dev tray (`topos/cli/tray.py`): quit means quit — quitting stops the
+  node it attached to instead of leaving it running; the node row shows the
+  Topos's own name.
 - `[O]` The 1.3.0 `backfill-attention-triage` upgrade step was a guaranteed
   no-op on every node: `attention_triage` lives in `SIGNAL_DERIVATION_JOBS`,
   but the runner routed it through `run_canonical()`, which filters
