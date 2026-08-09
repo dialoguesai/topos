@@ -9,6 +9,30 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+
+- `[O]` The conversation auto-classifier stops re-asking the same question
+  forever. It ran on every enrichment batch, took the newest 20 conversations
+  with no `context_tag`, and asked the local model "work or personal" — but
+  when the model answered `unclear`, nothing was written. Those rows stayed
+  untagged, sat at the top of the same `created_at DESC` window, and were
+  re-sent verbatim on the next batch. Measured on a real node: ~20 model calls
+  and ~26 seconds burned per derive batch, permanently, for zero progress —
+  the token counts repeat in identical order across passes. 64 of the 68 stuck
+  conversations were `test-dataset` fixtures with one or two messages, far too
+  thin to ever label, so they taxed every real batch. An unclear verdict now
+  retires the row with an `unclear:n<k>` marker recording how many excerpts
+  were judged; `context_tag` still stays NULL, so nothing is guessed. A retired
+  conversation becomes a candidate again only once it has grown new excerpts to
+  judge, and since the excerpt read caps at 8 a conversation at that cap can
+  never pose a different question and never returns. Retired rows only ever
+  fill budget left over by never-asked ones, so a backlog cannot crowd out new
+  work. Engine failures are now distinct from an unclear answer and never
+  retire anything — an Ollama outage previously looked identical to "the model
+  declined", which would have buried 20 rows that were never actually judged.
+  Verified against a copy of the live database: 4 passes to drain a 68-row
+  backlog, then 0 model calls per batch, down from 20 forever.
+
 ## [1.3.10] — 2026-08-09
 
 ### Fixed
