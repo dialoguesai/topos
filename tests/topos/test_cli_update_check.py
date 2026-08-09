@@ -12,11 +12,18 @@ def test_update_check_installs_when_user_confirms(monkeypatch):
     monkeypatch.setattr(commands, "_can_prompt_for_input", lambda: True)
     monkeypatch.setattr(commands.click, "confirm", lambda *_args, **_kwargs: True)
 
+    # The upgrade runs the *resolved* uv, never a bare "uv" — a GUI-launched
+    # node's PATH has none. Pinned here so the test does not depend on whether
+    # the machine running it happens to have uv installed.
+    monkeypatch.setattr(runtime_update, "resolve_uv_binary", lambda: "/fake/bin/uv")
+
     called = {"upgrade": False}
 
-    def _fake_run(cmd, check):
-        called["upgrade"] = cmd == ["uv", "tool", "upgrade", "topos-node"] and check is False
-        return SimpleNamespace(returncode=0)
+    def _fake_run(cmd, **kwargs):
+        called["upgrade"] = cmd == ["/fake/bin/uv", "tool", "upgrade", "topos-node"] and (
+            kwargs.get("check") is False
+        )
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(runtime_update.subprocess, "run", _fake_run)
 

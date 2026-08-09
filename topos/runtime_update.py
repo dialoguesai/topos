@@ -135,6 +135,12 @@ def resolve_uv_binary() -> Optional[str]:
         os.path.expanduser("~/.local/bin/uv"),
         "/opt/homebrew/bin/uv",
         "/usr/local/bin/uv",
+        # Last resort: the uv the macOS app ships inside its own bundle. Shells
+        # before 0.2.13 set neither TOPOS_UV_BIN nor PATH, and a DMG user who
+        # never installed uv has a copy *only* here — leaving them unable to
+        # update from the menu or by hand.
+        "/Applications/Topos.app/Contents/Resources/uv",
+        os.path.expanduser("~/Applications/Topos.app/Contents/Resources/uv"),
     ):
         if os.access(candidate, os.X_OK):
             return candidate
