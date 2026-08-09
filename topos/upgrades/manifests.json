@@ -204,6 +204,15 @@
       "notes": []
     },
     {
+      "version": "1.3.8",
+      "summary": "Stability: ingest/enrichment DB writes off the event loop; statistics job no longer holds an open write lock across the pipeline; graph refresher skips cross-thread dirty bumps; open-txn watchdog (opt-in); DMG in-app update finds bundled uv; control-plane pong deadline restored. Code-only.",
+      "steps": [],
+      "notes": [
+        "Code-only \u2014 no schema migration, no derived-layer invalidation, no consent prompt.",
+        "Worker-thread write offload + statistics txn hygiene close the database-is-locked / event-loop-stall class that hit repeat ingests after 1.3.7."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],

@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.8] — 2026-08-09
+
 ### Added
 
 - `[O]` Open-transaction watchdog behind `TOPOS_DB_TXN_WATCHDOG=1`
