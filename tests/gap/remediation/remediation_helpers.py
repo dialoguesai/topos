@@ -13,9 +13,11 @@ from topos.storage.db.migrations import apply_all_migrations
 
 
 def sqlite_conn() -> sqlite3.Connection:
-    # Reprocess runs its canonical stage on a worker thread (asyncio.to_thread),
-    # so an injected connection must allow cross-thread use, matching how
-    # core.state opens every real connection.
+    # check_same_thread=False matches how core.state opens every real
+    # connection, and how it hands an in-memory database to other threads
+    # (shared, since a per-thread copy would be empty). Without it, any code
+    # path that moves DB work to a worker thread -- as ingest and reprocess
+    # now do -- fails here on a restriction production never has.
     conn = sqlite3.connect(":memory:", check_same_thread=False)
     apply_all_migrations(conn)
     from topos.storage.canonical.ai_chat.tables import CanonicalTablesManager
