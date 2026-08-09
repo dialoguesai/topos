@@ -183,7 +183,9 @@ from ..storage.db.write_gate import (  # noqa: E402
     batched_writes,
     commit_connection,
     db_write_lock,
+    register_connection,
     sqlite_retry_busy,
+    unregister_connection,
     with_db_write,
 )
 
@@ -285,6 +287,7 @@ def _get_thread_db_connection(resolved_path: str) -> Optional[sqlite3.Connection
             _ensure_row_factory(cached)
             return cached
         except (sqlite3.ProgrammingError, sqlite3.OperationalError):
+            unregister_connection(cached)
             try:
                 cached.close()
             except Exception:  # noqa: BLE001
@@ -293,6 +296,7 @@ def _get_thread_db_connection(resolved_path: str) -> Optional[sqlite3.Connection
             _thread_state.path = None
     elif cached is not None:
         # Path changed under us (tests re-point DATABASE_PATH).
+        unregister_connection(cached)
         try:
             cached.close()
         except Exception:  # noqa: BLE001
@@ -314,6 +318,7 @@ def _get_thread_db_connection(resolved_path: str) -> Optional[sqlite3.Connection
     except Exception as exc:  # noqa: BLE001 — tuning is an optimization, not a gate
         logger.debug("Per-thread connection tuning skipped: %s", exc)
 
+    register_connection(conn)
     _thread_state.conn = conn
     _thread_state.path = resolved_path
     logger.debug(
@@ -329,6 +334,7 @@ def close_thread_db_connection() -> None:
     conn = getattr(_thread_state, "conn", None)
     if conn is None:
         return
+    unregister_connection(conn)
     try:
         conn.close()
     except Exception:  # noqa: BLE001
@@ -371,6 +377,7 @@ def _get_owner_db_connection() -> Optional[sqlite3.Connection]:
             try:
                 db_conn.execute("SELECT 1")
             except (sqlite3.ProgrammingError, sqlite3.OperationalError):
+                unregister_connection(db_conn)
                 db_conn = None
                 _db_conn_path = None
             else:
@@ -398,7 +405,10 @@ def _get_owner_db_connection() -> Optional[sqlite3.Connection]:
             # it across queries) — closing under them is the use-after-close
             # that SIGBUSed on 2026-08-08. Dropping the reference lets the last
             # user finish; the handle closes (rolling back any open
-            # transaction) when its refcount reaches zero.
+            # transaction) when its refcount reaches zero. The watchdog is told
+            # here for the same reason it holds no strong reference: it must
+            # not be what keeps this handle (or its stale record) around.
+            unregister_connection(db_conn)
             db_conn = None
             _db_conn_path = None
 
@@ -410,6 +420,7 @@ def _get_owner_db_connection() -> Optional[sqlite3.Connection]:
                     db_conn.row_factory = sqlite3.Row
                 return db_conn
             except (sqlite3.ProgrammingError, sqlite3.OperationalError):
+                unregister_connection(db_conn)
                 db_conn = None
                 _db_conn_path = None
 
@@ -425,11 +436,13 @@ def _get_owner_db_connection() -> Optional[sqlite3.Connection]:
             try:
                 db_conn.execute("SELECT 1")
             except Exception:
+                unregister_connection(db_conn)
                 try:
                     db_conn.close()
                 except Exception:  # noqa: BLE001
                     pass
             else:
+                unregister_connection(new_conn)
                 try:
                     new_conn.close()
                 except Exception:  # noqa: BLE001
@@ -467,6 +480,11 @@ def _open_owner_db_connection(db_path: Path) -> Optional[sqlite3.Connection]:
             )
         except Exception as tuning_exc:  # noqa: BLE001
             logger.warning("Connection tuning skipped: %s", tuning_exc)
+        # Registered before migrations run, not after: a migration that returns
+        # without committing wedges every writer behind it exactly like any
+        # other ungated write, and startup is when the database is least
+        # observable.
+        register_connection(conn)
         try:
             from ..storage.db.migrations import (
                 DowngradeGuardError,
@@ -478,6 +496,7 @@ def _open_owner_db_connection(db_path: Path) -> Optional[sqlite3.Connection]:
         except (MigrationError, DowngradeGuardError) as migration_exc:
             # Shape migrations must fail loud — serving a half-migrated DB corrupts data.
             logger.error("Schema migration failed; refusing to open database: %s", migration_exc)
+            unregister_connection(conn)
             try:
                 conn.close()
             except Exception:  # noqa: BLE001
@@ -490,6 +509,7 @@ def _open_owner_db_connection(db_path: Path) -> Optional[sqlite3.Connection]:
                 "Unexpected schema migration failure; refusing to open database: %s",
                 migration_exc,
             )
+            unregister_connection(conn)
             try:
                 conn.close()
             except Exception:  # noqa: BLE001
@@ -511,6 +531,7 @@ def _open_owner_db_connection(db_path: Path) -> Optional[sqlite3.Connection]:
             raise
         logger.warning("Failed to create database connection: %s", e)
         if conn is not None:
+            unregister_connection(conn)
             try:
                 conn.close()
             except Exception:  # noqa: BLE001
