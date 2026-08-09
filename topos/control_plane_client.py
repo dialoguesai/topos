@@ -29,6 +29,12 @@ logger = logging.getLogger("topos.control_plane_client")
 
 # Lightweight CP RPCs that must stay responsive while ingest/enrichment runs.
 # UI-critical reads and scheduler ops only — no ingest/enrichment writes.
+#: Keepalive. The control plane's own uvicorn pings at 30s with a 120s
+#: deadline; the node pings faster so IT notices a dead link first and
+#: reconnects, rather than waiting to be evicted.
+PING_INTERVAL_SECONDS = 20.0
+PING_TIMEOUT_SECONDS = 20.0
+
 _FAST_INBOUND_MESSAGE_TYPES = frozenset(
     {
         "healthcheck",
@@ -297,9 +303,20 @@ class ControlPlaneClient:
                     self.control_plane_url,
                     additional_headers=headers,
                     ssl=ssl_context,
-                    # Transform-heavy requests can block the event loop in the handler path long enough
-                    # to miss pong deadlines; disable pong timeout-driven disconnects.
-                    ping_timeout=None,
+                    # A real pong deadline, restored once the client got its own
+                    # thread and loop. It was disabled because handlers ran here
+                    # and could block long enough to miss pongs — that reason is
+                    # gone: handlers now marshal to the app loop, so this loop is
+                    # always free to answer and to notice silence.
+                    #
+                    # Disabling it turned every silent connection death into a
+                    # permanent wedge: `async for raw in ws` blocked forever, no
+                    # exception fired, no reconnect was scheduled, and the node
+                    # reported "connected" while the control plane had no socket
+                    # at all. Observed live 2026-08-08 — 25 minutes wedged, with
+                    # the web app correctly showing the Topos offline.
+                    ping_interval=PING_INTERVAL_SECONDS,
+                    ping_timeout=PING_TIMEOUT_SECONDS,
                 ) as ws:
                     self._ws = ws
                     self._set_state("connected")

@@ -564,3 +564,47 @@ async def test_get_device_info_prefers_the_real_answer_when_the_loop_is_healthy(
         assert client._device_info_snapshot["system"]["computer_name"] == "fresh"
     finally:
         await client.stop()
+
+
+@pytest.mark.asyncio
+async def test_connect_sets_a_real_pong_deadline(monkeypatch):
+    """A silently dead socket must become an exception, not a permanent wedge.
+
+    ping_timeout=None was a workaround for handlers blocking this loop and
+    missing pong deadlines — a reason removed when the client got its own
+    thread. Left in place it turned every silent connection death into a node
+    that reported "connected" forever while the control plane had no socket:
+    `async for raw in ws` blocks, nothing raises, no reconnect is scheduled.
+    Observed live 2026-08-08, wedged 25 minutes.
+    """
+    ws = StayOpenWebSocket([])
+    connect = FakeConnect(ws)
+    captured = {}
+
+    def capturing_connect(url, additional_headers=None, ssl=None, **kwargs):
+        captured.update(kwargs)
+        return connect(url, additional_headers=additional_headers, ssl=ssl, **kwargs)
+
+    monkeypatch.setattr(control_plane_client, "connect", capturing_connect)
+
+    async def handler(_message):
+        return None
+
+    client = ControlPlaneClient(
+        control_plane_url="wss://cp.example/ws/engine",
+        api_key="test-key",
+        handler=handler,
+        verify_ssl=True,
+    )
+    client.start()
+    try:
+        assert await client.wait_until_connected(timeout_s=5.0)
+        assert captured.get("ping_timeout") is not None, "a None pong deadline wedges forever"
+        assert captured["ping_timeout"] == control_plane_client.PING_TIMEOUT_SECONDS
+        assert captured["ping_interval"] == control_plane_client.PING_INTERVAL_SECONDS
+        # The node must notice before the control plane's own 120s eviction.
+        assert (
+            control_plane_client.PING_INTERVAL_SECONDS + control_plane_client.PING_TIMEOUT_SECONDS
+        ) < 120.0
+    finally:
+        await client.stop()
