@@ -13,7 +13,10 @@ from topos.storage.db.migrations import apply_all_migrations
 
 
 def sqlite_conn() -> sqlite3.Connection:
-    conn = sqlite3.connect(":memory:")
+    # Reprocess runs its canonical stage on a worker thread (asyncio.to_thread),
+    # so an injected connection must allow cross-thread use, matching how
+    # core.state opens every real connection.
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
     apply_all_migrations(conn)
     from topos.storage.canonical.ai_chat.tables import CanonicalTablesManager
     from topos.storage.canonical.conversations_tables import ensure_all_tables

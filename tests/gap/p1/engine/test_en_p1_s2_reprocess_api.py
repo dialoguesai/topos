@@ -22,7 +22,10 @@ pytestmark = [
 
 @pytest.mark.asyncio
 async def test_reprocess_api_contract_and_idempotency(monkeypatch) -> None:
-    conn = sqlite3.connect(":memory:")
+    # Reprocess runs its canonical stage on a worker thread (asyncio.to_thread),
+    # so the injected connection must allow cross-thread use, matching how
+    # core.state opens every real connection.
+    conn = sqlite3.connect(":memory:", check_same_thread=False)
     apply_all_migrations(conn)
     conn.execute(
         """

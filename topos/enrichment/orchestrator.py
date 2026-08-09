@@ -24,8 +24,27 @@ class EnrichmentOrchestrator(BaseObject):
         super().__init__(name=name)
         self.raw_jobs = list(RAW_JOBS)
         self.canonical_jobs = list(CANONICAL_JOBS)
-        self.tables_manager = tables_manager or DerivedTablesManager()
+        self._tables_manager = tables_manager
         self._engine = engine
+
+    @property
+    def tables_manager(self) -> Any:
+        """The derived-tables manager, constructed on first use.
+
+        Constructing one ensures enrichment DDL under the write gate — a
+        blocking OS lock. Building it in ``__init__`` ran that on whichever
+        thread built the orchestrator, and ``derivation_recovery`` builds one
+        inline on the event loop, where the hold stalls every coroutine
+        including the control-plane keepalive. Every read is now inside a
+        worker thread (see :meth:`_tables_manager_for_worker`).
+        """
+        if self._tables_manager is None:
+            self._tables_manager = DerivedTablesManager()
+        return self._tables_manager
+
+    @tables_manager.setter
+    def tables_manager(self, manager: Any) -> None:
+        self._tables_manager = manager
 
     def _bind_shared_engine(self, jobs: List[BaseEnrichmentJob]) -> None:
         if self._engine is None:
@@ -33,6 +52,32 @@ class EnrichmentOrchestrator(BaseObject):
         for job in jobs:
             if hasattr(job, "_engine"):
                 job._engine = self._engine
+
+    def _tables_manager_for_worker(self) -> Any:
+        """``self.tables_manager`` bound to the CALLING thread's connection.
+
+        The manager is built once and reused for the whole batch — the
+        post-canonical pipeline builds it on a ``to_thread`` worker — so the
+        connection it carries belongs to whichever thread constructed it. A
+        ``sqlite3.Connection`` must never be driven from another thread
+        (2026-07-30 transaction corruption), and enrichment DDL is remembered
+        per connection, so rebinding costs nothing after this thread's first
+        batch. Managers without a real connection (test fakes) pass through.
+        """
+        from ..core.state import get_db_connection
+
+        conn = get_db_connection()
+        if self._tables_manager is None and conn is not None:
+            # First use: build it here, against this worker's connection,
+            # rather than letting the property fall back to the state global.
+            self._tables_manager = DerivedTablesManager(conn)
+            return self._tables_manager
+        manager = self.tables_manager
+        if not isinstance(manager, DerivedTablesManager):
+            return manager
+        if conn is None or conn is manager.conn:
+            return manager
+        return DerivedTablesManager(conn)
 
     def register_raw_job(self, job) -> None:
         self.raw_jobs.append(job)
@@ -128,9 +173,20 @@ class EnrichmentOrchestrator(BaseObject):
                 
                 derived_table = job.get_derived_table()
                 if records and derived_table:
-                    records_written = self.tables_manager.write_enrichment_batch(
-                        records, derived_table
-                    )
+
+                    def _write_batch(
+                        _records: List[Dict[str, Any]] = records,
+                        _table: str = derived_table,
+                    ) -> int:
+                        # write_enrichment_batch holds the write gate for every
+                        # batch it writes — a blocking OS lock — so taken here
+                        # it stalls every coroutine on this loop, including the
+                        # control-plane keepalive.
+                        return self._tables_manager_for_worker().write_enrichment_batch(
+                            _records, _table
+                        )
+
+                    records_written = await asyncio.to_thread(_write_batch)
                     results["records_created"][derived_table] = records_written
                     logger.debug(
                         "[PIPELINE:ENRICHMENT] %s → %s: %d records written to %s (job %d/%d, %.1f%% complete)",
@@ -320,13 +376,18 @@ class SignalDerivationOrchestrator(EnrichmentOrchestrator):
         PipelineStage: Any,
     ) -> Dict[str, Any]:
         resolved = self._resolve_job_names(source_id, job_names)
-        # Captured BEFORE _get_adapters caches a runtime bundle: injected
-        # adapters (tests) are thread-agnostic fakes whose writes may run
-        # inline; a runtime bundle binds THIS thread's sqlite connection, so
-        # its writes must be offloaded to a worker thread that builds its own.
+        # Injected adapters (tests) are thread-agnostic fakes whose writes may
+        # run inline; a runtime bundle binds the sqlite connection of whichever
+        # thread built it, so its writes must be offloaded to a worker thread
+        # that builds its own. On the runtime path neither the bundle nor the
+        # connection is resolved here: AdapterFactory.create runs migrations
+        # and canonical DDL under the write gate, and _offload_write rebuilds
+        # both inside the worker anyway. Resolving eagerly also cached a
+        # loop-bound bundle that the next batch would treat as injected and
+        # then use inline.
         runtime_bound = self._adapters is None
-        adapters = self._get_adapters()
-        conn = get_db_connection()
+        adapters = None if runtime_bound else self._get_adapters()
+        conn = None if runtime_bound else get_db_connection()
 
         async def _offload_write(fn: Callable[[Any, Any], Any]) -> Any:
             """Run ``fn(conn, adapters)`` without blocking the event loop.
