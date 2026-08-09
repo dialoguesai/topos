@@ -233,7 +233,6 @@ async def ingest_ui_payload(
 
 async def run_ui_payload_enrichment(enrichment_ctx: dict) -> dict:
     """Run post-canonical enrichment for a deferred inbox ingest."""
-    from ..enrichment.derived_tables import DerivedTablesManager
     from ..sources.registry import REGISTRY
 
     source_id = str(enrichment_ctx.get("source_id") or "").strip()
@@ -251,16 +250,14 @@ async def run_ui_payload_enrichment(enrichment_ctx: dict) -> dict:
     if not canonical_records:
         return {"status": "ok", "enrichment_jobs_run": 0}
 
-    from ..core.state import get_db_connection
-
-    db_conn = get_db_connection()
-    tables_manager = DerivedTablesManager(conn=db_conn) if db_conn else DerivedTablesManager()
+    # No tables_manager passed: run_post_canonical_pipeline builds one on a
+    # worker thread (its constructor ensures DDL under the write gate, which
+    # must never be taken on the event-loop thread).
     sync_batch_id = str(enrichment_ctx.get("sync_batch_id") or uuid.uuid4())
     pipeline_outcome = await run_post_canonical_pipeline(
         source_def=source,
         canonical_records=canonical_records,
         sync_batch_id=sync_batch_id,
-        tables_manager=tables_manager,
     )
     enrich_out = pipeline_outcome.get("canonical_enrichment") or {}
     signal_out = pipeline_outcome.get("signal_derivation") or {}
@@ -311,9 +308,7 @@ async def _ingest_ui_payload_direct(
     """Process UI payload directly to database without creating JSONL files."""
     from .parsers import PARSER_REGISTRY
     from .sources.base import RawRecord
-    from ..enrichment.derived_tables import DerivedTablesManager
-    from ..core.state import get_db_connection
-    
+
     if not dataset_id:
         return {"status": "error", "error": "dataset_id required"}
     if not payload:
@@ -385,12 +380,91 @@ async def _ingest_ui_payload_direct(
         }
         record_id = raw_payload["id"]
     raw_record = RawRecord(record_id=record_id, payload=raw_payload)
-    
-    # Get database connection early (needed for raw storage)
+
+    sync_batch_id = str(job_id)
+
+    # The whole raw→canonical stretch takes the DB write gate — a blocking OS
+    # lock — at every stage, so it runs on a worker thread: holding the gate on
+    # the event-loop thread stalls every coroutine, including the control-plane
+    # keepalive. The worker uses its own thread-local connection.
+    result = await asyncio.to_thread(
+        _ingest_ui_payload_direct_db,
+        source=source,
+        source_id=source_id,
+        schema_id=schema_id,
+        dataset_id=dataset_id,
+        parser_cls=parser_cls,
+        raw_record=raw_record,
+        sync_batch_id=sync_batch_id,
+    )
+    canonical_result = result.pop("_canonical_result", None)
+    if canonical_result is None:
+        return result
+
+    if defer_enrichment:
+        return {
+            "status": "ok",
+            "job_id": job_id,
+            "records_processed": 1,
+            "errors_count": len(canonical_result.errors),
+            "canonical_events_created": canonical_result.events_created,
+            "canonical_messages_created": canonical_result.messages_created,
+            "timeline_rows_written": canonical_result.timeline_rows_written,
+            "enrichment_pending": True,
+            "_enrichment_ctx": {
+                "source_id": source_id,
+                "sync_batch_id": sync_batch_id,
+                "canonical_records": canonical_result.canonical_records,
+            },
+        }
+
+    pipeline_outcome = await run_post_canonical_pipeline(
+        source_def=source,
+        canonical_records=canonical_result.canonical_records,
+        sync_batch_id=sync_batch_id,
+    )
+    signal_out = pipeline_outcome.get("signal_derivation") or {}
+    enrich_out = pipeline_outcome.get("canonical_enrichment") or {}
+
+    return {
+        "status": "ok",
+        "job_id": job_id,
+        "records_processed": 1,
+        "errors_count": len(canonical_result.errors),
+        "canonical_events_created": canonical_result.events_created,
+        "canonical_messages_created": canonical_result.messages_created,
+        "timeline_rows_written": canonical_result.timeline_rows_written,
+        "signal_jobs_run": (signal_out.get("jobs_run") if isinstance(signal_out, dict) else 0) or 0,
+        "enrichment_jobs_run": (enrich_out.get("jobs_run") if isinstance(enrich_out, dict) else 0) or 0,
+    }
+
+
+def _ingest_ui_payload_direct_db(
+    *,
+    source: Any,
+    source_id: str,
+    schema_id: str,
+    dataset_id: str,
+    parser_cls: Any,
+    raw_record: Any,
+    sync_batch_id: str,
+) -> Dict[str, Any]:
+    """Raw retention → parse → source/flat tables → canonicalization.
+
+    Runs on a worker thread (see the asyncio.to_thread call site) with the
+    thread's own connection. On success the returned dict carries the
+    CanonicalizeResult under ``_canonical_result``; error dicts match the async
+    caller's response contract.
+    """
+    from ..core.state import get_db_connection
+
+    record_id = raw_record.record_id
+    raw_payload = raw_record.payload
+
     db_conn = get_db_connection()
     if not db_conn:
         return {"status": "error", "error": "Database connection not available"}
-    
+
     # Write raw record to raw retention table (architecture requirement)
     # This preserves original payload before parsing/canonicalization
     try:
@@ -470,9 +544,6 @@ async def _ingest_ui_payload_direct(
         except Exception as e:  # noqa: BLE001
             logger.warning("[PIPELINE:DIRECT] Failed to write browser_events flat row (non-fatal): %s", e)
 
-    tables_manager = DerivedTablesManager(conn=db_conn)
-    sync_batch_id = str(job_id)
-
     canonical_result = canonicalize_normalized_batch(
         db_conn,
         source,
@@ -487,40 +558,4 @@ async def _ingest_ui_payload_direct(
             canonical_result.errors,
         )
 
-    if defer_enrichment:
-        return {
-            "status": "ok",
-            "job_id": job_id,
-            "records_processed": 1,
-            "errors_count": len(canonical_result.errors),
-            "canonical_events_created": canonical_result.events_created,
-            "canonical_messages_created": canonical_result.messages_created,
-            "timeline_rows_written": canonical_result.timeline_rows_written,
-            "enrichment_pending": True,
-            "_enrichment_ctx": {
-                "source_id": source_id,
-                "sync_batch_id": sync_batch_id,
-                "canonical_records": canonical_result.canonical_records,
-            },
-        }
-
-    pipeline_outcome = await run_post_canonical_pipeline(
-        source_def=source,
-        canonical_records=canonical_result.canonical_records,
-        sync_batch_id=sync_batch_id,
-        tables_manager=tables_manager,
-    )
-    signal_out = pipeline_outcome.get("signal_derivation") or {}
-    enrich_out = pipeline_outcome.get("canonical_enrichment") or {}
-
-    return {
-        "status": "ok",
-        "job_id": job_id,
-        "records_processed": 1,
-        "errors_count": len(canonical_result.errors),
-        "canonical_events_created": canonical_result.events_created,
-        "canonical_messages_created": canonical_result.messages_created,
-        "timeline_rows_written": canonical_result.timeline_rows_written,
-        "signal_jobs_run": (signal_out.get("jobs_run") if isinstance(signal_out, dict) else 0) or 0,
-        "enrichment_jobs_run": (enrich_out.get("jobs_run") if isinstance(enrich_out, dict) else 0) or 0,
-    }
+    return {"status": "ok", "_canonical_result": canonical_result}

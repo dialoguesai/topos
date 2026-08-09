@@ -612,14 +612,21 @@ def start_background(
     ``ready_event`` should be set once the control plane (or local HTTP) is able
     to serve the React app's initial bootstrap. A grace window then lets those
     requests finish before enrichment reprocess contends for SQLite / Ollama /
-    MPS. Fresh installs stamp-and-skip inline (no thread).
+    MPS. Fresh installs stamp-and-skip on a short-lived thread.
     """
     if not _enabled():
         return None
     plan = plan_upgrade(conn)
     if plan["fresh_install"] or not plan["steps"]:
-        run_pending_upgrades(conn)  # cheap: stamp/no-op inline
-        return None
+        # Cheap (stamp or no-op), but the stamp still commits under the write
+        # gate — keep it off the event-loop thread that calls this at startup.
+        thread = threading.Thread(
+            target=lambda: run_pending_upgrades(conn),
+            name="topos-upgrade-stamp",
+            daemon=True,
+        )
+        thread.start()
+        return thread
     grace = _DEFAULT_UI_GRACE_SECONDS if ui_grace_s is None else max(0.0, float(ui_grace_s))
     ready_timeout = (
         _DEFAULT_READY_TIMEOUT_SECONDS if ready_timeout_s is None else max(0.0, float(ready_timeout_s))
