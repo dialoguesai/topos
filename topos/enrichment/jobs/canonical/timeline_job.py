@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 from typing import Any, Callable, Dict, List, Optional
 
@@ -27,10 +28,18 @@ class TimelineJob(BaseEnrichmentJob):
         canonical_messages: List[Dict[str, Any]],
         progress_callback: Optional[Callable[[int, int], None]] = None,
     ) -> List[Dict[str, Any]]:
-        conn = get_db_connection()
-        if conn is None:
+        def _project():
+            # project_timeline_rows holds the write gate for the whole batch —
+            # a blocking OS lock — so it runs on a worker thread with that
+            # thread's own connection, never on the event loop.
+            conn = get_db_connection()
+            if conn is None:
+                return None
+            return project_timeline_rows(conn, canonical_messages)
+
+        result = await asyncio.to_thread(_project)
+        if result is None:
             return [{"_deferred": True, "error": "database_unavailable"}]
-        result = project_timeline_rows(conn, canonical_messages)
         if progress_callback:
             progress_callback(len(canonical_messages), len(canonical_messages))
         logger.debug(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 from typing import Any, Callable, Dict, List, Optional
@@ -169,7 +170,14 @@ class EntitiesJob(BaseEnrichmentJob):
 
         if entity_spine_enabled() and results:
             try:
-                self._resolve_into_spine(results, canonical_messages)
+                # Spine resolution upserts entities, mentions, edges and
+                # dossiers under the write gate — a blocking OS lock that on
+                # the event loop stalls every coroutine, including the
+                # control-plane keepalive. It resolves its own connection, so
+                # on a worker thread it binds that thread's handle.
+                await asyncio.to_thread(
+                    self._resolve_into_spine, results, canonical_messages
+                )
             except Exception as exc:
                 logger.warning("entity spine resolution failed: %s", exc)
 
