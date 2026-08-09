@@ -61,8 +61,21 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
 _LIVE_DB_EXEMPT_MARKERS = ("live", "e2e", "qq_eval")
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture()
 def _live_db_guard_path(tmp_path_factory: pytest.TempPathFactory) -> str:
+    """Per-TEST guard file, deliberately not session-scoped.
+
+    One shared guard.db let tests poison each other: a real-data test (the
+    iMessage sync runs against this machine's actual chat.db) filled it with
+    records, and the enrichment jobs + graph-rebuild subprocesses that data
+    spawns kept writing it for the rest of the session — every later test's
+    startup then fought those writers through 30s SQLite busy timeouts. A
+    fresh file per test contains that fallout: leftover background threads
+    keep writing their (now unlinked) old file instead of the next test's.
+    Safe only since core.state serializes the owner-connection swap the
+    resulting per-test path changes trigger (_owner_conn_lock; the
+    unsynchronized version SIGBUSed on 2026-08-08).
+    """
     return str(tmp_path_factory.mktemp("no-live-db") / "guard.db")
 
 
