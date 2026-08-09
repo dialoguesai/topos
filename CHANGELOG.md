@@ -9,6 +9,47 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.10] — 2026-08-09
+
+### Fixed
+
+- `[O]` The control-plane connection no longer drops every 50 seconds. 1.3.9
+  restored a pong deadline so a silently dead socket could not wedge the node
+  forever, but 20s was far tighter than the engine can meet: measured live,
+  pongs round-trip through the tunnel in ~0.2s and the app loop answers
+  healthchecks throughout, yet the node still could not always *process* its
+  pong inside 20s. The link then died on a metronome — 20s to first ping + 20s
+  deadline + 10s close handshake — 18 times in one session, and each drop took
+  whatever was in flight with it, including a user's chat message: submitted,
+  processed, then gone, with no trace in history. The deadline is now 30s
+  interval / 90s timeout: far past any observed local stall, still detecting a
+  genuine death inside ~2 minutes, and inside the control plane's own eviction
+  (30s + 120s) so the node notices first and reconnects itself. Verified on a
+  real node: zero drops and a single stable connection across 15 minutes, where
+  the previous build produced a drop every 50 seconds.
+
+- `[O]` In-app "Update to vX" works for app-installed nodes. A Finder-launched
+  app inherits `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, where `uv` never lives, so
+  `uv tool upgrade` raised `FileNotFoundError`, the worker's `finally` stamped
+  `last_result="failed"`, nothing reached the log, and the menu silently
+  reverted to offering the update again — indistinguishable from a dead button.
+  In-app update had therefore never once worked for a DMG install.
+  `resolve_uv_binary()` now checks `TOPOS_UV_BIN` (which the macOS shell 0.2.13
+  passes from its bundled copy), then `PATH`, then the usual install locations;
+  failures log the reason and the `PATH` that was searched, and `OSError` is
+  caught instead of killing the worker thread.
+
+### Changed
+
+- `[O]` Tray parity with the macOS shell, for the Windows port that wraps it:
+  "Quit Topos Node" stops the node whether this process started it or merely
+  attached (previously an attached tray offered only "Close Tray (node keeps
+  running)", stranding anyone whose tray attached after a crash or an update
+  restart with no way to ever stop the node); the tray-only exit survives as an
+  explicit second item shown only when attached; a failed update says so
+  instead of rendering nothing; the badge spins while the node is starting; and
+  the bound Topos's own name appears in the menu.
+
 ## [1.3.9] — 2026-08-09
 
 ### Fixed
