@@ -11,6 +11,8 @@ import uuid
 from typing import Any, Awaitable, Callable, Dict, Optional
 
 from ..storage.db.write_gate import is_busy_error
+# Safe at import time: derivation_recovery has no module-level heavy imports.
+from ..enrichment.derivation_recovery import SIGNAL_DERIVE_RETRY_KIND
 from .job_store import (
     claim_matching_queued_jobs,
     claim_next_job,
@@ -18,6 +20,7 @@ from .job_store import (
     fail_job,
     recover_stale_jobs,
     record_derivation_completion,
+    requeue_job,
     update_job_progress,
 )
 
@@ -167,12 +170,27 @@ async def _execute_topic_consolidation(payload: Dict[str, Any]) -> Dict[str, Any
     return {"status": "ok", "result": result}
 
 
+async def _execute_signal_derive_retry(payload: Dict[str, Any]) -> Dict[str, Any]:
+    from ..enrichment.derivation_recovery import run_derivation_retry_job
+
+    return await run_derivation_retry_job(payload)
+
+
 EXECUTORS: Dict[str, ExecutorFn] = {
     "inbox_deferred_enrichment": _execute_inbox_deferred_enrichment,
     "file_ingestion": _execute_file_ingestion,
     "enrichment_process_source": _execute_enrichment_process_source,
     "topic_consolidation": _execute_topic_consolidation,
+    SIGNAL_DERIVE_RETRY_KIND: _execute_signal_derive_retry,
 }
+
+
+def _executable_kinds() -> list[str]:
+    """Kinds this worker may claim. Computed per claim so tests that patch
+    EXECUTORS are honored. A queued row of any other kind (e.g. written by a
+    newer node version) stays queued and visible instead of being claimed and
+    immediately failed as unknown."""
+    return sorted(EXECUTORS)
 
 
 #: Upper bound on inbox jobs merged into one derive batch. A CP backlog after
@@ -277,6 +295,18 @@ async def process_job(conn_factory: Callable[[], Any], job: Dict[str, Any]) -> N
         await _run_db(conn_factory, _mark_crashed)
         return
 
+    if str(result.get("status") or "ok") == "requeue":
+        # The executor declined to run right now (e.g. a derivation batch holds
+        # the write gate). Hand the claim back untouched — this is a deferral,
+        # not an attempt, so the row must not read as failed and must not burn
+        # a retry.
+        def _requeue(own: Any) -> None:
+            for entry in jobs:
+                requeue_job(own, str(entry["job_id"]))
+
+        await _run_db(conn_factory, _requeue)
+        return
+
     if str(result.get("status") or "ok") == "error":
         error = str(result.get("error") or result.get("message") or "failed")
 
@@ -345,7 +375,7 @@ async def _worker_loop(conn_factory: Callable[[], Any]) -> None:
                 own = conn_factory()
                 if own is None:
                     return None
-                return claim_next_job(own, lease_owner=_lease_owner)
+                return claim_next_job(own, lease_owner=_lease_owner, kinds=_executable_kinds())
 
             job = await asyncio.to_thread(_claim)
             if job is None:
@@ -409,7 +439,7 @@ async def process_pending_jobs_once(conn_factory: Callable[[], Any], *, limit: i
         own = conn_factory()
         if own is None:
             return None
-        return claim_next_job(own, lease_owner=_lease_owner)
+        return claim_next_job(own, lease_owner=_lease_owner, kinds=_executable_kinds())
 
     for _ in range(max(1, int(limit))):
         job = await asyncio.to_thread(_claim)

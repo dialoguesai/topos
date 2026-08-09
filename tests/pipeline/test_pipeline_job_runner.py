@@ -7,7 +7,14 @@ from unittest.mock import patch
 
 import pytest
 
-from topos.pipeline.job_runner import process_pending_jobs_once, recover_pipeline_jobs
+from topos.enrichment import pipeline_activity
+from topos.enrichment.derivation_recovery import (
+    SIGNAL_DERIVE_RETRY_KIND,
+    list_pending_derivation_retries,
+    record_failed_derivation,
+    retry_pending_derivations,
+)
+from topos.pipeline.job_runner import EXECUTORS, process_pending_jobs_once, recover_pipeline_jobs
 from topos.pipeline.job_store import (
     claim_matching_queued_jobs,
     claim_next_job,
@@ -15,6 +22,7 @@ from topos.pipeline.job_store import (
     get_job,
     is_derivation_complete,
     recover_stale_jobs,
+    requeue_job,
 )
 from topos.storage.db.migrations.pipeline_jobs_v1 import apply_pipeline_jobs_v1_up
 
@@ -262,3 +270,176 @@ async def test_process_pending_jobs_once(conn: sqlite3.Connection) -> None:
     job = get_job(conn, "job-process")
     assert job is not None
     assert job["status"] == "done"
+
+
+# --- signal_derive_retry: the worker half of derivation-debt recovery -------
+#
+# Regression for 2026-08-07: debt records were enqueued with a kind no executor
+# handled, so the worker claimed each one and instantly failed it with
+# "Unknown job kind: signal_derive_retry".
+
+
+def _record_debt(conn: sqlite3.Connection) -> str:
+    job_id = record_failed_derivation(
+        conn,
+        source_id="github_activity",
+        sync_batch_id="batch-1",
+        job_name="timeline",
+        error="database is locked",
+        record_ids=["r1", "r2"],
+        record_count=2,
+    )
+    assert job_id
+    return job_id
+
+
+def test_signal_derive_retry_has_an_executor() -> None:
+    assert SIGNAL_DERIVE_RETRY_KIND in EXECUTORS
+
+
+@pytest.mark.asyncio
+async def test_worker_reruns_recorded_derivation_debt(conn: sqlite3.Connection) -> None:
+    job_id = _record_debt(conn)
+    calls: list[dict] = []
+
+    async def _fake_retry(_conn, **kwargs) -> dict:
+        calls.append(kwargs)
+        return {"outcome": "recovered", "records": 2, "created": 2}
+
+    with (
+        patch("topos.enrichment.derivation_recovery.retry_single_derivation", _fake_retry),
+        patch("topos.core.state.get_db_connection", lambda: conn),
+    ):
+        processed = await process_pending_jobs_once(lambda: conn, limit=5)
+
+    assert processed == 1
+    assert calls == [
+        {
+            "source_id": "github_activity",
+            "sync_batch_id": "batch-1",
+            "job_name": "timeline",
+            "record_ids": ["r1", "r2"],
+        }
+    ]
+    assert get_job(conn, job_id)["status"] == "done"
+    assert list_pending_derivation_retries(conn) == []
+
+
+@pytest.mark.asyncio
+async def test_failed_retry_parks_debt_visible_with_real_error(
+    conn: sqlite3.Connection,
+) -> None:
+    job_id = _record_debt(conn)
+
+    async def _fake_retry(_conn, **_kwargs) -> dict:
+        return {"outcome": "still_failing", "error": "database is locked"}
+
+    with (
+        patch("topos.enrichment.derivation_recovery.retry_single_derivation", _fake_retry),
+        patch("topos.core.state.get_db_connection", lambda: conn),
+    ):
+        await process_pending_jobs_once(lambda: conn, limit=5)
+
+    job = get_job(conn, job_id)
+    assert job["status"] == "failed"
+    assert job["detail"]["error"] == "database is locked"
+    # A failed retry is still an outstanding debt.
+    pending = list_pending_derivation_retries(conn)
+    assert [p["job_name"] for p in pending] == ["timeline"]
+
+
+@pytest.mark.asyncio
+async def test_unretryable_debt_is_not_silently_discharged(
+    conn: sqlite3.Connection,
+) -> None:
+    job_id = _record_debt(conn)
+
+    async def _fake_retry(_conn, **_kwargs) -> dict:
+        return {"outcome": "skipped", "reason": "unknown source"}
+
+    with (
+        patch("topos.enrichment.derivation_recovery.retry_single_derivation", _fake_retry),
+        patch("topos.core.state.get_db_connection", lambda: conn),
+    ):
+        await process_pending_jobs_once(lambda: conn, limit=5)
+
+    job = get_job(conn, job_id)
+    assert job["status"] == "failed"
+    assert job["detail"]["error"] == "cannot retry: unknown source"
+    assert list_pending_derivation_retries(conn) != []
+
+
+@pytest.mark.asyncio
+async def test_retry_defers_while_derivation_batch_in_flight(
+    conn: sqlite3.Connection,
+) -> None:
+    job_id = _record_debt(conn)
+
+    with (
+        patch("topos.enrichment.derivation_recovery._IN_FLIGHT_WAIT_SECONDS", 0.0),
+        pipeline_activity.derivation_in_flight(),
+    ):
+        processed = await process_pending_jobs_once(lambda: conn, limit=1)
+
+    # Claimed once, then handed back: a deferral is not an attempt.
+    assert processed == 1
+    job = get_job(conn, job_id)
+    assert job["status"] == "queued"
+    assert job["lease_owner"] is None
+    assert [p["status"] for p in list_pending_derivation_retries(conn)] == ["queued"]
+
+
+@pytest.mark.asyncio
+async def test_retry_pending_derivations_maps_shared_runner_outcomes(
+    conn: sqlite3.Connection,
+) -> None:
+    _record_debt(conn)
+
+    async def _fake_retry(_conn, **_kwargs) -> dict:
+        return {"outcome": "recovered", "records": 2, "created": 2}
+
+    with patch("topos.enrichment.derivation_recovery.retry_single_derivation", _fake_retry):
+        out = await retry_pending_derivations(conn)
+
+    assert out["attempted"] == 1
+    assert out["recovered"] == [
+        {
+            "job_name": "timeline",
+            "source_id": "github_activity",
+            "records": 2,
+            "created": 2,
+            "batch": "batch-1",
+        }
+    ]
+    assert out["still_failing"] == []
+
+
+@pytest.mark.asyncio
+async def test_unknown_kind_parks_queued_instead_of_failing(
+    conn: sqlite3.Connection,
+) -> None:
+    enqueue_job(conn, kind="mystery_kind", payload={}, job_id="jm1")
+    processed = await process_pending_jobs_once(lambda: conn, limit=5)
+    assert processed == 0
+    assert get_job(conn, "jm1")["status"] == "queued"
+
+
+def test_requeue_job_returns_claim_to_queue(conn: sqlite3.Connection) -> None:
+    enqueue_job(conn, kind="file_ingestion", payload={}, job_id="jr1")
+    claimed = claim_next_job(conn, lease_owner="worker-a")
+    assert claimed is not None and claimed["status"] == "running"
+    requeue_job(conn, "jr1")
+    job = get_job(conn, "jr1")
+    assert job["status"] == "queued"
+    assert job["lease_owner"] is None
+    assert job["lease_expires_at"] is None
+
+
+def test_requeue_job_does_not_resurrect_settled_rows(conn: sqlite3.Connection) -> None:
+    enqueue_job(conn, kind="file_ingestion", payload={}, job_id="jr2")
+    claim_next_job(conn, lease_owner="worker-a")
+    # clear_derivation_retry can settle a claimed debt out-of-band.
+    conn.execute("UPDATE pipeline_jobs SET status='done' WHERE job_id='jr2'")
+    conn.commit()
+    requeue_job(conn, "jr2")
+    assert get_job(conn, "jr2")["status"] == "done"

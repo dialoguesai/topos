@@ -9,6 +9,46 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+
+- `[S1]` `public_bio:read` and `work_context:read` can reach profile data
+  again. The 2026-07-03 registry sync (`bee78d5`) replaced the engine scope
+  registry wholesale from the control plane and dropped `profile_records` from
+  both scopes, leaving no scope in the registry able to reach ingested
+  resume/profile data. `public_bio:read` was left with no readable lane at all
+  — its only declared surface was the summary object `public_bio`, a name no
+  migration creates, and retrieval never reads `summary_objects` (they declare
+  which access modes a scope supports, nothing more), so it answered every
+  query with `{"summaries": []}` while advertising
+  `implementation_status: "live"`. `profile_records` is restored to both scopes
+  upstream in `control_plane/uma/scope_registry.json` and re-synced; the
+  generated `scopeCatalog.ts` is unchanged, because the frontend's view of both
+  scopes stays summary-only. It is declared as `canonical_tables`
+  rather than `raw_tables` deliberately: both manifest builders read
+  `raw_tables or canonical_tables` for the content lane, but only `raw_tables`
+  feeds `_max_supported_access_mode`, so using it would have lifted both
+  scopes from their declared `summary` ceiling to `raw` and un-denied the
+  inference and raw requests `TestQueryPipelineDenyPressure` exists to reject.
+  The engine's retrieval already carried the `profile_records` handling this
+  depends on — the certification and prior-employer filters name the table and
+  the `work_context:read` scope directly. Harness quality on the seeded gate
+  DB goes 35/70 → 42/70 with no regressions and no change to any denial, and a
+  new `tests/query/test_scope_registry_surfaces.py` fails any live scope that
+  declares no lane retrieval can read.
+- `[S1]` Derivation-retry jobs actually run. `record_failed_derivation()`
+  enqueues work of kind `signal_derive_retry` so a lost derivation can be
+  re-derived, but no executor was ever registered for that kind: the worker
+  claimed each row and immediately failed it with `Unknown job kind:
+  signal_derive_retry`. Every recorded derivation debt was therefore
+  self-cancelling — the retry that was supposed to repair the gap destroyed
+  the record of it instead. `run_derivation_retry_job` is added and wired into
+  `EXECUTORS`, and `tests/pipeline` now asserts the registration the way
+  `topic_consolidation` already did (the assertion that would have caught
+  this). Workers also claim only kinds they can execute, so a row written by a
+  newer node version stays queued and visible instead of being claimed and
+  failed as unknown, and an executor may return `status: "requeue"` to hand a
+  claim back untouched when it declines to run — a deferral must not read as a
+  failed attempt.
 ## [1.3.8] — 2026-08-09
 
 ### Added
@@ -93,6 +133,15 @@ The machine-readable twin of each release is
 
 ### Changed
 
+- `[O]` `just harness-gate` scores answer quality against a `QUALITY_FLOOR`
+  ratchet instead of a flat 70/70. Permission and Signal stay hard 70/70 —
+  those are disclosure and retrieval-liveness checks and do not depend on how
+  derived the database is. The 70/70 quality baseline was recorded on a fully
+  derived node; the gate seeds a throwaway DB where the vector and cluster
+  layers are switched off by design, so a share of the catalog is
+  unanswerable there by construction and the gate could never go green. The
+  floor is the high-water mark on that environment (now 42/70, measured on
+  main at `39bf20b`) and the recipe says so when a run beats it.
 - `[O]` CI no longer runs the Home chat Wave A retrieval-quality harness:
   it drove scripts under the gitignored `demo/`, so it failed on every run
   from 2026-07-05 and masked the privacy-eval, package-metadata and
