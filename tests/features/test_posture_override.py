@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import asyncio
 import sqlite3
+import threading
 
 import pytest
 
@@ -346,15 +347,28 @@ class TestStatsSentFamilyHonoursPostureOverride:
     @pytest.fixture()
     def stats_conn(self, tmp_path, monkeypatch):
         from topos.storage.db.migrations import apply_all_migrations
+        import topos.config.settings as config_settings
         import topos.core.state as state
         import topos.features.stats.definitions as defs
 
-        c = sqlite3.connect(str(tmp_path / "stats.db"))
+        db_path = tmp_path / "stats.db"
+        c = sqlite3.connect(str(db_path))
         apply_all_migrations(c)
         ss.ensure_table(c)
-        # The stats posture resolver reads the global connection; point it at
-        # this DB and reset its module-level cache so overrides are seen.
+        # The stats posture resolver reads the global connection. Injecting
+        # the handle alone is not enough: state honours an injected FILE-backed
+        # handle only while the resolved settings path agrees with its cached
+        # path, otherwise it evicts it in favour of the (empty) live-DB guard
+        # file. Point the settings path at this DB and mark this thread as the
+        # owner so the injected handle is returned as-is; reset the resolver's
+        # module-level cache so overrides are seen.
+        monkeypatch.setenv("TOPOS_DATABASE_PATH", str(db_path))
+        monkeypatch.setattr(
+            config_settings.settings, "topos_database_path", str(db_path), raising=False
+        )
         monkeypatch.setattr(state, "db_conn", c, raising=False)
+        monkeypatch.setattr(state, "_db_conn_path", None, raising=False)
+        monkeypatch.setattr(state, "_conn_owner_thread", threading.get_ident(), raising=False)
         defs._POSTURE_RESOLVER = None
         yield c
         defs._POSTURE_RESOLVER = None
