@@ -29,6 +29,20 @@ The machine-readable twin of each release is
 
 ### Fixed
 
+- `[S1]` Derivation-retry jobs actually run. `record_failed_derivation()`
+  enqueues work of kind `signal_derive_retry` so a lost derivation can be
+  re-derived, but no executor was ever registered for that kind: the worker
+  claimed each row and immediately failed it with `Unknown job kind:
+  signal_derive_retry`. Every recorded derivation debt was therefore
+  self-cancelling — the retry that was supposed to repair the gap destroyed
+  the record of it instead. `run_derivation_retry_job` is added and wired into
+  `EXECUTORS`, and `tests/pipeline` now asserts the registration the way
+  `topic_consolidation` already did (the assertion that would have caught
+  this). Workers also claim only kinds they can execute, so a row written by a
+  newer node version stays queued and visible instead of being claimed and
+  failed as unknown, and an executor may return `status: "requeue"` to hand a
+  claim back untouched when it declines to run — a deferral must not read as a
+  failed attempt.
 - `[O]` In-app update works for DMG installs. It never had: a GUI-launched
   app inherits `PATH=/usr/bin:/bin:/usr/sbin:/sbin`, `uv` lives in
   `~/.local/bin`, so the update subprocess raised `FileNotFoundError`, the
