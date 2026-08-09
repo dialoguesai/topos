@@ -5,9 +5,30 @@ import logging.config
 import os
 import re
 
+import pytest
 from uvicorn.config import LOGGING_CONFIG
 
-from topos.core.logging import ColorFormatter, align_uvicorn_loggers, configure_logging, get_uvicorn_log_config, suppress_ml_progress_bars
+from topos.core.logging import (
+    ColorFormatter,
+    QuietPollingAccessFilter,
+    align_uvicorn_loggers,
+    configure_logging,
+    get_uvicorn_log_config,
+    suppress_ml_progress_bars,
+)
+
+
+def _access_record(path: str, status: int) -> logging.LogRecord:
+    logger = logging.getLogger("uvicorn.access")
+    return logger.makeRecord(
+        logger.name,
+        logging.INFO,
+        __file__,
+        1,
+        '%s - "%s %s HTTP/%s" %d',
+        ("127.0.0.1:50989", "GET", path, "1.1", status),
+        None,
+    )
 
 
 def test_get_uvicorn_log_config_routes_access_logs_to_root():
@@ -15,6 +36,61 @@ def test_get_uvicorn_log_config_routes_access_logs_to_root():
     access = config["loggers"]["uvicorn.access"]  # type: ignore[index]
     assert access["handlers"] == []
     assert access["propagate"] is True
+    assert access["filters"] == ["quiet_polling"]
+    assert config["filters"]["quiet_polling"]["()"] == (  # type: ignore[index]
+        "topos.core.logging.QuietPollingAccessFilter"
+    )
+
+
+@pytest.fixture(params=[logging.INFO, logging.DEBUG])
+def root_at_info(request):
+    """The filter must behave identically at DEBUG — topos/.env ships LOG_LEVEL=DEBUG."""
+    root = logging.getLogger()
+    previous = root.level
+    root.setLevel(request.param)
+    yield root
+    root.setLevel(previous)
+
+
+def test_quiet_filter_drops_successful_polls(monkeypatch, root_at_info):
+    monkeypatch.delenv("TOPOS_ACCESS_LOG", raising=False)
+    quiet = QuietPollingAccessFilter()
+
+    for path in ("/healthcheck", "/device_info", "/v1/shell/status", "/v1/shell/status/"):
+        assert quiet.filter(_access_record(path, 200)) is False
+    assert quiet.filter(_access_record("/healthcheck?verbose=1", 200)) is False
+
+
+def test_quiet_filter_keeps_failures_and_real_traffic(monkeypatch, root_at_info):
+    monkeypatch.delenv("TOPOS_ACCESS_LOG", raising=False)
+    quiet = QuietPollingAccessFilter()
+
+    assert quiet.filter(_access_record("/healthcheck", 503)) is True
+    assert quiet.filter(_access_record("/device_info", 401)) is True
+    assert quiet.filter(_access_record("/v1/signal/briefs/profile", 200)) is True
+    # Non-access records (no uvicorn arg tuple) always pass through.
+    assert quiet.filter(logging.getLogger("uvicorn.error").makeRecord(
+        "uvicorn.error", logging.INFO, __file__, 1, "Application startup complete.", None, None
+    )) is True
+
+
+def test_quiet_filter_opt_out(monkeypatch, root_at_info):
+    quiet = QuietPollingAccessFilter()
+
+    monkeypatch.setenv("TOPOS_ACCESS_LOG", "all")
+    assert quiet.filter(_access_record("/healthcheck", 200)) is True
+
+
+def test_align_uvicorn_loggers_attaches_quiet_filter_once(monkeypatch):
+    monkeypatch.setattr("sys.stdout.isatty", lambda: True)
+    configure_logging()
+    access_logger = logging.getLogger("uvicorn.access")
+    access_logger.filters.clear()
+
+    align_uvicorn_loggers()
+    align_uvicorn_loggers()
+
+    assert sum(isinstance(f, QuietPollingAccessFilter) for f in access_logger.filters) == 1
 
 
 def test_align_uvicorn_loggers_after_default_uvicorn_config(monkeypatch):
