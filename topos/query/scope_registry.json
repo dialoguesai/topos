@@ -272,14 +272,18 @@
     },
     {
       "scope_id": "public_bio:read",
-      "description": "The public profile summary \u2014 the bio shared with anyone.",
+      "description": "The public profile summary \u2014 the bio, education and credentials shared with anyone.",
       "example_questions": [
-        "What does my public bio say?"
+        "What does my public bio say?",
+        "What certifications do I hold?"
       ],
       "primary_dimensions": [
         "Profile"
       ],
       "raw_tables": [],
+      "canonical_tables": [
+        "profile_records"
+      ],
       "signal_objects": [],
       "summary_objects": [
         "public_bio"
@@ -373,14 +377,18 @@
     },
     {
       "scope_id": "work_context:read",
-      "description": "Work goals and context extracted from AI conversations and owner journals.",
+      "description": "Work goals and context: roles, skills and employment history from profile records, plus goals extracted from AI conversations and owner journals.",
       "example_questions": [
-        "What am I working on right now?"
+        "What am I working on right now?",
+        "What was my role at my previous employer?"
       ],
       "primary_dimensions": [
         "Work"
       ],
       "raw_tables": [],
+      "canonical_tables": [
+        "profile_records"
+      ],
       "signal_objects": [
         "user_goals"
       ],
