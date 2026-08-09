@@ -264,3 +264,62 @@ def test_start_background_waits_for_ready_event(conn, monkeypatch):
     ready.set()
     assert ran.wait(timeout=2.0), "upgrade should start after ready-event + grace"
     thread.join(timeout=2.0)
+
+
+# --- engine_endpoint dispatch ------------------------------------------------
+
+
+def test_derivation_debt_retry_endpoint_dispatches_to_the_sweep(conn, monkeypatch) -> None:
+    """The `retry-recorded-derivation-debt` step must reach the debt sweep.
+
+    Recorded debt is not self-healing — a failed row is only re-queued by the
+    next organic failure of the same (batch, job), and recover_stale_jobs resets
+    'running' rows, never 'failed' ones. If this dispatch is missing the step
+    raises "no internal dispatch", the upgrade fails, and every node keeps the
+    derivation gap the fix was meant to close.
+    """
+    from topos.upgrades.runner import _exec_engine_endpoint
+
+    seen: dict = {}
+
+    async def fake_retry(conn_, *, source_id=None, limit=20, dry_run=False):
+        seen.update({"conn": conn_, "source_id": source_id, "limit": limit})
+        return {"attempted": 2, "recovered": ["b1:timeline"], "pending_after": 0}
+
+    monkeypatch.setattr(
+        "topos.enrichment.derivation_recovery.retry_pending_derivations", fake_retry
+    )
+
+    out = _exec_engine_endpoint(
+        {"params": {"method": "POST", "path": "/v1/signal/derivation-debt/retry", "limit": 200}},
+        conn,
+    )
+    assert out["attempted"] == 2
+    assert out["pending_after"] == 0
+    assert seen["conn"] is conn, "the step's connection must be the one swept"
+    assert seen["limit"] == 200, "the manifest's limit must reach the sweep"
+
+
+def test_engine_endpoint_still_rejects_an_unknown_path(conn) -> None:
+    """Adding a dispatch must not turn unknown endpoints into silent no-ops."""
+    from topos.upgrades.runner import _exec_engine_endpoint
+
+    with pytest.raises(ValueError, match="no internal dispatch"):
+        _exec_engine_endpoint({"params": {"path": "/v1/does/not/exist"}}, conn)
+
+
+def test_shipped_manifest_declares_the_debt_retry_step() -> None:
+    """The dispatch is only reachable if the manifest actually declares it."""
+    import json
+    from pathlib import Path
+
+    import topos
+
+    data = json.loads(
+        (Path(topos.__file__).parent / "upgrades" / "manifests.json").read_text()
+    )
+    unreleased = next(r for r in data["releases"] if r["version"] == "unreleased")
+    step = next(s for s in unreleased["steps"] if s["id"] == "retry-recorded-derivation-debt")
+    assert step["kind"] == "engine_endpoint"
+    assert step["params"]["path"] == "/v1/signal/derivation-debt/retry"
+    assert step["consent"] == "auto", "repairing recorded loss should not need a prompt"
