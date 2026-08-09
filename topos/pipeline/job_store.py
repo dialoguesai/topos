@@ -273,6 +273,29 @@ def fail_job(
         commit_connection(conn)
 
 
+def requeue_job(conn: sqlite3.Connection, job_id: str) -> None:
+    """Return a claimed job to the queue without recording an attempt.
+
+    For executors that decline to run right now (e.g. a derivation batch is in
+    flight). Unlike ``fail_job`` the row goes back to 'queued', so nothing
+    downstream reads a deferral as a failure. Guarded on status='running' so a
+    job that was settled out-of-band while claimed (``clear_derivation_retry``
+    marks the row 'done' when a later batch succeeds) is not resurrected.
+    """
+    ensure_pipeline_jobs_schema(conn)
+    with with_db_write():
+        conn.execute(
+            """
+            UPDATE pipeline_jobs
+            SET status='queued', lease_owner=NULL, lease_expires_at=NULL,
+                updated_at=datetime('now')
+            WHERE job_id=? AND status='running'
+            """,
+            (job_id,),
+        )
+        commit_connection(conn)
+
+
 def recover_stale_jobs(conn: sqlite3.Connection) -> int:
     """Reset expired or orphaned running jobs to queued."""
     ensure_pipeline_jobs_schema(conn)

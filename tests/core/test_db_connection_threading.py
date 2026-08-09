@@ -418,6 +418,21 @@ def test_topic_consolidation_executor_is_registered():
     assert TOPIC_CONSOLIDATION_KIND in EXECUTORS, "deferred work needs a worker that runs it"
 
 
+def test_derivation_retry_executor_is_registered():
+    """The same assertion, for the kind that did NOT have one.
+
+    ``record_failed_derivation`` enqueued `signal_derive_retry` rows for weeks
+    with nothing registered to run them, so the worker claimed each one and
+    immediately failed it as an unknown kind — the retry meant to repair a lost
+    derivation destroyed the record of it instead. This is the check that would
+    have caught it on the first run.
+    """
+    from topos.pipeline.job_runner import EXECUTORS
+    from topos.enrichment.derivation_recovery import SIGNAL_DERIVE_RETRY_KIND
+
+    assert SIGNAL_DERIVE_RETRY_KIND in EXECUTORS, "recorded derivation debt needs a worker that runs it"
+
+
 # --- the diagnostic must not become the problem ------------------------------
 
 
