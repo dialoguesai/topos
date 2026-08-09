@@ -329,6 +329,8 @@ class ToposTray:
             items.append("Show Logs")
         if self.update.get("applying"):
             items.append("Installing update…")
+        elif self.update.get("last_result") == "failed":
+            items.append("Update failed — click to retry")
         elif self.update.get("last_result") == "success":
             items.append("Update installed — restart to finish")
         elif self.update.get("available"):
@@ -368,6 +370,10 @@ class ToposTray:
             items.append(pystray.MenuItem("Show Logs", self._show_logs))
         if self.update.get("applying"):
             items.append(pystray.MenuItem("Installing update…", None, enabled=False))
+        elif self.update.get("last_result") == "failed":
+            # Clickable: a failed update that renders nothing is
+            # indistinguishable from a click that never registered.
+            items.append(pystray.MenuItem("Update failed — click to retry", self._apply_update))
         elif self.update.get("last_result") == "success":
             items.append(pystray.MenuItem("Update installed — restart to finish", None, enabled=False))
         elif self.update.get("available"):

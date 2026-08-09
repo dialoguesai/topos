@@ -6,6 +6,8 @@ import asyncio
 import json
 import logging
 import os
+import shutil
+from typing import Optional
 import subprocess
 import sys
 import threading
@@ -114,10 +116,65 @@ def check_for_update(package_name: str = DEFAULT_PACKAGE_NAME) -> UpdateInfo | N
     return UpdateInfo(package_name=package_name, installed=installed, latest=latest)
 
 
+def resolve_uv_binary() -> Optional[str]:
+    """Find a usable `uv`, without assuming a login shell's PATH.
+
+    A GUI-launched node inherits PATH=/usr/bin:/bin:/usr/sbin:/sbin, where uv
+    never lives — so a bare `uv` raised FileNotFoundError and self-update was
+    impossible for every app install. The macOS shell now passes TOPOS_UV_BIN
+    (its own bundled uv); the fallbacks cover terminal installs and anyone
+    running an older shell.
+    """
+    explicit = os.environ.get("TOPOS_UV_BIN", "").strip()
+    if explicit and os.access(explicit, os.X_OK):
+        return explicit
+    found = shutil.which("uv")
+    if found:
+        return found
+    for candidate in (
+        os.path.expanduser("~/.local/bin/uv"),
+        "/opt/homebrew/bin/uv",
+        "/usr/local/bin/uv",
+    ):
+        if os.access(candidate, os.X_OK):
+            return candidate
+    return None
+
+
 def apply_package_update(package_name: str = DEFAULT_PACKAGE_NAME) -> bool:
     """Install the latest PyPI release via `uv tool upgrade`. Returns True on success."""
-    result = subprocess.run(["uv", "tool", "upgrade", package_name], check=False)
-    return result.returncode == 0
+    uv = resolve_uv_binary()
+    if uv is None:
+        _logger.error(
+            "Update failed: could not find `uv`. PATH=%s. Install uv, or run "
+            "`uv tool upgrade %s` yourself.",
+            os.environ.get("PATH", ""),
+            package_name,
+        )
+        return False
+    try:
+        result = subprocess.run(
+            [uv, "tool", "upgrade", package_name],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=900,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        # Previously this raised out of the worker thread and the only trace
+        # was last_result="failed" — a silent failure by construction.
+        _logger.error("Update failed to run `%s tool upgrade %s`: %s", uv, package_name, exc)
+        return False
+    if result.returncode != 0:
+        _logger.error(
+            "Update failed (`uv tool upgrade %s` exited %d): %s",
+            package_name,
+            result.returncode,
+            (result.stderr or result.stdout or "").strip()[:500],
+        )
+        return False
+    _logger.info("Update installed: %s. Restart Topos to run it.", package_name)
+    return True
 
 
 def _log_update_available_once(info: UpdateInfo) -> None:
