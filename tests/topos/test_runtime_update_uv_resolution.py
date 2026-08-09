@@ -43,6 +43,29 @@ def test_falls_back_to_the_home_install_under_a_gui_path(monkeypatch, tmp_path):
     assert runtime_update.resolve_uv_binary() == str(home_uv)
 
 
+def test_falls_back_to_the_app_bundle_when_uv_was_never_installed(monkeypatch, tmp_path):
+    """Shells before 0.2.13 set neither TOPOS_UV_BIN nor PATH, and a DMG user
+    who never installed uv by hand has one only inside Topos.app — the case
+    where even the manual `uv tool upgrade` workaround is unavailable."""
+    bundled = "/Applications/Topos.app/Contents/Resources/uv"
+    monkeypatch.delenv("TOPOS_UV_BIN", raising=False)
+    monkeypatch.setenv("PATH", GUI_PATH)
+    monkeypatch.setattr(os.path, "expanduser", lambda p: p.replace("~", str(tmp_path)))
+    monkeypatch.setattr(runtime_update.os, "access", lambda p, m: p == bundled)
+    assert runtime_update.resolve_uv_binary() == bundled
+
+
+def test_a_real_uv_install_outranks_the_app_bundle(monkeypatch, tmp_path):
+    """The bundle copy is a last resort: it is the one the user cannot manage."""
+    home_uv = tmp_path / ".local" / "bin" / "uv"
+    home_uv.parent.mkdir(parents=True)
+    _make_executable(home_uv)
+    monkeypatch.delenv("TOPOS_UV_BIN", raising=False)
+    monkeypatch.setenv("PATH", GUI_PATH)
+    monkeypatch.setattr(os.path, "expanduser", lambda p: p.replace("~", str(tmp_path)))
+    assert runtime_update.resolve_uv_binary() == str(home_uv)
+
+
 def test_returns_none_when_uv_is_genuinely_absent(monkeypatch, tmp_path):
     monkeypatch.delenv("TOPOS_UV_BIN", raising=False)
     monkeypatch.setenv("PATH", str(tmp_path))  # empty dir
