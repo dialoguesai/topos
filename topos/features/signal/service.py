@@ -71,7 +71,7 @@ class SignalService:
         from .hybrid_search import fts_search, merge_hybrid_results
         from .query_embed_cache import get_cached_query_embedding, set_cached_query_embedding
         from .source_hydration import hydrate_record_text
-        from .vector_settings import vector_chunking_enabled, vector_hybrid_enabled, min_similarity_threshold
+        from .vector_settings import vector_hybrid_enabled, min_similarity_threshold
 
         q = str(query or "").strip()
         limit = max(1, min(int(limit), 100))
@@ -101,7 +101,11 @@ class SignalService:
             query_vector = [float(x) for x in vectors[0]]
             set_cached_query_embedding(q, model=embed_model, vector=query_vector)
 
-        fetch_limit = limit * 3 if vector_chunking_enabled() else limit
+        # Over-fetch so the collapse below can still fill a page. Chunking
+        # splits one record across rows; identical text stored once per sighting
+        # collapses too — 37% of the first live corpus was byte-identical. Both
+        # shrink the result set after the fetch, never before it.
+        fetch_limit = limit * 3
         page = self._adapters.vector.search_similar(
             query_vector,
             source_id=source_id,
@@ -138,20 +142,40 @@ class SignalService:
                 value = row.get("similarity") or row.get("hybrid_score") or 0.0
             return float(value)
 
-        items = self._maybe_rerank(q, sorted(items, key=_rank, reverse=True))
+        items = sorted(items, key=_rank, reverse=True)
 
+        # One result per thing said, not per time it was stored. The same text
+        # is embedded once per sighting — a page title revisited six times is
+        # six rows sharing one content_hash — so a single phrase could take the
+        # whole page ("GitHub" filled four of five slots). Items arrive ranked,
+        # so the first survivor of a group is its best-scoring member, and the
+        # rest are counted rather than discarded silently.
+        #
+        # Runs BEFORE reranking on purpose: the cross-encoder scores only its
+        # top `rerank_candidate_limit` candidates, and spending that budget on
+        # six copies of one string buys nothing.
         deduped: List[Dict[str, Any]] = []
         seen_records: set[str] = set()
+        kept_by_content: Dict[str, Dict[str, Any]] = {}
         for item in items:
             record_key = str(item.get("record_id") or item.get("embedding_id") or "")
             if record_key and record_key in seen_records:
                 continue
+            content_key = str(item.get("content_hash") or "")
+            twin = kept_by_content.get(content_key) if content_key else None
+            if twin is not None:
+                twin["occurrences"] = int(twin.get("occurrences") or 1) + 1
+                if record_key:
+                    seen_records.add(record_key)
+                continue
             if record_key:
                 seen_records.add(record_key)
+            item["occurrences"] = 1
+            if content_key:
+                kept_by_content[content_key] = item
             deduped.append(item)
-            if len(deduped) >= limit:
-                break
-        items = deduped
+
+        items = self._maybe_rerank(q, deduped)[:limit]
 
         if hydrate and conn is not None:
             for item in items:
