@@ -98,6 +98,49 @@ def test_self_entity_never_pruned_even_with_dangling_anchor(conn):
     assert eid not in removed
 
 
+# ------------------------------------------- fix 3: derivation-minted vertices
+
+
+def _linked_entity(conn, name: str, etype: str = "topic") -> str:
+    """A vertex minted by graph derivation: no mentions, but carrying an edge.
+
+    fact_materializer and graph_enrichers mint theirs through
+    EntityResolver.resolve, so they get ordinary ``ent_`` ids and ordinary
+    types — neither the type nor the id-prefix exemption sees them.
+    """
+    other = EntityResolver(conn)._create_entity("Anchor Topic", etype)
+    eid = EntityResolver(conn)._create_entity(name, etype)
+    conn.execute(
+        "INSERT INTO entity_edges (edge_id, src_entity_id, dst_entity_id, edge_type, weight)"
+        " VALUES (?, ?, ?, 'discusses', 1.0)",
+        (f"edge_{eid}", other, eid),
+    )
+    conn.execute("UPDATE entities SET mention_count=0 WHERE entity_id IN (?, ?)", (eid, other))
+    conn.commit()
+    return eid
+
+
+def test_mentionless_vertex_with_an_edge_survives_the_scrub(conn):
+    """Reaping these wiped their edges too, and the next derivation run rebuilt
+    the same nodes and edges — the graph churned on every cycle."""
+    eid = _linked_entity(conn, "Personal Intelligence Infrastructure Quadrant")
+    removed = _delete_orphan_entities(conn)
+    assert eid not in removed
+    assert conn.execute("SELECT 1 FROM entities WHERE entity_id=?", (eid,)).fetchone() is not None
+    assert conn.execute(
+        "SELECT 1 FROM entity_edges WHERE dst_entity_id=?", (eid,)
+    ).fetchone() is not None, "cascade took the edge with it"
+
+
+def test_mentionless_vertex_without_an_edge_is_still_reaped(conn):
+    """An edge is what makes a vertex load-bearing; with none it is junk."""
+    eid = EntityResolver(conn)._create_entity("Nothing Points Here", "topic")
+    conn.execute("UPDATE entities SET mention_count=0 WHERE entity_id=?", (eid,))
+    conn.commit()
+    removed = _delete_orphan_entities(conn)
+    assert eid in removed
+
+
 # --------------------------------------------- fix 2: dangling provenance
 
 

@@ -31,6 +31,13 @@ logger = logging.getLogger("topos.features.entities.resolver")
 AUTO_MERGE_SCORE = 0.92
 REVIEW_SCORE = 0.80
 
+# Sightings an entity needs before the owner is asked to merge anything into it.
+# One bar for both proposal paths — the consolidation sweep imports it as
+# _MIN_MENTIONS_FOR_SWEEP. Lowering it to 1 admits one-sighting evidence for a
+# near-irreversible merge; on the first live node it would have taken the open
+# queue from 24 questions to 41.
+MIN_MENTIONS_FOR_MERGE = 2
+
 # Model labels → spine entity_type. Covers CoNLL-2003 (PER/ORG/LOC/MISC) and
 # OntoNotes 5 (18 types): identity-bearing labels get first-class or folded
 # types; everything else falls through to "topic".
@@ -63,7 +70,13 @@ _HONORIFICS = ("dr", "mr", "mrs", "ms", "prof", "dr.")
 def normalize_name(name: str) -> str:
     text = unicodedata.normalize("NFKD", str(name or ""))
     text = "".join(c for c in text if not unicodedata.combining(c))
-    text = re.sub(r"[^\w\s@.+-]", " ", text.lower())
+    # Possessives, before punctuation becomes whitespace. "Altman's" would
+    # otherwise normalize to "altman s" and mint a second entity beside
+    # "Altman" — 26 such twins in the first live graph ("Alpha Hotel's",
+    # "Tango Victor's", "School's"). Requiring the apostrophe keeps names that
+    # merely end in s ("James", "Suggs") untouched.
+    text = re.sub(r"['’]s\b", "", text.lower())
+    text = re.sub(r"[^\w\s@.+-]", " ", text)
     tokens = [t for t in text.split() if t]
     if tokens and tokens[0].rstrip(".") in _HONORIFICS:
         tokens = tokens[1:] or tokens
@@ -174,6 +187,17 @@ _SHORT_SURFACE_ALLOWLIST = frozenset(
 )
 
 
+def clean_entity_surface(text: str) -> str:
+    """Trim the punctuation a mention drags in from the sentence around it.
+
+    Extraction hands over spans as they were cut, so a list item or a range
+    keeps its dash: "Williamsburg-", "NYC-", "- Hood Circle". Left alone the
+    stray character is part of the identity, and the entity never matches the
+    clean spelling of the same place.
+    """
+    return str(text or "").strip().strip("-–—,;:").strip()
+
+
 def is_valid_entity_surface(text: str) -> bool:
     """Reject NER artifacts before they become entities.
 
@@ -181,9 +205,16 @@ def is_valid_entity_surface(text: str) -> bool:
     entity spans wordpieces; those, digit/punctuation-only surfaces, ≤3-char
     junk (plan C4), and all-stopword surfaces ('IS', 'Go', 'The One') must never
     enter the registry.
+
+    Redaction placeholders are rejected too. Text bound for a model that must
+    not see names comes back with "[NAME]", "[EMAIL]" and friends standing in
+    for them (see sanitization.privacy_filter.ENTITY_PLACEHOLDERS); anything
+    minted from that text names the redaction, not a thing in the world.
     """
-    surface = str(text or "").strip()
+    surface = clean_entity_surface(text)
     if not surface or "##" in surface:
+        return False
+    if re.search(r"\[[A-Z][A-Z_]*\]", surface):
         return False
     normalized = normalize_name(surface)
     if not normalized:
@@ -272,9 +303,23 @@ class EntityResolver:
         *,
         entity_type: Optional[str] = None,
         record_id: Optional[str] = None,
+        queue_review: bool = True,
     ) -> Tuple[str, str]:
-        """Resolve a mention; returns (entity_id, tier)."""
-        surface = str(surface_text or "").strip()
+        """Resolve a mention; returns (entity_id, tier).
+
+        ``queue_review=False`` for callers minting a graph vertex rather than
+        recording a sighting — ``fact_materializer`` needs a node to hang an
+        edge on, ``graph_enrichers`` the same for place names. They cite no
+        record, so a question raised here shows the owner nothing to judge by,
+        and the entity minted for it is deleted again by orphan cleanup (no
+        mentions, no contact anchor) before the next derivation run — which then
+        re-mints it and asks again. That loop, not the ingest path, produced
+        97% of the review rows on the first live node: 2,886 rows carrying 18
+        decisions, against 88 rows carrying 76 real ones. Nothing is lost by
+        staying quiet, because the record that fed derivation was itself
+        ingested, and the ingest path already asked about it with provenance.
+        """
+        surface = clean_entity_surface(surface_text)
         if not surface:
             raise ValueError("empty surface text")
         if not is_valid_entity_surface(surface):
@@ -321,7 +366,7 @@ class EntityResolver:
             self._add_alias(best_id, surface)
             return best_id, "fuzzy"
         entity_id = self._create_entity(surface, etype)
-        if best_id and best_score >= REVIEW_SCORE:
+        if queue_review and best_id and best_score >= REVIEW_SCORE:
             self._queue_review(surface, best_id, best_score, record_id)
         return entity_id, "created"
 
@@ -527,9 +572,80 @@ class EntityResolver:
                 (json.dumps(aliases), entity_id),
             )
 
+    def _is_mergeable_candidate(self, candidate_id: str) -> bool:
+        """Has this entity been seen enough to be worth merging something into?
+
+        The bar is the consolidation sweep's, and it applies to contacts too.
+        An address book is not a list of important people: most imported
+        contacts are someone met in passing, often a decade ago, who will never
+        come up again. A contact row says the owner once had a phone number, not
+        that a name in today's data is that person — so a question that exists
+        only because a surface fuzzy-matches an address-book entry is noise.
+        The live queue showed exactly that: 35 of its 39 contact questions
+        proposed a never-mentioned contact, among them "Delta Whiskey" (the Palantir
+        CEO) offered as the owner's contact "Alex", "Alexis" as "Alex", "Alice"
+        as "Allie", "Dan" as "Delta Sierra" — first names colliding, not
+        identities matching.
+
+        Once that contact IS named in ingested content it earns mentions like
+        anything else, and the question comes back with evidence behind it.
+        """
+        row = self._conn.execute(
+            "SELECT COALESCE(mention_count, 0) FROM entities WHERE entity_id=?",
+            (candidate_id,),
+        ).fetchone()
+        if row is None:
+            return False
+        return int(row[0] or 0) >= MIN_MENTIONS_FOR_MERGE
+
     def _queue_review(
         self, surface: str, candidate_id: str, score: float, record_id: Optional[str]
     ) -> None:
+        """Ask the owner "is this surface that entity?" — once, ever, and only
+        when both sides of the question are real.
+
+        Three gates, for three different failure modes.
+
+        ``record_id`` is provenance on the *surface* side.  ``resolve()``'s
+        ``queue_review`` flag lets a caller declare it is minting a graph vertex
+        rather than recording a sighting; this enforces the same thing from the
+        row's own contents, so a future derivation lane that forgets the flag
+        still cannot fill the queue with strings the owner never said.
+
+        ``_is_mergeable_candidate`` is evidence on the *candidate* side.
+
+        The last gate is repetition. This runs per *mention*, so a surface the
+        owner uses every week would otherwise stack up hundreds of identical
+        rows — and an answer already given is an answer: a decision they
+        approved or dismissed must never come back, which is what the sweep has
+        always done for its own merge proposals (see
+        consolidation._existing_pairs).
+
+        No gate for entity types: ``_best_fuzzy`` only scores within one
+        ``entity_type`` and the entity minted for the surface carries that same
+        type, so a proposal is same-type by construction. Approval is where that
+        invariant had to be re-stated (consolidation.resolve_review).
+        """
+        if not str(record_id or "").strip():
+            return
+        if not self._is_mergeable_candidate(candidate_id):
+            return
+        try:
+            already_asked = self._conn.execute(
+                """
+                SELECT 1 FROM entity_review
+                WHERE kind = 'resolution'
+                  AND candidate_entity_id = ?
+                  AND lower(trim(surface_text)) = lower(trim(?))
+                  AND status IN ('pending', 'approved', 'dismissed')
+                LIMIT 1
+                """,
+                (candidate_id, surface),
+            ).fetchone()
+        except sqlite3.OperationalError:
+            already_asked = None  # pre-`kind` schema; queue as before
+        if already_asked:
+            return
         self._conn.execute(
             """
             INSERT INTO entity_review (review_id, surface_text, candidate_entity_id, score, record_id)
@@ -625,15 +741,23 @@ class EntityResolver:
     def merge_entities(self, keep_id: str, absorb_id: str) -> None:
         """Reversible merge: absorb aliases/identifiers/mentions into keep_id."""
         keep = self._conn.execute(
-            "SELECT aliases_json, identifiers_json FROM entities WHERE entity_id=?",
+            "SELECT aliases_json, identifiers_json, entity_type FROM entities WHERE entity_id=?",
             (keep_id,),
         ).fetchone()
         gone = self._conn.execute(
-            "SELECT canonical_name, aliases_json, identifiers_json FROM entities WHERE entity_id=?",
+            "SELECT canonical_name, aliases_json, identifiers_json, entity_type"
+            " FROM entities WHERE entity_id=?",
             (absorb_id,),
         ).fetchone()
         if not keep or not gone:
             raise ValueError("both entities must exist")
+        # Every path that proposes a merge pairs like with like, so a cross-type
+        # merge arriving here is a malformed proposal, not a real duplicate —
+        # and this is the write that cannot be undone. Fail before it lands.
+        if str(keep[2]) != str(gone[3]):
+            raise ValueError(
+                f"cannot merge across entity types (keep={keep[2]!r}, absorb={gone[3]!r})"
+            )
         aliases = list(
             dict.fromkeys(
                 json.loads(keep[0] or "[]") + [gone[0]] + json.loads(gone[1] or "[]")

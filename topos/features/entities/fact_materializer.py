@@ -350,7 +350,8 @@ def materialize_signal_objects_to_graph(
             if not _mintable(str(name)):
                 continue
             try:
-                ent_id, _tier = resolver.resolve(str(name))
+                # A vertex for the edge below, not a sighting — see resolve().
+                ent_id, _tier = resolver.resolve(str(name), queue_review=False)
             except ValueError:
                 continue
             if ent_id == topic_id:
@@ -396,7 +397,9 @@ def materialize_signal_objects_to_graph(
                 continue
             try:
                 obj_id, _tier = resolver.resolve(
-                    obj_val, entity_type="place" if is_place else None
+                    obj_val,
+                    entity_type="place" if is_place else None,
+                    queue_review=False,
                 )
             except ValueError:
                 continue

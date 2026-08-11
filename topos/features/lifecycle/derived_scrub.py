@@ -109,13 +109,28 @@ def _delete_orphan_entities(conn: sqlite3.Connection) -> List[str]:
     never from ``entity_mentions``, so mention_count is always 0. Pruning them
     here used to wipe the goal layer on every rebuild until enrichers ran —
     and permanently if enrich failed after the mz-edge wipe.
+
+    So does anything still carrying an edge. Those hubs are recognised by type
+    and id prefix, but ``fact_materializer`` and ``graph_enrichers`` mint their
+    vertices through ``EntityResolver.resolve``, which hands out ordinary
+    ``ent_`` ids and ordinary types — invisible to both tests above. They are
+    mention-less by nature (a vertex is not a sighting), so every scrub reaped
+    them and ``_delete_entity_cascade`` took their edges too, and the next
+    derivation run built the same nodes and edges again. The graph a scrub left
+    behind was a subset of the graph until derivation caught up: 567 nodes
+    where the rebuilt graph holds 1,625. An edge is what makes a vertex load-
+    bearing, so having one is reason enough to keep it; once the edge goes, the
+    next pass reaps the node.
     """
     # Synthetic / enrichment-only nodes — never mention-backed.
     keep_clause = (
         "AND entity_type NOT IN ('goal', 'conversation') "
         "AND entity_id NOT LIKE 'goal_%' "
         "AND entity_id NOT LIKE 'topic_%' "
-        "AND entity_id NOT LIKE 'conv_%'"
+        "AND entity_id NOT LIKE 'conv_%' "
+        "AND NOT EXISTS (SELECT 1 FROM entity_edges g"
+        "                WHERE g.src_entity_id = e.entity_id"
+        "                   OR g.dst_entity_id = e.entity_id)"
     )
     try:
         rows = conn.execute(
@@ -129,9 +144,10 @@ def _delete_orphan_entities(conn: sqlite3.Connection) -> List[str]:
         ).fetchall()
     except sqlite3.OperationalError:
         # No contacts table in this database — fall back to the anchor-blind rule.
+        # Same alias, so the shared keep_clause binds here too.
         rows = conn.execute(
             f"""
-            SELECT entity_id FROM entities
+            SELECT entity_id FROM entities e
             WHERE mention_count = 0 AND contact_id IS NULL AND is_self = 0
               {keep_clause}
             """

@@ -21,6 +21,8 @@ from topos.features.entities.linking import entity_context_items, link_query_ent
 from topos.features.entities.resolver import (
     AUTO_MERGE_SCORE,
     EntityResolver,
+    clean_entity_surface,
+    is_valid_entity_surface,
     normalize_name,
     token_set_similarity,
 )
@@ -55,6 +57,41 @@ class TestNormalization:
     def test_diacritics_case_honorifics(self) -> None:
         assert normalize_name("Dr. Patél") == "patel"
         assert normalize_name("MAYA   Chen") == "maya chen"
+
+    def test_possessive_is_the_same_name(self) -> None:
+        # "Altman's" used to normalize to "altman s" and mint a twin beside
+        # "Altman" — 26 such pairs in the first live graph.
+        assert normalize_name("Altman’s") == normalize_name("Altman")
+        assert normalize_name("Woody Guthrie's") == normalize_name("Woody Guthrie")
+        # a name that merely ends in s is not a possessive
+        assert normalize_name("James") == "james"
+        assert normalize_name("Suggs") == "suggs"
+
+    def test_trailing_punctuation_is_not_identity(self) -> None:
+        assert normalize_name(clean_entity_surface("Williamsburg-")) == "williamsburg"
+        assert clean_entity_surface("- Hood Circle") == "Hood Circle"
+        assert clean_entity_surface("NYC-") == "NYC"
+
+
+class TestSurfaceRejection:
+    def test_redaction_placeholders_never_become_entities(self) -> None:
+        # Text sent to a model that must not see names comes back with these
+        # standing in for them; minting from it names the redaction.
+        assert not is_valid_entity_surface("[NAME]")
+        assert not is_valid_entity_surface("Meet [NAME][NAME] at Barton Creek Saloon")
+        assert not is_valid_entity_surface("[EMAIL]")
+        assert is_valid_entity_surface("Barton Creek Saloon")
+
+    def test_resolve_refuses_a_redacted_surface(self, conn) -> None:
+        with pytest.raises(ValueError, match="invalid entity surface"):
+            EntityResolver(conn).resolve("[NAME] Johnson", entity_type="person")
+
+    def test_dangling_dash_resolves_onto_the_clean_name(self, conn) -> None:
+        resolver = EntityResolver(conn)
+        clean_id = resolver._create_entity("Williamsburg", "place")
+        conn.commit()
+        got_id, tier = resolver.resolve("Williamsburg-", entity_type="place")
+        assert got_id == clean_id, f"minted a second Williamsburg (tier={tier})"
 
     def test_token_set_similarity_orderless(self) -> None:
         assert token_set_similarity("Chen Maya", "Maya Chen") == 1.0
@@ -123,6 +160,33 @@ class TestResolutionTiers:
             assert reviews >= 0  # created + possibly queued
         else:
             pytest.fail(f"near-duplicate person auto-merged (tier={tier})")
+
+    def test_derivation_mints_a_node_without_asking_the_owner(self, conn) -> None:
+        """Graph derivation resolves names to get a vertex, cites no record,
+        and has its mention-less entity deleted by orphan cleanup before the
+        next run — so a question raised here is unanswerable and comes back
+        every run. 97% of the review rows on the first live node came from
+        this path."""
+        resolver = EntityResolver(conn)
+        resolver._create_entity("Jonathan Marchetti", "person")
+        conn.commit()
+
+        for _ in range(5):  # five derivation runs over the same name
+            resolver.resolve("Jonathan Marchesi", entity_type="person", queue_review=False)
+        assert conn.execute("SELECT COUNT(*) FROM entity_review").fetchone()[0] == 0
+
+    def test_ingest_still_asks_when_it_has_a_record_to_cite(self, conn) -> None:
+        resolver = EntityResolver(conn)
+        resolver._create_entity("Jonathan Marchetti", "person")
+        conn.execute("UPDATE entities SET mention_count=5")
+        conn.commit()
+
+        resolver.resolve("Jonathan Marchesi", entity_type="person", record_id="rec-1")
+        row = conn.execute(
+            "SELECT record_id FROM entity_review WHERE kind='resolution'"
+        ).fetchone()
+        assert row is not None, "ingest path stopped asking"
+        assert row[0] == "rec-1", "question queued without the record backing it"
 
     def test_no_duplicates_for_seeded_contacts(self, conn) -> None:
         _seed_contacts(conn)

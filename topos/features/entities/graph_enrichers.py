@@ -289,7 +289,9 @@ def _materialize_places(conn: sqlite3.Connection, owner: Optional[str]) -> int:
             if not is_valid_entity_surface(name):
                 continue
             try:
-                place_id, _tier = resolver.resolve(name, entity_type="place")
+                place_id, _tier = resolver.resolve(
+                    name, entity_type="place", queue_review=False
+                )
             except ValueError:
                 continue
             if place_id == owner:
