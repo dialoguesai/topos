@@ -10,7 +10,26 @@
 # .github/workflows/secret-scan.yml. If the hook fires on something that is
 # genuinely not a secret, add a `gitleaks:allow` comment on that line rather
 # than exempting the file.
+#
+# Hook order is deliberate. The Smithers run guard is first and `fail_fast`, so
+# when a run owns the tree nothing else runs and the refusal is the only output.
+# It used to live as a hand-written .git/hooks/pre-commit, which meant it WAS the
+# repo's pre-commit hook — `pre-commit install` had never been run here, so the
+# gitleaks hook below it had been inert since July. On a public repo that is the
+# expensive kind of inert: CI catches the same secret, but only once it is
+# already in history. Owning one file each was the whole problem; pre-commit owns
+# the file now and the guard is a hook inside it.
 repos:
+  - repo: local
+    hooks:
+      - id: smithers-run-guard
+        name: no commits while a Smithers run owns the tree
+        entry: python3 scripts/check_smithers_run_guard.py
+        language: system
+        pass_filenames: false
+        always_run: true
+        fail_fast: true
+
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.28.0
     hooks:
