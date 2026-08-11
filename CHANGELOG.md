@@ -9,6 +9,44 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.13] — 2026-08-11
+
+### Fixed
+
+- `[S1] [E:entities]` The People tab's duplicate queue asks each question once.
+  `entity_review` holds a row per *sighting*, and the resolver queued one every
+  time a surface reappeared: 8,134 pending rows for 99 real decisions on a live
+  node, the same four pairs repeating down the page, with the genuine person
+  merges sorted below all of it and off the visible page. Everything
+  owner-facing now keys on the decision rather than the row — the page limit
+  counts questions, resolving one settles every row that asked it, and the count
+  reports the backlog instead of the page size. Existing queues collapse by
+  migration; every prior answer and unbind guard is preserved.
+- `[S1] [E:entities]` Three reasons a duplicate question should never have been
+  asked. Graph derivation minted vertices through the same call path as ingest
+  and asked about strings the owner never said (97% of the rows). A candidate
+  never seen in the data is not something to merge into — contacts included,
+  because an address book is not a list of important people, and 35 of 39 open
+  contact questions offered a never-mentioned contact. And `"Altman's"`,
+  `"Williamsburg-"` and text redacted to `[NAME]` are no longer identities.
+- `[E:entities]` Orphan cleanup stops reaping the vertices derivation just
+  minted. They carry ordinary `ent_` ids, so neither the type nor the id-prefix
+  exemption saw them: every scrub deleted 173 mention-less entities on a live
+  node and cascaded away the 206 edges that made them load-bearing, and the next
+  derivation run rebuilt them. An edge is reason enough to keep a vertex.
+- `[S1]` Search returns one result per thing said, not per time it was stored.
+  The same text is embedded once per sighting, and 37% of a live corpus (2,967
+  of 8,061 embeddings) is duplicate text, so `"GitHub"` took four of five slots
+  for the query `git github`. Results now collapse on content hash, keeping the
+  best-scoring copy and reporting how many sightings it stands for in
+  `occurrences`. The candidate fetch widens to match, and the collapse runs
+  before reranking so the cross-encoder's budget is spent on distinct text.
+- `[O]` Five documented environment variables were dead. pydantic v2 ignores
+  `Field(env=)`, so `TOPOS_FACTS_LLM_MODEL`, `TOPOS_OLLAMA_QUERY_MODEL`,
+  `TOPOS_OLLAMA_EXTRACTION_MODEL`, `TOPOS_DISCLOSURE_MINIMIZER_MODEL` and
+  `TOPOS_PRIVACY_JUDGE_MODEL` never reached `Settings` despite being documented
+  as the way to set them.
+
 ## [1.3.12] — 2026-08-10
 
 ### Fixed
