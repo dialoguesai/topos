@@ -295,6 +295,16 @@
       ]
     },
     {
+      "version": "1.3.13",
+      "summary": "Owner curation and search stop reporting how many times something was stored. The People tab's duplicate queue asked one question per sighting rather than per decision (8,134 pending rows for 99 real decisions on a live node), derivation asked about strings the owner never said, candidates never seen in the data were offered as merge targets (contacts included), and possessives, trailing punctuation and redaction placeholders were treated as identities. Search returned the same text once per time it was stored, where 37% of a live corpus is duplicate text. Orphan cleanup also stopped reaping the graph vertices derivation had just minted, which had been churning 173 entities and 206 edges per scrub. No steps: the three entity_review migrations run at boot and collapse the queue in place, preserving every prior answer and unbind guard; the spine and search changes are code-only and take effect on the next resolve and the next query.",
+      "steps": [],
+      "notes": [
+        "Migrations 57-59 delete duplicate and unanswerable entity_review rows and mark the rest stale; approved, dismissed and no_bind rows are never touched.",
+        "Entity labels already minted with a possessive, trailing dash or [NAME] are left in place \u2014 they surface through the review queue as ordinary merge decisions rather than being rewritten underneath the owner.",
+        "The occurrences count on search results ships in topos-react-app as well."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
