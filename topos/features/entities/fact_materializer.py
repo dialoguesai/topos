@@ -127,6 +127,61 @@ def _cluster_activity_window(
     return min(events), max(events)
 
 
+# Role resolution reads one canonical row per member; clusters run to hundreds
+# of members, so sample rather than walk them all. The dominant role of a few
+# hundred members is not going to be overturned by the tail.
+_ROLE_SAMPLE_PER_CLUSTER = 200
+
+
+def _cluster_actor_role(conn: sqlite3.Connection, cluster_id: str) -> str:
+    """Attribution role for a topic-cluster edge, from its members' families.
+
+    A topic cluster asserts nothing — nobody "said" a cluster — so these edges
+    carried no ``asserted_by`` and fell through ``_asserted_by_role(None)``,
+    whose "owner" default stamped every one of them ``authored``. On a live node
+    that put GitHub-feed exposure in the owner's own voice (19 recent edges) and
+    skewed the attribution overlay to 91.5% authored.
+
+    The role is computed per member from the canonical family it belongs to and
+    the MAJORITY wins, with ties breaking toward the LESS-attributing role —
+    the direction roles.py requires for ambiguity. Members we cannot place at
+    all yield ``ambient``: "we do not know whose words these are" is a true
+    statement, "the owner wrote it" is not.
+    """
+    from ..provenance.roles import ROLE_AMBIENT
+    from .maintenance import _dominant_role, _record_role_map
+
+    try:
+        rows = conn.execute(
+            """
+            SELECT DISTINCT t.record_id, t.canonical_table, t.source_id
+            FROM topic_cluster_members m
+            JOIN timeline t ON t.record_id = m.record_id
+            WHERE m.cluster_id = ?
+            LIMIT ?
+            """,
+            (str(cluster_id), _ROLE_SAMPLE_PER_CLUSTER),
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return ROLE_AMBIENT
+    by_record = {
+        str(rid): {"table": str(table or ""), "source_id": str(source_id or "")}
+        for rid, table, source_id in rows
+        if rid
+    }
+    if not by_record:
+        return ROLE_AMBIENT
+    # Same role map the co-occurrence edges use, so a topic edge and an organic
+    # edge over the same records never disagree about whose words they are. It
+    # reads the actual canonical row, so is_from_self and the source's posture
+    # both count — passing a bare table name would collapse the owner's own
+    # messages to "observed", trading one wrong attribution for another.
+    mix: Dict[str, int] = {}
+    for role in _record_role_map(conn, by_record).values():
+        mix[role] = mix.get(role, 0) + 1
+    return _dominant_role(mix) if mix else ROLE_AMBIENT
+
+
 def _asserted_by_role(asserted_by: Optional[str]) -> str:
     """Map a fact's asserted_by onto the record-role spectrum.
 
@@ -244,10 +299,19 @@ def materialize_signal_objects_to_graph(
     Returns counts of topic and fact edges written.
     """
     from .edges import EDGE_DISCUSSES, EDGE_LOCATED_AT
-    from .resolver import EntityResolver, is_valid_entity_surface
+    from .resolver import EntityResolver, is_valid_entity_surface, normalize_name
+    from .resolver import value_label_surfaces
 
     resolver = EntityResolver(conn)
     resolver.seed_from_contacts()
+
+    # Surfaces the model labelled DATE/TIME/CARDINAL/… Both lanes below resolve
+    # bare strings, so map_ner_type — the extraction lane's guard — cannot run
+    # here; without this, dates and quantities become graph nodes.
+    values = value_label_surfaces(conn)
+
+    def _mintable(surface: str) -> bool:
+        return is_valid_entity_surface(surface) and normalize_name(surface) not in values
 
     # Full refresh: drop previously-materialized edges (keep organic evidence edges).
     conn.execute("DELETE FROM entity_edges WHERE json_extract(metadata_json, '$.mz') = 1")
@@ -280,9 +344,10 @@ def materialize_signal_objects_to_graph(
         first_at, last_at = _cluster_activity_window(conn, str(object_key))
         edge_from = first_at or valid_from
         edge_last = last_at or first_at
+        cluster_role = _cluster_actor_role(conn, str(object_key))
         linked = 0
         for name in related:
-            if not is_valid_entity_surface(str(name)):
+            if not _mintable(str(name)):
                 continue
             try:
                 ent_id, _tier = resolver.resolve(str(name))
@@ -295,6 +360,7 @@ def materialize_signal_objects_to_graph(
                 weight=_MZ_WEIGHT_FLOOR, valid_from=edge_from, valid_to=None,
                 last_event_at=edge_last,
                 statement=f"topic: {tag}", source_object_id=object_id,
+                actor_role=cluster_role,
             )
             topic_edges += 1
             linked += 1
@@ -326,7 +392,7 @@ def materialize_signal_objects_to_graph(
 
         is_place = pred in _PLACE_PREDICATES
         if not obj_id:
-            if not resolve_strings or not is_valid_entity_surface(obj_val):
+            if not resolve_strings or not _mintable(obj_val):
                 continue
             try:
                 obj_id, _tier = resolver.resolve(
@@ -347,5 +413,29 @@ def materialize_signal_objects_to_graph(
         )
         fact_edges += 1
 
+    # 3) Purge value surfaces minted by EARLIER runs of this lane, which ran
+    # before the guard existed ("an hour", "this week", "Mon-Wed" — 51 such
+    # nodes on the first live node checked). Bounded hard on purpose:
+    # mention_count = 0 means the surface was never extracted as an entity in
+    # its own right, and the no-edge check runs after the refresh above, so a
+    # real entity that merely shares a value-ish surface is never touched.
+    purged = 0
+    for entity_id, _norm in [
+        (eid, norm)
+        for eid, norm in conn.execute(
+            "SELECT entity_id, normalized_name FROM entities WHERE COALESCE(mention_count, 0) = 0"
+        ).fetchall()
+        if str(norm or "") in values
+    ]:
+        if conn.execute(
+            "SELECT 1 FROM entity_edges WHERE src_entity_id=? OR dst_entity_id=? LIMIT 1",
+            (entity_id, entity_id),
+        ).fetchone():
+            continue
+        conn.execute("DELETE FROM entities WHERE entity_id=?", (entity_id,))
+        purged += 1
+    if purged:
+        logger.info("materializer purged %d value-surface entities (dates/quantities)", purged)
+
     conn.commit()
-    return {"topic_edges": topic_edges, "fact_edges": fact_edges}
+    return {"topic_edges": topic_edges, "fact_edges": fact_edges, "purged_value_nodes": purged}

@@ -344,10 +344,40 @@ class SQLiteCanonicalStore(CanonicalStore):
         )
         return CanonicalRef(record_id=event_id, created=existing is None)
 
+    @staticmethod
+    def _journal_entry_at(record: Dict[str, Any], ingested_at: str) -> Any:
+        """Event time for a journal row, preferring its own session start.
+
+        Grow's journal producers stamped ``entry_at`` with the import clock
+        while carrying the true session time in ``starts_at``: 127 rows landed
+        on 2026-08-08T03:34:44 — equal to ``ingested_at`` to the second — and
+        171 more on 2026-06-28T23:28:45, so sessions spanning months all claimed
+        to have happened the instant they were imported.
+
+        Downstream this is not cosmetic. The entity graph dates its edges from
+        canonical event time, so those entries pulled years-old relationships
+        into the "last 6 days" view of /data/graph.
+
+        A journal entry whose stated time matches the ingest second to the
+        second, while it separately knows when the session started, is reporting
+        the importer's clock rather than its own — so prefer ``starts_at``.
+        Records that omit ``entry_at`` fall back to it as well.
+        """
+        entry_at = record.get("entry_at")
+        starts_at = record.get("starts_at")
+        if not starts_at:
+            return entry_at
+        if not entry_at:
+            return starts_at
+        if str(entry_at)[:19] == str(ingested_at or "")[:19]:
+            return starts_at
+        return entry_at
+
     def _upsert_journal_entry(self, record: Dict[str, Any], *, sync_batch_id: Optional[str]) -> CanonicalRef:
         entry_id = str(record.get("entry_id") or record.get("source_record_id") or "")
         if not entry_id:
             raise ValueError("journal_entries upsert requires entry_id")
+        ingested_at = record.get("ingested_at") or _utc_now()
         existing = self._conn.execute(
             "SELECT entry_id FROM journal_entries WHERE entry_id=?",
             (entry_id,),
@@ -374,7 +404,7 @@ class SQLiteCanonicalStore(CanonicalStore):
             """,
             (
                 entry_id,
-                record.get("entry_at"),
+                self._journal_entry_at(record, ingested_at),
                 record.get("starts_at"),
                 record.get("ends_at"),
                 record.get("mood_tag"),
@@ -385,7 +415,7 @@ class SQLiteCanonicalStore(CanonicalStore):
                 record.get("place_name"),
                 record.get("source_id"),
                 record.get("source_record_id") or entry_id,
-                record.get("ingested_at") or _utc_now(),
+                ingested_at,
                 sync_batch_id or record.get("sync_batch_id"),
                 _json_metadata(record.get("metadata_json")),
             ),

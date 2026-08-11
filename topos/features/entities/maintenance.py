@@ -551,7 +551,32 @@ def rebuild_evidence_edges(
         comm += 1
 
     # -- write phase: swap the folded edge set in under one bounded hold ------
-    valid_from = _now_iso()
+    # valid_from is BELIEF validity — "when the edge started being held" (see
+    # update_edge, and the FactStore successor chaining in edges.py). It is
+    # deliberately NOT the event date: deriving an edge today from 2023 evidence
+    # means belief started today, so valid_from > last_event_at is normal.
+    #
+    # The bug is narrower than it looks: this phase deletes and re-inserts the
+    # whole co-occurrence set, and stamping a fresh _now_iso() on every row
+    # restarted the belief clock on every rebuild. Belief did not restart — 492
+    # edges on a live node claimed to have begun at whichever rebuild ran last,
+    # and the previous date was gone for good.
+    #
+    # So: carry the prior belief date across the swap; only genuinely new edges
+    # begin believing now. Do NOT clamp to the evidence date — that would assert
+    # a belief history that never happened.
+    now_iso = _now_iso()
+    prior_valid_from: Dict[tuple, str] = {}
+    try:
+        for src, dst, edge_type, existing in conn.execute(
+            "SELECT src_entity_id, dst_entity_id, edge_type, valid_from FROM entity_edges "
+            "WHERE edge_type IN ('co_occurrence', 'communicates_with') AND valid_to IS NULL "
+            "AND valid_from IS NOT NULL"
+        ):
+            prior_valid_from[(str(src), str(dst), str(edge_type))] = str(existing)
+    except sqlite3.Error:
+        prior_valid_from = {}
+
     payload = []
     for (src, dst, edge_type), state in acc.edges.items():
         mix = edge_roles.get((src, dst, edge_type))
@@ -560,6 +585,8 @@ def rebuild_evidence_edges(
             if mix
             else None
         )
+        last_event = state["last"]
+        valid_from = prior_valid_from.get((src, dst, edge_type)) or now_iso
         payload.append(
             (
                 f"edg_{uuid.uuid4().hex[:16]}",
@@ -568,7 +595,7 @@ def rebuild_evidence_edges(
                 edge_type,
                 float(state["weight"]),
                 int(state["count"]),
-                state["last"],
+                last_event,
                 valid_from,
                 metadata,
             )

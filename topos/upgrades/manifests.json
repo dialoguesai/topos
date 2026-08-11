@@ -244,9 +244,55 @@
     },
     {
       "version": "1.3.11",
-      "summary": "Ingest throughput: the conversation auto-classifier stops re-asking the same unlabelable conversations on every enrichment batch (~20 model calls / ~26s per batch, permanently, for zero progress). An unclear verdict now retires the row instead of being silently dropped. No steps: nothing on-node is invalidated — prompt, model and parse logic are unchanged, so existing auto: tags remain valid, and retired rows self-heal on the next enrichment pass.",
+      "summary": "Ingest throughput: the conversation auto-classifier stops re-asking the same unlabelable conversations on every enrichment batch (~20 model calls / ~26s per batch, permanently, for zero progress). An unclear verdict now retires the row instead of being silently dropped. No steps: nothing on-node is invalidated \u2014 prompt, model and parse logic are unchanged, so existing auto: tags remain valid, and retired rows self-heal on the next enrichment pass.",
       "steps": [],
       "notes": []
+    },
+    {
+      "version": "1.3.12",
+      "summary": "Graph time correctness: edges stop being dated by when the machine touched them. Co-occurrence rebuilds no longer restart each edge's belief clock (valid_from); topic-cluster edges take the attribution role of their member records instead of defaulting to 'authored'; journal entry_at written from the import clock is re-dated from starts_at; and DATE/TIME/CARDINAL surfaces are no longer minted as graph nodes. Also: a failed upgrade step is reachable for retry again (ledger rows key on the DECLARING release, and the plan carries any step short of 'done'), and a progress bar can no longer fail the step it narrates.",
+      "steps": [
+        {
+          "id": "repair-journal-ingest-clock-dates",
+          "kind": "engine_endpoint",
+          "title": "Re-date journal entries that recorded the import clock as their event time",
+          "why": "Grow's journal producers wrote entry_at from the import clock while the true session time sat in starts_at. On the first live node checked: 309 rows across two sources, 127 of them sharing 2026-08-08T03:34:44 to the second, with real sessions spanning months. The entity graph dates its edges from canonical event time, so those batches pulled years-old relationships into the recent graph window. SQLiteCanonicalStore._journal_entry_at closes this for new writes, but a row already on disk only moves if something sweeps it. The predicate IS the corruption signature (entry_at equal to ingested_at to the second, with a real starts_at present), so a genuine entry_at is never touched and the step is safe to re-run. The timeline projection is unaffected either way: it already reads starts_at, so this brings entry_at into agreement with what timeline always showed.",
+          "params": {
+            "method": "POST",
+            "path": "/v1/canonical/journal/repair-ingest-dates"
+          },
+          "consent": "auto",
+          "cost": "no LLM, no network; one bounded UPDATE over journal_entries",
+          "progress": "GET /v1/upgrade/status",
+          "idempotent": "the signature stops matching once a row is repaired",
+          "estimated_duration": "milliseconds",
+          "order": 1
+        },
+        {
+          "id": "rebuild-entity-graph-after-date-repair",
+          "kind": "derived_rebuild",
+          "title": "Rebuild the entity graph so edges pick up the corrected dates, roles and value-surface guard",
+          "why": "Three of this release's fixes only reach EXISTING data through a rebuild: co-occurrence edges stop having their belief clock (valid_from) restarted on every rebuild; topic-cluster edges stop defaulting to actor_role 'authored' and take the role of their member records instead; and DATE/TIME/CARDINAL surfaces ('an hour', 'this week', 'four') are no longer minted as graph nodes, with previously-minted ones purged. It must run AFTER the journal date repair, because rebuilding first would only re-derive edges from the uncorrected event times.",
+          "params": {
+            "targets": [
+              "entity_graph"
+            ]
+          },
+          "depends_on": [
+            "repair-journal-ingest-clock-dates"
+          ],
+          "consent": "auto",
+          "cost": "no LLM, no network; the rebuild runs in a subprocess so the node's event loop stays live",
+          "progress": "TUI progress bar on the node + GET /v1/upgrade/status",
+          "idempotent": "deterministic recompute from surviving mentions",
+          "estimated_duration": "measured ~124s on a real node (2,741 edges)",
+          "order": 2
+        }
+      ],
+      "notes": [
+        "Graph time-window RCA (2026-08-10): five defects, all variations on recording when the machine touched the data rather than when the thing happened.",
+        "The scrub-window fix ships in topos-react-app, not here."
+      ]
     },
     {
       "version": "unreleased",

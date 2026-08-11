@@ -13,6 +13,7 @@ import sqlite3
 import pytest
 
 from topos.storage.db.migrations import apply_all_migrations
+from topos.upgrades import steps_between
 from topos.upgrades.runner import (
     plan_upgrade,
     read_baseline,
@@ -118,6 +119,114 @@ def test_failed_step_blocks_baseline_and_retries_next_boot(conn):
     result = run_pending_upgrades(conn, shipped="1.2.0", executors=_recording_executors(log))
     assert result["steps_run"] == 2
     assert read_baseline(conn) == "1.2.0"
+
+
+def _stamp(conn, version):
+    # engine_config is bootstrapped outside the migration set, so go through
+    # the runner's own stamp rather than assuming the table exists.
+    from topos.upgrades.runner import _stamp_baseline
+
+    _stamp_baseline(conn, version)
+
+
+def _ledger(conn, version, step_id, status):
+    conn.execute(
+        "INSERT INTO derivation_ledger (version, step_id, status) VALUES (?, ?, ?)",
+        (version, step_id, status),
+    )
+    conn.commit()
+
+
+def test_failed_step_is_retried_after_the_baseline_moves_past_it(conn):
+    """A failure must survive later releases, not fall out of the version window.
+
+    Live regression (2026-08-09): `backfill-attention-triage-redo`, declared in
+    1.3.7, failed under shipped 1.3.9 — and was ledgered under 1.3.9, because
+    rows were keyed by whatever was shipping rather than by the declaring
+    release. The node went on to 1.3.10 and 1.3.11, the baseline passed 1.3.7,
+    and `steps_between(baseline, shipped)` could no longer name the step. It
+    was unretryable forever while the banner promised a retry every restart.
+    """
+    _seed_data(conn)
+    _stamp(conn, "1.3.8")  # baseline already past the declaring release
+    _ledger(conn, "1.3.9", "backfill-attention-triage-redo", "failed")
+
+    # This hop's window genuinely cannot see a 1.3.7 step — that is the trap.
+    assert "backfill-attention-triage-redo" not in [
+        s["id"] for s in steps_between("1.3.8", "1.3.11")
+    ]
+    plan = plan_upgrade(conn, shipped="1.3.11")
+    assert "backfill-attention-triage-redo" in [s["id"] for s in plan["steps"]]
+
+    log = []
+    run_pending_upgrades(conn, shipped="1.3.11", executors=_recording_executors(log))
+    assert ("reprocess", "backfill-attention-triage-redo") in log
+    assert read_baseline(conn) == "1.3.11"
+    # The retry files under the declaring release, collapsing the legacy row.
+    assert ("1.3.7", "done") in conn.execute(
+        "SELECT version, status FROM derivation_ledger "
+        "WHERE step_id='backfill-attention-triage-redo'"
+    ).fetchall()
+
+
+def test_release_with_no_steps_does_not_stamp_over_a_failure(conn):
+    """The live node's exact state: baseline == shipped, one orphaned failure.
+
+    1.3.10 and 1.3.11 declare no steps, so the window is empty and the old
+    short circuit stamped the baseline and returned without ever looking at the
+    outstanding failure.
+    """
+    _seed_data(conn)
+    _stamp(conn, "1.3.11")
+    _ledger(conn, "1.3.9", "backfill-attention-triage-redo", "failed")
+    assert steps_between("1.3.11", "1.3.11") == []
+
+    log = []
+    run_pending_upgrades(conn, shipped="1.3.11", executors=_recording_executors(log))
+    assert ("reprocess", "backfill-attention-triage-redo") in log
+
+
+def test_baseline_never_advances_past_an_outstanding_failure(conn):
+    """The stamp gate must see failures from earlier hops, not just this one."""
+    _seed_data(conn)
+    _stamp(conn, "1.3.8")
+    _ledger(conn, "1.3.9", "backfill-attention-triage-redo", "failed")
+
+    def failing(step, conn_):
+        raise RuntimeError("stderr closed")
+
+    execs = _recording_executors([])
+    execs["enrichment_reprocess"] = failing
+    run_pending_upgrades(conn, shipped="1.3.11", executors=execs)
+    assert read_baseline(conn) != "1.3.11"
+
+
+def test_legacy_row_under_a_later_shipped_version_still_counts_as_done(conn):
+    """Rows written before the re-keying must not cause a re-run.
+
+    `retry-recorded-derivation-debt` (declared 1.3.9) ledgered 'done' under
+    both 1.3.9 and 1.3.10 on real nodes. Reading only the declaring version's
+    row would miss a 'done' filed under a later one and re-run finished work.
+    """
+    _seed_data(conn)
+    conn.execute(
+        "INSERT INTO derivation_ledger (version, step_id, status) "
+        "VALUES ('1.3.10', 'retry-recorded-derivation-debt', 'done')"
+    )
+    conn.commit()
+    log = []
+    run_pending_upgrades(conn, shipped="1.3.10", executors=_recording_executors(log))
+    assert "retry-recorded-derivation-debt" not in [sid for _, sid in log]
+
+
+def test_fresh_install_does_not_drag_back_unrun_history(conn):
+    """No ledger row means never owed — only an unfinished row is retried."""
+    plan = plan_upgrade(conn, shipped="1.3.11")
+    assert plan["fresh_install"] is True
+    run_pending_upgrades(conn, shipped="1.3.11", executors=_recording_executors([]))
+    assert read_baseline(conn) == "1.3.11"
+    # A later boot on the stamped baseline must stay empty, not resurrect 1.2.0.
+    assert plan_upgrade(conn, shipped="1.3.11")["steps"] == []
 
 
 def test_interrupted_running_step_is_retried(conn):

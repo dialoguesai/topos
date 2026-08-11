@@ -35,9 +35,34 @@ class ProgressBar:
         self.n = 0
         self.start_time = time.time()
         self.last_update_time = self.start_time
-        self._isatty = hasattr(self.file, 'isatty') and self.file.isatty()
+        try:
+            self._isatty = hasattr(self.file, 'isatty') and self.file.isatty()
+        except ValueError:
+            # Closed stream — isatty() raises rather than answering.
+            self._isatty = False
         self._last_line_length = 0
-        
+        # Set once a write fails: a detached process (node launched by the
+        # macOS shell, --app --no-tray) can have stderr closed out from under
+        # it, and every later write would raise the same ValueError.
+        self._broken = False
+
+    def _write(self, text: str, end: str = "") -> None:
+        """Emit progress, or give up permanently. NEVER raises.
+
+        Progress display is cosmetic; the work it narrates is not. On
+        2026-08-09 this exact write killed the `backfill-attention-triage-redo`
+        upgrade step six seconds into a boot — before a single source had been
+        touched — because the step ran in a daemon thread whose stderr had been
+        closed. A progress bar must not be able to fail a data repair.
+        """
+        if self._broken:
+            return
+        try:
+            print(text, end=end, file=self.file, flush=True)
+        except (ValueError, OSError):
+            # ValueError: I/O operation on closed file. OSError: EPIPE/EBADF.
+            self._broken = True
+
     def update(self, n: int = 1) -> None:
         """Update progress by n items.
         
@@ -62,12 +87,9 @@ class ProgressBar:
             if self.n % max(1, self.total // 10) == 0 or self.n == self.total:
                 elapsed = time.time() - self.start_time
                 percent = (self.n / self.total * 100) if self.total > 0 else 0
-                print(
+                self._write(
                     f"\r{self.desc}: {self.n}/{self.total} ({percent:.1f}%) "
-                    f"[{elapsed:.1f}s]",
-                    end="",
-                    file=self.file,
-                    flush=True,
+                    f"[{elapsed:.1f}s]"
                 )
             return
             
@@ -96,13 +118,13 @@ class ProgressBar:
         
         # Clear previous line and print new one
         # Use carriage return and clear to end of line
-        print(f"\r{' ' * self._last_line_length}\r{status}", end="", file=self.file, flush=True)
+        self._write(f"\r{' ' * self._last_line_length}\r{status}")
         self._last_line_length = len(status)
-        
+
     def close(self) -> None:
         """Close the progress bar (print final newline)."""
         if self._isatty:
-            print(file=self.file)  # Newline to move past progress bar
+            self._write("", end="\n")  # Newline to move past progress bar
         self._last_line_length = 0
         
     def __enter__(self):

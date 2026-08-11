@@ -97,6 +97,47 @@ def map_ner_type(ner_label: Optional[str]) -> Optional[str]:
     return _NER_TYPE_MAP.get(label, "topic")
 
 
+def value_label_surfaces(conn: sqlite3.Connection) -> frozenset:
+    """Normalized surfaces the NER model judged to be VALUES, not identities.
+
+    ``map_ner_type`` drops DATE/TIME/CARDINAL/… on the extraction lane, but it
+    needs a label — and the graph's other minting lane (topic-cluster
+    ``related_entities`` and string-valued fact objects in
+    ``fact_materializer``) only ever sees a bare surface string. With no label
+    the drop list cannot fire, so "an hour", "this week", "four" and "Mon-Wed"
+    were minted as first-class ``topic`` nodes and rendered in the graph.
+
+    Rather than guess from the string — an endless denylist that would also
+    swallow real names — this reuses the judgment the model already made when
+    it extracted the mention. A surface is a value only when value-labelled
+    mentions OUTNUMBER identity-labelled ones, so a genuine entity that was
+    mislabelled once ("Phoenix" as a DATE) still survives.
+    """
+    try:
+        rows = conn.execute(
+            """
+            SELECT COALESCE(json_extract(payload_json, '$.entity_text'), entity_text) AS surface,
+                   UPPER(COALESCE(json_extract(payload_json, '$.entity_type'), '')) AS label,
+                   COUNT(*) AS n
+            FROM message_entities
+            GROUP BY surface, label
+            """
+        ).fetchall()
+    except sqlite3.Error:
+        return frozenset()
+    value_n: Dict[str, int] = {}
+    total_n: Dict[str, int] = {}
+    for surface, label, n in rows:
+        key = normalize_name(str(surface or ""))
+        if not key:
+            continue
+        count = int(n or 0)
+        total_n[key] = total_n.get(key, 0) + count
+        if str(label or "") in _NER_DROP_LABELS:
+            value_n[key] = value_n.get(key, 0) + count
+    return frozenset(k for k, v in value_n.items() if v * 2 > total_n.get(k, 0))
+
+
 # Function/common words that NER routinely mislabels as MISC/topic entities.
 # A surface made ENTIRELY of these is junk ('IS', 'Go', 'and', 'of', 'The One',
 # 'Place') — 634 such entities polluted the live spine, dossiers, and mentions.
