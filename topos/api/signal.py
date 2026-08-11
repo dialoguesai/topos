@@ -434,10 +434,13 @@ async def list_entity_review(
     _api_key: str = Depends(require_api_key),
 ):
     """Pending entity merge candidates (owner curation queue)."""
-    from ..features.entities.consolidation import list_review
+    from ..features.entities.consolidation import count_review, list_review
 
-    items = list_review(_entities_conn(), status=status, limit=limit)
-    return {"items": items, "total": len(items)}
+    conn = _entities_conn()
+    items = list_review(conn, status=status, limit=limit)
+    # ``total`` is the whole queue, not this page — counting ``items`` would
+    # report the limit back as if it were the backlog.
+    return {"items": items, "total": count_review(conn, status=status)}
 
 
 @router.post("/entity-review/sweep")

@@ -25,12 +25,54 @@ import uuid
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from ...storage.db.write_gate import batched_writes, commit_connection, with_db_write
-from .resolver import AUTO_MERGE_SCORE, REVIEW_SCORE, token_set_similarity
+from .resolver import (
+    AUTO_MERGE_SCORE,
+    MIN_MENTIONS_FOR_MERGE,
+    REVIEW_SCORE,
+    token_set_similarity,
+)
 
 logger = logging.getLogger("topos.features.entities.consolidation")
 
 EMBED_MERGE_SCORE = 0.90
-_MIN_MENTIONS_FOR_SWEEP = 2  # ignore one-off noise entities as merge *sources*
+# Ignore one-off noise entities as merge *sources*. Defined in the resolver so
+# both proposal paths — this sweep and EntityResolver._queue_review — hold the
+# owner's queue to one bar.
+_MIN_MENTIONS_FOR_SWEEP = MIN_MENTIONS_FOR_MERGE
+
+
+def _decision_key_sql(alias: str = "r") -> str:
+    """SQL for the *decision* a review row records, not the row itself.
+
+    The queue is a list of questions for the owner ("are these two the same?"),
+    but the table stores one row per sighting: the resolver queues a row every
+    time a surface reappears at ingest, so one question can sit in the table
+    hundreds of times. Everything owner-facing keys on the decision — the queue
+    shows it once, and resolving it settles every row that recorded it.
+
+    Merge rows carry both entity ids. Resolution rows carry only a surface (the
+    entity for it is created at ingest and may not exist yet), so they key on
+    the normalized surface instead.
+    """
+    return (
+        f"{alias}.kind || '|' || COALESCE({alias}.subject_entity_id,"
+        f" 'surface:' || lower(trim({alias}.surface_text)))"
+        f" || '|' || {alias}.candidate_entity_id"
+    )
+
+
+# Rows the owner can actually act on: the candidate must still exist (entities
+# merge and vanish, leaving reviews pointing at nothing), and a merge row's
+# subject must too, or approving it would fail at merge time.
+_ACTIONABLE_SQL = """
+    FROM entity_review r
+    JOIN entities c ON c.entity_id = r.candidate_entity_id
+    WHERE r.status = ?
+      AND (
+        r.kind != 'merge'
+        OR r.subject_entity_id IN (SELECT entity_id FROM entities)
+      )
+"""
 
 
 def _existing_pairs(conn: sqlite3.Connection) -> set:
@@ -318,13 +360,29 @@ def propose_merges(conn: sqlite3.Connection, *, use_embeddings: bool = True) -> 
 def list_review(
     conn: sqlite3.Connection, *, status: str = "pending", limit: int = 100
 ) -> List[Dict[str, Any]]:
+    """One item per pending decision, oldest sighting representing each.
+
+    Grouping happens in SQL so ``limit`` counts questions the owner has to
+    answer rather than rows in the table. ``MIN(r.created_at)`` also picks which
+    row represents the group: with exactly one min/max aggregate SQLite takes
+    the bare columns from that same row, so the representative is always the
+    sighting that first raised the question.
+
+    Sweep proposals lead. Score is not comparable across kinds — a resolution
+    row scores 1.0 when the resolver found *several* equally good matches and
+    refused to choose, which says nothing about how much the answer is worth —
+    so ordering on score alone pushed the duplicate people the panel exists to
+    catch below hundreds of surface confirmations, off the visible page.
+    """
     rows = conn.execute(
-        """
-        SELECT r.review_id, r.kind, r.score, r.reason, r.status, r.created_at,
-               r.subject_entity_id, r.candidate_entity_id, r.surface_text
-        FROM entity_review r
-        WHERE r.status = ?
-        ORDER BY r.score DESC, r.created_at DESC
+        f"""
+        SELECT r.review_id, r.kind, r.score, r.reason, r.status,
+               MIN(r.created_at) AS created_at,
+               r.subject_entity_id, r.candidate_entity_id, r.surface_text,
+               COUNT(*) AS occurrences
+        {_ACTIONABLE_SQL}
+        GROUP BY {_decision_key_sql()}
+        ORDER BY (r.kind = 'merge') DESC, r.score DESC, r.created_at DESC
         LIMIT ?
         """,
         (status, max(1, min(int(limit), 500))),
@@ -348,22 +406,66 @@ def list_review(
             "is_contact": bool(row[4]),
         }
 
-    out = []
-    for r in rows:
-        out.append(
-            {
-                "review_id": r[0],
-                "kind": r[1],
-                "score": r[2],
-                "reason": r[3],
-                "status": r[4],
-                "created_at": r[5],
-                "subject": _entity_summary(r[6]) or {"canonical_name": r[8]},
-                "candidate": _entity_summary(r[7]),
-            }
+    return [
+        {
+            "review_id": r[0],
+            "kind": r[1],
+            "score": r[2],
+            "reason": r[3],
+            "status": r[4],
+            "created_at": r[5],
+            "subject": _entity_summary(r[6]) or {"canonical_name": r[8]},
+            "candidate": _entity_summary(r[7]),
+            # How many sightings this one decision stands for; acting on the
+            # item settles all of them.
+            "occurrences": int(r[9] or 1),
+        }
+        for r in rows
+    ]
+
+
+def count_review(conn: sqlite3.Connection, *, status: str = "pending") -> int:
+    """Total decisions awaiting the owner — the honest number behind the page.
+
+    ``list_review`` is capped, so counting what it returned reports the page
+    size as if it were the whole queue.
+    """
+    row = conn.execute(
+        f"""
+        SELECT COUNT(*) FROM (
+            SELECT 1 {_ACTIONABLE_SQL} GROUP BY {_decision_key_sql()}
         )
-    # Drop rows whose entities vanished (merged elsewhere) — mark them stale.
-    return [item for item in out if item.get("candidate")]
+        """,
+        (status,),
+    ).fetchone()
+    return int(row[0] or 0)
+
+
+def _decision_siblings(conn: sqlite3.Connection, review_id: str) -> List[str]:
+    """Other pending rows recording the same decision as ``review_id``."""
+    rows = conn.execute(
+        f"""
+        SELECT r.review_id FROM entity_review r
+        WHERE r.status = 'pending' AND r.review_id != ?
+          AND ({_decision_key_sql()}) = (
+              SELECT {_decision_key_sql('t')} FROM entity_review t WHERE t.review_id = ?
+          )
+        """,
+        (review_id, review_id),
+    ).fetchall()
+    return [str(r[0]) for r in rows]
+
+
+def _settle_siblings(conn: sqlite3.Connection, siblings: List[str], status: str) -> None:
+    """Carry one answer across every row that asked the same question.
+
+    Must run inside the caller's write hold, alongside the target row's update.
+    """
+    for sibling_id in siblings:
+        conn.execute(
+            "UPDATE entity_review SET status=? WHERE review_id=? AND status='pending'",
+            (status, sibling_id),
+        )
 
 
 def resolve_review(
@@ -389,13 +491,21 @@ def resolve_review(
     if status != "pending":
         raise ValueError(f"review already {status}")
 
+    # The owner answers a question once, not once per sighting of it.
+    siblings = _decision_siblings(conn, review_id)
+
     if action == "dismiss":
         with with_db_write():
             conn.execute(
                 "UPDATE entity_review SET status='dismissed' WHERE review_id=?", (review_id,)
             )
+            _settle_siblings(conn, siblings, "dismissed")
             commit_connection(conn)
-        return {"review_id": review_id, "status": "dismissed"}
+        return {
+            "review_id": review_id,
+            "status": "dismissed",
+            "also_settled": len(siblings),
+        }
 
     if action != "approve":
         raise ValueError(f"unknown action: {action}")
@@ -412,10 +522,24 @@ def resolve_review(
         if not surface:
             raise ValueError("resolution review has no surface text")
         # The resolver created a separate entity for this surface at ingest —
-        # find it by normalized name (never the candidate itself).
+        # find it by normalized name (never the candidate itself), and only
+        # within the candidate's type.
+        #
+        # The resolver scores candidates within one entity_type and gives the
+        # entity it mints that same type, so the surface's entity is always a
+        # type-mate of the candidate. Matching on the name alone reached past
+        # that and absorbed whichever same-named entity SQLite handed back
+        # first: the live queue asked 478 times "is 'Unemployment Benefit
+        # Services' the topic 'unemployment'?", and approving it would have
+        # folded a 21-mention org into a mention-less topic hub. With no
+        # type-mate the answer is an alias on the candidate, which is
+        # recoverable; a merge is not.
         hit = conn.execute(
-            "SELECT entity_id FROM entities WHERE normalized_name=? AND entity_id != ? LIMIT 1",
-            (normalize_name(surface), str(candidate_id)),
+            "SELECT entity_id FROM entities"
+            " WHERE normalized_name=? AND entity_id != ?"
+            "   AND entity_type = (SELECT entity_type FROM entities WHERE entity_id=?)"
+            " LIMIT 1",
+            (normalize_name(surface), str(candidate_id), str(candidate_id)),
         ).fetchone()
         subject_id = hit[0] if hit else None
         if subject_id is None:
@@ -425,6 +549,7 @@ def resolve_review(
                 conn.execute(
                     "UPDATE entity_review SET status='approved' WHERE review_id=?", (review_id,)
                 )
+                _settle_siblings(conn, siblings, "approved")
                 commit_connection(conn)
             # Self-gating — must not run under this hold.
             refresh_dossiers(conn)
@@ -433,6 +558,7 @@ def resolve_review(
                 "status": "approved",
                 "kept": str(candidate_id),
                 "alias_added": surface,
+                "also_settled": len(siblings),
             }
     elif kind != "merge" or not subject_id:
         raise ValueError("only merge/resolution reviews can be approved")
@@ -442,6 +568,9 @@ def resolve_review(
         conn.execute(
             "UPDATE entity_review SET status='approved' WHERE review_id=?", (review_id,)
         )
+        # Other sightings of this same question are answered too. Resolution
+        # rows carry no subject id, so the stale sweep below cannot reach them.
+        _settle_siblings(conn, siblings, "approved")
         # Any other pending reviews touching the absorbed entity are now stale.
         conn.execute(
             """
@@ -454,7 +583,13 @@ def resolve_review(
         commit_connection(conn)
     # Self-gating — must not run under this hold.
     refresh_dossiers(conn)
-    return {"review_id": review_id, "status": "approved", "kept": str(candidate_id), "absorbed": str(subject_id)}
+    return {
+        "review_id": review_id,
+        "status": "approved",
+        "kept": str(candidate_id),
+        "absorbed": str(subject_id),
+        "also_settled": len(siblings),
+    }
 
 
 def split_surface(conn: sqlite3.Connection, entity_id: str, surface: str) -> Dict[str, Any]:

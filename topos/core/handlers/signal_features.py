@@ -641,15 +641,17 @@ async def handle_signal_list_entity_review(message: Dict[str, Any]) -> Optional[
         return None
     payload = message.get("payload") or {}
     try:
-        from ...features.entities.consolidation import list_review
+        from ...features.entities.consolidation import count_review, list_review
 
         conn = hub.get_db_connection()
+        status = str(payload.get("status") or "pending")
         items = list_review(
             conn,
-            status=str(payload.get("status") or "pending"),
+            status=status,
             limit=min(int(payload.get("limit") or 100), 500),
         )
-        return {"id": req_id, "status": "ok", "payload": {"items": items, "total": len(items)}}
+        total = count_review(conn, status=status)
+        return {"id": req_id, "status": "ok", "payload": {"items": items, "total": total}}
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}
 

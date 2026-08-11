@@ -194,6 +194,18 @@ from .entity_mentions_authored_v1 import (
     MIGRATION_ID as ENTITY_MENTIONS_AUTHORED_V1_ID,
     apply_entity_mentions_authored_v1_up,
 )
+from .entity_review_dedup_v1 import (
+    MIGRATION_ID as ENTITY_REVIEW_DEDUP_V1_ID,
+    apply_entity_review_dedup_v1_up,
+)
+from .entity_review_provenance_v1 import (
+    MIGRATION_ID as ENTITY_REVIEW_PROVENANCE_V1_ID,
+    apply_entity_review_provenance_v1_up,
+)
+from .entity_review_candidate_bar_v1 import (
+    MIGRATION_ID as ENTITY_REVIEW_CANDIDATE_BAR_V1_ID,
+    apply_entity_review_candidate_bar_v1_up,
+)
 
 ApplyFn = Callable[[sqlite3.Connection], object]
 
@@ -306,6 +318,9 @@ MIGRATIONS: List[MigrationSpec] = [
         apply_entity_mentions_authored_v1_up,
         always_run=True,
     ),
+    _spec(57, ENTITY_REVIEW_DEDUP_V1_ID, apply_entity_review_dedup_v1_up),
+    _spec(58, ENTITY_REVIEW_PROVENANCE_V1_ID, apply_entity_review_provenance_v1_up),
+    _spec(59, ENTITY_REVIEW_CANDIDATE_BAR_V1_ID, apply_entity_review_candidate_bar_v1_up),
 ]
 
 
@@ -369,4 +384,7 @@ __all__ = [
     "ENTITY_CONTEXT_VECTORS_V1_ID",
     "ENTITY_AFFINITY_V1_ID",
     "ENTITY_CONTEXT_VECTORS_V2_ID",
+    "ENTITY_REVIEW_DEDUP_V1_ID",
+    "ENTITY_REVIEW_PROVENANCE_V1_ID",
+    "ENTITY_REVIEW_CANDIDATE_BAR_V1_ID",
 ]
