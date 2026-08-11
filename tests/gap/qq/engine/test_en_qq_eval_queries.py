@@ -133,6 +133,12 @@ async def test_vector_search_git_sanity(live_orchestrator: QueryPipelineOrchestr
         pytest.skip("no vector embeddings in database")
     top = items[0]
     score = float(top.get("similarity") or top.get("score") or 0)
-    preview = str(top.get("preview") or top.get("text") or top.get("source_text") or "").lower()
+    # The field is `text_preview`; reading `preview` made the lexical half of
+    # the assertion dead, so a hybrid top hit — no cosine, but the words right
+    # there — failed on score alone. "git push to GitHub repository main
+    # branch" was reported as a weak vector hit with an empty preview.
+    preview = str(
+        top.get("text_preview") or top.get("preview") or top.get("text") or top.get("source_text") or ""
+    ).lower()
     print(f"\n[Q7] vector top similarity={score:.3f} preview={preview[:80]} latency={elapsed_ms:.0f}ms")
     assert score > 0.35 or "git" in preview, f"weak vector hit: score={score} preview={preview[:60]}"
