@@ -9,6 +9,69 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.12] — 2026-08-10
+
+### Fixed
+
+- `[E:graph]` The entity graph stops dating relationships by when the machine
+  touched them. Four defects, one theme. (1) `rebuild_evidence_edges` deletes
+  and re-inserts the whole co-occurrence set and stamped a fresh `now` on every
+  row, restarting each edge's belief clock — 492 edges on a live node claimed to
+  have begun at whichever rebuild happened to run last, and the prior date was
+  gone for good. `valid_from` is belief validity, not an event date, so the
+  prior date is now carried across the swap and only genuinely new edges begin
+  believing now; it is deliberately NOT clamped to the evidence date, which
+  would assert a belief history that never happened. (2) Materialized topic
+  edges carried `actor_role: authored` without exception: nobody asserts a topic
+  cluster, so they passed no `asserted_by` and the fallback's "owner" default
+  claimed the owner wrote them — putting browser and GitHub-feed exposure in the
+  owner's own voice and reading 91.5% authored on a window where it was a
+  fraction of that. The role now comes from the cluster's member records via the
+  same role map the co-occurrence edges use, so a topic edge and an organic edge
+  over the same records cannot disagree; on the measured node 34 clusters moved
+  from 34 authored to 2 authored / 15 observed / 17 ambient. (3) `entry_at` was
+  written from the import clock while the true session time sat in `starts_at`
+  (309 rows across two sources, 127 sharing one second), so months-old sessions
+  looked like they happened at import and pulled years-old relationships into
+  the recent graph window; the canonical store now prefers `starts_at` when
+  `entry_at` matches `ingested_at` to the second, and an upgrade step re-dates
+  rows already on disk. (4) DATE/TIME/CARDINAL surfaces ("an hour", "this week",
+  "four", "Mon-Wed") were minted as first-class topic nodes: the extraction lane
+  already drops value labels, but the graph's second minting lane resolves bare
+  surfaces with no label attached, so `map_ner_type` never ran. Both lanes now
+  consult the labels the model already assigned — a surface counts as a value
+  only when value-labelled mentions outnumber identity-labelled ones, so a real
+  entity mislabelled once survives — and 51 previously-minted junk nodes are
+  purged. Verified end-to-end on a live node: 20 junk nodes to 0.
+
+- `[O]` A failed upgrade step is retried again, and the banner that promises
+  the retry stops lying. Three defects stacked. (1) The runner planned purely
+  from `steps_between(baseline, shipped)` and filed ledger rows under the
+  SHIPPED version rather than the release that declared the step, so a failure
+  detached from its step: `backfill-attention-triage-redo` (declared 1.3.7)
+  failed under shipped 1.3.9, the baseline went on to 1.3.11, and the step left
+  the version window permanently — unreachable by the planner and by
+  `POST /v1/upgrade/consent`, which rejects anything not in the current plan.
+  Rows are now keyed to the declaring release, the plan carries any step whose
+  ledger row never reached `done`, and the baseline stamp is gated on that same
+  set, so a release with no steps of its own can no longer stamp straight over
+  an outstanding failure. A step with no row at all is still never dragged
+  back — fresh installs stamp without running history, and re-running all of it
+  would be far worse than the gap. (2) `UpgradeBanner` filtered the ledger on
+  `status === "failed"` with no version scope and no check against
+  `pending_steps`, so one historical row pinned "Upgrade step failed — will
+  retry on next restart" to `/data` forever, and the step counter drew its
+  numerator from every `done` row the node had ever written. Both are now
+  scoped to the current plan, and the retry sentence only appears when a retry
+  is genuinely planned. (3) The step had died on its progress bar, not on any
+  data work: `ProgressBar` writes to `sys.stderr`, and upgrade steps run in a
+  daemon thread ~20s into boot, where a detached node (`--app --no-tray`) can
+  have stderr closed — `__enter__`'s first draw raised
+  `ValueError: I/O operation on closed file.` six seconds in, before a single
+  source was touched. Display writes are now swallowed and disabled after the
+  first failure, which also covers the ingestion manager, the iMessage reader,
+  and the emo-27 job.
+
 ## [1.3.11] — 2026-08-09
 
 ### Fixed

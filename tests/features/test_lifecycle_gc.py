@@ -95,6 +95,14 @@ class TestTopTopicsReconciliation:
 
 class TestBriefCompaction:
     def _seed_revisions(self, conn, brief_id: str, *, days_ago: int, per_day: int, start_num: int) -> list[str]:
+        # Anchor at MIDDAY of the target day, not at "now minus N days". These
+        # tests assert one-survivor-per-day, so the seeds must all land on the
+        # same calendar day — and datetime('now') is UTC, so a suite running in
+        # the last few minutes before UTC midnight pushed the '+i minutes'
+        # offsets across the boundary. Compaction then correctly kept one per
+        # day for TWO days and the assertion failed. Observed for real: the
+        # release gate on 2026-08-10 ran 23:54 -> 00:00 UTC and went red here
+        # with removed=4, survivors=[12, 15].
         ids = []
         num = start_num
         for i in range(per_day):
@@ -104,7 +112,7 @@ class TestBriefCompaction:
                 INSERT INTO signal_dimension_brief_revisions
                     (revision_id, brief_id, revision_number, change_kind, created_at)
                 VALUES (?, ?, ?, 'ingest_merge',
-                        datetime('now', ?, ?))
+                        datetime('now', ?, 'start of day', '+12 hours', ?))
                 """,
                 (rid, brief_id, num, f"-{days_ago} days", f"+{i} minutes"),
             )

@@ -102,21 +102,15 @@ def load_unreleased() -> Optional[Dict[str, Any]]:
     return None
 
 
-def steps_between(installed: str, shipped: str) -> List[Dict[str, Any]]:
-    """Union of re-derivation steps for installed < version <= shipped.
+def _collect_steps(releases: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Flatten releases' steps, keeping the LAST occurrence of each step id.
 
-    Later releases' steps run after earlier ones; duplicate step ids keep the
-    LATEST occurrence (a later release re-requiring a rebuild supersedes the
-    earlier request — running it once at the end is sufficient).
-    Staging ``unreleased`` is never included.
+    A later release re-requiring a rebuild supersedes the earlier request —
+    running it once, at the point the latest release asks for it, is enough.
     """
-    lo, hi = _version_key(installed), _version_key(shipped)
     ordered: List[Dict[str, Any]] = []
-    for release in load_manifests(include_unreleased=False):
-        v = _version_key(release["version"])
-        if lo < v <= hi:
-            ordered.extend(release.get("steps", []))
-    # Keep the LAST occurrence of each step id, in last-occurrence order.
+    for release in releases:
+        ordered.extend(release.get("steps", []))
     result: List[Dict[str, Any]] = []
     seen: set = set()
     for step in reversed(ordered):
@@ -126,3 +120,48 @@ def steps_between(installed: str, shipped: str) -> List[Dict[str, Any]]:
         result.append(step)
     result.reverse()
     return [s for s in result if s["kind"] != "none"]
+
+
+def steps_between(installed: str, shipped: str) -> List[Dict[str, Any]]:
+    """Union of re-derivation steps for installed < version <= shipped.
+
+    Later releases' steps run after earlier ones; duplicate step ids keep the
+    LATEST occurrence. Staging ``unreleased`` is never included.
+    """
+    lo, hi = _version_key(installed), _version_key(shipped)
+    return _collect_steps([
+        r for r in load_manifests(include_unreleased=False)
+        if lo < _version_key(r["version"]) <= hi
+    ])
+
+
+def steps_through(shipped: str) -> List[Dict[str, Any]]:
+    """Every step declared at or below ``shipped``, in declaring order.
+
+    ``steps_between`` answers "what does THIS hop owe"; this answers "what does
+    this release line owe in total". The upgrade runner needs both: the hop
+    decides what is newly due, the total decides what an earlier hop left
+    unfinished — a step whose declaring release is already behind the baseline
+    is invisible to the window, and was therefore unretryable forever.
+    """
+    hi = _version_key(shipped)
+    return _collect_steps([
+        r for r in load_manifests(include_unreleased=False)
+        if _version_key(r["version"]) <= hi
+    ])
+
+
+def declaring_versions() -> Dict[str, str]:
+    """step_id → version of the LAST release declaring it.
+
+    The ledger keys on this rather than on the version that happened to be
+    shipping when a step ran, so a step owns exactly one row across its life
+    and a failure stays attached to it across later upgrades. "Last release"
+    matches ``steps_between``'s dedup rule: re-declaring an id in a newer
+    release means "run it again", and the new key is what makes that happen.
+    """
+    out: Dict[str, str] = {}
+    for release in load_manifests(include_unreleased=False):
+        for step in release.get("steps", []):
+            out[str(step["id"])] = str(release["version"])
+    return out

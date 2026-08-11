@@ -156,14 +156,17 @@ def _assert_steps_did_work(
     # 'pending_consent' is a legitimate resting place (a consent-gated step
     # waits for POST /v1/upgrade/consent), so it is accepted here and excluded
     # from the effect assertions below rather than treated as a failure.
+    from topos.upgrades import declaring_versions
+    from topos.upgrades.runner import _effective_status
+
+    declared = declaring_versions()
     awaiting_consent: set[str] = set()
     for step in steps:
         step_id = str(step["id"])
-        row = conn.execute(
-            "SELECT status FROM derivation_ledger WHERE version=? AND step_id=?",
-            (shipped, step_id),
-        ).fetchone()
-        status = str(row[0]) if row else None
+        # Ledger rows are keyed by the release that DECLARED the step, not by
+        # whatever was shipping when it ran — a step declared in 1.3.7 keeps
+        # one row across every later hop.
+        status = _effective_status(conn, step_id, declared.get(step_id) or shipped)
         if status == "pending_consent":
             awaiting_consent.add(step_id)
             continue

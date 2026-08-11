@@ -35,7 +35,7 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
-from . import steps_between
+from . import _version_key, declaring_versions, steps_between, steps_through
 from ..storage.db.write_gate import commit_connection, with_db_write
 
 logger = logging.getLogger("topos.upgrades.runner")
@@ -179,7 +179,11 @@ def plan_upgrade(conn: sqlite3.Connection, shipped: Optional[str] = None) -> Dic
     fresh = baseline is None and not _has_data(conn)
     if baseline is None and not fresh:
         baseline = _BOOTSTRAP_BASELINE
-    steps = [] if fresh or baseline == shipped else steps_between(baseline, shipped)
+    if fresh:
+        steps: List[Dict[str, Any]] = []
+    else:
+        window = [] if baseline == shipped else steps_between(baseline, shipped)
+        steps = _plan_steps(conn, window, shipped)
     return {
         "shipped": shipped,
         "baseline": baseline,
@@ -188,15 +192,85 @@ def plan_upgrade(conn: sqlite3.Connection, shipped: Optional[str] = None) -> Dic
     }
 
 
+def _plan_steps(
+    conn: sqlite3.Connection, window: List[Dict[str, Any]], shipped: str
+) -> List[Dict[str, Any]]:
+    """This hop's steps, plus anything an earlier hop left unfinished.
+
+    The version window alone cannot express "this failed, run it again": once
+    the baseline moves past the release that declared a step, the step drops
+    out of every future plan and can never be retried. That is how 1.3.7's
+    ``backfill-attention-triage-redo`` stayed failed across 1.3.8→1.3.11 while
+    the UI promised a retry on every restart.
+
+    Only steps that HAVE a ledger row short of 'done' come back. A step with no
+    row at all was legitimately never owed — fresh installs stamp the baseline
+    without running history, and dragging all of it back would be a far worse
+    failure than the gap it closes.
+    """
+    in_window = {str(s["id"]) for s in window}
+    declared = declaring_versions()
+    planned: List[Dict[str, Any]] = []
+    for step in steps_through(shipped):
+        step_id = str(step["id"])
+        if step_id in in_window:
+            planned.append(step)
+            continue
+        status = _effective_status(conn, step_id, declared.get(step_id) or shipped)
+        if status not in (None, "done"):
+            planned.append(step)
+    return planned
+
+
 # --- ledger -----------------------------------------------------------------
 
 
-def _ledger_status(conn: sqlite3.Connection, version: str, step_id: str) -> Optional[str]:
-    row = conn.execute(
-        "SELECT status FROM derivation_ledger WHERE version=? AND step_id=?",
-        (version, step_id),
-    ).fetchone()
-    return str(row[0]) if row else None
+def _ledger_version(step_id: str, shipped: str, declared: Optional[Dict[str, str]] = None) -> str:
+    """The release a step's ledger row is filed under — where it was declared.
+
+    Not the shipped version: filing under "whatever was running at the time"
+    scatters one step across a row per upgrade hop and detaches its failures
+    from the step itself.
+    """
+    declared = declaring_versions() if declared is None else declared
+    return declared.get(str(step_id)) or shipped
+
+
+def _effective_status(
+    conn: sqlite3.Connection, step_id: str, declaring_version: str
+) -> Optional[str]:
+    """A step's status across every version it was ever ledgered under.
+
+    Rows written before this fix are keyed by the shipped version at run time,
+    so one step can own several (``retry-recorded-derivation-debt`` ledgered
+    'done' under both 1.3.9 and 1.3.10). Any 'done' among them means done.
+    Rows older than the declaring release belong to a PREVIOUS declaration of
+    the same id and are ignored, which is what lets a re-declared step re-run.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT version, status FROM derivation_ledger WHERE step_id=?",
+            (str(step_id),),
+        ).fetchall()
+    except sqlite3.Error:
+        return None
+    try:
+        floor = _version_key(declaring_version)
+    except (TypeError, ValueError):
+        floor = None
+    latest: Optional[tuple] = None
+    for version, status in rows:
+        try:
+            key = _version_key(str(version))
+        except (TypeError, ValueError):
+            continue
+        if floor is not None and key < floor:
+            continue
+        if str(status) == "done":
+            return "done"
+        if latest is None or key > latest[0]:
+            latest = (key, str(status))
+    return latest[1] if latest else None
 
 
 def _ledger_set(
@@ -395,6 +469,16 @@ def _exec_engine_endpoint(step: Dict[str, Any], conn: sqlite3.Connection) -> Dic
                 )
             )
         )
+    if path == "/v1/canonical/journal/repair-ingest-dates":
+        # entry_at written from the import clock while starts_at held the real
+        # session time. New writes are fixed in SQLiteCanonicalStore; rows
+        # already on disk only move if something sweeps them.
+        from ..storage.canonical.journal_repair import repair_ingest_clock_dates
+
+        params = step.get("params") or {}
+        return dict(
+            repair_ingest_clock_dates(conn, dry_run=bool(params.get("dry_run", False)))
+        )
     raise ValueError(f"no internal dispatch for endpoint step: {path!r}")
 
 
@@ -526,9 +610,11 @@ def run_pending_upgrades(
     failed_ids: set = set()
     steps = list(plan["steps"])
     steps_total = len(steps)
+    declared = declaring_versions()
     for step_index, step in enumerate(steps):
         step_id = str(step["id"])
-        status = _ledger_status(conn, shipped_v, step_id)
+        ledger_v = _ledger_version(step_id, shipped_v, declared)
+        status = _effective_status(conn, step_id, ledger_v)
         if status == "done":
             continue
         consent = str(step.get("consent") or "auto").strip().lower()
@@ -537,7 +623,7 @@ def run_pending_upgrades(
             if status != "pending_consent":
                 _ledger_set(
                     conn,
-                    shipped_v,
+                    ledger_v,
                     step_id,
                     "pending_consent",
                     {
@@ -552,7 +638,7 @@ def run_pending_upgrades(
         deps = step.get("depends_on") or []
         blocked_by_consent = False
         for dep in deps:
-            dep_status = _ledger_status(conn, shipped_v, dep)
+            dep_status = _effective_status(conn, dep, _ledger_version(dep, shipped_v, declared))
             if dep in failed_ids or dep_status == "failed":
                 logger.warning("step %s skipped: dependency failed (%s)", step_id, deps)
                 failed_ids.add(step_id)
@@ -569,8 +655,9 @@ def run_pending_upgrades(
             continue
         executor = executors.get(str(step["kind"]))
         if executor is None:
-            _ledger_set(conn, shipped_v, step_id, "failed",
-                        {"error": f"no executor for kind {step['kind']!r}"})
+            _ledger_set(conn, ledger_v, step_id, "failed",
+                        {"error": f"no executor for kind {step['kind']!r}",
+                         "ran_under": shipped_v})
             failed_ids.add(step_id)
             failed += 1
             continue
@@ -590,21 +677,29 @@ def run_pending_upgrades(
                 total=1,
             ),
         )
-        _ledger_set(conn, shipped_v, step_id, "running", started=True)
+        _ledger_set(conn, ledger_v, step_id, "running", started=True)
         logger.info("upgrade step %s (%s) starting", step_id, step["kind"])
         try:
             detail = executor(annotated, conn)
-            _ledger_set(conn, shipped_v, step_id, "done", detail if isinstance(detail, dict) else None)
+            record = dict(detail) if isinstance(detail, dict) else {}
+            record["ran_under"] = shipped_v
+            _ledger_set(conn, ledger_v, step_id, "done", record)
             ran += 1
         except Exception as exc:  # noqa: BLE001 — ledger the failure, keep the node up
             logger.warning("upgrade step %s failed: %s", step_id, exc)
-            _ledger_set(conn, shipped_v, step_id, "failed", {"error": str(exc)})
+            _ledger_set(conn, ledger_v, step_id, "failed",
+                        {"error": str(exc), "ran_under": shipped_v})
             failed_ids.add(step_id)
             failed += 1
     _set_runner_state(running=False, waiting_for_ui=False, current_step=None, progress=None)
 
+    # plan["steps"] carries this hop's window AND every step an earlier hop left
+    # unfinished, so this gate is what keeps the baseline behind a failure
+    # instead of stranding it one release back.
     all_done = all(
-        _ledger_status(conn, shipped_v, str(s["id"])) == "done" for s in plan["steps"]
+        _effective_status(conn, str(s["id"]), _ledger_version(str(s["id"]), shipped_v, declared))
+        == "done"
+        for s in plan["steps"]
     )
     if all_done:
         _stamp_baseline(conn, shipped_v)
@@ -697,12 +792,14 @@ def start_background(
 def runner_status(conn: sqlite3.Connection) -> Dict[str, Any]:
     plan = plan_upgrade(conn)
     shipped_v = plan["shipped"]
+    declared = declaring_versions()
     pending_consent_steps: List[Dict[str, Any]] = []
     for step in plan["steps"]:
         step_id = str(step["id"])
-        if _ledger_status(conn, shipped_v, step_id) == "pending_consent" or (
+        status = _effective_status(conn, step_id, _ledger_version(step_id, shipped_v, declared))
+        if status == "pending_consent" or (
             str(step.get("consent") or "auto").lower() == "prompt"
-            and _ledger_status(conn, shipped_v, step_id) in (None, "pending_consent")
+            and status in (None, "pending_consent")
         ):
             pending_consent_steps.append(
                 {
@@ -743,7 +840,8 @@ def consent_upgrade_step(
     match = next((s for s in plan["steps"] if str(s.get("id")) == str(step_id)), None)
     if match is None:
         raise ValueError(f"unknown upgrade step {step_id!r} for {shipped_v}")
-    status = _ledger_status(conn, shipped_v, str(step_id))
+    ledger_v = _ledger_version(str(step_id), shipped_v)
+    status = _effective_status(conn, str(step_id), ledger_v)
     if status not in (None, "pending_consent"):
         return {
             "status": "ok",
@@ -753,7 +851,7 @@ def consent_upgrade_step(
         }
     _ledger_set(
         conn,
-        shipped_v,
+        ledger_v,
         str(step_id),
         "pending",
         {"consented_at": _now(), "cost": match.get("cost"), "why": match.get("why")},
