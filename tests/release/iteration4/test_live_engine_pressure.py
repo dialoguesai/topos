@@ -107,8 +107,17 @@ class TestLiveSignalPressure:
         assert r.status_code == 200, r.text[:200]
         items = (r.json() or {}).get("items") or []
         for item in items:
-            sim = float(item.get("similarity") or item.get("hybrid_score") or 0.0)
-            assert sim >= 0.30, f"hit below min similarity threshold: {item}"
+            # Only cosine is on the 0-1 scale the threshold is expressed in.
+            # Hybrid mode also returns lexical hits from FTS, which carry no
+            # cosine at all and rank by RRF instead — a score near 1/60 by
+            # construction, so reading it as a similarity fails every item that
+            # earned its place on keywords. The service draws the same line:
+            # it thresholds items that have a cosine and keeps the rest
+            # (features/signal/service.py, min_similarity_threshold).
+            sim = item.get("similarity")
+            if sim is None:
+                continue
+            assert float(sim) >= 0.30, f"hit below min similarity threshold: {item}"
 
 
 class TestLiveQueryPressure:
