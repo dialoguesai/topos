@@ -25,15 +25,15 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    topos_key: Optional[str] = Field(None, env="TOPOS_KEY")
-    openai_api_key: Optional[str] = Field(None, env="OPENAI_API_KEY")
+    topos_key: Optional[str] = Field(None)
+    openai_api_key: Optional[str] = Field(None)
 
-    environment: str = Field("development", env="ENVIRONMENT")
-    log_format: Optional[str] = Field(None, env="LOG_FORMAT")
-    log_level: str = Field("INFO", env="LOG_LEVEL")
+    environment: str = Field("development")
+    log_format: Optional[str] = Field(None)
+    log_level: str = Field("INFO")
 
-    openai_base_url: str = Field("https://api.openai.com/v1", env="OPENAI_BASE_URL")
-    openai_model: str = Field("gpt-4o-mini", env="OPENAI_MODEL")
+    openai_base_url: str = Field("https://api.openai.com/v1")
+    openai_model: str = Field("gpt-4o-mini")
     red_pill_api_key: Optional[str] = Field(
         None,
         validation_alias=AliasChoices("RED_PILL_API_KEY", "REDPILL_API_KEY"),
@@ -43,10 +43,8 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("RED_PILL_API_BASE", "REDPILL_API_BASE"),
     )
 
-    gt_cloud_api_key: Optional[str] = Field(None, env="GT_CLOUD_API_KEY")
-    griptape_nodes_api_base_url: str = Field(
-        "https://api.nodes.griptape.ai", env="GRIPTAPE_NODES_API_BASE_URL"
-    )
+    gt_cloud_api_key: Optional[str] = Field(None)
+    griptape_nodes_api_base_url: str = Field("https://api.nodes.griptape.ai")
 
     allowed_origins_raw: str = Field(
         "http://localhost:3000",
@@ -54,61 +52,57 @@ class Settings(BaseSettings):
         # read ALLOWED_ORIGINS_RAW and the documented ALLOWED_ORIGINS was dead.
         validation_alias=AliasChoices("ALLOWED_ORIGINS", "ALLOWED_ORIGINS_RAW"),
     )
-    allowed_origin_regex: Optional[str] = Field(None, env="ALLOWED_ORIGIN_REGEX")
-    enable_health_auth: bool = Field(False, env="ENABLE_HEALTH_AUTH")
+    allowed_origin_regex: Optional[str] = Field(None)
+    enable_health_auth: bool = Field(False)
 
-    request_timeout_seconds: float = Field(20.0, env="REQUEST_TIMEOUT_SECONDS")
-    openai_timeout_seconds: float = Field(15.0, env="OPENAI_TIMEOUT_SECONDS")
-    connection_retry_initial_seconds: float = Field(1.0, env="CONNECTION_RETRY_INITIAL_SECONDS")
-    connection_retry_max_seconds: float = Field(30.0, env="CONNECTION_RETRY_MAX_SECONDS")
-    connection_retry_jitter_ratio: float = Field(0.2, env="CONNECTION_RETRY_JITTER_RATIO")
-    connection_readiness_timeout_seconds: float = Field(15.0, env="CONNECTION_READINESS_TIMEOUT_SECONDS")
-    wait_for_control_plane_on_startup: bool = Field(False, env="WAIT_FOR_CONTROL_PLANE_ON_STARTUP")
-    wait_for_sync_on_startup: bool = Field(False, env="WAIT_FOR_SYNC_ON_STARTUP")
-    control_plane_inbound_concurrency_limit: int = Field(16, env="CONTROL_PLANE_INBOUND_CONCURRENCY_LIMIT")
-    control_plane_inbound_max_pending: int = Field(128, env="CONTROL_PLANE_INBOUND_MAX_PENDING")
-    control_plane_presence_outbox_size: int = Field(64, env="CONTROL_PLANE_PRESENCE_OUTBOX_SIZE")
-    sync_cursor_retry_attempts: int = Field(3, env="SYNC_CURSOR_RETRY_ATTEMPTS")
-    sync_cursor_retry_delay_seconds: float = Field(0.5, env="SYNC_CURSOR_RETRY_DELAY_SECONDS")
+    request_timeout_seconds: float = Field(20.0)
+    openai_timeout_seconds: float = Field(15.0)
+    connection_retry_initial_seconds: float = Field(1.0)
+    connection_retry_max_seconds: float = Field(30.0)
+    connection_retry_jitter_ratio: float = Field(0.2)
+    connection_readiness_timeout_seconds: float = Field(15.0)
+    wait_for_control_plane_on_startup: bool = Field(False)
+    wait_for_sync_on_startup: bool = Field(False)
+    control_plane_inbound_concurrency_limit: int = Field(16)
+    control_plane_inbound_max_pending: int = Field(128)
+    control_plane_presence_outbox_size: int = Field(64)
+    sync_cursor_retry_attempts: int = Field(3)
+    sync_cursor_retry_delay_seconds: float = Field(0.5)
 
-    rate_limit_per_minute: int = Field(60, env="RATE_LIMIT_PER_MINUTE")
-    topos_control_plane_url: Optional[str] = Field(
-        DEFAULT_TOPOS_CONTROL_PLANE_URL, env="TOPOS_CONTROL_PLANE_URL"
-    )
-    control_plane_verify_ssl: bool = Field(True, env="CONTROL_PLANE_VERIFY_SSL")
-    hosted_pool_lease_enabled: bool = Field(False, env="HOSTED_POOL_LEASE_ENABLED")
-    hosted_pool_allow_static_key_in_cloud: bool = Field(
-        False, env="HOSTED_POOL_ALLOW_STATIC_KEY_IN_CLOUD"
-    )
-    hosted_pool_enforce_lease_in_cloud: bool = Field(
-        True, env="HOSTED_POOL_ENFORCE_LEASE_IN_CLOUD"
-    )
-    hosted_pool_lease_audience: Optional[str] = Field(None, env="HOSTED_POOL_LEASE_AUDIENCE")
-    hosted_pool_lease_issue_path: str = Field(
-        "/v1/system/pool-connectors/lease/issue", env="HOSTED_POOL_LEASE_ISSUE_PATH"
-    )
-    hosted_pool_lease_renew_path: str = Field(
-        "/v1/system/pool-connectors/lease/renew", env="HOSTED_POOL_LEASE_RENEW_PATH"
-    )
-    hosted_pool_lease_revoke_path: str = Field(
-        "/v1/system/pool-connectors/lease/revoke", env="HOSTED_POOL_LEASE_REVOKE_PATH"
-    )
-    hosted_pool_lease_pool_group: str = Field("default", env="HOSTED_POOL_LEASE_POOL_GROUP")
-    hosted_pool_lease_renew_skew_seconds: int = Field(60, env="HOSTED_POOL_LEASE_RENEW_SKEW_SECONDS")
+    rate_limit_per_minute: int = Field(60)
+    topos_control_plane_url: Optional[str] = Field(DEFAULT_TOPOS_CONTROL_PLANE_URL)
+    control_plane_verify_ssl: bool = Field(True)
+    hosted_pool_lease_enabled: bool = Field(False)
+    hosted_pool_allow_static_key_in_cloud: bool = Field(False)
+    hosted_pool_enforce_lease_in_cloud: bool = Field(True)
+    hosted_pool_lease_audience: Optional[str] = Field(None)
+    hosted_pool_lease_issue_path: str = Field("/v1/system/pool-connectors/lease/issue")
+    hosted_pool_lease_renew_path: str = Field("/v1/system/pool-connectors/lease/renew")
+    hosted_pool_lease_revoke_path: str = Field("/v1/system/pool-connectors/lease/revoke")
+    hosted_pool_lease_pool_group: str = Field("default")
+    hosted_pool_lease_renew_skew_seconds: int = Field(60)
 
-    engine_mode: str = Field("full", env="ENGINE_MODE")
-    enable_llm: bool = Field(True, env="ENABLE_LLM")
-    engine_transport_mode: str = Field("ws", env="ENGINE_TRANSPORT_MODE")
-    engine_name: Optional[str] = Field(None, env="ENGINE_NAME")
-    topos_compute_profile: str = Field("basic_hosted", env="TOPOS_COMPUTE_PROFILE")
+    engine_mode: str = Field("full")
+    enable_llm: bool = Field(True)
+    engine_transport_mode: str = Field("ws")
+    engine_name: Optional[str] = Field(None)
+    topos_compute_profile: str = Field("basic_hosted")
 
-    engine_ollama_base_url: str = Field("http://localhost:11434", env="ENGINE_OLLAMA_BASE_URL")
-    ollama_query_model: str = Field("llama3.2:latest", env="TOPOS_OLLAMA_QUERY_MODEL")
+    engine_ollama_base_url: str = Field("http://localhost:11434")
+    ollama_query_model: str = Field(
+        "llama3.2:latest",
+        validation_alias=AliasChoices("TOPOS_OLLAMA_QUERY_MODEL", "OLLAMA_QUERY_MODEL"),
+    )
     # Ingest-time signal extraction (goals, dimension summaries) — separate from the fast
     # query-inference model because ingest is slow-tolerant and quality-critical (plan C1/E1):
     # llama3.2-3b drops ~49% of goal extractions to malformed JSON; a 9B model parses cleanly.
     # Empty string ⇒ fall back to ollama_query_model (the floor tier keeps the small model).
-    ollama_extraction_model: str = Field("qwen3.5:9b-mlx", env="TOPOS_OLLAMA_EXTRACTION_MODEL")
+    ollama_extraction_model: str = Field(
+        "qwen3.5:9b-mlx",
+        validation_alias=AliasChoices(
+            "TOPOS_OLLAMA_EXTRACTION_MODEL", "OLLAMA_EXTRACTION_MODEL"
+        ),
+    )
     # B4 (PLAN_NODE_UPGRADE §B4 / PLAN_PROVENANCE_SPLIT P4.3): role-gated LLM fact
     # extraction — an ADDITIVE pass on top of the rules-only floor. Tri-state:
     # unset ⇒ auto (ON when ollama_extraction_model resolves to a non-empty model),
@@ -116,88 +110,90 @@ class Settings(BaseSettings):
     # JOB degrades to rules-only if Ollama is unreachable; it never crashes ingest.
     # Resolve with features.facts.llm_extract.facts_llm_enabled(), not by reading
     # this field directly (the auto default lives there).
-    topos_facts_llm: Optional[str] = Field(None, env="TOPOS_FACTS_LLM")
+    topos_facts_llm: Optional[str] = Field(None)
     # Owner-selectable model for the LLM fact pass. Empty ⇒ fall back to
     # ollama_extraction_model → ollama_query_model. A per-node device override
     # (engine_config["facts_llm_model"], set via /v1/facts-llm-config) wins over
     # this env default. Resolve with config.facts_llm.resolve_facts_llm_model();
     # thinking vs non-thinking is auto-detected per model by the Ollama adapter.
-    facts_llm_model: str = Field("", env="TOPOS_FACTS_LLM_MODEL")
-    engine_default_provider: str = Field("huggingface", env="ENGINE_DEFAULT_PROVIDER")
+    facts_llm_model: str = Field(
+        "",
+        validation_alias=AliasChoices("TOPOS_FACTS_LLM_MODEL", "FACTS_LLM_MODEL"),
+    )
+    engine_default_provider: str = Field("huggingface")
     # §D minimizer runs on EVERY grantee query, so it uses a small/fast local model. The judge
     # only runs in nightly privacy evals (F.4/CER semantic scoring), so it can be larger/slower.
-    disclosure_minimizer_model: str = Field("llama3.2:latest", env="TOPOS_DISCLOSURE_MINIMIZER_MODEL")
-    privacy_judge_model: str = Field("qwen3.5:9b-mlx", env="TOPOS_PRIVACY_JUDGE_MODEL")
+    disclosure_minimizer_model: str = Field(
+        "llama3.2:latest",
+        validation_alias=AliasChoices(
+            "TOPOS_DISCLOSURE_MINIMIZER_MODEL", "DISCLOSURE_MINIMIZER_MODEL"
+        ),
+    )
+    privacy_judge_model: str = Field(
+        "qwen3.5:9b-mlx",
+        validation_alias=AliasChoices("TOPOS_PRIVACY_JUDGE_MODEL", "PRIVACY_JUDGE_MODEL"),
+    )
 
-    engine_max_resident_models: int = Field(3, env="ENGINE_MAX_RESIDENT_MODELS")
-    engine_model_idle_ttl_sec: int = Field(0, env="ENGINE_MODEL_IDLE_TTL_SEC")
-    engine_memory_rss_soft_limit_mb: int = Field(0, env="ENGINE_MEMORY_RSS_SOFT_LIMIT_MB")
-    engine_flush_after_task: bool = Field(False, env="ENGINE_FLUSH_AFTER_TASK")
-    engine_ml_device: Optional[str] = Field(None, env="ENGINE_ML_DEVICE")
+    engine_max_resident_models: int = Field(3)
+    engine_model_idle_ttl_sec: int = Field(0)
+    engine_memory_rss_soft_limit_mb: int = Field(0)
+    engine_flush_after_task: bool = Field(False)
+    engine_ml_device: Optional[str] = Field(None)
 
     # Sanitization field-transforms via Ollama (see topos.config.sanitization_ollama + engine_config overrides)
-    sanitization_ollama_enabled: bool = Field(False, env="SANITIZATION_OLLAMA_ENABLED")
-    sanitization_ollama_host: Optional[str] = Field(None, env="SANITIZATION_OLLAMA_HOST")
-    sanitization_ollama_default_model: str = Field("llama3.2", env="SANITIZATION_OLLAMA_DEFAULT_MODEL")
-    sanitization_ollama_timeout_sec: float = Field(120.0, env="SANITIZATION_OLLAMA_TIMEOUT_SEC")
+    sanitization_ollama_enabled: bool = Field(False)
+    sanitization_ollama_host: Optional[str] = Field(None)
+    sanitization_ollama_default_model: str = Field("llama3.2")
+    sanitization_ollama_timeout_sec: float = Field(120.0)
     # llm_generation / routine hops — must cover local thinking models. Do NOT
     # reuse sanitization_ollama_timeout_sec (120s): that cuts digest synthesis
     # mid-flight and surfaces as "Ollama unreachable".
-    engine_ollama_generate_timeout_sec: float = Field(
-        300.0, env="ENGINE_OLLAMA_GENERATE_TIMEOUT_SEC"
-    )
-    ollama_list_timeout_sec: float = Field(10.0, env="OLLAMA_LIST_TIMEOUT_SEC")
-    sanitization_ollama_auto_pull: bool = Field(True, env="SANITIZATION_OLLAMA_AUTO_PULL")
-    sanitization_ollama_max_input_chars: int = Field(8000, env="SANITIZATION_OLLAMA_MAX_INPUT_CHARS")
-    sanitization_ollama_model_pii_redaction: Optional[str] = Field(None, env="SANITIZATION_OLLAMA_MODEL_PII_REDACTION")
-    sanitization_ollama_model_nsfw_sanitization: Optional[str] = Field(None, env="SANITIZATION_OLLAMA_MODEL_NSFW_SANITIZATION")
-    sanitization_ollama_model_raw_to_summary: Optional[str] = Field(None, env="SANITIZATION_OLLAMA_MODEL_RAW_TO_SUMMARY")
-    sanitization_ollama_model_raw_to_sentiment: Optional[str] = Field(None, env="SANITIZATION_OLLAMA_MODEL_RAW_TO_SENTIMENT")
-    sanitization_ollama_model_third_party_anonymization: Optional[str] = Field(
-        None, env="SANITIZATION_OLLAMA_MODEL_THIRD_PARTY_ANONYMIZATION"
-    )
-    sanitization_ollama_model_name_removal: Optional[str] = Field(None, env="SANITIZATION_OLLAMA_MODEL_NAME_REMOVAL")
-    sanitization_ollama_model_contact_removal: Optional[str] = Field(None, env="SANITIZATION_OLLAMA_MODEL_CONTACT_REMOVAL")
+    engine_ollama_generate_timeout_sec: float = Field(300.0)
+    ollama_list_timeout_sec: float = Field(10.0)
+    sanitization_ollama_auto_pull: bool = Field(True)
+    sanitization_ollama_max_input_chars: int = Field(8000)
+    sanitization_ollama_model_pii_redaction: Optional[str] = Field(None)
+    sanitization_ollama_model_nsfw_sanitization: Optional[str] = Field(None)
+    sanitization_ollama_model_raw_to_summary: Optional[str] = Field(None)
+    sanitization_ollama_model_raw_to_sentiment: Optional[str] = Field(None)
+    sanitization_ollama_model_third_party_anonymization: Optional[str] = Field(None)
+    sanitization_ollama_model_name_removal: Optional[str] = Field(None)
+    sanitization_ollama_model_contact_removal: Optional[str] = Field(None)
 
     # Local PII redaction via Hugging Face openai/privacy-filter (see topos.sanitization.privacy_filter)
-    privacy_filter_enabled: bool = Field(True, env="PRIVACY_FILTER_ENABLED")
-    privacy_filter_model: str = Field("openai/privacy-filter", env="PRIVACY_FILTER_MODEL")
-    privacy_filter_device: Optional[str] = Field(None, env="PRIVACY_FILTER_DEVICE")
-    privacy_filter_max_input_chars: Optional[int] = Field(None, env="PRIVACY_FILTER_MAX_INPUT_CHARS")
-    nsfw_classifier_enabled: bool = Field(True, env="NSFW_CLASSIFIER_ENABLED")
-    nsfw_classifier_model: str = Field(
-        "michellejieli/NSFW_text_classifier",
-        env="NSFW_CLASSIFIER_MODEL",
-    )
-    nsfw_classifier_threshold: float = Field(0.5, env="NSFW_CLASSIFIER_THRESHOLD")
-    nsfw_classifier_max_input_chars: int = Field(512, env="NSFW_CLASSIFIER_MAX_INPUT_CHARS")
-    sanitization_prewarm_on_startup: bool = Field(True, env="SANITIZATION_PREWARM_ON_STARTUP")
-    platform_privacy_via_engine: bool = Field(True, env="PLATFORM_PRIVACY_VIA_ENGINE")
-    topos_engine_service_url: Optional[str] = Field(None, env="TOPOS_ENGINE_SERVICE_URL")
+    privacy_filter_enabled: bool = Field(True)
+    privacy_filter_model: str = Field("openai/privacy-filter")
+    privacy_filter_device: Optional[str] = Field(None)
+    privacy_filter_max_input_chars: Optional[int] = Field(None)
+    nsfw_classifier_enabled: bool = Field(True)
+    nsfw_classifier_model: str = Field("michellejieli/NSFW_text_classifier")
+    nsfw_classifier_threshold: float = Field(0.5)
+    nsfw_classifier_max_input_chars: int = Field(512)
+    sanitization_prewarm_on_startup: bool = Field(True)
+    platform_privacy_via_engine: bool = Field(True)
+    topos_engine_service_url: Optional[str] = Field(None)
 
-    topos_database_path: Optional[str] = Field(None, env="TOPOS_DATABASE_PATH")
-    topos_database_mode: str = Field("local", env="TOPOS_DATABASE_MODE")
-    topos_database_service_url: Optional[str] = Field(None, env="TOPOS_DATABASE_SERVICE_URL")
-    topos_postgres_dsn: Optional[str] = Field(None, env="TOPOS_POSTGRES_DSN")
-    topos_postgres_host: Optional[str] = Field(None, env="TOPOS_POSTGRES_HOST")
-    topos_postgres_port: Optional[int] = Field(None, env="TOPOS_POSTGRES_PORT")
-    topos_postgres_db: Optional[str] = Field(None, env="TOPOS_POSTGRES_DB")
-    topos_postgres_user: Optional[str] = Field(None, env="TOPOS_POSTGRES_USER")
-    topos_postgres_password: Optional[str] = Field(None, env="TOPOS_POSTGRES_PASSWORD")
-    topos_postgres_reset_incompatible_schema: bool = Field(
-        False, env="TOPOS_POSTGRES_RESET_INCOMPATIBLE_SCHEMA"
-    )
-    topos_default_dataset_id: str = Field("default", env="TOPOS_DEFAULT_DATASET_ID")
-    topos_user_id: Optional[str] = Field(None, env="TOPOS_USER_ID")
+    topos_database_path: Optional[str] = Field(None)
+    topos_database_mode: str = Field("local")
+    topos_database_service_url: Optional[str] = Field(None)
+    topos_postgres_dsn: Optional[str] = Field(None)
+    topos_postgres_host: Optional[str] = Field(None)
+    topos_postgres_port: Optional[int] = Field(None)
+    topos_postgres_db: Optional[str] = Field(None)
+    topos_postgres_user: Optional[str] = Field(None)
+    topos_postgres_password: Optional[str] = Field(None)
+    topos_postgres_reset_incompatible_schema: bool = Field(False)
+    topos_default_dataset_id: str = Field("default")
+    topos_user_id: Optional[str] = Field(None)
     # Pooled read enforcement mode for hosted shared-tenancy engines.
     # "off" preserves legacy behavior; set to "pooled" to require tenant-scoped reads.
-    topos_pool_mode: str = Field("off", env="TOPOS_POOL_MODE")
+    topos_pool_mode: str = Field("off")
 
-    scrub_min_embeddings_for_recluster: int = Field(3, env="SCRUB_MIN_EMBEDDINGS_FOR_RECLUSTER")
-    scrub_sync_row_limit: int = Field(50000, env="SCRUB_SYNC_ROW_LIMIT")
+    scrub_min_embeddings_for_recluster: int = Field(3)
+    scrub_sync_row_limit: int = Field(50000)
 
-    topos_sync_url: str = Field("wss://cp.logu3s.com/ws/sync", env="TOPOS_SYNC_URL")
-    enable_sync: bool = Field(True, env="ENABLE_SYNC")
+    topos_sync_url: str = Field("wss://cp.logu3s.com/ws/sync")
+    enable_sync: bool = Field(True)
 
     # P1.5 (PLAN_PROVENANCE_SPLIT): exposure-profile visibility. When True
     # (default), exposure-ledger stats ("you've been reading a lot about X") and
@@ -207,7 +203,7 @@ class Settings(BaseSettings):
     # "exposure_profile_visible" (a bool the owner toggles from the UI) overrides
     # it — read both through exposure_profile_visible() below, never this field
     # directly, so the DB toggle is always honored.
-    exposure_profile_visible: bool = Field(True, env="EXPOSURE_PROFILE_VISIBLE")
+    exposure_profile_visible: bool = Field(True)
 
     @property
     def allowed_origins(self) -> List[str]:

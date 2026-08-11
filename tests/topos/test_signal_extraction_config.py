@@ -19,12 +19,20 @@ from topos.config.signal_extraction import (
 )
 
 
+# Deliberately NOT the field defaults ("llama3.2:latest" / "qwen3.5:9b-mlx"):
+# these tests assert env values reach Settings, so a sentinel that collides with
+# the default would pass even if env resolution were completely broken.
+ENV_QUERY_MODEL = "env-query-model:test"
+ENV_EXTRACTION_MODEL = "env-extraction-model:test"
+
+
 @pytest.fixture()
 def memory_settings(monkeypatch: pytest.MonkeyPatch) -> Settings:
     monkeypatch.setenv("TOPOS_KEY", "test-key-for-settings")
-    monkeypatch.setenv("TOPOS_OLLAMA_QUERY_MODEL", "llama3.2:latest")
+    monkeypatch.setenv("TOPOS_OLLAMA_QUERY_MODEL", ENV_QUERY_MODEL)
+    monkeypatch.setenv("TOPOS_OLLAMA_EXTRACTION_MODEL", ENV_EXTRACTION_MODEL)
     monkeypatch.setenv("OPENAI_MODEL", "gpt-4o-mini")
-    return Settings()
+    return Settings(_env_file=None)
 
 
 def _memory_conn() -> sqlite3.Connection:
@@ -41,14 +49,24 @@ def _memory_conn() -> sqlite3.Connection:
     return conn
 
 
+def test_documented_env_names_reach_settings(memory_settings: Settings) -> None:
+    """The TOPOS_-prefixed names the docs and backfill scripts use must bind.
+
+    Regression guard: these were declared as Field(env="TOPOS_..."), which
+    pydantic v2 silently ignores, so the documented names were dead and the
+    fields only ever read the bare OLLAMA_* forms.
+    """
+    assert memory_settings.ollama_query_model == ENV_QUERY_MODEL
+    assert memory_settings.ollama_extraction_model == ENV_EXTRACTION_MODEL
+
+
 def test_resolve_signal_extraction_query_model_uses_env_default(memory_settings: Settings) -> None:
     conn = _memory_conn()
     # C1 (5407bf5): ingest extraction prefers the QUALITY model — the resolver
     # reads settings.ollama_extraction_model first, falling back to the query model.
-    assert (
-        resolve_signal_extraction_query_model(memory_settings, conn)
-        == memory_settings.ollama_extraction_model
-    )
+    # Asserted against the literal sentinel so this cannot pass vacuously if
+    # either the env binding or the extraction-over-query preference regresses.
+    assert resolve_signal_extraction_query_model(memory_settings, conn) == ENV_EXTRACTION_MODEL
 
 
 def test_resolve_signal_extraction_query_model_device_override(memory_settings: Settings) -> None:
