@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.14] — 2026-08-12
+
 ### Added
 
 - `[O]` `topos-node profile` — multiple Topoi on one machine. `list`/`current`
