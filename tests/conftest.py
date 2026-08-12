@@ -118,6 +118,34 @@ def _no_live_db_guard(request, monkeypatch, _live_db_guard_path):
     yield
 
 
+@pytest.fixture(autouse=True)
+def _no_live_ollama_probe_guard(request, monkeypatch):
+    """Same disease as the live-DB guard, one lane over.
+
+    The config readers now ask the machine which ollama tags are installed
+    before resolving a pack role, so an unguarded test opens a socket to
+    localhost:11434 and its result depends on what the developer happens to
+    have pulled: a pack bound to `phi3:latest` resolves to the pack on a
+    laptop without ollama and to the engine default on one with it.
+
+    None is the honest stand-in because it is what the probe already returns
+    when nothing answers, and it means "I did not check" rather than "nothing
+    is installed" — so guarded tests see exactly the trust-the-pack behaviour
+    they were written against. Tests that are about the installed set patch
+    this name themselves, which wins over an autouse fixture.
+    """
+    if any(request.node.get_closest_marker(m) for m in _LIVE_DB_EXEMPT_MARKERS):
+        yield
+        return
+    try:
+        from topos.config import model_packs
+    except Exception:
+        pass
+    else:
+        monkeypatch.setattr(model_packs, "installed_local_models", lambda: None, raising=False)
+    yield
+
+
 _CORE_RELOAD_MODULES = (
     "topos.config.settings",
     "topos.core.state",

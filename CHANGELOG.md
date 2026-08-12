@@ -26,6 +26,15 @@ The machine-readable twin of each release is
   empty active slot for pre-profile machines. No derived data is invalidated —
   a profile switch changes which files sit at the top level, nothing else.
 
+- `[O]` `ollama_list_installed` / `ollama_pull` / `ollama_pull_status` message
+  handlers, so the control plane can seed model packs from what is actually
+  installed on this node and drive a model download with typed progress.
+  Registration now reports the installed-model set honestly (installed /
+  empty / unknown — never unknown-as-empty), and the node-side pack config
+  readers (facts, conversation context, signal extraction, sanitization)
+  fall back to the engine default instead of a pack tag that is not
+  installed. No stored data is touched.
+
 ## [1.3.13] — 2026-08-11
 
 ### Fixed

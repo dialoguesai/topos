@@ -63,8 +63,13 @@ def resolve_context_llm_model(settings: Any, conn: Optional[sqlite3.Connection] 
             SOURCE_OVERRIDE,
             SOURCE_PACK,
             active_pack_dict,
+            installed_local_models,
             resolve_model,
         )
+
+        # See facts_llm: a pack tag the machine never pulled must fall to the
+        # engine default here rather than 404 on first use (§1.4).
+        installed = installed_local_models()
 
         resolved = resolve_model(
             role="classify",
@@ -73,6 +78,7 @@ def resolve_context_llm_model(settings: Any, conn: Optional[sqlite3.Connection] 
             engine_default=(
                 {"provider": "ollama", "model": engine_default} if engine_default else None
             ),
+            installed_local_models=installed,
         )
         if resolved.source == SOURCE_OVERRIDE and resolved.model:
             return resolved.model
@@ -82,6 +88,7 @@ def resolve_context_llm_model(settings: Any, conn: Optional[sqlite3.Connection] 
                 engine_default=(
                     {"provider": "ollama", "model": engine_default} if engine_default else None
                 ),
+                installed_local_models=installed,
             )
         if resolved.model:
             return resolved.model

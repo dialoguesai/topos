@@ -88,12 +88,20 @@ def resolve_signal_extraction_config(
 
     device_override_present = device.provider is not None or bool(model_override)
     if not device_override_present and conn is not None:
-        from .model_packs import SOURCE_PACK, active_pack_dict, resolve_model
+        from .model_packs import (
+            SOURCE_PACK,
+            active_pack_dict,
+            installed_local_models,
+            resolve_model,
+        )
 
         resolved = resolve_model(
             role="tool",
             pack=active_pack_dict(conn),
             engine_default={"provider": provider, "model": default_model},
+            # A `tool` binding to an unpulled tag would 404 on every extraction
+            # run; the live list makes it fall back instead (§1.4).
+            installed_local_models=installed_local_models(),
         )
         if resolved.source == SOURCE_PACK and resolved.provider in SIGNAL_EXTRACTION_PROVIDERS:
             return DeviceSignalExtractionOverrides(

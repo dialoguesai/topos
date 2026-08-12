@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timezone
 from typing import Any, Dict
 from uuid import uuid4
 
 from ..config.settings import settings
 
+
+logger = logging.getLogger("topos.engine.registration")
 
 CAPABILITIES_SCHEMA_VERSION = "v2"
 
@@ -26,8 +29,17 @@ RUNTIME_PROFILE_OPERATIONS: dict[str, list[str]] = {
         "filter_lab.create_job_group",
         "llm_generation",
         "ollama_list_models",
+        "ollama_pull_model",
+        "ollama_pull_status",
     ],
 }
+
+
+def ollama_is_reachable() -> bool:
+    """True when this machine's Ollama server actually answers."""
+    from .backends.ollama import OllamaAdapter
+
+    return OllamaAdapter().is_reachable()
 
 
 def resolve_runtime_profile() -> str:
@@ -56,8 +68,16 @@ def build_engine_capabilities() -> Dict[str, Any]:
         if settings.openai_model:
             models.append(settings.openai_model)
 
+    # A configured base URL proves nothing: it defaults to localhost:11434, so
+    # the old truthiness test registered every node ever started as
+    # Ollama-capable, including machines that have never had it installed
+    # (PLAN_LOCAL_MODEL_QUICKSTART §1.2). Only a server that answers counts.
     if settings.engine_ollama_base_url:
-        providers.append("ollama")
+        try:
+            if ollama_is_reachable():
+                providers.append("ollama")
+        except Exception as exc:  # noqa: BLE001 — a broken probe is not a capability
+            logger.debug("ollama reachability probe failed: %s", exc)
     providers.append("huggingface")
 
     capability_tiers = ["tier.core", "tier.summary"]
