@@ -26,6 +26,24 @@ The machine-readable twin of each release is
   empty active slot for pre-profile machines. No derived data is invalidated —
   a profile switch changes which files sit at the top level, nothing else.
 
+- `[O]` LLM stream protocol v1 (PLAN_HOME_CHAT_STREAMING_SLA P1). Streaming
+  `llm_generation` now resolves `think` like the non-stream path (default OFF,
+  capability-probed, budget floored to 2048 on explicit think-on) instead of
+  leaving reasoning models to burn the whole `num_predict` on chain-of-thought
+  the loop then discarded — the 2026-08-11 home-chat stall. Thinking tokens are
+  forwarded as typed `kind:"thinking"` chunk frames; the handler emits an
+  `ack` frame before model work and phase-aware `heartbeat` frames while the
+  stream is silent (all interim traffic stays `status:"chunk"` with an empty
+  `delta`, which older control planes provably no-op). An exhausted budget is
+  a typed `thinking_budget_exhausted` error, never an empty success; a
+  truncated oversized prompt gets a soft `context_truncated` verdict on the
+  result. New `llm_cancel` message aborts an in-flight generation (the httpx
+  unwind closes the Ollama connection, freeing the decode slot) and the
+  original request answers a typed 499. Chat generations set
+  `keep_alive=30m` so a follow-up question does not pay a cold reload.
+  Registration and heartbeats advertise `llm_stream_protocol_version: 1` for
+  control-plane feature detection. No stored data is touched.
+
 - `[O]` `ollama_list_installed` / `ollama_pull` / `ollama_pull_status` message
   handlers, so the control plane can seed model packs from what is actually
   installed on this node and drive a model download with typed progress.

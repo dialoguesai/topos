@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from datetime import datetime, timezone
 from typing import Any, Dict
@@ -100,6 +101,11 @@ def build_engine_capabilities() -> Dict[str, Any]:
         "supports_filtering": True,
         "supports_sanitization": True,
         "supports_enrichment": True,
+        # Staged-deadline stream protocol (PLAN_HOME_CHAT_STREAMING_SLA §2):
+        # version 1 = ack/heartbeat/thinking chunk kinds + llm_cancel. The
+        # control plane keys cancel emission and frame translation on this,
+        # not on version-string parsing.
+        "llm_stream_protocol_version": 1,
         "capability_tiers": capability_tiers,
         "signal_providers": [p for p in ("huggingface", "ollama") if p in providers],
         "signal_jobs_available": signal_jobs_available,
@@ -147,6 +153,14 @@ def build_engine_register_message() -> Dict[str, Any]:
 
 
 def build_engine_heartbeat_message() -> Dict[str, Any]:
+    """Presence, plus a FRESHLY probed capability set.
+
+    Capabilities used to ride on registration alone. Ollama is installed and
+    started by a human, often minutes after the node — so a node that came up
+    first advertised no Ollama for the rest of its process life, and the owner
+    who followed the quick-start saw nothing change (journey Branch C).
+    Re-probing here is what lets the capability arrive late, and leave again.
+    """
     now = datetime.now(timezone.utc).isoformat()
     memory_meta: Dict[str, Any] = {}
     try:
@@ -169,6 +183,7 @@ def build_engine_heartbeat_message() -> Dict[str, Any]:
             "occurred_at": now,
             "status": "connected",
             "transport_mode": resolve_transport_mode(),
+            "capabilities": build_engine_capabilities(),
             "metadata": {
                 "engine_mode": settings.engine_mode,
                 "enable_llm": settings.enable_llm,
@@ -176,3 +191,22 @@ def build_engine_heartbeat_message() -> Dict[str, Any]:
             },
         },
     }
+
+
+async def build_engine_register_message_async() -> Dict[str, Any]:
+    """`build_engine_register_message` off the event loop.
+
+    Capability building probes Ollama over a blocking socket with a timeout. The
+    presence loop is asyncio and shares its thread with every other engine task,
+    so a hung Ollama would stall them all for the duration.
+    """
+    return await asyncio.to_thread(build_engine_register_message)
+
+
+async def build_engine_heartbeat_message_async() -> Dict[str, Any]:
+    """`build_engine_heartbeat_message` off the event loop — see above.
+
+    This one matters more: it now re-probes on every beat, so the blocking call
+    would land on the loop every 30 seconds rather than once.
+    """
+    return await asyncio.to_thread(build_engine_heartbeat_message)

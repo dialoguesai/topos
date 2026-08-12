@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import time
 from typing import Any, Dict, Optional
 
 import httpx
@@ -12,6 +14,47 @@ from ...openai_client import OpenAIError
 from ...config.settings import settings
 
 logger = logging.getLogger("topos.services.llm")
+
+
+class LlmTypedError(Exception):
+    """A generation failure with a machine-readable code the control plane and
+    frontend can branch on (PLAN_HOME_CHAT_STREAMING_SLA §2 terminal codes).
+
+    ``code`` today: ``thinking_budget_exhausted`` — the model consumed its
+    whole ``num_predict`` on chain-of-thought and emitted zero visible answer,
+    which used to be returned as an EMPTY SUCCESS (the 2026-08-11 stall's
+    quietest failure mode).
+    """
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+        self.message = message
+
+
+#: Chat generations keep the model warm so a follow-up question does not pay a
+#: cold reload mid-conversation (critic finding #3 in the SLA plan). Ollama's
+#: default is 5m — shorter than a human reading a long answer.
+_STREAM_KEEP_ALIVE = "30m"
+
+#: Estimated chars-per-token for the context-truncation heuristic. Deliberately
+#: coarse: the verdict is a soft flag on the result payload, never an error on
+#: its own (a false positive that killed a good answer would be worse than the
+#: silent truncation it guards against).
+_CHARS_PER_TOKEN_ESTIMATE = 4
+
+
+def _stream_ollama_adapter(base_url: str):
+    """The engine's capability-probing adapter, shared caches and all.
+
+    Imported lazily: the backends module is heavier company than this service
+    needs at import time, and the adapter's module-level caches
+    (_THINKING_CAPABILITY_CACHE, _THINK_DISABLE_REJECTED) are what make a
+    fresh instance cheap.
+    """
+    from ...engine.backends.ollama import OllamaAdapter
+
+    return OllamaAdapter(base_url=base_url)
 
 
 def _normalize_provider(raw: Any) -> str:
@@ -134,8 +177,18 @@ async def _ollama_stream_generate(
     payload: Dict[str, Any],
     *,
     on_delta: Optional[Any] = None,
+    on_protocol: Optional[Any] = None,
 ) -> Dict[str, Any]:
-    """Stream Ollama ``/api/generate`` and optionally emit deltas via ``on_delta``."""
+    """Stream Ollama ``/api/generate``, emitting visible deltas via ``on_delta``
+    and protocol frames (thinking / heartbeat) via ``on_protocol(kind, fields)``.
+
+    P1 of PLAN_HOME_CHAT_STREAMING_SLA: thinking now defaults OFF like the
+    non-stream path — the old ``default=None`` let reasoning models burn the
+    whole budget on chain-of-thought this loop then DISCARDED (the 2026-08-11
+    stall). When thinking is on (explicit opt-in), its tokens are forwarded as
+    a first-class stream instead of dropped, and the budget is floored so the
+    visible answer survives the reasoning spend.
+    """
     prompt = payload.get("prompt") or ""
     model_raw = payload.get("model")
     model = (
@@ -147,6 +200,23 @@ async def _ollama_stream_generate(
     num_ctx = payload.get("num_ctx")
     base = settings.engine_ollama_base_url.rstrip("/")
     body: Dict[str, Any] = {"model": model, "prompt": prompt, "stream": True}
+    # Same default as the non-stream sibling, adapted through the capability
+    # probe: models without the thinking capability (or that 400 on
+    # think=false) get the param omitted rather than a doomed request.
+    desired_think = _resolve_payload_think(payload, default=False)
+    adapter = _stream_ollama_adapter(base)
+    # The probe is blocking urllib (cached per base_url+model after the first
+    # call) — keep it off the event loop.
+    think = await asyncio.to_thread(adapter.resolve_think, model, desired_think)
+    if think is not None:
+        body["think"] = think
+    if think is True and max_tokens is not None:
+        from ...engine.backends.ollama import _THINKING_NUM_PREDICT_FLOOR
+
+        # Thinking and answer share num_predict (live-verified 2026-08-11):
+        # an unfloored budget starves the visible answer to zero.
+        max_tokens = max(int(max_tokens), _THINKING_NUM_PREDICT_FLOOR)
+    body["keep_alive"] = _STREAM_KEEP_ALIVE
     opts: Dict[str, Any] = {}
     if max_tokens is not None:
         opts["num_predict"] = max_tokens
@@ -156,16 +226,36 @@ async def _ollama_stream_generate(
         opts["num_ctx"] = num_ctx
     if opts:
         body["options"] = opts
-    # Streaming chat: leave thinking at the model default unless the client
-    # opted in/out explicitly. Still use the longer generate timeout.
-    think = _resolve_payload_think(payload, default=None)
-    if think is not None:
-        body["think"] = think
     timeout = _ollama_generate_timeout()
     output_parts: list[str] = []
+    thinking_chars = 0
     resp_model = model
     prompt_tokens = 0
     completion_tokens = 0
+    done_reason = ""
+    # Liveness (plan §2): phase-aware heartbeats whenever nothing else flows —
+    # 10s pre-first-token (load + prefill are silent), 30s mid-stream. Emitted
+    # frames of any kind reset the clock.
+    phase = "loading"
+    last_frame_at = time.monotonic()
+
+    async def _emit_protocol(kind: str, fields: Dict[str, Any]) -> None:
+        nonlocal last_frame_at
+        last_frame_at = time.monotonic()
+        if on_protocol is None:
+            return
+        result = on_protocol(kind, fields)
+        if hasattr(result, "__await__"):
+            await result
+
+    async def _heartbeats() -> None:
+        while True:
+            await asyncio.sleep(1.0)
+            interval = 10.0 if phase == "loading" else 30.0
+            if time.monotonic() - last_frame_at >= interval:
+                await _emit_protocol("heartbeat", {"phase": phase})
+
+    hb_task = asyncio.create_task(_heartbeats()) if on_protocol is not None else None
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             async with client.stream("POST", f"{base}/api/generate", json=body) as response:
@@ -183,8 +273,18 @@ async def _ollama_stream_generate(
                     except json.JSONDecodeError:
                         continue
                     resp_model = str(data.get("model") or resp_model)
+                    thinking_chunk = str(data.get("thinking") or "")
+                    if thinking_chunk:
+                        # Forwarded, not discarded: reasoning is the liveness
+                        # signal during an otherwise-silent stretch, and the
+                        # UI renders it as progress.
+                        phase = "thinking"
+                        thinking_chars += len(thinking_chunk)
+                        await _emit_protocol("thinking", {"thinking_delta": thinking_chunk})
                     chunk = str(data.get("response") or "")
                     if chunk:
+                        phase = "answer"
+                        last_frame_at = time.monotonic()
                         output_parts.append(chunk)
                         if on_delta is not None:
                             result = on_delta(chunk)
@@ -193,13 +293,27 @@ async def _ollama_stream_generate(
                     if data.get("done"):
                         prompt_tokens = int(data.get("prompt_eval_count") or prompt_tokens)
                         completion_tokens = int(data.get("eval_count") or completion_tokens)
+                        done_reason = str(data.get("done_reason") or "")
     except httpx.RequestError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Ollama unreachable at {base}: {exc}",
         ) from exc
+    finally:
+        if hb_task is not None:
+            hb_task.cancel()
 
     text = "".join(output_parts).strip()
+    if not text and done_reason == "length":
+        # The whole budget went to reasoning (or the budget was simply too
+        # small). Returning this as an empty SUCCESS is what poisoned the
+        # facts lane and stalled home chat — it is a typed failure now.
+        raise LlmTypedError(
+            "thinking_budget_exhausted",
+            f"Model {resp_model} spent its whole token budget"
+            + (" on reasoning" if thinking_chars else "")
+            + " and produced no visible answer. Retry with a larger max_tokens or thinking disabled.",
+        )
     total_tokens = prompt_tokens + completion_tokens
     usage: Dict[str, Any] = {}
     if total_tokens > 0:
@@ -208,7 +322,26 @@ async def _ollama_stream_generate(
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
         }
-    return {"output": text, "model": resp_model, "usage": usage}
+    result: Dict[str, Any] = {"output": text, "model": resp_model, "usage": usage}
+    if thinking_chars:
+        result["thinking_chars"] = thinking_chars
+    if done_reason:
+        result["done_reason"] = done_reason
+    # Soft context-truncation verdict (SLA plan §3, critic #2): Ollama drops
+    # the prompt HEAD on overflow and reports only the tokens it kept. A soft
+    # flag, never an error — the answer may still be right, but the caller can
+    # now say "older context was dropped" instead of nothing.
+    estimated_prompt_tokens = max(1, len(prompt) // _CHARS_PER_TOKEN_ESTIMATE)
+    if (
+        prompt_tokens > 0
+        and estimated_prompt_tokens > 2048
+        and prompt_tokens < estimated_prompt_tokens // 2
+    ):
+        result["context_truncated"] = {
+            "prompt_eval_count": prompt_tokens,
+            "estimated_prompt_tokens": estimated_prompt_tokens,
+        }
+    return result
 
 
 async def _ollama_list_model_names() -> list[str]:
@@ -245,6 +378,7 @@ class OpenAILLMService:
         payload: Dict[str, Any],
         *,
         on_delta: Optional[Any] = None,
+        on_protocol: Optional[Any] = None,
     ) -> Dict[str, Any]:
         if not settings.enable_llm or state.get_engine_mode() != "full":
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="LLM is disabled")
@@ -253,7 +387,7 @@ class OpenAILLMService:
         if provider == "ollama":
             logger.info("LLM generate routed to Ollama (model=%r)", payload.get("model"))
             if payload.get("stream"):
-                return await _ollama_stream_generate(payload, on_delta=on_delta)
+                return await _ollama_stream_generate(payload, on_delta=on_delta, on_protocol=on_protocol)
             return await _ollama_generate(payload)
 
         if not settings.openai_api_key:
