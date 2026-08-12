@@ -9,6 +9,23 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+
+- `[O]` `topos-node profile` — multiple Topoi on one machine. `list`/`current`
+  show the active Topos (top-level `~/.topos`, unchanged layout) and archived
+  ones under `~/.topos/profiles/<slug>/`; `new` archives the active Topos and
+  leaves the machine fresh for a new pairing (the zero-click "New Topos"
+  primitive — pairing can no longer hit the already-bound refusal); `switch`
+  swaps the active Topos for an archived one. Only an explicit allowlist moves
+  (`.env`, `database.db` + WAL/SHM sidecars, `ingestion/`, `nightly/`,
+  `config.yaml`) — backups and scratch files stay put, and logs stay
+  machine-global. Every rename is journalled, so a crash mid-switch rolls back
+  to the pre-switch layout on the next profile command. Refuses to run while a
+  node answers on the port or a database rebuild lock is present. `adopt`
+  copies a legacy (`~/.topos_engine`, Application Support) database into an
+  empty active slot for pre-profile machines. No derived data is invalidated —
+  a profile switch changes which files sit at the top level, nothing else.
+
 ## [1.3.13] — 2026-08-11
 
 ### Fixed
