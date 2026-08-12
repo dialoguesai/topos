@@ -292,16 +292,55 @@ async def handle_ollama_list_models(message: Dict[str, Any]) -> Optional[Dict[st
         return None
     try:
         result = await get_services().llm.list_ollama_models()
-        return {"id": req_id, "status": "ok", "payload": result}
+        return {"id": req_id, "status": "ok", "payload": {"reachable": True, **result}}
     except HTTPException as exc:
         detail = exc.detail
         err_msg = detail if isinstance(detail, str) else str(detail)
+        if exc.status_code == 502:
+            # "Ollama is not running" is a fact about this machine, not a failed
+            # request. Reported as data so the UI can tell it apart from "Ollama
+            # is running with nothing pulled" — indistinguishable until now
+            # (PLAN_LOCAL_MODEL_QUICKSTART §1.7).
+            return {
+                "id": req_id,
+                "status": "ok",
+                "payload": {"reachable": False, "models": [], "detail": err_msg},
+            }
         return {
             "id": req_id,
             "status": "error",
             "error": err_msg,
             "error_code": exc.status_code,
         }
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+@handles("ollama_pull_model")
+async def handle_ollama_pull_model(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    try:
+        from ...engine.ollama_pull import start_pull
+
+        return {"id": req_id, "status": "ok", "payload": start_pull(str(payload.get("model") or ""))}
+    except ValueError as exc:
+        return {"id": req_id, "status": "error", "error": str(exc), "error_code": 400}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+@handles("ollama_pull_status")
+async def handle_ollama_pull_status(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    try:
+        from ...engine.ollama_pull import pull_status
+
+        record = pull_status(str(payload.get("model") or ""))
+        return {"id": req_id, "status": "ok", "payload": record}
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}
 

@@ -6,7 +6,7 @@ import json
 import logging
 import urllib.error
 import urllib.request
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .generative_prompts import build_generative_prompt
 from .generative_response import parse_generative_response
@@ -148,8 +148,19 @@ class OllamaAdapter:
         except Exception:
             return []
 
-    def pull_model(self, model_name: str, *, stream: bool = True) -> None:
-        """Download the model from the registry. Logs progress when stream=True. Raises on failure."""
+    def pull_model(
+        self,
+        model_name: str,
+        *,
+        stream: bool = True,
+        on_progress: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ) -> None:
+        """Download the model from the registry. Logs progress when stream=True. Raises on failure.
+
+        ``on_progress`` receives each decoded /api/pull frame so a caller can
+        show the download to a human. A callback that raises must not abort a
+        multi-gigabyte transfer that is otherwise healthy.
+        """
         body = {"model": model_name, "stream": stream}
         req = urllib.request.Request(
             f"{self._base_url}/api/pull",
@@ -171,6 +182,11 @@ class OllamaAdapter:
                     status = event.get("status", "")
                     total = event.get("total") or 0
                     completed = event.get("completed") or 0
+                    if on_progress is not None:
+                        try:
+                            on_progress(event)
+                        except Exception as exc:  # noqa: BLE001
+                            logger.debug("pull progress callback failed: %s", exc)
                     if total and total > 0 and completed >= 0:
                         pct = min(100, int(100 * completed / total))
                         if pct != last_pct and (pct % 10 == 0 or pct == 100):

@@ -13,9 +13,10 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import threading
 import time
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, Mapping, Optional, Set, Tuple
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field
@@ -263,6 +264,62 @@ def _local_model_present(binding: Mapping[str, str], installed_local_models: Opt
     if wanted.endswith(":latest") and wanted[: -len(":latest")] in installed:
         return True
     return False
+
+
+#: Bound on first probe rather than at import: reaching `topos.engine.backends`
+#: drags in the whole inference stack, and this module is imported by config
+#: readers that must stay cheap. Tests patch this name.
+OllamaAdapter: Any = None
+
+#: Short enough that a model pulled a moment ago is usable without a restart,
+#: long enough that a batch of a thousand rows does not open a thousand sockets.
+INSTALLED_LOCAL_MODELS_TTL_SECONDS = 30.0
+
+_installed_lock = threading.Lock()
+_installed_cache: Optional[Tuple[float, Optional[Set[str]]]] = None
+
+
+def reset_installed_local_models_cache() -> None:
+    """Forget the probe result. Test seam, and the hook a fresh pull would use."""
+    global _installed_cache
+    with _installed_lock:
+        _installed_cache = None
+
+
+def installed_local_models() -> Optional[Set[str]]:
+    """Tags this machine has actually pulled, or None when Ollama did not answer.
+
+    None means "I did not check", which is not the same claim as the empty set.
+    Demoting every local pack role because a probe hiccuped would change the
+    owner's models on a transient failure, so callers treat None as "trust the
+    pack" (see `_local_model_present`).
+    """
+    global _installed_cache
+    now = time.monotonic()
+    with _installed_lock:
+        cached = _installed_cache
+        if cached is not None and now - cached[0] < INSTALLED_LOCAL_MODELS_TTL_SECONDS:
+            return cached[1]
+
+    result: Optional[Set[str]]
+    try:
+        global OllamaAdapter
+        if OllamaAdapter is None:
+            from ..engine.backends.ollama import OllamaAdapter as _Adapter
+
+            OllamaAdapter = _Adapter
+        adapter = OllamaAdapter()
+        if not adapter.is_reachable():
+            result = None
+        else:
+            result = {str(name).strip().lower() for name in adapter.list_models() if name}
+    except Exception as exc:  # noqa: BLE001 — an unanswered probe is not an empty machine
+        logger.debug("installed local model probe failed: %s", exc)
+        result = None
+
+    with _installed_lock:
+        _installed_cache = (now, result)
+    return result
 
 
 def resolve_model(
