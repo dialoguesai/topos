@@ -105,6 +105,7 @@ SUPPORTED_MESSAGE_TYPES = [
     "list_routine_runs",
     "list_routines",
     "list_waiting_routine_runs",
+    "llm_cancel",
     "llm_generation",
     "llm_integrations_storage",
     "messenger_analytics_communities",

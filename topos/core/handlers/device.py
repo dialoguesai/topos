@@ -1,8 +1,12 @@
 """Connection, device, compute, and LLM message handlers."""
 from __future__ import annotations
 
+import asyncio
+import time
+
 import topos.core.handlers as hub
 
+from ...services.llm.openai import LlmTypedError
 from .common import (
     Any,
     Dict,
@@ -243,6 +247,13 @@ def _unusable_num_ctx(payload: Dict[str, Any]) -> Optional[str]:
     return None
 
 
+#: In-flight llm_generation tasks by request id, so ``llm_cancel`` can abort
+#: one (PLAN_HOME_CHAT_STREAMING_SLA §5). Cancellation unwinds the httpx
+#: stream, which closes the connection — the only cancel Ollama has, and it
+#: frees the decode slot within one prefill batch (probe-verified 2026-08-12).
+_LLM_GENERATION_TASKS: Dict[str, asyncio.Task] = {}
+
+
 @handles("llm_generation")
 async def handle_llm_generation(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
@@ -259,10 +270,20 @@ async def handle_llm_generation(message: Dict[str, Any]) -> Optional[Dict[str, A
         len(str(payload.get("prompt") or "")),
         bool(payload.get("stream")),
     )
+    current = asyncio.current_task()
+    if current is not None:
+        _LLM_GENERATION_TASKS[str(req_id)] = current
     try:
         on_delta = None
+        on_protocol = None
         if payload.get("stream"):
             cp_client = getattr(engine_state, "control_plane_client", None)
+            # Frame contract (SLA plan §2): ALL interim traffic rides
+            # status:"chunk" with payload.delta always present — old control
+            # planes provably no-op empty-delta chunks, so kind frames are
+            # additive. A new top-level status would resolve their pending
+            # future; never introduce one.
+            seq = 0
 
             async def _emit_chunk(delta: str) -> None:
                 if cp_client is not None:
@@ -270,9 +291,62 @@ async def handle_llm_generation(message: Dict[str, Any]) -> Optional[Dict[str, A
                         {"id": req_id, "status": "chunk", "payload": {"delta": delta}}
                     )
 
+            async def _emit_protocol(kind: str, fields: Dict[str, Any]) -> None:
+                nonlocal seq
+                if cp_client is None:
+                    return
+                seq += 1
+                await cp_client.send_message(
+                    {
+                        "id": req_id,
+                        "status": "chunk",
+                        "payload": {
+                            "delta": "",
+                            "kind": kind,
+                            "seq": seq,
+                            "ts_ms": int(time.monotonic() * 1000),
+                            **fields,
+                        },
+                    }
+                )
+
             on_delta = _emit_chunk
-        result = await get_services().llm.generate(payload, on_delta=on_delta)
+            on_protocol = _emit_protocol
+            # S1 made real: the engine acknowledges the dispatch before any
+            # model work, replacing the control plane's synthesized ack.
+            await _emit_protocol("ack", {})
+        result = await get_services().llm.generate(
+            payload, on_delta=on_delta, on_protocol=on_protocol
+        )
         return {"id": req_id, "status": "ok", "payload": result}
+    except asyncio.CancelledError:
+        # llm_cancel: answer the original request with a typed 499 so the
+        # control plane's pending future settles, then keep cancelling. The
+        # send is shielded — it must not be torn out from under itself by the
+        # very cancellation it is reporting.
+        cp_client = getattr(engine_state, "control_plane_client", None)
+        if cp_client is not None:
+            try:
+                await asyncio.shield(
+                    cp_client.send_message(
+                        {
+                            "id": req_id,
+                            "status": "error",
+                            "error": "Generation cancelled by the control plane.",
+                            "error_code": 499,
+                        }
+                    )
+                )
+            except Exception:  # noqa: BLE001 — reporting must not mask the cancel
+                pass
+        raise
+    except LlmTypedError as exc:
+        return {
+            "id": req_id,
+            "status": "error",
+            "error": exc.message,
+            "error_code": exc.code,
+        }
     except HTTPException as exc:
         detail = exc.detail
         err_msg = detail if isinstance(detail, str) else str(detail)
@@ -284,6 +358,31 @@ async def handle_llm_generation(message: Dict[str, Any]) -> Optional[Dict[str, A
         }
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}
+    finally:
+        _LLM_GENERATION_TASKS.pop(str(req_id), None)
+
+
+@handles("llm_cancel")
+async def handle_llm_cancel(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Cancel an in-flight llm_generation (SLA plan §5).
+
+    The cancel message carries its OWN fresh id — the target rides in the
+    payload. (Reusing the target's id would have this handler's reply settle
+    the original request's future on the control plane.)
+    """
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    target = str(payload.get("target_request_id") or "").strip()
+    if not target:
+        return {"id": req_id, "status": "error", "error": "target_request_id required", "error_code": 422}
+    task = _LLM_GENERATION_TASKS.get(target)
+    if task is None or task.done():
+        return {"id": req_id, "status": "ok", "payload": {"cancelled": False, "reason": "not_found"}}
+    task.cancel()
+    logger.info("llm_cancel: cancelled in-flight generation %s", target[:8])
+    return {"id": req_id, "status": "ok", "payload": {"cancelled": True}}
 
 @handles("ollama_list_models")
 async def handle_ollama_list_models(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
