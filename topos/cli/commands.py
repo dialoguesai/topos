@@ -246,6 +246,7 @@ def main(
 
     Subcommands:
       reprocess   Re-run raw→canonical for a source (recovery utility).
+      profile     Manage multiple Topoi on this machine (list, new, switch).
     """
     if ctx.invoked_subcommand is not None:
         return
@@ -368,8 +369,10 @@ def main(
 
 
 from topos.cli.reprocess_cmd import reprocess_command  # noqa: E402
+from topos.cli.profile_cmd import profile_group  # noqa: E402
 
 main.add_command(reprocess_command)
+main.add_command(profile_group)
 
 
 if __name__ == "__main__":
