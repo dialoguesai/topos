@@ -378,6 +378,19 @@ def resolve_model(
         )
 
     fallback = _as_binding(engine_default) or {}
+    demoted_local = bool(binding) and binding["provider"] in LOCAL_PROVIDERS
+    if demoted_local and fallback.get("provider", "") not in LOCAL_PROVIDERS:
+        # Mirrors the CP: a role pinned to this machine whose tag is missing
+        # stays on this machine. An engine default that is empty or someone
+        # else's hardware would answer a failed download by moving the owner's
+        # data off the box, which no code path may decide on its own.
+        return ResolvedModel(
+            provider=binding["provider"],
+            model="",
+            source=SOURCE_ENGINE_DEFAULT,
+            role=resolved_role,
+        )
+
     return ResolvedModel(
         provider=fallback.get("provider", ""),
         model=fallback.get("model", ""),

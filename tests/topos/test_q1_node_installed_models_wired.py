@@ -51,14 +51,14 @@ def _memory_conn() -> sqlite3.Connection:
     return conn
 
 
-def _seed_pack(conn: sqlite3.Connection, *, provider: str, model: str) -> None:
+def _seed_pack(conn: sqlite3.Connection, *, provider: str, model: str, role: str = "classify") -> None:
     apply_sync_payload(
         conn,
         {
             "revision": 1,
             "active": "pack-1",
             "packs": [
-                {"pack_id": "pack-1", "roles": {"classify": {"provider": provider, "model": model}}}
+                {"pack_id": "pack-1", "roles": {role: {"provider": provider, "model": model}}}
             ],
         },
     )
@@ -142,6 +142,71 @@ def test_installed_probe_is_cached_so_every_batch_row_does_not_hit_the_socket(mo
     assert len(calls) == 1
 
 
+# --------------------------------------------------------------------------
+# The mirrored demoted-local branch, exercised the way production reaches it
+# --------------------------------------------------------------------------
+
+
+class _NoDefaults:
+    """A node that never had a fallback model configured.
+
+    This is the only shape that reaches the node's demoted-local branch, and it
+    is why the branch is not dead code: every other node `engine_default` is an
+    ollama binding, which is already on the right side of the locality line.
+    """
+
+    facts_llm_model = ""
+    ollama_extraction_model = ""
+    ollama_query_model = ""
+
+
+def test_a_missing_local_tag_with_no_engine_default_goes_inert_rather_than_off_the_box():
+    # Nothing on this machine can serve the role and there is no configured
+    # fallback. The pass staying inert is the correct answer; anything that
+    # names a model here would either 404 on first use or be a provider the
+    # owner never pinned.
+    conn = _memory_conn()
+    _seed_pack(conn, provider="ollama", model=MISSING_TAG)
+
+    assert resolve_facts_llm_model(_NoDefaults(), conn) == ""
+
+
+def test_the_node_resolver_keeps_a_demoted_local_role_on_the_local_provider():
+    resolved = model_packs.resolve_model(
+        role="classify",
+        pack={
+            "pack_id": "pack-1",
+            "roles": {"classify": {"provider": "ollama", "model": MISSING_TAG}},
+        },
+        engine_default=None,
+        installed_local_models={INSTALLED_TAG},
+    )
+
+    assert resolved.provider == "ollama", (
+        f"a role pinned to this machine was demoted to {resolved.provider!r}; an "
+        "empty provider hands the turn to the cloud routers, which answers a "
+        "failed download by moving the owner's data off their machine"
+    )
+    assert resolved.model == "", "the missing tag was kept, so the call still 404s"
+
+
+def test_a_cloud_engine_default_does_not_rescue_a_demoted_local_role():
+    # The mirror's whole point: the fallback being *configured* is not enough,
+    # it has to be on the same side of the locality line.
+    resolved = model_packs.resolve_model(
+        role="classify",
+        pack={
+            "pack_id": "pack-1",
+            "roles": {"classify": {"provider": "ollama", "model": MISSING_TAG}},
+        },
+        engine_default={"provider": "openai", "model": "gpt-4o-mini"},
+        installed_local_models={INSTALLED_TAG},
+    )
+
+    assert resolved.provider == "ollama"
+    assert resolved.model != "gpt-4o-mini"
+
+
 def _resolve_model_calls(relative: str) -> list[ast.Call]:
     tree = ast.parse((NODE_ROOT / relative).read_text())
     return [
@@ -163,8 +228,47 @@ def test_every_node_pack_reader_supplies_the_installed_set(relative):
     calls = _resolve_model_calls(relative)
     assert calls, f"{relative} no longer resolves through the node resolver"
     for call in calls:
-        kwargs = {kw.arg for kw in call.keywords}
-        assert "installed_local_models" in kwargs, (
+        kw_map = {kw.arg: kw.value for kw in call.keywords if kw.arg}
+        assert "installed_local_models" in kw_map, (
             f"resolve_model at {relative}:{call.lineno} trusts a pack tag without "
             "checking the machine has it"
         )
+        value = kw_map["installed_local_models"]
+        # `installed_local_models=None` recreates the dead parameter; a bare
+        # name-presence check cannot see it. The value must call the probe
+        # (or name a variable bound to it).
+        live = False
+        if isinstance(value, ast.Call):
+            func = value.func
+            live = (isinstance(func, ast.Name) and func.id == "installed_local_models") or (
+                isinstance(func, ast.Attribute) and func.attr == "installed_local_models"
+            )
+        elif isinstance(value, ast.Name):
+            live = value.id in {"installed", "installed_local_models"}
+        assert live, (
+            f"resolve_model at {relative}:{call.lineno} passes {ast.dump(value)}, "
+            "not the live installed set — the router never sees what the machine has"
+        )
+
+
+def test_signal_extraction_falls_to_the_engine_default_when_the_pack_tag_is_missing():
+    """Behavioural twin of the facts_llm guard — AST presence is not enough."""
+    from topos.config.signal_extraction import resolve_signal_extraction_config
+
+    conn = _memory_conn()
+    _seed_pack(conn, provider="ollama", model=MISSING_TAG, role="tool")
+    resolved = resolve_signal_extraction_config(_Settings(), conn)
+    assert resolved.query_model == "extraction-default:latest", (
+        f"signal extraction kept the missing pack tag {resolved.query_model!r} "
+        "instead of falling to the engine default"
+    )
+
+
+def test_signal_extraction_keeps_the_pack_tag_when_it_is_installed(monkeypatch):
+    from topos.config.signal_extraction import resolve_signal_extraction_config
+
+    monkeypatch.setattr(model_packs, "installed_local_models", lambda: {INSTALLED_TAG, MISSING_TAG})
+    conn = _memory_conn()
+    _seed_pack(conn, provider="ollama", model=MISSING_TAG, role="tool")
+    resolved = resolve_signal_extraction_config(_Settings(), conn)
+    assert resolved.query_model == MISSING_TAG

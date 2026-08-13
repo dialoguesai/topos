@@ -116,6 +116,8 @@ SUPPORTED_MESSAGE_TYPES = [
     "messenger_analytics_sources",
     "messenger_contact_graph",
     "migrate_browser_plugin_app_id",
+    "ollama_install",
+    "ollama_install_status",
     "ollama_list_models",
     "ollama_pull_model",
     "ollama_pull_status",

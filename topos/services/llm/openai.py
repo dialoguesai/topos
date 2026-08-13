@@ -344,7 +344,14 @@ async def _ollama_stream_generate(
     return result
 
 
-async def _ollama_list_model_names() -> list[str]:
+async def _ollama_list_models() -> Dict[str, Any]:
+    """Installed tags plus size / capabilities / modified_at from /api/tags.
+
+    Capabilities and modified_at ride along for Branch A preselect/chips
+    (PLAN_LOCAL_MODEL_QUICKSTART). Uninstalled starters still take their CTA
+    size from the curated table (D1) — Ollama has no size for a tag that is
+    not on the machine.
+    """
     base = settings.engine_ollama_base_url.rstrip("/")
     timeout = httpx.Timeout(settings.ollama_list_timeout_sec, connect=10.0)
     logger.info("Ollama list models: base=%s timeout_sec=%s", base, settings.ollama_list_timeout_sec)
@@ -360,18 +367,46 @@ async def _ollama_list_model_names() -> list[str]:
         detail = (r.text or str(r.status_code))[:800]
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Ollama error: {detail}")
     data = r.json()
-    names = [str(m.get("name", "")).strip() for m in data.get("models", []) if m.get("name")]
+    sizes: Dict[str, int] = {}
+    capabilities: Dict[str, list[str]] = {}
+    modified_at: Dict[str, str] = {}
+    names: list[str] = []
+    for entry in data.get("models", []) or []:
+        name = str(entry.get("name") or "").strip()
+        if not name:
+            continue
+        names.append(name)
+        raw_size = entry.get("size")
+        if isinstance(raw_size, int) and raw_size >= 0:
+            sizes[name] = raw_size
+        raw_caps = entry.get("capabilities")
+        if isinstance(raw_caps, list):
+            caps = [str(c).strip() for c in raw_caps if str(c or "").strip()]
+            if caps:
+                capabilities[name] = caps
+        modified = entry.get("modified_at") or entry.get("modifiedAt")
+        if isinstance(modified, str) and modified.strip():
+            modified_at[name] = modified.strip()
     unique = sorted(set(names))
     logger.info("Ollama list models complete: count=%d", len(unique))
-    return unique
+    return {
+        "models": unique,
+        "sizes": sizes,
+        "capabilities": capabilities,
+        "modified_at": modified_at,
+    }
+
+
+async def _ollama_list_model_names() -> list[str]:
+    payload = await _ollama_list_models()
+    return list(payload.get("models") or [])
 
 
 class OpenAILLMService:
     async def list_ollama_models(self) -> Dict[str, Any]:
         if not settings.enable_llm or state.get_engine_mode() != "full":
             raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="LLM is disabled")
-        models = await _ollama_list_model_names()
-        return {"models": models}
+        return await _ollama_list_models()
 
     async def generate(
         self,

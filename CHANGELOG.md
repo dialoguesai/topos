@@ -9,6 +9,27 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+
+- `[E:llm]` One-click Ollama install for the quick-start journey (J-B10):
+  `ollama_install` runs the official installer on an explicit request —
+  Darwin only, single-flight, never from ambient state — and
+  `ollama_install_status` reports `idle|installing|started|error` with the
+  installer's status lines. A nonzero installer exit with `/Applications/
+  Ollama.app` present still ends in `started` (the node launches it and lets
+  reachability be the truth), because the script's only sudo is a PATH symlink
+  the engine does not need.
+- `[E:llm]` `ollama_list_models` now carries per-tag `capabilities`,
+  `modified_at`, and size detail so the quick-setup station can prefer a
+  tools-capable model and label downloads honestly.
+
+### Changed
+
+- `[E:llm]` Ollama pull/list hardening from the J-B10 verification rounds:
+  monotonic pull progress survives a restarted layer, a garbage tag surfaces
+  the Ollama error instead of polling forever, and a 502 answers
+  `reachable: false` rather than an ambiguous empty list.
+
 ## [1.3.15] — 2026-08-13
 
 ### Added

@@ -140,11 +140,40 @@ class OllamaAdapter:
 
     def list_models(self) -> List[str]:
         """Return list of model names available on the server (from /api/tags)."""
+        return [m["name"] for m in self.list_models_detailed() if m.get("name")]
+
+    def list_models_detailed(self) -> List[Dict[str, Any]]:
+        """Installed tags with size / capabilities / modified_at from /api/tags.
+
+        Size is what a size-labelled CTA needs for an already-installed tag
+        (Branch A). Capabilities drive tools-preferring preselect and chips;
+        modified_at is the recency fallback. Uninstalled starters still use the
+        curated table — Ollama has no size for a tag that is not on disk
+        (PLAN_LOCAL_MODEL_QUICKSTART D4).
+        """
         req = urllib.request.Request(f"{self._base_url}/api/tags", method="GET")
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
                 data = json.loads(resp.read().decode())
-                return [m.get("name", "") for m in data.get("models", []) if m.get("name")]
+                out: List[Dict[str, Any]] = []
+                for m in data.get("models", []) or []:
+                    name = m.get("name")
+                    if not name:
+                        continue
+                    entry: Dict[str, Any] = {"name": str(name)}
+                    raw_size = m.get("size")
+                    if isinstance(raw_size, int) and raw_size >= 0:
+                        entry["size"] = raw_size
+                    raw_caps = m.get("capabilities")
+                    if isinstance(raw_caps, list):
+                        caps = [str(c).strip() for c in raw_caps if str(c or "").strip()]
+                        if caps:
+                            entry["capabilities"] = caps
+                    modified = m.get("modified_at") or m.get("modifiedAt")
+                    if isinstance(modified, str) and modified.strip():
+                        entry["modified_at"] = modified.strip()
+                    out.append(entry)
+                return out
         except Exception:
             return []
 
