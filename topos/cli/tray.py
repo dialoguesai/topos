@@ -203,6 +203,11 @@ class ToposTray:
         # asking the node renders nothing, ever.
         self.topos_name: str | None = None
         self._topos_name_tick = 0
+        # Set by the Select Topos submenu, acted on by serve_with_tray once the
+        # server has actually stopped: ("switch", profile_id) or ("new", "").
+        # A click cannot do the work itself — the node it must stop IS this
+        # process, so the swap happens after the run loop unwinds.
+        self.pending_profile_action: tuple[str, str] | None = None
 
     # -- status ------------------------------------------------------------
 
@@ -307,6 +312,37 @@ class ToposTray:
         except Exception:
             pass
 
+    # -- profiles ----------------------------------------------------------
+
+    def _profiles(self) -> list:
+        """Every Topos on this machine, active first. Empty on any error —
+        a tray that cannot list profiles must still render its other rows."""
+        try:
+            from topos import profiles
+
+            return profiles.list_profiles()
+        except Exception:  # noqa: BLE001
+            return []
+
+    @staticmethod
+    def _format_size(size_bytes: int) -> str:
+        gb = size_bytes / 1_000_000_000
+        return f"{gb:.1f} GB" if gb >= 0.1 else f"{size_bytes // 1_000_000} MB"
+
+    def _profile_label(self, info) -> str:
+        return f"{info.name or info.profile_id} ({self._format_size(info.size_bytes)})"
+
+    def _offers_profile_switching(self) -> bool:
+        """Only a tray that owns the server may swap the database under it.
+
+        Attached mode supervises a node this process did not start and cannot
+        restart, so a switch there would stop the node, move its database, and
+        leave nothing running. The macOS shell has a supervisor and can do
+        this; a bare tray cannot, and pretending otherwise is worse than
+        omitting the row.
+        """
+        return not self.attached
+
     # -- menu --------------------------------------------------------------
 
     def _menu_labels(self) -> list[str]:
@@ -325,6 +361,11 @@ class ToposTray:
             "Open Topos",
             "Open Docs",
         ]
+        if self._offers_profile_switching():
+            items.append("Select Topos")
+            for info in self._profiles():
+                items.append(self._profile_label(info))
+            items.append("New Topos…")
         if self.log_path is not None:
             items.append("Show Logs")
         if self.update.get("applying"):
@@ -366,6 +407,8 @@ class ToposTray:
             pystray.MenuItem("Open Topos", self._open_app),
             pystray.MenuItem("Open Docs", self._open_docs),
         ]
+        if self._offers_profile_switching():
+            items.append(pystray.MenuItem("Select Topos", self._build_profile_menu()))
         if self.log_path is not None:
             items.append(pystray.MenuItem("Show Logs", self._show_logs))
         if self.update.get("applying"):
@@ -388,6 +431,40 @@ class ToposTray:
                 pystray.MenuItem("Close Tray Only (node keeps running)", self._close_tray_only)
             )
         return pystray.Menu(*items)
+
+    def _build_profile_menu(self):
+        """The Select Topos submenu: active one checked, the rest switchable."""
+        import pystray
+
+        entries = []
+        for info in self._profiles():
+            label = self._profile_label(info)
+            if info.active:
+                entries.append(
+                    pystray.MenuItem(label, None, enabled=False, checked=lambda item: True)
+                )
+            else:
+                # Bind the id per iteration; a closure over the loop variable
+                # would switch every row to the last profile listed.
+                entries.append(
+                    pystray.MenuItem(
+                        label, lambda icon, item, pid=info.profile_id: self._switch_profile(pid)
+                    )
+                )
+        entries.append(pystray.Menu.SEPARATOR)
+        entries.append(pystray.MenuItem("New Topos…", self._new_topos))
+        return pystray.Menu(*entries)
+
+    def _switch_profile(self, profile_id: str) -> None:
+        """Queue the switch and stand the node down; serve_with_tray finishes it."""
+        self.pending_profile_action = ("switch", profile_id)
+        self._notify("Switching Topos — Topos will restart.")
+        self._close_tray_only()
+
+    def _new_topos(self, icon=None, item=None) -> None:
+        self.pending_profile_action = ("new", "")
+        self._notify("Your current Topos is being set aside…")
+        self._close_tray_only()
 
     def _open_docs(self, icon=None, item=None) -> None:
         webbrowser.open_new(self.docs_url)
@@ -484,6 +561,56 @@ class ToposTray:
             self._on_quit()
 
 
+def _reexec_topos_node() -> None:
+    """Replace this process with a fresh topos-node, same arguments.
+
+    The node's database is chosen at startup, so serving the switched-to Topos
+    means starting over — and re-exec beats asking the user to relaunch an app
+    they just clicked a menu item in. ``sys.executable -m`` rather than
+    ``sys.argv[0]``: the console script is a shim whose path is not guaranteed
+    to be executable from here (a uv tool shim, a wheel entry point, a
+    PyInstaller bundle on Windows all differ), while the interpreter running
+    us always is.
+    """
+    os.execv(sys.executable, [sys.executable, "-m", "topos.cli.commands", *sys.argv[1:]])
+
+
+def apply_pending_profile_action(action: tuple[str, str]) -> bool:
+    """Perform a queued Select Topos action. True when the node should restart.
+
+    Runs only after the server has stopped — the profile guard refuses while
+    anything answers the port, which is exactly the protection wanted here.
+    """
+    from topos import profiles
+
+    kind, profile_id = action
+    try:
+        if kind == "switch":
+            result = profiles.switch_profile(profile_id)
+            print(f"Switched to '{result['activated']}'.")
+            if result.get("archived_as"):
+                print(f"Previous Topos kept as '{result['archived_as']}'.")
+            return True
+        if kind == "new":
+            result = profiles.new_profile()
+            if result["archived"]:
+                print(f"Your Topos is kept as '{result['archived_as']}'.")
+            # Deliberately does NOT restart: a node with no key exits within a
+            # second, so relaunching would only print an error over the
+            # instructions the user needs. This platform has no topos:// deep
+            # link, so pairing is the documented terminal step.
+            print(
+                "This machine is now unbound. Create the new Topos at "
+                f"{TOPOS_APP_URL}, then run:\n"
+                "  topos-node --set-topos-key <YOUR_TOPOS_KEY>\n"
+                "Your previous Topos stays available under Select Topos."
+            )
+            return False
+    except Exception as exc:  # noqa: BLE001 — the message is the whole point
+        print(f"Could not complete that: {exc}")
+    return False
+
+
 def attach_tray(
     *,
     host: str,
@@ -549,3 +676,10 @@ def serve_with_tray(
         except KeyboardInterrupt:
             stop_server()
     server_thread.join(timeout=10)
+
+    # A Select Topos click can only be honoured here: the node it has to stop
+    # is this process, so the swap waits until the server thread is done and
+    # the port is free.
+    if tray.pending_profile_action is not None:
+        if apply_pending_profile_action(tray.pending_profile_action):
+            _reexec_topos_node()
