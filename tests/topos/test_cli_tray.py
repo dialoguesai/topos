@@ -192,3 +192,116 @@ class TestFailedUpdateIsVisible:
         assert "Installing update…" in t._menu_labels()
         t.update = {"available": True, "latest": "1.3.7", "applying": False, "last_result": "success"}
         assert "Update installed — restart to finish" in t._menu_labels()
+
+
+class TestSelectToposMenu:
+    """Multi-Topos parity with the macOS shell (PLAN_MULTI_TOPOS_SWITCHING M5).
+
+    The submenu itself needs a display; these pin the parts that do not —
+    which profiles are offered, which are switchable, and the rule that a tray
+    not owning the node must not offer to swap the database under it.
+    """
+
+    def _tray(self, *, attached: bool = False) -> tray.ToposTray:
+        return tray.ToposTray(
+            host="127.0.0.1",
+            port=9000,
+            version="1.3.15",
+            package_name="topos-node",
+            on_quit=lambda: None,
+            attached=attached,
+        )
+
+    def _profiles(self, monkeypatch, entries):
+        monkeypatch.setattr(tray.ToposTray, "_profiles", lambda self: entries)
+
+    def test_profiles_are_listed_with_names_and_sizes(self, monkeypatch):
+        from topos.profiles import ProfileInfo
+
+        self._profiles(
+            monkeypatch,
+            [
+                ProfileInfo("default", "PersonalDB", "/p/a", 2_800_000_000, active=True),
+                ProfileInfo("work", "Work", "/p/b", 830_000_000),
+            ],
+        )
+        labels = self._tray()._menu_labels()
+        assert "Select Topos" in labels
+        assert "PersonalDB (2.8 GB)" in labels
+        assert "Work (0.8 GB)" in labels
+        assert "New Topos…" in labels
+
+    def test_unnamed_profile_falls_back_to_its_id(self, monkeypatch):
+        from topos.profiles import ProfileInfo
+
+        self._profiles(monkeypatch, [ProfileInfo("topos-20260812", None, "/p/a", 5_000_000)])
+        assert "topos-20260812 (5 MB)" in self._tray()._menu_labels()
+
+    def test_attached_tray_never_offers_to_switch(self, monkeypatch):
+        from topos.profiles import ProfileInfo
+
+        self._profiles(monkeypatch, [ProfileInfo("work", "Work", "/p/b", 1)])
+        labels = self._tray(attached=True)._menu_labels()
+        # It cannot restart a node it did not start; stopping one and moving
+        # its database would leave the machine with nothing running.
+        assert "Select Topos" not in labels
+        assert "New Topos…" not in labels
+
+    def test_profile_listing_failure_does_not_break_the_menu(self, monkeypatch):
+        monkeypatch.setattr(
+            tray.ToposTray,
+            "_profiles",
+            lambda self: (_ for _ in ()).throw(RuntimeError("disk gone")),
+        )
+        # _profiles swallows its own errors; assert the real one does too.
+        t = self._tray()
+        monkeypatch.undo()
+        monkeypatch.setattr(
+            "topos.profiles.list_profiles",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("disk gone")),
+        )
+        assert t._profiles() == []
+        assert "Quit Topos Node" in t._menu_labels()
+
+    def test_click_queues_the_action_rather_than_doing_it(self, monkeypatch):
+        t = self._tray()
+        closed = {}
+        monkeypatch.setattr(tray.ToposTray, "_close_tray_only", lambda self: closed.setdefault("x", True))
+        monkeypatch.setattr(tray.ToposTray, "_notify", lambda self, m: None)
+        t._switch_profile("work")
+        # The node to stop IS this process, so the click may only queue.
+        assert t.pending_profile_action == ("switch", "work")
+        assert closed["x"] is True
+
+    def test_new_topos_queues_its_own_action(self, monkeypatch):
+        t = self._tray()
+        monkeypatch.setattr(tray.ToposTray, "_close_tray_only", lambda self: None)
+        monkeypatch.setattr(tray.ToposTray, "_notify", lambda self, m: None)
+        t._new_topos()
+        assert t.pending_profile_action == ("new", "")
+
+
+class TestApplyPendingProfileAction:
+    def test_switch_asks_for_a_restart(self, monkeypatch):
+        monkeypatch.setattr(
+            "topos.profiles.switch_profile",
+            lambda pid: {"activated": pid, "archived_as": "old"},
+        )
+        assert tray.apply_pending_profile_action(("switch", "work")) is True
+
+    def test_new_does_not_restart_into_an_unbound_node(self, monkeypatch):
+        monkeypatch.setattr(
+            "topos.profiles.new_profile", lambda: {"archived": True, "archived_as": "personal"}
+        )
+        # A node with no key exits in a second; relaunching would bury the
+        # pairing instructions under an error.
+        assert tray.apply_pending_profile_action(("new", "")) is False
+
+    def test_a_refused_switch_never_restarts(self, monkeypatch):
+        from topos.profiles import ProfileError
+
+        monkeypatch.setattr(
+            "topos.profiles.switch_profile",
+            lambda pid: (_ for _ in ()).throw(ProfileError("node is running")),
+        )
+        assert tray.apply_pending_profile_action(("switch", "work")) is False
