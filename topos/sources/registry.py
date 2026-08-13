@@ -649,6 +649,13 @@ REGISTRY = {
     DEMO_CONTACTS_FILE.source_id: DEMO_CONTACTS_FILE,
 }
 
+# Pristine engine-shipped definitions. REGISTRY entries are REPLACED by runtime
+# installs (install_source_definition), so lane-policy resolution against "the
+# bundled definition" must read this snapshot, never REGISTRY: a 2026-05
+# browser_visits install row (enrichment_trigger='manual', no jobs) rehydrated
+# at every boot and silently disabled all browser enrichment for a month.
+BUNDLED_REGISTRY = dict(REGISTRY)
+
 
 def list_sources() -> list[DataSourceDefinition]:
     return list(REGISTRY.values())

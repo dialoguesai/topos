@@ -9,6 +9,34 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+
+- `[S1] [E:embeddings]` Runtime installs of bundled sources no longer shadow
+  the bundled enrichment-lane policy. A 2026-05-29 `source_runtime_installs`
+  row for `browser_visits` snapshotted the then-bundled definition
+  (`enrichment_trigger='manual'`, no jobs); rehydrated at every boot it
+  overrode the 2026-07-09 flip to automatic url_classification+embeddings, and
+  once the manual gate landed on the signal lane every live browser push ran
+  zero enrichment jobs while reporting "done" (August: 0/1,034 visits embedded
+  or url-classified across 2,304 no-op inbox jobs). `browser_events`
+  highlights, and the newer signal jobs on `chatgpt_ui_conversation`,
+  `imessage`, `signal`, and `gcal_events` (availability_scores), were silently
+  dropped the same way. Lane policy (trigger + job lists) now always resolves
+  from `BUNDLED_REGISTRY` for bundled source ids; per-source toggles remain in
+  `source_enrichment_overrides`.
+
+### Changed
+
+- `[S1] [E:embeddings]` Ambient activity rows (browser visits) now embed ONE
+  vector per distinct page text instead of one per visit: batch-level dedup in
+  the embeddings job plus a cross-record `content_hash` check at the vector
+  write (`has_duplicate_content`). A page revisited 30 times contributes one
+  ANN neighbor, not 30 near-identical ones (August data: 1,034 visit rows →
+  360 distinct titles). Message-family rows are exempt — every message keeps
+  its own vector row so it stays individually retrievable. Reloaded activity
+  batches without a `_table` stamp now classify as `activity_event` via their
+  `activity_type`, so backfills get the same policy.
+
 ### Added
 
 - `[E:llm]` One-click Ollama install for the quick-start journey (J-B10):

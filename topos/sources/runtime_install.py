@@ -56,11 +56,43 @@ def _parse_source_definition_from_version_row(version_row: Dict[str, Any]) -> Di
     return source_def
 
 
+# Enrichment-lane policy fields owned by the bundled registry for bundled
+# source ids. A runtime install row snapshots the definition as of install
+# time; rehydrated at boot it SHADOWS the current bundled definition, so a
+# stale snapshot silently reverts later lane decisions (a 2026-05-29
+# browser_visits row with enrichment_trigger='manual' and no jobs turned off
+# every browser enrichment lane once the manual gate shipped on 2026-07-06).
+# Per-source user toggles belong in source_enrichment_overrides, which the
+# lane resolvers apply on top of these values.
+_BUNDLED_LANE_POLICY_FIELDS = (
+    "enrichment_trigger",
+    "raw_enrichment_jobs",
+    "canonical_enrichment_jobs",
+    "signal_derivation_jobs",
+)
+
+
+def _adopt_bundled_lane_policy(payload: Dict[str, Any]) -> Dict[str, Any]:
+    from .registry import BUNDLED_REGISTRY
+
+    source_id = str(payload.get("source_id") or "").strip()
+    bundled = BUNDLED_REGISTRY.get(source_id)
+    if bundled is None:
+        return payload
+    merged = dict(payload)
+    for field_name in _BUNDLED_LANE_POLICY_FIELDS:
+        value = getattr(bundled, field_name, None)
+        merged[field_name] = list(value) if isinstance(value, list) else value
+    return merged
+
+
 def _build_source_definition(payload: Dict[str, Any]) -> DataSourceDefinition:
     from .bundled_canonical_triples import apply_bundled_canonical_defaults
     from .definitions import definition_from_payload
 
-    return definition_from_payload(apply_bundled_canonical_defaults(payload))
+    return definition_from_payload(
+        _adopt_bundled_lane_policy(apply_bundled_canonical_defaults(payload))
+    )
 
 
 def _tokenize(path: str) -> List[str]:

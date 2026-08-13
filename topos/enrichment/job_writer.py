@@ -252,6 +252,31 @@ def _write_signal_records_unlocked(
                     existing = get_hashes(rid, model)
                     if existing.get(chunk_index) == parent_hash:
                         continue
+            # Activity rows dedupe ACROSS records: one vector per distinct
+            # page text (browser visits repeat the same title dozens of times
+            # a month, and every copy is a near-identical ANN neighbor).
+            # Message-family rows are exempt — each message must stay
+            # individually reachable through vector search.
+            has_dup = getattr(vector_index, "has_duplicate_content", None)
+            if (
+                has_dup is not None
+                and str(meta.get("record_type") or "") == "activity_event"
+            ):
+                rid = str(meta.get("record_id") or "")
+                model = str(meta.get("model") or "")
+                parent_hash = str(meta.get("content_hash") or "")
+                if (
+                    rid
+                    and model
+                    and parent_hash
+                    and has_dup(
+                        parent_hash,
+                        model,
+                        record_type="activity_event",
+                        exclude_record_id=rid,
+                    )
+                ):
+                    continue
             adapters.vector.upsert(meta, vector=rec.get("vector"))
             written += 1
     elif job_name == "entities":

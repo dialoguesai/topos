@@ -670,6 +670,31 @@ class SQLiteVectorIndex:
         ).fetchall()
         return {int(row[0]): str(row[1]) for row in rows if row[1]}
 
+    def has_duplicate_content(
+        self,
+        content_hash: str,
+        model: str,
+        *,
+        record_type: Optional[str] = None,
+        exclude_record_id: Optional[str] = None,
+    ) -> bool:
+        """True when another record already holds a vector for this exact text.
+
+        Cross-record dedup for ambient rows (browser visits): the same page
+        title revisited must not add a near-identical neighbor per visit.
+        """
+        if not content_hash or not model:
+            return False
+        query = "SELECT 1 FROM signal_embeddings WHERE content_hash=? AND model=?"
+        params: List[Any] = [content_hash, model]
+        if record_type:
+            query += " AND record_type=?"
+            params.append(record_type)
+        if exclude_record_id:
+            query += " AND record_id!=?"
+            params.append(exclude_record_id)
+        return self._conn.execute(query + " LIMIT 1", params).fetchone() is not None
+
     def delete_chunks_for_record(
         self,
         record_id: str,
