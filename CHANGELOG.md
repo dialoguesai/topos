@@ -9,6 +9,21 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.15] — 2026-08-13
+
+### Added
+
+- `[O]` Select Topos in the menu-bar/system-tray icon, so machines without the
+  desktop shell can switch between the Topoi they hold. The submenu lists every
+  Topos with its size, ticks the active one, and offers New Topos. This tray has
+  no supervisor — run in-process it IS the node — so a click queues the action
+  and stands the server down; the swap runs once the port is free and the
+  process re-execs onto the chosen Topos. A tray *attached* to a node it did not
+  start is not offered the row at all: stopping a node it cannot restart would
+  move a database out from under the machine and leave nothing serving. New
+  Topos deliberately does not re-exec, because a node with no key exits within a
+  second and would bury the pairing instructions under an error.
+
 ## [1.3.14] — 2026-08-12
 
 ### Added
