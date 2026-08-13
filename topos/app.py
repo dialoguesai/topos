@@ -58,7 +58,10 @@ from .extensions import load_extensions
 from .core import state
 from .core.handlers import handle_control_plane_request
 from .control_plane_client import ControlPlaneClient
-from .engine.registration import build_engine_heartbeat_message, build_engine_register_message
+from .engine.registration import (
+    build_engine_heartbeat_message_async,
+    build_engine_register_message_async,
+)
 from .hosted_pool_lease import HostedPoolLeaseClient
 from .services.container import get_services
 from .runtime_update import (
@@ -366,13 +369,17 @@ async def startup_event() -> None:
             await asyncio.sleep(0.1)
             while True:
                 if state.control_plane_client:
-                    await state.control_plane_client.send_message(build_engine_register_message())
+                    await state.control_plane_client.send_message(
+                        await build_engine_register_message_async()
+                    )
                     break
                 await asyncio.sleep(1.0)
             while True:
                 await asyncio.sleep(30.0)
                 if state.control_plane_client:
-                    await state.control_plane_client.send_message(build_engine_heartbeat_message())
+                    await state.control_plane_client.send_message(
+                        await build_engine_heartbeat_message_async()
+                    )
 
         state.engine_presence_task = asyncio.create_task(_presence_loop())
     start_runtime_update_monitor()

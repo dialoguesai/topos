@@ -32,6 +32,8 @@ RUNTIME_PROFILE_OPERATIONS: dict[str, list[str]] = {
         "ollama_list_models",
         "ollama_pull_model",
         "ollama_pull_status",
+        "ollama_install",
+        "ollama_install_status",
     ],
 }
 

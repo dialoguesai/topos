@@ -29,6 +29,29 @@ STATE_ERROR = "error"
 _LOCK = threading.Lock()
 _PROGRESS: Dict[str, Dict[str, Any]] = {}
 
+#: A node runs for weeks and the browser may name any tag, typos included. More
+#: than a handful of finished records means this store is being kept as a log,
+#: which is not what it is for.
+_MAX_TERMINAL_RECORDS = 64
+
+
+def _evict_locked(keep: str = "") -> None:
+    """Drop the oldest FINISHED records once there are too many.
+
+    Caller holds ``_LOCK``. Only terminal records are eligible: forgetting a
+    download that is still running would let the CTA offer to start it again,
+    costing the owner the transfer twice (spec D4). `keep` spares the record the
+    caller has just written, which is the one about to be polled. Dicts preserve
+    insertion order, so the oldest terminal record is the first one found.
+    """
+    terminal = [
+        tag
+        for tag, record in _PROGRESS.items()
+        if record.get("state") in (STATE_DONE, STATE_ERROR) and tag != keep
+    ]
+    for tag in terminal[: max(0, len(terminal) - _MAX_TERMINAL_RECORDS)]:
+        _PROGRESS.pop(tag, None)
+
 
 def _record(model: str) -> Dict[str, Any]:
     return {
@@ -60,6 +83,7 @@ def _apply_frame(tag: str, frame: Dict[str, Any]) -> None:
     total = int(frame.get("total") or 0)
     with _LOCK:
         record = _PROGRESS.setdefault(tag, _record(tag))
+        _evict_locked(keep=tag)
         record["status"] = str(frame.get("status") or "")
         record["total"] = max(total, int(record.get("total") or 0))
         # /api/pull reports per-layer byte counts, so a fresh layer restarts at
@@ -77,6 +101,7 @@ def _run_pull(tag: str, adapter: Any) -> None:
             record = _PROGRESS.setdefault(tag, _record(tag))
             record["state"] = STATE_ERROR
             record["error"] = str(exc)
+            _evict_locked(keep=tag)
         return
     with _LOCK:
         record = _PROGRESS.setdefault(tag, _record(tag))
@@ -86,6 +111,7 @@ def _run_pull(tag: str, adapter: Any) -> None:
         # otherwise report 0/0 and render as a stalled bar.
         if not record["total"]:
             record["total"] = record["completed"] = 1
+        _evict_locked(keep=tag)
 
 
 def start_pull(model: str, *, adapter: Optional[Any] = None) -> Dict[str, Any]:

@@ -389,9 +389,13 @@ async def handle_ollama_list_models(message: Dict[str, Any]) -> Optional[Dict[st
     req_id = message.get("id")
     if not req_id:
         return None
+    # Schema stamps that this payload knows how to distinguish reachable from
+    # empty. The CP refuses to default `reachable` without it — an older node
+    # answering `{models: []}` must read as unknown, not "Ollama up, empty".
+    _schema = {"ollama_models_schema": 1}
     try:
         result = await get_services().llm.list_ollama_models()
-        return {"id": req_id, "status": "ok", "payload": {"reachable": True, **result}}
+        return {"id": req_id, "status": "ok", "payload": {"reachable": True, **_schema, **result}}
     except HTTPException as exc:
         detail = exc.detail
         err_msg = detail if isinstance(detail, str) else str(detail)
@@ -403,7 +407,12 @@ async def handle_ollama_list_models(message: Dict[str, Any]) -> Optional[Dict[st
             return {
                 "id": req_id,
                 "status": "ok",
-                "payload": {"reachable": False, "models": [], "detail": err_msg},
+                "payload": {
+                    "reachable": False,
+                    "models": [],
+                    "detail": err_msg,
+                    **_schema,
+                },
             }
         return {
             "id": req_id,
@@ -440,6 +449,30 @@ async def handle_ollama_pull_status(message: Dict[str, Any]) -> Optional[Dict[st
 
         record = pull_status(str(payload.get("model") or ""))
         return {"id": req_id, "status": "ok", "payload": record}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+@handles("ollama_install")
+async def handle_ollama_install(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    try:
+        from ...engine.ollama_install import start_install
+
+        return {"id": req_id, "status": "ok", "payload": start_install()}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+@handles("ollama_install_status")
+async def handle_ollama_install_status(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    try:
+        from ...engine.ollama_install import install_status
+
+        return {"id": req_id, "status": "ok", "payload": install_status()}
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}
 
