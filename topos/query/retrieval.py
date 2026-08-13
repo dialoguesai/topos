@@ -1362,7 +1362,21 @@ def _load_attention_summary_items(conn: Optional[Any], limit: int = 10) -> List[
                         else f"KL={payload.get('day_kl')}")
             parts = [f"Attention digest {day} ({surprise})"]
             if movers:
-                parts.append(f"surprise movers: {movers}")
+                # A surprise is an event, not a state: narrators were re-telling
+                # a days-old spike in the present tense because the movers list
+                # carried no date of its own. Age is computed at query time so
+                # the qualifier stays true however long the object is served.
+                age = None
+                try:
+                    age = (datetime.now(timezone.utc).date()
+                           - datetime.strptime(str(day)[:10], "%Y-%m-%d").date()).days
+                except ValueError:
+                    pass
+                when = (f"on {day}" if age is None
+                        else "today" if age <= 0
+                        else "yesterday" if age == 1
+                        else f"on {day}, {age} days ago — not current")
+                parts.append(f"surprise movers ({when}): {movers}")
             if surface:
                 parts.append(f"missed-but-matters: {surface}")
             if distraction:
