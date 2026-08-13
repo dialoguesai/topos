@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from datetime import date
+from datetime import date, datetime, timezone
 
 import pytest
 
@@ -246,6 +246,16 @@ def test_retrieval_surfaces_attention_objects(conn):
     assert DAY in digest["summary_text"]
     assert ("surprise p" in digest["summary_text"]) or ("KL=" in digest["summary_text"])
     assert "discard" not in digest["summary_text"].lower()
+    # Movers are date-qualified so a days-old spike can never be narrated as
+    # current (the texasventuregala case: one 07-31 burst re-told for 11 days).
+    if "surprise movers" in digest["summary_text"]:
+        assert "surprise movers (" in digest["summary_text"]
+        fixture_age = (datetime.now(timezone.utc).date()
+                       - datetime.strptime(DAY, "%Y-%m-%d").date()).days
+        expected = ("today" if fixture_age <= 0 else
+                    "yesterday" if fixture_age == 1 else
+                    f"on {DAY}, {fixture_age} days ago — not current")
+        assert f"({expected})" in digest["summary_text"]
 
 
 def test_attention_dashboard_endpoint(conn, tmp_path, monkeypatch):
