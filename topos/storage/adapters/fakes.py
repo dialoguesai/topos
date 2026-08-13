@@ -133,6 +133,28 @@ class InMemoryVectorIndex:
                     out[int(item.get("chunk_index") or 0)] = str(item["content_hash"])
         return out
 
+    def has_duplicate_content(
+        self,
+        content_hash: str,
+        model: str,
+        *,
+        record_type: Optional[str] = None,
+        exclude_record_id: Optional[str] = None,
+    ) -> bool:
+        if not content_hash or not model:
+            return False
+        for item in self._items.values():
+            if str(item.get("content_hash") or "") != content_hash:
+                continue
+            if str(item.get("model") or "") != model:
+                continue
+            if record_type and str(item.get("record_type") or "") != record_type:
+                continue
+            if exclude_record_id and str(item.get("record_id") or "") == exclude_record_id:
+                continue
+            return True
+        return False
+
     def delete_chunks_for_record(
         self,
         record_id: str,

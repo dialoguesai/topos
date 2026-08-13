@@ -43,7 +43,13 @@ def _record_type(msg: Dict[str, Any]) -> Optional[str]:
         "profile_records": "profile_record",
         "calendar_events": "calendar_event",
     }
-    return mapping.get(table)
+    if table in mapping:
+        return mapping[table]
+    # Reloaded activity batches (load_canonical_records_for_signal) carry no
+    # table stamp; activity_type is the marker that survives the round-trip.
+    if msg.get("activity_type"):
+        return "activity_event"
+    return None
 
 
 class EmbeddingsJob(BaseEnrichmentJob):
@@ -80,6 +86,12 @@ class EmbeddingsJob(BaseEnrichmentJob):
 
         total = len(canonical_messages)
         processed = 0
+        # Activity rows (browser visits above all) repeat the same title/url
+        # many times per batch; one vector per distinct text is the policy —
+        # revisits must not multiply near-identical neighbors in the index.
+        # Message-family rows are never deduped: each message needs its own
+        # vector row or it is unreachable through retrieval.
+        seen_activity_hashes: set = set()
         for msg in canonical_messages:
             message_id = msg.get("message_id") or msg.get("id")
             record_id = msg.get("event_id") or msg.get("record_id") or message_id
@@ -90,6 +102,11 @@ class EmbeddingsJob(BaseEnrichmentJob):
 
             record_type = _record_type(msg)
             parent_hash = _content_hash(str(content))
+            if record_type == "activity_event":
+                if parent_hash in seen_activity_hashes:
+                    processed += 1
+                    continue
+                seen_activity_hashes.add(parent_hash)
             specs = (
                 chunk_text(str(content))
                 if vector_chunking_enabled()

@@ -319,8 +319,29 @@
     {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
-      "steps": [],
-      "notes": []
+      "steps": [
+        {
+          "id": "backfill-browser-activity-lanes",
+          "kind": "enrichment_reprocess",
+          "title": "Backfill url_classification + embeddings for browser activity rows the stale-install gate dropped",
+          "why": "A 2026-05-29 source_runtime_installs snapshot for browser_visits/browser_events (enrichment_trigger='manual', no jobs) shadowed the bundled lane policy from the ~2026-07-10 deploy on: every live browser push since ran zero enrichment/signal jobs while the inbox job reported done (one live node: 0/1,034 August visits embedded or url-classified). Runtime installs now adopt bundled lane policy, but rows ingested while the gate was closed still have no derived data.",
+          "params": {
+            "job_names": [
+              "url_classification",
+              "embeddings"
+            ],
+            "include_signal": true
+          },
+          "progress": "per-source progress via GET /v1/upgrade/status",
+          "idempotent": "coverage-driven row selection (only rows missing derived output); embedding writes are (record_id, model, chunk_index)-keyed with content-hash skip, and activity rows dedupe to one vector per distinct text, so re-running converges",
+          "consent": "auto",
+          "cost": "local models only, no network; ~1k title-length rows on the affected node, minutes on the local embedding + url classifier; unaffected sources no-op on the coverage check",
+          "order": 1
+        }
+      ],
+      "notes": [
+        "Deploying this build requires reinstalling the node (frozen uv tool snapshot) — a plain restart runs the old code and leaves the browser lanes dark."
+      ]
     }
   ]
 }
