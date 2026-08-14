@@ -14,10 +14,17 @@ Never touches the live database: the source is opened read-only and copied
 into the system temp dir with the sqlite backup API; every write lands on the
 copy. Nothing here restarts or signals a running node.
 
+That copy is the size of the node's database (~480 MB on a live one) and is
+deleted on exit, including when a run fails or is interrupted — five runs
+while measuring this labeler once left ~2.4 GB behind and filled the disk.
+The report is kilobytes and is kept. Pass ``--keep-copy`` to inspect the
+database a run worked on.
+
     python scripts/eval_cluster_labels.py                  # all clusters, both arms
     python scripts/eval_cluster_labels.py --limit 40       # bounded
     python scripts/eval_cluster_labels.py --arms contrastive
     python scripts/eval_cluster_labels.py --dry-run        # print prompts, no model
+    python scripts/eval_cluster_labels.py --keep-copy      # leave the copy on disk
 """
 
 from __future__ import annotations
@@ -60,6 +67,11 @@ def copy_database(source: Path, dest: Path) -> Dict[str, Any]:
 
 def label_metrics(rows: List[Dict[str, str]]) -> Dict[str, Any]:
     """rows: [{"label": ..., "dimension": ...}] — one per cluster."""
+    from topos.features.signal.cluster_labels import (
+        label_banned_words,
+        label_is_wrong_length,
+    )
+
     counts = Counter(str(r["label"]).strip().lower() for r in rows)
     dims: Dict[str, set] = defaultdict(set)
     for row in rows:
@@ -68,6 +80,22 @@ def label_metrics(rows: List[Dict[str, str]]) -> Dict[str, Any]:
     cross_dimension = {
         label: sorted(dims[label]) for label in duplicated if len(dims[label]) > 1
     }
+    # The banned vocabulary is the mechanism, not a style rule: every duplicate
+    # measured on the live node is built out of those eight words. A prompt that
+    # bans them and still returns them has not fixed anything, so the share is
+    # reported rather than assumed to be zero.
+    banned_hits = Counter()
+    banned_rows = 0
+    word_counts = Counter()
+    in_rule = 0
+    for row in rows:
+        hits = label_banned_words(str(row["label"]))
+        if hits:
+            banned_rows += 1
+            banned_hits.update(hits)
+        word_counts[len(str(row["label"]).split())] += 1
+        if not label_is_wrong_length(str(row["label"])):
+            in_rule += 1
     return {
         "clusters": len(rows),
         "distinct_labels": len(counts),
@@ -75,6 +103,16 @@ def label_metrics(rows: List[Dict[str, str]]) -> Dict[str, Any]:
         "duplicated_labels": len(duplicated),
         "clusters_carrying_a_duplicate_label": sum(duplicated.values()),
         "labels_spanning_multiple_dimensions": len(cross_dimension),
+        "labels_with_a_banned_word": banned_rows,
+        "banned_word_share": round(banned_rows / len(rows), 3) if rows else 0.0,
+        "banned_words_used": dict(banned_hits.most_common()),
+        # Duplication and informativeness pull in opposite directions: bare
+        # proper nouns are unique, so a prompt can post perfect distinctness
+        # while saying less than the one it replaced. Both are reported.
+        "labels_within_word_rule": in_rule,
+        "word_rule_share": round(in_rule / len(rows), 3) if rows else 0.0,
+        "single_word_labels": word_counts.get(1, 0),
+        "words_per_label": dict(sorted(word_counts.items())),
         "top_duplicates": [
             {"label": label, "count": n, "dimensions": sorted(dims[label])}
             for label, n in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:8]
@@ -176,8 +214,60 @@ def print_metrics(title: str, metrics: Dict[str, Any]) -> None:
     print(f"  labels used more than once        {metrics['duplicated_labels']}")
     print(f"  clusters carrying a dup label     {metrics['clusters_carrying_a_duplicate_label']}")
     print(f"  dup labels spanning >1 dimension  {metrics['labels_spanning_multiple_dimensions']}")
+    print(
+        f"  labels with a banned word         {metrics['labels_with_a_banned_word']}"
+        f" ({metrics['banned_word_share']:.1%})"
+    )
+    if metrics["banned_words_used"]:
+        print(f"    {metrics['banned_words_used']}")
+    print(
+        f"  labels obeying the 2-5 word rule   {metrics['labels_within_word_rule']}"
+        f" ({metrics['word_rule_share']:.1%}), single-word {metrics['single_word_labels']}"
+    )
+    print(f"    words per label {metrics['words_per_label']}")
     for entry in metrics["top_duplicates"]:
         print(f"    x{entry['count']:<3} {entry['label']!r} across {entry['dimensions']}")
+
+
+def stale_copies() -> List[Path]:
+    """Working copies left behind by earlier runs — crashed, killed, or older."""
+    root = Path(tempfile.gettempdir())
+    try:
+        candidates = sorted(root.glob("topos-labeleval-*/labels_eval.db"))
+    except OSError:
+        return []
+    return [p for p in candidates if p.is_file()]
+
+
+def discard_copy(copy_path: Path, workdir: Path, *, created_workdir: bool) -> None:
+    """Remove the working copy. Always — this is a ~480 MB file per run.
+
+    The script exists to be run repeatedly while iterating on a prompt, and it
+    took five runs to measure the labeler: that left ~2.4 GB of orphaned copies
+    and filled the disk. Only the database and its sqlite sidecars go; the
+    report is kilobytes and stays — so an auto-created workdir survives holding
+    just that, and is removed only when the report went elsewhere via
+    ``--report``.
+    """
+    # Glob rather than a fixed -wal/-shm list: a run killed mid-backup can
+    # leave whichever sidecar sqlite had open at the time.
+    sidecars = sorted(copy_path.parent.glob(f"{copy_path.name}-*"))
+    freed = 0
+    for path in [copy_path, *sidecars]:
+        try:
+            if path.is_file():
+                freed += path.stat().st_size
+                path.unlink()
+        except OSError as exc:  # a copy we cannot delete must not fail the run
+            log("cleanup", f"could not remove {path}: {exc}")
+    if freed:
+        log("cleanup", f"removed the working copy ({freed / 1e6:.0f} MB)")
+    if created_workdir:
+        try:
+            if not any(workdir.iterdir()):
+                workdir.rmdir()
+        except OSError:
+            pass
 
 
 def main() -> int:
@@ -200,10 +290,36 @@ def main() -> int:
         help="print one prompt per arm and exit — no model calls",
     )
     parser.add_argument("--report", default="", help="write the JSON report here")
+    parser.add_argument(
+        "--keep-copy",
+        action="store_true",
+        help="keep the ~480MB working copy for inspection (deleted by default)",
+    )
     args = parser.parse_args()
 
+    created_workdir = not args.workdir
     workdir = Path(args.workdir) if args.workdir else Path(tempfile.mkdtemp(prefix="topos-labeleval-"))
     copy_path = workdir / "labels_eval.db"
+    try:
+        return _run_eval(args, workdir, copy_path)
+    finally:
+        if args.keep_copy:
+            log("cleanup", f"kept the working copy at {copy_path} (--keep-copy)")
+        else:
+            discard_copy(copy_path, workdir, created_workdir=created_workdir)
+
+
+def _run_eval(args: argparse.Namespace, workdir: Path, copy_path: Path) -> int:
+    leftovers = [p for p in stale_copies() if p != copy_path]
+    if leftovers:
+        total = sum(p.stat().st_size for p in leftovers) / 1e6
+        # Not deleted here: one of these may belong to a run happening right now.
+        log(
+            "cleanup",
+            f"{len(leftovers)} working copies from earlier runs are still on disk"
+            f" ({total:.0f} MB). Remove with:"
+            f" rm -rf {Path(tempfile.gettempdir()) / 'topos-labeleval-*'}",
+        )
     log("copy", f"{args.source_db} -> {copy_path} (read-only source)")
     log("copy", str(copy_database(Path(args.source_db), copy_path)))
 

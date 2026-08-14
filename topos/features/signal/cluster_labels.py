@@ -65,6 +65,10 @@ logger = logging.getLogger("topos.features.signal.cluster_labels")
 
 _LABEL_POOL = ThreadPoolExecutor(max_workers=2)
 _MAX_LABEL_CHARS = 60
+# The prompt's own first rule, enforced after parsing too — see
+# label_is_wrong_length for why the rule alone was not enough.
+_MIN_LABEL_WORDS = 2
+_MAX_LABEL_WORDS = 5
 _SAMPLE_PREVIEWS = 12
 _PREVIEW_CHARS = 140
 
@@ -506,8 +510,13 @@ def build_contrastive_label_prompt(
         [
             "",
             "Rules:",
-            "- 2-5 words. No quotes, no punctuation, no explanation.",
+            # "2-5 words" alone measured 46% compliant; naming the failure mode
+            # is what the other rules here already do for links and generics.
+            "- 2-5 words, never one word on its own. No quotes, no punctuation,"
+            " no explanation.",
             "- Name the actual subject, activity, person, place, product or project.",
+            "- A bare name is not enough: say what about it - what they do with it,"
+            " or what happens there.",
             "- Never a URL, domain, file path or @handle - write what it IS.",
             "- Never use: " + ", ".join(_BANNED_LABEL_WORDS) + ".",
         ]
@@ -528,6 +537,18 @@ def build_contrastive_label_prompt(
         lines.append(
             f'- "{rejected_label}" was rejected as too generic. Name the subject itself.'
         )
+    elif rejected_label and rejected_reason == "length":
+        count = label_word_count(rejected_label)
+        if count < _MIN_LABEL_WORDS:
+            lines.append(
+                f'- "{rejected_label}" is one word. Keep it and add what about it,'
+                f" for {_MIN_LABEL_WORDS}-{_MAX_LABEL_WORDS} words in total."
+            )
+        else:
+            lines.append(
+                f'- "{rejected_label}" is {count} words. Answer with'
+                f" {_MIN_LABEL_WORDS}-{_MAX_LABEL_WORDS}."
+            )
     elif rejected_label:
         lines.append(
             f'- "{rejected_label}" is already taken by another cluster. Pick a different name.'
@@ -555,6 +576,27 @@ def parse_label(text: str) -> Optional[str]:
     return line
 
 
+def label_word_count(label: str) -> int:
+    return len(str(label or "").split())
+
+
+def label_is_wrong_length(label: str) -> bool:
+    """True when an answer ignores the prompt's own first rule.
+
+    Measured on the first full relabel of the live node: the contrastive prompt
+    fixed duplication but obeyed "2-5 words" LESS than the prompt it replaced —
+    46% compliance against 90%, with single-word answers going 15 → 81
+    ("Met", "America", "Friend", "Internet"). Every directive in the prompt
+    asks the model to *name a thing*, and distinguishing terms arrive as bare
+    tokens, so a lone proper noun is the path of least resistance. Those names
+    are unique, which is exactly why the duplication metrics looked healthy
+    while the labels got less informative — one bare noun says who or where,
+    never what about them.
+    """
+    count = label_word_count(label)
+    return count < _MIN_LABEL_WORDS or count > _MAX_LABEL_WORDS
+
+
 def _normalized_label(label: str) -> str:
     return re.sub(r"[^a-z0-9 ]", "", str(label or "").lower()).strip()
 
@@ -573,6 +615,8 @@ def _rejection_reason(
         return "taken"
     if label_is_generic(label):
         return "generic"
+    if label_is_wrong_length(label):
+        return "length"  # last: a terse name is weak, not unpublishable
     return None
 
 
@@ -580,14 +624,20 @@ def _label_rank(
     label: str,
     used: Dict[str, int],
     protected_terms: Optional[Any] = None,
-) -> tuple[int, int, int, int]:
+) -> tuple[int, int, int, int, int]:
     """Higher is better: publishable beats protected, then link, then duplicate,
-    then generic."""
+    then generic, then well-formed length.
+
+    Length ranks last on purpose. "Austin" is a worse label than "Austin Trips",
+    but it is a better one than a duplicate or "personal projects" — so a retry
+    only wins on length when it costs nothing above it.
+    """
     return (
         0 if label_mentions_protected(label, protected_terms) else 1,
         0 if label_is_urlish(label) else 1,
         0 if _normalized_label(label) in used else 1,
         0 if label_is_generic(label) else 1,
+        0 if label_is_wrong_length(label) else 1,
     )
 
 
