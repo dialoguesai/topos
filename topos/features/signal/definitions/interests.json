@@ -1,0 +1,131 @@
+{
+  "definition_version": "1.0.0",
+  "dimension_id": "interests",
+  "status": "typed",
+  "core_question": "What are they paying attention to, what did that crowd out, and how concentrated is their focus against their own baseline?",
+  "primary_entity_types": [
+    {
+      "id": "InterestTopic",
+      "description": "A recurring subject of attention with weight against the owner's own baseline.",
+      "fields": [
+        "label",
+        "weight",
+        "trend_band",
+        "first_seen_at",
+        "evidence_count"
+      ]
+    },
+    {
+      "id": "AttentionVerdict",
+      "description": "Triage outcome for a day's items \u2014 signal, surface, or distraction \u2014 as coarse groups only.",
+      "fields": [
+        "verdict_kind",
+        "group_label",
+        "count",
+        "day"
+      ]
+    },
+    {
+      "id": "FocusReading",
+      "description": "Concentration of attention for a window, relative to the owner's personal baseline.",
+      "fields": [
+        "focus_index",
+        "structure_clarity",
+        "information_breadth",
+        "pipeline_confidence",
+        "trend",
+        "baseline_delta"
+      ]
+    },
+    {
+      "id": "ShiftSpike",
+      "description": "A week-over-week change in the shape of attention.",
+      "fields": [
+        "score",
+        "interpretation",
+        "current_week",
+        "magnitude_band"
+      ]
+    },
+    {
+      "id": "InfluenceThread",
+      "description": "A ranked thread shaping current focus.",
+      "fields": [
+        "thread_label",
+        "influence_rank",
+        "entity_lens"
+      ]
+    }
+  ],
+  "signal_objects": [
+    "interest_profile",
+    "attention_summary",
+    "top_topics",
+    "activity_tags",
+    "interest_scores",
+    "url_classification",
+    "complexity_summary",
+    "complexity_influence",
+    "interests_living_brief",
+    "triage_params"
+  ],
+  "gate_objects": [
+    "interest_profile",
+    "attention_summary",
+    "complexity_summary"
+  ],
+  "canonical_contributions": {
+    "activity_events": {
+      "primary_weight": 1.0,
+      "secondary_dimensions": [
+        "profile",
+        "places"
+      ],
+      "weight_fields": [
+        "activity_type",
+        "occurred_at"
+      ]
+    },
+    "browser_visits": {
+      "primary_weight": 0.9,
+      "secondary_dimensions": [
+        "profile"
+      ],
+      "weight_fields": [
+        "hostname",
+        "visited_at",
+        "title"
+      ]
+    },
+    "topic": {
+      "primary_weight": 1.0
+    },
+    "content_item": {
+      "primary_weight": 0.8
+    },
+    "reading_activity": {
+      "primary_weight": 0.8
+    },
+    "conversation_messages": {
+      "primary_weight": 0.3,
+      "secondary_dimensions": [
+        "memory",
+        "relationships"
+      ]
+    },
+    "location_events": {
+      "primary_weight": 0.3,
+      "secondary_dimensions": [
+        "places"
+      ]
+    }
+  },
+  "view_types": [
+    "topic_tags",
+    "attention_digest",
+    "focus_gauge",
+    "influence_threads",
+    "narrative_brief_optional"
+  ],
+  "extraction_hints": "Describe topics, focus concentration and rhythm as labels and bands. SILENCE INVARIANT: never reference, count, or allude to items triaged as discarded \u2014 those exist only in the pull-only triage_verdicts ledger. Never include full URLs, page titles verbatim, or per-item browsing history."
+}

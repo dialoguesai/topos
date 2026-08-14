@@ -7,12 +7,22 @@
     {
       "id": "RelationshipEdge",
       "description": "Typed link between the owner and another person or organization.",
-      "fields": ["target_entity_id", "tier", "warmth_band", "cadence_band", "last_interaction_at"]
+      "fields": [
+        "target_entity_id",
+        "tier",
+        "warmth_band",
+        "cadence_band",
+        "last_interaction_at"
+      ]
     },
     {
       "id": "NetworkCluster",
       "description": "A group of related contacts (work, social, family band).",
-      "fields": ["cluster_label", "member_count", "dominant_context"]
+      "fields": [
+        "cluster_label",
+        "member_count",
+        "dominant_context"
+      ]
     }
   ],
   "signal_objects": [
@@ -20,7 +30,8 @@
     "warmth_score",
     "relationship_tier",
     "relationship_narrative_summary",
-    "entity_dossier"
+    "entity_dossier",
+    "relationship_edge_summary"
   ],
   "gate_objects": [
     "warmth_score",
@@ -30,11 +41,16 @@
   "canonical_contributions": {
     "conversation_messages": {
       "primary_weight": 0.9,
-      "secondary_dimensions": ["memory", "interests"]
+      "secondary_dimensions": [
+        "memory",
+        "interests"
+      ]
     },
     "contacts": {
       "primary_weight": 1.0,
-      "secondary_dimensions": ["profile"]
+      "secondary_dimensions": [
+        "profile"
+      ]
     },
     "contact_identifiers": {
       "primary_weight": 0.8
@@ -44,10 +60,20 @@
     },
     "journal_entries": {
       "primary_weight": 0.6,
-      "secondary_dimensions": ["time", "work"],
-      "weight_fields": ["people", "entry_at"]
+      "secondary_dimensions": [
+        "time",
+        "work"
+      ],
+      "weight_fields": [
+        "people",
+        "entry_at"
+      ]
     }
   },
-  "view_types": ["relationship_graph", "tier_summary", "narrative_brief_optional"],
+  "view_types": [
+    "relationship_graph",
+    "tier_summary",
+    "narrative_brief_optional"
+  ],
   "extraction_hints": "Relationship tiers and interaction cadence bands; no contact names or message excerpts in inference-safe outputs."
 }
