@@ -945,3 +945,25 @@ def test_defer_reports_false_when_nothing_is_pending():
             job_store.enqueue_job = original
     finally:
         conn.close()
+
+
+def test_defer_falls_back_inline_when_the_pending_check_raises():
+    """The safe branch must be exercised by a test, not by the day it matters.
+
+    _defer_consolidation's `except` returns False so the caller runs the
+    consolidation inline — "a consolidation that never happens is worse than a
+    slow one". That fallback sat unreachable for two weeks (the constant-key
+    bug returned True without ever throwing) and nothing noticed, because
+    nothing asserted the direction. A queue that cannot even be inspected must
+    fail toward doing the work, not toward reporting it done.
+    """
+    from topos.enrichment.jobs.canonical.topic_clusters_job import _defer_consolidation
+
+    class _RaisingConn:
+        def __getattr__(self, name):
+            def _raise(*args, **kwargs):
+                raise sqlite3.OperationalError("pipeline_jobs unavailable")
+
+            return _raise
+
+    assert _defer_consolidation(_RaisingConn()) is False
