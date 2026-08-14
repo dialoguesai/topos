@@ -47,6 +47,17 @@ def validate_definition(data: Dict[str, Any]) -> None:
         path = ".".join(str(p) for p in first.path) or "root"
         raise DimensionDefinitionError(f"Invalid dimension definition at {path}: {first.message}")
 
+    # JSON Schema cannot express a subset relation between two sibling arrays,
+    # so the invariant is enforced here: a gate object the dimension never
+    # emits cannot gate anything, and it silently widens the write allowlist
+    # in SignalObjectStore._validate_object_type.
+    orphans = sorted(set(data.get("gate_objects") or []) - set(data.get("signal_objects") or []))
+    if orphans:
+        raise DimensionDefinitionError(
+            f"Invalid dimension definition at gate_objects: {data.get('dimension_id')!r} "
+            f"gates on undeclared signal objects: {orphans}"
+        )
+
 
 def list_definition_ids() -> List[str]:
     ids: List[str] = []

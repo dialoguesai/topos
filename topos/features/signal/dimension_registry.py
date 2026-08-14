@@ -115,11 +115,15 @@ def view_types_by_dimension(dimension: str) -> List[str]:
 
 
 def gate_objects_by_dimension(dimension: str) -> List[str]:
-    explicit = gate_objects_for_dimension(str(dimension or "").strip().lower())
-    if explicit:
-        return explicit
-    dim = str(dimension or "").strip().lower()
-    return list(DIMENSION_SIGNAL_OBJECTS.get(dim, []))
+    """Objects a qualification gate may read for this dimension (wiki Layer 3).
+
+    Fails CLOSED: an unknown dimension, or one that declares no gate objects,
+    grants nothing. This previously fell back to DIMENSION_SIGNAL_OBJECTS, which
+    is a data-health job catalog rather than a disclosure allowlist — that path
+    granted gates the dimension's whole signal set, including the
+    ``*_living_brief`` narrative objects no typed definition permits gating on.
+    """
+    return list(gate_objects_for_dimension(str(dimension or "").strip().lower()))
 
 
 VIEW_TYPES_BY_DIMENSION: Dict[str, List[str]] = {

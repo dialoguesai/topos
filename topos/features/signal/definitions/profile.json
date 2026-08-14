@@ -22,6 +22,7 @@
   ],
   "signal_objects": [
     "skill_vector",
+    "skill_vector_overlap",
     "seniority_band",
     "domain_tags",
     "public_bio"
