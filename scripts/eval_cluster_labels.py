@@ -181,12 +181,14 @@ def run_arm(
 
     working = copy.deepcopy(clusters)
     t0 = time.time()
+    stats: Dict[str, Any] = {}
     relabeled = apply_llm_cluster_labels(
         working,
         complete=runner,
         mode="on",
         timeout_sec=timeout_sec,
         contrastive=(arm == "contrastive"),
+        stats=stats,
     )
     rows = [
         {
@@ -202,6 +204,7 @@ def run_arm(
         "relabeled": relabeled,
         "seconds": round(time.time() - t0, 1),
         "rows": rows,
+        "labeler_stats": stats,
         "metrics": label_metrics(rows),
     }
 
@@ -389,7 +392,7 @@ def _run_eval(args: argparse.Namespace, workdir: Path, copy_path: Path) -> int:
         log(
             arm,
             f"relabeled {results[arm]['relabeled']}/{len(clusters)} "
-            f"in {results[arm]['seconds']}s",
+            f"in {results[arm]['seconds']}s; {results[arm]['labeler_stats']}",
         )
         print_metrics(f"ARM: {arm}", results[arm]["metrics"])
 
@@ -422,6 +425,7 @@ def _run_eval(args: argparse.Namespace, workdir: Path, copy_path: Path) -> int:
                 "relabeled": results[arm]["relabeled"],
                 "seconds": results[arm]["seconds"],
                 "metrics": results[arm]["metrics"],
+                "labeler_stats": results[arm]["labeler_stats"],
                 "labels": results[arm]["rows"],
             }
             for arm in results
