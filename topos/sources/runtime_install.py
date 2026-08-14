@@ -71,6 +71,17 @@ _BUNDLED_LANE_POLICY_FIELDS = (
     "signal_derivation_jobs",
 )
 
+# The MAPPING contract of a bundled source is the engine's, not a snapshot's.
+# Lane policy (above) answers "which jobs run"; this answers "what does a record
+# become" — and a snapshot that predates a declaration silently maps less than
+# the shipped engine does. Live case: github_activity's active install was taken
+# before canonical_field_map existed, so the engine shipped
+# `activity_events.content <- payload.commits[*].message` and the node kept
+# mapping without it — a re-map wrote 458 rows and 0 contents, no error anywhere.
+# Same failure family as the 2026-05-29 browser_visits snapshot (216ab92): a
+# stale install row quietly outranking the build.
+_BUNDLED_MAPPING_FIELDS = ("canonical_field_map",)
+
 
 def _adopt_bundled_lane_policy(payload: Dict[str, Any]) -> Dict[str, Any]:
     from .registry import BUNDLED_REGISTRY
@@ -80,9 +91,14 @@ def _adopt_bundled_lane_policy(payload: Dict[str, Any]) -> Dict[str, Any]:
     if bundled is None:
         return payload
     merged = dict(payload)
-    for field_name in _BUNDLED_LANE_POLICY_FIELDS:
+    for field_name in (*_BUNDLED_LANE_POLICY_FIELDS, *_BUNDLED_MAPPING_FIELDS):
         value = getattr(bundled, field_name, None)
-        merged[field_name] = list(value) if isinstance(value, list) else value
+        if isinstance(value, list):
+            merged[field_name] = list(value)
+        elif isinstance(value, dict):
+            merged[field_name] = dict(value)
+        else:
+            merged[field_name] = value
     return merged
 
 
