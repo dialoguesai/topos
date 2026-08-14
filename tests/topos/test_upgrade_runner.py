@@ -551,3 +551,63 @@ def test_shipped_manifest_declares_the_blackhole_rerun_after_the_relabel() -> No
     assert rerun, "no release declares rerun-blackhole-rebuilds"
     assert rerun[0]["params"]["targets"] == ["blackhole_rebuilds"]
     assert "relabel-topic-clusters" in (rerun[0].get("depends_on") or [])
+
+
+def test_canonical_reprocess_passes_run_enrichment_through(conn, monkeypatch):
+    """A step that declares run_enrichment: false must not run derivation.
+
+    The flag is the whole point of the github content backfill: reprocess_source
+    defaults to the source's full baseline signal fan-out, and a batch over
+    topic_clusters' incremental cap forces a FULL cluster recompute — a
+    repartition, on a release that only owes corrected canonical rows. A
+    silently-ignored flag would do exactly what it was added to prevent.
+    """
+    from topos.upgrades.runner import _exec_canonical_reprocess
+
+    seen = {}
+
+    async def fake_reprocess_source(**kwargs):
+        seen.update(kwargs)
+        return {"status": "ok"}
+
+    import topos.ingestion.reprocess as reprocess_module
+
+    monkeypatch.setattr(reprocess_module, "reprocess_source", fake_reprocess_source)
+
+    detail = _exec_canonical_reprocess(
+        {
+            "id": "backfill-github-activity-commit-content",
+            "params": {
+                "from_stage": "raw",
+                "source_ids": ["github_activity"],
+                "run_enrichment": False,
+            },
+        },
+        conn,
+    )
+    assert seen["run_enrichment"] is False
+    assert seen["source_id"] == "github_activity"
+    assert seen["from_stage"] == "raw"
+    assert detail["run_enrichment"] is False
+    assert detail["sources"]["github_activity"] == "ok"
+
+
+def test_canonical_reprocess_still_defaults_to_running_enrichment(conn, monkeypatch):
+    """Steps that omit the flag keep the historical behavior."""
+    from topos.upgrades.runner import _exec_canonical_reprocess
+
+    seen = {}
+
+    async def fake_reprocess_source(**kwargs):
+        seen.update(kwargs)
+        return {"status": "ok"}
+
+    import topos.ingestion.reprocess as reprocess_module
+
+    monkeypatch.setattr(reprocess_module, "reprocess_source", fake_reprocess_source)
+
+    _exec_canonical_reprocess(
+        {"id": "s", "params": {"from_stage": "raw", "source_ids": ["github_activity"]}},
+        conn,
+    )
+    assert seen["run_enrichment"] is True

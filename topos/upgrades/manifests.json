@@ -347,13 +347,15 @@
             "from_stage": "raw",
             "source_ids": [
               "github_activity"
-            ]
+            ],
+            "run_enrichment": false
           },
           "progress": "GET /v1/upgrade/status",
-          "idempotent": "re-mapping is upsert-keyed (activity event_id, journal entry_id) and content is written with COALESCE, so re-running rewrites the same values; downstream embedding writes are (record_id, model, chunk_index)-keyed with a content-hash skip",
+          "idempotent": "re-mapping is upsert-keyed (activity event_id, journal entry_id) and content is written with COALESCE, so re-running rewrites the same values",
           "consent": "auto",
-          "cost": "no network (raw payloads are local); local embedding + NER over a few hundred commit-message-length rows, seconds to a couple of minutes; nodes with no github_activity install no-op",
-          "order": 2
+          "cost": "no network, no models: one parse + upsert per retained raw row (458 on the measured node), seconds. Nodes with no github_activity install no-op",
+          "order": 2,
+          "$comment": "CANONICAL ONLY (run_enrichment: false), deliberately. The default fan-out would run this source's baseline signal jobs, and a 458-row batch exceeds topic_clusters' _INCREMENTAL_MAX_BATCH (200), which forces a FULL cluster recompute: on the measured node that repartitions all 152 clusters, and 85 of them (interests 48, wellbeing 27, memory 10) sit in dimensions whose definitions/<dimension>.json is not yet in the tree, so dimension_core_question falls back to the generic prompt silently. Corrected content is what this release owes; derivation over it belongs to the release that lands the topic-dimension work, as one pass with the definitions present rather than two with a repartition in between."
         },
         {
           "id": "relabel-topic-clusters",
