@@ -240,6 +240,15 @@ def list_pending_derivation_retries(
     return out
 
 
+def _deferral_reason(result: Dict[str, Any], job_name: str) -> str:
+    """The job's own deferral error ('ollama_unreachable'), if it envelope'd one."""
+    for env in result.get("envelopes") or []:
+        prov = env.get("provenance") or {}
+        if prov.get("job_name") == job_name and prov.get("status") == "deferred":
+            return f"{job_name} deferred: {env.get('error') or 'unknown'}"
+    return f"{job_name} deferred again"
+
+
 async def retry_single_derivation(
     conn: sqlite3.Connection,
     *,
@@ -292,6 +301,16 @@ async def retry_single_derivation(
             return {
                 "outcome": "still_failing",
                 "error": result["errors"][0].get("error"),
+            }
+        if job_name in (result.get("deferred_jobs") or []):
+            # A deferral is a return value, not a raise, so it never reaches
+            # results["errors"]. Falling through to "recovered" discharged the
+            # debt and marked the queue row done with zero rows created — the
+            # retry claimed to have repaired data it never produced. Retrying
+            # into a provider that is still down is still failing.
+            return {
+                "outcome": "still_failing",
+                "error": _deferral_reason(result, job_name),
             }
         # run_signal_derivation clears the debt itself on success.
         return {
@@ -369,6 +388,103 @@ async def retry_pending_derivations(
     return outcome
 
 
+#: engine_config key holding the last observed readiness of each blocking
+#: provider. PERSISTED rather than process state: installing a model and
+#: restarting the app is how a person actually does it, so the edge has to
+#: survive the restart to fire. Keeping it in memory instead would either miss
+#: that sequence entirely, or — if a cold start counted as an edge — re-run
+#: every genuinely broken debt on every launch.
+PROVIDER_READY_KEY = "derivation_debt.provider_ready"
+
+
+def _read_last_ready(conn: sqlite3.Connection) -> Dict[str, bool]:
+    try:
+        from ..core.state import get_engine_config_value
+
+        raw = get_engine_config_value(conn, PROVIDER_READY_KEY)
+        return {str(k): bool(v) for k, v in json.loads(str(raw or "{}")).items()}
+    except Exception as exc:  # noqa: BLE001 — unknown reads as "never observed"
+        logger.debug("[DERIVE:RETRY] could not read provider readiness: %s", exc)
+        return {}
+
+
+def _write_last_ready(conn: sqlite3.Connection, ready: Dict[str, bool]) -> None:
+    try:
+        from ..core.state import set_engine_config_value
+
+        set_engine_config_value(conn, PROVIDER_READY_KEY, json.dumps(ready, sort_keys=True))
+    except Exception as exc:  # noqa: BLE001 — failing to remember must not break the sweep
+        logger.debug("[DERIVE:RETRY] could not persist provider readiness: %s", exc)
+
+
+def revive_capability_blocked_debts(
+    conn: Optional[sqlite3.Connection],
+    *,
+    limit: int = 200,
+) -> Dict[str, Any]:
+    """Re-queue failed debts whose provider has just become reachable.
+
+    EDGE-triggered, not level-triggered. Re-queueing every failed debt whose
+    job looks runnable would put debts that fail for real reasons — a bug, a
+    corrupt record — back on the queue on every sweep, forever. Firing only on
+    the not-ready → ready transition means a debt gets exactly one fresh
+    attempt per time the missing provider actually shows up, which is the event
+    that could plausibly change the outcome.
+
+    The edge is read from and written to ``engine_config``, so it survives a
+    restart. That matters in both directions: "install the model, relaunch the
+    app" still fires, and a node that has always had the provider does not
+    re-run its broken debts on every launch.
+
+    This is the half that makes recorded debt self-healing: ``run_derivation_
+    retry_job`` declines to burn an attempt while the provider is absent, so
+    the debt sits parked until this notices the provider arrive.
+    """
+    from .job_readiness import blocking_providers_ready, provider_for_job
+
+    out: Dict[str, Any] = {"revived": 0, "newly_ready": [], "job_ids": []}
+    if conn is None:
+        return out
+
+    current = blocking_providers_ready(force=True)
+    last = _read_last_ready(conn)
+    newly_ready = sorted(p for p, ready in current.items() if ready and not last.get(p, False))
+    _write_last_ready(conn, {**last, **current})
+    out["newly_ready"] = newly_ready
+    if not newly_ready:
+        return out
+
+    ready_set = set(newly_ready)
+    candidates = [
+        debt
+        for debt in list_pending_derivation_retries(conn, limit=limit)
+        if debt.get("status") == "failed"
+        and provider_for_job(str(debt.get("job_name") or "")) in ready_set
+    ]
+    if not candidates:
+        return out
+
+    try:
+        from ..pipeline.job_store import requeue_failed_jobs
+
+        job_ids = [str(d["job_id"]) for d in candidates]
+        moved = requeue_failed_jobs(conn, job_ids)
+    except Exception as exc:  # noqa: BLE001 — a sweep must never break the worker
+        logger.warning("[DERIVE:RETRY] reviving blocked debts failed: %s", exc)
+        return out
+
+    out["revived"] = int(moved)
+    out["job_ids"] = job_ids
+    if moved:
+        logger.info(
+            "[DERIVE:RETRY] %s reachable again — re-queued %d parked derivation debt(s): %s",
+            ", ".join(newly_ready),
+            moved,
+            ", ".join(sorted({str(d.get("job_name") or "?") for d in candidates})),
+        )
+    return out
+
+
 #: How long a worker-claimed retry waits for an active derivation batch to end
 #: before handing the job back to the queue. Debts are recorded MID-batch, and
 #: the worker claims within its poll interval — re-running immediately would
@@ -387,13 +503,34 @@ async def run_derivation_retry_job(payload: Dict[str, Any]) -> Dict[str, Any]:
     describes. Success marks the row done (the orchestrator clears the debt,
     then the worker completes the job). A retry that fails again returns an
     error status, parking the row 'failed' — still visible in every debt
-    listing, re-queued by the next organic failure of the same (batch, job), and
-    re-runnable via ``POST /signal/derivation-debt/retry``. One claim is one
-    attempt; nothing here loops.
+    listing, and re-queued by the next organic failure of the same (batch, job),
+    by ``revive_capability_blocked_debts`` when a missing provider returns, or
+    by ``POST /signal/derivation-debt/retry``. One claim is one attempt; nothing
+    here loops.
     """
     import asyncio
 
+    from .job_readiness import job_is_ready
     from .pipeline_activity import is_derivation_in_flight
+
+    job_name = str(payload.get("job_name") or "")
+
+    # Asked FIRST, before the in-flight wait: a debt that cannot run at all is
+    # not worth blocking a worker for 30s to discover. Re-running would reload
+    # every canonical record for the batch and re-enter the orchestrator only
+    # to defer again — expensive work whose sole output is the same parked row
+    # and a spent attempt. Park it with what it is waiting FOR instead of a
+    # generic failure; revive_capability_blocked_debts() picks it back up when
+    # the provider returns.
+    ready, reason = job_is_ready(job_name)
+    if not ready:
+        logger.info(
+            "[DERIVE:RETRY] holding debt job=%s batch=%s — %s",
+            job_name,
+            payload.get("sync_batch_id"),
+            reason,
+        )
+        return {"status": "error", "error": f"waiting for provider: {reason}"}
 
     waited = 0.0
     while is_derivation_in_flight():
@@ -408,7 +545,6 @@ async def run_derivation_retry_job(payload: Dict[str, Any]) -> Dict[str, Any]:
     if conn is None:
         return {"status": "error", "error": "no database connection"}
 
-    job_name = str(payload.get("job_name") or "")
     result = await retry_single_derivation(
         conn,
         source_id=str(payload.get("source_id") or ""),
