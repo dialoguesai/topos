@@ -296,6 +296,35 @@ def requeue_job(conn: sqlite3.Connection, job_id: str) -> None:
         commit_connection(conn)
 
 
+def requeue_failed_jobs(conn: sqlite3.Connection, job_ids: List[str]) -> int:
+    """Return specific FAILED jobs to the queue. Returns rows moved.
+
+    Nothing else in this module moves a row out of 'failed': ``requeue_job``
+    only releases a claim the worker still holds, and ``recover_stale_jobs``
+    only touches 'running'. So a job that failed for a reason that has since
+    gone away — a model that was not installed at the time and is now — stayed
+    parked forever on its one spent attempt. Callers decide what "gone away"
+    means; this only performs the transition, for ids they name.
+    """
+    ids = [str(j) for j in (job_ids or []) if j]
+    if not ids:
+        return 0
+    ensure_pipeline_jobs_schema(conn)
+    placeholders = ",".join("?" for _ in ids)
+    with with_db_write():
+        cursor = conn.execute(
+            f"""
+            UPDATE pipeline_jobs
+            SET status='queued', lease_owner=NULL, lease_expires_at=NULL,
+                finished_at=NULL, updated_at=datetime('now')
+            WHERE status='failed' AND job_id IN ({placeholders})
+            """,
+            ids,
+        )
+        commit_connection(conn)
+    return int(cursor.rowcount or 0)
+
+
 def recover_stale_jobs(conn: sqlite3.Connection) -> int:
     """Reset expired or orphaned running jobs to queued."""
     ensure_pipeline_jobs_schema(conn)
