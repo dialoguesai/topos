@@ -9,8 +9,10 @@ The score is a graded 0-1 signal-richness reading, not a coverage cliff:
 - freshness: 24h half-life decay from the newest signal row / embedding.
 - brief:     7d half-life decay from the last real brief revision (empty
              initial shells at revision 1 earn nothing).
-- model:     fraction of the dimension's enrichment jobs whose provider is
-             actually usable (Ollama reachable + model fits the device).
+- model:     fraction of the dimension's enrichment jobs whose model is
+             actually usable — Ollama reachable and above the size minimum,
+             HuggingFace weights present in the local cache. Per-job detail
+             rides along in `model_readiness_jobs`.
 
 Honesty rules: stub rows (model *_stub_v1, provider "stub") and deferred
 placeholders never count; dimensions with zero real signal report
@@ -23,8 +25,9 @@ import logging
 import math
 import sqlite3
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
+from ...enrichment.job_readiness import jobs_for_provider, readiness_of
 from ...storage.adapters.factory import AdapterBundle
 from .dimension_registry import (
     DEFAULT_VOLUME_TARGET,
@@ -42,8 +45,15 @@ WEIGHT_MODEL = 0.15
 
 BRIEF_HALF_LIFE_HOURS = 7 * 24.0
 
-# Signal jobs that require the configured LLM provider (Ollama by default).
-_LLM_JOBS = frozenset({"topics", "dimension_summary", "goal_extraction"})
+
+def _llm_jobs() -> frozenset:
+    """Signal jobs bound to the LLM provider, read from the model catalog.
+
+    Was a literal frozenset here, which is a second copy of something the
+    catalog already states — and the kind that goes stale silently when a job
+    is added or repointed to another provider.
+    """
+    return jobs_for_provider("ollama")
 
 
 def _parse_ts(value: Optional[str]) -> Optional[datetime]:
@@ -84,7 +94,14 @@ def is_stub_signal_row(item: Dict[str, Any]) -> bool:
 
 
 def check_provider_status() -> Dict[str, str]:
-    """Real provider reachability (not inferred from deferred jobs)."""
+    """Reachability of provider SERVICES (not inferred from deferred jobs).
+
+    ``huggingface`` is always "up" and that is not a claim about models: there
+    is no HuggingFace service to reach, the library runs in-process. Whether a
+    given job's weights are actually on disk is a per-model question, answered
+    by ``enrichment.job_readiness`` — do not read this key as "the HF jobs can
+    run".
+    """
     try:
         from ...engine.backends.ollama import OllamaAdapter
 
@@ -112,25 +129,41 @@ def _jobs_for_dimension(dim_id: str) -> List[str]:
 def _model_readiness(
     jobs: List[str],
     *,
-    ollama_up: bool,
     llm_remote: bool,
     llm_meets_minimum: bool,
-) -> float:
-    """Fraction of the dimension's jobs whose provider/model is usable now."""
+    provider_status: Optional[Dict[str, str]] = None,
+) -> Tuple[float, List[Dict[str, Any]]]:
+    """Per-job model availability for a dimension, and the fraction ready.
+
+    This used to be a bare fraction that counted every non-LLM job ready
+    unconditionally — "HuggingFace task models and rules jobs run in-process on
+    any supported device", which is true only once the weights are on disk. A
+    machine set up offline has no weights cached and was still reported at
+    100% model readiness for every dimension those jobs feed.
+
+    Returning the per-job detail is the other half: it makes an empty dimension
+    explainable ("the NER weights are not downloaded yet") rather than merely
+    low-scoring, which is the question a person actually has.
+    """
     if not jobs:
-        return 1.0
-    ready = 0
+        return 1.0, []
+    details: List[Dict[str, Any]] = []
     for job in jobs:
-        if job in _LLM_JOBS:
+        state = readiness_of(job, provider_status=provider_status)
+        ready, reason = state.ready, state.reason
+        if state.provider == "ollama":
+            # Routing the engine does that the catalog does not describe: a
+            # configured remote provider serves these whatever is installed
+            # locally, and a local model below the minimum does not.
             if llm_remote:
-                ready += 1
-            elif ollama_up and llm_meets_minimum:
-                ready += 1
-        else:
-            # HuggingFace task models and rules jobs run in-process on any
-            # supported device.
-            ready += 1
-    return ready / len(jobs)
+                ready, reason = True, "remote LLM provider"
+            elif ready and not llm_meets_minimum:
+                ready, reason = False, "installed model below minimum"
+        entry = state.as_dict()
+        entry["ready"] = ready
+        entry["reason"] = reason
+        details.append(entry)
+    return sum(1 for d in details if d["ready"]) / len(details), details
 
 
 class DataHealthComputer:
@@ -223,7 +256,7 @@ class DataHealthComputer:
         provider_failures: List[str] = []
         # Deferred LLM jobs in this run are direct evidence of an unreachable
         # provider, corroborating (or preempting) the live probe.
-        if not ollama_up or any(j in deferred_jobs for j in _LLM_JOBS):
+        if not ollama_up or any(j in deferred_jobs for j in _llm_jobs()):
             provider_failures.append("ollama_unreachable")
 
         try:
@@ -250,11 +283,13 @@ class DataHealthComputer:
             freshness = freshness_score(latest)
             brief, brief_revision, brief_updated_at = self._brief_score(dim_id)
             jobs = _jobs_for_dimension(dim_id)
-            model_readiness = _model_readiness(
+            model_readiness, model_jobs = _model_readiness(
                 jobs,
-                ollama_up=ollama_up,
                 llm_remote=llm_remote,
                 llm_meets_minimum=llm_meets_minimum,
+                # The probe this method already took, so ten dimensions do not
+                # re-ask ten times and cannot disagree with `provider_failures`.
+                provider_status=provider_status,
             )
             measured = signal_count > 0
             # Unmeasured dimensions score 0: model readiness alone must not
@@ -276,6 +311,10 @@ class DataHealthComputer:
                 "freshness_score": round(freshness, 4),
                 "brief_score": round(brief, 4),
                 "model_readiness_score": round(model_readiness, 4),
+                # Which job is waiting on what. The score alone cannot say
+                # whether a dimension is dark because a server is missing or
+                # because a download has not happened yet.
+                "model_readiness_jobs": model_jobs,
                 "signal_count": signal_count,
                 "volume_target": target,
                 "brief_revision": brief_revision,

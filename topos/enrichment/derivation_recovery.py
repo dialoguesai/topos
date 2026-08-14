@@ -510,7 +510,7 @@ async def run_derivation_retry_job(payload: Dict[str, Any]) -> Dict[str, Any]:
     """
     import asyncio
 
-    from .job_readiness import job_is_ready
+    from .job_readiness import should_hold_job
     from .pipeline_activity import is_derivation_in_flight
 
     job_name = str(payload.get("job_name") or "")
@@ -522,8 +522,12 @@ async def run_derivation_retry_job(payload: Dict[str, Any]) -> Dict[str, Any]:
     # and a spent attempt. Park it with what it is waiting FOR instead of a
     # generic failure; revive_capability_blocked_debts() picks it back up when
     # the provider returns.
-    ready, reason = job_is_ready(job_name)
-    if not ready:
+    #
+    # HOLD, not "not ready": a HuggingFace job whose weights are not cached is
+    # not ready either, but it downloads them on first run, so holding it would
+    # strand work a networked node finishes on its own.
+    hold, reason = should_hold_job(job_name)
+    if hold:
         logger.info(
             "[DERIVE:RETRY] holding debt job=%s batch=%s — %s",
             job_name,
