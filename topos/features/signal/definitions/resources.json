@@ -1,0 +1,64 @@
+{
+  "definition_version": "1.0.0",
+  "dimension_id": "resources",
+  "status": "typed",
+  "core_question": "What flows in and out, what standing commitments consume it, and which way is that trending?",
+  "primary_entity_types": [
+    {
+      "id": "SpendCategory",
+      "description": "Spending grouped by category over a period, as a band rather than a total.",
+      "fields": ["category_label", "amount_band", "period", "trend_band", "transaction_count"]
+    },
+    {
+      "id": "RecurringCommitment",
+      "description": "A standing obligation such as a subscription or regular payment.",
+      "fields": ["service_label", "cadence", "amount_band", "status"]
+    },
+    {
+      "id": "FinancialTrend",
+      "description": "Direction and coarse magnitude of change across a window.",
+      "fields": ["direction", "magnitude_band", "period", "confidence"]
+    },
+    {
+      "id": "AccountActivity",
+      "description": "Coarse activity level for an account kind, never an identity or balance.",
+      "fields": ["account_type", "activity_band", "last_activity_at"]
+    }
+  ],
+  "signal_objects": [
+    "financial_summary",
+    "resources_living_brief"
+  ],
+  "gate_objects": [
+    "financial_summary"
+  ],
+  "canonical_contributions": {
+    "financial_transactions": {
+      "primary_weight": 1.0,
+      "weight_fields": ["amount", "category", "posted_at", "account_type"]
+    },
+    "transaction": {
+      "primary_weight": 1.0,
+      "weight_fields": ["description"]
+    },
+    "subscription": {
+      "primary_weight": 0.9,
+      "weight_fields": ["service_name"]
+    },
+    "receipt": {
+      "primary_weight": 0.8,
+      "weight_fields": ["merchant_name"]
+    },
+    "journal_entries": {
+      "primary_weight": 0.2,
+      "secondary_dimensions": ["wellbeing", "memory"]
+    }
+  },
+  "view_types": [
+    "spend_categories",
+    "commitment_list",
+    "trend_summary",
+    "narrative_brief_optional"
+  ],
+  "extraction_hints": "Report money as categories, bands and directions over a period. Never emit an exact amount, a balance, an account or card identifier, or an individual merchant tied to a dated transaction. Recurring services may be named where the commitment itself is the answer; one-off purchases never are."
+}
