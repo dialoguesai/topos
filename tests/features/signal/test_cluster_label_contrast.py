@@ -137,24 +137,41 @@ class TestSiblingContext:
         assert labeling_order(corpus) == order
 
 
+def _defined_dimensions() -> list[str]:
+    """Dimensions this checkout can actually resolve a `core_question` for.
+
+    Asked of the loader, never hard-coded: `interests`, `wellbeing`, `memory`,
+    `places` and `resources` were untracked working-tree files when this landed,
+    so naming them directly made these tests pass locally and fail in CI, which
+    only ever sees committed definitions.
+    """
+    from topos.features.signal.cluster_labels import _DIMENSION_LABEL_INSTRUCTIONS
+    from topos.features.signal.dimension_definition_loader import list_definition_ids
+
+    return sorted(set(list_definition_ids()) & set(_DIMENSION_LABEL_INSTRUCTIONS))
+
+
 class TestDimensionFraming:
     def test_two_dimensions_frame_identical_content_differently(self):
+        defined = _defined_dimensions()
+        assert len(defined) >= 2, f"need two defined dimensions, got {defined}"
+        first, second = defined[0], defined[1]
         previews = ["long run felt heavy", "slept badly before the race"]
-        wellbeing = _cluster("tc_w", "wellbeing", previews)
-        interests = _cluster("tc_i", "interests", previews)
-        prompt_w = build_contrastive_label_prompt(wellbeing)
-        prompt_i = build_contrastive_label_prompt(interests)
-        assert prompt_w != prompt_i
-        assert dimension_core_question("wellbeing") != dimension_core_question("interests")
-        assert dimension_label_instruction("wellbeing") != dimension_label_instruction("interests")
+        prompt_a = build_contrastive_label_prompt(_cluster("tc_a2", first, previews))
+        prompt_b = build_contrastive_label_prompt(_cluster("tc_b2", second, previews))
+        assert prompt_a != prompt_b
+        assert dimension_core_question(first) != dimension_core_question(second)
+        assert dimension_label_instruction(first) != dimension_label_instruction(second)
         # Same items, same sample block — only the dimension lines moved.
-        assert "long run felt heavy" in prompt_w and "long run felt heavy" in prompt_i
+        assert "long run felt heavy" in prompt_a and "long run felt heavy" in prompt_b
 
     def test_core_question_comes_from_the_definition_layer(self):
         """No second copy of dimension semantics in the labeler."""
         from topos.features.signal.dimension_definition_loader import get_definition
 
-        for dimension in ("interests", "wellbeing", "memory", "relationships"):
+        defined = _defined_dimensions()
+        assert defined, "no dimension definition carries a labeling directive"
+        for dimension in defined:
             declared = str(get_definition(dimension)["core_question"])
             assert dimension_core_question(dimension) == declared
             assert declared in build_contrastive_label_prompt(
