@@ -493,7 +493,19 @@ def _apply_distinctive_labels(clusters: List[Dict[str, Any]]) -> None:
 
 
 def _disambiguate_labels(clusters: List[Dict[str, Any]]) -> None:
+    """Make repeated term labels distinct — checking the result, not just the input.
+
+    The member_count suffix is not unique: two 7-member clusters that both came
+    out "hello" both became "hello (7)", and a live node carried exactly that
+    pair. Every candidate is now checked against the labels already handed out,
+    with the occurrence index as the suffix that cannot collide.
+    """
     seen: Dict[str, int] = Counter()
+    taken = {
+        str(c.get("label") or "").lower()
+        for c in clusters
+        if int(c.get("member_count") or 0) >= _MIN_MEANINGFUL_CLUSTER_SIZE
+    }
     for cluster in clusters:
         if int(cluster.get("member_count") or 0) < _MIN_MEANINGFUL_CLUSTER_SIZE:
             continue
@@ -505,10 +517,14 @@ def _disambiguate_labels(clusters: List[Dict[str, Any]]) -> None:
                 for term in (cluster.get("label_terms") or [])
                 if term.lower() not in label.lower()
             ]
-            if suffix_terms:
-                cluster["label"] = f"{label} ({suffix_terms[0]})"
-            else:
-                cluster["label"] = f"{label} ({cluster.get('member_count')})"
+            candidates = [f"{label} ({term})" for term in suffix_terms[:1]]
+            candidates.append(f"{label} ({cluster.get('member_count')})")
+            candidates.append(f"{label} ({seen[label]})")
+            for candidate in candidates:
+                if candidate.lower() not in taken:
+                    cluster["label"] = candidate
+                    taken.add(candidate.lower())
+                    break
 
 
 def _merge_cluster_into(target: Dict[str, Any], source: Dict[str, Any]) -> None:
@@ -1337,6 +1353,155 @@ def _cluster_row_to_dict(row: Sequence[Any], *, has_metadata: bool) -> Dict[str,
         "query_aliases": metadata.get("query_aliases") or [],
         "centroid_vector": metadata.get("centroid_vector"),
         "object_type": "top_topics",
+    }
+
+
+def load_clusters_with_members(
+    conn,
+    *,
+    limit: Optional[int] = None,
+    dimensions: Optional[Sequence[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Existing clusters plus their member rows — no clustering, no vectors.
+
+    The relabel path (and the labeling evaluation) needs member text and
+    centroids for clusters that already exist. Re-running k-means to get them
+    would hand back a different partition (seed-to-seed ARI ~0.52 on the live
+    corpus), which is precisely what must NOT move when only the prompt does.
+    Ordered by member_count then cluster_id so a relabel pass is repeatable.
+    """
+    if conn is None:
+        return []
+    has_metadata_col = _table_has_column(conn, "topic_clusters", "metadata_json")
+    columns = (
+        "cluster_id, label, dimension, member_count, source_mix_json, "
+        "label_terms_json, centroid_preview"
+    )
+    if has_metadata_col:
+        columns += ", metadata_json"
+    query = f"SELECT {columns} FROM topic_clusters"  # noqa: S608 — fixed column list
+    params: List[Any] = []
+    wanted = [_normalize_dimension_key(d) for d in (dimensions or []) if str(d or "").strip()]
+    if wanted:
+        query += f" WHERE dimension IN ({','.join('?' for _ in wanted)})"
+        params.extend(wanted)
+    query += " ORDER BY member_count DESC, cluster_id ASC"
+    if limit and int(limit) > 0:
+        query += " LIMIT ?"
+        params.append(int(limit))
+    rows = conn.execute(query, tuple(params)).fetchall()
+    clusters = [_cluster_row_to_dict(row, has_metadata=has_metadata_col) for row in rows]
+    by_id = {str(c["cluster_id"]): c for c in clusters}
+    for cluster in clusters:
+        cluster["members"] = []
+    if not by_id:
+        return clusters
+
+    ids = list(by_id)
+    for start in range(0, len(ids), 400):
+        chunk = ids[start : start + 400]
+        member_rows = conn.execute(
+            f"""
+            SELECT cluster_id, record_id, source_id, record_type, text_preview, metadata_json
+            FROM topic_cluster_members
+            WHERE cluster_id IN ({','.join('?' for _ in chunk)})
+            ORDER BY cluster_id, member_id
+            """,  # noqa: S608 — placeholders only
+            tuple(chunk),
+        ).fetchall()
+        for cluster_id, record_id, source_id, record_type, text_preview, metadata_json in member_rows:
+            cluster = by_id.get(str(cluster_id))
+            if cluster is None:
+                continue
+            try:
+                metadata = json.loads(metadata_json or "{}")
+            except json.JSONDecodeError:
+                metadata = {}
+            cluster["members"].append(
+                {
+                    "record_id": record_id,
+                    "source_id": source_id,
+                    "record_type": record_type or "unknown",
+                    "text_preview": text_preview,
+                    "metadata": metadata if isinstance(metadata, dict) else {},
+                }
+            )
+    return clusters
+
+
+def relabel_existing_clusters(
+    conn,
+    *,
+    complete=None,
+    mode: Optional[str] = None,
+    contrastive: Optional[bool] = None,
+    limit: Optional[int] = None,
+    dimensions: Optional[Sequence[str]] = None,
+    dry_run: bool = False,
+) -> Dict[str, Any]:
+    """Re-run the labeler over the clusters already on disk, in place.
+
+    Cluster membership, ids and centroids are untouched — only ``label`` and
+    the label metadata move, so top_topics facts, UI links and embedding
+    cluster_id columns all survive. This is what a released prompt change owes
+    existing nodes: a full recompute would relabel too, but it would also
+    reshuffle every cluster in the process.
+    """
+    clusters = load_clusters_with_members(conn, limit=limit, dimensions=dimensions)
+    if not clusters:
+        return {"status": "skipped", "reason": "no_clusters", "clusters": 0, "relabeled": 0}
+    before = [str(c.get("label") or "") for c in clusters]
+
+    from .cluster_labels import apply_llm_cluster_labels
+
+    relabeled = apply_llm_cluster_labels(
+        clusters, complete=complete, mode=mode, contrastive=contrastive
+    )
+    changed = [
+        {"cluster_id": c["cluster_id"], "before": old, "after": str(c.get("label") or "")}
+        for c, old in zip(clusters, before)
+        if str(c.get("label") or "") != old
+    ]
+    if dry_run or not changed:
+        return {
+            "status": "completed",
+            "clusters": len(clusters),
+            "relabeled": relabeled,
+            "changed": len(changed),
+            "dry_run": bool(dry_run),
+        }
+
+    from ...storage.db.write_gate import begin_immediate, sqlite_retry_busy, with_db_write
+
+    changed_ids = {entry["cluster_id"] for entry in changed}
+    with with_db_write():
+        try:
+            begin_immediate(conn)
+            for cluster in clusters:
+                if cluster.get("cluster_id") not in changed_ids:
+                    continue
+                conn.execute(
+                    """
+                    UPDATE topic_clusters
+                       SET label=?, metadata_json=?, updated_at=datetime('now')
+                     WHERE cluster_id=?
+                    """,
+                    (
+                        str(cluster.get("label") or ""),
+                        json.dumps(cluster.get("metadata") or {}),
+                        str(cluster.get("cluster_id")),
+                    ),
+                )
+            sqlite_retry_busy(conn.commit)
+        except Exception:
+            conn.rollback()
+            raise
+    return {
+        "status": "completed",
+        "clusters": len(clusters),
+        "relabeled": relabeled,
+        "changed": len(changed),
+        "dry_run": False,
     }
 
 

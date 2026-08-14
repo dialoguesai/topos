@@ -528,6 +528,20 @@ def _exec_derived_rebuild(step: Dict[str, Any], conn: sqlite3.Connection) -> Dic
                 from ..features.signal.topic_clustering import recompute_topic_clusters
 
                 detail["targets"][name] = dict(recompute_topic_clusters(conn) or {})
+            elif name in ("topic_cluster_labels", "cluster_labels"):
+                # Labels only: a prompt change owes existing clusters new names,
+                # not a new partition (a recompute would reshuffle membership).
+                from ..features.signal.topic_clustering import (
+                    relabel_existing_clusters,
+                    write_top_topics_signal_facts,
+                )
+                from ..storage.adapters.factory import AdapterFactory
+
+                outcome = dict(relabel_existing_clusters(conn) or {})
+                if outcome.get("changed"):
+                    bundle = AdapterFactory.create("local_database", conn=conn)
+                    outcome["top_topics_facts"] = write_top_topics_signal_facts(bundle, conn)
+                detail["targets"][name] = outcome
             elif name in ("timeline",):
                 from ..features.timeline_projection import repair_timeline_for_source
 
