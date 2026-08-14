@@ -52,6 +52,41 @@ def test_registry_definition_matches_browser_activity_template() -> None:
     assert accepts_app_ingest(GITHUB_ACTIVITY)
 
 
+def test_definition_declares_commit_messages_as_activity_content() -> None:
+    """§5a: WHERE commit messages land is stated in the source definition, not
+    hardcoded in the mapper — the same knob a third-party source would set."""
+    declaration = GITHUB_ACTIVITY.canonical_field_map
+    assert declaration["activity_events"]["content"] == {
+        "path": "payload.commits[*].message",
+        "join": "\n\n",
+    }
+
+
+def test_declaration_survives_definition_serialization_round_trip() -> None:
+    """Install/rehydrate goes through to_dict → definition_from_payload; a field
+    map that does not survive it would silently stop mapping on the next boot
+    (the stale-install failure mode from 216ab92)."""
+    from topos.sources.definitions import definition_from_payload
+
+    payload = GITHUB_ACTIVITY.to_dict()
+    assert payload["canonical_field_map"] == GITHUB_ACTIVITY.canonical_field_map
+    assert definition_from_payload(payload).canonical_field_map == GITHUB_ACTIVITY.canonical_field_map
+
+
+def test_third_party_definition_rejects_an_invalid_declaration() -> None:
+    """Fail loud at definition time: a typo'd declaration that silently ingests
+    nothing is the failure this capability exists to remove."""
+    from topos.sources.definitions import definition_from_payload
+
+    payload = {
+        **GITHUB_ACTIVITY.to_dict(),
+        "source_id": "acme_activity",
+        "canonical_field_map": {"activity_events": {"content": {"path": "a", "transform": "nope"}}},
+    }
+    with pytest.raises(ValueError, match="unknown transform"):
+        definition_from_payload(payload)
+
+
 def test_bundled_triple_and_registries() -> None:
     assert infer_bundled_canonical_triple(schema_id="github.activity.v1") == (
         "github_activity",

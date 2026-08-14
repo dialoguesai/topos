@@ -216,6 +216,20 @@ GITHUB_ACTIVITY = _source(
             FilterInstance(filter_id="max_rows", params={"count": 250}),
         ),
     },
+    # §5a capability 2, first bundled consumer: the WORK a push event describes
+    # is its commit messages, and nothing carried them onto the canonical row —
+    # activity_events.content was NULL on every push (451/451 on the first live
+    # node checked, 11 distinct titles over 451 rows), so every semantic reader
+    # downstream could only ever match the repo NAME. Declared here rather than
+    # hardcoded in the mapper so a third-party source states the same thing in
+    # its own definition. Event granularity is unchanged (one row per push; the
+    # per-commit lane is journal_entries via map_many) — a multi-commit push
+    # joins its messages, which is what "what did I work on" wants to read.
+    canonical_field_map={
+        "activity_events": {
+            "content": {"path": "payload.commits[*].message", "join": "\n\n"},
+        },
+    },
 )
 
 # Sprint 02: Messenger ingestion (local_sync -> conversation_messages)

@@ -9,8 +9,51 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+
+- `[S1]` **Declarative canonical field mapping** (`canonical_field_map` on a
+  source definition — PLAN_CONNECTOR_CATALOG_ROLLOUT §5a capabilities 2–3). A
+  source now DECLARES which piece of its records lands in which canonical
+  column, and where extra rows fan out from, instead of that being Python in
+  this repo: `{table: {column: rule}}` with a rule vocabulary of `path` (dotted,
+  `[*]` expands lists), `first_of`, `template`, `const`, `map`/`default`,
+  `transform` (closed catalog), `join`, `when`, plus `fan_out` + `where` for
+  one-row-per-item lanes. A declaration overlays the source's code mapper where
+  it has one and IS the mapping where it does not — which is what makes the
+  activity/journal/documents lanes reachable for a runtime-installed source
+  (previously they fell back to the *browser* mapper, the wrong shape for
+  anything but browser visits). Validated at definition time, so a typo'd path
+  fails the install instead of silently ingesting nothing.
+  (`topos/canonicalization/declared_field_map.py`)
+
 ### Fixed
 
+- `[S1] [E:embeddings]` **GitHub push events carry their commit messages.**
+  `activity_events.content` was NULL on every push row (451/451 on the first
+  live node checked, 11 distinct titles across all 451 — all of the form
+  "{owner}/{repo}: pushed N commit"), because the mapper carried only
+  repo/actor. Every semantic reader downstream could therefore only ever match
+  the repo NAME: goal/interest attachment to engineering work was pure name
+  matching, a contrastive term extraction over commit-attached items returned
+  nothing but "pushed"/"commit", and the derived "creation" signal counted
+  events that said nothing about what was created. `github_activity` now
+  declares `activity_events.content ← payload.commits[*].message` (joined for a
+  multi-commit push) in its source definition — the first bundled consumer of
+  the declarative capability above. Event granularity is unchanged: one
+  activity row per push, one journal row per authored commit.
+- `[S1] [E:embeddings] [E:entities]` **activity_events writes now persist
+  `content` and `hostname`.** The `activity_events_content_v1` migration added
+  both columns and the P2.1 browser mapper filled them, but the store's INSERT
+  never listed them — so every value was discarded at the write (0 of 4,444
+  rows populated on the first live node checked, browser highlight spans
+  included). Both columns are in the INSERT and in the conflict update
+  (COALESCE, so a blank batch never blanks a stored value), which also means a
+  re-ingest or reprocess-from-raw heals rows written before this fix.
+- `[S1] [E:embeddings] [E:entities]` The activity signal record and the
+  signal-reload query now carry `content`, `hostname` and `metadata_json`.
+  Without them an activity row embedded on its title alone, and the declared
+  ENTITY mapping (§5a capability 4, `metadata_json.repo` → project +
+  `worked_on` edge) was reading fields absent from the record it was handed.
 - `[S1] [E:embeddings]` Runtime installs of bundled sources no longer shadow
   the bundled enrichment-lane policy. A 2026-05-29 `source_runtime_installs`
   row for `browser_visits` snapshotted the then-bundled definition

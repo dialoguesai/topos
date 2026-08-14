@@ -176,6 +176,14 @@ def activity_payload_to_signal_record(
         "record_id": event_id,
         "url": canonical_payload.get("url"),
         "title": canonical_payload.get("title"),
+        # content/hostname/metadata_json are the activity row's SEMANTIC payload
+        # (github commit messages, browser highlight spans, the declared-entity
+        # mapping's metadata paths). Dropping them here made every activity row
+        # embed as its title alone and left declared entity extraction reading
+        # fields that were not in the record it was handed.
+        "content": canonical_payload.get("content"),
+        "hostname": canonical_payload.get("hostname"),
+        "metadata_json": canonical_payload.get("metadata_json"),
         "activity_type": canonical_payload.get("activity_type"),
         "occurred_at": canonical_payload.get("occurred_at"),
         "source_id": source_id,
@@ -266,11 +274,17 @@ def canonicalize_normalized_batch(
 
     if group == "activity":
         try:
-            from ..canonicalization.mappers import MAPPER_REGISTRY
+            from ..canonicalization.declared_field_map import build_canonical_mapper
             from ..storage.canonical.activity_tables import ActivityEventsManager
 
-            mapper_cls = MAPPER_REGISTRY.get(source_def.canonical_mapper_id or "browser_activity")
-            mapper = mapper_cls() if mapper_cls else None
+            # Code mapper, declared field map (§5a), or both — see
+            # canonicalization/declared_field_map.py. browser_activity stays the
+            # fallback for sources that declare neither.
+            mapper = build_canonical_mapper(
+                source_def,
+                default_table="activity_events",
+                fallback_mapper_id="browser_activity",
+            )
             # Dual-lane sources (github_activity) emit rows for more than one
             # canonical table from a single event via map_many(); each record
             # carries an explicit target table (None → the group's default,
@@ -362,41 +376,54 @@ def canonicalize_normalized_batch(
         "places": "location_events",
         "documents": "documents",
     }
-    if group in demo_table_by_group and source_def.canonical_mapper_id:
+    if group in demo_table_by_group and (
+        source_def.canonical_mapper_id or getattr(source_def, "canonical_field_map", None)
+    ):
         table_name = demo_table_by_group[group]
         try:
-            from ..canonicalization.mappers import MAPPER_REGISTRY
+            from ..canonicalization.declared_field_map import build_canonical_mapper
             from ..storage.canonical.canonical_store import SQLiteCanonicalStore
 
-            mapper_cls = MAPPER_REGISTRY.get(source_def.canonical_mapper_id)
-            mapper = mapper_cls() if mapper_cls else None
+            mapper = build_canonical_mapper(source_def, default_table=table_name)
             store = SQLiteCanonicalStore(db_conn)
             created = 0
             for payload in payloads:
                 norm = NormalizedRecord(record_id=str(payload.get("record_id") or payload.get("event_id") or ""), payload=payload)
-                canonical_payload = dict(mapper.map(norm).payload if mapper else payload)
-                canonical_payload["source_id"] = source_id
-                ref = store.upsert(table_name, canonical_payload, sync_batch_id=sync_batch_id)
-                if ref.created:
-                    created += 1
-                signal_record = _prepare_signal_record(dict(canonical_payload))
-                signal_record["source_id"] = source_id
-                if table_name == "calendar_events":
-                    result.events_created += 1
-                result.canonical_records.append(signal_record)
-                if table_name == "journal_entries" and str(canonical_payload.get("place_name") or "").strip():
-                    from .journal_location_fanout import (
-                        journal_location_event_from_entry,
-                        journal_location_signal_record,
-                    )
-
-                    loc_row = journal_location_event_from_entry(canonical_payload, source_id=source_id)
-                    if loc_row:
-                        store.upsert("location_events", loc_row, sync_batch_id=sync_batch_id)
+                # map_many so a declared fan_out (one canonical row per item in
+                # a list field) works on these lanes too; code mappers default
+                # it to [map()], so their behavior is unchanged.
+                mapped_records = (
+                    [(rec.table or table_name, dict(rec.payload)) for rec in mapper.map_many(norm)]
+                    if mapper
+                    else [(table_name, dict(payload))]
+                )
+                for target_table, canonical_payload in mapped_records:
+                    canonical_payload["source_id"] = source_id
+                    ref = store.upsert(target_table, canonical_payload, sync_batch_id=sync_batch_id)
+                    if ref.created:
+                        created += 1
+                    signal_record = _prepare_signal_record(dict(canonical_payload))
+                    signal_record["source_id"] = source_id
+                    if target_table != table_name:
+                        # Mixed-family batch: downstream attribution cannot rely
+                        # on the group-level default stamp alone.
+                        signal_record["_table"] = target_table
+                    if target_table == "calendar_events":
                         result.events_created += 1
-                        result.canonical_records.append(
-                            _prepare_signal_record(journal_location_signal_record(loc_row))
+                    result.canonical_records.append(signal_record)
+                    if target_table == "journal_entries" and str(canonical_payload.get("place_name") or "").strip():
+                        from .journal_location_fanout import (
+                            journal_location_event_from_entry,
+                            journal_location_signal_record,
                         )
+
+                        loc_row = journal_location_event_from_entry(canonical_payload, source_id=source_id)
+                        if loc_row:
+                            store.upsert("location_events", loc_row, sync_batch_id=sync_batch_id)
+                            result.events_created += 1
+                            result.canonical_records.append(
+                                _prepare_signal_record(journal_location_signal_record(loc_row))
+                            )
             result.messages_created = created
         except Exception as exc:
             logger.error("[PIPELINE:CANONICAL] demo %s upsert failed: %s", group, exc, exc_info=True)
@@ -520,9 +547,13 @@ def load_canonical_records_for_signal(
     group = getattr(source_def, "canonical_group_id", None)
 
     if group == "activity":
+        # content/hostname/metadata_json are selected so a reprocess/backfill
+        # batch carries the same semantic payload a fresh ingest does — without
+        # them a backfill re-embeds titles and re-derives nothing new.
         rows = db_conn.execute(
             """
-            SELECT event_id, activity_type, url, title, occurred_at, source_id
+            SELECT event_id, activity_type, url, title, occurred_at, source_id,
+                   content, hostname, metadata_json
             FROM activity_events
             WHERE source_id=?
             ORDER BY occurred_at DESC
@@ -539,6 +570,9 @@ def load_canonical_records_for_signal(
                 "title": row[3],
                 "occurred_at": row[4],
                 "source_id": row[5] or source_id,
+                "content": row[6],
+                "hostname": row[7],
+                "metadata_json": row[8],
             }
             out.append(activity_payload_to_signal_record(payload, source_id=source_id))
         return out
