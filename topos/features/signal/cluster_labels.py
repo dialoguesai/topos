@@ -732,6 +732,7 @@ def apply_llm_cluster_labels(
     mode: Optional[str] = None,
     contrastive: Optional[bool] = None,
     protected_terms: Optional[Any] = None,
+    stats: Optional[Dict[str, Any]] = None,
 ) -> int:
     """Replace deterministic labels with LLM labels where possible.
 
@@ -748,6 +749,11 @@ def apply_llm_cluster_labels(
     (``blackholed_name_terms``), passed by the callers that hold a connection.
     A label is a caller-agnostic stored artifact, so a protected name is
     refused at production rather than filtered per reader.
+
+    ``stats``, when given, is filled with the retry and drop counts by reason.
+    Without it, whether a retry rule fires at all is invisible from outside,
+    and a rule that never triggers looks exactly like one that does nothing —
+    the difference a measured no-op turns on.
     """
     from .vector_settings import cluster_llm_labels_mode
 
@@ -793,11 +799,14 @@ def apply_llm_cluster_labels(
             )
             if reason:
                 # One bounded retry naming what was wrong with the answer — a
-                # link, a name a sibling already took, or one built from the
-                # banned vocabulary. Never a third call: a model that repeats
-                # itself twice will repeat again, and the labeler is budgeted
-                # per recompute. A duplicate that survives is suffixed below; a
-                # link that survives is dropped.
+                # link, a name a sibling already took, one built from the
+                # banned vocabulary, or one that ignores the 2-5 word rule.
+                # Never a third call: a second retry aimed at bare common nouns
+                # was built and measured over 152 live clusters — it fired 25
+                # times and moved rule compliance not at all (77.0% either
+                # way), because the residual one-word labels are mostly real
+                # names. A duplicate that survives is suffixed below; a link
+                # that survives is dropped.
                 retries[reason] += 1
                 label = _better_label(
                     label,
@@ -861,6 +870,15 @@ def apply_llm_cluster_labels(
         assigned[index] = label
         used[_normalized_label(label)] = index
         relabeled += 1
+    if stats is not None:
+        stats.update(
+            {
+                "retries_by_reason": dict(retries),
+                "retry_calls": sum(retries.values()),
+                "dropped_urls": dropped_urls,
+                "dropped_protected": dropped_protected,
+            }
+        )
     if retries or dropped_urls or dropped_protected:
         logger.info(
             "cluster labeling retried %d duplicate, %d generic, %d link and %d "
