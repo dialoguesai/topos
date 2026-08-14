@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import uuid
 from typing import Any, Callable, Dict, List, Optional
 
 from ..base import BaseEnrichmentJob
@@ -23,12 +24,26 @@ TOPIC_CONSOLIDATION_KIND = "topic_consolidation"
 def _defer_consolidation(conn) -> bool:
     """Queue the full recompute instead of running it inside this batch.
 
-    Returns True when it was queued (caller should return early). Falls back to
-    False — run inline, as before — if the queue is unavailable, because a
+    Returns True ONLY when a consolidation is actually pending afterwards — a
+    row this call queued, or one already queued/running that it coalesced onto.
+    False means nothing is pending, and the caller must run inline, because a
     consolidation that never happens is worse than a slow one.
 
-    Coalescing is free: ``enqueue_job`` is idempotent on the key, so a hundred
-    batches in a row leave exactly one pending consolidation.
+    That distinction is the whole function. It previously enqueued under the
+    constant key ``topic_consolidation:pending`` and returned True
+    unconditionally, on the assumption that "enqueue_job is idempotent on the
+    key, so a hundred batches leave exactly one pending consolidation". True
+    while that row is queued/running — but ``enqueue_job`` returns an existing
+    ``done`` row untouched, so once the first consolidation ever COMPLETED, its
+    row swallowed every later request forever: nothing queued, True returned,
+    caller returns early, and the inline fallback below cannot fire because
+    nothing throws. Live evidence: one pipeline_jobs row for this kind, done
+    2026-08-01, while batches went on logging "consolidation due" for two weeks
+    and cluster_recompute_log recorded no ``full`` since 2026-08-13 — not
+    because a recompute was judged unnecessary, but because it was never asked
+    for. Coalescing is now stated directly (is one pending?) instead of being
+    inferred from key collision, and the key is unique per request so a
+    finished consolidation can never absorb the next one.
     """
     if conn is None:
         return False
@@ -40,16 +55,40 @@ def _defer_consolidation(conn) -> bool:
     ):
         return False
     try:
-        from ....pipeline.job_store import enqueue_job
+        from ....pipeline.job_store import enqueue_job, ensure_pipeline_jobs_schema
 
-        enqueue_job(
+        ensure_pipeline_jobs_schema(conn)
+        pending = conn.execute(
+            "SELECT job_id FROM pipeline_jobs WHERE kind=? AND status IN ('queued','running') LIMIT 1",
+            (TOPIC_CONSOLIDATION_KIND,),
+        ).fetchone()
+        if pending is not None:
+            logger.info(
+                "[PIPELINE:TOPIC_CLUSTERS] consolidation already pending (job_id=%s); coalescing",
+                str(pending[0]),
+            )
+            return True
+
+        job_id = enqueue_job(
             conn,
             kind=TOPIC_CONSOLIDATION_KIND,
             payload={"reason": "consolidation_due"},
-            idempotency_key="topic_consolidation:pending",
+            idempotency_key=f"{TOPIC_CONSOLIDATION_KIND}:pending:{uuid.uuid4()}",
         )
+        row = conn.execute(
+            "SELECT status FROM pipeline_jobs WHERE job_id=?", (job_id,)
+        ).fetchone()
+        status = str(row[0]) if row is not None else ""
+        if status not in ("queued", "running"):
+            # Never report a deferral that did not happen; run inline instead.
+            logger.warning(
+                "[PIPELINE:TOPIC_CLUSTERS] enqueue produced no pending job (status=%s); running inline",
+                status or "missing",
+            )
+            return False
         logger.info(
-            "[PIPELINE:TOPIC_CLUSTERS] consolidation due; queued for after this batch"
+            "[PIPELINE:TOPIC_CLUSTERS] consolidation due; queued for after this batch (job_id=%s)",
+            job_id,
         )
         return True
     except Exception as exc:  # noqa: BLE001

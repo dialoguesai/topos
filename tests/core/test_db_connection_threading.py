@@ -876,3 +876,72 @@ def test_summary_reports_gaps_with_their_scope():
         assert summary["covers"]
     finally:
         conn.close()
+
+
+def test_completed_consolidation_does_not_swallow_the_next_one():
+    """The live bug: a `done` row absorbed every later consolidation forever.
+
+    _defer_consolidation enqueued under a constant idempotency key, and
+    enqueue_job returns an existing `done` row without creating anything — so
+    once the first consolidation completed (2026-08-01 on the live node), every
+    later "consolidation due" queued nothing, returned True anyway, and the
+    caller returned early. Two weeks of batches logged the deferral and no
+    recompute was ever asked for.
+    """
+    from topos.enrichment.jobs.canonical.topic_clusters_job import (
+        TOPIC_CONSOLIDATION_KIND,
+        _defer_consolidation,
+    )
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    try:
+        assert _defer_consolidation(conn) is True
+        conn.execute(
+            "UPDATE pipeline_jobs SET status='done' WHERE kind=?", (TOPIC_CONSOLIDATION_KIND,)
+        )
+        conn.commit()
+
+        # A new need after the previous one finished must queue a NEW job.
+        assert _defer_consolidation(conn) is True
+        pending = conn.execute(
+            "SELECT COUNT(*) FROM pipeline_jobs WHERE kind=? AND status IN ('queued','running')",
+            (TOPIC_CONSOLIDATION_KIND,),
+        ).fetchone()[0]
+        assert pending == 1, f"a finished consolidation swallowed the next one ({pending} pending)"
+    finally:
+        conn.close()
+
+
+def test_defer_reports_false_when_nothing_is_pending():
+    """True must mean "a consolidation is pending", or the inline fallback —
+    which exists precisely for this — can never fire."""
+    from topos.enrichment.jobs.canonical import topic_clusters_job as mod
+
+    conn = sqlite3.connect(":memory:")
+    conn.row_factory = sqlite3.Row
+    try:
+        from topos.pipeline.job_store import ensure_pipeline_jobs_schema
+
+        ensure_pipeline_jobs_schema(conn)
+
+        # Simulate an enqueue that yields no pending row (the `done`-collapse shape).
+        def _enqueue_returning_done(conn_, **kwargs):
+            conn_.execute(
+                "INSERT INTO pipeline_jobs (job_id, kind, status, idempotency_key) "
+                "VALUES ('stale-1', ?, 'done', ?)",
+                (mod.TOPIC_CONSOLIDATION_KIND, kwargs.get("idempotency_key")),
+            )
+            conn_.commit()
+            return "stale-1"
+
+        import topos.pipeline.job_store as job_store
+
+        original = job_store.enqueue_job
+        job_store.enqueue_job = _enqueue_returning_done
+        try:
+            assert mod._defer_consolidation(conn) is False
+        finally:
+            job_store.enqueue_job = original
+    finally:
+        conn.close()
