@@ -5,7 +5,7 @@ Before sprint: EXPECT FAIL / NOT IMPLEMENTED
 After sprint:  EXPECT PASS
 """
 
-from features.signal.test_topic_clustering import (  # noqa: F401
+from tests.features.signal.test_topic_clustering import (  # noqa: F401
     test_mvp_query_source_ids_cover_chatgpt_and_browser,
     test_recompute_persists_clusters_and_top_topics,
 )

@@ -70,6 +70,14 @@ The machine-readable twin of each release is
   retry claim to have repaired data it never produced, and it under-counted
   `pending_derivation_summary()`. The deferral is now `still_failing`, carrying
   the job's own reason. (`topos/enrichment/derivation_recovery.py`)
+- `[D]` **`grand-cypher` pin moved to `>=0.13,<0.14`** (was `>=0.12,<0.13`, in
+  both core dependencies and the `engine` extra). The ceiling is load-bearing
+  rather than cautious: 1.0.0+ changed `RETURN a` to yield the whole node dict
+  instead of the node id, which breaks `_rows_from_columns` and
+  `test_entity_cypher.py::test_result_is_json_serialisable`. 0.13.0 is the
+  newest release this code works against — the upper bound must not be raised
+  without re-running that test. (`pyproject.toml`)
+
 - `[S1] [E:embeddings]` **GitHub push events carry their commit messages.**
   `activity_events.content` was NULL on every push row (451/451 on the first
   live node checked, 11 distinct titles across all 451 — all of the form
