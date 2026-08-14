@@ -14,10 +14,17 @@ Never touches the live database: the source is opened read-only and copied
 into the system temp dir with the sqlite backup API; every write lands on the
 copy. Nothing here restarts or signals a running node.
 
+That copy is the size of the node's database (~480 MB on a live one) and is
+deleted on exit, including when a run fails or is interrupted — five runs
+while measuring this labeler once left ~2.4 GB behind and filled the disk.
+The report is kilobytes and is kept. Pass ``--keep-copy`` to inspect the
+database a run worked on.
+
     python scripts/eval_cluster_labels.py                  # all clusters, both arms
     python scripts/eval_cluster_labels.py --limit 40       # bounded
     python scripts/eval_cluster_labels.py --arms contrastive
     python scripts/eval_cluster_labels.py --dry-run        # print prompts, no model
+    python scripts/eval_cluster_labels.py --keep-copy      # leave the copy on disk
 """
 
 from __future__ import annotations
@@ -222,6 +229,47 @@ def print_metrics(title: str, metrics: Dict[str, Any]) -> None:
         print(f"    x{entry['count']:<3} {entry['label']!r} across {entry['dimensions']}")
 
 
+def stale_copies() -> List[Path]:
+    """Working copies left behind by earlier runs — crashed, killed, or older."""
+    root = Path(tempfile.gettempdir())
+    try:
+        candidates = sorted(root.glob("topos-labeleval-*/labels_eval.db"))
+    except OSError:
+        return []
+    return [p for p in candidates if p.is_file()]
+
+
+def discard_copy(copy_path: Path, workdir: Path, *, created_workdir: bool) -> None:
+    """Remove the working copy. Always — this is a ~480 MB file per run.
+
+    The script exists to be run repeatedly while iterating on a prompt, and it
+    took five runs to measure the labeler: that left ~2.4 GB of orphaned copies
+    and filled the disk. Only the database and its sqlite sidecars go; the
+    report is kilobytes and stays — so an auto-created workdir survives holding
+    just that, and is removed only when the report went elsewhere via
+    ``--report``.
+    """
+    # Glob rather than a fixed -wal/-shm list: a run killed mid-backup can
+    # leave whichever sidecar sqlite had open at the time.
+    sidecars = sorted(copy_path.parent.glob(f"{copy_path.name}-*"))
+    freed = 0
+    for path in [copy_path, *sidecars]:
+        try:
+            if path.is_file():
+                freed += path.stat().st_size
+                path.unlink()
+        except OSError as exc:  # a copy we cannot delete must not fail the run
+            log("cleanup", f"could not remove {path}: {exc}")
+    if freed:
+        log("cleanup", f"removed the working copy ({freed / 1e6:.0f} MB)")
+    if created_workdir:
+        try:
+            if not any(workdir.iterdir()):
+                workdir.rmdir()
+        except OSError:
+            pass
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--source-db", default=str(Path.home() / ".topos" / "database.db"))
@@ -242,10 +290,36 @@ def main() -> int:
         help="print one prompt per arm and exit — no model calls",
     )
     parser.add_argument("--report", default="", help="write the JSON report here")
+    parser.add_argument(
+        "--keep-copy",
+        action="store_true",
+        help="keep the ~480MB working copy for inspection (deleted by default)",
+    )
     args = parser.parse_args()
 
+    created_workdir = not args.workdir
     workdir = Path(args.workdir) if args.workdir else Path(tempfile.mkdtemp(prefix="topos-labeleval-"))
     copy_path = workdir / "labels_eval.db"
+    try:
+        return _run_eval(args, workdir, copy_path)
+    finally:
+        if args.keep_copy:
+            log("cleanup", f"kept the working copy at {copy_path} (--keep-copy)")
+        else:
+            discard_copy(copy_path, workdir, created_workdir=created_workdir)
+
+
+def _run_eval(args: argparse.Namespace, workdir: Path, copy_path: Path) -> int:
+    leftovers = [p for p in stale_copies() if p != copy_path]
+    if leftovers:
+        total = sum(p.stat().st_size for p in leftovers) / 1e6
+        # Not deleted here: one of these may belong to a run happening right now.
+        log(
+            "cleanup",
+            f"{len(leftovers)} working copies from earlier runs are still on disk"
+            f" ({total:.0f} MB). Remove with:"
+            f" rm -rf {Path(tempfile.gettempdir()) / 'topos-labeleval-*'}",
+        )
     log("copy", f"{args.source_db} -> {copy_path} (read-only source)")
     log("copy", str(copy_database(Path(args.source_db), copy_path)))
 
