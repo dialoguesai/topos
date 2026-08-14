@@ -107,6 +107,29 @@ The machine-readable twin of each release is
   and, if they survive it, are dropped in favour of the term label. An
   all-lowercase answer is title-cased deterministically (two thirds of live
   answers came back in prose case).
+- `[D]` **A cluster label must be 2-5 words, checked and not just asked for.**
+  The contrastive prompt opens with that rule and, measured over a full
+  relabel, obeyed it LESS than the prompt it replaced: 46% of answers in range
+  against the isolated prompt's 90%, single-word answers going 15 → 81
+  ("Met", "America", "Friend", "Internet"). Nothing enforced it — `parse_label`
+  capped the top at seven words and had no floor — while every other line
+  pushed the other way, since each per-dimension directive asks the model to
+  *name a thing* and distinguishing terms arrive as bare tokens. Bare proper
+  nouns are unique, so this was invisible in the duplication metrics: the
+  labels got more distinct and less informative at the same time. A
+  wrong-length answer now earns the same one bounded retry the generic and
+  link answers do, naming the specific fault ("\"Austin\" is one word. Keep it
+  and add what about it"). Length ranks BELOW duplication and genericness when
+  the retry is scored, so a distinct bare noun still beats a repeat, and a
+  stubbornly terse answer ships rather than reverting to `https / good / here`.
+  Measured on the same 152 clusters: rule compliance **46% → 77%**, single-word
+  labels **81 → 34**, with distinctness unharmed (151 → **152 of 152**, worst
+  duplication 2 → 1) and banned words still **0%**. Still short of the control
+  arm's 90%: the 34 that remain are mostly real proper nouns (`Gmail`,
+  `Brooklyn`, `Smithers`, `Dialoguesai`), which the rule above arguably wants,
+  alongside a weaker tail of bare common nouns (`Friend`, `Food`, `Account`).
+  `scripts/eval_cluster_labels.py` reports `word_rule_share` and
+  `single_word_labels` so this cannot regress unnoticed again.
 - `[D]` **Repeated term labels are disambiguated against each other, not just
   counted.** The suffix for a repeat was the cluster's member_count, which is
   not unique: two 7-member clusters that both reduced to "hello" both became
