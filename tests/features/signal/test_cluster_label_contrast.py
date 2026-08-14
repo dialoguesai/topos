@@ -23,6 +23,7 @@ from topos.features.signal.cluster_labels import (
     dimension_core_question,
     dimension_label_instruction,
     label_is_generic,
+    label_is_wrong_length,
     label_is_urlish,
     labeling_order,
     parse_label,
@@ -119,9 +120,11 @@ class TestSiblingContext:
         assert sibling_labels(0, corpus, terms, {}, limit=1) == ["Same Dimension"]
 
     def test_isolated_prompt_carries_no_sibling_context(self):
+        """The control arm must stay the prompt that shipped, or the eval is rigged."""
         prompt = build_label_prompt(_corpus()[0])
-        assert "Sibling" not in prompt
-        assert "Lens:" not in prompt
+        assert "already used by neighbouring clusters" not in prompt
+        assert "QUESTION THIS DIMENSION ANSWERS" not in prompt
+        assert "Frequent terms:" in prompt
 
     def test_labeling_order_is_deterministic_and_biggest_first(self):
         corpus = [
@@ -192,7 +195,12 @@ class TestGenericLabelGate:
         assert not label_is_generic(label)
 
     def test_the_banned_vocabulary_reaches_the_prompt(self):
-        assert "personal" in build_contrastive_label_prompt(_corpus()[0]).lower()
+        """Every word the live duplicates are built from is named in the rule."""
+        prompt = build_contrastive_label_prompt(_corpus()[0])
+        assert (
+            "- Never use: personal, private, general, misc, various, notes, stuff,"
+            " activities." in prompt
+        )
 
     def test_a_generic_answer_earns_one_retry_and_the_better_answer_wins(self):
         answers = iter(["Personal Projects", "River Kayaking"])
@@ -204,6 +212,60 @@ class TestGenericLabelGate:
         corpus = _corpus()[:1]
         apply_llm_cluster_labels(corpus, complete=lambda p: "Personal Projects", mode="on")
         assert corpus[0]["label"] == "Personal Projects"
+
+
+class TestLabelLengthGate:
+    """The prompt's own first rule, enforced after parsing.
+
+    Measured on the first full relabel of the live node: the contrastive prompt
+    obeyed "2-5 words" on 46% of answers against the isolated prompt's 90%,
+    single-word answers going 15 -> 81 ("Met", "America", "Friend"). Bare proper
+    nouns are unique, so duplication looked fixed while the labels said less.
+    """
+
+    @pytest.mark.parametrize("label", ["Austin", "Met", "America", "Internet"])
+    def test_a_bare_noun_is_wrong_length(self, label):
+        assert label_is_wrong_length(label)
+
+    @pytest.mark.parametrize(
+        "label", ["Austin Trips", "Marathon Training", "Weekly Grocery Run"]
+    )
+    def test_a_qualified_name_passes(self, label):
+        assert not label_is_wrong_length(label)
+
+    def test_an_over_long_answer_is_also_gated(self):
+        assert label_is_wrong_length("Notes About The Six Word Limit")
+
+    def test_the_rule_reaches_the_prompt(self):
+        prompt = build_contrastive_label_prompt(_corpus()[0])
+        assert "never one word on its own" in prompt
+
+    def test_one_word_earns_a_retry_and_the_qualified_answer_wins(self):
+        answers = iter(["Austin", "Austin Kayaking Trips"])
+        prompts: list[str] = []
+
+        def _complete(prompt: str) -> str:
+            prompts.append(prompt)
+            return next(answers)
+
+        corpus = _corpus()[:1]
+        apply_llm_cluster_labels(corpus, complete=_complete, mode="on")
+        assert corpus[0]["label"] == "Austin Kayaking Trips"
+        assert len(prompts) == 2
+        assert '"Austin" is one word' in prompts[1]
+
+    def test_a_stubbornly_terse_answer_still_beats_the_term_label(self):
+        """One bare noun still says more than "term / label" — it ships."""
+        corpus = _corpus()[:1]
+        apply_llm_cluster_labels(corpus, complete=lambda p: "Austin", mode="on")
+        assert corpus[0]["label"] == "Austin"
+
+    def test_length_never_outranks_distinctness(self):
+        """A distinct bare noun beats a duplicate phrase: length ranks last."""
+        answers = iter(["Mortgage Refinance", "Kayaking", "Mortgage Refinance"])
+        corpus = _corpus()[:2]
+        apply_llm_cluster_labels(corpus, complete=lambda p: next(answers), mode="on")
+        assert sorted(c["label"] for c in corpus) == ["Kayaking", "Mortgage Refinance"]
 
 
 class TestLinkGate:
