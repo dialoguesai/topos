@@ -15,6 +15,13 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _text_or_none(value: Any) -> Optional[str]:
+    """Text column value; blank/absent stays NULL so a COALESCE upsert never
+    overwrites a stored value with an empty string."""
+    text = "" if value is None else str(value).strip()
+    return text or None
+
+
 def _json_metadata(value: Any) -> Optional[str]:
     if value is None:
         return None
@@ -237,16 +244,26 @@ class SQLiteCanonicalStore(CanonicalStore):
             "SELECT event_id FROM activity_events WHERE event_id=?",
             (event_id,),
         ).fetchone()
+        # content/hostname (activity_events_content_v1) are written here: the
+        # P2.1 browser mapper and the §5a declared field maps both produce them,
+        # and until this INSERT carried the columns every value they computed was
+        # discarded at the write (0/4,444 rows populated on the first live node
+        # checked). They are in the DO UPDATE set too, so a re-ingest or a
+        # reprocess-from-raw heals rows that were written before this fix.
         self._conn.execute(
             """
             INSERT INTO activity_events (
                 event_id, activity_type, url, title, occurred_at, source_id,
-                source_record_id, ingested_at, sync_batch_id, metadata_json
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                source_record_id, ingested_at, sync_batch_id, metadata_json,
+                content, hostname
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(event_id) DO UPDATE SET
                 title=excluded.title,
                 sync_batch_id=excluded.sync_batch_id,
-                ingested_at=excluded.ingested_at
+                ingested_at=excluded.ingested_at,
+                metadata_json=COALESCE(excluded.metadata_json, activity_events.metadata_json),
+                content=COALESCE(excluded.content, activity_events.content),
+                hostname=COALESCE(excluded.hostname, activity_events.hostname)
             """,
             (
                 event_id,
@@ -259,6 +276,8 @@ class SQLiteCanonicalStore(CanonicalStore):
                 record.get("ingested_at") or _utc_now(),
                 sync_batch_id or record.get("sync_batch_id"),
                 _json_metadata(record.get("metadata_json")),
+                _text_or_none(record.get("content")),
+                _text_or_none(record.get("hostname")),
             ),
         )
         return CanonicalRef(record_id=event_id, created=existing is None)

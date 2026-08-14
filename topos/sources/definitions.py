@@ -5,6 +5,8 @@ from typing import Any, Dict, List, Literal, Optional
 
 from shared.filtering import filter_manifest_from_storage, get_filter_definition
 
+from .declared_field_map_spec import validate_canonical_field_map
+
 
 DELIVERY_OWNER_UPLOAD = "owner_upload"
 DELIVERY_OWNER_UI = "owner_ui"
@@ -174,6 +176,13 @@ class DataSourceDefinition:
     default_filter_tiers: Optional[Dict[str, Dict[str, object]]] = None
     # Stage 10: registerer-defined field-level default transforms (which fields need which filters)
     field_transform_defaults: Optional[List[Dict[str, Any]]] = None
+    # §5a capabilities 2–3 (PLAN_CONNECTOR_CATALOG_ROLLOUT): registerer-declared
+    # canonical field mapping — which piece of a record lands in which canonical
+    # column, and where extra rows fan out from. Shape and rule vocabulary live
+    # in canonicalization/declared_field_map.py. Declared columns overlay the
+    # source's code mapper when it has one, and ARE the mapping when it doesn't,
+    # so a third party can put data on a non-message lane without shipping code.
+    canonical_field_map: Optional[Dict[str, Any]] = None
     # Managed source install metadata used by runtime ingestion for file sources.
     tables: Optional[List[Dict[str, Any]]] = None
     file_ingest_shape: Optional[Dict[str, Any]] = None
@@ -207,6 +216,7 @@ class DataSourceDefinition:
                     raise ValueError(f"Unsupported default filter tier {tier_name!r}")
                 filter_manifest_from_storage(manifest)
         _validate_field_transform_defaults(self.field_transform_defaults)
+        validate_canonical_field_map(self.canonical_field_map)
 
     def to_dict(self) -> dict:
         out = {
@@ -247,6 +257,8 @@ class DataSourceDefinition:
             out["default_filter_tiers"] = dict(self.default_filter_tiers)
         if self.field_transform_defaults is not None:
             out["field_transform_defaults"] = list(self.field_transform_defaults)
+        if self.canonical_field_map is not None:
+            out["canonical_field_map"] = dict(self.canonical_field_map)
         if self.tables is not None:
             out["tables"] = list(self.tables)
         if self.file_ingest_shape is not None:
