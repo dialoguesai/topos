@@ -26,8 +26,50 @@ The machine-readable twin of each release is
   fails the install instead of silently ingesting nothing.
   (`topos/canonicalization/declared_field_map.py`)
 
+### Added
+
+- `[S1]` **Recorded derivation debt now waits for its model instead of burning
+  its one attempt on it.** A debt whose job needs a provider this machine does
+  not have could only be claimed, re-run into the same wall, and parked
+  `failed` — after which nothing in the queue moved it, because `requeue_job`
+  only releases a live claim and `recover_stale_jobs` only touches `running`.
+  The work resumed when a human hit `POST /signal/derivation-debt/retry`, or
+  never. Two halves: `run_derivation_retry_job` now asks
+  `job_readiness.job_is_ready()` BEFORE reloading the batch's canonical records,
+  and holds with `waiting for provider: …` rather than doing the work to defer
+  again; and `revive_capability_blocked_debts()` re-queues the parked rows on
+  the not-ready → ready EDGE, swept by the pipeline worker every 5 min. Edge
+  rather than level so a debt that fails for a real reason gets one fresh
+  attempt per time the missing provider actually appears, instead of being
+  re-queued forever. Per-job provider is read from the model catalog
+  (`MVP_JOB_SPECS`), so a job registered there is classified without a second
+  list to maintain; jobs absent from it are assumed runnable rather than
+  stalled. (`topos/enrichment/job_readiness.py`,
+  `topos/pipeline/job_store.py::requeue_failed_jobs`)
+
 ### Fixed
 
+- `[S1]` **A deferred derivation job now records durable debt.** Jobs report an
+  unreachable provider by RETURNING `[{"_deferred": True, ...}]` rather than
+  raising, and only the raise path called `record_failed_derivation()`. So the
+  exact case the debt mechanism exists for — ingest with no model installed,
+  install one a week later — wrote nothing to `pipeline_jobs`: the worker and
+  `POST /signal/derivation-debt/retry` had nothing to find, and the only durable
+  trace was an `ingest_audit` row naming the batch but not the job (the
+  orchestrator's `deferred_jobs` list, which does name them, is dropped at end
+  of batch). The deferral path now writes the same record as the raise path,
+  idempotent per (batch, job) so re-ingesting while still offline re-queues the
+  one row instead of stacking. Affects `topics` and `goal_extraction` on
+  `ollama_unreachable`, plus the seven canonical jobs that defer on
+  `database_unavailable`. (`topos/enrichment/orchestrator.py`)
+- `[S1]` **A retry that defers again is no longer reported as recovered.**
+  `retry_single_derivation()` checked only `results["errors"]`, which a deferral
+  never reaches — so re-running a debt while the provider was still down fell
+  through to `outcome: "recovered"` with zero rows created, discharging the debt
+  and marking the queue row `done` while the data stayed missing. That made the
+  retry claim to have repaired data it never produced, and it under-counted
+  `pending_derivation_summary()`. The deferral is now `still_failing`, carrying
+  the job's own reason. (`topos/enrichment/derivation_recovery.py`)
 - `[S1] [E:embeddings]` **GitHub push events carry their commit messages.**
   `activity_events.content` was NULL on every push row (451/451 on the first
   live node checked, 11 distinct titles across all 451 — all of the form

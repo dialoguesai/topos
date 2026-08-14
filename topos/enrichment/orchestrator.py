@@ -410,6 +410,33 @@ class SignalDerivationOrchestrator(EnrichmentOrchestrator):
 
             return await asyncio.to_thread(_in_thread)
 
+        def _debt_writer(job_name: str, error: str) -> Callable[[Any, Any], None]:
+            """Durable-debt closure for a job that produced no output.
+
+            Shared by the raise path and the deferral path because they mean
+            the same thing to the data: this job's rows are MISSING for this
+            batch. Only the raise path used to record anything, so a node that
+            ingested with ollama down (a deferral, not an exception) left no
+            debt at all — nothing for the worker or
+            ``POST /signal/derivation-debt/retry`` to find.
+            """
+
+            def _record(conn_w: Any, _adapters: Any) -> None:
+                record_failed_derivation(
+                    conn_w,
+                    source_id=source_id,
+                    sync_batch_id=sync_batch_id or "unknown",
+                    job_name=job_name,
+                    error=error,
+                    record_ids=[
+                        str(m.get("message_id") or m.get("record_id") or "")
+                        for m in canonical_messages[:500]
+                    ],
+                    record_count=len(canonical_messages),
+                )
+
+            return _record
+
         results: Dict[str, Any] = {
             "jobs_run": 0,
             "records_created": {},
@@ -434,6 +461,7 @@ class SignalDerivationOrchestrator(EnrichmentOrchestrator):
             try:
                 records = await job.enrich(canonical_messages)
                 if records and records[0].get("_deferred"):
+                    deferral_error = str(records[0].get("error"))
                     results["deferred_jobs"].append(job_name)
                     env = JobEnvelope(
                         stage=PipelineStage.SIGNAL_DERIVE,
@@ -442,10 +470,15 @@ class SignalDerivationOrchestrator(EnrichmentOrchestrator):
                         record_ids=[],
                         status="failed",
                         provenance={"job_name": job_name, "status": "deferred"},
-                        error=str(records[0].get("error")),
+                        error=deferral_error,
                         idempotency_key=f"{sync_batch_id or source_id}:{job_name}:signal_derive",
                     )
                     results["envelopes"].append(env.to_dict())
+                    # The envelope is in-memory and the audit row names no job,
+                    # so without this the deferral vanished at end of batch.
+                    # Idempotent per (batch, job): re-ingesting while still
+                    # offline re-queues the existing row instead of stacking.
+                    await _offload_write(_debt_writer(job_name, deferral_error))
                     continue
                 records = [r for r in records if not r.get("_deferred")]
                 # Direct-write jobs (facts → FactStore) persist inside enrich()
@@ -507,21 +540,7 @@ class SignalDerivationOrchestrator(EnrichmentOrchestrator):
                 # Durable debt. Catching this exception used to be the whole
                 # response, which is how 88 records' facts were lost with the
                 # batch still reporting clean.
-                def _record_debt(conn_w: Any, _adapters: Any, *, _job: str = job_name, _error: str = str(exc)) -> None:
-                    record_failed_derivation(
-                        conn_w,
-                        source_id=source_id,
-                        sync_batch_id=sync_batch_id or "unknown",
-                        job_name=_job,
-                        error=_error,
-                        record_ids=[
-                            str(m.get("message_id") or m.get("record_id") or "")
-                            for m in canonical_messages[:500]
-                        ],
-                        record_count=len(canonical_messages),
-                    )
-
-                await _offload_write(_record_debt)
+                await _offload_write(_debt_writer(job_name, str(exc)))
 
         try:
             from ..features.signal.dimension_profiles import DimensionProfileUpdater

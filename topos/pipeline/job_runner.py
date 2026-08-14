@@ -7,6 +7,7 @@ import logging
 import os
 import socket
 import threading
+import time
 import uuid
 from typing import Any, Awaitable, Callable, Dict, Optional
 
@@ -351,14 +352,42 @@ _IDLE_POLL_SECONDS = 0.25
 #: no reason to hit the database four times a second.
 _MAX_POLL_SECONDS = 5.0
 
+#: How often to check whether a provider that was blocking parked derivation
+#: debts has come back. Deliberately slow: the check is a cached reachability
+#: probe and touches the database ONLY on the not-ready → ready edge, so this
+#: is the latency of noticing a newly installed model, not a polling cost.
+_DEBT_SWEEP_SECONDS = 300.0
+
+
+async def _maybe_revive_blocked_debts(conn_factory: Callable[[], Any]) -> None:
+    """Give parked derivation debts a fresh attempt when their model arrives.
+
+    ``run_derivation_retry_job`` refuses to re-run a debt whose provider is
+    absent, so those rows sit 'failed' and nothing else in the queue moves them
+    out. Without this the work resumed only when a human hit
+    ``POST /signal/derivation-debt/retry``.
+    """
+    from ..enrichment.derivation_recovery import revive_capability_blocked_debts
+
+    try:
+        await _run_db(conn_factory, revive_capability_blocked_debts)
+    except Exception as exc:  # noqa: BLE001 — a sweep must never kill the worker
+        logger.debug("pipeline debt sweep skipped: %s", exc)
+
 
 async def _worker_loop(conn_factory: Callable[[], Any]) -> None:
     idle_delay = _IDLE_POLL_SECONDS
+    next_debt_sweep = 0.0
     while True:
         try:
             if not _enabled():
                 await asyncio.sleep(1.0)
                 continue
+
+            now = time.monotonic()
+            if now >= next_debt_sweep:
+                next_debt_sweep = now + _DEBT_SWEEP_SECONDS
+                await _maybe_revive_blocked_debts(conn_factory)
 
             # claim_next_job takes the process-wide write gate — a BLOCKING
             # threading lock. Called directly it ran on the event loop, so every
