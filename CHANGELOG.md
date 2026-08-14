@@ -25,6 +25,68 @@ The machine-readable twin of each release is
   from `BUNDLED_REGISTRY` for bundled source ids; per-source toggles remain in
   `source_enrichment_overrides`.
 
+- `[D]` **Topic-cluster labels are named against their siblings, under their
+  dimension's question.** Every cluster was named by one prompt that saw only
+  that cluster's own most frequent terms: no idea what the neighbouring
+  clusters were already called, and the same generic instruction whether the
+  cluster was built under the wellbeing lens or the interests one. For a
+  personal corpus the most frequent terms are exactly the words every cluster
+  shares, so labels collapsed toward the generic — one live node carried 152
+  clusters under 91 distinct labels, "personal projects" on fourteen of them
+  spanning five dimensions. Four changes: frequent terms become
+  DISTINGUISHING terms (class-based TF-IDF — this cluster's share of a term
+  against the rest of the set, so a word the whole corpus uses scores zero
+  instead of leading every list); each prompt opens with the question that
+  dimension exists to answer, read from its own
+  `topos/features/signal/definitions/<dimension>.json`, plus one line saying
+  what kind of name answers it; the prompt carries the names the nearest
+  siblings already took, with clusters named in a deterministic order
+  (dimension, then size) so those names exist when they are needed; and an
+  answer that comes back generic, already-taken or as a link earns one bounded
+  retry naming the problem, then a deterministic suffix that is checked against
+  every name in play — including the term labels still carried by clusters the
+  model declined. Measured relabel-only over the same 152 clusters with the
+  same local model (`scripts/eval_cluster_labels.py`): **93 → 151 distinct
+  labels**, worst duplication **13 → 2**, clusters carrying a duplicated name
+  **75 → 2**, names duplicated across more than one dimension **10 → 0**. The
+  control arm reproduces the live node to within two labels (93 vs 91 distinct,
+  "personal projects" 13 vs 14), which is what makes the comparison the prompt
+  and not the run. `TOPOS_CLUSTER_LABEL_CONTRAST=off` restores the isolated
+  prompt (it is that control arm); `TOPOS_CLUSTER_LLM_LABELS=off` and the
+  deterministic term-label fallback are unchanged.
+  (`topos/features/signal/cluster_labels.py`)
+- `[D]` **A cluster label can no longer be a link.** Distinguishing terms are
+  drawn from page titles and links, which invites the model to answer with one:
+  a measured relabel returned a full `maps.app.goo.gl/…?g_st=i&utm_…` URL as a
+  cluster label. Labels are published — into `top_topics` signal facts and every
+  surface that lists topics — and the interests definition bans verbatim URLs
+  there outright. URL, bare-domain, path and @handle answers now earn a retry
+  and, if they survive it, are dropped in favour of the term label. An
+  all-lowercase answer is title-cased deterministically (two thirds of live
+  answers came back in prose case).
+- `[D]` **Repeated term labels are disambiguated against each other, not just
+  counted.** The suffix for a repeat was the cluster's member_count, which is
+  not unique: two 7-member clusters that both reduced to "hello" both became
+  "hello (7)", and a live node carried exactly that pair. Every candidate
+  suffix is now checked against the labels already handed out, with the
+  occurrence index as the fallback that cannot collide. This was the only
+  duplicate the LLM labeler could not resolve, because it inherits the term
+  label whenever the model declines a cluster.
+- `[D]` **Existing clusters can be relabeled without being re-clustered.**
+  `relabel_existing_clusters()` runs the labeler over the clusters already on
+  disk and writes back labels only — membership, cluster ids and centroids are
+  untouched, and the deterministic term label is preserved in
+  `metadata.term_label`. A prompt change owes existing nodes new names, not a
+  new partition: two k-means passes over the same corpus agree only to ARI
+  ~0.52, so shipping this through a recompute would churn every cluster id,
+  `top_topics` fact and UI link with it. Reachable as the `derived_rebuild`
+  target `topic_cluster_labels` and as the release step
+  `relabel-topic-clusters`; `scripts/eval_cluster_labels.py` drives the same
+  path against a temp copy of the database to A/B two prompts over one fixed
+  partition. **Clusters keep their old names until that step runs**, and this
+  build reaches a node by reinstall (frozen uv tool snapshot), not restart.
+  (`topos/features/signal/topic_clustering.py`, `topos/upgrades/runner.py`)
+
 ### Changed
 
 - `[S1] [E:embeddings]` Ambient activity rows (browser visits) now embed ONE

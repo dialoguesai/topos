@@ -337,10 +337,45 @@
           "consent": "auto",
           "cost": "local models only, no network; ~1k title-length rows on the affected node, minutes on the local embedding + url classifier; unaffected sources no-op on the coverage check",
           "order": 1
+        },
+        {
+          "id": "backfill-github-activity-commit-content",
+          "kind": "canonical_reprocess",
+          "title": "Re-map retained GitHub push events so activity rows carry their commit messages",
+          "why": "activity_events.content was NULL on every github push row (one live node: 451/451, and only 11 DISTINCT titles across all 451 — all '{owner}/{repo}: pushed N commit'), because the mapper carried repo/actor and nothing else, and the store's INSERT did not list the content column at all. The commit messages — the only text that says what the work WAS — sat unused in the retained raw payloads. Everything semantic downstream could therefore match on repo NAME alone: goal/interest attachment to engineering work was pure name matching, and a contrastive term extraction over commit-attached items returned nothing but 'pushed'/'commit'. The declared field map and the store fix land in this release, but neither reaches a row already on disk: re-mapping from raw retention is what fills it. Raw retention holds the full PushEvent payloads (461 rows on the same node), so no re-fetch from GitHub is needed.",
+          "params": {
+            "from_stage": "raw",
+            "source_ids": [
+              "github_activity"
+            ]
+          },
+          "progress": "GET /v1/upgrade/status",
+          "idempotent": "re-mapping is upsert-keyed (activity event_id, journal entry_id) and content is written with COALESCE, so re-running rewrites the same values; downstream embedding writes are (record_id, model, chunk_index)-keyed with a content-hash skip",
+          "consent": "auto",
+          "cost": "no network (raw payloads are local); local embedding + NER over a few hundred commit-message-length rows, seconds to a couple of minutes; nodes with no github_activity install no-op",
+          "order": 2
+        },
+        {
+          "id": "relabel-topic-clusters",
+          "kind": "derived_rebuild",
+          "title": "Rename existing topic clusters with the contrastive, dimension-framed labeler",
+          "why": "Cluster labels were generated one cluster at a time from that cluster's own most frequent terms, under one generic instruction regardless of which signal dimension the cluster was built in. On one live node that left 152 clusters carrying 91 distinct labels — 'personal projects' on fourteen of them spanning five dimensions, 'private notes' on five — which is what every surface that lists topics showed. The new prompt reaches an existing cluster only through a relabel: nothing about its membership changed, so no other stage will rewrite these names on its own. Labels ONLY, deliberately — a full recompute would relabel but also repartition (seed-to-seed ARI ~0.52 on the live corpus), churning cluster ids, top_topics facts and UI links for what is a prompt change.",
+          "params": {
+            "targets": [
+              "topic_cluster_labels"
+            ]
+          },
+          "progress": "GET /v1/upgrade/status",
+          "idempotent": "labels and label metadata only — cluster ids, membership and centroids are untouched, and the deterministic term label is preserved in metadata.term_label. Re-running renames from the same inputs; the local model is sampled, so a second run can word the same clusters differently.",
+          "consent": "prompt",
+          "cost": "one short local-LLM call per cluster, plus one retry per duplicate name; measured ~2s per call on llama3.2:latest (~6 min for 152 clusters). No network. Nodes with no clusters no-op.",
+          "order": 3
         }
       ],
       "notes": [
-        "Deploying this build requires reinstalling the node (frozen uv tool snapshot) — a plain restart runs the old code and leaves the browser lanes dark."
+        "Deploying this build requires reinstalling the node (frozen uv tool snapshot) — a plain restart runs the old code and leaves the browser lanes dark.",
+        "Existing clusters keep their old labels until relabel-topic-clusters runs: the labeler runs at cluster write time, and this release changes the prompt, not the partition.",
+        "Nodes whose github raw retention was purged keep NULL content on their old push rows; new pushes carry commit messages from this build on. Browser rows written before this release keep NULL content/hostname until they are re-ingested — no raw-retention re-map step is declared for them because the plugin re-pushes visits organically."
       ]
     }
   ]

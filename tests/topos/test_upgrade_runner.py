@@ -446,3 +446,70 @@ def test_shipped_manifest_declares_the_debt_retry_step() -> None:
     assert step["kind"] == "engine_endpoint"
     assert step["params"]["path"] == "/v1/signal/derivation-debt/retry"
     assert step["consent"] == "auto", "repairing recorded loss should not need a prompt"
+
+
+def test_relabel_target_renames_clusters_without_reclustering(conn, monkeypatch) -> None:
+    """`topic_cluster_labels` must relabel in place, never recompute.
+
+    A recompute would also relabel — and repartition. Seed-to-seed ARI on the
+    live corpus is ~0.52, so shipping a prompt change through a recompute
+    churns cluster ids, top_topics facts and every UI link with them.
+    """
+    from topos.features.signal import topic_clustering
+    from topos.upgrades.runner import _exec_derived_rebuild
+
+    calls: list[str] = []
+
+    def fake_relabel(conn_, **kwargs):
+        calls.append("relabel")
+        assert conn_ is conn
+        return {"status": "completed", "clusters": 12, "relabeled": 12, "changed": 0}
+
+    def fake_recompute(conn_, **kwargs):  # pragma: no cover - must not run
+        calls.append("recompute")
+        return {}
+
+    monkeypatch.setattr(topic_clustering, "relabel_existing_clusters", fake_relabel)
+    monkeypatch.setattr(topic_clustering, "recompute_topic_clusters", fake_recompute)
+
+    out = _exec_derived_rebuild({"params": {"targets": ["topic_cluster_labels"]}}, conn)
+    assert calls == ["relabel"]
+    assert out["targets"]["topic_cluster_labels"]["relabeled"] == 12
+
+
+def test_relabel_target_refreshes_top_topics_facts_when_names_moved(conn, monkeypatch) -> None:
+    """Renamed clusters whose facts still carry the old tag would read stale."""
+    from topos.features.signal import topic_clustering
+    from topos.upgrades.runner import _exec_derived_rebuild
+
+    monkeypatch.setattr(
+        topic_clustering,
+        "relabel_existing_clusters",
+        lambda conn_, **kw: {"status": "completed", "clusters": 3, "relabeled": 3, "changed": 3},
+    )
+    monkeypatch.setattr(topic_clustering, "write_top_topics_signal_facts", lambda a, c: 3)
+    out = _exec_derived_rebuild({"params": {"targets": ["cluster_labels"]}}, conn)
+    assert out["targets"]["cluster_labels"]["top_topics_facts"] == 3
+
+
+def test_shipped_manifest_declares_the_cluster_relabel_step() -> None:
+    """The dispatch is only reachable if a release actually declares it."""
+    import json
+    from pathlib import Path
+
+    import topos
+
+    data = json.loads(
+        (Path(topos.__file__).parent / "upgrades" / "manifests.json").read_text()
+    )
+    steps = [
+        s
+        for release in data["releases"]
+        for s in release.get("steps", [])
+        if s.get("id") == "relabel-topic-clusters"
+    ]
+    assert steps, "no release declares relabel-topic-clusters"
+    step = steps[0]
+    assert step["kind"] == "derived_rebuild"
+    assert step["params"]["targets"] == ["topic_cluster_labels"]
+    assert step["consent"] == "prompt", "one local-LLM call per cluster is not a silent cost"
