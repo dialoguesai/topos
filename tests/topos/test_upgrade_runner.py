@@ -513,3 +513,41 @@ def test_shipped_manifest_declares_the_cluster_relabel_step() -> None:
     assert step["kind"] == "derived_rebuild"
     assert step["params"]["targets"] == ["topic_cluster_labels"]
     assert step["consent"] == "prompt", "one local-LLM call per cluster is not a silent cost"
+
+
+def test_blackhole_rebuild_target_reruns_completed_rebuilds(conn, monkeypatch) -> None:
+    """`run_pending_rebuilds` skips 'complete' entities — which are exactly the
+    ones carrying data from a surface the rebuild only just learned about."""
+    from topos.features.lifecycle import blackhole_rebuild
+    from topos.upgrades.runner import _exec_derived_rebuild
+
+    monkeypatch.setattr(
+        blackhole_rebuild,
+        "rerun_all_rebuilds",
+        lambda conn_: [
+            {"cluster_labels_withdrawn": 2, "cluster_member_previews_blanked": 5},
+            {"cluster_labels_withdrawn": 0, "cluster_member_previews_blanked": 0},
+        ],
+    )
+    out = _exec_derived_rebuild({"params": {"targets": ["blackhole_rebuilds"]}}, conn)
+    target = out["targets"]["blackhole_rebuilds"]
+    assert target["entities"] == 2
+    assert target["cluster_labels_withdrawn"] == 2
+    assert target["cluster_member_previews_blanked"] == 5
+
+
+def test_shipped_manifest_declares_the_blackhole_rerun_after_the_relabel() -> None:
+    """Order matters: the relabel writes labels the withdrawal must then see."""
+    import json
+    from pathlib import Path
+
+    import topos
+
+    data = json.loads(
+        (Path(topos.__file__).parent / "upgrades" / "manifests.json").read_text()
+    )
+    steps = [s for r in data["releases"] for s in r.get("steps", [])]
+    rerun = [s for s in steps if s.get("id") == "rerun-blackhole-rebuilds"]
+    assert rerun, "no release declares rerun-blackhole-rebuilds"
+    assert rerun[0]["params"]["targets"] == ["blackhole_rebuilds"]
+    assert "relabel-topic-clusters" in (rerun[0].get("depends_on") or [])
