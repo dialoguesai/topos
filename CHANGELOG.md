@@ -49,6 +49,30 @@ The machine-readable twin of each release is
 
 ### Fixed
 
+- `[S1]` **Model readiness stops counting jobs ready because they are not LLM
+  jobs.** `_model_readiness()` scored every non-LLM job ready unconditionally —
+  "HuggingFace task models and rules jobs run in-process on any supported
+  device", which is true only once the weights are on disk. A machine set up
+  offline has nothing cached and was still reported at **100% model readiness**
+  for every dimension those jobs feed, which is precisely the machine that most
+  needs to be told otherwise. Readiness is now per job, from the model catalog:
+  ollama jobs need a reachable server (and a model above the size minimum),
+  HuggingFace jobs need their snapshot present in the local HF cache, rules jobs
+  need nothing. The per-dimension profile gains `model_readiness_jobs` —
+  `{job, provider, model, ready, reason}` per job — so a dark dimension can say
+  *which* model it is waiting on ("the NER weights are not downloaded yet")
+  instead of only scoring low. `data_health._LLM_JOBS`, a literal that
+  duplicated what the catalog already states, is now derived from it via
+  `jobs_for_provider("ollama")`. (`topos/enrichment/job_readiness.py`,
+  `topos/features/signal/data_health.py`)
+
+  Readiness and *holding* are deliberately separate questions:
+  `readiness_of().ready` answers "can this run now" and is what a person is
+  shown; `.blocking` answers the narrower "should queued work WAIT", and only a
+  hard stop sets it. Uncached HuggingFace weights make a job not ready but never
+  blocking — the first run downloads them, so holding that debt would strand
+  work a networked node completes unaided.
+
 - `[S1]` **A deferred derivation job now records durable debt.** Jobs report an
   unreachable provider by RETURNING `[{"_deferred": True, ...}]` rather than
   raising, and only the raise path called `record_failed_derivation()`. So the

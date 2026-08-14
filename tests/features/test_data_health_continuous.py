@@ -13,6 +13,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from topos.enrichment import job_readiness
 from topos.features.signal import data_health as dh
 from topos.features.signal.data_health import (
     DataHealthComputer,
@@ -127,6 +128,10 @@ class TestModelReadiness:
             "topos.features.signal.model_recommendations.signal_model_recommendation",
             lambda _conn=None: {"provider": "ollama", "meets_minimum": True},
         )
+        # Weights on disk are now part of readiness, so pin them too or this
+        # measures whatever the host happens to have downloaded.
+        monkeypatch.setattr(job_readiness, "hf_model_cached", lambda *_a, **_k: True)
+
         monkeypatch.setattr(dh, "check_provider_status", lambda: {"ollama": "up", "huggingface": "up"})
         up = DataHealthComputer(bundle).compute()["memory"]["model_readiness_score"]
 
@@ -135,6 +140,44 @@ class TestModelReadiness:
 
         assert down < up
         assert up == 1.0
+
+    def test_uncached_hf_weights_drop_readiness(self, monkeypatch):
+        """An offline first run used to report 100% model readiness."""
+        bundle = _bundle()
+        bundle.signal.put_fact({"dimension": "memory", "source_id": "s", "record_id": "m1"})
+        monkeypatch.setattr(
+            "topos.features.signal.model_recommendations.signal_model_recommendation",
+            lambda _conn=None: {"provider": "ollama", "meets_minimum": True},
+        )
+        monkeypatch.setattr(dh, "check_provider_status", lambda: {"ollama": "up", "huggingface": "up"})
+
+        monkeypatch.setattr(job_readiness, "hf_model_cached", lambda *_a, **_k: True)
+        cached = DataHealthComputer(bundle).compute()["memory"]["model_readiness_score"]
+
+        monkeypatch.setattr(job_readiness, "hf_model_cached", lambda *_a, **_k: False)
+        missing = DataHealthComputer(bundle).compute()["memory"]
+
+        assert cached == 1.0
+        assert missing["model_readiness_score"] < cached
+
+    def test_per_job_detail_names_what_is_missing(self, monkeypatch):
+        """A low score alone cannot say WHICH model a dimension is waiting on."""
+        bundle = _bundle()
+        bundle.signal.put_fact({"dimension": "memory", "source_id": "s", "record_id": "m1"})
+        monkeypatch.setattr(
+            "topos.features.signal.model_recommendations.signal_model_recommendation",
+            lambda _conn=None: {"provider": "ollama", "meets_minimum": True},
+        )
+        monkeypatch.setattr(dh, "check_provider_status", lambda: {"ollama": "down", "huggingface": "up"})
+        monkeypatch.setattr(job_readiness, "hf_model_cached", lambda *_a, **_k: True)
+
+        detail = DataHealthComputer(bundle).compute()["memory"]["model_readiness_jobs"]
+
+        assert detail, "per-job readiness must be reported, not just the score"
+        by_job = {d["job"]: d for d in detail}
+        assert by_job["dimension_summary"]["ready"] is False
+        assert "ollama" in by_job["dimension_summary"]["reason"]
+        assert by_job["dimension_summary"]["provider"] == "ollama"
 
     def test_all_ten_dimensions_scored(self, monkeypatch):
         monkeypatch.setattr(dh, "check_provider_status", lambda: {"ollama": "down", "huggingface": "up"})

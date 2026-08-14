@@ -77,30 +77,64 @@ def _status_of(conn: sqlite3.Connection, job_id: str) -> str:
 # --- readiness classification -------------------------------------------------
 
 
-def test_rules_and_hf_jobs_are_ready_without_ollama(monkeypatch) -> None:
+def test_rules_jobs_never_hold(monkeypatch) -> None:
     _set_providers(monkeypatch, ollama="down", huggingface="up")
-    assert job_readiness.job_is_ready("relationship_edges")[0] is True
-    assert job_readiness.job_is_ready("entities")[0] is True
+    assert job_readiness.should_hold_job("relationship_edges")[0] is False
 
 
-def test_llm_jobs_are_not_ready_without_ollama(monkeypatch) -> None:
+def test_llm_jobs_hold_without_ollama(monkeypatch) -> None:
     _set_providers(monkeypatch, ollama="down", huggingface="up")
-    ready, reason = job_readiness.job_is_ready("topics")
-    assert ready is False
+    hold, reason = job_readiness.should_hold_job("topics")
+    assert hold is True
     assert "ollama" in reason
-    assert job_readiness.job_is_ready("goal_extraction")[0] is False
+    assert job_readiness.should_hold_job("goal_extraction")[0] is True
 
 
-def test_llm_jobs_ready_once_ollama_answers(monkeypatch) -> None:
+def test_llm_jobs_release_once_ollama_answers(monkeypatch) -> None:
     _set_providers(monkeypatch, ollama="up", huggingface="up")
-    assert job_readiness.job_is_ready("topics")[0] is True
+    assert job_readiness.should_hold_job("topics")[0] is False
 
 
-def test_uncatalogued_job_is_assumed_runnable(monkeypatch) -> None:
-    """Blocking what we cannot classify would stall debts we don't understand."""
+def test_uncatalogued_job_never_holds(monkeypatch) -> None:
+    """Holding what we cannot classify would stall debts we don't understand."""
     _set_providers(monkeypatch, ollama="down", huggingface="up")
-    assert job_readiness.job_is_ready("facts")[0] is True
-    assert job_readiness.job_is_ready("not_a_real_job")[0] is True
+    assert job_readiness.should_hold_job("facts")[0] is False
+    assert job_readiness.should_hold_job("not_a_real_job")[0] is False
+
+
+def test_uncached_hf_job_is_not_ready_but_never_holds(monkeypatch) -> None:
+    """The two questions come apart here, which is the whole reason for both.
+
+    Weights that are not on disk mean the job cannot run *now*, so a person
+    should be told. But the first run downloads them, so holding its debt
+    would strand work a networked node finishes unaided.
+    """
+    _set_providers(monkeypatch, ollama="up", huggingface="up")
+    monkeypatch.setattr(job_readiness, "hf_model_cached", lambda *_a, **_k: False)
+
+    state = job_readiness.readiness_of("entities")
+    assert state.ready is False
+    assert state.blocking is False
+    assert "not downloaded" in state.reason
+    assert job_readiness.should_hold_job("entities")[0] is False
+
+
+def test_llm_job_set_is_derived_from_the_catalog() -> None:
+    """The set data_health gates on must come from the catalog, not a literal."""
+    assert job_readiness.jobs_for_provider("ollama") == frozenset(
+        {"topics", "dimension_summary", "goal_extraction"}
+    )
+    assert "entities" in job_readiness.jobs_for_provider("huggingface")
+    assert job_readiness.jobs_for_provider("nonexistent") == frozenset()
+
+
+def test_cached_hf_job_is_ready(monkeypatch) -> None:
+    _set_providers(monkeypatch, ollama="down", huggingface="up")
+    monkeypatch.setattr(job_readiness, "hf_model_cached", lambda *_a, **_k: True)
+
+    state = job_readiness.readiness_of("embeddings")
+    assert state.ready is True
+    assert state.model == "sentence-transformers/all-MiniLM-L6-v2"
 
 
 # --- the executor holds instead of burning the attempt ------------------------
