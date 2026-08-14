@@ -52,6 +52,7 @@ class RebuildReport:
     briefs_invalidated: int = 0
     stat_insights_removed: int = 0
     context_vectors_removed: int = 0
+    cluster_labels_withdrawn: int = 0
     details: Dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> Dict[str, Any]:
@@ -61,6 +62,7 @@ class RebuildReport:
             "briefs_invalidated": self.briefs_invalidated,
             "stat_insights_removed": self.stat_insights_removed,
             "context_vectors_removed": self.context_vectors_removed,
+            "cluster_labels_withdrawn": self.cluster_labels_withdrawn,
             **self.details,
         }
 
@@ -180,6 +182,77 @@ def _remove_context_vector(conn: sqlite3.Connection, entity_id: str) -> int:
         return 0
 
 
+def _withdraw_cluster_labels(conn: sqlite3.Connection, terms: Set[str]) -> int:
+    """Take the protected name out of topic cluster labels and previews.
+
+    Closing the derived ``top_topics`` object is not enough on its own: the
+    object is minted FROM ``topic_clusters.label`` by
+    ``write_top_topics_signal_facts``, so the next cluster pass would write the
+    withdrawn name straight back. The row is the producer, and it has to be
+    cleaned or the withdrawal lasts until the next recompute.
+
+    The cluster itself is kept — it is real structure in the owner's own data,
+    and deleting it would take the members with it. What goes is the prose: the
+    label falls back to the deterministic term label when that is clean, and to
+    the neutral placeholder when it is not (term labels are built from member
+    text, so they can carry the name too). The centroid preview is a verbatim
+    member excerpt, so it is blanked rather than rewritten.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT cluster_id, label, centroid_preview, metadata_json FROM topic_clusters"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return 0
+    cleaned = 0
+    for cluster_id, label, centroid_preview, metadata_json in rows:
+        label_hit = _mentions(label, terms)
+        preview_hit = _mentions(centroid_preview, terms)
+        if not label_hit and not preview_hit:
+            continue
+        new_label = str(label or "")
+        if label_hit:
+            try:
+                metadata = json.loads(metadata_json or "{}")
+            except json.JSONDecodeError:
+                metadata = {}
+            term_label = str((metadata or {}).get("term_label") or "")
+            new_label = term_label if term_label and not _mentions(term_label, terms) else "topic cluster"
+        conn.execute(
+            "UPDATE topic_clusters SET label=?, centroid_preview=?, updated_at=datetime('now')"
+            " WHERE cluster_id=?",
+            (new_label, "" if preview_hit else centroid_preview, cluster_id),
+        )
+        cleaned += 1
+    return cleaned
+
+
+def _withdraw_cluster_member_previews(conn: sqlite3.Connection, terms: Set[str]) -> int:
+    """Blank member excerpts that quote the protected entity.
+
+    A member row is a verbatim slice of a canonical record, served by
+    `signal_list_topic_cluster_members` and carried in the retrieval packet. The
+    row itself stays — it is the cluster's own membership, and the id is what
+    the read-side guard joins on — but the quoted text goes.
+    """
+    try:
+        rows = conn.execute(
+            "SELECT member_id, text_preview FROM topic_cluster_members"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return 0
+    blanked = 0
+    for member_id, text_preview in rows:
+        if not _mentions(text_preview, terms):
+            continue
+        conn.execute(
+            "UPDATE topic_cluster_members SET text_preview='' WHERE member_id=?",
+            (member_id,),
+        )
+        blanked += 1
+    return blanked
+
+
 def rebuild_for_blackhole(conn: sqlite3.Connection, entity_ref: str) -> RebuildReport:
     """Withdraw every prose artifact naming this entity, then mark the flag ready.
 
@@ -207,6 +280,10 @@ def rebuild_for_blackhole(conn: sqlite3.Connection, entity_ref: str) -> RebuildR
             report.context_vectors_removed = _remove_context_vector(
                 conn, str(record.get("entity_id") or "")
             )
+            report.cluster_labels_withdrawn = _withdraw_cluster_labels(conn, terms)
+            report.details["cluster_member_previews_blanked"] = (
+                _withdraw_cluster_member_previews(conn, terms)
+            )
     except Exception as exc:  # noqa: BLE001
         conn.rollback()
         # Leaves rebuild_state='failed', which keeps the withholding in force.
@@ -220,11 +297,12 @@ def rebuild_for_blackhole(conn: sqlite3.Connection, entity_ref: str) -> RebuildR
     report.details["status"] = "complete"
     logger.info(
         "blackhole rebuild complete: %s objects closed, %s briefs blanked, "
-        "%s insights removed, %s context vectors removed",
+        "%s insights removed, %s context vectors removed, %s cluster labels withdrawn",
         report.objects_closed,
         report.briefs_invalidated,
         report.stat_insights_removed,
         report.context_vectors_removed,
+        report.cluster_labels_withdrawn,
     )
     return report
 
@@ -239,3 +317,17 @@ def run_pending_rebuilds(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
     store = BlackholeStore(conn)
     pending = [r for r in store.list() if r["rebuild_state"] != "complete"]
     return [rebuild_for_blackhole(conn, r["normalized_name"]).as_dict() for r in pending]
+
+
+def rerun_all_rebuilds(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    """Re-run the rebuild for every black hole, completed ones included.
+
+    A rebuild is only ever as complete as the surface list it knew about. When
+    this job learns a new one — topic cluster labels and member excerpts did not
+    exist in its list until now — entities already marked ``complete`` are
+    exactly the ones carrying the un-withdrawn data, and ``run_pending_rebuilds``
+    skips precisely those. One live node had five member excerpts still quoting
+    a protected entity under three ``complete`` rebuilds.
+    """
+    store = BlackholeStore(conn)
+    return [rebuild_for_blackhole(conn, r["normalized_name"]).as_dict() for r in store.list()]

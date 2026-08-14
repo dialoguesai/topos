@@ -1245,6 +1245,54 @@ def _rebuild_affinity_lane(conn) -> Dict[str, Any]:
     return {"context_centroids": centroids, "affinity_edges": _rebuild_affinity_edges(conn)}
 
 
+def _protected_name_terms(conn) -> set:
+    """The owner's off-limits names, for the labeler's producer-side refusal.
+
+    Empty (never an error) when the feature is absent or the store is
+    unreadable: a labeler that crashed on a missing table would take the whole
+    recompute with it, and the read-side guards still stand behind this.
+    """
+    if conn is None:
+        return set()
+    try:
+        from ..lifecycle.blackhole import blackholed_name_terms
+
+        return set(blackholed_name_terms(conn))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("blackhole terms unavailable for cluster labeling: %s", exc)
+        return set()
+
+
+def _scrub_protected_previews(clusters: List[Dict[str, Any]], terms) -> int:
+    """Blank cluster/member excerpts quoting an off-limits entity, pre-persist.
+
+    The labeler refuses to NAME a protected entity, but a cluster also stores
+    two verbatim slices of member text — the centroid preview and each member's
+    preview — and those are minted fresh by every recompute. Without this a
+    rebuild's withdrawal would last exactly until the next cluster pass.
+    Membership itself is untouched: what a protected record contributes to the
+    partition is a D3 question about clustering, not about stored prose.
+    """
+    if not terms:
+        return 0
+    from ..lifecycle.blackhole import normalize_entity_name
+
+    def _hits(text: Optional[str]) -> bool:
+        blob = normalize_entity_name(str(text or ""))
+        return bool(blob) and any(term and term in blob for term in terms)
+
+    scrubbed = 0
+    for cluster in clusters:
+        if _hits(cluster.get("centroid_preview")):
+            cluster["centroid_preview"] = ""
+            scrubbed += 1
+        for member in cluster.get("members") or []:
+            if _hits(member.get("text_preview")):
+                member["text_preview"] = ""
+                scrubbed += 1
+    return scrubbed
+
+
 def recompute_topic_clusters(
     conn,
     *,
@@ -1270,7 +1318,13 @@ def recompute_topic_clusters(
 
     from .cluster_labels import apply_llm_cluster_labels
 
-    metrics["llm_labels"] = apply_llm_cluster_labels(clusters)
+    protected_terms = _protected_name_terms(conn)
+    metrics["llm_labels"] = apply_llm_cluster_labels(
+        clusters, protected_terms=protected_terms
+    )
+    metrics["protected_previews_scrubbed"] = _scrub_protected_previews(
+        clusters, protected_terms
+    )
 
     # Stable identities: rename new clusters to matched old IDs (centroid
     # cosine, greedy) so top_topics facts / UI links / embedding cluster_id
@@ -1455,7 +1509,11 @@ def relabel_existing_clusters(
     from .cluster_labels import apply_llm_cluster_labels
 
     relabeled = apply_llm_cluster_labels(
-        clusters, complete=complete, mode=mode, contrastive=contrastive
+        clusters,
+        complete=complete,
+        mode=mode,
+        contrastive=contrastive,
+        protected_terms=_protected_name_terms(conn),
     )
     changed = [
         {"cluster_id": c["cluster_id"], "before": old, "after": str(c.get("label") or "")}

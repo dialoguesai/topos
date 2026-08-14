@@ -77,6 +77,13 @@ TOKENS: Dict[str, str] = {
     "top_topics_related": "BHTOPICqx15",
     "affinity_edge": "BHAFFINqx16",
     "context_vector": "BHCTXqx17",
+    # A topic cluster's own row. The label used to be term soup ("https / good
+    # / here") and named nobody; the contrastive labeler names the subject, so
+    # a cluster about a protected person is now called after them. The label is
+    # stored once and served to every caller, and top_topics facts are minted
+    # from it — so it is a name-string surface in its own right.
+    "cluster_label": "BHCLUSTERqx18",
+    "cluster_preview": "BHPREVIEWqx19",
 }
 
 # Control tokens — these must SURVIVE for every non-owner caller.
@@ -401,6 +408,48 @@ def build_blackhole_corpus(db_path: str, *, rebuild_complete: bool = True) -> Bl
         "INSERT INTO user_goals (goal_id, goal_text, payload_json) VALUES (?,?,'{}')",
         ("g-1", f"spend more time with {BH_CANONICAL} {t['goal_text']}"),
     )
+
+    # ------------------------------------------------- topic cluster rows
+    # The label is the surface: stored once, served to every caller, and the
+    # source `write_top_topics_signal_facts` mints top_topics facts from. The
+    # control cluster is what keeps the probe non-vacuous.
+    for cluster_id, label, preview, member_text in (
+        (
+            "tc-bh",
+            f"{BH_CANONICAL} {t['cluster_label']}",
+            f"catching up with {BH_CANONICAL} {t['cluster_preview']}",
+            f"dinner with {BH_CANONICAL}",
+        ),
+        (
+            "tc-ok",
+            f"{OK_CANONICAL} standup",
+            "sprint planning notes",
+            f"standup with {OK_CANONICAL}",
+        ),
+    ):
+        conn.execute(
+            """
+            INSERT INTO topic_clusters
+                (cluster_id, label, dimension, member_count, source_mix_json,
+                 label_terms_json, centroid_preview, metadata_json)
+            VALUES (?, ?, 'relationships', 4, '{}', ?, ?, ?)
+            """,
+            (
+                cluster_id,
+                label,
+                json.dumps([label.split()[0].lower()]),
+                preview,
+                json.dumps({"term_label": f"{label.split()[0].lower()} / notes"}),
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO topic_cluster_members
+                (member_id, cluster_id, record_id, source_id, record_type, text_preview)
+            VALUES (?, ?, ?, 'src-a', 'conversation_message', ?)
+            """,
+            (f"m-{cluster_id}", cluster_id, f"rec-{cluster_id}", member_text),
+        )
 
     conn.commit()
 

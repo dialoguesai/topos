@@ -87,6 +87,27 @@ The machine-readable twin of each release is
   build reaches a node by reinstall (frozen uv tool snapshot), not restart.
   (`topos/features/signal/topic_clustering.py`, `topos/upgrades/runner.py`)
 
+- `[D]` **A topic cluster label is now a black-hole surface.** Making labels
+  specific made them name people: 33 of 152 labels on a live node came back as
+  an entity name (six people, four places) where the old term-soup labels named
+  nobody. The black-hole battery had no token in `topic_clusters` at all — an
+  unenumerated leak surface — and the withdrawal job's list stopped at the
+  derived `top_topics` object, which is minted *from* `topic_clusters.label`, so
+  a rebuild's withdrawal only lasted until the next cluster pass. Both
+  directions of time are now covered: the labeler refuses to mint a name in the
+  owner's off-limits set (one retry that never echoes the rejected name back
+  into the prompt, then the deterministic term label), and the rebuild withdraws
+  labels, centroid previews and member excerpts written before the entity was
+  protected. The cluster, its membership and its counts survive — withdrawal
+  takes the prose, not the owner's structure. `rerun-blackhole-rebuilds` applies
+  it to entities already marked complete, which `run_pending_rebuilds` skips by
+  design: on the live node three completed rebuilds still had **seven member
+  excerpts quoting a protected entity** (five for one, two for another).
+  Probes: `tests/evals/privacy/blackhole/test_cluster_labels.py` (16), plus the
+  surface and its two canary tokens in the battery's corpus.
+  (`topos/features/signal/cluster_labels.py`,
+  `topos/features/lifecycle/blackhole_rebuild.py`)
+
 ### Changed
 
 - `[S1] [E:embeddings]` Ambient activity rows (browser visits) now embed ONE

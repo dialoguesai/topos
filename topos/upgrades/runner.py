@@ -542,6 +542,22 @@ def _exec_derived_rebuild(step: Dict[str, Any], conn: sqlite3.Connection) -> Dic
                     bundle = AdapterFactory.create("local_database", conn=conn)
                     outcome["top_topics_facts"] = write_top_topics_signal_facts(bundle, conn)
                 detail["targets"][name] = outcome
+            elif name in ("blackhole_rebuilds", "blackholes"):
+                # Completed rebuilds are the ones carrying data from a surface
+                # the job did not know about yet, and run_pending_rebuilds skips
+                # exactly those.
+                from ..features.lifecycle.blackhole_rebuild import rerun_all_rebuilds
+
+                reports = rerun_all_rebuilds(conn)
+                detail["targets"][name] = {
+                    "entities": len(reports),
+                    "cluster_labels_withdrawn": sum(
+                        int(r.get("cluster_labels_withdrawn") or 0) for r in reports
+                    ),
+                    "cluster_member_previews_blanked": sum(
+                        int(r.get("cluster_member_previews_blanked") or 0) for r in reports
+                    ),
+                }
             elif name in ("timeline",):
                 from ..features.timeline_projection import repair_timeline_for_source
 

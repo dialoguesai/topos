@@ -370,6 +370,25 @@
           "consent": "prompt",
           "cost": "one short local-LLM call per cluster, plus one retry per duplicate name; measured ~2s per call on llama3.2:latest (~6 min for 152 clusters). No network. Nodes with no clusters no-op.",
           "order": 3
+        },
+        {
+          "id": "rerun-blackhole-rebuilds",
+          "kind": "derived_rebuild",
+          "title": "Re-run every black-hole rebuild so it reaches topic cluster labels and member excerpts",
+          "why": "The black-hole rebuild withdraws prose artifacts naming a protected entity, but topic_clusters and topic_cluster_members were never on its list — the label used to be term soup that named nobody, and the contrastive labeler now names the subject (33 of 152 labels on one live node were an entity name). The rebuild also had to learn that the cluster ROW is the producer: closing the derived top_topics object alone is undone by the next cluster pass, which re-mints the fact from topic_clusters.label. Existing black holes are marked 'complete', so run_pending_rebuilds skips exactly the entities carrying the un-withdrawn data: the same live node had five member excerpts still quoting a protected entity under three completed rebuilds. Must run AFTER relabel-topic-clusters so it also sees anything that pass just wrote.",
+          "params": {
+            "targets": [
+              "blackhole_rebuilds"
+            ]
+          },
+          "depends_on": [
+            "relabel-topic-clusters"
+          ],
+          "progress": "GET /v1/upgrade/status",
+          "idempotent": "withdrawal is a name scan re-applied to whatever is currently stored; a second run finds nothing left to withdraw. Cluster ids, membership and counts are untouched — only prose (label, centroid preview, member excerpts) is withdrawn.",
+          "consent": "auto",
+          "cost": "no LLM, no network; a scan of topic_clusters, topic_cluster_members, signal_objects and briefs per protected entity. Seconds. Nodes with no black holes no-op.",
+          "order": 4
         }
       ],
       "notes": [

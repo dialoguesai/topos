@@ -202,6 +202,28 @@ def label_is_urlish(label: str) -> bool:
     return bool(_URL_LIKE.search(str(label or "")))
 
 
+def label_mentions_protected(label: str, protected_terms: Optional[Any] = None) -> bool:
+    """True when a label names an entity the owner put off limits.
+
+    A cluster label is stored once and served to every caller, so there is no
+    per-caller variant to filter: the name must not be minted in the first
+    place. This is the same name scan the egress surfaces use
+    (``blackholed_name_terms``), applied at the producer instead — the labeler
+    only started needing it when labels stopped being term soup and started
+    naming the subject.
+    """
+    if not protected_terms:
+        return False
+    try:
+        from ..lifecycle.blackhole import normalize_entity_name
+    except Exception:  # noqa: BLE001 — no blackhole feature means nothing to protect
+        return False
+    blob = normalize_entity_name(str(label or ""))
+    if not blob:
+        return False
+    return any(term and term in blob for term in protected_terms)
+
+
 def label_is_generic(label: str) -> bool:
     """True when a label leans on the banned vocabulary for its meaning.
 
@@ -490,7 +512,15 @@ def build_contrastive_label_prompt(
             "- Never use: " + ", ".join(_BANNED_LABEL_WORDS) + ".",
         ]
     )
-    if rejected_label and rejected_reason == "url":
+    if rejected_reason == "protected":
+        # Deliberately does NOT quote the rejected answer: it contains the name
+        # the owner put off limits, and echoing it back into the next prompt
+        # would put it right back in front of the model.
+        lines.append(
+            "- The previous answer named a person or place that must not appear."
+            " Name the activity or subject instead."
+        )
+    elif rejected_label and rejected_reason == "url":
         lines.append(
             f'- "{rejected_label}" was rejected: it is a link, not a name. Say what it is about.'
         )
@@ -529,10 +559,16 @@ def _normalized_label(label: str) -> str:
     return re.sub(r"[^a-z0-9 ]", "", str(label or "").lower()).strip()
 
 
-def _rejection_reason(label: str, used: Dict[str, int]) -> Optional[str]:
+def _rejection_reason(
+    label: str,
+    used: Dict[str, int],
+    protected_terms: Optional[Any] = None,
+) -> Optional[str]:
     """Why this answer earns the one retry, or None to accept it as given."""
+    if label_mentions_protected(label, protected_terms):
+        return "protected"  # first: unpublishable at any distinctness
     if label_is_urlish(label):
-        return "url"  # first: a link is unpublishable however distinct it is
+        return "url"
     if _normalized_label(label) in used:
         return "taken"
     if label_is_generic(label):
@@ -540,10 +576,15 @@ def _rejection_reason(label: str, used: Dict[str, int]) -> Optional[str]:
     return None
 
 
-def _label_rank(label: str, used: Dict[str, int]) -> tuple[int, int, int]:
-    """Higher is better: publishable beats a link, distinct beats duplicate,
-    specific beats generic."""
+def _label_rank(
+    label: str,
+    used: Dict[str, int],
+    protected_terms: Optional[Any] = None,
+) -> tuple[int, int, int, int]:
+    """Higher is better: publishable beats protected, then link, then duplicate,
+    then generic."""
     return (
+        0 if label_mentions_protected(label, protected_terms) else 1,
         0 if label_is_urlish(label) else 1,
         0 if _normalized_label(label) in used else 1,
         0 if label_is_generic(label) else 1,
@@ -561,16 +602,27 @@ def _presentable(label: str) -> str:
     return text.title() if text and not any(ch.isupper() for ch in text) else text
 
 
-def _better_label(first: str, retried: Optional[str], used: Dict[str, int]) -> str:
+def _better_label(
+    first: str,
+    retried: Optional[str],
+    used: Dict[str, int],
+    protected_terms: Optional[Any] = None,
+) -> str:
     """Keep the retry only when it is actually an improvement.
 
     A model that answers "personal projects" twice still beats falling back to
     the term label it was replacing ("https / good / here"), so a stubbornly
-    generic answer ships and is counted, not discarded.
+    generic answer ships and is counted, not discarded. A protected name never
+    ships either way — the caller drops it after this.
     """
     if not retried:
         return first
-    return retried if _label_rank(retried, used) > _label_rank(first, used) else first
+    return (
+        retried
+        if _label_rank(retried, used, protected_terms)
+        > _label_rank(first, used, protected_terms)
+        else first
+    )
 
 
 def _disambiguated(
@@ -629,6 +681,7 @@ def apply_llm_cluster_labels(
     timeout_sec: float = 10.0,
     mode: Optional[str] = None,
     contrastive: Optional[bool] = None,
+    protected_terms: Optional[Any] = None,
 ) -> int:
     """Replace deterministic labels with LLM labels where possible.
 
@@ -640,6 +693,11 @@ def apply_llm_cluster_labels(
     already took, and a name that still collides is suffixed rather than
     duplicated. ``contrastive=False`` (or TOPOS_CLUSTER_LABEL_CONTRAST=off)
     runs the original isolated prompt — the control arm of the relabel eval.
+
+    ``protected_terms`` is the owner's off-limits name set
+    (``blackholed_name_terms``), passed by the callers that hold a connection.
+    A label is a caller-agnostic stored artifact, so a protected name is
+    refused at production rather than filtered per reader.
     """
     from .vector_settings import cluster_llm_labels_mode
 
@@ -658,6 +716,7 @@ def apply_llm_cluster_labels(
     relabeled = 0
     retries = Counter()
     dropped_urls = 0
+    dropped_protected = 0
 
     def _run(prompt: str) -> str:
         future = _LABEL_POOL.submit(runner, prompt)
@@ -677,7 +736,11 @@ def apply_llm_cluster_labels(
         try:
             text = _run(prompt)
             label = parse_label(text)
-            reason = _rejection_reason(label, used) if (use_contrast and label) else None
+            reason = (
+                _rejection_reason(label, used, protected_terms)
+                if (use_contrast and label)
+                else None
+            )
             if reason:
                 # One bounded retry naming what was wrong with the answer — a
                 # link, a name a sibling already took, or one built from the
@@ -694,12 +757,13 @@ def apply_llm_cluster_labels(
                                 cluster,
                                 distinguishing_terms=terms,
                                 siblings=siblings,
-                                rejected_label=label,
+                                rejected_label=None if reason == "protected" else label,
                                 rejected_reason=reason,
                             )
                         )
                     ),
                     used,
+                    protected_terms,
                 )
         except (FuturesTimeoutError, LabelerUnavailable, Exception) as exc:  # noqa: BLE001
             logger.info("cluster LLM labeling stopped (%s); term labels kept", exc)
@@ -710,6 +774,9 @@ def apply_llm_cluster_labels(
         # not of the isolated prompt — keeping them out of that arm is what
         # makes the eval's control the behaviour that actually shipped.
         if use_contrast:
+            if label_mentions_protected(label, protected_terms):
+                dropped_protected += 1
+                continue  # off-limits names are never minted, only refused
             if label_is_urlish(label):
                 dropped_urls += 1
                 continue  # a link is never a published label
@@ -744,13 +811,16 @@ def apply_llm_cluster_labels(
         assigned[index] = label
         used[_normalized_label(label)] = index
         relabeled += 1
-    if retries or dropped_urls:
+    if retries or dropped_urls or dropped_protected:
         logger.info(
-            "cluster labeling retried %d duplicate, %d generic and %d link answer(s); "
-            "%d link answer(s) dropped to the term label",
+            "cluster labeling retried %d duplicate, %d generic, %d link and %d "
+            "off-limits answer(s); %d link and %d off-limits answer(s) dropped "
+            "to the term label",
             retries["taken"],
             retries["generic"],
             retries["url"],
+            retries["protected"],
             dropped_urls,
+            dropped_protected,
         )
     return relabeled

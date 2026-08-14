@@ -197,6 +197,36 @@ def read_top_topics(conn: sqlite3.Connection, guard: BlackholeGuard) -> List[Dic
     return out
 
 
+def read_topic_clusters(conn: sqlite3.Connection, guard: BlackholeGuard) -> List[Dict[str, Any]]:
+    """A cluster row carries no entity id — the label IS the name.
+
+    Both the label and the centroid preview are prose the labeler wrote from
+    member text, so the whole row goes when either mentions a protected entity.
+    Withdrawal rather than redaction: a cluster with its name cut out still says
+    a cluster about that person exists, and its member_count still counts them.
+    """
+    rows = [
+        {"cluster_id": r[0], "label": r[1], "centroid_preview": r[2]}
+        for r in conn.execute(
+            "SELECT cluster_id, label, centroid_preview FROM topic_clusters"
+        )
+    ]
+    return guard.filter_name_string_artifacts(rows, text_keys=("label", "centroid_preview"))
+
+
+def read_topic_cluster_members(
+    conn: sqlite3.Connection, guard: BlackholeGuard
+) -> List[Dict[str, Any]]:
+    """Members hand back raw canonical text, so they leak without the label."""
+    rows = [
+        {"cluster_id": r[0], "record_id": r[1], "text_preview": r[2]}
+        for r in conn.execute(
+            "SELECT cluster_id, record_id, text_preview FROM topic_cluster_members"
+        )
+    ]
+    return guard.filter_name_string_artifacts(rows, text_keys=("text_preview",))
+
+
 def read_attention_digest(conn: sqlite3.Connection, guard: BlackholeGuard) -> List[Dict[str, Any]]:
     """Movers, seeds and surface titles are all bare labels — scan every one."""
     out: List[Dict[str, Any]] = []
@@ -253,6 +283,8 @@ SURFACES: Dict[str, Reader] = {
     "raw_messages": read_raw_messages,
     "briefs": read_briefs,
     "top_topics": read_top_topics,
+    "topic_clusters": read_topic_clusters,
+    "topic_cluster_members": read_topic_cluster_members,
     "attention_digest": read_attention_digest,
     "stat_insights": read_stat_insights,
     "user_goals": read_user_goals,
