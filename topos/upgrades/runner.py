@@ -492,8 +492,20 @@ def _exec_canonical_reprocess(step: Dict[str, Any], conn: sqlite3.Connection) ->
     from_stage = str(params.get("from_stage") or "raw")
     if from_stage not in ("raw", "canonical"):
         raise ValueError(f"canonical_reprocess from_stage must be raw|canonical, got {from_stage!r}")
+    # A re-map and its derived layers are separable, and sometimes must be:
+    # reprocess_source defaults to running the source's full baseline signal
+    # fan-out, which for any canonical-mapped source includes topic_clusters —
+    # and a batch over _INCREMENTAL_MAX_BATCH forces a FULL cluster recompute
+    # (repartition, not just relabel). A step that only needs canonical rows
+    # corrected declares run_enrichment: false and leaves derivation to a
+    # release that is ready for it.
+    run_enrichment = bool(params.get("run_enrichment", True))
     source_ids = list(params.get("source_ids") or []) or _real_source_ids(conn)
-    detail: Dict[str, Any] = {"sources": {}, "from_stage": from_stage}
+    detail: Dict[str, Any] = {
+        "sources": {},
+        "from_stage": from_stage,
+        "run_enrichment": run_enrichment,
+    }
     for source_id in source_ids:
         try:
             out = asyncio.run(
@@ -502,6 +514,7 @@ def _exec_canonical_reprocess(step: Dict[str, Any], conn: sqlite3.Connection) ->
                     dataset_id=str(params.get("dataset_id") or "default"),
                     from_stage=from_stage,  # type: ignore[arg-type]
                     force=bool(params.get("force", False)),
+                    run_enrichment=run_enrichment,
                 )
             )
             detail["sources"][source_id] = str(out.get("status") or "ok")
