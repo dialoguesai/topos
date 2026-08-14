@@ -254,3 +254,48 @@ class TestOwnerAuthored:
 
 def test_role_vocabulary_is_the_approved_five():
     assert ROLES == ("authored", "addressed", "participated", "observed", "ambient")
+
+
+class TestCommitDerivedJournalRows:
+    """A commit message is the owner's deed, not reliably the owner's words.
+
+    journal_entries is authored-by-construction, so a commit fanned into that
+    lane mints belief-grade first-person text out of prose a coding agent may
+    have written. The producer's gate (authorship=authored) cannot separate
+    them: it keys on a `Co-Authored-By:` trailer, which demotes the honest case
+    and passes the untrailed one. github_activity is therefore ambient-posture,
+    and this is the rule that makes that choice mean something.
+    """
+
+    def _commit_journal_row(self):
+        return {
+            "entry_id": "github:dialoguesai/topos:" + "a" * 40,
+            "entry_at": "2026-08-14T12:00:00Z",
+            "category": "code",
+            "content": "retrieval: date-qualify surprise movers in attention digest items",
+            "metadata_json": {"repo": "dialoguesai/topos", "authorship": "authored"},
+        }
+
+    def test_commit_journal_row_is_not_belief_grade_under_ambient_posture(self):
+        row = self._commit_journal_row()
+        # Without the posture it reads as the owner's own writing…
+        assert record_role(row, table="journal_entries") == ROLE_AUTHORED
+        # …and the source posture is what strips belief eligibility.
+        assert (
+            record_role(row, table="journal_entries", posture="ambient") == ROLE_OBSERVED
+        )
+
+    def test_github_activity_declares_the_posture_that_applies_the_cap(self):
+        from topos.sources.registry import GITHUB_ACTIVITY
+
+        assert GITHUB_ACTIVITY.posture == "ambient"
+
+    def test_activity_rows_keep_their_interest_signal(self):
+        """The cap must not darken retrieval/clustering: activity_events rows are
+        ambient by table already, so the interest lane is untouched."""
+        row = {
+            "event_id": "github:push:dialoguesai/topos:" + "a" * 40,
+            "activity_type": "push",
+            "content": "retrieval: date-qualify surprise movers",
+        }
+        assert record_role(row, table="activity_events", posture="ambient") == ROLE_AMBIENT

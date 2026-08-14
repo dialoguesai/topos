@@ -188,7 +188,28 @@ BROWSER_EVENTS = _source(
 # Remote connectors: GitHub user events fetched via remote MCP tools, saved via app_ingest
 GITHUB_ACTIVITY = _source(
     source_id="github_activity",
-    posture="personal",
+    # Was 'personal' on the reasoning "owner-performed deeds, not consumption".
+    # The deed is the owner's; the PROSE increasingly is not. Commit messages are
+    # now written by coding agents, and posture answers "whose words is this
+    # content" — not "who caused the work". The journal lane makes that concrete:
+    # journal_entries is authored-by-construction in provenance.roles, so a
+    # commit-derived entry was minting belief-grade first-person text out of
+    # sentences the owner may never have read closely. The gate meant to prevent
+    # that (authorship=authored, stamped by the producer) keys on a co-author
+    # TRAILER regex, so it demotes `Co-Authored-By: Claude` and passes an equally
+    # AI-written message that carries no trailer — undetectable by construction.
+    # Evidence from this node's own corpus (2026-08-14): once commit text reached
+    # the topic layer, `network_bridge :: "Topos (claude)"` came back as the third
+    # largest cluster of it, 65 vectors.
+    # 'ambient' is the module's own rule for this case — "unknown/ambiguous rows
+    # fail toward the LESS-attributing role, never authored; belief extraction
+    # must not guess" — and its cap is what strips belief eligibility (goals,
+    # self-facts) while leaving interest/topic signal untouched: activity_events
+    # rows are ROLE_AMBIENT by table already, so retrieval, clustering and triage
+    # are unaffected. The owner can still override per connector
+    # (storage.source_settings → effective_posture) if they want their commits
+    # read as their own words.
+    posture="ambient",
     display_name="GitHub Activity",
     source_type="ui_stream",
     delivery="client_push",

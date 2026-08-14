@@ -31,7 +31,13 @@ EXPECTED_POSTURES = {
     "demo_journal_file": "personal",
     "demo_resume_file": "personal",
     # remaining bundled sources (documented decisions)
-    "github_activity": "personal",  # owner-performed deeds, not consumption
+    # The deed is the owner's, the prose is often an agent's. Commit-derived
+    # journal rows are authored-by-construction in provenance.roles, and the
+    # producer's authorship gate keys on a co-author TRAILER, so an untrailed
+    # AI-written message is indistinguishable from one the owner typed. Ambient
+    # caps those rows at observed (no belief) without touching interest/topic
+    # signal, which reads activity_events — ambient by table already.
+    "github_activity": "ambient",
     "voxterm_transcripts": "mixed",  # transcripts can carry other speakers
     "calendar_stub": "personal",
     "canonical_address_book": "personal",
