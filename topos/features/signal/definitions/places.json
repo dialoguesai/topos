@@ -1,0 +1,65 @@
+{
+  "definition_version": "1.0.0",
+  "dimension_id": "places",
+  "status": "typed",
+  "core_question": "Where do they spend time, and what is the rhythm of those places?",
+  "primary_entity_types": [
+    {
+      "id": "PlaceVisit",
+      "description": "A place the owner returns to, with coarse frequency and dwell.",
+      "fields": ["place_label", "locality", "visit_count", "dwell_band", "last_visited_at"]
+    },
+    {
+      "id": "MovementPattern",
+      "description": "A recurring movement rhythm such as a weekday commute or weekend range.",
+      "fields": ["pattern_kind", "frequency_band", "time_band", "confidence"]
+    },
+    {
+      "id": "TripSpan",
+      "description": "A period away from the usual range, as a destination label and span.",
+      "fields": ["destination_label", "span_band", "started_at", "ended_at"]
+    }
+  ],
+  "signal_objects": [
+    "location_context",
+    "places_living_brief"
+  ],
+  "gate_objects": [
+    "location_context"
+  ],
+  "canonical_contributions": {
+    "location_events": {
+      "primary_weight": 1.0,
+      "secondary_dimensions": ["time", "interests"],
+      "weight_fields": ["place_name", "city", "occurred_at"]
+    },
+    "location_event": {
+      "primary_weight": 1.0,
+      "weight_fields": ["place_label"]
+    },
+    "place": {
+      "primary_weight": 0.9,
+      "weight_fields": ["label"]
+    },
+    "trip": {
+      "primary_weight": 0.8,
+      "secondary_dimensions": ["time"],
+      "weight_fields": ["destination_label"]
+    },
+    "calendar_events": {
+      "primary_weight": 0.4,
+      "secondary_dimensions": ["time", "work"]
+    },
+    "journal_entries": {
+      "primary_weight": 0.3,
+      "secondary_dimensions": ["memory", "wellbeing"]
+    }
+  },
+  "view_types": [
+    "place_summary",
+    "movement_rhythm",
+    "trip_list",
+    "narrative_brief_optional"
+  ],
+  "extraction_hints": "Describe places as coarse labels and movement as rhythm bands. Never emit precise coordinates, a street address, or a home or workplace location, and never answer at a granularity that resolves to a current or near-real-time position. This dimension is the most re-identifying of the ten: prefer abstaining over a low-confidence reading."
+}

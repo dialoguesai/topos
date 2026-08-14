@@ -1,0 +1,72 @@
+{
+  "definition_version": "1.0.0",
+  "dimension_id": "memory",
+  "status": "typed",
+  "core_question": "What have they discussed and thought about, and which threads keep coming back?",
+  "primary_entity_types": [
+    {
+      "id": "ConversationTopic",
+      "description": "A subject recurring across chats, messages or notes, with salience.",
+      "fields": ["topic_label", "salience", "first_seen_at", "last_seen_at", "message_count"]
+    },
+    {
+      "id": "RecallThread",
+      "description": "A thread of related discussion that persists across sessions.",
+      "fields": ["thread_label", "span_band", "recurrence", "last_touched_at"]
+    },
+    {
+      "id": "MentionedEntity",
+      "description": "An entity referenced in a discussion, carried as a mention rather than as text.",
+      "fields": ["entity_text", "entity_kind", "mention_count", "last_mentioned_at"]
+    },
+    {
+      "id": "ToneReading",
+      "description": "Coarse emotional tone of a discussion window, from role-filtered message emotions.",
+      "fields": ["emotion_label", "confidence", "context_band"]
+    }
+  ],
+  "signal_objects": [
+    "topics",
+    "message_topics",
+    "message_entities",
+    "message_emotions",
+    "user_goals",
+    "embeddings",
+    "dimension_summary",
+    "memory_dimension_summary",
+    "memory_living_brief"
+  ],
+  "gate_objects": [
+    "message_topics",
+    "memory_dimension_summary",
+    "message_emotions"
+  ],
+  "canonical_contributions": {
+    "ai_chat_messages": {
+      "primary_weight": 1.0,
+      "secondary_dimensions": ["work", "intentions"],
+      "weight_fields": ["content", "ts", "sender_type"]
+    },
+    "conversation_messages": {
+      "primary_weight": 0.9,
+      "secondary_dimensions": ["relationships", "interests"],
+      "weight_fields": ["content", "ts", "sender_type"]
+    },
+    "journal_entries": {
+      "primary_weight": 0.7,
+      "secondary_dimensions": ["wellbeing", "work", "time"],
+      "weight_fields": ["entry_at", "content"]
+    },
+    "note": {
+      "primary_weight": 0.6,
+      "weight_fields": ["content"]
+    }
+  },
+  "view_types": [
+    "topic_list",
+    "thread_summary",
+    "tone_bands",
+    "narrative_brief_optional"
+  ],
+  "extraction_hints": "Describe topics, threads and tone as labels and bands. Never quote message or chat content verbatim, never name the counterparty in a conversation, and never reconstruct a turn — raw text belongs to messages:read and ai_conversations:read under their own grants and ceilings."
+}

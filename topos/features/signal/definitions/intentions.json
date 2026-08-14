@@ -41,7 +41,8 @@
     "intention_tags",
     "declared_intent",
     "badge",
-    "worn_badge"
+    "worn_badge",
+    "opportunity_seeking_score"
   ],
   "gate_objects": [
     "seeking_signals",

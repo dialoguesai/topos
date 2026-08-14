@@ -1,0 +1,68 @@
+{
+  "definition_version": "1.0.0",
+  "dimension_id": "wellbeing",
+  "status": "typed",
+  "core_question": "How are they doing — mood, rest and wellbeing trend over time, against their own baseline?",
+  "primary_entity_types": [
+    {
+      "id": "MoodReading",
+      "description": "A coarse mood observation drawn from journals or role-filtered message emotions.",
+      "fields": ["mood_band", "valence_band", "recorded_at", "confidence"]
+    },
+    {
+      "id": "WellnessScore",
+      "description": "A component wellbeing score for a window, expressed as a band.",
+      "fields": ["component", "score_band", "trend", "computed_at", "confidence"]
+    },
+    {
+      "id": "RestSession",
+      "description": "A rest or sleep span reduced to duration and quality bands.",
+      "fields": ["duration_band", "quality_band", "started_at"]
+    },
+    {
+      "id": "JournalSignal",
+      "description": "A recurring wellbeing theme surfaced from owner journal entries.",
+      "fields": ["theme_label", "sentiment_band", "entry_at", "evidence_count"]
+    }
+  ],
+  "signal_objects": [
+    "wellness_summary",
+    "wellness_scores",
+    "message_emotions",
+    "wellbeing_living_brief"
+  ],
+  "gate_objects": [
+    "wellness_summary",
+    "wellness_scores"
+  ],
+  "canonical_contributions": {
+    "journal_entries": {
+      "primary_weight": 1.0,
+      "secondary_dimensions": ["memory", "time", "work"],
+      "weight_fields": ["entry_at", "content"]
+    },
+    "mood_entry": {
+      "primary_weight": 1.0,
+      "weight_fields": ["notes"]
+    },
+    "sleep_session": {
+      "primary_weight": 0.9,
+      "weight_fields": ["summary"]
+    },
+    "activity_log": {
+      "primary_weight": 0.6,
+      "secondary_dimensions": ["interests"],
+      "weight_fields": ["activity_type"]
+    },
+    "conversation_messages": {
+      "primary_weight": 0.3,
+      "secondary_dimensions": ["memory", "relationships"]
+    }
+  },
+  "view_types": [
+    "wellness_trend",
+    "mood_bands",
+    "narrative_brief_optional"
+  ],
+  "extraction_hints": "Describe mood and wellbeing as trends and bands against the owner's own baseline. Never quote journal text, never name or infer a medical condition, diagnosis, medication or treatment, and never emit a raw physiological value. This dimension is owner-sensitive: prefer abstaining over a low-confidence reading."
+}
