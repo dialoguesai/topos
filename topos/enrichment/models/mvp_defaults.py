@@ -13,7 +13,13 @@ MVP_JOB_SPECS = [
     ("entities", "entity_extraction", "huggingface", "djagatiya/ner-roberta-base-ontonotesv5-englishv4", True),
     ("embeddings", "embedding", "huggingface", "sentence-transformers/all-MiniLM-L6-v2", True),
     ("sentiment", "sentiment_classification", "huggingface", "cardiffnlp/twitter-roberta-base-sentiment-latest", True),
-    ("url_classification", "url_classification", "huggingface", "facebook/bart-large-mnli", True),
+    # The model this job ACTUALLY loads. It declared facebook/bart-large-mnli,
+    # which is never fetched: the job runs subtype "url_classification_batch"
+    # and get_model_for_task matches on task_name, so the spec never resolves
+    # and HuggingFaceAdapter falls through to DEFAULT_URL_CLASSIFICATION_MODEL.
+    # Harmless while nothing read the declaration; job_readiness reads it now,
+    # and read it as "url_classification cannot run" on a machine where it runs.
+    ("url_classification", "url_classification", "huggingface", "KnutJaegersberg/website-classifier", True),
     ("topics", "topic_extraction", "ollama", "llama3.2", True),
     ("dimension_summary", "raw_to_summary", "ollama", "llama3.2", True),
     ("goal_extraction", "goal_extraction", "ollama", "llama3.2", True),
