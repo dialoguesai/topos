@@ -23,8 +23,9 @@ from topos.features.signal.cluster_labels import (
     dimension_core_question,
     dimension_label_instruction,
     label_is_generic,
-    label_is_wrong_length,
     label_is_urlish,
+    label_is_wrong_length,
+    member_bigrams,
     labeling_order,
     parse_label,
     sibling_labels,
@@ -67,14 +68,20 @@ def _corpus() -> list[dict]:
 
 class TestDistinguishingTerms:
     def test_shared_term_loses_to_the_term_only_this_cluster_has(self):
+        distinctive = (
+            {"kayaking", "river", "paddling"},
+            {"mortgage", "refinance", "lender"},
+            {"chemotherapy", "oncologist", "scan"},
+        )
         terms = compute_distinguishing_terms(_corpus())
-        assert set(terms[0]) == {"kayaking", "paddling", "river"}
-        assert set(terms[1]) == {"mortgage", "refinance", "lender"}
-        assert set(terms[2]) == {"chemotherapy", "oncologist", "scan"}
-        # "personal"/"notes" are equally frequent everywhere: no contrast, dropped.
+        for per_cluster, expected in zip(terms, distinctive):
+            assert per_cluster, "a cluster must never lose all terms"
+            words = {word for term in per_cluster for word in term.split()}
+            assert words <= expected, per_cluster
+        # "personal"/"notes" are equally frequent everywhere: no contrast. Not
+        # as a term of their own, and not smuggled in as half of a phrase.
         for per_cluster in terms:
-            assert "personal" not in per_cluster
-            assert "notes" not in per_cluster
+            assert not any("personal" in t or "notes" in t for t in per_cluster)
 
     def test_raw_frequency_would_have_picked_the_shared_term(self):
         """The old path fed exactly the term this one drops."""
@@ -92,6 +99,52 @@ class TestDistinguishingTerms:
         corpus = _corpus()
         assert compute_distinguishing_terms(corpus) == compute_distinguishing_terms(corpus)
         assert len(compute_distinguishing_terms(corpus)) == len(corpus)
+
+
+class TestPhraseTerms:
+    """Terms reach the prompt as phrases, not shredded into bare tokens.
+
+    The extractor was a `[a-z]{4,}` findall, so "google search" arrived as
+    "google", "search". The prompt then asks for a NAME from a list of bare
+    tokens and gets one bare token back — which is most of what the 2-5 word
+    rule was fighting.
+    """
+
+    def _phrases(self, text: str) -> list[str]:
+        from topos.features.signal.topic_clustering import _STOPWORDS
+
+        return member_bigrams(text, _STOPWORDS)
+
+    def test_adjacent_content_words_form_a_phrase(self):
+        assert "google search" in self._phrases("opened google search today")
+
+    def test_punctuation_ends_a_phrase(self):
+        """A comma is a boundary — "google, search" is not a thing."""
+        assert self._phrases("google, search results") == ["search results"]
+
+    def test_a_stopword_or_short_word_never_joins_one(self):
+        assert self._phrases("the search was slow") == []
+
+    def test_a_banned_word_never_joins_one(self):
+        """Pairing a banned word with a rare one would top the contrast rank."""
+        assert self._phrases("personal kayaking river") == ["kayaking river"]
+
+    def test_a_phrase_displaces_its_own_words(self):
+        cluster = _cluster("tc_p", "interests", ["google search results page"] * 3)
+        other = _cluster("tc_q", "memory", ["unrelated content entirely"] * 3)
+        terms = compute_distinguishing_terms([cluster, other])[0]
+        assert any(" " in term for term in terms), terms
+        for term in terms:
+            if " " in term:
+                for word in term.split():
+                    assert word not in terms, f"{word!r} is redundant beside {term!r}"
+
+    def test_a_cluster_with_no_phrase_still_gets_terms(self):
+        corpus = [
+            _cluster("tc_1", "memory", ["kayaking, river, paddling"] * 3),
+            _cluster("tc_2", "memory", ["mortgage, refinance, lender"] * 3),
+        ]
+        assert all(compute_distinguishing_terms(corpus))
 
 
 class TestSiblingContext:
