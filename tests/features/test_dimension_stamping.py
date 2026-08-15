@@ -13,6 +13,9 @@ import sqlite3
 import pytest
 
 from topos.features.signal.embed_context import dimension_for_record
+from topos.storage.db.migrations.journal_origin_dimension_v1 import (
+    restamp_journal_origin_dimensions,
+)
 from topos.storage.db.migrations.signal_dimension_backfill_v1 import (
     apply_signal_dimension_backfill_v1_up,
     backfill_signal_dimensions,
@@ -118,3 +121,75 @@ class TestBackfill:
         # Re-running is harmless (idempotent WHERE clauses).
         counts = backfill_signal_dimensions(conn)
         assert counts == {"signal_embeddings": 0, "timeline": 0}
+
+
+class TestJournalOriginBeatsRecordKind:
+    """A commit is work; what a person writes in a journal is wellbeing.
+
+    The GitHub connector writes one journal row per authored commit, and the
+    kind-only map stamped every one of them `wellbeing`. On one live node that
+    was 123 embeddings and 19 of 163 clusters named "Wellbeing Tracker (…)"
+    over terms like "merge branch" and "gitignore".
+    """
+
+    @pytest.mark.parametrize(
+        "source_id,expected",
+        [
+            ("github_activity", "work"),
+            ("GitHub_Activity", "work"),  # source ids are matched case-insensitively
+            ("grow_journal", "wellbeing"),
+            ("grow_data_file", "wellbeing"),
+            ("", "wellbeing"),
+        ],
+    )
+    def test_journal_dimension_follows_its_source(self, source_id, expected):
+        msg = {"source_id": source_id} if source_id else {}
+        assert dimension_for_record(msg, record_type="journal_entry") == expected
+
+    def test_other_kinds_from_the_same_source_are_untouched(self):
+        """Only the journal lane is overridden — github activity stays interests."""
+        msg = {"source_id": "github_activity"}
+        assert dimension_for_record(msg, record_type="activity_event") == "interests"
+
+    def test_an_explicit_dimension_still_wins(self):
+        msg = {"source_id": "github_activity", "signal_dimension": "memory"}
+        assert dimension_for_record(msg, record_type="journal_entry") == "memory"
+
+    def _db(self):
+        conn = sqlite3.connect(":memory:")
+        conn.execute(
+            "CREATE TABLE signal_embeddings (record_type TEXT, source_id TEXT, signal_dimension TEXT)"
+        )
+        conn.executemany(
+            "INSERT INTO signal_embeddings VALUES (?,?,?)",
+            [
+                ("journal_entry", "github_activity", "wellbeing"),
+                ("journal_entry", "github_activity", "wellbeing"),
+                ("journal_entry", "grow_journal", "wellbeing"),
+                ("activity_event", "github_activity", "interests"),
+                ("journal_entry", "github_activity", "resources"),
+            ],
+        )
+        return conn
+
+    def test_restamp_moves_only_the_commit_journal_rows(self):
+        conn = self._db()
+        counts = restamp_journal_origin_dimensions(conn)
+        assert counts["signal_embeddings"] == 2
+        got = dict(
+            conn.execute(
+                "SELECT signal_dimension, COUNT(*) FROM signal_embeddings GROUP BY 1"
+            ).fetchall()
+        )
+        # two moved to work; the hand-written journal, the activity row and the
+        # deliberately-set 'resources' row are all left alone.
+        assert got == {"work": 2, "wellbeing": 1, "interests": 1, "resources": 1}
+
+    def test_restamp_is_idempotent(self):
+        conn = self._db()
+        restamp_journal_origin_dimensions(conn)
+        assert restamp_journal_origin_dimensions(conn)["signal_embeddings"] == 0
+
+    def test_restamp_survives_a_db_without_the_tables(self):
+        conn = sqlite3.connect(":memory:")
+        assert restamp_journal_origin_dimensions(conn) == {"signal_embeddings": 0, "timeline": 0}
