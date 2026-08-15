@@ -24,9 +24,12 @@ class ModelSlot(str, Enum):
     NSFW = "nsfw"
     PRIVACY_FILTER = "privacy_filter"
     RERANKER = "reranker"
+    SCOPE_HEAD = "scope_head"
 
 
 _SUBTYPE_TO_SLOT: Dict[str, ModelSlot] = {
+    "scope_classification": ModelSlot.SCOPE_HEAD,
+    "scope_classification_batch": ModelSlot.SCOPE_HEAD,
     "emotion_classification": ModelSlot.EMOTION,
     "emo_27": ModelSlot.EMOTION,
     "emotion_classification_batch": ModelSlot.EMOTION,
