@@ -13,7 +13,6 @@ from .tasks import (
     RequestedBy,
     TaskOptions,
     build_task,
-    build_url_classification_task,
 )
 
 __all__ = [
@@ -34,5 +33,4 @@ __all__ = [
     "Provenance",
     "ExecutionMeta",
     "build_task",
-    "build_url_classification_task",
 ]

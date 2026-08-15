@@ -10,9 +10,8 @@ async def test_enrichment_orchestrator_runs_canonical_jobs():
     messages = [{"message_id": "m1", "content": "hello"}]
 
     # Not every canonical job runs on every message: the orchestrator skips any
-    # job whose should_run() declines the batch (url_classification only fires
-    # on browser records, for one). Expect the jobs that opted in, not all of
-    # CANONICAL_JOBS.
+    # job whose should_run() declines the batch. Expect the jobs that opted
+    # in, not all of CANONICAL_JOBS.
     expected_jobs = [job for job in CANONICAL_JOBS if job.should_run(messages)]
 
     result = await orchestrator.run_canonical(messages)

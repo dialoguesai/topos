@@ -4,7 +4,7 @@ The live node carried a 2026-05-29 source_runtime_installs row for
 browser_visits snapshotting the then-bundled definition
 (enrichment_trigger='manual', no enrichment jobs). Rehydrated into REGISTRY at
 every boot, the snapshot shadowed the 2026-07-09 bundled flip to automatic
-url_classification+embeddings — and once the 2026-07-06 manual gate shipped,
+embeddings — and once the 2026-07-06 manual gate shipped,
 every live browser push ran ZERO enrichment/signal jobs: August 2026 ended
 0/1,034 visits embedded or url-classified, with 2,304 inbox jobs reporting
 "done". browser_events (highlights), chatgpt_ui, imessage, signal, and
@@ -29,7 +29,7 @@ STALE_BROWSER_VISITS_SNAPSHOT = {
     "parser_id": "browser.visits.v1",
     "canonical_mapper_id": None,
     "canonical_group_id": None,
-    "raw_enrichment_jobs": ["url_classification"],
+    "raw_enrichment_jobs": ["embeddings"],
     "canonical_enrichment_jobs": [],
     "enrichment_trigger": "manual",
     "ingestion_trigger": "automatic",
@@ -68,7 +68,7 @@ def test_non_bundled_source_keeps_declared_lane_policy() -> None:
         "parser_id": "browser.visits.v1",
         "enrichment_trigger": "manual",
         "canonical_enrichment_jobs": [],
-        "signal_derivation_jobs": ["url_classification"],
+        "signal_derivation_jobs": ["embeddings"],
         "default_scope_id": "activity",
         "allowed_scope_ids": ["activity:read", "activity:write"],
     }
@@ -77,7 +77,7 @@ def test_non_bundled_source_keeps_declared_lane_policy() -> None:
         installed = REGISTRY["custom_lane_policy_source"]
         assert installed.enrichment_trigger == "manual"
         assert list(installed.canonical_enrichment_jobs) == []
-        assert list(installed.signal_derivation_jobs or []) == ["url_classification"]
+        assert list(installed.signal_derivation_jobs or []) == ["embeddings"]
     finally:
         handle.uninstall()
     assert "custom_lane_policy_source" not in REGISTRY

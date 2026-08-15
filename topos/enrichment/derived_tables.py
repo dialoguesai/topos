@@ -230,8 +230,6 @@ class DerivedTablesManager(BaseObject):
                 "message_embeddings writes are deprecated; use signal_embeddings via write_signal_records"
             )
             return 0
-        elif table_name == "browser_url_classification":
-            return self._write_url_classification_batch(enrichment_records, batch_size)
         else:
             logger.warning("%s: Unknown derived table: %s", self, table_name)
             return 0
@@ -514,89 +512,3 @@ class DerivedTablesManager(BaseObject):
             return values
 
         return self._write_batch_by_columns("message_embeddings", records, batch_size, build_values)
-
-    def _write_url_classification_batch(
-        self,
-        records: List[Dict[str, Any]],
-        batch_size: int,
-    ) -> int:
-        """Write URL classification enrichment rows keyed by canonical activity event_id."""
-        if not self.conn:
-            return 0
-        from ..storage.raw.browser_flat_tables import ensure_browser_url_classification_table
-
-        written = 0
-        try:
-            ensure_browser_url_classification_table(self.conn)
-            for i in range(0, len(records), batch_size):
-                batch = records[i : i + batch_size]
-                values = []
-                cols = _table_columns(self.conn, "browser_url_classification")
-                with batched_writes(self.conn):
-                    for record in batch:
-                        record_id = record.get("record_id") or record.get("event_id")
-                        if not record_id:
-                            continue
-                        row = {
-                            "enriched_from_table": record.get("enriched_from_table") or "activity_events",
-                            "record_id": record_id,
-                            "dataset_id": record.get("dataset_id"),
-                            "url": record.get("url"),
-                            "title": record.get("title"),
-                            "url_category": record.get("url_category") or record.get("category"),
-                            "url_confidence": (
-                                record.get("url_confidence")
-                                if record.get("url_confidence") is not None
-                                else record.get("confidence")
-                            ),
-                            "model_name": record.get("model_name") or record.get("model"),
-                            "updated_at": "datetime('now')",
-                            "spec_version": _record_spec_version(record, "url_classification"),
-                        }
-                        # updated_at uses SQL datetime — keep prior executemany path for that col
-                        if "spec_version" in cols:
-                            self.conn.execute(
-                                """
-                                INSERT OR REPLACE INTO browser_url_classification
-                                (enriched_from_table, record_id, dataset_id, url, title,
-                                 url_category, url_confidence, model_name, updated_at, spec_version)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'), ?)
-                                """,
-                                (
-                                    row["enriched_from_table"],
-                                    row["record_id"],
-                                    row["dataset_id"],
-                                    row["url"],
-                                    row["title"],
-                                    row["url_category"],
-                                    row["url_confidence"],
-                                    row["model_name"],
-                                    row["spec_version"],
-                                ),
-                            )
-                        else:
-                            self.conn.execute(
-                                """
-                                INSERT OR REPLACE INTO browser_url_classification
-                                (enriched_from_table, record_id, dataset_id, url, title,
-                                 url_category, url_confidence, model_name, updated_at)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-                                """,
-                                (
-                                    row["enriched_from_table"],
-                                    row["record_id"],
-                                    row["dataset_id"],
-                                    row["url"],
-                                    row["title"],
-                                    row["url_category"],
-                                    row["url_confidence"],
-                                    row["model_name"],
-                                ),
-                            )
-                        values.append(1)
-                written += len(values)
-        except Exception as exc:
-            logger.error("%s: Failed to write browser_url_classification batch: %s", self, exc)
-            if self.conn:
-                self.conn.rollback()
-        return written

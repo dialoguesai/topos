@@ -71,49 +71,6 @@ def test_activity_payload_to_signal_record_shape() -> None:
     assert record["source_id"] == "browser_visits"
 
 
-@pytest.mark.asyncio
-async def test_browser_direct_ingest_runs_signal_derive_from_canonical(migrated_conn) -> None:
-    mock_engine_result = MagicMock()
-    mock_engine_result.status = "completed"
-    mock_engine_result.error = None
-    mock_engine_result.output = {
-        "category": "technology",
-        "confidence": 0.91,
-        "model": "test-model",
-        "items": [{"category": "technology", "confidence": 0.91, "model": "test-model"}],
-    }
-
-    with patch(
-        "topos.enrichment.jobs.canonical.url_classification_core.run_engine_task",
-        new=AsyncMock(return_value=mock_engine_result),
-    ):
-        result = await ingest_ui_payload(
-                dataset_id="user-1:default:device1",
-                schema_id="browser.visits.v1",
-                payload={
-                    "url": "https://example.com/docs",
-                    "visited_at": "2026-05-31T20:38:56.765Z",
-                    "title": "Example Docs",
-                },
-            source_id="browser_visits",
-        )
-
-    assert result["status"] == "ok"
-    assert migrated_conn.execute("SELECT COUNT(*) FROM activity_events").fetchone()[0] == 1
-    enrichment = migrated_conn.execute(
-        "SELECT url_category, record_id FROM browser_url_classification WHERE enriched_from_table='activity_events'"
-    ).fetchone()
-    assert enrichment is not None
-    assert enrichment["url_category"] == "technology"
-    fact = migrated_conn.execute(
-        """
-        SELECT dimension, payload_json FROM signal_facts
-        WHERE source_id='browser_visits' AND payload_json LIKE '%technology%'
-        """
-    ).fetchone()
-    assert fact is not None
-    assert fact["dimension"] == "interests"
-    assert "technology" in (fact["payload_json"] or "")
 
 
 @pytest.mark.asyncio
@@ -214,7 +171,6 @@ def test_chatgpt_sources_declare_automatic_enrichment_for_ui_and_file() -> None:
     assert CHATGPT_UI.enrichment_trigger == "automatic"
     assert CHATGPT_FILE.enrichment_trigger == "automatic"
     assert BROWSER_VISITS.raw_enrichment_jobs == []
-    assert "url_classification" in BROWSER_VISITS.canonical_enrichment_jobs
     assert "embeddings" in BROWSER_VISITS.canonical_enrichment_jobs
     browser_jobs = resolved_signal_derivation_jobs(BROWSER_VISITS)
     assert "topic_clusters" in browser_jobs

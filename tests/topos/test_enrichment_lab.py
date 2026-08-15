@@ -26,13 +26,14 @@ def test_bundle_metadata_lists_enrichment_fit():
     assert personal["record_count"] > 0
 
     urls = by_id["enrich.browser.urls"]
-    assert "url_classification" in urls["enrichment_fit"]
+    assert "embeddings" in urls["enrichment_fit"]
 
 
 def test_bundle_compatibility():
     bundle = lab_bundles.get_bundle("enrich.messages.personal")
     assert lab_bundles.is_bundle_compatible_with_job(bundle, "emo_27")
-    assert not lab_bundles.is_bundle_compatible_with_job(bundle, "url_classification")
+    urls = lab_bundles.get_bundle("enrich.browser.urls")
+    assert not lab_bundles.is_bundle_compatible_with_job(urls, "emo_27")
 
 
 # ---------------------------------------------------------------------------
@@ -216,9 +217,9 @@ def test_create_job_group_validations(conn):
         )
     with pytest.raises(ValueError, match="not compatible"):
         lab_service.create_job_group(
-            job_id="url_classification",
+            job_id="emo_27",
             models=["default"],
-            bundle_id="enrich.messages.personal",
+            bundle_id="enrich.browser.urls",
         )
     with pytest.raises(ValueError, match="Invalid HuggingFace"):
         lab_service.create_job_group(

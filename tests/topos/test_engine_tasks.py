@@ -18,18 +18,18 @@ def test_task_roundtrip():
     data = {
         "id": "task_1",
         "type": "enrichment",
-        "subtype": "url_classification",
+        "subtype": "emotion_classification",
         "source_id": "browser_visits",
         "record_ids": ["r1"],
         "input": {"url": "https://example.com", "title": "Example"},
-        "model_request": {"provider": "huggingface", "model": "KnutJaegersberg/website-classifier"},
+        "model_request": {"provider": "huggingface", "model": "SamLowe/roberta-base-go_emotions"},
         "execution": {"mode": "sync", "priority": 100},
     }
     task = ProcessingTask.model_validate(data)
     out = task.model_dump_json_roundtrip()
     assert out["id"] == "task_1"
     assert out["type"] == "enrichment"
-    assert out["subtype"] == "url_classification"
+    assert out["subtype"] == "emotion_classification"
     assert out["input"]["url"] == "https://example.com"
     assert out["model_request"]["provider"] == "huggingface"
     # JSON round-trip
@@ -48,7 +48,7 @@ def test_result_roundtrip():
         output_type="json",
         confidence=0.9,
         provenance=Provenance(source_id="browser_visits", record_ids=["r1"]),
-        execution_meta={"provider": "huggingface", "model": "website-classifier", "duration_ms": 100, "cache_hit": False},
+        execution_meta={"provider": "huggingface", "model": "roberta-base-go_emotions", "duration_ms": 100, "cache_hit": False},
     )
     out = result.model_dump_json_roundtrip()
     assert out["task_id"] == "task_1"
@@ -67,7 +67,7 @@ def test_processing_task_has_prd_fields():
         id="t1",
         type="enrichment",
         model_request=ModelRequest(provider="huggingface"),
-        subtype="url_classification",
+        subtype="emotion_classification",
         source_id="messages",
         record_ids=["msg_1"],
         input={"url": "https://x.com"},
@@ -107,13 +107,13 @@ def test_build_task_helper():
         "tid",
         "enrichment",
         ModelRequest(provider="huggingface", model="x"),
-        subtype="url_classification",
+        subtype="emotion_classification",
         source_id="browser_visits",
         record_ids=["r1"],
         input_data={"url": "https://y.com"},
     )
     assert task.id == "tid"
     assert task.type == "enrichment"
-    assert task.subtype == "url_classification"
+    assert task.subtype == "emotion_classification"
     assert task.model_request.provider == "huggingface"
     assert task.execution.mode == "sync"

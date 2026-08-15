@@ -57,7 +57,7 @@ class ModelRegistry:
         source_id: Optional[str] = None,
     ) -> Optional[Dict[str, Any]]:
         """
-        Return model spec for a task (e.g. enrichment + url_classification).
+        Return model spec for a task (e.g. enrichment + entity_extraction).
         Prefers is_preferred; otherwise first match by task_name or subtype.
         Returns dict with huggingface_path (and later provider, ollama_model).
         """

@@ -12,7 +12,7 @@ def test_engine_run_valid_minimal_task():
     task = ProcessingTask(
         id="task_123",
         type="enrichment",
-        subtype="url_classification",
+        subtype="emotion_classification",
         input={"url": "https://example.com", "title": "Example"},
         model_request=ModelRequest(provider="stub"),
     )
@@ -75,7 +75,7 @@ def test_engine_run_triggers_intake_and_formatter():
     task = ProcessingTask(
         id="t1",
         type="enrichment",
-        subtype="url_classification",
+        subtype="emotion_classification",
         source_id="browser_visits",
         record_ids=["r1", "r2"],
         input={"url": "https://x.com"},
@@ -101,13 +101,13 @@ def test_registry_get_model_for_task():
         model_name="Website Classifier",
         model_version="1",
         model_type="text-classification",
-        task_name="url_classification",
-        huggingface_path="KnutJaegersberg/website-classifier",
+        task_name="emotion_classification",
+        huggingface_path="SamLowe/roberta-base-go_emotions",
         is_preferred=True,
     )
-    spec = reg.get_model_for_task("enrichment", "url_classification")
+    spec = reg.get_model_for_task("enrichment", "emotion_classification")
     assert spec is not None
-    assert spec.get("huggingface_path") == "KnutJaegersberg/website-classifier"
+    assert spec.get("huggingface_path") == "SamLowe/roberta-base-go_emotions"
     unknown = reg.get_model_for_task("enrichment", "unknown_subtype")
     assert unknown is None
 

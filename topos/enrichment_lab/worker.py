@@ -189,7 +189,6 @@ def _build_job(job_id: str, engine: Any) -> Any:
         GoalExtractionJob,
         SentimentJob,
         TopicsJob,
-        UrlClassificationSignalJob,
     )
 
     factories = {
@@ -199,7 +198,6 @@ def _build_job(job_id: str, engine: Any) -> Any:
         "embeddings": EmbeddingsJob,
         "topics": TopicsJob,
         "goal_extraction": GoalExtractionJob,
-        "url_classification": UrlClassificationSignalJob,
     }
     factory = factories.get(job_id)
     if not factory:
@@ -209,14 +207,6 @@ def _build_job(job_id: str, engine: Any) -> Any:
 
 def _record_for_job(job_id: str, record_id: str, input_data: Dict[str, Any]) -> Dict[str, Any]:
     """Shape a lab input into the canonical-record dict the job expects."""
-    if job_id == "url_classification":
-        return {
-            "record_id": record_id,
-            "event_id": record_id,
-            "url": input_data.get("url"),
-            "title": input_data.get("title") or input_data.get("body"),
-            "source_id": input_data.get("source_id") or "enrichment_lab",
-        }
     record = dict(input_data)
     record.setdefault("message_id", record_id)
     record.setdefault("content", input_data.get("body") or input_data.get("content") or "")

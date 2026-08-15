@@ -55,7 +55,7 @@ class ProcessingTask(BaseModel):
 
     id: str = Field(..., description="Unique task id")
     type: str = Field(..., description="enrichment, transformation, derivation, query, etc.")
-    subtype: Optional[str] = Field(None, description="e.g. emotion_classification, url_classification")
+    subtype: Optional[str] = Field(None, description="e.g. emotion_classification, entity_extraction")
     source_id: Optional[str] = None
     record_ids: List[str] = Field(default_factory=list)
     input: Dict[str, Any] = Field(default_factory=dict)
@@ -141,24 +141,4 @@ def build_task(
         model_request=model_request,
         execution=execution or ExecutionSpec(),
         requested_by=requested_by,
-    )
-
-
-def build_url_classification_task(
-    task_id: str,
-    url: str,
-    title: Optional[str] = None,
-    *,
-    source_id: Optional[str] = None,
-    record_ids: Optional[List[str]] = None,
-) -> ProcessingTask:
-    """Build a ProcessingTask for URL classification (enrichment, url_classification)."""
-    return build_task(
-        task_id=task_id,
-        task_type="enrichment",
-        model_request=ModelRequest(provider="huggingface"),
-        subtype="url_classification",
-        source_id=source_id,
-        record_ids=record_ids or [],
-        input_data={"url": url, "title": title or ""},
     )

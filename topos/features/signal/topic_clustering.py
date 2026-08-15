@@ -385,9 +385,6 @@ def cluster_embedding_records(
 def _member_term_counts(members: List[Dict[str, Any]]) -> Counter[str]:
     counter: Counter[str] = Counter()
     for member in members:
-        cat = (member.get("metadata") or {}).get("url_category")
-        if isinstance(cat, str) and cat.strip():
-            counter[cat.strip().lower()] += 3
         text = str(member.get("text_preview") or "").lower()
         for token in re.findall(r"[a-z]{4,}", text):
             if token not in _STOPWORDS:

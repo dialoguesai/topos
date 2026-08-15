@@ -27,7 +27,6 @@ RESOLVE_TIMEOUT_SECONDS = 8.0
 _CACHE_TTL_SECONDS = 600.0
 
 # Hub pipeline tags acceptable for a job's hf_task beyond an exact match.
-# url_classification runs a plain text-classification pipeline at runtime, and
 # sentence-transformers embedding models are usually tagged sentence-similarity.
 _TASK_COMPAT: Dict[str, Tuple[str, ...]] = {
     "text-classification": ("text-classification",),

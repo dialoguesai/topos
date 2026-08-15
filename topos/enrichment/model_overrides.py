@@ -25,7 +25,6 @@ SUBTYPE_TO_JOB: Dict[str, str] = {
     "embedding": "embeddings",
     "sentiment_classification": "sentiment",
     "entity_extraction": "entities",
-    "url_classification": "url_classification",
     "topic_extraction": "topics",
     "goal_extraction": "goal_extraction",
 }

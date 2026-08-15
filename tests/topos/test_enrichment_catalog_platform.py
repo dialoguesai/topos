@@ -61,9 +61,9 @@ def test_jobs_configured_for_source_merges_lanes():
 
 
 def test_backfill_allowed_for_signal_lane_jobs():
-    # url_classification is configured on browser_visits (canonical + signal lanes)
-    assert "url_classification" in all_jobs_for_source(BROWSER_VISITS)
-    entry = get_catalog_entry("url_classification")
+    # embeddings is configured on browser_visits (canonical + signal lanes)
+    assert "embeddings" in all_jobs_for_source(BROWSER_VISITS)
+    entry = get_catalog_entry("embeddings")
     assert entry is not None and entry.supports_backfill
 
 
@@ -135,7 +135,7 @@ def db_conn(monkeypatch):
     conn.execute(
         "INSERT INTO signal_embeddings (embedding_id, record_id, source_id, model) VALUES ('e2','x0','other_source','mini')"
     )
-    # signal_facts rows: interests (url_classification) + stats (statistics).
+    # signal_facts rows: interests + stats (statistics).
     conn.execute(
         "INSERT INTO signal_facts (fact_id, dimension, source_id, record_id, payload_json) VALUES ('f1','interests','chatgpt_file_ingestion','m0','{}')"
     )

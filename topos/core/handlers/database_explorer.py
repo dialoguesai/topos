@@ -414,7 +414,6 @@ async def handle_list_database_tables(message: Dict[str, Any]) -> Optional[Dict[
         raw_enrichment_tables = {
             "raw_attachments", "raw_tool_calls", "raw_language", "raw_time_normalization",
             "raw_attendees", "raw_locations",  # Calendar-specific raw enrichment
-            "browser_url_classification",  # URL classification derived from browser_visits/events
         }
         raw_enrichment_prefixes = [
             "raw_attachments_", "raw_tool_calls_", "raw_language_", "raw_time_normalization_",

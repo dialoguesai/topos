@@ -49,8 +49,8 @@ def test_distinctive_terms_differ_for_similar_clusters() -> None:
 
 def test_label_cluster_prefers_dominant_terms() -> None:
     members = [
-        {"text_preview": "deploy kubernetes cluster", "metadata": {"url_category": "technology"}},
-        {"text_preview": "fix docker compose", "metadata": {"url_category": "technology"}},
+        {"text_preview": "deploy kubernetes cluster"},
+        {"text_preview": "fix docker compose"},
     ]
     label = label_cluster(members)
     assert "technology" in label.lower() or "deploy" in label.lower() or "docker" in label.lower()

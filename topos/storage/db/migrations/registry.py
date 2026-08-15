@@ -202,6 +202,10 @@ from .entity_review_provenance_v1 import (
     MIGRATION_ID as ENTITY_REVIEW_PROVENANCE_V1_ID,
     apply_entity_review_provenance_v1_up,
 )
+from .retire_url_classification_v1 import (
+    MIGRATION_ID as RETIRE_URL_CLASSIFICATION_V1_ID,
+    apply_retire_url_classification_v1_up,
+)
 from .entity_review_candidate_bar_v1 import (
     MIGRATION_ID as ENTITY_REVIEW_CANDIDATE_BAR_V1_ID,
     apply_entity_review_candidate_bar_v1_up,
@@ -321,6 +325,7 @@ MIGRATIONS: List[MigrationSpec] = [
     _spec(57, ENTITY_REVIEW_DEDUP_V1_ID, apply_entity_review_dedup_v1_up),
     _spec(58, ENTITY_REVIEW_PROVENANCE_V1_ID, apply_entity_review_provenance_v1_up),
     _spec(59, ENTITY_REVIEW_CANDIDATE_BAR_V1_ID, apply_entity_review_candidate_bar_v1_up),
+    _spec(60, RETIRE_URL_CLASSIFICATION_V1_ID, apply_retire_url_classification_v1_up),
 ]
 
 
@@ -387,4 +392,5 @@ __all__ = [
     "ENTITY_REVIEW_DEDUP_V1_ID",
     "ENTITY_REVIEW_PROVENANCE_V1_ID",
     "ENTITY_REVIEW_CANDIDATE_BAR_V1_ID",
+    "RETIRE_URL_CLASSIFICATION_V1_ID",
 ]

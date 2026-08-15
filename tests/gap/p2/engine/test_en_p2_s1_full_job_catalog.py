@@ -21,7 +21,6 @@ EXPECTED_JOBS = {
     "goal_extraction",
     "relationship_edges",
     "availability_scores",
-    "url_classification",
 }
 
 

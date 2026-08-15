@@ -10,8 +10,7 @@ from ..model_cache import ModelSlot, get_model_cache
 
 logger = logging.getLogger("topos.engine.huggingface")
 
-# Default models (same as current website_classifier and emo_27_job)
-DEFAULT_URL_CLASSIFICATION_MODEL = "KnutJaegersberg/website-classifier"
+# Default models (same as emo_27_job)
 DEFAULT_EMOTION_MODEL = "SamLowe/roberta-base-go_emotions"
 DEFAULT_NER_MODEL = "djagatiya/ner-roberta-base-ontonotesv5-englishv4"
 DEFAULT_EMBEDDING_MODEL = "sentence-transformers/all-MiniLM-L6-v2"
@@ -83,7 +82,6 @@ def apply_embedding_prefix(texts: List[str], *, model_name: Optional[str], input
 
 
 _MODEL_NAME_TO_SLOT: Dict[str, ModelSlot] = {
-    DEFAULT_URL_CLASSIFICATION_MODEL: ModelSlot.URL_PIPELINE,
     DEFAULT_EMOTION_MODEL: ModelSlot.EMOTION,
     DEFAULT_NER_MODEL: ModelSlot.NER,
     DEFAULT_EMBEDDING_MODEL: ModelSlot.EMBEDDING,
@@ -99,8 +97,6 @@ def _match_slot(model_name: str) -> Optional[ModelSlot]:
     for key, slot in _MODEL_NAME_TO_SLOT.items():
         if key.lower() == name or key.split("/")[-1].lower() in name:
             return slot
-    if "website-classifier" in name:
-        return ModelSlot.URL_PIPELINE
     if "go_emotions" in name or "emotion" in name:
         return ModelSlot.EMOTION
     if "ner" in name:
@@ -209,16 +205,6 @@ class HuggingFaceAdapter:
         logger.info("Model %s (huggingface) download complete.", model_name)
         return True
 
-    def _get_url_pipeline(self, model_name: str):
-        model = model_name or DEFAULT_URL_CLASSIFICATION_MODEL
-
-        def _load():
-            from transformers import pipeline
-
-            return pipeline(task="text-classification", model=model)
-
-        handle, _ = get_model_cache().acquire(ModelSlot.URL_PIPELINE, model, _load)
-        return handle
 
     def _get_emotion_model(self, model_name: str) -> Tuple[Any, Any]:
         model = model_name or DEFAULT_EMOTION_MODEL
@@ -235,15 +221,11 @@ class HuggingFaceAdapter:
         return handle
 
     def run_inference(self, payload: Dict[str, Any], config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
-        """Dispatch by config.subtype to url_classification or emotion_classification."""
+        """Dispatch by config.subtype to the matching task pipeline."""
         config = config or {}
         subtype = config.get("subtype") or ""
         model = config.get("model") or ""
 
-        if subtype == "url_classification":
-            return self._run_url_classification(payload, model)
-        if subtype == "url_classification_batch":
-            return self._run_url_classification_batch(payload, model)
         if subtype in ("emotion_classification", "emo_27"):
             return self._run_emotion_classification(payload, model)
         if subtype == "emotion_classification_batch":
@@ -264,70 +246,7 @@ class HuggingFaceAdapter:
             return self._run_content_nsfw_classification(payload, model)
         return {"error": f"Unknown subtype: {subtype}", "status": "unsupported"}
 
-    def _run_url_classification(self, payload: Dict[str, Any], model_name: str) -> Dict[str, Any]:
-        url = payload.get("url") or ""
-        title = payload.get("title") or ""
-        if not isinstance(url, str) or not url.strip():
-            return {
-                "error": "url must be a non-empty string",
-                "category": "unknown",
-                "confidence": 0.0,
-                "model": model_name or DEFAULT_URL_CLASSIFICATION_MODEL,
-            }
-        model = model_name or DEFAULT_URL_CLASSIFICATION_MODEL
-        pipe = self._get_url_pipeline(model)
-        clean_url = url.strip()
-        clean_title = (title or "").strip()
-        text = f"{clean_url} [SEP] {clean_title}" if clean_title else clean_url
-        result = pipe(text, truncation=True, top_k=1)
-        top_result = result[0] if isinstance(result, list) and result else {}
-        return {
-            "category": top_result.get("label", "unknown"),
-            "confidence": float(top_result.get("score", 0.0) or 0.0),
-            "model": model,
-        }
 
-    def _run_url_classification_batch(self, payload: Dict[str, Any], model_name: str) -> Dict[str, Any]:
-        items = payload.get("items") or []
-        if not isinstance(items, list) or not items:
-            return {"error": "items required", "items": [], "model": model_name or DEFAULT_URL_CLASSIFICATION_MODEL}
-        model = model_name or DEFAULT_URL_CLASSIFICATION_MODEL
-        pipe = self._get_url_pipeline(model)
-        texts: List[str] = []
-        for item in items:
-            url = str(item.get("url") or "").strip()
-            title = str(item.get("title") or "").strip()
-            if not url:
-                texts.append("")
-                continue
-            texts.append(f"{url} [SEP] {title}" if title else url)
-
-        non_empty_idx = [i for i, t in enumerate(texts) if t]
-        classified: List[Any] = []
-        if non_empty_idx:
-            batch_texts = [texts[i] for i in non_empty_idx]
-            classified = pipe(batch_texts, truncation=True, top_k=1)
-            if not isinstance(classified, list):
-                classified = [classified]
-
-        out_items: List[Dict[str, Any]] = []
-        cls_ptr = 0
-        for text in texts:
-            if not text:
-                out_items.append({"category": "unknown", "confidence": 0.0, "model": model})
-                continue
-            top_result = classified[cls_ptr] if cls_ptr < len(classified) else {}
-            cls_ptr += 1
-            if isinstance(top_result, list) and top_result:
-                top_result = top_result[0]
-            out_items.append(
-                {
-                    "category": top_result.get("label", "unknown"),
-                    "confidence": float(top_result.get("score", 0.0) or 0.0),
-                    "model": model,
-                }
-            )
-        return {"items": out_items, "model": model}
 
     def _classify_emotion_text(self, text: str, model_name: str) -> Dict[str, Any]:
         import torch
