@@ -7,17 +7,39 @@
     {
       "id": "ProjectLoad",
       "description": "Active project or bet with load weight.",
-      "fields": ["project_label", "domain_tags", "load_band", "status"]
+      "fields": [
+        "project_label",
+        "domain_tags",
+        "load_band",
+        "status"
+      ]
     },
     {
       "id": "DomainFocus",
       "description": "Primary professional domain concentration.",
-      "fields": ["domain_tags", "focus_strength"]
+      "fields": [
+        "domain_tags",
+        "focus_strength"
+      ]
     },
     {
       "id": "CapacityBand",
       "description": "Coarse available capacity for new work.",
-      "fields": ["capacity_band", "confidence", "computed_at"]
+      "fields": [
+        "capacity_band",
+        "confidence",
+        "computed_at"
+      ]
+    },
+    {
+      "id": "WorkItem",
+      "description": "A concrete work artifact: a deliverable with a deadline, an item awaiting review, an on-call slot, a doc in progress.",
+      "fields": [
+        "item_label",
+        "due_at",
+        "queue_state",
+        "rotation_at"
+      ]
     }
   ],
   "signal_objects": [
@@ -35,11 +57,16 @@
   "canonical_contributions": {
     "ai_chat_messages": {
       "primary_weight": 0.8,
-      "secondary_dimensions": ["memory", "intentions"]
+      "secondary_dimensions": [
+        "memory",
+        "intentions"
+      ]
     },
     "profile_records": {
       "primary_weight": 0.7,
-      "secondary_dimensions": ["profile"]
+      "secondary_dimensions": [
+        "profile"
+      ]
     },
     "project": {
       "primary_weight": 1.0
@@ -49,9 +76,15 @@
     },
     "user_goals": {
       "primary_weight": 0.6,
-      "secondary_dimensions": ["intentions"]
+      "secondary_dimensions": [
+        "intentions"
+      ]
     }
   },
-  "view_types": ["project_summary", "domain_tags", "narrative_brief_optional"],
+  "view_types": [
+    "project_summary",
+    "domain_tags",
+    "narrative_brief_optional"
+  ],
   "extraction_hints": "Active project themes, domain focus, and capacity bands; no repo names or ticket text."
 }

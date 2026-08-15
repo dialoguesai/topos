@@ -17,7 +17,7 @@
     },
     {
       "id": "AttentionVerdict",
-      "description": "Triage outcome for a day's items \u2014 signal, surface, or distraction \u2014 as coarse groups only.",
+      "description": "Triage outcome for a day's items — signal, surface, or distraction — as coarse groups only.",
       "fields": [
         "verdict_kind",
         "group_label",
@@ -54,6 +54,16 @@
         "thread_label",
         "influence_rank",
         "entity_lens"
+      ]
+    },
+    {
+      "id": "BrowseTrail",
+      "description": "Concrete browsing recall: which pages, when, what kind, what was left open — as labels and counts, never full history dumps.",
+      "fields": [
+        "page_label",
+        "category_label",
+        "open_state",
+        "visited_at"
       ]
     }
   ],
@@ -126,5 +136,5 @@
     "influence_threads",
     "narrative_brief_optional"
   ],
-  "extraction_hints": "Describe topics, focus concentration and rhythm as labels and bands. SILENCE INVARIANT: never reference, count, or allude to items triaged as discarded \u2014 those exist only in the pull-only triage_verdicts ledger. Never include full URLs, page titles verbatim, or per-item browsing history."
+  "extraction_hints": "Describe topics, focus concentration and rhythm as labels and bands. SILENCE INVARIANT: never reference, count, or allude to items triaged as discarded — those exist only in the pull-only triage_verdicts ledger. Never include full URLs, page titles verbatim, or per-item browsing history."
 }

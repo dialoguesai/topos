@@ -53,6 +53,13 @@ DENIED_LICENCE_MARKERS = ("-SA", " SA", "sharealike", "share-alike", "NonCommerc
 KIND_LINEAR = "linear"      # logistic weights over a frozen sentence embedding
 KIND_ENCODER = "encoder"    # a fine-tuned encoder directory (rung 3)
 
+#: Reserved sentinel label: "confidently no scope needed". NOT a registry scope and never
+#: reaches the pipeline as one — it exists because 77.6% of training rows are negatives,
+#: and without a named none-class "confidently nothing" and "no idea" are the same
+#: all-zero vector, which makes the router's ignorance branch unimplementable
+#: (PLAN_SCOPE_CLASSIFIER_REBUILD.md §B0a).
+NONE_LABEL = "none"
+
 
 class ScopeHeadError(RuntimeError):
     """A head exists but must not be used. Never swallow this — fall back loudly."""
@@ -124,7 +131,15 @@ def _check_labels(labels: Sequence[str]) -> None:
     if legacy:
         raise ScopeHeadError(f"head emits legacy scope ids {legacy} (PLAN §6A.2)")
     live = set(live_scope_ids())
-    unknown = sorted(set(labels) - live)
+    if NONE_LABEL in live:
+        # The sentinel is only safe while no real scope claims the name. If the registry
+        # ever grows a scope literally called "none", every trained artifact becomes
+        # ambiguous — refuse loudly rather than guess which meaning was intended.
+        raise ScopeHeadError(
+            f"the live registry contains a scope named {NONE_LABEL!r}, which collides "
+            f"with the head's reserved abstain sentinel (REBUILD §B0a)"
+        )
+    unknown = sorted(set(labels) - live - {NONE_LABEL})
     if unknown:
         raise ScopeHeadError(
             f"head emits {unknown}, absent from the live registry — the taxonomy moved "
