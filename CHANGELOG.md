@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.16] — 2026-08-15
+
 ### Added
 
 - `[D]` **A cold labeling model no longer silently discards a whole relabel

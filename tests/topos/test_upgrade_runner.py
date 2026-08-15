@@ -517,18 +517,24 @@ def test_shipped_manifest_declares_the_cluster_relabel_step() -> None:
     # A recompute relabels every cluster it writes, so a labels-only relabel in
     # the same release pays a second local-LLM pass for labels this one throws
     # away. Both shipped in the unreleased entry at once and nothing caught it.
-    ids = [s.get("id") for r in data["releases"] for s in r.get("steps", [])]
-    llm_label_steps = [
-        s
-        for r in data["releases"]
-        if r["version"] == "unreleased"
-        for s in r.get("steps", [])
-        if s.get("params", {}).get("targets", []) and set(s["params"]["targets"])
-        & {"topic_clusters", "topic_cluster_labels"}
-    ]
-    assert len(llm_label_steps) == 1, (
-        f"exactly one label-writing step per release; got {[s['id'] for s in llm_label_steps]}"
-    )
+    #
+    # Checked per release rather than against `unreleased` alone. That entry is
+    # staging: cut_release.py moves its steps into the stamped version and
+    # leaves it empty, so a check pinned there asserts nothing about anything
+    # shipped -- and, requiring exactly one, failed the first cut that ran.
+    # The rule is one label-writing pass per release; a release with none is
+    # ordinary, which is why this bounds rather than fixes the count.
+    for release in data["releases"]:
+        label_steps = [
+            s
+            for s in release.get("steps", [])
+            if set(s.get("params", {}).get("targets", []) or [])
+            & {"topic_clusters", "topic_cluster_labels"}
+        ]
+        assert len(label_steps) <= 1, (
+            f"at most one label-writing step per release; {release['version']} has "
+            f"{[s['id'] for s in label_steps]}"
+        )
 
 
 def test_blackhole_rebuild_target_reruns_completed_rebuilds(conn, monkeypatch) -> None:
