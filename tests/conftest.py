@@ -80,6 +80,108 @@ PRIVATE_PATH_HINTS = (
 )
 
 
+#: Module attributes that must survive every test unchanged.
+#:
+#: These names are re-exported BY VALUE across modules, so a test that rebinds
+#: one can poison it for the rest of the session — and monkeypatch will not save
+#: you. If the rebind happens before the importing module's first import, the
+#: package binds the patched object, monkeypatch records THAT as the "original",
+#: and undoing the patch cements it instead of removing it.
+#:
+#: The gate cannot be trusted to catch this by ordering alone: the leak that
+#: motivated this guard sat inside the gate's own selection and passed on every
+#: run, because the gate's order never happened to put the leaking test ahead of
+#: a victim. Shuffling would surface such leaks only sometimes, and would name
+#: the VICTIM. This names the culprit, deterministically, on every run.
+#: Watch the RE-EXPORTS, not the source module. topos.core.state is legitimately
+#: re-created by tests that `sys.modules.pop()` core modules to isolate app
+#: startup (tests/topos/test_app_routes.py, test_auth.py), which yields a fresh
+#: function object with the same name — 10 such rebinds in one gate run, none of
+#: them a poisoning. The re-export is where the damage happens anyway: it is the
+#: binding every handler actually reads, and the one monkeypatch cements.
+_LEAK_WATCHED_ATTRS = (
+    ("topos.core.handlers", "get_db_connection"),
+    ("topos.core.handlers.common", "get_db_connection"),
+)
+
+#: (nodeid, "module.attr: before -> after") for every leak observed this session.
+_LEAK_FINDINGS: list[tuple[str, str]] = []
+_LEAK_BASELINE: dict = {}
+
+
+def _leak_snapshot() -> dict:
+    snap = {}
+    for mod_name, attr in _LEAK_WATCHED_ATTRS:
+        mod = sys.modules.get(mod_name)
+        if mod is not None:
+            snap[(mod_name, attr)] = getattr(mod, attr, None)
+    return snap
+
+
+def pytest_sessionstart(session) -> None:
+    """Baseline BEFORE the first test, so no test is exempt.
+
+    Safe to read here only because this file imports the re-exporting handler
+    modules at module scope above: sessionstart runs after conftest import, so
+    the names being watched are already bound to their real objects.
+    """
+    del session
+    _LEAK_BASELINE.update(_leak_snapshot())
+
+
+def pytest_runtest_logfinish(nodeid: str) -> None:
+    """Compare watched attributes once a test is COMPLETELY done.
+
+    Deliberately a hook and not a fixture. An autouse fixture cannot see this:
+    ``_no_live_db_guard`` below requests ``monkeypatch``, which makes monkeypatch
+    set up first and therefore finalise LAST — so any fixture-based check runs
+    before ``monkeypatch.undo`` and flags every ordinary patch as a leak.
+    ``pytest_runtest_logfinish`` fires after teardown has fully completed, which
+    is the only point where "still rebound" means "outlived the undo".
+    """
+    for key, was in _LEAK_BASELINE.items():
+        now = _leak_snapshot().get(key, was)
+        if now is not was:
+            mod_name, attr = key
+            _LEAK_FINDINGS.append(
+                (nodeid, f"{mod_name}.{attr}: "
+                         f"{getattr(was, '__name__', was)!r} -> {getattr(now, '__name__', now)!r}")
+            )
+            _LEAK_BASELINE[key] = now  # report each leak once, not once per later test
+
+
+def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:
+    del exitstatus, config
+    if not _LEAK_FINDINGS:
+        return
+    terminalreporter.section("module state leaked between tests", red=True, bold=True)
+    for nodeid, detail in _LEAK_FINDINGS:
+        terminalreporter.write_line(f"{nodeid}\n    {detail}")
+    terminalreporter.write_line("")
+    terminalreporter.write_line(
+        "Each of these outlived its own teardown and poisons every later test in"
+    )
+    terminalreporter.write_line(
+        "the session. The usual cause is patching a name BEFORE first-importing a"
+    )
+    terminalreporter.write_line(
+        "module that re-exports it by value: the package binds the patched object,"
+    )
+    terminalreporter.write_line(
+        "monkeypatch records that as the original, and undo cements it. Import the"
+    )
+    terminalreporter.write_line(
+        "re-exporting module at conftest scope so the binding predates any patch."
+    )
+
+
+def pytest_sessionfinish(session, exitstatus) -> None:
+    """Red the run on a leak, so the gate cannot pass while one is live."""
+    del exitstatus
+    if _LEAK_FINDINGS:
+        session.exitstatus = 1
+
+
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     del config
     for item in items:
