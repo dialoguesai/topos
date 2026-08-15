@@ -84,6 +84,8 @@ _MIN_CLUSTERS_FOR_UBIQUITY_CUT = 10
 
 _REJECT_MARKERS = ("label", "topic cluster", "i cannot", "i can't", "sorry", "as an ai")
 _WORD_TOKEN = re.compile(r"[a-z]+")
+# A disambiguating suffix, as _disambiguated appends it.
+_TRAILING_PARENTHETICAL = re.compile(r"(?:\s*\([^()]*\))+$")
 _LABEL_PREFIX = re.compile(r"^\s*(?:label|name|answer)\s*[:\-]\s*", re.IGNORECASE)
 # A published label must never be a link. "&" stays legal (AT&T, R&D).
 _URL_LIKE = re.compile(
@@ -744,6 +746,20 @@ def _better_label(
     )
 
 
+def base_label(label: str) -> str:
+    """A label with its disambiguating parentheticals stripped.
+
+    Distinctness counted over full labels is inflated by the suffix
+    ``_disambiguated`` appends. Measured on 152 live clusters: 152/152 labels
+    distinct, but only 113 distinct BASE names, one of them repeated fifteen
+    times. The suffix adds a word too, so it lifts the 2-5 word rule by the
+    same stroke. Both metrics only mean something read against the base name.
+    """
+    text = str(label or "").strip()
+    stripped = _TRAILING_PARENTHETICAL.sub("", text).strip()
+    return stripped or text
+
+
 def _disambiguated(
     label: str,
     terms: Sequence[str],
@@ -754,12 +770,22 @@ def _disambiguated(
 
     Same parenthetical shape the term labeler uses (``_disambiguate_labels``),
     so a duplicate never reaches a surface that lists clusters side by side.
+
+    Suffixes are never stacked. An incoming label that already carries one is
+    reduced to its base first, so a collision yields "Wellbeing (grandma)" and
+    never "Wellbeing (regal) (grandma)" — two of those reached the live node,
+    and the shape reads as broken rather than disambiguated. The bare base is
+    tried first: if the name is free without a suffix, that is the better
+    label.
     """
-    lowered = str(label).lower()
+    base = base_label(label)
+    lowered = base.lower()
     candidates = [str(t) for t in terms if str(t).lower() not in lowered]
     candidates.append(str(cluster.get("member_count") or len(cluster.get("members") or [])))
+    if base != str(label).strip() and _normalized_label(base) not in used:
+        return base  # the base is free: better than any suffix
     for candidate in candidates:
-        suffixed = f"{label} ({candidate})"
+        suffixed = f"{base} ({candidate})"
         if len(suffixed) > _MAX_LABEL_CHARS:
             continue
         if _normalized_label(suffixed) not in used:
