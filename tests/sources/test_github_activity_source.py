@@ -200,8 +200,16 @@ def test_mapper_humanized_titles() -> None:
         assert mapped.payload["title"] == expected, overrides["type"]
 
 
-def test_map_many_push_event_emits_activity_plus_journal_per_commit() -> None:
-    """Dual lane: 1 activity_events record + 1 journal_entries record per commit."""
+def test_map_many_push_event_stays_single_lane() -> None:
+    """No journal fan-out: a push is ONE activity row, commit prose included.
+
+    Each commit used to become a journal_entries row. journal is
+    authored-by-construction in provenance.roles, so that lane published agent-
+    written sentences as the owner's own writing, belief-grade — and the gate
+    protecting it read a co-author TRAILER, which an AI-written message need not
+    carry. The prose now rides the activity row's `content` (declared in the
+    source definition) where the role model reads it as ambient.
+    """
     event = _github_event(
         payload={
             "push_id": 21980276450,
@@ -220,83 +228,39 @@ def test_map_many_push_event_emits_activity_plus_journal_per_commit() -> None:
     records = GithubActivityCanonicalMapper().map_many(
         NormalizedRecord(record_id="44851245900", payload=event)
     )
-    assert len(records) == 3
 
+    assert len(records) == 1
     activity = records[0]
     assert activity.table is None  # default lane → group table (activity_events)
     assert activity.payload["event_id"] == "github:44851245900"
     assert activity.payload["activity_type"] == "push"
-
-    first, second = records[1], records[2]
-    assert first.table == "journal_entries"
-    assert first.record_id == f"github:dialogues/topos:{'a' * 40}"
-    assert first.payload["entry_id"] == f"github:dialogues/topos:{'a' * 40}"
-    # Commit timestamp wins over event created_at; ends_at mirrors entry_at.
-    assert first.payload["entry_at"] == "2026-07-01T12:30:00Z"
-    assert first.payload["ends_at"] == "2026-07-01T12:30:00Z"
-    assert first.payload["starts_at"] is None  # never invent durations
-    assert first.payload["duration"] is None
-    assert first.payload["mood_tag"] is None
-    assert first.payload["category"] == "code"
-    assert first.payload["content"] == "fix: tighten retry loop"
-    assert first.payload["people"] is None
-    assert first.payload["place_name"] is None
-    assert first.payload["source_record_id"] == f"44851245900:{'a' * 40}"
-    assert first.payload["metadata_json"] == {
-        "repo": "dialogues/topos",
-        "sha": "a" * 40,
-        "ref": "refs/heads/main",
-        "branch": "main",
-        "event_id": "github:44851245900",
-    }
-
-    # Commit without timestamp falls back to the event created_at.
-    assert second.payload["entry_at"] == "2026-07-01T12:34:56Z"
-    assert second.payload["ends_at"] == "2026-07-01T12:34:56Z"
-    assert second.payload["content"] == "docs: add sync notes"
-    assert second.payload["source_record_id"] == f"44851245900:{'b' * 40}"
+    assert all(r.table != "journal_entries" for r in records)
 
 
-def test_map_many_journal_lane_is_authored_only_when_authorship_stamped() -> None:
-    """Strict policy: commits stamped ai_assisted/participated/bot stay
-    activity-only; only `authored` fans out to journal_entries. Absent field
-    keeps the legacy all-commits behavior (previous test covers it)."""
+def test_authorship_stamp_no_longer_routes_anything() -> None:
+    """The authorship gate is gone with the lane it guarded.
+
+    Its verdicts were only ever used to decide journal eligibility, and it could
+    not see an untrailed agent-written message. Commits stamped any way at all
+    now produce exactly one activity row, and the stamp routes nothing.
+    """
     event = _github_event(
         payload={
             "size": 4,
             "ref": "refs/heads/main",
             "commits": [
                 {"sha": "a" * 40, "message": "my own work", "authorship": "authored"},
-                {"sha": "b" * 40, "message": "co-authored with claude", "authorship": "ai_assisted"},
+                {"sha": "b" * 40, "message": "co-authored", "authorship": "ai_assisted"},
                 {"sha": "c" * 40, "message": "someone else's PR", "authorship": "participated"},
                 {"sha": "d" * 40, "message": "chore(deps): bump", "authorship": "bot"},
             ],
         }
     )
     records = GithubActivityCanonicalMapper().map_many(
-        NormalizedRecord(record_id="e-lane", payload=event)
+        NormalizedRecord(record_id="e-mixed", payload=event)
     )
-    # 1 activity event + ONLY the authored commit's journal entry.
-    assert len(records) == 2
-    journal = records[1]
-    assert journal.table == "journal_entries"
-    assert journal.payload["content"] == "my own work"
-    # Authorship is recorded on the journal row's metadata for later filtering.
-    assert journal.payload["metadata_json"]["authorship"] == "authored"
-
-
-def test_map_many_authorship_matching_is_case_insensitive() -> None:
-    event = _github_event(
-        payload={
-            "size": 1,
-            "commits": [{"sha": "e" * 40, "message": "shouting", "authorship": "AUTHORED"}],
-        }
-    )
-    records = GithubActivityCanonicalMapper().map_many(
-        NormalizedRecord(record_id="e-case", payload=event)
-    )
-    assert len(records) == 2
-    assert records[1].payload["metadata_json"]["authorship"] == "authored"
+    assert len(records) == 1
+    assert records[0].table is None
 
 
 def test_map_many_non_push_event_is_activity_only() -> None:

@@ -47,6 +47,35 @@ The machine-readable twin of each release is
   stalled. (`topos/enrichment/job_readiness.py`,
   `topos/pipeline/job_store.py::requeue_failed_jobs`)
 
+### Changed
+
+- `[S1] [D]` **A commit is the owner's deed, not reliably the owner's words:
+  `github_activity` is ambient-posture and no longer fans commits into the
+  journal.** The source declared `posture='personal'` ("owner-performed deeds")
+  and mapped every PushEvent commit into a `journal_entries` row. But
+  `journal_entries` is authored-by-construction in `provenance.roles` — a row
+  there IS the owner's own writing, belief-grade, eligible to mint goals and
+  self-facts — and commit prose is written by coding agents now. The gate meant
+  to protect that lane keyed on a co-author TRAILER, so it correctly demoted
+  `Co-Authored-By: Claude` and passed an identical agent-written message with no
+  trailer; that blind spot is not fixable by a better regex. Both halves are
+  retired: the fan-out is gone (the mapper is single-lane, and the `authorship`
+  stamp now routes nothing), and `posture='ambient'` caps any row this source
+  produces at `observed`, which the fact store's LLM gate honours ("an
+  ambient-flagged source can never mint a belief here"). The lane existed
+  because commit messages lived nowhere else — no longer true since they land on
+  `activity_events.content`, where the role model already reads them as ambient.
+  Retrieval, clustering, interests and attention triage are unaffected: activity
+  rows are `ROLE_AMBIENT` by table either way. On the first live node checked,
+  485 journal-lane facts existed and **zero** were belief-shaped (all entity
+  mentions, no predicates), so this closes the door before anything came
+  through it. The owner can still override per connector
+  (`storage.source_settings` → `effective_posture`). Empirically, once commit
+  text reached the topic layer the corpus surfaced
+  `network_bridge :: "Topos (claude)"` as its third-largest cluster (65
+  vectors) — the history saying out loud that much of it is "an agent worked on
+  this with me".
+
 ### Fixed
 
 - `[S1]` **Model readiness stops counting jobs ready because they are not LLM
@@ -114,7 +143,8 @@ The machine-readable twin of each release is
   declares `activity_events.content ← payload.commits[*].message` (joined for a
   multi-commit push) in its source definition — the first bundled consumer of
   the declarative capability above. Event granularity is unchanged: one
-  activity row per push, one journal row per authored commit.
+  activity row per push, and — as of the journal-lane retirement below — that
+  row is the only place the commit prose lands.
 - `[S1] [E:embeddings] [E:entities]` **activity_events writes now persist
   `content` and `hostname`.** The `activity_events_content_v1` migration added
   both columns and the P2.1 browser mapper filled them, but the store's INSERT

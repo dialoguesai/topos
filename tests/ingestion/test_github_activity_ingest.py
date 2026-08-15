@@ -85,8 +85,15 @@ async def test_github_activity_ui_stream_writes_activity_event(migrated_conn, mo
 
 
 @pytest.mark.asyncio
-async def test_github_push_ui_stream_ingest_writes_journal_rows(migrated_conn, monkeypatch) -> None:
-    """Full ui_stream path: PushEvent with commits → activity event + journal rows."""
+async def test_github_push_ui_stream_ingest_writes_no_journal_rows(
+    migrated_conn, monkeypatch
+) -> None:
+    """Full ui_stream path: a PushEvent is ONE activity row, journal untouched.
+
+    The per-commit journal lane was retired: journal_entries is
+    authored-by-construction, so it published agent-written commit prose as the
+    owner's own writing. The messages still arrive — on the activity row.
+    """
     monkeypatch.setattr(core_state, "get_db_connection", lambda: migrated_conn)
 
     result = await _ingest_ui_payload_direct(
@@ -99,18 +106,15 @@ async def test_github_push_ui_stream_ingest_writes_journal_rows(migrated_conn, m
     )
     assert result["status"] == "ok"
     assert result["canonical_events_created"] == 1
-    assert result["canonical_messages_created"] == 2
+    assert result["canonical_messages_created"] == 0
 
     assert migrated_conn.execute("SELECT COUNT(*) FROM activity_events").fetchone()[0] == 1
-    rows = migrated_conn.execute(
-        "SELECT entry_id, category, source_id FROM journal_entries ORDER BY entry_id"
-    ).fetchall()
-    assert [row["entry_id"] for row in rows] == [
-        f"github:dialogues/topos:{'a' * 40}",
-        f"github:dialogues/topos:{'b' * 40}",
-    ]
-    assert all(row["category"] == "code" for row in rows)
-    assert all(row["source_id"] == "github_activity" for row in rows)
+    assert migrated_conn.execute("SELECT COUNT(*) FROM journal_entries").fetchone()[0] == 0
+    content = migrated_conn.execute(
+        "SELECT content FROM activity_events LIMIT 1"
+    ).fetchone()["content"]
+    assert "fix: tighten retry loop" in content
+    assert "docs: add sync notes" in content
 
 
 def _push_event_with_commits() -> dict:
@@ -137,7 +141,12 @@ def _push_event_with_commits() -> dict:
     }
 
 
-def test_push_event_canonicalize_writes_activity_and_journal_rows(migrated_conn, monkeypatch) -> None:
+def test_push_event_canonicalize_writes_activity_only(migrated_conn, monkeypatch) -> None:
+    """Canonicalization writes the activity row and nothing else.
+
+    Pinned as a count on BOTH tables, not just journal: a lane that silently
+    reappears (a declared fan_out, a restored map_many) should fail here.
+    """
     monkeypatch.setattr(core_state, "get_db_connection", lambda: migrated_conn)
     payload = _push_event_with_commits()
     result = canonicalize_normalized_batch(
@@ -148,47 +157,11 @@ def test_push_event_canonicalize_writes_activity_and_journal_rows(migrated_conn,
         sync_batch_id="batch-dual-1",
     )
     assert result.events_created == 1
-    assert result.messages_created == 2  # journal lane
+    assert result.messages_created == 0
     assert not result.errors
 
     assert migrated_conn.execute("SELECT COUNT(*) FROM activity_events").fetchone()[0] == 1
-
-    rows = migrated_conn.execute(
-        """
-        SELECT entry_id, entry_at, starts_at, ends_at, mood_tag, category, content,
-               duration, people, place_name, source_id, source_record_id,
-               sync_batch_id, metadata_json
-        FROM journal_entries ORDER BY entry_id
-        """
-    ).fetchall()
-    assert len(rows) == 2
-    first = rows[0]
-    assert first["entry_id"] == f"github:dialogues/topos:{'a' * 40}"
-    assert first["entry_at"] == "2026-07-01T12:30:00Z"  # commit timestamp
-    assert first["starts_at"] is None
-    assert first["ends_at"] == "2026-07-01T12:30:00Z"
-    assert first["mood_tag"] is None
-    assert first["category"] == "code"
-    assert first["content"] == "fix: tighten retry loop"
-    assert first["duration"] is None
-    assert first["people"] is None
-    assert first["place_name"] is None
-    assert first["source_id"] == "github_activity"
-    assert first["source_record_id"] == f"44851245900:{'a' * 40}"
-    assert first["sync_batch_id"] == "batch-dual-1"
-    metadata = json.loads(first["metadata_json"])
-    assert metadata["repo"] == "dialogues/topos"
-    assert metadata["sha"] == "a" * 40
-    assert metadata["branch"] == "main"
-    assert metadata["event_id"] == "github:44851245900"
-
-    second = rows[1]
-    assert second["entry_at"] == "2026-07-01T12:34:56Z"  # falls back to event created_at
-    assert second["content"] == "docs: add sync notes"
-
-    # Signal records carry per-record table stamps (mixed-family batch).
-    tables = sorted(str(rec.get("_table")) for rec in result.canonical_records)
-    assert tables == ["activity_events", "journal_entries", "journal_entries"]
+    assert migrated_conn.execute("SELECT COUNT(*) FROM journal_entries").fetchone()[0] == 0
 
 
 def test_push_event_carries_commit_messages_into_activity_content(migrated_conn, monkeypatch) -> None:
@@ -325,29 +298,25 @@ def test_activity_signal_record_feeds_declared_entity_extraction(migrated_conn, 
 
 
 def test_push_event_reingest_is_idempotent(migrated_conn, monkeypatch) -> None:
+    """Re-ingest rewrites the same activity row and still mints no journal row."""
     monkeypatch.setattr(core_state, "get_db_connection", lambda: migrated_conn)
     payload = _push_event_with_commits()
-    normalized = [NormalizedRecord(record_id=payload["id"], payload=payload)]
-    canonicalize_normalized_batch(
-        migrated_conn, GITHUB_ACTIVITY, normalized,
-        dataset_id="user:default:device", sync_batch_id="batch-dual-1",
+    records = [NormalizedRecord(record_id=payload["id"], payload=payload)]
+
+    first = canonicalize_normalized_batch(
+        migrated_conn, GITHUB_ACTIVITY, records, dataset_id="user:default:device",
+        sync_batch_id="batch-idem-1",
     )
+    assert first.events_created == 1
+
     second = canonicalize_normalized_batch(
-        migrated_conn, GITHUB_ACTIVITY, normalized,
-        dataset_id="user:default:device", sync_batch_id="batch-dual-2",
+        migrated_conn, GITHUB_ACTIVITY, records, dataset_id="user:default:device",
+        sync_batch_id="batch-idem-2",
     )
     assert second.events_created == 0
     assert second.messages_created == 0
     assert migrated_conn.execute("SELECT COUNT(*) FROM activity_events").fetchone()[0] == 1
-    assert migrated_conn.execute("SELECT COUNT(*) FROM journal_entries").fetchone()[0] == 2
-    # Re-ingest refreshed the batch stamp without duplicating rows.
-    stamps = [
-        row[0]
-        for row in migrated_conn.execute(
-            "SELECT DISTINCT sync_batch_id FROM journal_entries"
-        ).fetchall()
-    ]
-    assert stamps == ["batch-dual-2"]
+    assert migrated_conn.execute("SELECT COUNT(*) FROM journal_entries").fetchone()[0] == 0
 
 
 def test_pull_request_event_writes_no_journal_rows(migrated_conn, monkeypatch) -> None:
