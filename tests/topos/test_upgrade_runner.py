@@ -506,13 +506,29 @@ def test_shipped_manifest_declares_the_cluster_relabel_step() -> None:
         s
         for release in data["releases"]
         for s in release.get("steps", [])
-        if s.get("id") == "relabel-topic-clusters"
+        if s.get("id") == "recompute-topic-clusters-split"
     ]
-    assert steps, "no release declares relabel-topic-clusters"
+    assert steps, "no release declares recompute-topic-clusters-split"
     step = steps[0]
     assert step["kind"] == "derived_rebuild"
-    assert step["params"]["targets"] == ["topic_cluster_labels"]
+    assert step["params"]["targets"] == ["topic_clusters"]
     assert step["consent"] == "prompt", "one local-LLM call per cluster is not a silent cost"
+
+    # A recompute relabels every cluster it writes, so a labels-only relabel in
+    # the same release pays a second local-LLM pass for labels this one throws
+    # away. Both shipped in the unreleased entry at once and nothing caught it.
+    ids = [s.get("id") for r in data["releases"] for s in r.get("steps", [])]
+    llm_label_steps = [
+        s
+        for r in data["releases"]
+        if r["version"] == "unreleased"
+        for s in r.get("steps", [])
+        if s.get("params", {}).get("targets", []) and set(s["params"]["targets"])
+        & {"topic_clusters", "topic_cluster_labels"}
+    ]
+    assert len(llm_label_steps) == 1, (
+        f"exactly one label-writing step per release; got {[s['id'] for s in llm_label_steps]}"
+    )
 
 
 def test_blackhole_rebuild_target_reruns_completed_rebuilds(conn, monkeypatch) -> None:
@@ -536,8 +552,8 @@ def test_blackhole_rebuild_target_reruns_completed_rebuilds(conn, monkeypatch) -
     assert target["cluster_member_previews_blanked"] == 5
 
 
-def test_shipped_manifest_declares_the_blackhole_rerun_after_the_relabel() -> None:
-    """Order matters: the relabel writes labels the withdrawal must then see."""
+def test_shipped_manifest_declares_the_blackhole_rerun_after_the_recompute() -> None:
+    """Order matters: the recompute writes labels the withdrawal must then see."""
     import json
     from pathlib import Path
 
@@ -550,7 +566,7 @@ def test_shipped_manifest_declares_the_blackhole_rerun_after_the_relabel() -> No
     rerun = [s for s in steps if s.get("id") == "rerun-blackhole-rebuilds"]
     assert rerun, "no release declares rerun-blackhole-rebuilds"
     assert rerun[0]["params"]["targets"] == ["blackhole_rebuilds"]
-    assert "relabel-topic-clusters" in (rerun[0].get("depends_on") or [])
+    assert "recompute-topic-clusters-split" in (rerun[0].get("depends_on") or [])
 
 
 def test_canonical_reprocess_passes_run_enrichment_through(conn, monkeypatch):

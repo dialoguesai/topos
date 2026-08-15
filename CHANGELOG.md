@@ -9,6 +9,116 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+
+- `[D]` **A cold labeling model no longer silently discards a whole relabel
+  pass.** `apply_llm_cluster_labels` aborts on the first failure so a down model
+  costs one timeout rather than k of them — but the budget was a flat 10s, the
+  first call of a pass pays the local model's load cost, and labeling order is
+  biggest-cluster-first, so the longest prompt always landed on the coldest
+  model. On a live node that aborted all 163 clusters in 12 seconds and reported
+  `status: completed, relabeled: 0`: a no-op that reads as success. Three
+  changes: the first call of a pass gets a warm-up budget
+  (`TOPOS_CLUSTER_LABEL_WARMUP_TIMEOUT`, default 90s) while later calls keep the
+  ordinary one; a single slow cluster costs that cluster its label rather than
+  the remainder of the pass (abort now needs three CONSECUTIVE failures, or a
+  model that never answered at all); and the abort is reported —
+  `relabel_existing_clusters` returns `status: "aborted"` with a reason instead
+  of a completed run that did nothing. Still never raised: `recompute_topic_clusters`
+  calls the same labeler, and a down model must cost the labels, not the cluster
+  rebuild. (`topos/features/signal/cluster_labels.py`)
+
+- `[S1]` **Declarative canonical field mapping** (`canonical_field_map` on a
+  source definition — PLAN_CONNECTOR_CATALOG_ROLLOUT §5a capabilities 2–3). A
+  source now DECLARES which piece of its records lands in which canonical
+  column, and where extra rows fan out from, instead of that being Python in
+  this repo: `{table: {column: rule}}` with a rule vocabulary of `path` (dotted,
+  `[*]` expands lists), `first_of`, `template`, `const`, `map`/`default`,
+  `transform` (closed catalog), `join`, `when`, plus `fan_out` + `where` for
+  one-row-per-item lanes. A declaration overlays the source's code mapper where
+  it has one and IS the mapping where it does not — which is what makes the
+  activity/journal/documents lanes reachable for a runtime-installed source
+  (previously they fell back to the *browser* mapper, the wrong shape for
+  anything but browser visits). Validated at definition time, so a typo'd path
+  fails the install instead of silently ingesting nothing.
+  (`topos/canonicalization/declared_field_map.py`)
+
+- `[S1]` **Recorded derivation debt now waits for its model instead of burning
+  its one attempt on it.** A debt whose job needs a provider this machine does
+  not have could only be claimed, re-run into the same wall, and parked
+  `failed` — after which nothing in the queue moved it, because `requeue_job`
+  only releases a live claim and `recover_stale_jobs` only touches `running`.
+  The work resumed when a human hit `POST /signal/derivation-debt/retry`, or
+  never. Two halves: `run_derivation_retry_job` now asks
+  `job_readiness.job_is_ready()` BEFORE reloading the batch's canonical records,
+  and holds with `waiting for provider: …` rather than doing the work to defer
+  again; and `revive_capability_blocked_debts()` re-queues the parked rows on
+  the not-ready → ready EDGE, swept by the pipeline worker every 5 min. Edge
+  rather than level so a debt that fails for a real reason gets one fresh
+  attempt per time the missing provider actually appears, instead of being
+  re-queued forever. Per-job provider is read from the model catalog
+  (`MVP_JOB_SPECS`), so a job registered there is classified without a second
+  list to maintain; jobs absent from it are assumed runnable rather than
+  stalled. (`topos/enrichment/job_readiness.py`,
+  `topos/pipeline/job_store.py::requeue_failed_jobs`)
+
+- `[E:llm]` One-click Ollama install for the quick-start journey (J-B10):
+  `ollama_install` runs the official installer on an explicit request —
+  Darwin only, single-flight, never from ambient state — and
+  `ollama_install_status` reports `idle|installing|started|error` with the
+  installer's status lines. A nonzero installer exit with `/Applications/
+  Ollama.app` present still ends in `started` (the node launches it and lets
+  reachability be the truth), because the script's only sudo is a PATH symlink
+  the engine does not need.
+
+- `[E:llm]` `ollama_list_models` now carries per-tag `capabilities`,
+  `modified_at`, and size detail so the quick-setup station can prefer a
+  tools-capable model and label downloads honestly.
+
+### Changed
+
+- `[S1] [D]` **A commit is the owner's deed, not reliably the owner's words:
+  `github_activity` is ambient-posture and no longer fans commits into the
+  journal.** The source declared `posture='personal'` ("owner-performed deeds")
+  and mapped every PushEvent commit into a `journal_entries` row. But
+  `journal_entries` is authored-by-construction in `provenance.roles` — a row
+  there IS the owner's own writing, belief-grade, eligible to mint goals and
+  self-facts — and commit prose is written by coding agents now. The gate meant
+  to protect that lane keyed on a co-author TRAILER, so it correctly demoted
+  `Co-Authored-By: Claude` and passed an identical agent-written message with no
+  trailer; that blind spot is not fixable by a better regex. Both halves are
+  retired: the fan-out is gone (the mapper is single-lane, and the `authorship`
+  stamp now routes nothing), and `posture='ambient'` caps any row this source
+  produces at `observed`, which the fact store's LLM gate honours ("an
+  ambient-flagged source can never mint a belief here"). The lane existed
+  because commit messages lived nowhere else — no longer true since they land on
+  `activity_events.content`, where the role model already reads them as ambient.
+  Retrieval, clustering, interests and attention triage are unaffected: activity
+  rows are `ROLE_AMBIENT` by table either way. On the first live node checked,
+  485 journal-lane facts existed and **zero** were belief-shaped (all entity
+  mentions, no predicates), so this closes the door before anything came
+  through it. The owner can still override per connector
+  (`storage.source_settings` → `effective_posture`). Empirically, once commit
+  text reached the topic layer the corpus surfaced
+  `network_bridge :: "Topos (claude)"` as its third-largest cluster (65
+  vectors) — the history saying out loud that much of it is "an agent worked on
+  this with me".
+
+- `[S1] [E:embeddings]` Ambient activity rows (browser visits) now embed ONE
+  vector per distinct page text instead of one per visit: batch-level dedup in
+  the embeddings job plus a cross-record `content_hash` check at the vector
+  write (`has_duplicate_content`). A page revisited 30 times contributes one
+  ANN neighbor, not 30 near-identical ones (August data: 1,034 visit rows →
+  360 distinct titles). Message-family rows are exempt — every message keeps
+  its own vector row so it stays individually retrievable. Reloaded activity
+  batches without a `_table` stamp now classify as `activity_event` via their
+  `activity_type`, so backfills get the same policy.
+
+- `[E:llm]` Ollama pull/list hardening from the J-B10 verification rounds:
+  monotonic pull progress survives a restarted layer, a garbage tag surfaces
+  the Ollama error instead of polling forever, and a 502 answers
+  `reachable: false` rather than an ambiguous empty list.
+
 ### Removed
 
 - `[D]` **Mega-clusters split; labels read the canonical text.** Two coupled
@@ -33,7 +143,6 @@ The machine-readable twin of each release is
   redaction that matters stays on the stored tables.
   (`topos/features/signal/topic_clustering.py`)
 
-
 - `[P]` **The live-engine pressure tests stop failing 401 against a healthy
   node.** `tests/conftest.py` sets `TOPOS_KEY="test-key"` so Settings validation
   passes for the whole suite. `test_live_engine_pressure` guards itself with
@@ -46,7 +155,6 @@ The machine-readable twin of each release is
   else skip with a reason that says which. Against a live node all four tests
   pass; with no key anywhere they skip rather than fail.
   (`tests/release/iteration4/test_live_engine_pressure.py`)
-
 
 - `[S1]` **`url_classification` is retired — job, table, engine path and the
   interest tags it wrote.** The job labelled every visited page with a DMOZ
@@ -85,91 +193,6 @@ The machine-readable twin of each release is
   `fact` objects that also live in `interests` survive. Rehearsed against a copy
   of a live node: interests objects 828 → 370, `fact` 6 → 6, other dimensions
   6,580 unchanged.
-
-### Added
-
-- `[D]` **A cold labeling model no longer silently discards a whole relabel
-  pass.** `apply_llm_cluster_labels` aborts on the first failure so a down model
-  costs one timeout rather than k of them — but the budget was a flat 10s, the
-  first call of a pass pays the local model's load cost, and labeling order is
-  biggest-cluster-first, so the longest prompt always landed on the coldest
-  model. On a live node that aborted all 163 clusters in 12 seconds and reported
-  `status: completed, relabeled: 0`: a no-op that reads as success. Three
-  changes: the first call of a pass gets a warm-up budget
-  (`TOPOS_CLUSTER_LABEL_WARMUP_TIMEOUT`, default 90s) while later calls keep the
-  ordinary one; a single slow cluster costs that cluster its label rather than
-  the remainder of the pass (abort now needs three CONSECUTIVE failures, or a
-  model that never answered at all); and the abort is reported —
-  `relabel_existing_clusters` returns `status: "aborted"` with a reason instead
-  of a completed run that did nothing. Still never raised: `recompute_topic_clusters`
-  calls the same labeler, and a down model must cost the labels, not the cluster
-  rebuild. (`topos/features/signal/cluster_labels.py`)
-
-
-- `[S1]` **Declarative canonical field mapping** (`canonical_field_map` on a
-  source definition — PLAN_CONNECTOR_CATALOG_ROLLOUT §5a capabilities 2–3). A
-  source now DECLARES which piece of its records lands in which canonical
-  column, and where extra rows fan out from, instead of that being Python in
-  this repo: `{table: {column: rule}}` with a rule vocabulary of `path` (dotted,
-  `[*]` expands lists), `first_of`, `template`, `const`, `map`/`default`,
-  `transform` (closed catalog), `join`, `when`, plus `fan_out` + `where` for
-  one-row-per-item lanes. A declaration overlays the source's code mapper where
-  it has one and IS the mapping where it does not — which is what makes the
-  activity/journal/documents lanes reachable for a runtime-installed source
-  (previously they fell back to the *browser* mapper, the wrong shape for
-  anything but browser visits). Validated at definition time, so a typo'd path
-  fails the install instead of silently ingesting nothing.
-  (`topos/canonicalization/declared_field_map.py`)
-
-### Added
-
-- `[S1]` **Recorded derivation debt now waits for its model instead of burning
-  its one attempt on it.** A debt whose job needs a provider this machine does
-  not have could only be claimed, re-run into the same wall, and parked
-  `failed` — after which nothing in the queue moved it, because `requeue_job`
-  only releases a live claim and `recover_stale_jobs` only touches `running`.
-  The work resumed when a human hit `POST /signal/derivation-debt/retry`, or
-  never. Two halves: `run_derivation_retry_job` now asks
-  `job_readiness.job_is_ready()` BEFORE reloading the batch's canonical records,
-  and holds with `waiting for provider: …` rather than doing the work to defer
-  again; and `revive_capability_blocked_debts()` re-queues the parked rows on
-  the not-ready → ready EDGE, swept by the pipeline worker every 5 min. Edge
-  rather than level so a debt that fails for a real reason gets one fresh
-  attempt per time the missing provider actually appears, instead of being
-  re-queued forever. Per-job provider is read from the model catalog
-  (`MVP_JOB_SPECS`), so a job registered there is classified without a second
-  list to maintain; jobs absent from it are assumed runnable rather than
-  stalled. (`topos/enrichment/job_readiness.py`,
-  `topos/pipeline/job_store.py::requeue_failed_jobs`)
-
-### Changed
-
-- `[S1] [D]` **A commit is the owner's deed, not reliably the owner's words:
-  `github_activity` is ambient-posture and no longer fans commits into the
-  journal.** The source declared `posture='personal'` ("owner-performed deeds")
-  and mapped every PushEvent commit into a `journal_entries` row. But
-  `journal_entries` is authored-by-construction in `provenance.roles` — a row
-  there IS the owner's own writing, belief-grade, eligible to mint goals and
-  self-facts — and commit prose is written by coding agents now. The gate meant
-  to protect that lane keyed on a co-author TRAILER, so it correctly demoted
-  `Co-Authored-By: Claude` and passed an identical agent-written message with no
-  trailer; that blind spot is not fixable by a better regex. Both halves are
-  retired: the fan-out is gone (the mapper is single-lane, and the `authorship`
-  stamp now routes nothing), and `posture='ambient'` caps any row this source
-  produces at `observed`, which the fact store's LLM gate honours ("an
-  ambient-flagged source can never mint a belief here"). The lane existed
-  because commit messages lived nowhere else — no longer true since they land on
-  `activity_events.content`, where the role model already reads them as ambient.
-  Retrieval, clustering, interests and attention triage are unaffected: activity
-  rows are `ROLE_AMBIENT` by table either way. On the first live node checked,
-  485 journal-lane facts existed and **zero** were belief-shaped (all entity
-  mentions, no predicates), so this closes the door before anything came
-  through it. The owner can still override per connector
-  (`storage.source_settings` → `effective_posture`). Empirically, once commit
-  text reached the topic layer the corpus surfaced
-  `network_bridge :: "Topos (claude)"` as its third-largest cluster (65
-  vectors) — the history saying out loud that much of it is "an agent worked on
-  this with me".
 
 ### Fixed
 
@@ -258,6 +281,7 @@ The machine-readable twin of each release is
   one row instead of stacking. Affects `topics` and `goal_extraction` on
   `ollama_unreachable`, plus the seven canonical jobs that defer on
   `database_unavailable`. (`topos/enrichment/orchestrator.py`)
+
 - `[S1]` **A retry that defers again is no longer reported as recovered.**
   `retry_single_derivation()` checked only `results["errors"]`, which a deferral
   never reaches — so re-running a debt while the provider was still down fell
@@ -266,6 +290,7 @@ The machine-readable twin of each release is
   retry claim to have repaired data it never produced, and it under-counted
   `pending_derivation_summary()`. The deferral is now `still_failing`, carrying
   the job's own reason. (`topos/enrichment/derivation_recovery.py`)
+
 - `[D]` **`grand-cypher` pin moved to `>=0.13,<0.14`** (was `>=0.12,<0.13`, in
   both core dependencies and the `engine` extra). The ceiling is load-bearing
   rather than cautious: 1.0.0+ changed `RETURN a` to yield the whole node dict
@@ -288,6 +313,7 @@ The machine-readable twin of each release is
   the declarative capability above. Event granularity is unchanged: one
   activity row per push, and — as of the journal-lane retirement below — that
   row is the only place the commit prose lands.
+
 - `[S1] [E:embeddings] [E:entities]` **activity_events writes now persist
   `content` and `hostname`.** The `activity_events_content_v1` migration added
   both columns and the P2.1 browser mapper filled them, but the store's INSERT
@@ -296,11 +322,13 @@ The machine-readable twin of each release is
   included). Both columns are in the INSERT and in the conflict update
   (COALESCE, so a blank batch never blanks a stored value), which also means a
   re-ingest or reprocess-from-raw heals rows written before this fix.
+
 - `[S1] [E:embeddings] [E:entities]` The activity signal record and the
   signal-reload query now carry `content`, `hostname` and `metadata_json`.
   Without them an activity row embedded on its title alone, and the declared
   ENTITY mapping (§5a capability 4, `metadata_json.repo` → project +
   `worked_on` edge) was reading fields absent from the record it was handed.
+
 - `[S1] [E:embeddings]` Runtime installs of bundled sources no longer shadow
   the bundled enrichment-lane policy. A 2026-05-29 `source_runtime_installs`
   row for `browser_visits` snapshotted the then-bundled definition
@@ -352,6 +380,7 @@ The machine-readable twin of each release is
   the suffix inflates the word-count rule below by the same stroke. The eval
   now reports `distinct_base_labels` as its headline number.**
   (`topos/features/signal/cluster_labels.py`)
+
 - `[D]` **A cluster label can no longer be a link.** Distinguishing terms are
   drawn from page titles and links, which invites the model to answer with one:
   a measured relabel returned a full `maps.app.goo.gl/…?g_st=i&utm_…` URL as a
@@ -361,6 +390,7 @@ The machine-readable twin of each release is
   and, if they survive it, are dropped in favour of the term label. An
   all-lowercase answer is title-cased deterministically (two thirds of live
   answers came back in prose case).
+
 - `[D]` **A cluster label must be 2-5 words, checked and not just asked for.**
   The contrastive prompt opens with that rule and, measured over a full
   relabel, obeyed it LESS than the prompt it replaced: 46% of answers in range
@@ -384,6 +414,7 @@ The machine-readable twin of each release is
   alongside a weaker tail of bare common nouns (`Friend`, `Food`, `Account`).
   `scripts/eval_cluster_labels.py` reports `word_rule_share` and
   `single_word_labels` so this cannot regress unnoticed again.
+
 - `[D]` **Repeated term labels are disambiguated against each other, not just
   counted.** The suffix for a repeat was the cluster's member_count, which is
   not unique: two 7-member clusters that both reduced to "hello" both became
@@ -392,6 +423,7 @@ The machine-readable twin of each release is
   occurrence index as the fallback that cannot collide. This was the only
   duplicate the LLM labeler could not resolve, because it inherits the term
   label whenever the model declines a cluster.
+
 - `[D]` **Existing clusters can be relabeled without being re-clustered.**
   `relabel_existing_clusters()` runs the labeler over the clusters already on
   disk and writes back labels only — membership, cluster ids and centroids are
@@ -401,7 +433,7 @@ The machine-readable twin of each release is
   ~0.52, so shipping this through a recompute would churn every cluster id,
   `top_topics` fact and UI link with it. Reachable as the `derived_rebuild`
   target `topic_cluster_labels` and as the release step
-  `relabel-topic-clusters`; `scripts/eval_cluster_labels.py` drives the same
+  `recompute-topic-clusters-split`; `scripts/eval_cluster_labels.py` drives the same
   path against a temp copy of the database to A/B two prompts over one fixed
   partition. **Clusters keep their old names until that step runs**, and this
   build reaches a node by reinstall (frozen uv tool snapshot), not restart.
@@ -427,39 +459,6 @@ The machine-readable twin of each release is
   surface and its two canary tokens in the battery's corpus.
   (`topos/features/signal/cluster_labels.py`,
   `topos/features/lifecycle/blackhole_rebuild.py`)
-
-### Changed
-
-- `[S1] [E:embeddings]` Ambient activity rows (browser visits) now embed ONE
-  vector per distinct page text instead of one per visit: batch-level dedup in
-  the embeddings job plus a cross-record `content_hash` check at the vector
-  write (`has_duplicate_content`). A page revisited 30 times contributes one
-  ANN neighbor, not 30 near-identical ones (August data: 1,034 visit rows →
-  360 distinct titles). Message-family rows are exempt — every message keeps
-  its own vector row so it stays individually retrievable. Reloaded activity
-  batches without a `_table` stamp now classify as `activity_event` via their
-  `activity_type`, so backfills get the same policy.
-
-### Added
-
-- `[E:llm]` One-click Ollama install for the quick-start journey (J-B10):
-  `ollama_install` runs the official installer on an explicit request —
-  Darwin only, single-flight, never from ambient state — and
-  `ollama_install_status` reports `idle|installing|started|error` with the
-  installer's status lines. A nonzero installer exit with `/Applications/
-  Ollama.app` present still ends in `started` (the node launches it and lets
-  reachability be the truth), because the script's only sudo is a PATH symlink
-  the engine does not need.
-- `[E:llm]` `ollama_list_models` now carries per-tag `capabilities`,
-  `modified_at`, and size detail so the quick-setup station can prefer a
-  tools-capable model and label downloads honestly.
-
-### Changed
-
-- `[E:llm]` Ollama pull/list hardening from the J-B10 verification rounds:
-  monotonic pull progress survives a restarted layer, a garbage tag surfaces
-  the Ollama error instead of polling forever, and a 502 answers
-  `reachable: false` rather than an ambiguous empty list.
 
 ## [1.3.15] — 2026-08-13
 
