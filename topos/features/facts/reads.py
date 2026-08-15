@@ -4,9 +4,12 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from typing import Any, Dict, List, Optional
+from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from .store import FactStore
+
+if TYPE_CHECKING:  # import cost only, never at runtime
+    from ..lifecycle.blackhole_guard import BlackholeGuard
 
 
 def _subject_names(conn: sqlite3.Connection, subject_ids: List[str]) -> Dict[str, str]:
@@ -26,6 +29,7 @@ def _subject_names(conn: sqlite3.Connection, subject_ids: List[str]) -> Dict[str
 def list_facts(
     conn: sqlite3.Connection,
     *,
+    guard: "BlackholeGuard",
     predicate: Optional[str] = None,
     dimension: Optional[str] = None,
     include_closed: bool = False,
@@ -68,6 +72,10 @@ def list_facts(
                 "dimension": row[1],
                 "object_key": row[2],
                 "payload": payload,
+                # Lifted for the black-hole filter below. Both are internal:
+                # `items` is rebuilt field by field, so neither reaches a caller.
+                "subject_entity_id": str(payload.get("subject_entity_id") or ""),
+                "_scan_blob": json.dumps(payload, default=str),
                 "confidence": row[4],
                 "source_refs": json.loads(row[5] or "[]"),
                 "valid_from": row[6],
@@ -75,6 +83,15 @@ def list_facts(
                 "updated_at": row[8],
             }
         )
+
+    # Filtered here, ahead of total/page/predicate_counts, so all three agree.
+    # A `total` computed before the filter would shift when an entity is
+    # protected and confirm its existence -- the count side channel D5 removes.
+    # Both halves are needed: the id-join is exact but misses a fact whose
+    # subject was never bound, and the payload scan catches the name in prose
+    # (object_value, a rendered claim) where no id exists at all.
+    parsed = guard.filter_rows(parsed, id_keys=("subject_entity_id",))
+    parsed = guard.filter_name_string_artifacts(parsed, text_keys=("_scan_blob",))
 
     total = len(parsed)
     page = parsed[offset : offset + limit]
@@ -130,6 +147,7 @@ def list_facts(
 def list_stat_insights(
     conn: sqlite3.Connection,
     *,
+    guard: "BlackholeGuard",
     dimension: Optional[str] = None,
     limit: int = 200,
 ) -> Dict[str, Any]:
@@ -175,6 +193,14 @@ def list_stat_insights(
                 "created_at": created_at,
             }
         )
+    # A stat insight carries the entity name in its group_key and its rendered
+    # text and has no id to join on, which is why the feasibility report listed
+    # stat group_key as a name-string leak surface in its own right.
+    items = guard.filter_name_string_artifacts(items, text_keys=("text", "group_key"))
+    dimension_counts = {}
+    for item in items:
+        key = str(item.get("dimension") or "memory")
+        dimension_counts[key] = dimension_counts.get(key, 0) + 1
     return {"items": items, "total": len(items), "dimension_counts": dimension_counts}
 
 
