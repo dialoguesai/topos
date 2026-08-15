@@ -12,12 +12,16 @@ from topos.sources.registry import VOXTERM_TRANSCRIPTS
 
 
 @pytest.fixture
-def migrated_conn(tmp_path):
+def migrated_conn(tmp_path, pin_db_path):
     from topos.storage.db.migrations import apply_all_migrations
 
     # The ingest DB stretch runs on a worker thread (asyncio.to_thread),
     # so the injected connection must allow cross-thread use.
-    conn = sqlite3.connect(str(tmp_path / "voxterm.db"), check_same_thread=False)
+    db_file = tmp_path / "voxterm.db"
+    # Settings must name the SAME file the injected connection uses;
+    # AdapterFactory resolves by path, not by the patched accessor.
+    pin_db_path(db_file)
+    conn = sqlite3.connect(str(db_file), check_same_thread=False)
     conn.row_factory = sqlite3.Row
     apply_all_migrations(conn)
     yield conn
