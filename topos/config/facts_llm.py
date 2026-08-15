@@ -51,58 +51,25 @@ def device_facts_llm_model(conn: Optional[sqlite3.Connection]) -> str:
 
 
 def resolve_facts_llm_model(settings: Any, conn: Optional[sqlite3.Connection] = None) -> str:
-    """Effective model for the LLM fact pass ("" ⇒ pass stays inert)."""
-    override = device_facts_llm_model(conn)
+    """Effective model for the LLM fact pass ("" ⇒ pass stays inert).
 
-    # Resolution order (PLAN_MODEL_PACKS.md M3 / S6): device override → pack
-    # `classify` role → this function's own default chain. Routed through the
-    # one node resolver so precedence cannot drift from home chat / routines.
-    # This module only ever runs against local Ollama — a cloud-bound pack
-    # role falls through to the engine default rather than leaving the machine.
-    engine_default = ""
+    Device override → this function's own default chain. Deliberately NO pack
+    rung since 2026-08-15: facts extraction is an INGEST function — it runs when
+    data arrives, not when the owner asks something — and its model is chosen
+    under Settings → Models → Node functions (the device override below). The
+    retired `classify` pack role used to sit between these rungs, which let a
+    query-time pack steer an ingest model sideways; that is the exact confusion
+    the query-only pack schema removes. This module only ever runs against local
+    Ollama either way.
+    """
+    override = device_facts_llm_model(conn)
+    if override:
+        return override
     for attr in ("facts_llm_model", "ollama_extraction_model", "ollama_query_model"):
         value = str(getattr(settings, attr, "") or "").strip()
         if value:
-            engine_default = value
-            break
-
-    if conn is not None:
-        from .model_packs import (
-            SOURCE_OVERRIDE,
-            SOURCE_PACK,
-            active_pack_dict,
-            installed_local_models,
-            resolve_model,
-        )
-
-        # A pack can bind `classify` to a tag this machine never pulled; without
-        # the live list the resolver trusts it and the Ollama call 404s mid-batch
-        # (PLAN_LOCAL_MODEL_QUICKSTART §1.4).
-        installed = installed_local_models()
-
-        resolved = resolve_model(
-            role="classify",
-            override=override or None,
-            pack=active_pack_dict(conn),
-            engine_default=(
-                {"provider": "ollama", "model": engine_default} if engine_default else None
-            ),
-            installed_local_models=installed,
-        )
-        if resolved.source == SOURCE_OVERRIDE and resolved.model:
-            return resolved.model
-        if resolved.source == SOURCE_PACK and resolved.provider != "ollama":
-            resolved = resolve_model(
-                role="classify",
-                engine_default=(
-                    {"provider": "ollama", "model": engine_default} if engine_default else None
-                ),
-                installed_local_models=installed,
-            )
-        if resolved.model:
-            return resolved.model
-
-    return override or engine_default
+            return value
+    return ""
 
 
 def normalize_put_model(payload: Any) -> str:

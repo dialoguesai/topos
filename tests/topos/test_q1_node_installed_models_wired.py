@@ -70,29 +70,29 @@ def _no_live_ollama_probe(monkeypatch):
     monkeypatch.setattr(model_packs, "installed_local_models", lambda: {INSTALLED_TAG})
 
 
-def test_facts_llm_falls_to_the_engine_default_when_the_pack_tag_is_not_installed():
+def test_facts_llm_falls_to_the_engine_default_with_a_pack_present():
     conn = _memory_conn()
     _seed_pack(conn, provider="ollama", model=MISSING_TAG)
     assert resolve_facts_llm_model(_Settings(), conn) == "extraction-default:latest"
 
 
-def test_facts_llm_keeps_the_pack_tag_when_it_is_installed(monkeypatch):
+def test_facts_llm_ignores_the_pack_entirely(monkeypatch):
+    """Inverted 2026-08-15 with the `classify` role's retirement.
+
+    The two tests this replaces pinned the pack rung's behaviour (installed tag
+    kept; unknown installed-set trusted). There is no pack rung to pin any more:
+    facts extraction is an ingest function whose model comes from Node functions
+    or the settings chain, and a query pack naming even an INSTALLED tag must be
+    walked past. The 404-mid-batch hazard those tests guarded cannot occur when
+    no pack tag can be chosen.
+    """
     monkeypatch.setattr(model_packs, "installed_local_models", lambda: {INSTALLED_TAG, MISSING_TAG})
     conn = _memory_conn()
-    _seed_pack(conn, provider="ollama", model=MISSING_TAG)
-    assert resolve_facts_llm_model(_Settings(), conn) == MISSING_TAG
+    _seed_pack(conn, provider="ollama", model=INSTALLED_TAG)
+    assert resolve_facts_llm_model(_Settings(), conn) == "extraction-default:latest"
 
 
-def test_facts_llm_still_trusts_the_pack_when_the_installed_set_is_unknown(monkeypatch):
-    # Ollama down ⇒ "unknown", not "empty". Demoting every pack role because a
-    # probe failed would change behaviour on a transient hiccup.
-    monkeypatch.setattr(model_packs, "installed_local_models", lambda: None)
-    conn = _memory_conn()
-    _seed_pack(conn, provider="ollama", model=MISSING_TAG)
-    assert resolve_facts_llm_model(_Settings(), conn) == MISSING_TAG
-
-
-def test_conversation_context_falls_to_the_engine_default_when_the_tag_is_missing():
+def test_conversation_context_falls_to_the_engine_default_with_a_pack_present():
     conn = _memory_conn()
     _seed_pack(conn, provider="ollama", model=MISSING_TAG)
     assert resolve_context_llm_model(_Settings(), conn) == "extraction-default:latest"
@@ -173,10 +173,10 @@ def test_a_missing_local_tag_with_no_engine_default_goes_inert_rather_than_off_t
 
 def test_the_node_resolver_keeps_a_demoted_local_role_on_the_local_provider():
     resolved = model_packs.resolve_model(
-        role="classify",
+        role="tool",
         pack={
             "pack_id": "pack-1",
-            "roles": {"classify": {"provider": "ollama", "model": MISSING_TAG}},
+            "roles": {"tool": {"provider": "ollama", "model": MISSING_TAG}},
         },
         engine_default=None,
         installed_local_models={INSTALLED_TAG},
@@ -194,10 +194,10 @@ def test_a_cloud_engine_default_does_not_rescue_a_demoted_local_role():
     # The mirror's whole point: the fallback being *configured* is not enough,
     # it has to be on the same side of the locality line.
     resolved = model_packs.resolve_model(
-        role="classify",
+        role="tool",
         pack={
             "pack_id": "pack-1",
-            "roles": {"classify": {"provider": "ollama", "model": MISSING_TAG}},
+            "roles": {"tool": {"provider": "ollama", "model": MISSING_TAG}},
         },
         engine_default={"provider": "openai", "model": "gpt-4o-mini"},
         installed_local_models={INSTALLED_TAG},
@@ -219,8 +219,9 @@ def _resolve_model_calls(relative: str) -> list[ast.Call]:
 @pytest.mark.parametrize(
     "relative",
     [
-        "topos/config/facts_llm.py",
-        "topos/config/conversation_context_llm.py",
+        # facts_llm and conversation_context_llm left this list 2026-08-15: they
+        # are ingest functions and no longer read packs at all (their absence is
+        # asserted separately below).
         "topos/config/signal_extraction.py",
     ],
 )
@@ -272,3 +273,14 @@ def test_signal_extraction_keeps_the_pack_tag_when_it_is_installed(monkeypatch):
     _seed_pack(conn, provider="ollama", model=MISSING_TAG, role="tool")
     resolved = resolve_signal_extraction_config(_Settings(), conn)
     assert resolved.query_model == MISSING_TAG
+
+
+def test_ingest_functions_do_not_read_packs_at_all():
+    """The inverse of the parametrized wiring test: these two must have NO
+    resolve_model call. Re-adding one would put a query-time pack back in
+    charge of an ingest model."""
+    for relative in ("topos/config/facts_llm.py", "topos/config/conversation_context_llm.py"):
+        assert _resolve_model_calls(relative) == [], (
+            f"{relative} resolves through the pack resolver again — ingest "
+            "functions are configured under Node functions, not by packs"
+        )
