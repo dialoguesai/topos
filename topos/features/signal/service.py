@@ -2,13 +2,30 @@
 
 from __future__ import annotations
 
+import json
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple
 
 from ...storage.adapters.factory import AdapterBundle
 from .data_health import DataHealthComputer
 from .dimension_registry import SIGNAL_DIMENSIONS
 from .schemas import strip_vector_fields
+
+if TYPE_CHECKING:  # import cost only, never at runtime
+    from ..lifecycle.blackhole_guard import BlackholeGuard
+
+# Every string a cluster row hands a caller. `label_terms` are lifted verbatim
+# from member text, so a filter reading only the label would pass the name on.
+_CLUSTER_TEXT_KEYS = ("label", "centroid_preview", "label_terms")
+
+
+def _safe_json_list(raw: Optional[str]) -> List[Any]:
+    try:
+        parsed = json.loads(raw or "[]")
+    except (TypeError, json.JSONDecodeError):
+        return []
+    return parsed if isinstance(parsed, list) else []
+
 
 _DATA_HEALTH_CACHE: Dict[str, Tuple[float, Dict[str, Any]]] = {}
 _DATA_HEALTH_TTL_SEC = 30.0
@@ -380,23 +397,43 @@ class SignalService:
     def list_topic_clusters(
         self,
         *,
+        guard: "BlackholeGuard",
         limit: int = 50,
         dimension: Optional[str] = None,
     ) -> Dict[str, Any]:
+        """List topic clusters, minus any the caller may not see.
+
+        ``guard`` is required and keyword-only, the same discipline
+        ``features/entities/reads.py`` uses: a cluster row carries no entity id
+        to join on, so a call site that forgot to pass one would leak silently
+        rather than fail. Making it required turns that into a TypeError.
+
+        ``total`` counts what is returned, not what exists — a total that
+        disagrees with the rows confirms something was withheld, which is the
+        side channel D5 rules out.
+        """
         from ...core.state import get_db_connection
         from .topic_clustering import load_topic_clusters_for_query
 
         limit = max(1, min(int(limit), 200))
         conn = get_db_connection()
         items = load_topic_clusters_for_query(conn, limit=limit, dimension=dimension) if conn else []
+        items = guard.filter_name_string_artifacts(items, text_keys=_CLUSTER_TEXT_KEYS)
         return {"items": items, "total": len(items), "limit": limit}
 
     def list_topic_cluster_members(
         self,
         cluster_id: str,
         *,
+        guard: "BlackholeGuard",
         limit: int = 100,
     ) -> Dict[str, Any]:
+        """Members of one cluster, minus any excerpt the caller may not see.
+
+        A withheld cluster answers exactly as a missing one does (``LookupError``
+        → 404): confirming that a cluster exists but is hidden would tell a
+        caller the protected entity exists, which is the distinction D5 removes.
+        """
         from ...core.state import get_db_connection
         from .topic_clustering import load_topic_cluster_members
 
@@ -405,12 +442,22 @@ class SignalService:
         if conn is None:
             return {"items": [], "total": 0, "cluster_id": cluster_id, "limit": limit}
         row = conn.execute(
-            "SELECT 1 FROM topic_clusters WHERE cluster_id=? LIMIT 1",
+            "SELECT cluster_id, label, centroid_preview, label_terms_json"
+            " FROM topic_clusters WHERE cluster_id=? LIMIT 1",
             (cluster_id,),
         ).fetchone()
         if row is None:
             raise LookupError(f"topic cluster not found: {cluster_id}")
+        cluster = {
+            "cluster_id": row[0],
+            "label": row[1],
+            "centroid_preview": row[2],
+            "label_terms": _safe_json_list(row[3]),
+        }
+        if not guard.filter_name_string_artifacts([cluster], text_keys=_CLUSTER_TEXT_KEYS):
+            raise LookupError(f"topic cluster not found: {cluster_id}")
         items = load_topic_cluster_members(conn, cluster_id, limit=limit)
+        items = guard.filter_name_string_artifacts(items, text_keys=("text_preview",))
         return {"items": items, "total": len(items), "cluster_id": cluster_id, "limit": limit}
 
     def list_briefs(self) -> Dict[str, Any]:

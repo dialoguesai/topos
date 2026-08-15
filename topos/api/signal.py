@@ -197,8 +197,17 @@ async def list_topic_clusters(
     dimension: Optional[str] = Query(default=None),
     _api_key: str = Depends(require_api_key),
 ):
+    # Local API-key route: owner identity is established by the transport, so
+    # the owner sees their own protected clusters here (same rule as the entity
+    # registry above). The guard still exists so this route cannot drift into
+    # serving a non-owner unfiltered.
+    from ..features.lifecycle.blackhole_guard import owner_ui_guard
+    from ..core.state import get_db_connection
+
     service = get_signal_service()
-    return service.list_topic_clusters(limit=limit, dimension=dimension)
+    return service.list_topic_clusters(
+        guard=owner_ui_guard(get_db_connection()), limit=limit, dimension=dimension
+    )
 
 
 @router.get("/topic-clusters/{cluster_id}/members")
@@ -207,9 +216,14 @@ async def list_topic_cluster_members(
     limit: int = Query(default=100, ge=1, le=500),
     _api_key: str = Depends(require_api_key),
 ):
+    from ..features.lifecycle.blackhole_guard import owner_ui_guard
+    from ..core.state import get_db_connection
+
     service = get_signal_service()
     try:
-        return service.list_topic_cluster_members(cluster_id, limit=limit)
+        return service.list_topic_cluster_members(
+            cluster_id, guard=owner_ui_guard(get_db_connection()), limit=limit
+        )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 
