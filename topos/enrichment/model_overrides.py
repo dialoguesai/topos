@@ -24,6 +24,14 @@ SUBTYPE_TO_JOB: Dict[str, str] = {
     "emotion_classification": "emo_27",
     "embedding": "embeddings",
     "sentiment_classification": "sentiment",
+    # Both forms, deliberately. entities_job emits the _batch subtype, and for
+    # months only the bare form was mapped — so a Lab "apply preferred" for
+    # entities was stored, displayed, and silently never applied. emo_27 had
+    # already hit the same hole and was patched to carry both; entities was
+    # missed. tests/enrichment/test_model_override_subtypes.py now derives the
+    # required entries from the jobs' own run_engine_task calls, so a job
+    # renaming its subtype fails a test instead of orphaning its override.
+    "entity_extraction_batch": "entities",
     "entity_extraction": "entities",
     "topic_extraction": "topics",
     "goal_extraction": "goal_extraction",
