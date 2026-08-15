@@ -243,9 +243,12 @@ GITHUB_ACTIVITY = _source(
     # node checked, 11 distinct titles over 451 rows), so every semantic reader
     # downstream could only ever match the repo NAME. Declared here rather than
     # hardcoded in the mapper so a third-party source states the same thing in
-    # its own definition. Event granularity is unchanged (one row per push; the
-    # per-commit lane is journal_entries via map_many) — a multi-commit push
-    # joins its messages, which is what "what did I work on" wants to read.
+    # its own definition. Event granularity is one row per push — a multi-commit
+    # push joins its messages, which is what "what did I work on" wants to read.
+    # This row is now the ONLY place commit prose lands: the per-commit
+    # journal_entries fan-out was retired with the posture change above, because
+    # journal is authored-by-construction and commit prose is not reliably the
+    # owner's words. Ambient here, first-person nowhere.
     canonical_field_map={
         "activity_events": {
             "content": {"path": "payload.commits[*].message", "join": "\n\n"},
