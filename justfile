@@ -84,12 +84,14 @@ test:
 # (+ history.jsonl trend). Exits non-zero if a tier-1 privacy gate regresses. Run right after
 # the version bump so the report is stamped with the version being shipped.
 eval-release:
+    uv run python scripts/preflight_release_env.py
     uv run python scripts/run_release_eval.py --print
 
 # Release gate: everything ci.yml checks, runnable locally before tagging a
 # release (dep pins in sync, migration checksums, public test lane incl. the
 # handled-message-types protocol snapshot guards, build + release smoke).
 gate:
+    uv run python scripts/preflight_release_env.py
     uv run python scripts/sync-dep-pins.py --check
     uv run python scripts/sync_migration_checksums.py --check
     uv run pytest tests -m "public and not e2e and not live and not qq_eval" -q
