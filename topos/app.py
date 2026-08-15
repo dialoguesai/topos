@@ -171,10 +171,19 @@ async def startup_event() -> None:
         bool(importlib.util.find_spec("transformers")),
         bool(importlib.util.find_spec("torch")),
     )
-    # Scope-shadow warm, deliberately HERE: before any request and before the MPS-backed
+    # Bound torch's thread pools BEFORE the first model loads. Torch's intra-op pool is
+    # one thread per core (twenty-six here); each can need the GIL to refcount a
+    # Python-owned tensor, and on 2026-08-15 that deadlocked the event loop twelve
+    # times (TensorImpl::incref_pyobject -> gil_scoped_acquire -> take_gil).
+    try:
+        from .engine.torch_runtime import configure as _configure_torch
+
+        _configure_torch()
+    except Exception:  # noqa: BLE001 — never block startup on a tuning call
+        logger.debug("torch runtime configuration skipped", exc_info=True)
+    # Scope-shadow warm, deliberately HERE: before any request and before the accelerator
     # models load. Loading the head mid-request instead put a 265 MB load in flight next
-    # to live Metal work and tripped a torch GIL/MPS deadlock twelve times on 2026-08-15.
-    # No-ops unless shadow is armed; never raises (see scope_shadow.warm).
+    # to live Metal work. No-ops unless shadow is armed; never raises.
     await asyncio.to_thread(_warm_scope_shadow)
     # Tests may inject an in-memory connection before startup.
     # Avoid initializing file-backed services in that case.

@@ -329,35 +329,53 @@ class HuggingFaceAdapter:
             # only merged adjacent same-tag TOKENS: any mid-word tag flip split
             # the word — 5.2% of live raw hits were ## junk, and the kept
             # halves were silently truncated surfaces like "Jon" for "Jonny".)
-            return pipeline("ner", model=model, aggregation_strategy="first")
+            return pipeline(
+                "ner", model=model, aggregation_strategy="first", device=device,
+            )
 
-        handle, _ = get_model_cache().acquire(ModelSlot.NER, model, _load)
+        from ..torch_runtime import device_for
+
+        device = device_for("ner")
+        handle, _ = get_model_cache().acquire(ModelSlot.NER, f"{model}@{device}", _load)
         return handle
 
     def _get_embedding_model(self, model_name: str):
         model = model_name or active_embedding_model()
         profile = EMBEDDING_MODEL_PROFILES.get(model, {})
 
+        from ..torch_runtime import device_for
+
+        # Was: no device argument at all, so sentence-transformers picked MPS by itself
+        # on any Mac ("No device provided, using mps") and CUDA nowhere else it might
+        # have been available. Now the host decides and the owner can override.
+        device = device_for("embeddings")
+
         def _load():
             from sentence_transformers import SentenceTransformer
 
-            kwargs: Dict[str, Any] = {}
+            kwargs: Dict[str, Any] = {"device": device}
             if profile.get("trust_remote_code"):
                 kwargs["trust_remote_code"] = True
             return SentenceTransformer(model, **kwargs)
 
-        handle, _ = get_model_cache().acquire(ModelSlot.EMBEDDING, model, _load)
+        # Device is part of the cache identity: switching it must reload, not serve a
+        # handle still pinned to the old one.
+        handle, _ = get_model_cache().acquire(ModelSlot.EMBEDDING, f"{model}@{device}", _load)
         return handle
 
     def _get_rerank_model(self, model_name: str):
         model = model_name or DEFAULT_RERANK_MODEL
 
+        from ..torch_runtime import device_for
+
+        device = device_for("rerank")
+
         def _load():
             from sentence_transformers import CrossEncoder
 
-            return CrossEncoder(model)
+            return CrossEncoder(model, device=device)
 
-        handle, _ = get_model_cache().acquire(ModelSlot.RERANKER, model, _load)
+        handle, _ = get_model_cache().acquire(ModelSlot.RERANKER, f"{model}@{device}", _load)
         return handle
 
     def _get_sentiment_pipeline(self, model_name: str):
