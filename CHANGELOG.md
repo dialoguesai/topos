@@ -9,6 +9,26 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+
+- `[E]` **The node stopped wedging: torch's thread pool is bounded and every model's
+  device is resolved in one place.** Twelve event-loop deadlocks on 2026-08-15, always
+  the same stack — `TensorImpl::incref_pyobject → gil_scoped_acquire → take_gil`, with
+  26 threads resident in libtorch and the loop blocked behind them. Torch's intra-op
+  pool is one thread per core and each can need the GIL to refcount a Python-owned
+  tensor; in an asyncio server that already runs DB work and job workers on threads,
+  the pool and the loop deadlock. New `topos/engine/torch_runtime.py` bounds intra-op
+  to 2 and inter-op to 1 at startup, before the first model loads. It also owns device
+  selection for embeddings, NER, rerank, the privacy filter and the scope head, which
+  previously each guessed for themselves: sentence-transformers took no device argument
+  at all and silently chose MPS on any Mac (and CUDA nowhere), while the privacy filter
+  ran its own capability ladder that had drifted from it. One resolver now: explicit
+  `TOPOS_ML_DEVICE`/`engine_ml_device` → `auto` (CUDA, else MPS, else CPU) → CPU, so a
+  CUDA host uses CUDA without a code change and any host can be pinned by name.
+  Device is part of each model's cache key, so switching it reloads instead of serving
+  a handle pinned to the old device.
+
+
 ### Changed
 
 - `[E:query]` **Horos ships from Hugging Face, picks its device by capability, and

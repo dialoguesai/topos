@@ -56,27 +56,19 @@ def privacy_filter_enabled() -> bool:
 
 
 def _resolve_device() -> int | str:
+    """Delegate to the engine-wide policy; keep transformers' int-for-CUDA convention.
+
+    `engine_ml_device` / `privacy_filter_device` still win when set — this only stops
+    the filter from making its own capability guess, which drifted from every other
+    model's and left MPS hardcoded as the Mac default.
+    """
     from topos.config.settings import settings
 
-    configured = (getattr(settings, "engine_ml_device", None) or "").strip().lower()
-    if not configured:
-        configured = (getattr(settings, "privacy_filter_device", None) or "").strip().lower()
-    if configured in ("cpu", "cuda", "mps"):
-        import torch
+    from topos.engine.torch_runtime import device_for
 
-        if configured == "cuda":
-            return 0 if torch.cuda.is_available() else "cpu"
-        if configured == "mps":
-            return "mps" if torch.backends.mps.is_available() else "cpu"
-        return configured
-
-    import torch
-
-    if torch.cuda.is_available():
-        return 0
-    if getattr(torch.backends, "mps", None) and torch.backends.mps.is_available():
-        return "mps"
-    return "cpu"
+    preferred = (getattr(settings, "privacy_filter_device", None) or "").strip().lower()
+    device = device_for("privacy-filter", preferred or None)
+    return 0 if device == "cuda" else device
 
 
 def _get_pipeline(model_id: str):
