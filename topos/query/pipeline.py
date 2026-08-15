@@ -406,6 +406,16 @@ class QueryPipelineOrchestrator:
         intent_hash = compute_intent_hash(scope_id=scope_id, access_mode=access_mode, query_text=query_text)
         turn = QueryTurn(query_text=query_text, scope_id=scope_id, access_mode=access_mode, intent_hash=intent_hash)
 
+        # Shadow-mode scope classification. OFF unless TOPOS_SCOPE_SHADOW=1, never raises,
+        # and changes nothing below this line. The caller has already told us the correct
+        # scope_id, so predicting alongside it yields labelled real traffic for free —
+        # the test set PLAN_SCOPE_CLASSIFIER.md §6.5 requires and §9A-§9F never had.
+        # Observation only: §9F measured the trained head BELOW the untrained prototype,
+        # so nothing here is fit to decide a scope.
+        from .scope_shadow import observe as _shadow_observe
+
+        _shadow_observe(query_text, scope_id)
+
         from ..disclosure.tier import resolve_disclosure_tier
 
         disclosure_tier = resolve_disclosure_tier(
