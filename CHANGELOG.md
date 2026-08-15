@@ -211,6 +211,17 @@ The machine-readable twin of each release is
 
 ### Fixed
 
+- `[S1] [E:retrieval]` **Attention-digest movers are date-qualified at read
+  time.** The routine narrator reads the last ~10 daily digests, and a movers
+  list carried no date of its own — so a one-day spike (28 visits to a new
+  host on 07-31) was re-narrated in the present tense for 11 days as if it
+  were news. Each movers fragment now carries its day and query-time age
+  ("on 2026-07-31, 13 days ago — not current" / "yesterday" / "today"),
+  computed when the object is served so the qualifier stays true however
+  long it keeps being retrieved. A surprise is an event, not a state.
+  (44bb721; entry deferred from that commit because the changelog was held
+  by a co-resident session at the time.)
+
 - `[S1] [E:embeddings]` **A journal row's signal dimension follows its origin,
   not its record type.** `signal_dimension` was mapped from record kind alone
   (`journal_entry` → `wellbeing`), and the GitHub connector writes one journal
