@@ -9,21 +9,6 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
-### Fixed
-
-- `[S1]` **The Lab's "apply preferred model" for entities is applied, not just
-  stored.** Overrides are saved per JOB id but looked up per engine SUBTYPE via
-  `SUBTYPE_TO_JOB`, and `entities_job` emits `entity_extraction_batch` while the
-  map carried only the bare `entity_extraction` — so picking a preferred NER
-  model in the Enrichment Lab wrote the override, displayed it, and never used
-  it. emo_27 hit the identical hole at its `_batch` rename and was patched by
-  hand; entities was missed. Both forms are mapped now, and a new test derives
-  the required entries from the Lab's own factory dict and each job module's
-  actual `run_engine_task(subtype=...)` literals, so the next subtype rename
-  fails a test instead of silently orphaning an override.
-  (`topos/enrichment/model_overrides.py`,
-  `tests/enrichment/test_model_override_subtypes.py`)
-
 ### Added
 
 - `[D]` **A cold labeling model no longer silently discards a whole relabel
@@ -210,6 +195,19 @@ The machine-readable twin of each release is
   6,580 unchanged.
 
 ### Fixed
+
+- `[S1]` **The Lab's "apply preferred model" for entities is applied, not just
+  stored.** Overrides are saved per JOB id but looked up per engine SUBTYPE via
+  `SUBTYPE_TO_JOB`, and `entities_job` emits `entity_extraction_batch` while the
+  map carried only the bare `entity_extraction` — so picking a preferred NER
+  model in the Enrichment Lab wrote the override, displayed it, and never used
+  it. emo_27 hit the identical hole at its `_batch` rename and was patched by
+  hand; entities was missed. Both forms are mapped now, and a new test derives
+  the required entries from the Lab's own factory dict and each job module's
+  actual `run_engine_task(subtype=...)` literals, so the next subtype rename
+  fails a test instead of silently orphaning an override.
+  (`topos/enrichment/model_overrides.py`,
+  `tests/enrichment/test_model_override_subtypes.py`)
 
 - `[S1] [E:retrieval]` **Attention-digest movers are date-qualified at read
   time.** The routine narrator reads the last ~10 daily digests, and a movers
