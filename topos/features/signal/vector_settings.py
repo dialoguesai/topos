@@ -128,6 +128,34 @@ def cluster_max_k() -> int:
         return 64
 
 
+def cluster_split_size() -> int:
+    """Members above which a cluster is re-clustered within itself.
+
+    Measured live 2026-08-15: 23 clusters of 120+ members held 51% of all
+    members, and the labeler cannot name a 446-member bag with one subject —
+    the base-name collisions ("Cameron and Danielle" x13) concentrate in
+    exactly these clusters. 0 disables splitting.
+    """
+    raw = os.environ.get("TOPOS_CLUSTER_SPLIT_SIZE", "120").strip()
+    try:
+        return max(0, int(raw))
+    except ValueError:
+        return 120
+
+
+def cluster_label_raw_text_enabled() -> bool:
+    """Labeling reads canonical (pre-redaction) text; stored rows stay redacted.
+
+    The privacy filter strips exactly the nouns a labeler needs ([NAME],
+    [ACCOUNT] in text_preview), so labels and distinguishing terms were being
+    minted from de-specified text. Owner decision 2026-08-15: the label prompt
+    and term extraction read the canonical row IN MEMORY; every persisted
+    surface (text_preview on embeddings and members) keeps redaction exactly
+    where and how it is.
+    """
+    return _flag("TOPOS_CLUSTER_LABEL_RAW_TEXT", "on")
+
+
 def cluster_assign_threshold() -> float:
     """Min cosine for incremental assignment to an existing cluster.
 
