@@ -1489,6 +1489,7 @@ def relabel_existing_clusters(
     limit: Optional[int] = None,
     dimensions: Optional[Sequence[str]] = None,
     dry_run: bool = False,
+    timeout_sec: float = 10.0,
 ) -> Dict[str, Any]:
     """Re-run the labeler over the clusters already on disk, in place.
 
@@ -1505,12 +1506,15 @@ def relabel_existing_clusters(
 
     from .cluster_labels import apply_llm_cluster_labels
 
+    label_stats: Dict[str, Any] = {}
     relabeled = apply_llm_cluster_labels(
         clusters,
         complete=complete,
         mode=mode,
         contrastive=contrastive,
         protected_terms=_protected_name_terms(conn),
+        timeout_sec=timeout_sec,
+        stats=label_stats,
     )
     changed = [
         {"cluster_id": c["cluster_id"], "before": old, "after": str(c.get("label") or "")}
@@ -1519,11 +1523,12 @@ def relabel_existing_clusters(
     ]
     if dry_run or not changed:
         return {
-            "status": "completed",
+            "status": "aborted" if label_stats.get("aborted") else "completed",
             "clusters": len(clusters),
             "relabeled": relabeled,
             "changed": len(changed),
             "dry_run": bool(dry_run),
+            **({"reason": label_stats["aborted_reason"]} if label_stats.get("aborted") else {}),
         }
 
     from ...storage.db.write_gate import begin_immediate, sqlite_retry_busy, with_db_write
@@ -1552,11 +1557,12 @@ def relabel_existing_clusters(
             conn.rollback()
             raise
     return {
-        "status": "completed",
+        "status": "aborted" if label_stats.get("aborted") else "completed",
         "clusters": len(clusters),
         "relabeled": relabeled,
         "changed": len(changed),
         "dry_run": False,
+        **({"reason": label_stats["aborted_reason"]} if label_stats.get("aborted") else {}),
     }
 
 
