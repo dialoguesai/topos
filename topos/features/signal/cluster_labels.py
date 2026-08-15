@@ -83,6 +83,7 @@ _UBIQUITY_SHARE = 0.4
 _MIN_CLUSTERS_FOR_UBIQUITY_CUT = 10
 
 _REJECT_MARKERS = ("label", "topic cluster", "i cannot", "i can't", "sorry", "as an ai")
+_WORD_TOKEN = re.compile(r"[a-z]+")
 _LABEL_PREFIX = re.compile(r"^\s*(?:label|name|answer)\s*[:\-]\s*", re.IGNORECASE)
 # A published label must never be a link. "&" stays legal (AT&T, R&D).
 _URL_LIKE = re.compile(
@@ -258,16 +259,84 @@ def _fallback_terms(cluster: Dict[str, Any]) -> Counter:
     return counter
 
 
+def member_bigrams(text: str, stopwords: Any) -> List[str]:
+    """Adjacent content-word pairs, in reading order.
+
+    The unigram extractor is a ``[a-z]{4,}`` findall, which destroys every
+    phrase before the model sees it: "google search" reaches the prompt as
+    "google", "search", and "commit messages" as "commit", "messages". The
+    prompt then asks for a NAME from a list of bare tokens, and gets one bare
+    token back — which is most of what the 2-5 word rule was fighting.
+
+    Adjacent means nothing but whitespace between the two words, so a comma or
+    a full stop ends the phrase rather than joining across it. Both halves
+    face the same length and stopword filter as unigrams, so "the search"
+    never forms.
+    """
+    pairs: List[str] = []
+    previous: Optional[str] = None
+    previous_end = -1
+    for match in _WORD_TOKEN.finditer(text):
+        token = match.group(0)
+        joined_by_space = previous_end >= 0 and not text[previous_end : match.start()].strip()
+        if (
+            joined_by_space
+            and previous
+            and len(previous) >= 4
+            and len(token) >= 4
+            and previous not in stopwords
+            and token not in stopwords
+            # A banned word is not distinguishing on its own, but pairing it
+            # with one that is ("personal kayaking") makes the pair rare enough
+            # to top the contrast ranking — which would feed the exact generic
+            # vocabulary the prompt bans straight back into the prompt.
+            and previous not in _BANNED_LABEL_WORD_SET
+            and token not in _BANNED_LABEL_WORD_SET
+        ):
+            pairs.append(f"{previous} {token}")
+        previous, previous_end = token, match.end()
+    return pairs
+
+
 def _cluster_term_counts(clusters: Sequence[Dict[str, Any]]) -> List[Counter]:
     # Lazy: topic_clustering imports this module from inside its functions, and
     # a module-level import here would make that a cycle the day it moves up.
-    from .topic_clustering import _member_term_counts
+    from .topic_clustering import _STOPWORDS, _member_term_counts
 
     counts: List[Counter] = []
     for cluster in clusters:
-        counter = _member_term_counts(list(cluster.get("members") or []))
+        members = list(cluster.get("members") or [])
+        counter = _member_term_counts(members)
+        if counter:
+            for member in members:
+                text = str(member.get("text_preview") or "").lower()
+                counter.update(member_bigrams(text, _STOPWORDS))
         counts.append(counter if counter else _fallback_terms(cluster))
     return counts
+
+
+def _drop_subsumed(scored: Sequence[tuple[str, float]], top_n: int) -> List[str]:
+    """Take the best ``top_n``, letting a phrase stand in for its own words.
+
+    "google search" ranking above "google" makes "google" redundant: spending
+    two of eight slots on the halves of a phrase already listed tells the model
+    less, not more. Order is preserved, so the strongest term still leads.
+    """
+    chosen: List[str] = []
+    covered: set[str] = set()
+    for term, _weight in scored:
+        parts = term.split(" ")
+        if len(parts) == 1:
+            if term in covered:
+                continue
+        else:
+            covered.update(parts)
+            # A phrase arriving after one of its own words replaces it.
+            chosen = [c for c in chosen if c not in parts]
+        chosen.append(term)
+        if len(chosen) >= top_n:
+            break
+    return chosen[:top_n]
 
 
 def compute_distinguishing_terms(
@@ -318,7 +387,7 @@ def compute_distinguishing_terms(
                 continue  # no more frequent here than anywhere else
             scored.append((term, weight))
         scored.sort(key=lambda item: (-item[1], item[0]))
-        return [term for term, _ in scored[:top_n]]
+        return _drop_subsumed(scored, top_n)
 
     out: List[List[str]] = []
     for counter in counts:
