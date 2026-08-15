@@ -10,10 +10,23 @@ import pytest
 from topos.api.enrichment import _process_enrichment_core
 from topos.storage.db.migrations.pipeline_jobs_v1 import apply_pipeline_jobs_v1_up
 
+# Imported HERE, at module scope, and deliberately not inside the tests below.
+# topos.core.handlers re-exports get_db_connection by value (via .common), so
+# whatever topos.core.state.get_db_connection happens to be at first-import time
+# is what the package binds — permanently. A test that patches state and only
+# then triggers that first import bakes its own lambda into the package;
+# monkeypatch then "restores" the poisoned value it recorded, and every later
+# test in the session gets this test's closed connection. That is what made
+# tests/core/test_graph_cypher_handler.py fail with "SQLite objects created in
+# a thread can only be used in that same thread" when run after this file.
+import topos.core.handlers as _handlers_hub  # noqa: E402,F401
+import topos.core.handlers.enrichment as _handlers_enrichment  # noqa: E402,F401
+import topos.core.handlers.ingest as _handlers_ingest  # noqa: E402,F401
+
 
 @pytest.mark.asyncio
 async def test_ws_executor_uses_process_enrichment_core_with_signal(monkeypatch, tmp_path) -> None:
-    conn = sqlite3.connect(str(tmp_path / "parity.db"))
+    conn = sqlite3.connect(str(tmp_path / "parity.db"), check_same_thread=False)
     apply_pipeline_jobs_v1_up(conn)
     monkeypatch.setattr("topos.core.state.get_db_connection", lambda: conn)
 
@@ -43,17 +56,12 @@ async def test_ws_executor_uses_process_enrichment_core_with_signal(monkeypatch,
 
 @pytest.mark.asyncio
 async def test_enrichment_progress_reads_sqlite_not_memory(monkeypatch, tmp_path) -> None:
-    conn = sqlite3.connect(str(tmp_path / "progress.db"))
+    conn = sqlite3.connect(str(tmp_path / "progress.db"), check_same_thread=False)
     apply_pipeline_jobs_v1_up(conn)
     monkeypatch.setattr("topos.core.state.get_db_connection", lambda: conn)
-    import topos.core.handlers as handlers_module
-    import topos.core.handlers.ingest as ingest_module
-
-    monkeypatch.setattr(handlers_module, "get_db_connection", lambda: conn)
-    monkeypatch.setattr(ingest_module.hub, "get_db_connection", lambda: conn)
-    import topos.core.handlers.enrichment as enrichment_module
-
-    monkeypatch.setattr(enrichment_module.hub, "get_db_connection", lambda: conn)
+    monkeypatch.setattr(_handlers_hub, "get_db_connection", lambda: conn)
+    monkeypatch.setattr(_handlers_ingest.hub, "get_db_connection", lambda: conn)
+    monkeypatch.setattr(_handlers_enrichment.hub, "get_db_connection", lambda: conn)
 
     from topos.core.handlers.enrichment import handle_enrichment_progress
     from topos.pipeline.job_store import enqueue_job, update_job_progress

@@ -8,6 +8,27 @@ import pytest
 os.environ.setdefault("TOPOS_KEY", "test-key")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
 os.environ.setdefault("CONTROL_PLANE_URL", "")
+
+# Bind the re-exporting handler modules NOW, before any test can patch
+# topos.core.state.get_db_connection.
+#
+# topos.core.handlers re-exports get_db_connection BY VALUE (`from .common
+# import ...`, and common in turn `from ...core.state import ...`), so whichever
+# object state holds at FIRST import is what the package keeps for the session.
+# A test that patches state and only then triggers that first import bakes its
+# own lambda into the package permanently: monkeypatch records the poisoned
+# value as the "original" and faithfully restores it at teardown, so undoing the
+# patch cements it instead of removing it. Every later test in the session then
+# receives that test's closed connection.
+#
+# It cost tests/core/test_graph_cypher_handler.py two tests, which failed with
+# "SQLite objects created in a thread can only be used in that same thread"
+# whenever they ran after test_enrichment_entrypoint_parity.py and passed alone.
+# Over a dozen test files patch that name, so any of them could be the first
+# importer; importing here — before any test runs — makes the order irrelevant.
+import topos.core.handlers  # noqa: E402,F401
+import topos.core.handlers.enrichment  # noqa: E402,F401
+import topos.core.handlers.ingest  # noqa: E402,F401
 # No live-model calls from unit tests: cluster recomputes would otherwise try
 # the local Ollama labeler (auto mode). Labeler tests inject `complete`.
 os.environ.setdefault("TOPOS_CLUSTER_LLM_LABELS", "off")
