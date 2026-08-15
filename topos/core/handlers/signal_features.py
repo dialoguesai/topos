@@ -104,11 +104,13 @@ async def handle_signal_list_topic_clusters(message: Dict[str, Any]) -> Optional
         return None
     payload = message.get("payload") or {}
     try:
+        from ...features.lifecycle.blackhole_guard import guard_from_message
         from ...features.signal.service import get_signal_service
 
         conn = hub.get_db_connection()
         service = get_signal_service(conn=conn)
         result = service.list_topic_clusters(
+            guard=guard_from_message(conn, message),
             limit=min(int(payload.get("limit") or 50), 200),
             dimension=payload.get("dimension"),
         )
@@ -126,12 +128,14 @@ async def handle_signal_list_topic_cluster_members(message: Dict[str, Any]) -> O
     if not cluster_id:
         return {"id": req_id, "status": "error", "error": "cluster_id required", "code": 400}
     try:
+        from ...features.lifecycle.blackhole_guard import guard_from_message
         from ...features.signal.service import get_signal_service
 
         conn = hub.get_db_connection()
         service = get_signal_service(conn=conn)
         result = service.list_topic_cluster_members(
             cluster_id,
+            guard=guard_from_message(conn, message),
             limit=min(int(payload.get("limit") or 100), 500),
         )
         return {"id": req_id, "status": "ok", "payload": result}

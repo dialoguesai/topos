@@ -2002,6 +2002,39 @@ def _load_ranked_clusters(
     *,
     limit: int = _CLUSTER_LIMIT,
     primary_dimensions: Optional[List[str]] = None,
+    disclosure_tier: str = "owner_raw",
+) -> List[Dict[str, Any]]:
+    """Ranked clusters with the black-hole policy applied to every exit.
+
+    Wrapped rather than filtered inline for the same reason
+    `_build_summary_items` is: the loader has four return paths (two early
+    empties, query-ranked, size-ranked), and the packet attaches the result at
+    two call sites. One choke point here is what makes a future fifth path
+    impossible to leak through.
+    """
+    return _blackhole_policy_for_clusters(
+        _load_ranked_clusters_unfiltered(
+            query_text, limit=limit, primary_dimensions=primary_dimensions
+        ),
+        conn=_cluster_policy_connection(),
+        disclosure_tier=disclosure_tier,
+    )
+
+
+def _cluster_policy_connection():
+    try:
+        from ..core.state import get_db_connection
+
+        return get_db_connection()
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _load_ranked_clusters_unfiltered(
+    query_text: str,
+    *,
+    limit: int = _CLUSTER_LIMIT,
+    primary_dimensions: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
     try:
         from ..core.state import get_db_connection
@@ -2593,6 +2626,81 @@ def _blackhole_policy_for_summary(
             continue
         if owner_view:
             kept.append({**item, "blackhole_protected": True})
+    return kept
+
+
+_CLUSTER_TEXT_KEYS = ("label", "centroid_preview", "term_label")
+
+
+def _cluster_text_blob(cluster: Dict[str, Any]) -> str:
+    """Every string a cluster hands a caller.
+
+    A cluster row carries no entity id — the label IS the name — so the scan
+    has to cover the prose the labeler wrote (`label`, `centroid_preview`), the
+    deterministic label kept beside it, and `label_terms`, which are lifted
+    verbatim from member text and would otherwise carry the name past a filter
+    that only read the label.
+    """
+    parts = [str(cluster.get(key) or "") for key in _CLUSTER_TEXT_KEYS]
+    metadata = cluster.get("metadata")
+    if isinstance(metadata, dict):
+        parts.append(str(metadata.get("term_label") or ""))
+    parts.extend(str(term) for term in (cluster.get("label_terms") or []))
+    parts.extend(str(alias) for alias in (cluster.get("query_aliases") or []))
+    return " ".join(parts).lower()
+
+
+def _blackhole_policy_for_clusters(
+    clusters: List[Dict[str, Any]],
+    *,
+    conn: Optional[Any],
+    disclosure_tier: str,
+) -> List[Dict[str, Any]]:
+    """Apply the entity black hole to topic clusters in the retrieval packet.
+
+    Same split as `_blackhole_policy_for_summary`, applied to a surface the
+    summary policy never saw: `packet["topic_clusters"]` is assembled from
+    `load_topic_clusters_for_query` and attached directly, so a cluster named
+    after a protected entity reached every grantee and MCP caller no matter
+    what the summary items did.
+
+    The labeler refuses to mint a protected name and the rebuild withdraws the
+    ones written before protection, so on a healthy node this filter has
+    nothing to catch. It is here because those are producer-side guarantees:
+    they hold for labels this build wrote, not for a row that predates the
+    rebuild, arrives by restore, or is written by an older node against the
+    same database.
+    """
+    if conn is None or not clusters:
+        return clusters
+    try:
+        from ..features.lifecycle.blackhole import (
+            blackholed_name_terms,
+            normalize_entity_name,
+        )
+    except Exception:  # noqa: BLE001
+        return clusters
+    try:
+        terms = blackholed_name_terms(conn)
+    except Exception:  # noqa: BLE001
+        # Same fail-closed rule as the summary policy: a store that cannot
+        # answer must not serve protected content to a grantee.
+        if str(disclosure_tier or "") == "owner_raw":
+            return clusters
+        raise
+    if not terms:
+        return clusters
+
+    owner_view = str(disclosure_tier or "") == "owner_raw"
+    kept: List[Dict[str, Any]] = []
+    for cluster in clusters:
+        blob = normalize_entity_name(_cluster_text_blob(cluster))
+        hit = bool(blob) and any(term in blob for term in terms)
+        if not hit:
+            kept.append(cluster)
+            continue
+        if owner_view:
+            kept.append({**cluster, "blackhole_protected": True})
     return kept
 
 
@@ -3387,6 +3495,7 @@ class DefaultSignalRetrievalAdapter:
             ranked_clusters = _load_ranked_clusters(
                 query_text,
                 primary_dimensions=manifest.primary_dimensions,
+                disclosure_tier=request.disclosure_tier,
             )
             if ranked_clusters:
                 touched.append("topic_clusters")
