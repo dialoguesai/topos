@@ -65,6 +65,65 @@ def enabled() -> bool:
         return False
 
 
+#: Circuit breaker. Observation is telemetry — it may cost a millisecond, never a turn.
+#: After this many slow-or-failed observations the shadow disables itself for the life of
+#: the process and says so once. Restarting re-arms it; the flag file is untouched, so an
+#: operator's intent survives a trip.
+BREAKER_LIMIT = 3
+#: An observation slower than this is not "shadow mode changes nothing" any more.
+BREAKER_SLOW_MS = 1500.0
+_breaker_faults = 0
+_breaker_announced = False
+
+
+def _breaker_tripped() -> bool:
+    return _breaker_faults >= BREAKER_LIMIT
+
+
+def _breaker_fault(why: str) -> None:
+    global _breaker_faults, _breaker_announced
+    _breaker_faults += 1
+    if _breaker_tripped() and not _breaker_announced:
+        _breaker_announced = True
+        logger.warning(
+            "scope shadow DISABLED for this process after %d faults (last: %s). "
+            "Routing is unaffected; restart the node to re-arm.",
+            _breaker_faults, why,
+        )
+
+
+def warm() -> bool:
+    """Load the scorer ONCE, at startup, before the node serves traffic.
+
+    This is the whole safety design. The head is 265 MB and loading it holds the GIL in
+    C-level stretches; doing that mid-request, alongside the engine's MPS work, can trip
+    a live torch deadlock (synchronous Metal dispatch whose block re-acquires the GIL) —
+    observed wedging this node twelve times on 2026-08-15. Called from app startup, the
+    load happens single-threaded, before any MPS model exists and before the first
+    request, so there is nothing to contend with.
+
+    Never raises and never blocks startup on a failure: shadow is telemetry, and a node
+    that cannot load a head simply does not observe.
+    """
+    if not enabled():
+        return False
+    try:
+        started = time.perf_counter()
+        from .scope_classifier import _head_cached
+
+        head = _head_cached()
+        elapsed = (time.perf_counter() - started) * 1000.0
+        if head is None:
+            logger.info("scope shadow armed, but no head is installed — nothing to warm")
+            return False
+        logger.info("scope shadow armed: head warm in %.0f ms", elapsed)
+        return True
+    except Exception:  # noqa: BLE001 — startup must not fail because telemetry cannot
+        logger.warning("scope shadow warm failed; observation stays off", exc_info=True)
+        _breaker_fault("warm failed")
+        return False
+
+
 def default_log_path() -> Path:
     return Path.home() / ".topos" / "scope_shadow.jsonl"
 
@@ -155,40 +214,31 @@ def observe(
     Returns the record when shadowing ran, ``None`` when it was off or failed. Callers
     ignore the return value — it exists for tests.
     """
+    if _breaker_tripped() and not force:
+        return None
     if not (force or enabled()):
         return None
     try:
         from .scope_classifier import _head_cached, _prototypes_cached, classify
 
         if not force:
-            # "Shadow mode changes nothing" has to mean latency too: never load a model
-            # INLINE in the request path (10.5s measured for the embedding model, 1-2s
-            # for an encoder head). With a HEAD installed, the prototype cache never
-            # warms — retrieval touches a different slot — so the original
-            # prototypes-only guard skipped every observation forever. Whichever scorer
-            # is cold: warm it on a daemon thread and skip THIS turn; the next request
-            # observes against a resident model.
-            head_warm = _head_cached.cache_info().currsize > 0
-            proto_warm = _prototypes_cached.cache_info().currsize > 0
-            if not head_warm and not proto_warm:
-                import threading
-
-                if not getattr(observe, "_warming", None):
-                    observe._warming = threading.Thread(  # type: ignore[attr-defined]
-                        target=lambda: (_head_cached(), None), daemon=True,
-                        name="scope-shadow-warm",
-                    )
-                    observe._warming.start()  # type: ignore[attr-defined]
-                return None
-            if head_warm and _head_cached() is None and not proto_warm:
-                # The warm thread found NO head installed (the cache holds None). The
-                # prototype path is the only scorer left and it is still cold — keep
-                # skipping until retrieval warms the embedding slot, as before.
+            # Never load a model INLINE in the request path. Warming used to happen on a
+            # daemon thread here; that put a 265 MB load in flight ALONGSIDE the engine's
+            # MPS work, and this process carries a live torch/MPS deadlock (a synchronous
+            # Metal dispatch whose block re-acquires the GIL) that wedged the node twelve
+            # times on 2026-08-15. Warming now happens once at startup via `warm()`,
+            # single-threaded, before traffic and before the MPS models load. If a scorer
+            # is still cold here, skip the turn rather than load anything.
+            if _head_cached.cache_info().currsize == 0 and _prototypes_cached.cache_info().currsize == 0:
                 return None
 
         started = time.perf_counter()
         verdict_obj = (classify_fn or classify)(query_text)
         elapsed = (time.perf_counter() - started) * 1000.0
+        if elapsed > BREAKER_SLOW_MS and not force:
+            # Slow enough that the owner would feel it. Record the fault, still log the
+            # observation — a slow verdict is data about the node, not a reason to lose it.
+            _breaker_fault(f"observation took {elapsed:.0f} ms")
         record = ShadowRecord(
             verdict=compare(
                 verdict_obj.labels, true_scope, escalated=verdict_obj.escalated
@@ -205,6 +255,7 @@ def observe(
         return record
     except Exception:  # noqa: BLE001 — shadowing must never affect the query path
         logger.debug("scope shadow observation failed", exc_info=True)
+        _breaker_fault("observation raised")
         return None
 
 
