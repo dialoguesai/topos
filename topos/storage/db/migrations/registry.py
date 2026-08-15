@@ -38,6 +38,10 @@ from .signal_dimension_harness import (
     MIGRATION_ID as HARNESS_ID,
     apply_signal_dimension_harness_up,
 )
+from .journal_origin_dimension_v1 import (
+    MIGRATION_ID as JOURNAL_ORIGIN_DIMENSION_V1_ID,
+    apply_journal_origin_dimension_v1_up,
+)
 from .signal_dimension_backfill_v1 import (
     MIGRATION_ID as SIGNAL_DIMENSION_BACKFILL_V1_ID,
     apply_signal_dimension_backfill_v1_up,
@@ -326,6 +330,7 @@ MIGRATIONS: List[MigrationSpec] = [
     _spec(58, ENTITY_REVIEW_PROVENANCE_V1_ID, apply_entity_review_provenance_v1_up),
     _spec(59, ENTITY_REVIEW_CANDIDATE_BAR_V1_ID, apply_entity_review_candidate_bar_v1_up),
     _spec(60, RETIRE_URL_CLASSIFICATION_V1_ID, apply_retire_url_classification_v1_up),
+    _spec(61, JOURNAL_ORIGIN_DIMENSION_V1_ID, apply_journal_origin_dimension_v1_up),
 ]
 
 
@@ -392,5 +397,6 @@ __all__ = [
     "ENTITY_REVIEW_DEDUP_V1_ID",
     "ENTITY_REVIEW_PROVENANCE_V1_ID",
     "ENTITY_REVIEW_CANDIDATE_BAR_V1_ID",
+    "JOURNAL_ORIGIN_DIMENSION_V1_ID",
     "RETIRE_URL_CLASSIFICATION_V1_ID",
 ]

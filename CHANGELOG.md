@@ -118,6 +118,30 @@ The machine-readable twin of each release is
 
 ### Fixed
 
+- `[S1] [E:embeddings]` **A journal row's signal dimension follows its origin,
+  not its record type.** `signal_dimension` was mapped from record kind alone
+  (`journal_entry` → `wellbeing`), and the GitHub connector writes one journal
+  row per authored COMMIT — so the entire commit stream was stamped
+  `wellbeing`. On one live node that was 123 of 765 journal embeddings, and
+  because clustering facets by dimension, **19 of 163 topic clusters** came
+  back named `Wellbeing Tracker (…)` over distinguishing terms like
+  `merge branch`, `gitignore`, `build`, `layout`, `settings`. The labeler was
+  not at fault and no amount of prompt work could fix it: asked to "name the
+  state, rhythm or condition" for a cluster of commits, the dimension's own
+  noun is the only answer left, and the parenthetical suffix ends up carrying
+  all of the real signal. A commit is work; what a person writes in a journal
+  is wellbeing. `dimension_for_record` now consults a `(record kind, source)`
+  table before the kind-only one, so a single source's journal lane can differ
+  from the rest without reclassifying anything per record.
+  `journal_origin_dimension_v1` re-stamps the rows already on disk — unlike
+  `signal_dimension_backfill_v1`, which only filled rows still at the `memory`
+  default, this one matches the wrong value explicitly and leaves a dimension
+  set deliberately to anything else alone. Clusters pick the split up at the
+  next recompute, which the ingest job runner already triggers; nothing here
+  forces a repartition, since a recompute reshuffles every cluster (two passes
+  over one corpus agree only to ARI ~0.52).
+  (`topos/features/signal/embed_context.py`)
+
 - `[S1]` **A repeated cluster name earns its retry even when it arrives
   suffixed.** Not stacking the suffix stopped the runaway shape, but by the
   time `_disambiguated` sees a label the retry has already been skipped:
