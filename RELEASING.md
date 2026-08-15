@@ -51,6 +51,13 @@ Every changelog / manifest entry classifies its impact:
 
 ```bash
 cd topos
+# TOPOS_KEY must be set: cut_release regenerates the handled-types snapshot by
+# importing the app, and Settings refuses to construct without it. Without the
+# key the script fails PART WAY THROUGH, leaving the manifest stamped, the
+# CHANGELOG stamped and the version bumped but the snapshot stale — `git
+# checkout` those four files and start over.
+export TOPOS_KEY=$(grep -o '^TOPOS_KEY=.*' ~/.topos/.env | cut -d= -f2)
+
 # Stamp unreleased → X.Y.Z, bump versions, regen checksums + handled types
 python scripts/cut_release.py --bump patch   # or --version X.Y.Z
 

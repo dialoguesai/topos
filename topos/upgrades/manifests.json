@@ -357,39 +357,23 @@
           "$comment": "CANONICAL ONLY (run_enrichment: false), deliberately. The default fan-out would run this source's baseline signal jobs, and a 458-row batch exceeds topic_clusters' _INCREMENTAL_MAX_BATCH (200), which forces a FULL cluster recompute: on the measured node that repartitions all 152 clusters, and 85 of them (interests 48, wellbeing 27, memory 10) sit in dimensions whose definitions/<dimension>.json is not yet in the tree, so dimension_core_question falls back to the generic prompt silently. Corrected content is what this release owes; derivation over it belongs to the release that lands the topic-dimension work, as one pass with the definitions present rather than two with a repartition in between."
         },
         {
-          "id": "relabel-topic-clusters",
-          "kind": "derived_rebuild",
-          "title": "Rename existing topic clusters with the contrastive, dimension-framed labeler",
-          "why": "Cluster labels were generated one cluster at a time from that cluster's own most frequent terms, under one generic instruction regardless of which signal dimension the cluster was built in. On one live node that left 152 clusters carrying 91 distinct labels — 'personal projects' on fourteen of them spanning five dimensions, 'private notes' on five — which is what every surface that lists topics showed. The new prompt reaches an existing cluster only through a relabel: nothing about its membership changed, so no other stage will rewrite these names on its own. Labels ONLY, deliberately — a full recompute would relabel but also repartition (seed-to-seed ARI ~0.52 on the live corpus), churning cluster ids, top_topics facts and UI links for what is a prompt change.",
-          "params": {
-            "targets": [
-              "topic_cluster_labels"
-            ]
-          },
-          "progress": "GET /v1/upgrade/status",
-          "idempotent": "labels and label metadata only — cluster ids, membership and centroids are untouched, and the deterministic term label is preserved in metadata.term_label. Re-running renames from the same inputs; the local model is sampled, so a second run can word the same clusters differently.",
-          "consent": "prompt",
-          "cost": "one short local-LLM call per cluster, plus one retry per duplicate name; measured ~2s per call on llama3.2:latest (~6 min for 152 clusters). No network. Nodes with no clusters no-op.",
-          "order": 3
-        },
-        {
           "id": "rerun-blackhole-rebuilds",
           "kind": "derived_rebuild",
           "title": "Re-run every black-hole rebuild so it reaches topic cluster labels and member excerpts",
-          "why": "The black-hole rebuild withdraws prose artifacts naming a protected entity, but topic_clusters and topic_cluster_members were never on its list — the label used to be term soup that named nobody, and the contrastive labeler now names the subject (33 of 152 labels on one live node were an entity name). The rebuild also had to learn that the cluster ROW is the producer: closing the derived top_topics object alone is undone by the next cluster pass, which re-mints the fact from topic_clusters.label. Existing black holes are marked 'complete', so run_pending_rebuilds skips exactly the entities carrying the un-withdrawn data: the same live node had five member excerpts still quoting a protected entity under three completed rebuilds. Must run AFTER relabel-topic-clusters so it also sees anything that pass just wrote.",
+          "why": "The black-hole rebuild withdraws prose artifacts naming a protected entity, but topic_clusters and topic_cluster_members were never on its list — the label used to be term soup that named nobody, and the contrastive labeler now names the subject (33 of 152 labels on one live node were an entity name). The rebuild also had to learn that the cluster ROW is the producer: closing the derived top_topics object alone is undone by the next cluster pass, which re-mints the fact from topic_clusters.label. Existing black holes are marked 'complete', so run_pending_rebuilds skips exactly the entities carrying the un-withdrawn data: the same live node had five member excerpts still quoting a protected entity under three completed rebuilds. Must run AFTER recompute-topic-clusters-split so it also sees the labels that pass just wrote.",
           "params": {
             "targets": [
               "blackhole_rebuilds"
             ]
           },
           "depends_on": [
-            "relabel-topic-clusters"
+            "recompute-topic-clusters-split"
           ],
           "progress": "GET /v1/upgrade/status",
           "idempotent": "withdrawal is a name scan re-applied to whatever is currently stored; a second run finds nothing left to withdraw. Cluster ids, membership and counts are untouched — only prose (label, centroid preview, member excerpts) is withdrawn.",
           "consent": "auto",
           "cost": "no LLM, no network; a scan of topic_clusters, topic_cluster_members, signal_objects and briefs per protected entity. Seconds. Nodes with no black holes no-op.",
-          "order": 4
+          "order": 5
         },
         {
           "id": "retire-url-classification",
@@ -402,7 +386,7 @@
           "id": "recompute-topic-clusters-split",
           "kind": "derived_rebuild",
           "title": "Recompute topic clusters with the oversized-cluster split and canonical-text labels",
-          "why": "23 clusters of 120+ members held 51% of all members on one live node, and labels were minted from redacted previews ([NAME]/[ACCOUNT]) rather than the canonical text. Both fixes only reach existing clusters through a recompute; rehearsed on a live-DB copy it took mega-clusters 23 -> 14 and their member share 51% -> 33% with 134/167 ids preserved.",
+          "why": "23 clusters of 120+ members held 51% of all members on one live node, and labels were minted from redacted previews ([NAME]/[ACCOUNT]) rather than the canonical text. Both fixes only reach existing clusters through a recompute; rehearsed on a live-DB copy it took mega-clusters 23 -> 14 and their member share 51% -> 33% with 134/167 ids preserved. Subsumes a labels-only relabel: this pass relabels every cluster it writes, so a separate relabel step would spend one local-LLM call per cluster on labels this recompute immediately discards.",
           "params": {
             "targets": [
               "topic_clusters"
@@ -412,12 +396,12 @@
           "idempotent": "full recompute with stable-id matching; re-running converges on the same partition modulo k-means seed",
           "consent": "prompt",
           "cost": "one full clustering pass plus one short local-LLM call per cluster (~2s each warm); minutes at personal scale. No network.",
-          "order": 5
+          "order": 4
         }
       ],
       "notes": [
         "Deploying this build requires reinstalling the node (frozen uv tool snapshot) — a plain restart runs the old code and leaves the browser lanes dark.",
-        "Existing clusters keep their old labels until relabel-topic-clusters runs: the labeler runs at cluster write time, and this release changes the prompt, not the partition.",
+        "Existing clusters keep their old labels and their old partition until recompute-topic-clusters-split runs: the labeler runs at cluster write time, and this release changes both the prompt and the partition.",
         "Nodes whose github raw retention was purged keep NULL content on their old push rows; new pushes carry commit messages from this build on. Browser rows written before this release keep NULL content/hostname until they are re-ingested — no raw-retention re-map step is declared for them because the plugin re-pushes visits organically."
       ]
     }
