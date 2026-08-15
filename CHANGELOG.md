@@ -9,6 +9,23 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+
+- `[E:query]` **Horos, the scope classifier, trained to its spec: multi-label with an
+  explicit `none` class and a four-branch ladder.** `classify()` now escalates on
+  UNCERTAINTY (ambiguity or ignorance), never on cardinality — a confident
+  `{availability, schedule}` set is acted on, and a new `reason` field keeps the
+  branches measurable apart. The trained head is published as `Dialogues/horos`
+  (macro-F1 0.512 on classify-8 vs mistral:7b's 0.495; hybrid-with-escalation 0.550
+  at ~1/6th the LLM calls). Pre-`none` artifacts keep the legacy two-threshold path.
+  New `scope` pack role (engine mirror): on-device `scope-head` provider, optional
+  and engine-defaulted so stored packs stay valid. Dimension definitions gain
+  `WorkItem`, `BrowseTrail`, `ProfileSurface` — the classifier's dead zone was
+  partly a schema gap. Shadow mode gains a `~/.topos/scope_shadow.on` flag-file
+  switch (the app-shell node inherits no env) and an off-thread model warm so a
+  cold head never loads inline in the request path.
+
+
 ### Fixed
 
 - `[S1]` **The Lab's "apply preferred model" for entities is applied, not just

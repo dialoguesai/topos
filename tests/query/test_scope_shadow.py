@@ -37,13 +37,21 @@ def _verdict(labels=(), confidence=0.8, escalated=False):
 # --- off by default ---------------------------------------------------------
 
 
-def test_disabled_unless_the_env_flag_is_set(monkeypatch) -> None:
+def test_disabled_unless_the_env_flag_is_set(monkeypatch, tmp_path) -> None:
+    from topos.query import scope_shadow as _ss
+
     monkeypatch.delenv(ENV_FLAG, raising=False)
+    # Pin the flag file away from the real ~/.topos — the operator may legitimately
+    # have shadow armed on this machine, and tests must not read live state.
+    monkeypatch.setattr(_ss, "FLAG_FILE", tmp_path / "off")
     assert enabled() is False
     assert observe("anything", "health:read") is None
 
 
-def test_flag_accepts_the_usual_truthy_spellings(monkeypatch) -> None:
+def test_flag_accepts_the_usual_truthy_spellings(monkeypatch, tmp_path) -> None:
+    from topos.query import scope_shadow as _ss
+
+    monkeypatch.setattr(_ss, "FLAG_FILE", tmp_path / "off")
     for value in ("1", "true", "yes", "ON"):
         monkeypatch.setenv(ENV_FLAG, value)
         assert enabled() is True, value
@@ -161,8 +169,16 @@ def test_cold_cache_is_skipped_rather_than_loaded_inline(monkeypatch, tmp_path) 
 # --- the pipeline wiring ----------------------------------------------------
 
 
-def test_pipeline_calls_observe_and_ignores_its_result() -> None:
-    """The hook must be fire-and-forget: no branch below it may read the return."""
+def test_shadow_mode_is_NOT_wired_into_the_product() -> None:
+    """Shadow mode is deliberately not node code — inverted 2026-08-15.
+
+    The hook once lived in `QueryPipelineOrchestrator.execute`. Two facts killed it: the
+    deployed node runs a frozen `uv tool` snapshot, so the repo hook never executed on the
+    real node anyway; and the owner asked for shadow collection that ships nothing. It is
+    now `topos-eval/scripts/shadow_offline_report.py`, which reads the node DB read-only.
+
+    This test is the guard. Re-adding the hook should be a decision, not a drive-by.
+    """
     import inspect
 
     from topos.query import pipeline
@@ -173,5 +189,69 @@ def test_pipeline_calls_observe_and_ignores_its_result() -> None:
         and obj.__module__ == pipeline.__name__
     )
     src = inspect.getsource(cls.execute)
-    assert "_shadow_observe(query_text, scope_id)" in src
-    assert "= _shadow_observe" not in src, "the result must not feed any decision"
+    assert "shadow" not in src.lower(), (
+        "shadow mode is back in the query path — that is product code, and the offline "
+        "reporter exists so it does not have to be"
+    )
+
+
+def test_the_shadow_library_still_works_standalone(tmp_path) -> None:
+    """Unwired, not deleted. The offline reporter and any future patch both use it."""
+    log = ShadowLog(tmp_path / "s.jsonl")
+    record = observe(
+        "how did I sleep", "health:read", log=log,
+        classify_fn=lambda t: _verdict(("health:read",)), force=True,
+    )
+    assert record is not None and record.verdict == VERDICT_HIT
+    assert len(log.read()) == 1
+
+
+def test_flag_file_enables_shadow_without_env(tmp_path, monkeypatch) -> None:
+    """The app-shell node inherits no shell env, so the file is the reachable switch."""
+    from topos.query import scope_shadow as ss
+
+    monkeypatch.delenv(ss.ENV_FLAG, raising=False)
+    monkeypatch.setattr(ss, "FLAG_FILE", tmp_path / "scope_shadow.on")
+    assert ss.enabled() is False
+    (tmp_path / "scope_shadow.on").touch()
+    assert ss.enabled() is True
+
+
+def test_cold_head_warms_off_thread_then_observes(tmp_path, monkeypatch) -> None:
+    """With a head installed, the old prototypes-only guard skipped EVERY observation
+    forever (retrieval warms a different slot). Now: first call skips and warms on a
+    daemon thread; once resident, observation proceeds with no inline load."""
+    import time as _time
+
+    from topos.query import scope_classifier as sc
+    from topos.query import scope_shadow as ss
+
+    class _Verdict:
+        labels = ("health:read",)
+        confidence = 0.9
+        escalated = False
+        scores = {}
+        reason = ""
+
+    sc.reset_cache()
+    monkeypatch.setattr(sc, "load_head", None, raising=False)
+    monkeypatch.setattr(
+        "topos.query.scope_head.load_head", lambda *a, **k: object()
+    )
+    monkeypatch.setattr(ss, "FLAG_FILE", tmp_path / "on")
+    (tmp_path / "on").touch()
+    observe = ss.observe
+    if getattr(observe, "_warming", None):
+        observe._warming = None
+
+    log = ss.ShadowLog(tmp_path / "log.jsonl")
+    first = observe("q", "health:read", log=log, classify_fn=lambda t: _Verdict())
+    assert first is None  # cold: skipped, warming in the background
+    for _ in range(50):
+        if sc._head_cached.cache_info().currsize:
+            break
+        _time.sleep(0.05)
+    second = observe("q", "health:read", log=log, classify_fn=lambda t: _Verdict())
+    assert second is not None and second.verdict == ss.VERDICT_HIT
+    sc.reset_cache()
+    observe._warming = None

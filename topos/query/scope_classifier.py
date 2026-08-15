@@ -35,11 +35,26 @@ from .scope_registry_loader import LEGACY_SCOPE_IDS, list_scopes
 
 logger = logging.getLogger(__name__)
 
-#: Answer at or above this. Start high — escalating is cheap, a wrong scope is not.
-TAU_HIGH = 0.42
+#: Answer at or above this.
+#:
+#: Set to 0.30 by operator decision 2026-08-15, down from 0.42. The offline report over
+#: 112 real questions on a live node measured median confidence at 0.346 — the classifier
+#: is far less confident on real language than on generated validation data, and at 0.42
+#: it answered only ~25% of real turns. TRADE-OFF, recorded so it is not rediscovered:
+#: PLAN §9A measured negatives-abstained at 0.589 at this threshold against 0.877 at 0.42,
+#: i.e. below the 0.85 gate. Nothing consumes this in production yet (the router is not
+#: wired to a caller), so the exposure today is zero — but promoting the ladder to a real
+#: caller at 0.30 would need that number re-measured first.
+TAU_HIGH = 0.30
 
 #: Below this, abstain rather than escalate: nothing in range looks like owner data.
-TAU_LOW = 0.28
+#:
+#: Set to 0.18 by operator decision 2026-08-15, down from 0.28, to reopen the escalation
+#: band after TAU_HIGH moved to 0.30. At 0.28 the band was 0.02 wide and the ladder
+#: degenerated: only 5.3% of real turns handed off, against 33% at the previous spacing.
+#: The gap is load-bearing twice over — it is the safety valve AND the flywheel that
+#: produces labelled hard cases (PLAN §6.5g), so a closed band stops both.
+TAU_LOW = 0.18
 
 #: Routing label -> permission scopes. Identity today; the seam for §6A.4 option (B),
 #: where a coarser routing taxonomy maps many-to-one onto finer permission scopes.
@@ -59,6 +74,11 @@ class ScopeVerdict:
     source: str
     escalated: bool
     scores: Dict[str, float] = field(default_factory=dict)
+    #: Why this branch was taken: "" (acted) | "ambiguity" | "ignorance" | "confident-none".
+    #: Ambiguity and ignorance both escalate, but they are different facts — one says the
+    #: model is torn, the other says it has never seen this — and only the label keeps
+    #: them measurable apart (REBUILD §B0a).
+    reason: str = ""
 
     @property
     def abstained(self) -> bool:
@@ -123,6 +143,40 @@ def _cosine(a: Sequence[float], b: Sequence[float]) -> float:
     if na == 0.0 or nb == 0.0:
         return 0.0
     return dot / (na * nb)
+
+
+def resolve_scope_binding(conn: Any = None) -> Dict[str, Any]:
+    """The pack's `scope` role binding, with the head as the engine default.
+
+    Packs answer "when some code needs a model, which one?" — and scope routing is
+    now a bound role rather than hardwired behaviour. Resolution order matches every
+    other role: explicit pack binding, then the engine default (the installed head
+    with LLM escalation — the hybrid REBUILD §2A measured above LLM-only on every
+    axis except silent drops).
+
+    Binding semantics:
+      provider "scope-head"  → use the head at `model` (a path, or "" for the
+                               default install location); escalate to the pack's
+                               `classify` LLM on ambiguity/ignorance.
+      provider "ollama" etc. → LLM-only for the scope step (the pre-head behaviour),
+                               for owners who opt out of the head.
+    Never raises: a broken pack cache falls back to the engine default, because a
+    routing degradation must not become a query outage.
+    """
+    default = {"provider": "scope-head", "model": "", "source": "engine_default"}
+    try:
+        from ..config.model_packs import resolve_role_binding
+
+        binding = resolve_role_binding(conn, "scope")
+        if binding is not None and getattr(binding, "provider", ""):
+            return {
+                "provider": str(binding.provider),
+                "model": str(binding.model or ""),
+                "source": "pack",
+            }
+    except Exception:  # noqa: BLE001 — packs must never break scope routing
+        logger.debug("scope role binding unresolvable; using engine default", exc_info=True)
+    return default
 
 
 @lru_cache(maxsize=1)
@@ -195,18 +249,60 @@ def _check_emittable(labels: Sequence[str]) -> None:
             )
 
 
+#: Sanity cap on an acted-on scope set. The benchmark's widest gold is 3; a prediction
+#: wider than this is treated as ambiguity, not as a very confident model.
+MAX_ACTED_SCOPES = 3
+
+
 def _classify_with_head(head: Any, query: str, *, top_k: int) -> ScopeVerdict:
-    """Same thresholds, same contract — only the scorer changes."""
+    """The four-branch ladder (REBUILD §B0/§B0a): escalate on UNCERTAINTY, never on
+    cardinality. A confident ``{availability, schedule}`` is the model doing its job;
+    the LLM is the fallback for ambiguity and ignorance, not for sets.
+
+    Heads without a trained ``none`` output (pre-B0a artifacts) keep the legacy
+    two-threshold behaviour — they cannot distinguish ignorance from confident-none,
+    so pretending they can would relabel every abstention as an escalation.
+    """
+    from .scope_head import NONE_LABEL
+
     scores = head.predict([query])[0]
-    ranked = sorted(scores.items(), key=lambda kv: -kv[1])
+    if NONE_LABEL not in scores:
+        ranked = sorted(scores.items(), key=lambda kv: -kv[1])
+        best = ranked[0][1] if ranked else 0.0
+        if best < head.tau_low:
+            return ScopeVerdict((), best, SOURCE_HEAD, False, scores)
+        if best < head.tau_high:
+            return ScopeVerdict((), best, SOURCE_HEAD, True, scores, reason="ambiguity")
+        labels = list(expand_routing([s for s, v in ranked[:top_k] if v >= head.tau_high]))
+        _check_emittable(labels)
+        return ScopeVerdict(tuple(labels), best, SOURCE_HEAD, False, scores)
+
+    none_score = scores[NONE_LABEL]
+    scope_scores = {s: v for s, v in scores.items() if s != NONE_LABEL}
+    ranked = sorted(scope_scores.items(), key=lambda kv: -kv[1])
     best = ranked[0][1] if ranked else 0.0
-    if best < head.tau_low:
-        return ScopeVerdict((), best, SOURCE_HEAD, False, scores)
-    if best < head.tau_high:
-        return ScopeVerdict((), best, SOURCE_HEAD, True, scores)
-    labels = list(expand_routing([s for s, v in ranked[:top_k] if v >= head.tau_high]))
-    _check_emittable(labels)
-    return ScopeVerdict(tuple(labels), best, SOURCE_HEAD, False, scores)
+    acted = [s for s, v in ranked if v >= head.tau_high]
+    banded = any(head.tau_low <= v < head.tau_high for _s, v in ranked)
+    none_high = none_score >= head.tau_high
+
+    if acted and not banded and not none_high:
+        if len(acted) > MAX_ACTED_SCOPES:
+            return ScopeVerdict((), best, SOURCE_HEAD, True, scores, reason="ambiguity")
+        labels = list(expand_routing(acted))
+        _check_emittable(labels)
+        return ScopeVerdict(tuple(labels), best, SOURCE_HEAD, False, scores)
+    if none_high and not acted and not banded:
+        # Confident abstain: the model DECIDED no scope is needed, it did not merely
+        # fail to have an opinion.
+        return ScopeVerdict((), none_score, SOURCE_HEAD, False, scores, reason="confident-none")
+    if not acted and not banded and not none_high:
+        # Ignorance: no signal anywhere, none included. Before B0a this was
+        # representationally identical to confident-none and silently abstained —
+        # 54.6% of all failures. Now it hands off to the LLM.
+        return ScopeVerdict((), best, SOURCE_HEAD, True, scores, reason="ignorance")
+    # Mixed signals — a banded scope, or none and a scope both confident: the model is
+    # torn, and torn goes to the LLM.
+    return ScopeVerdict((), best, SOURCE_HEAD, True, scores, reason="ambiguity")
 
 
 def classify(

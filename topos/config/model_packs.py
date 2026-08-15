@@ -29,9 +29,15 @@ logger = logging.getLogger("topos.config.model_packs")
 ENGINE_CONFIG_KEY_MODEL_PACKS_CACHE = "model_packs_cache"
 
 #: Mirrors control_plane/model_pack_roles.py::ROLES. Duplicated rather than
+#: (`scope` = scope routing: raw text → UMA scope set. Bound to the on-device
+#: `scope-head` provider by default; NOT the extraction `classify` role.)
 #: imported — the node and control plane are deployed independently — and
 #: asserted against the control-plane copy in test_model_packs_cache.py.
-ROLES: Tuple[str, ...] = ("primary", "reasoning", "tool", "classify")
+ROLES: Tuple[str, ...] = ("primary", "reasoning", "tool", "classify", "scope")
+
+#: The one non-LLM provider; only the `scope` role may bind it. The node serves it
+#: from `topos.query.scope_head` (ModelSlot.SCOPE_HEAD), never through an LLM adapter.
+SCOPE_HEAD_PROVIDER = "scope-head"
 
 #: Mirrors control_plane/model_pack_roles.py::FUNCTION_ROLES for attribution.
 FUNCTION_ROLES: Dict[str, str] = {
