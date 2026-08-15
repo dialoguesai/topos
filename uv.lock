@@ -661,7 +661,7 @@ grpc = [
 
 [[package]]
 name = "grand-cypher"
-version = "0.12.0"
+version = "0.13.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "grandiso" },
@@ -669,7 +669,7 @@ dependencies = [
     { name = "networkx", version = "3.4.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "networkx", version = "3.6.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/af/3e/9548603df25f4f7bc248b898ff49125fde53a0cd627ef993fb083a4cf1be/grand-cypher-0.12.0.tar.gz", hash = "sha256:95664ad6b91926872116c019ae6235306b40a2940ff32e1cb1391dc22c6103c5", size = 24722 }
+sdist = { url = "https://files.pythonhosted.org/packages/ac/94/cbfdde49e0ee513674e3cf2c3100acaf4d9337d3dd43821803249e81f082/grand-cypher-0.13.0.tar.gz", hash = "sha256:7ecf823b8641e62fd128123af47fedcd4591b73eea0825a907da3c5defd27e83", size = 24959 }
 
 [[package]]
 name = "grandiso"
@@ -3029,8 +3029,8 @@ requires-dist = [
     { name = "fastapi", specifier = "~=0.136.0" },
     { name = "google-cloud-run", specifier = "~=0.16.0" },
     { name = "google-cloud-storage", specifier = "~=3.10.1" },
-    { name = "grand-cypher", specifier = ">=0.12,<0.13" },
-    { name = "grand-cypher", marker = "extra == 'engine'", specifier = ">=0.12,<0.13" },
+    { name = "grand-cypher", specifier = ">=0.13,<0.14" },
+    { name = "grand-cypher", marker = "extra == 'engine'", specifier = ">=0.13,<0.14" },
     { name = "hf-xet", specifier = "~=1.5.1" },
     { name = "hf-xet", marker = "extra == 'engine'", specifier = "~=1.5.1" },
     { name = "httpx", specifier = "~=0.28.1" },
