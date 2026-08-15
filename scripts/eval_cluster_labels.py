@@ -68,11 +68,19 @@ def copy_database(source: Path, dest: Path) -> Dict[str, Any]:
 def label_metrics(rows: List[Dict[str, str]]) -> Dict[str, Any]:
     """rows: [{"label": ..., "dimension": ...}] — one per cluster."""
     from topos.features.signal.cluster_labels import (
+        base_label,
         label_banned_words,
         label_is_wrong_length,
     )
 
     counts = Counter(str(r["label"]).strip().lower() for r in rows)
+    # THE headline number. Distinctness over full labels is inflated by the
+    # parenthetical _disambiguated appends: a measured relabel scored 152/152
+    # distinct while carrying only 113 distinct base names, one repeated
+    # fifteen times. Counting full labels rewards a labeler for suffixing.
+    base_counts = Counter(base_label(r["label"]).lower() for r in rows)
+    base_duplicated = {b: n for b, n in base_counts.items() if n > 1}
+    suffixed = sum(1 for r in rows if base_label(r["label"]) != str(r["label"]).strip())
     dims: Dict[str, set] = defaultdict(set)
     for row in rows:
         dims[str(row["label"]).strip().lower()].add(str(row["dimension"] or ""))
@@ -99,6 +107,15 @@ def label_metrics(rows: List[Dict[str, str]]) -> Dict[str, Any]:
     return {
         "clusters": len(rows),
         "distinct_labels": len(counts),
+        "distinct_base_labels": len(base_counts),
+        "clusters_sharing_a_base_name": sum(base_duplicated.values()),
+        "max_base_duplication": max(base_counts.values()) if base_counts else 0,
+        "suffixed_labels": suffixed,
+        "top_base_duplicates": [
+            {"base": b, "count": n}
+            for b, n in sorted(base_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:6]
+            if n > 1
+        ],
         "max_duplication": max(counts.values()) if counts else 0,
         "duplicated_labels": len(duplicated),
         "clusters_carrying_a_duplicate_label": sum(duplicated.values()),
@@ -213,6 +230,14 @@ def print_metrics(title: str, metrics: Dict[str, Any]) -> None:
     print(f"\n{title}")
     print(f"  clusters                          {metrics['clusters']}")
     print(f"  distinct labels                   {metrics['distinct_labels']}")
+    print(
+        f"  DISTINCT BASE NAMES               {metrics['distinct_base_labels']}"
+        f"  ({metrics['suffixed_labels']} labels carry a suffix,"
+        f" {metrics['clusters_sharing_a_base_name']} share a base, worst"
+        f" x{metrics['max_base_duplication']})"
+    )
+    for entry in metrics["top_base_duplicates"]:
+        print(f"    x{entry['count']:<3} base {entry['base']!r}")
     print(f"  max duplication of one label      {metrics['max_duplication']}")
     print(f"  labels used more than once        {metrics['duplicated_labels']}")
     print(f"  clusters carrying a dup label     {metrics['clusters_carrying_a_duplicate_label']}")

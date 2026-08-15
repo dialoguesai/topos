@@ -201,6 +201,13 @@ The machine-readable twin of each release is
   and not the run. `TOPOS_CLUSTER_LABEL_CONTRAST=off` restores the isolated
   prompt (it is that control arm); `TOPOS_CLUSTER_LLM_LABELS=off` and the
   deterministic term-label fallback are unchanged.
+  **Correction (measured later, same corpus): the 151 counts full labels, and
+  a full label can carry the `(term)` suffix the deduplicator appends. Counted
+  by BASE name — suffix stripped — the same run holds only 113 distinct names,
+  with 41 labels suffixed and one base repeated fifteen times. So the honest
+  figure for this change is 91 → 113 distinct base names, not 91 → 151, and
+  the suffix inflates the word-count rule below by the same stroke. The eval
+  now reports `distinct_base_labels` as its headline number.**
   (`topos/features/signal/cluster_labels.py`)
 - `[D]` **A cluster label can no longer be a link.** Distinguishing terms are
   drawn from page titles and links, which invites the model to answer with one:

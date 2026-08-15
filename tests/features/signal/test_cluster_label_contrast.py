@@ -17,6 +17,7 @@ import pytest
 
 from topos.features.signal.cluster_labels import (
     apply_llm_cluster_labels,
+    base_label,
     build_contrastive_label_prompt,
     build_label_prompt,
     compute_distinguishing_terms,
@@ -145,6 +146,45 @@ class TestPhraseTerms:
             _cluster("tc_2", "memory", ["mortgage, refinance, lender"] * 3),
         ]
         assert all(compute_distinguishing_terms(corpus))
+
+
+class TestSuffixesNeverStack:
+    """Distinctness bought by suffixing is not distinctness.
+
+    A measured relabel scored 152/152 distinct labels over only 113 distinct
+    BASE names — the parenthetical `_disambiguated` appends inflates the
+    distinctness metric AND, because it adds a word, the 2-5 word rule too.
+    Two live labels had stacked to "Wellbeing (regal) (grandma)".
+    """
+
+    def test_base_label_strips_every_trailing_parenthetical(self):
+        assert base_label("Wellbeing (regal) (grandma)") == "Wellbeing"
+        assert base_label("Social Connections (travels)") == "Social Connections"
+
+    def test_base_label_leaves_a_plain_name_alone(self):
+        assert base_label("Gmail Inbox Triage") == "Gmail Inbox Triage"
+
+    def test_base_label_never_empties_a_label(self):
+        """A label that is only a parenthetical still has to name something."""
+        assert base_label("(only)") == "(only)"
+
+    def test_a_collision_never_stacks_a_second_suffix(self):
+        answers = iter(["Wellbeing (regal)", "Wellbeing (regal)"])
+        corpus = _corpus()[:2]
+        apply_llm_cluster_labels(corpus, complete=lambda p: next(answers), mode="on")
+        for cluster in corpus:
+            label = str(cluster["label"])
+            assert label.count("(") <= 1, label
+
+    def test_a_free_base_beats_any_suffix(self):
+        """"X (term)" colliding, with "X" free, resolves to "X" — not "X (other)"."""
+        corpus = _corpus()[:2]
+        corpus[0]["label"] = "Kayaking River"
+        answers = iter(["Kayaking River", "Kayaking River (paddling)"])
+        apply_llm_cluster_labels(corpus, complete=lambda p: next(answers), mode="on")
+        labels = [str(c["label"]) for c in corpus]
+        assert len({l.lower() for l in labels}) == 2, labels
+        assert not any(l.count("(") > 1 for l in labels), labels
 
 
 class TestSiblingContext:
