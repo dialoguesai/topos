@@ -20,173 +20,20 @@ logger = logging.getLogger("topos.api.enrichment")
 router = APIRouter()
 
 
-def _url_classification_test_schema() -> Dict[str, Any]:
-    return {
-        "type": "object",
-        "required": ["url"],
-        "properties": {
-            "url": {
-                "type": "string",
-                "title": "URL",
-                "description": "Website URL to classify",
-                "example": "https://www.nytimes.com",
-            },
-            "title": {
-                "type": "string",
-                "title": "Page Title",
-                "description": "Optional page title for better classification context",
-                "example": "The New York Times - Breaking News",
-            },
-        },
-    }
 
 
-async def _test_browser_visits_url_classification(*, data_packet: Dict[str, Any]) -> Dict[str, Any]:
-    from ..engine import Engine, build_url_classification_task
-
-    url = data_packet.get("url")
-    title = data_packet.get("title")
-    if not isinstance(url, str) or not url.strip():
-        raise HTTPException(status_code=400, detail="data_packet.url must be a non-empty string")
-    if title is not None and not isinstance(title, str):
-        raise HTTPException(status_code=400, detail="data_packet.title must be a string when provided")
-
-    task = build_url_classification_task(
-        task_id="test_url_cls",
-        url=url.strip(),
-        title=title,
-    )
-    engine = Engine()
-    result = await asyncio.to_thread(engine.run, task)
-    if result.status != "completed":
-        raise HTTPException(
-            status_code=502,
-            detail=result.error or f"Engine returned status {result.status}",
-        )
-    return {
-        "status": "ok",
-        "input": {"url": url, "title": title},
-        "output": result.output,
-    }
 
 
 _RAW_SOURCE_TEST_HANDLERS = {
-    ("browser_visits", "url_classification"): _test_browser_visits_url_classification,
 }
 
 _RAW_SOURCE_TEST_SCHEMAS = {
-    ("browser_visits", "url_classification"): _url_classification_test_schema(),
 }
 
 
-async def _backfill_browser_visits_url_classification(
-    *,
-    db_conn,
-    only_missing: bool = True,
-    limit: Optional[int] = None,
-) -> Dict[str, Any]:
-    """Backfill Interests signal facts from canonical activity_events (not raw tables)."""
-    import uuid
-
-    from ..ingestion.canonical_pipeline import (
-        activity_payload_to_signal_record,
-        run_post_canonical_pipeline,
-    )
-    from ..sources.registry import BROWSER_VISITS
-
-    logger.debug(
-        "[PIPELINE:SIGNAL_DERIVE] Browser visits backfill from activity_events only_missing=%s limit=%s",
-        only_missing,
-        limit,
-    )
-
-    table_exists = db_conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table' AND name='activity_events'"
-    ).fetchone()
-    if not table_exists:
-        return {
-            "rows_scanned": 0,
-            "rows_processed": 0,
-            "rows_skipped": 0,
-            "rows_failed": 0,
-            "errors": [],
-        }
-
-    params: List[Any] = ["browser_visits"]
-    query = """
-        SELECT event_id, activity_type, url, title, occurred_at, source_id
-        FROM activity_events
-        WHERE source_id=?
-    """
-    if only_missing:
-        query += """
-          AND event_id NOT IN (
-            SELECT record_id FROM signal_facts
-            WHERE source_id='browser_visits' AND dimension='interests'
-          )
-        """
-    query += " ORDER BY occurred_at ASC"
-    if isinstance(limit, int) and limit > 0:
-        query += " LIMIT ?"
-        params.append(limit)
-
-    rows = db_conn.execute(query, tuple(params)).fetchall()
-    canonical_records = [
-        activity_payload_to_signal_record(
-            {
-                "event_id": row[0],
-                "activity_type": row[1],
-                "url": row[2],
-                "title": row[3],
-                "occurred_at": row[4],
-                "source_id": row[5],
-            },
-            source_id="browser_visits",
-        )
-        for row in rows
-        if isinstance(row[2], str) and row[2].strip()
-    ]
-
-    skipped = max(len(rows) - len(canonical_records), 0)
-    if not canonical_records:
-        return {
-            "rows_scanned": len(rows),
-            "rows_processed": 0,
-            "rows_skipped": skipped + len(rows),
-            "rows_failed": 0,
-            "errors": [],
-        }
-
-    pipeline_outcome = await run_post_canonical_pipeline(
-        source_def=BROWSER_VISITS,
-        canonical_records=canonical_records,
-        sync_batch_id=f"backfill_browser_visits_{uuid.uuid4().hex[:12]}",
-        run_enrichment=False,
-        job_names=["url_classification"],
-    )
-    derive_result = pipeline_outcome.get("signal_derivation") or {}
-    processed = sum((derive_result.get("records_created") or {}).values())
-    failed = len(derive_result.get("errors") or [])
-
-    summary = {
-        "rows_scanned": len(rows),
-        "rows_processed": int(processed),
-        "rows_skipped": skipped,
-        "rows_failed": failed,
-        "errors": (derive_result.get("errors") or [])[:100],
-    }
-    logger.debug(
-        "[PIPELINE:SIGNAL_DERIVE] Browser visits backfill complete: scanned=%d processed=%d skipped=%d failed=%d",
-        summary["rows_scanned"],
-        summary["rows_processed"],
-        summary["rows_skipped"],
-        summary["rows_failed"],
-    )
-    return summary
 
 
 _RAW_SOURCE_BACKFILL_HANDLERS = {
-    ("browser_visits", "url_classification"): _backfill_browser_visits_url_classification,
 }
 
 
@@ -370,7 +217,6 @@ def _enrichment_coverage_core(source_id: str) -> Dict[str, Any]:
 # Extra WHERE constraints when deleting shared tables so one job's delete does
 # not wipe another job's rows in the same table.
 _DELETE_CONSTRAINTS: Dict[tuple[str, str], tuple[str, tuple]] = {
-    ("url_classification", "signal_facts"): ("dimension = ?", ("interests",)),
     ("statistics", "signal_facts"): ("fact_id LIKE ?", ("stat:%",)),
 }
 

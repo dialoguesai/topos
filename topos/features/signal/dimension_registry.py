@@ -37,7 +37,7 @@ MVP_DIMENSIONS: List[Dict[str, str]] = [d for d in SIGNAL_DIMENSIONS if d["id"] 
 DIMENSION_SIGNAL_OBJECTS: Dict[str, List[str]] = {
     "profile": ["goal_extraction", "activity_summary", "profile_living_brief"],
     "time": ["availability_scores", "signal_scores", "time_living_brief"],
-    "interests": ["url_classification", "topics", "interests_living_brief"],
+    "interests": ["topics", "interests_living_brief"],
     "relationships": ["relationship_edges", "message_entities", "relationships_living_brief"],
     "work": ["user_goals", "work_context_summary", "work_living_brief"],
     "memory": ["embeddings", "topics", "dimension_summary", "message_emotions", "memory_living_brief"],

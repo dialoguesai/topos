@@ -109,8 +109,8 @@ BROWSER_VISITS = _source(
     parser_id="browser.visits.v1",
     canonical_group_id="activity",
     raw_enrichment_jobs=[],
-    canonical_enrichment_jobs=["url_classification", "embeddings"],
-    signal_derivation_jobs=['url_classification'],
+    canonical_enrichment_jobs=["embeddings"],
+    signal_derivation_jobs=[],
     analytics_profile_id=None,
     enrichment_trigger="automatic",
     ingestion_trigger="automatic",
@@ -151,13 +151,13 @@ BROWSER_EVENTS = _source(
     # P2.2 (PLAN_PROVENANCE_SPLIT): browser highlights are Annotate-grade
     # engagement (expression of INTEREST) — they must reach the vector index and
     # the entity spine like browser_visits, not sit unenriched (was []/manual).
-    # Mirror browser_visits (url_classification + embeddings) and add entities so
+    # Mirror browser_visits (embeddings) and add entities so
     # a highlighted span is retrievable and its entities join the spine. Posture
     # stays 'personal'-grade engagement; the row role is still ambient+engaged
     # (record_role treats the activity/browser family as ambient regardless, so
     # enabling enrichment never upgrades belief — only interest reachability).
-    canonical_enrichment_jobs=["url_classification", "embeddings", "entities"],
-    signal_derivation_jobs=["url_classification", "entities"],
+    canonical_enrichment_jobs=["embeddings", "entities"],
+    signal_derivation_jobs=["entities"],
     analytics_profile_id=None,
     enrichment_trigger="automatic",
     ingestion_trigger="automatic",
@@ -583,8 +583,8 @@ DEMO_BROWSER_FILE = _source(
     schema_id="demo.browser.v1",
     parser_id="demo.browser.v1",
     canonical_group_id="activity",
-    canonical_enrichment_jobs=["url_classification", "embeddings"],
-    signal_derivation_jobs=['url_classification'],
+    canonical_enrichment_jobs=["embeddings"],
+    signal_derivation_jobs=[],
     enrichment_trigger="automatic",
     ingestion_trigger="automatic",
     default_scope_id="activity",

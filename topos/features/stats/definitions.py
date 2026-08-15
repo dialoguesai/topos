@@ -124,7 +124,7 @@ def group_key_for(row: Dict[str, Any], group_by: str) -> Optional[str]:
     if group_by == "hour_of_week":
         return f"{_WEEKDAYS[ts.weekday()]} {ts.hour:02d}:00" if ts else None
     if group_by == "category":
-        value = row.get("category") or row.get("url_category") or _row_meta(row).get("category")
+        value = row.get("category") or _row_meta(row).get("category")
         return str(value).strip().lower() if value else None
     if group_by == "city":
         value = row.get("city")

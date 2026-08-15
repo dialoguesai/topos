@@ -9,6 +9,46 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Removed
+
+- `[S1]` **`url_classification` is retired — job, table, engine path and the
+  interest tags it wrote.** The job labelled every visited page with a DMOZ
+  top-level category. Six months on the node this was measured on produced
+  8,616 rows, **73% of them the single label "Reference"** — at an average
+  confidence of **0.961, higher than any other bucket**, so no threshold could
+  separate it from filler (87% of Reference rows scored ≥0.95, and the lowest
+  confidence bucket was `Computers`, the useful one). Labels were not stable per
+  site, because the classifier reads the page TITLE and an authenticated app
+  title carries almost nothing: `github.com` came back Reference 720 /
+  Computers 125 / Business 23 / Kids 5, `google.com` was "Porn" twelve times,
+  and `drive.google.com` was *majority* "Home". The skew was structural, not a
+  regression — 61% Reference in February, 70–79% every month since.
+
+  It is a taxonomy mismatch rather than a tuning problem. DMOZ categories
+  describe where a site files in a web directory; they do not describe what a
+  person is doing, and "Reference" is that scheme's catch-all.
+
+  The rows reached `interests` through
+  `scope_materializer._materialize_activity_tags`, which upserted each category
+  as an `activity_tags` signal object: **458 of the dimension's 828 objects, 349
+  of them "Reference"** — roughly 40% of the structured interest layer was that
+  one string. The keyword-rule branch beneath it (edtech, ai_research,
+  infrastructure, outdoors, privacy) is untouched and becomes the only path.
+
+  Removed with it: `browser_url_classification` and its writer, the three job
+  modules, the `website_classifier.py` compat wrapper, `build_url_classification_task`,
+  `ModelSlot.URL_PIPELINE` and the backend's two inference paths, the catalog /
+  registry / model-override / lab entries, the `/api/enrichment` test+backfill
+  endpoints, and two readers that never fired anyway — `topic_clustering`'s ×3
+  `url_category` term boost (members never carried the key) and the
+  `url_category` fallback in stats grouping.
+
+  Migration `retire_url_classification_v1` drops the table and deletes the tags,
+  scoped by `payload_json.source_kind` so the rule-based tags and the personal
+  `fact` objects that also live in `interests` survive. Rehearsed against a copy
+  of a live node: interests objects 828 → 370, `fact` 6 → 6, other dimensions
+  6,580 unchanged.
+
 ### Added
 
 - `[S1]` **Declarative canonical field mapping** (`canonical_field_map` on a

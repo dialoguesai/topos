@@ -5,7 +5,6 @@
     "entities": {"task_type": "entity_extraction", "default_model_id": "mvp/entities", "provider": "huggingface"},
     "embeddings": {"task_type": "embedding", "default_model_id": "mvp/embeddings", "provider": "huggingface"},
     "sentiment": {"task_type": "sentiment_classification", "default_model_id": "mvp/sentiment", "provider": "huggingface"},
-    "url_classification": {"task_type": "url_classification", "default_model_id": "mvp/url_classification", "provider": "huggingface"},
     "topics": {"task_type": "topic_extraction", "default_model_id": "mvp/topics", "provider": "ollama"},
     "dimension_summary": {"task_type": "raw_to_summary", "default_model_id": "mvp/dimension_summary", "provider": "ollama"},
     "goal_extraction": {"task_type": "goal_extraction", "default_model_id": "mvp/goal_extraction", "provider": "ollama"},

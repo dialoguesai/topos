@@ -86,7 +86,6 @@ _OUTPUT_TABLES: Dict[str, Tuple[str, ...]] = {
     "topics": ("message_topics",),
     "sentiment": ("message_sentiment",),
     "embeddings": ("signal_embeddings",),
-    "url_classification": ("browser_url_classification", "signal_tags", "signal_facts"),
     # C5/B3: signal_summaries dropped; living briefs are written inside the job
     # (no source_id delete target — supports_delete stays False).
     "goal_extraction": ("user_goals",),
@@ -109,7 +108,6 @@ _LAB_SAFE_JOBS = frozenset(
         "sentiment",
         "embeddings",
         "topics",
-        "url_classification",
         "goal_extraction",
     }
 )
@@ -122,7 +120,6 @@ _COVERAGE_TABLES: Dict[str, str] = {
     "topics": "message_topics",
     "sentiment": "message_sentiment",
     "embeddings": "signal_embeddings",
-    "url_classification": "signal_facts",
     "goal_extraction": "user_goals",
 }
 
@@ -176,16 +173,6 @@ _STATIC_METADATA: Dict[str, Dict[str, Any]] = {
         "cost_tier": COST_MEDIUM,
         "hf_task": "feature-extraction",
         "value_props": ("precision_retrieval", "latency"),
-    },
-    "url_classification": {
-        "title": "URL classification",
-        "description": (
-            "Classifies visited pages into interest categories (zero-shot), "
-            "turning raw browser history into an Interests signal."
-        ),
-        "cost_tier": COST_HIGH,
-        "hf_task": "zero-shot-classification",
-        "value_props": ("signal_density",),
     },
     "dimension_summary": {
         "title": "Dimension briefs",

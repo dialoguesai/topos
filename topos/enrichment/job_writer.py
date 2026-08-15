@@ -21,7 +21,6 @@ _LEGACY_TABLE_BY_JOB: Dict[str, str] = {
     "topics": "message_topics",
     "sentiment": "message_sentiment",
     "goal_extraction": "user_goals",
-    "url_classification": "signal_tags",
     "availability_scores": "signal_scores",
 }
 
@@ -31,7 +30,6 @@ _SIGNAL_ONLY_JOBS = frozenset({
     "topic_clusters",
     "embeddings",
     "dimension_summary",
-    "url_classification",
     "availability_scores",
 })
 
@@ -431,21 +429,6 @@ def _write_signal_records_unlocked(
                         "score_type": "availability",
                         "label": rec.get("label", "availability"),
                         "value": rec.get("score", 0.0),
-                    },
-                    prov,
-                )
-            )
-            written += 1
-    elif job_name == "url_classification":
-        for rec in records:
-            adapters.signal.put_fact(
-                _merge_provenance(
-                    {
-                        "dimension": "interests",
-                        "source_id": rec.get("source_id"),
-                        "record_id": rec.get("record_id"),
-                        "tag": rec.get("category") or rec.get("tag"),
-                        "confidence": rec.get("confidence"),
                     },
                     prov,
                 )

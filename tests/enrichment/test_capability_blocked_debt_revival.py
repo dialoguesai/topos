@@ -287,18 +287,3 @@ def test_requeue_failed_jobs_only_moves_failed_rows(conn) -> None:
     assert requeue_failed_jobs(conn, []) == 0
 
 
-def test_catalog_declares_the_url_model_the_backend_actually_loads() -> None:
-    """The declaration readiness reads must be the model that gets loaded.
-
-    It declared facebook/bart-large-mnli while the job loads
-    DEFAULT_URL_CLASSIFICATION_MODEL, so readiness called url_classification
-    unrunnable on a machine where it runs fine. Nothing had read the
-    declaration before, so the drift was invisible.
-    """
-    from topos.engine.backends.huggingface import DEFAULT_URL_CLASSIFICATION_MODEL
-
-    entry = job_readiness._catalog_entry("url_classification")
-    assert entry is not None
-    provider, model = entry
-    assert provider == "huggingface"
-    assert model == DEFAULT_URL_CLASSIFICATION_MODEL

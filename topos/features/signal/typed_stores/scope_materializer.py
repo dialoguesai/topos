@@ -164,34 +164,6 @@ def _materialize_table_rows(
 
 def _materialize_activity_tags(store: SignalObjectStore, conn: sqlite3.Connection) -> int:
     created = 0
-    if _table_exists(conn, "browser_url_classification"):
-        rows = conn.execute(
-            """
-            SELECT record_id, url_category, url_confidence
-            FROM browser_url_classification
-            WHERE enriched_from_table='activity_events'
-            LIMIT 200
-            """
-        ).fetchall()
-        for record_id, category, confidence in rows:
-            if not category:
-                continue
-            store.upsert_object(
-                "interests",
-                "activity_tags",
-                f"{record_id}:{category}",
-                {
-                    "tag": category,
-                    "confidence": float(confidence or 0.7),
-                    "source_kind": "browser_url_classification",
-                },
-                source_refs=[_source_ref("activity_events", record_id)],
-                confidence=float(confidence or 0.7),
-                extractor_version="scope_materializer_v1",
-            )
-            created += 1
-    if created:
-        return created
     if not _table_exists(conn, "activity_events"):
         return 0
     tag_rules = (

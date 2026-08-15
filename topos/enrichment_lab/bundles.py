@@ -72,7 +72,7 @@ _BUNDLES: List[Dict[str, Any]] = [
         "label": "Browser history sample",
         "description": "Synthetic visited pages for URL/interest classification.",
         "bundle_version": "1",
-        "enrichment_fit": {"url_classification": FIT_RECOMMENDED, "embeddings": FIT_SUPPORTED},
+        "enrichment_fit": {"embeddings": FIT_SUPPORTED},
         "records": [
             {"id": "u1", "url": "https://news.example.com/markets/rates-decision", "title": "Central bank holds rates steady", "body": "Central bank holds rates steady"},
             {"id": "u2", "url": "https://recipes.example.org/thai-basil-noodles", "title": "20-minute Thai basil noodles", "body": "20-minute Thai basil noodles"},

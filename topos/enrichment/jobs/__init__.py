@@ -16,8 +16,6 @@ from .canonical.attention_triage_job import AttentionTriageJob
 from .canonical.complexity_snapshot_job import ComplexitySnapshotJob
 from .canonical.topic_clusters_job import TopicClusterJob
 from .canonical.topics_job import TopicsJob
-from .canonical.url_classification_enrichment_job import UrlClassificationEnrichmentJob
-from .canonical.url_classification_signal_job import UrlClassificationSignalJob
 from .raw.attachments_job import AttachmentsJob
 from .raw.language_job import LanguageJob
 from .raw.time_normalization_job import TimeNormalizationJob
@@ -29,7 +27,6 @@ CANONICAL_JOBS = [
     SentimentJob(),
     EmbeddingsJob(),
     Emo27Job(),
-    UrlClassificationEnrichmentJob(),
     StatisticsJob(),
     FactExtractionJob(),
     TimelineJob(),
@@ -45,7 +42,6 @@ SIGNAL_DERIVATION_JOBS = [
     GoalExtractionJob(),
     RelationshipEdgesJob(),
     AvailabilityScoresJob(),
-    UrlClassificationSignalJob(),
     TopicClusterJob(),
     StatisticsJob(),
     FactExtractionJob(),
@@ -74,8 +70,6 @@ __all__ = [
     "TimelineJob",
     "AttentionTriageJob",
     "TopicClusterJob",
-    "UrlClassificationEnrichmentJob",
-    "UrlClassificationSignalJob",
     "AttachmentsJob",
     "ToolCallsJob",
     "LanguageJob",

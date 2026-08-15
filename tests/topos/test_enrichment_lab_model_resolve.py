@@ -80,8 +80,6 @@ def test_compatible_jobs_text_classification():
     by_id = {j["job_id"]: j for j in jobs}
     assert by_id["emo_27"]["match"] == "exact"
     assert by_id["sentiment"]["match"] == "exact"
-    # url_classification declares zero-shot but runs a text-classification pipeline
-    assert by_id["url_classification"]["match"] == "compatible"
     # exact matches sort first
     assert jobs[0]["match"] == "exact"
 

@@ -17,7 +17,6 @@ _cache_lock = threading.Lock()
 
 
 class ModelSlot(str, Enum):
-    URL_PIPELINE = "url_pipeline"
     EMOTION = "emotion"
     NER = "ner"
     EMBEDDING = "embedding"
@@ -28,8 +27,6 @@ class ModelSlot(str, Enum):
 
 
 _SUBTYPE_TO_SLOT: Dict[str, ModelSlot] = {
-    "url_classification": ModelSlot.URL_PIPELINE,
-    "url_classification_batch": ModelSlot.URL_PIPELINE,
     "emotion_classification": ModelSlot.EMOTION,
     "emo_27": ModelSlot.EMOTION,
     "emotion_classification_batch": ModelSlot.EMOTION,

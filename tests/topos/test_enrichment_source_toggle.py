@@ -120,27 +120,30 @@ def test_jobs_configured_for_source_reflects_toggles(conn):
 
     source_def = REGISTRY.get(SOURCE_ID)
     so.set_source_enrichment_override(SOURCE_ID, "sentiment", False, conn=conn)
-    so.set_source_enrichment_override(SOURCE_ID, "url_classification", True, conn=conn)
+    so.set_source_enrichment_override(SOURCE_ID, "embeddings", True, conn=conn)
 
     lanes = jobs_configured_for_source(source_def)
     assert "sentiment" not in lanes["canonical"]
     assert "sentiment" not in lanes["signal"]
-    assert "url_classification" in lanes["canonical"]
+    assert "embeddings" in lanes["canonical"]
 
 
 def test_toggle_core_end_to_end(conn):
     from topos.api.enrichment import _toggle_source_enrichment_core
 
-    result = _toggle_source_enrichment_core(SOURCE_ID, "url_classification", True)
+    # A job this source does NOT enable by default, so clearing the override
+    # genuinely turns it back off. url_classification used to be the subject
+    # here; availability_scores is signal-lane only, hence the narrower lanes.
+    result = _toggle_source_enrichment_core(SOURCE_ID, "availability_scores", True)
     assert result["status"] == "ok"
     assert result["enabled"] is True
-    assert "canonical" in result["enabled_lanes"]
+    assert "signal" in result["enabled_lanes"]
     assert result["override"] == {
         "enabled": True,
-        "lanes": ["canonical", "signal"],
+        "lanes": ["signal"],
     }
 
-    result = _toggle_source_enrichment_core(SOURCE_ID, "url_classification", None)
+    result = _toggle_source_enrichment_core(SOURCE_ID, "availability_scores", None)
     assert result["override"] is None
     assert result["enabled"] is False  # not in the definition's defaults
 

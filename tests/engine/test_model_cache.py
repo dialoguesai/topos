@@ -60,10 +60,10 @@ def test_lru_eviction_when_at_capacity():
 
         return _load
 
-    cache.acquire(ModelSlot.URL_PIPELINE, "m1", make_loader(ModelSlot.URL_PIPELINE))
+    cache.acquire(ModelSlot.SENTIMENT, "m1", make_loader(ModelSlot.SENTIMENT))
     cache.acquire(ModelSlot.NER, "m2", make_loader(ModelSlot.NER))
     cache.acquire(ModelSlot.EMOTION, "m3", make_loader(ModelSlot.EMOTION))
-    assert ModelSlot.URL_PIPELINE.value not in cache.resident_slots()
+    assert ModelSlot.SENTIMENT.value not in cache.resident_slots()
     assert len(cache.resident_slots()) == 2
     assert cache.evictions_total >= 1
 

@@ -17,7 +17,6 @@ logger = logging.getLogger("topos.storage.raw.browser_flat_tables")
 
 BROWSER_VISITS_TABLE = "browser_visits"
 BROWSER_EVENTS_TABLE = "browser_events"
-BROWSER_URL_CLASSIFICATION_TABLE = "browser_url_classification"
 # Normalized raw retention table for browser_visits (architecture layer).
 RAW_BROWSER_VISITS_TABLE = "raw_chat_messages_browservisits"
 
@@ -113,39 +112,6 @@ def ensure_browser_events_table(conn) -> None:
         """)
         commit_connection(conn)
     logger.debug("Ensured table %s exists", BROWSER_EVENTS_TABLE)
-
-
-def ensure_browser_url_classification_table(conn) -> None:
-    """Create browser URL classification table for enrichment output. Stage 9: enriched_from_table."""
-    # DDL takes SQLite's write lock at execute time — gate it with the commit
-    # (write_gate lock-order inversion); the enrichment writer calls this on
-    # its write path.
-    with with_db_write():
-        conn.execute(f"""
-            CREATE TABLE IF NOT EXISTS {BROWSER_URL_CLASSIFICATION_TABLE} (
-                enriched_from_table TEXT NOT NULL,
-                record_id TEXT NOT NULL,
-                dataset_id TEXT,
-                url TEXT NOT NULL,
-                title TEXT,
-                url_category TEXT,
-                url_confidence REAL,
-                model_name TEXT,
-                created_at TEXT DEFAULT (datetime('now')),
-                updated_at TEXT DEFAULT (datetime('now')),
-                PRIMARY KEY (enriched_from_table, record_id)
-            )
-        """)
-        conn.execute(f"""
-            CREATE INDEX IF NOT EXISTS idx_{BROWSER_URL_CLASSIFICATION_TABLE}_category
-            ON {BROWSER_URL_CLASSIFICATION_TABLE}(url_category)
-        """)
-        conn.execute(f"""
-            CREATE INDEX IF NOT EXISTS idx_{BROWSER_URL_CLASSIFICATION_TABLE}_dataset
-            ON {BROWSER_URL_CLASSIFICATION_TABLE}(dataset_id)
-        """)
-        commit_connection(conn)
-    logger.debug("Ensured table %s exists", BROWSER_URL_CLASSIFICATION_TABLE)
 
 
 def backfill_browser_visits_from_raw_retention(conn) -> int:
@@ -274,44 +240,3 @@ def write_browser_event(conn, payload: Dict[str, Any]) -> None:
         commit_connection(conn)
     logger.info("[PIPELINE:RAW] Wrote flat row to %s: record_id=%s event_type=%s", BROWSER_EVENTS_TABLE, record_id[:24] if record_id else None, event_type)
 
-
-def write_browser_url_classification(
-    conn,
-    *,
-    source_table: str,
-    record_id: str,
-    dataset_id: Optional[str],
-    url: str,
-    title: Optional[str],
-    category: Optional[str],
-    confidence: Optional[float],
-    model_name: Optional[str],
-    ensure_table: bool = True,
-    log_write: bool = True,
-) -> None:
-    """Insert or replace one URL classification enrichment row."""
-    if ensure_table:
-        ensure_browser_url_classification_table(conn)
-    with with_db_write():
-        conn.execute(f"""
-            INSERT OR REPLACE INTO {BROWSER_URL_CLASSIFICATION_TABLE}
-            (enriched_from_table, record_id, dataset_id, url, title, url_category, url_confidence, model_name, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, datetime('now'))
-        """, (
-            _to_sql_value(source_table),
-            _to_sql_value(record_id),
-            _to_sql_value(dataset_id),
-            _to_sql_value(url),
-            _to_sql_value(title),
-            _to_sql_value(category),
-            confidence,
-            _to_sql_value(model_name),
-        ))
-        commit_connection(conn)
-    if log_write:
-        logger.info(
-            "[PIPELINE:RAW] Wrote URL classification row: source=%s record_id=%s category=%s",
-            source_table,
-            record_id[:24] if record_id else None,
-            category,
-        )

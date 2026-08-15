@@ -771,7 +771,6 @@ async def run_post_canonical_pipeline(
     ``force_signal=True`` to run the signal lane regardless of trigger.
     """
     from ..enrichment.derived_tables import DerivedTablesManager
-    from ..enrichment.jobs.canonical.url_classification_core import merge_url_classification_into_records
     from ..enrichment.orchestrator import EnrichmentOrchestrator, SignalDerivationOrchestrator
 
     outcome: Dict[str, Any] = {
@@ -857,39 +856,6 @@ async def run_post_canonical_pipeline(
                 records_for_enrichment,
                 job_names=canonical_jobs,
             )
-            if "url_classification" in canonical_jobs:
-                from ..core.state import get_db_connection
-
-                conn = get_db_connection()
-                if conn:
-                    classified_rows = []
-                    for rec in records_for_enrichment:
-                        event_id = rec.get("event_id") or rec.get("record_id")
-                        if not event_id:
-                            continue
-                        row = conn.execute(
-                            """
-                            SELECT url_category, url_confidence, model_name
-                            FROM browser_url_classification
-                            WHERE enriched_from_table='activity_events' AND record_id=?
-                            """,
-                            (event_id,),
-                        ).fetchone()
-                        if row:
-                            classified_rows.append(
-                                {
-                                    "record_id": event_id,
-                                    "event_id": event_id,
-                                    "category": row[0],
-                                    "confidence": row[1],
-                                    "model": row[2],
-                                }
-                            )
-                    if classified_rows:
-                        records_for_signal = merge_url_classification_into_records(
-                            records_for_signal,
-                            classified_rows,
-                        )
         except Exception as exc:
             logger.error("[PIPELINE:ENRICHMENT] post-canonical failed: %s", exc, exc_info=True)
             outcome["canonical_enrichment"] = {"errors": [str(exc)]}
