@@ -100,11 +100,29 @@ _DIMENSION_BY_RECORD_KIND = {
 }
 
 
+# Record kind is usually enough, but not always: the same kind can arrive
+# from a source that means something different by it. Keyed (kind, source_id),
+# checked before the kind alone.
+#
+# The GitHub connector writes one journal row per authored COMMIT, so the
+# whole commit stream was landing in wellbeing — 123 rows on one live node,
+# and with them 19 of 163 topic clusters named "Wellbeing Tracker (…)" over
+# terms like "merge branch", "gitignore", "build". The labeler was doing its
+# best: asked to "name the state, rhythm or condition" for a cluster of
+# commits, the only honest answer left is the dimension's own noun. A commit
+# is work; what a person writes in a journal is wellbeing. Origin decides.
+_DIMENSION_BY_RECORD_KIND_AND_SOURCE = {
+    ("journal_entry", "github_activity"): "work",
+    ("journal_entries", "github_activity"): "work",
+}
+
+
 def dimension_for_record(msg: Dict[str, Any], *, record_type: Optional[str] = None) -> str:
     """Signal dimension for a canonical record (default 'memory')."""
     explicit = str(msg.get("signal_dimension") or "").strip()
     if explicit:
         return explicit
+    source = str(msg.get("source_id") or "").strip().lower()
     for kind in (
         record_type,
         msg.get("record_type"),
@@ -112,7 +130,11 @@ def dimension_for_record(msg: Dict[str, Any], *, record_type: Optional[str] = No
         msg.get("canonical_table"),
     ):
         key = str(kind or "").strip().lower()
-        if key and key in _DIMENSION_BY_RECORD_KIND:
+        if not key:
+            continue
+        if source and (key, source) in _DIMENSION_BY_RECORD_KIND_AND_SOURCE:
+            return _DIMENSION_BY_RECORD_KIND_AND_SOURCE[(key, source)]
+        if key in _DIMENSION_BY_RECORD_KIND:
             return _DIMENSION_BY_RECORD_KIND[key]
     return "memory"
 
