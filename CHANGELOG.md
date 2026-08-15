@@ -11,6 +11,29 @@ The machine-readable twin of each release is
 
 ### Removed
 
+- `[D]` **Mega-clusters split; labels read the canonical text.** Two coupled
+  changes to the topics pipeline, both from the same live measurement: 23
+  clusters of 120+ members held 51% of all members (one 147-member cluster
+  mixed T-Mobile spam with housing logistics), and the stored member previews
+  are redacted (`[NAME]`/`[ACCOUNT]`) — so the labeler was naming subjectless
+  bags from de-specified text, and base-name collisions ("Cameron and
+  Danielle" ×13) concentrated in exactly those clusters. (1) A cluster above
+  `TOPOS_CLUSTER_SPLIT_SIZE` (default 120) members is re-clustered within
+  itself; fragments go straight back through the similarity merge, so a
+  genuinely coherent big cluster re-merges and stays whole — the merge is the
+  split's veto. The parent id survives on the largest fragment. Rehearsed on a
+  live-DB copy: 23 → 14 mega-clusters, mega-member share 51% → 33%. (2) The
+  label prompt and distinguishing-term extraction now read the CANONICAL row
+  (`_hydrate_label_texts`, in memory only, `TOPOS_CLUSTER_LABEL_RAW_TEXT=off`
+  to revert); every persisted surface — embedding previews, member previews,
+  centroid previews — keeps redaction exactly where and how it was, pinned by
+  a test that persists a hydrated cluster and asserts the raw name never
+  reaches disk. The off-limits gate still refuses protected names at the
+  label. Owner decision 2026-08-15: labeling is an owner-side surface; the
+  redaction that matters stays on the stored tables.
+  (`topos/features/signal/topic_clustering.py`)
+
+
 - `[P]` **The live-engine pressure tests stop failing 401 against a healthy
   node.** `tests/conftest.py` sets `TOPOS_KEY="test-key"` so Settings validation
   passes for the whole suite. `test_live_engine_pressure` guards itself with

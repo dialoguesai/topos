@@ -385,7 +385,7 @@ def cluster_embedding_records(
 def _member_term_counts(members: List[Dict[str, Any]]) -> Counter[str]:
     counter: Counter[str] = Counter()
     for member in members:
-        text = str(member.get("text_preview") or "").lower()
+        text = str(member.get("label_text") or member.get("text_preview") or "").lower()
         for token in re.findall(r"[a-z]{4,}", text):
             if token not in _STOPWORDS:
                 counter[token] += 1
@@ -598,6 +598,59 @@ def _merge_similar_clusters(clusters: List[Dict[str, Any]]) -> List[Dict[str, An
     return pool
 
 
+def _split_oversized_clusters(clusters: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Re-cluster any cluster whose membership outgrew a single subject.
+
+    Live 2026-08-15: 23 clusters of 120+ members held 51% of all members. One
+    447-member "relationships" cluster mixed T-Mobile spam, housing logistics
+    and software-dev chatter — no label can name that, and the base-name
+    collisions concentrate in exactly these clusters.
+
+    Deliberately self-limiting: fragments go straight back through
+    ``_merge_similar_clusters`` (the caller runs it after this pass), so a
+    mega-cluster that IS one coherent subject re-merges and the split is a
+    no-op. Only clusters whose fragments are genuinely separated stay split.
+    Requires member vectors, so it runs at recompute time and never on the
+    relabel path (labels-only, vectors already stripped).
+    """
+    from .vector_settings import cluster_split_size
+
+    max_size = cluster_split_size()
+    if max_size <= 0 or not clusters:
+        return clusters
+    out: List[Dict[str, Any]] = []
+    for cluster in clusters:
+        members = cluster.get("members") or []
+        vectored = [m for m in members if isinstance(m.get("vector"), list)]
+        if len(members) <= max_size or len(vectored) < 2 * _MIN_MEANINGFUL_CLUSTER_SIZE:
+            out.append(cluster)
+            continue
+        k = max(2, math.ceil(len(vectored) / max_size))
+        fragments = cluster_embedding_records(vectored, k=k)
+        # Tiny shards re-attach to their nearest sibling fragment, not to the
+        # whole corpus — the split must never leak members across clusters.
+        fragments = _merge_small_clusters(fragments)
+        if len(fragments) < 2:
+            out.append(cluster)
+            continue
+        biggest = max(fragments, key=lambda f: int(f.get("member_count") or 0))
+        for fragment in fragments:
+            # The parent's facet is authoritative; _build_cluster re-derives it
+            # from members and mixed-source fragments can vote differently.
+            fragment["dimension"] = cluster.get("dimension")
+            fragment["primary_dimension"] = cluster.get("primary_dimension") or cluster.get("dimension")
+            # The parent's id survives on the largest fragment so stable-id
+            # matching (and everything keyed on it) degrades gracefully.
+            if fragment is biggest and cluster.get("cluster_id"):
+                fragment["cluster_id"] = cluster["cluster_id"]
+        logger.info(
+            "split oversized cluster %s (%d members) into %d fragments",
+            cluster.get("cluster_id"), len(members), len(fragments),
+        )
+        out.extend(fragments)
+    return out
+
+
 def _post_process_facet_clusters(
     clusters: List[Dict[str, Any]],
     *,
@@ -612,6 +665,10 @@ def _post_process_facet_clusters(
         cluster["centroid_preview"] = _centroid_preview(members, centroid)
     if merge_small:
         clusters = _merge_small_clusters(clusters)
+        # Split before the similarity merge, so fragments of a genuinely
+        # coherent mega-cluster are re-merged by the same gate that merges
+        # any other near-duplicate pair — the merge is the split's veto.
+        clusters = _split_oversized_clusters(clusters)
     return _merge_similar_clusters(clusters)
 
 
@@ -1242,6 +1299,45 @@ def _rebuild_affinity_lane(conn) -> Dict[str, Any]:
     return {"context_centroids": centroids, "affinity_edges": _rebuild_affinity_edges(conn)}
 
 
+def _hydrate_label_texts(conn, clusters: List[Dict[str, Any]], *, per_cluster: int = 24) -> int:
+    """Attach canonical (pre-redaction) text to members, in memory only.
+
+    The privacy filter redacts text_preview at embedding time, which strips
+    exactly the specificity a labeler needs — the stored previews say [NAME]
+    where the canonical row says the name. Labels and distinguishing terms are
+    now minted from the canonical row; nothing here is persisted
+    (persist_topic_clusters writes text_preview, never label_text) and every
+    stored surface keeps redaction exactly as it was. The off-limits gate
+    still refuses protected names at the label itself.
+    """
+    from .vector_settings import cluster_label_raw_text_enabled
+
+    if conn is None or not cluster_label_raw_text_enabled():
+        return 0
+    from .source_hydration import hydrate_record_text
+
+    hydrated = 0
+    for cluster in clusters:
+        for member in (cluster.get("members") or [])[:per_cluster]:
+            record_id = str(member.get("record_id") or "")
+            if not record_id or member.get("label_text"):
+                continue
+            try:
+                result = hydrate_record_text(
+                    conn,
+                    record_id,
+                    source_id=member.get("source_id"),
+                    record_type=member.get("record_type"),
+                    max_chars=500,
+                )
+            except Exception:  # noqa: BLE001 — labeling must not die on one row
+                continue
+            if getattr(result, "found", False) and result.content:
+                member["label_text"] = result.content
+                hydrated += 1
+    return hydrated
+
+
 def _protected_name_terms(conn) -> set:
     """The owner's off-limits names, for the labeler's producer-side refusal.
 
@@ -1316,6 +1412,7 @@ def recompute_topic_clusters(
     from .cluster_labels import apply_llm_cluster_labels
 
     protected_terms = _protected_name_terms(conn)
+    metrics["label_texts_hydrated"] = _hydrate_label_texts(conn, clusters)
     metrics["llm_labels"] = apply_llm_cluster_labels(
         clusters, protected_terms=protected_terms
     )
@@ -1507,6 +1604,7 @@ def relabel_existing_clusters(
     from .cluster_labels import apply_llm_cluster_labels
 
     label_stats: Dict[str, Any] = {}
+    _hydrate_label_texts(conn, clusters)
     relabeled = apply_llm_cluster_labels(
         clusters,
         complete=complete,

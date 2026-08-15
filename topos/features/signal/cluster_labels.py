@@ -528,7 +528,12 @@ def sibling_labels(
 def _previews(cluster: Dict[str, Any]) -> List[str]:
     previews: List[str] = []
     for member in (cluster.get("members") or [])[: _SAMPLE_PREVIEWS * 3]:
-        text = str(member.get("text_preview") or "").strip()
+        # label_text is the canonical, pre-redaction row, hydrated in memory at
+        # labeling time (_hydrate_label_texts). The stored preview is redacted
+        # ([NAME]/[ACCOUNT]), which strips exactly the specificity a label
+        # needs. Falls back to the redacted preview when hydration found
+        # nothing — a de-specified sample beats an empty one.
+        text = str(member.get("label_text") or member.get("text_preview") or "").strip()
         if text:
             previews.append(text[:_PREVIEW_CHARS])
         if len(previews) >= _SAMPLE_PREVIEWS:
