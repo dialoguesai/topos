@@ -26,7 +26,11 @@ The machine-readable twin of each release is
   `TOPOS_ML_DEVICE`/`engine_ml_device` → `auto` (CUDA, else MPS, else CPU) → CPU, so a
   CUDA host uses CUDA without a code change and any host can be pinned by name.
   Device is part of each model's cache key, so switching it reloads instead of serving
-  a handle pinned to the old device.
+  a handle pinned to the old device. **`auto` does not select MPS**: bounding threads
+  alone did not stop the wedge — the node hung again on the next burst of MPS
+  embedding calls with the pool at two — so while the torch bug stands, MPS is opt-in
+  by name (`ENGINE_ML_DEVICE=mps`). These models are small (MiniLM 22M, NER 125M) and
+  CPU-fast on Apple silicon; the cost is far smaller than a hung node.
 
 
 ### Changed
