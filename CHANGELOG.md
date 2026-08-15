@@ -78,6 +78,30 @@ The machine-readable twin of each release is
 
 ### Fixed
 
+- `[S1]` **A repeated cluster name earns its retry even when it arrives
+  suffixed.** Not stacking the suffix stopped the runaway shape, but by the
+  time `_disambiguated` sees a label the retry has already been skipped:
+  collision was tested on the whole string, so a model answering
+  "Social Connections (weekend)" where "Social Connections" was spoken for
+  produced a brand-new string, matched nothing in `used`, and was accepted. The
+  model was never told it had repeated itself and never got the chance to
+  rename — it went straight to a deterministic suffix, which is a worse name
+  than the one it was not asked for. And the prompt shows each cluster the
+  names its siblings took, so a suffixed sibling is exactly what it copies.
+  Collision now tests the base name alongside the whole label (`_collides`),
+  and an assigned label claims both identities (`_register_label`) — including
+  the term labels still carried by clusters the labeler skipped, which sit on
+  the same surface. `_label_rank` uses the same test, or a rename would be
+  bought by the retry and then discarded when the two disagreed. The eval gains
+  `stacked_suffix_labels` beside `suffixed_labels`: one suffix is the
+  disambiguator working, two is it running away, and that difference deserves
+  its own number rather than hiding inside a count.
+  (`topos/features/signal/cluster_labels.py`)
+
+  How many labels share a base is still deliberately not capped — keeping the
+  term label instead ("https / good / here") trades a weak name for a useless
+  one, and a model that repeats itself must still get every cluster named.
+
 - `[S1]` **Model readiness stops counting jobs ready because they are not LLM
   jobs.** `_model_readiness()` scored every non-LLM job ready unconditionally —
   "HuggingFace task models and rules jobs run in-process on any supported

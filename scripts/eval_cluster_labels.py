@@ -81,6 +81,13 @@ def label_metrics(rows: List[Dict[str, str]]) -> Dict[str, Any]:
     base_counts = Counter(base_label(r["label"]).lower() for r in rows)
     base_duplicated = {b: n for b, n in base_counts.items() if n > 1}
     suffixed = sum(1 for r in rows if base_label(r["label"]) != str(r["label"]).strip())
+    # A label carrying more than one "(...)" is a suffix stacked on a suffix,
+    # which the labeler must never mint. Distinct from suffixed_labels: one
+    # suffix is the disambiguator working, two is it running away
+    # ("Social Connections (travels) (affirmation) (logically)" reached a live
+    # node). Non-zero is a regression, always — worth its own number rather
+    # than hiding inside the suffixed count.
+    stacked = sum(1 for r in rows if str(r["label"]).count("(") > 1)
     dims: Dict[str, set] = defaultdict(set)
     for row in rows:
         dims[str(row["label"]).strip().lower()].add(str(row["dimension"] or ""))
@@ -111,6 +118,7 @@ def label_metrics(rows: List[Dict[str, str]]) -> Dict[str, Any]:
         "clusters_sharing_a_base_name": sum(base_duplicated.values()),
         "max_base_duplication": max(base_counts.values()) if base_counts else 0,
         "suffixed_labels": suffixed,
+        "stacked_suffix_labels": stacked,
         "top_base_duplicates": [
             {"base": b, "count": n}
             for b, n in sorted(base_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:6]
@@ -236,6 +244,11 @@ def print_metrics(title: str, metrics: Dict[str, Any]) -> None:
         f" {metrics['clusters_sharing_a_base_name']} share a base, worst"
         f" x{metrics['max_base_duplication']})"
     )
+    if metrics.get("stacked_suffix_labels"):
+        print(
+            f"  labels with a STACKED suffix      {metrics['stacked_suffix_labels']}"
+            "   <- REGRESSION, must be 0"
+        )
     for entry in metrics["top_base_duplicates"]:
         print(f"    x{entry['count']:<3} base {entry['base']!r}")
     print(f"  max duplication of one label      {metrics['max_duplication']}")

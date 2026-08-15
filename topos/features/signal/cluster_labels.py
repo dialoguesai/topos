@@ -672,6 +672,29 @@ def _normalized_label(label: str) -> str:
     return re.sub(r"[^a-z0-9 ]", "", str(label or "").lower()).strip()
 
 
+def _collides(label: str, used: Dict[str, int]) -> bool:
+    """Taken means a reader could not tell these apart.
+
+    Both the whole label and its base name are tested, because ``used`` claims
+    both keys for everything already assigned. Testing the whole string alone
+    let a repeat through whenever it arrived already suffixed: the prompt shows
+    a cluster the names its siblings took, the model answers
+    "Social Connections (weekend)" where "Social Connections" is spoken for,
+    and that is a brand-new string — so no retry fired and the model was never
+    told it had repeated itself. It went straight to the deterministic suffix,
+    which is a worse name than the rename it never got asked for.
+    """
+    return _normalized_label(label) in used or _normalized_label(base_label(label)) in used
+
+
+def _register_label(used: Dict[str, int], label: str, index: int) -> None:
+    """Claim a label under both identities it can collide on."""
+    used.setdefault(_normalized_label(label), index)
+    base = _normalized_label(base_label(label))
+    if base:
+        used.setdefault(base, index)
+
+
 def _rejection_reason(
     label: str,
     used: Dict[str, int],
@@ -682,7 +705,7 @@ def _rejection_reason(
         return "protected"  # first: unpublishable at any distinctness
     if label_is_urlish(label):
         return "url"
-    if _normalized_label(label) in used:
+    if _collides(label, used):
         return "taken"
     if label_is_generic(label):
         return "generic"
@@ -706,7 +729,7 @@ def _label_rank(
     return (
         0 if label_mentions_protected(label, protected_terms) else 1,
         0 if label_is_urlish(label) else 1,
-        0 if _normalized_label(label) in used else 1,
+        0 if _collides(label, used) else 1,
         0 if label_is_generic(label) else 1,
         0 if label_is_wrong_length(label) else 1,
     )
@@ -944,10 +967,10 @@ def apply_llm_cluster_labels(
             for other, sibling in enumerate(clusters):
                 if other == index or other in assigned:
                     continue
-                carried = _normalized_label(str(sibling.get("label") or ""))
+                carried = str(sibling.get("label") or "")
                 if carried:
-                    blocked.setdefault(carried, other)
-            if _normalized_label(label) in blocked:
+                    _register_label(blocked, carried, other)
+            if _collides(label, blocked):
                 distinct = _disambiguated(label, terms, blocked, cluster)
                 if distinct is None:
                     continue  # keep the term label rather than ship a duplicate
@@ -963,7 +986,7 @@ def apply_llm_cluster_labels(
         cluster["metadata"] = metadata
         cluster["label"] = label
         assigned[index] = label
-        used[_normalized_label(label)] = index
+        _register_label(used, label, index)
         relabeled += 1
     if stats is not None:
         stats.update(

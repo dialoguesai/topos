@@ -720,3 +720,63 @@ def test_term_labels_are_disambiguated_against_each_other_not_just_counted():
     labels = [c["label"] for c in clusters]
     assert len(set(labels)) == 3, labels
     assert labels[0] == "hello"
+
+
+class TestSuffixedRepeatEarnsTheRetry:
+    """A repeat that arrives already suffixed is still a repeat.
+
+    Stripping the suffix in `_disambiguated` stops it stacking, but by then the
+    retry has already been skipped: the collision check saw a brand-new string
+    and accepted it, so the model was never told it had repeated itself and
+    never got the chance to rename. The deterministic suffix is a worse name
+    than the one it was not asked for.
+    """
+
+    def test_a_suffixed_echo_of_a_sibling_earns_the_taken_retry(self):
+        prompts: list[str] = []
+        answers = iter(["River Kayaking Trips", "River Kayaking Trips (weekend)"])
+
+        def _echo_sibling(prompt: str) -> str:
+            prompts.append(prompt)
+            try:
+                return next(answers)
+            except StopIteration:
+                return "Mortgage Refinance Search"
+
+        corpus = _corpus()
+        apply_llm_cluster_labels(corpus, complete=_echo_sibling, mode="on")
+        labels = [c["label"] for c in corpus]
+        assert any("already taken" in p for p in prompts), prompts
+        # The echo was rejected, so what shipped is the rename the retry bought.
+        assert base_label(labels[1]) != base_label(labels[0]), labels
+
+    def test_a_taken_base_ranks_a_retry_the_way_a_taken_label_does(self):
+        """_label_rank decides whether the retry is kept; it has to agree with
+        _rejection_reason or a rename is bought and then thrown away."""
+        from topos.features.signal.cluster_labels import _label_rank
+
+        used = {"river kayaking trips": 0}
+        suffixed = _label_rank("River Kayaking Trips (weekend)", used)
+        fresh = _label_rank("Mortgage Refinance Search", used)
+        assert fresh > suffixed
+
+    def test_a_carried_term_label_blocks_its_base_too(self):
+        """Clusters the labeler skips keep term labels carrying the same "(n)"
+        shape, and they sit on the same surface as the assigned ones. Answering
+        the bare "Hello" beside a retained "Hello (4)" is a collision the model
+        should hear about.
+
+        It is NOT asserted that every base ends up unique: `_disambiguated`
+        deliberately still mints suffixed variants rather than dropping a
+        cluster back to its term label. What must happen is the retry.
+        """
+        prompts: list[str] = []
+        corpus = _corpus()
+        corpus[1]["label"] = "Hello (4)"
+
+        def _always_hello(prompt: str) -> str:
+            prompts.append(prompt)
+            return "Hello"
+
+        apply_llm_cluster_labels(corpus, complete=_always_hello, mode="on")
+        assert any("already taken" in p for p in prompts), prompts
