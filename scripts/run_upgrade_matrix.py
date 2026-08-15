@@ -160,26 +160,59 @@ def _assert_steps_did_work(
     from topos.upgrades.runner import _effective_status
 
     declared = declaring_versions()
-    awaiting_consent: set[str] = set()
-    for step in steps:
-        step_id = str(step["id"])
-        # Ledger rows are keyed by the release that DECLARED the step, not by
-        # whatever was shipping when it ran — a step declared in 1.3.7 keeps
-        # one row across every later hop.
-        status = _effective_status(conn, step_id, declared.get(step_id) or shipped)
-        if status == "pending_consent":
-            awaiting_consent.add(step_id)
+    # Ledger rows are keyed by the release that DECLARED the step, not by
+    # whatever was shipping when it ran — a step declared in 1.3.7 keeps one
+    # row across every later hop.
+    status_by_id = {
+        str(s["id"]): _effective_status(
+            conn, str(s["id"]), declared.get(str(s["id"])) or shipped
+        )
+        for s in steps
+    }
+
+    # A consent-gated step rests at 'pending_consent' until
+    # POST /v1/upgrade/consent, and the matrix runs non-interactively, so that
+    # is expected rather than a failure.
+    #
+    # So is a step waiting BEHIND one. The runner defers a step whose
+    # dependency is not yet 'done' without writing a ledger row at all, so its
+    # status is None — indistinguishable, to the old check, from a step that
+    # should have run and did not. 1.3.16 is the first release to ship a
+    # `consent: prompt` step (every earlier one is auto or unset), so this is
+    # the first time the difference could be observed, and it failed the
+    # release install smoke rather than the release.
+    #
+    # Computed to a fixpoint: dependency chains are arbitrarily deep and the
+    # step list is not in dependency order.
+    by_id = {str(s["id"]): s for s in steps}
+    awaiting_consent = {
+        sid for sid, status in status_by_id.items() if status == "pending_consent"
+    }
+    deferred = set(awaiting_consent)
+    while True:
+        newly = {
+            sid
+            for sid, step in by_id.items()
+            if sid not in deferred
+            and any(str(dep) in deferred for dep in (step.get("depends_on") or []))
+        }
+        if not newly:
+            break
+        deferred |= newly
+
+    for step_id, status in status_by_id.items():
+        if step_id in deferred:
             continue
         if status != "done":
             raise AssertionError(
-                f"step {step_id!r} (kind={step.get('kind')!r}) ledger status is "
-                f"{status!r}, expected 'done'"
+                f"step {step_id!r} (kind={by_id[step_id].get('kind')!r}) ledger "
+                f"status is {status!r}, expected 'done'"
             )
 
     executable = [
         s
         for s in steps
-        if str(s.get("kind")) != "none" and str(s["id"]) not in awaiting_consent
+        if str(s.get("kind")) != "none" and str(s["id"]) not in deferred
     ]
     if executable and int(result.get("steps_run") or 0) <= 0:
         raise AssertionError(
@@ -189,7 +222,9 @@ def _assert_steps_did_work(
     if not executable:
         print(
             "note: no executable steps this run "
-            f"(pending_consent={sorted(awaiting_consent)}); skipping effect asserts"
+            f"(pending_consent={sorted(awaiting_consent)}, "
+            f"blocked behind consent={sorted(deferred - awaiting_consent)}); "
+            "skipping effect asserts"
         )
         return
 
