@@ -716,9 +716,12 @@ async def list_facts(
 ):
     """Atomic owner facts with temporal validity (belief history via include_closed)."""
     from ..features.facts.reads import list_facts as _list
+    from ..features.lifecycle.blackhole_guard import owner_ui_guard
 
+    conn = _entities_conn()
     return _list(
-        _entities_conn(),
+        conn,
+        guard=owner_ui_guard(conn),
         predicate=predicate,
         dimension=dimension,
         include_closed=include_closed,
@@ -763,8 +766,10 @@ async def list_stat_insights(
 ):
     """Promoted statistical insights (owner-only rhythms, session stats, trends)."""
     from ..features.facts.reads import list_stat_insights as _list
+    from ..features.lifecycle.blackhole_guard import owner_ui_guard
 
-    return _list(_entities_conn(), dimension=dimension, limit=limit)
+    conn = _entities_conn()
+    return _list(conn, guard=owner_ui_guard(conn), dimension=dimension, limit=limit)
 
 
 @router.get("/timeline")

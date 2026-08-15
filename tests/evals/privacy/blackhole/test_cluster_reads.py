@@ -170,3 +170,62 @@ def test_total_counts_what_is_returned_not_what_exists(corpus, monkeypatch):
     assert out["total"] == len(out["items"])
     labels = " ".join(str(i.get("label") or "") for i in out["items"])
     assert BH_CANONICAL not in labels
+
+
+# ------------------------------- site 4: the fact reads that carry the label
+
+def test_the_fact_readers_require_a_guard(corpus):
+    """`top_topics` facts carry the cluster label as `tag`, and ordinary facts
+    carry entity names in object_value — neither had a guard."""
+    from topos.features.facts.reads import list_facts, list_stat_insights
+
+    with pytest.raises(TypeError):
+        list_facts(corpus.conn)                    # type: ignore[call-arg]
+    with pytest.raises(TypeError):
+        list_stat_insights(corpus.conn)            # type: ignore[call-arg]
+
+
+def test_grantee_loses_facts_naming_a_protected_entity(corpus):
+    from topos.features.facts.reads import list_facts
+
+    out = list_facts(corpus.conn, guard=_guard(corpus.conn, grantee=True), limit=500)
+    blob = str(out["items"])
+    assert BH_CANONICAL not in blob
+    assert corpus.tokens["fact_object_value"] not in blob
+
+
+def test_owner_still_sees_them(corpus):
+    from topos.features.facts.reads import list_facts
+
+    owner = list_facts(corpus.conn, guard=_guard(corpus.conn, grantee=False), limit=500)
+    grantee = list_facts(corpus.conn, guard=_guard(corpus.conn, grantee=True), limit=500)
+    assert owner["total"] > grantee["total"], "the filter must actually remove something"
+
+
+def test_total_and_rows_agree_after_filtering(corpus):
+    """A total computed before the filter shifts when an entity is protected,
+    which confirms it exists — the count side channel D5 removes."""
+    from topos.features.facts.reads import list_facts
+
+    out = list_facts(corpus.conn, guard=_guard(corpus.conn, grantee=True), limit=500)
+    assert out["total"] == len(out["items"])
+    assert sum(out["predicate_counts"].values()) <= out["total"] + len(out["items"])
+
+
+def test_stat_insights_are_filtered_by_group_key_and_text(corpus):
+    from topos.features.facts.reads import list_stat_insights
+
+    out = list_stat_insights(corpus.conn, guard=_guard(corpus.conn, grantee=True))
+    blob = str(out["items"])
+    assert BH_CANONICAL not in blob
+    assert corpus.tokens["stat_group_key"] not in blob
+    assert out["total"] == len(out["items"])
+
+
+def test_internal_scan_keys_never_reach_a_caller(corpus):
+    """The filter lifts a payload blob onto each row; it must not be served."""
+    from topos.features.facts.reads import list_facts
+
+    out = list_facts(corpus.conn, guard=_guard(corpus.conn, grantee=False), limit=500)
+    for item in out["items"]:
+        assert "_scan_blob" not in item

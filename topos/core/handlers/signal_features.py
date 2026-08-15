@@ -553,10 +553,12 @@ async def handle_signal_list_facts(message: Dict[str, Any]) -> Optional[Dict[str
     payload = message.get("payload") or {}
     try:
         from ...features.facts.reads import list_facts
+        from ...features.lifecycle.blackhole_guard import guard_from_message
 
         conn = hub.get_db_connection()
         result = list_facts(
             conn,
+            guard=guard_from_message(conn, message),
             predicate=payload.get("predicate"),
             dimension=payload.get("dimension"),
             include_closed=bool(payload.get("include_closed")),
@@ -602,10 +604,12 @@ async def handle_signal_list_insights(message: Dict[str, Any]) -> Optional[Dict[
     payload = message.get("payload") or {}
     try:
         from ...features.facts.reads import list_stat_insights
+        from ...features.lifecycle.blackhole_guard import guard_from_message
 
         conn = hub.get_db_connection()
         result = list_stat_insights(
             conn,
+            guard=guard_from_message(conn, message),
             dimension=payload.get("dimension"),
             limit=min(int(payload.get("limit") or 200), 500),
         )
