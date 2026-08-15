@@ -9,6 +9,20 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Changed
+
+- `[E]` **Ingest models are no longer steered by the model pack.** The pack's
+  `classify` role selected the models for facts extraction and conversation-context
+  tagging — ingest functions that run when data arrives, not when the owner asks
+  something, and that already have their own selectors (engine_config, surfaced as
+  Node functions). The role is retired repo-wide: `resolve_facts_llm_model` and
+  `resolve_context_llm_model` are now device-override → settings default with no
+  pack rung, and enrichment usage (`ENRICHMENT_SUBTYPES`) is attributed to the
+  active pack with NO role — the old chain fell through to a generic `primary`
+  label, billing the pack for a decision it did not make. The engine ROLES mirror
+  is (primary, reasoning, tool, scope). Guards inverted: the J-B10 wiring test now
+  asserts these two functions make NO pack-resolver call at all.
+
 ### Fixed
 
 - `[E]` **The node stopped wedging: torch's thread pool is bounded and every model's

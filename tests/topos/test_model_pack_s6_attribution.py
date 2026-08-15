@@ -25,12 +25,11 @@ def test_every_function_role_resolves_through_node_resolver():
             "primary": {"provider": "ollama", "model": "primary:latest"},
             "reasoning": {"provider": "ollama", "model": "reason:latest"},
             "tool": {"provider": "ollama", "model": "tool:latest"},
-            "classify": {"provider": "ollama", "model": "classify:latest"},
         },
     }
+    # facts / conversation_context are absent on purpose: ingest functions carry
+    # no pack role since 2026-08-15 (their models live under Node functions).
     for key in (
-        "facts",
-        "conversation_context",
         "signal_extraction",
         "sanitization",
         "routine_orchestration",
@@ -61,7 +60,9 @@ def test_attribution_for_engine_call_reads_active_pack():
     )
     pack_id, role = attribution_for_engine_call(conn, subtype="fact_llm_extract")
     assert pack_id == "pack_active"
-    assert role == "classify"
+    # Role-less: enrichment models are chosen under Node functions, and neither the
+    # retired `classify` nor the generic `primary` fallback may claim their spend.
+    assert role is None
 
 
 def test_emit_engine_llm_usage_observation_stamps_pack_and_role(monkeypatch):
