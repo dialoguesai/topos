@@ -118,6 +118,38 @@ def _no_live_db_guard(request, monkeypatch, _live_db_guard_path):
     yield
 
 
+@pytest.fixture
+def pin_db_path(monkeypatch):
+    """Point the SETTINGS path at a test's own database, not just the accessor.
+
+    Patching ``core.state.get_db_connection`` is only half the resolution.
+    ``AdapterFactory`` re-resolves by PATH: it asks the accessor for the shared
+    connection, compares that connection's file against ``db_path`` from
+    settings, and reuses it ONLY when they match — otherwise it opens
+    ``db_path`` itself (storage/adapters/factory.py). Since ``_no_live_db_guard``
+    above pins ``TOPOS_DATABASE_PATH`` at one session-wide guard.db, a test that
+    injects a connection at its own tmp path fails that comparison, and the
+    whole adapter bundle silently writes to guard.db instead.
+
+    That mismatch is order-dependent, not deterministic: it only bites once an
+    earlier test has migrated guard.db far enough for the writes to succeed
+    there, which is why these tests passed alone and failed in a suite. Pinning
+    both halves to the same file removes the disagreement.
+    """
+
+    def _pin(db_path) -> None:
+        monkeypatch.setenv("TOPOS_DATABASE_PATH", str(db_path))
+        try:
+            from topos.config.settings import settings as runtime_settings
+        except Exception:  # noqa: BLE001
+            return
+        monkeypatch.setattr(
+            runtime_settings, "topos_database_path", str(db_path), raising=False
+        )
+
+    return _pin
+
+
 @pytest.fixture(autouse=True)
 def _no_live_ollama_probe_guard(request, monkeypatch):
     """Same disease as the live-DB guard, one lane over.
