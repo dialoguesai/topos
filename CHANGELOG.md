@@ -51,6 +51,24 @@ The machine-readable twin of each release is
 
 ### Added
 
+- `[D]` **A cold labeling model no longer silently discards a whole relabel
+  pass.** `apply_llm_cluster_labels` aborts on the first failure so a down model
+  costs one timeout rather than k of them — but the budget was a flat 10s, the
+  first call of a pass pays the local model's load cost, and labeling order is
+  biggest-cluster-first, so the longest prompt always landed on the coldest
+  model. On a live node that aborted all 163 clusters in 12 seconds and reported
+  `status: completed, relabeled: 0`: a no-op that reads as success. Three
+  changes: the first call of a pass gets a warm-up budget
+  (`TOPOS_CLUSTER_LABEL_WARMUP_TIMEOUT`, default 90s) while later calls keep the
+  ordinary one; a single slow cluster costs that cluster its label rather than
+  the remainder of the pass (abort now needs three CONSECUTIVE failures, or a
+  model that never answered at all); and the abort is reported —
+  `relabel_existing_clusters` returns `status: "aborted"` with a reason instead
+  of a completed run that did nothing. Still never raised: `recompute_topic_clusters`
+  calls the same labeler, and a down model must cost the labels, not the cluster
+  rebuild. (`topos/features/signal/cluster_labels.py`)
+
+
 - `[S1]` **Declarative canonical field mapping** (`canonical_field_map` on a
   source definition — PLAN_CONNECTOR_CATALOG_ROLLOUT §5a capabilities 2–3). A
   source now DECLARES which piece of its records lands in which canonical

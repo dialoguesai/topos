@@ -82,6 +82,17 @@ _DISTINGUISHING_TERMS = 8
 _UBIQUITY_SHARE = 0.4
 _MIN_CLUSTERS_FOR_UBIQUITY_CUT = 10
 
+# A local model pays its load cost on the first call of a pass, and the
+# labeling order is biggest-cluster-first, so the longest prompt always lands on
+# the coldest model. Measured: a warm call answers in ~2s, a cold one blew the
+# 10s budget and — under the old "first failure means the model is down" rule —
+# aborted all 163 clusters while reporting a completed run.
+_WARMUP_TIMEOUT_SEC = 90.0
+# One slow cluster is not a down model. Only this many CONSECUTIVE failures
+# means stop; a single timeout mid-pass costs that cluster its label, not the
+# whole remaining pass.
+_MAX_CONSECUTIVE_FAILURES = 3
+
 _REJECT_MARKERS = ("label", "topic cluster", "i cannot", "i can't", "sorry", "as an ai")
 _WORD_TOKEN = re.compile(r"[a-z]+")
 # A disambiguating suffix, as _disambiguated appends it.
@@ -144,6 +155,16 @@ def cluster_label_model() -> str:
         return str(settings.ollama_query_model)
     except Exception:
         return "llama3.2:latest"
+
+
+def warmup_timeout_sec() -> float:
+    """Budget for the first call of a labeling pass (model load included)."""
+    raw = os.environ.get("TOPOS_CLUSTER_LABEL_WARMUP_TIMEOUT", "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return _WARMUP_TIMEOUT_SEC
+    return value if value > 0 else _WARMUP_TIMEOUT_SEC
 
 
 def cluster_label_contrast_enabled() -> bool:
@@ -892,9 +913,21 @@ def apply_llm_cluster_labels(
     dropped_urls = 0
     dropped_protected = 0
 
+    # The first call of a pass is allowed the warm-up budget: it pays model
+    # load, and on the biggest prompt. Every later call gets the ordinary
+    # budget, so a genuinely unresponsive model still costs one long wait and
+    # then a bounded number of short ones rather than k of them.
+    answered_once = False
+    consecutive_failures = 0
+    aborted_reason: Optional[str] = None
+
     def _run(prompt: str) -> str:
+        nonlocal answered_once
+        budget = timeout_sec if answered_once else max(timeout_sec, warmup_timeout_sec())
         future = _LABEL_POOL.submit(runner, prompt)
-        return future.result(timeout=timeout_sec)
+        text = future.result(timeout=budget)
+        answered_once = True
+        return text
 
     for index in order:
         cluster = clusters[index]
@@ -943,8 +976,21 @@ def apply_llm_cluster_labels(
                     protected_terms,
                 )
         except (FuturesTimeoutError, LabelerUnavailable, Exception) as exc:  # noqa: BLE001
-            logger.info("cluster LLM labeling stopped (%s); term labels kept", exc)
-            break  # one failure means the model is down — don't pay k timeouts
+            consecutive_failures += 1
+            if consecutive_failures >= _MAX_CONSECUTIVE_FAILURES or not answered_once:
+                # Never answered at all, or several in a row: the model is down.
+                # Stop rather than pay a timeout per remaining cluster.
+                aborted_reason = f"{type(exc).__name__}: {exc}"
+                logger.warning(
+                    "cluster LLM labeling aborted after %d cluster(s) (%s); term labels kept",
+                    relabeled,
+                    exc,
+                )
+                break
+            # One slow cluster: skip it, keep going.
+            logger.info("cluster label skipped (%s); term label kept", exc)
+            continue
+        consecutive_failures = 0
         if not label:
             continue
         # Uniqueness and the link gate are part of the contrastive contract,
@@ -997,6 +1043,13 @@ def apply_llm_cluster_labels(
                 "dropped_protected": dropped_protected,
             }
         )
+    if stats is not None:
+        # Reported, never raised: recompute_topic_clusters calls this, and a
+        # down model must cost the labels, not the whole cluster rebuild. The
+        # caller decides what an aborted pass means — `relabel_existing_clusters`
+        # turns it into status="aborted" so a no-op stops reading as success.
+        stats["aborted"] = aborted_reason is not None
+        stats["aborted_reason"] = aborted_reason
     if retries or dropped_urls or dropped_protected:
         logger.info(
             "cluster labeling retried %d duplicate, %d generic, %d link and %d "
