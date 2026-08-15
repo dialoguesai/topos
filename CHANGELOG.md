@@ -11,6 +11,20 @@ The machine-readable twin of each release is
 
 ### Removed
 
+- `[P]` **The live-engine pressure tests stop failing 401 against a healthy
+  node.** `tests/conftest.py` sets `TOPOS_KEY="test-key"` so Settings validation
+  passes for the whole suite. `test_live_engine_pressure` guards itself with
+  `if not TOPOS_KEY: skip`, which cannot tell that placeholder from a real key —
+  so instead of skipping it sent `Bearer test-key` to the running node and got a
+  401 on every assertion. Three sessions read those 401s as "engine not
+  reachable" and waved them through as environmental, which is how a lane stops
+  meaning anything. The module now resolves the key it should actually use:
+  an explicit non-placeholder `TOPOS_KEY`, else the node's own `~/.topos/.env`,
+  else skip with a reason that says which. Against a live node all four tests
+  pass; with no key anywhere they skip rather than fail.
+  (`tests/release/iteration4/test_live_engine_pressure.py`)
+
+
 - `[S1]` **`url_classification` is retired — job, table, engine path and the
   interest tags it wrote.** The job labelled every visited page with a DMOZ
   top-level category. Six months on the node this was measured on produced

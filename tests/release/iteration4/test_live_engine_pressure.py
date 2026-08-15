@@ -3,18 +3,55 @@
 from __future__ import annotations
 
 import os
+import pathlib
 
 import pytest
 
 pytestmark = [pytest.mark.release_pressure, pytest.mark.p0, pytest.mark.live]
 
 LOCAL_ENGINE = os.environ.get("TOPOS_ENGINE_URL", "http://localhost:9000")
-TOPOS_KEY = os.environ.get("TOPOS_KEY", "")
+
+# tests/conftest.py sets TOPOS_KEY="test-key" so Settings validation passes for
+# the whole suite. This module is the one that talks to a REAL node, and that
+# placeholder is indistinguishable from a real key to `if not TOPOS_KEY` — so
+# these tests stopped skipping, sent "Bearer test-key" to the running engine and
+# failed 401 against a healthy node. Three sessions read those 401s as "engine
+# not reachable" and waved them through as environmental.
+_PLACEHOLDER_KEYS = frozenset({"", "test-key"})
+
+
+def _node_env_key() -> str:
+    """The key the local node actually authenticates with.
+
+    A developer running this against their own node wants it to RUN, not skip,
+    and the node's key lives in its env file rather than the shell. Falling back
+    to it is what makes these tests exercise anything locally; CI has no such
+    file and skips instead.
+    """
+    env_path = pathlib.Path.home() / ".topos" / ".env"
+    try:
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if line.startswith("TOPOS_KEY=") and not line.startswith("#"):
+                return line.partition("=")[2].strip().strip('"').strip("'")
+    except OSError:
+        return ""
+    return ""
+
+
+def _resolve_key() -> str:
+    explicit = os.environ.get("TOPOS_KEY", "")
+    if explicit not in _PLACEHOLDER_KEYS:
+        return explicit
+    return _node_env_key()
+
+
+TOPOS_KEY = _resolve_key()
 
 
 def _auth_headers() -> dict[str, str]:
     if not TOPOS_KEY:
-        pytest.skip("TOPOS_KEY not set")
+        pytest.skip("no TOPOS_KEY for the live engine (shell env and ~/.topos/.env both unset)")
     return {"Authorization": f"Bearer {TOPOS_KEY}"}
 
 
