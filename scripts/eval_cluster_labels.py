@@ -65,14 +65,31 @@ def copy_database(source: Path, dest: Path) -> Dict[str, Any]:
     return {"copied_to": str(dest), "size_mb": round(dest.stat().st_size / 1e6, 1)}
 
 
+def _norm(label: str) -> str:
+    """Same normalization the labeler claims a name under, for comparing a
+    label against its own base."""
+    from topos.features.signal.cluster_labels import _normalized_label
+
+    return _normalized_label(label)
+
+
 def label_metrics(rows: List[Dict[str, str]]) -> Dict[str, Any]:
     """rows: [{"label": ..., "dimension": ...}] — one per cluster."""
     from topos.features.signal.cluster_labels import (
         label_banned_words,
+        label_base_name,
         label_is_wrong_length,
     )
 
     counts = Counter(str(r["label"]).strip().lower() for r in rows)
+    # The metric that matters on a surface listing clusters side by side. A
+    # disambiguating suffix makes a repeat unique without making it different,
+    # so distinct FULL labels called the live node 152/152 distinct while 18 of
+    # those labels read "Social Connections (…)" — 100 base names in all. Gate
+    # here, not on `distinct_labels`.
+    base_counts = Counter(base for base in (label_base_name(str(r["label"])) for r in rows) if base)
+    suffixed = sum(1 for r in rows if label_base_name(str(r["label"])) != _norm(str(r["label"])))
+    stacked = sum(1 for r in rows if str(r["label"]).count("(") > 1)
     dims: Dict[str, set] = defaultdict(set)
     for row in rows:
         dims[str(row["label"]).strip().lower()].add(str(row["dimension"] or ""))
@@ -100,6 +117,18 @@ def label_metrics(rows: List[Dict[str, str]]) -> Dict[str, Any]:
         "clusters": len(rows),
         "distinct_labels": len(counts),
         "max_duplication": max(counts.values()) if counts else 0,
+        "distinct_base_names": len(base_counts),
+        "base_name_share": round(len(base_counts) / len(rows), 3) if rows else 0.0,
+        "max_base_repeat": max(base_counts.values()) if base_counts else 0,
+        "suffixed_labels": suffixed,
+        # A label carrying more than one "(…)" is a suffix stacked on a suffix,
+        # which the labeler must never mint. Non-zero is a regression, always.
+        "stacked_suffix_labels": stacked,
+        "top_base_names": [
+            {"base": base, "count": n}
+            for base, n in sorted(base_counts.items(), key=lambda kv: (-kv[1], kv[0]))[:8]
+            if n > 1
+        ],
         "duplicated_labels": len(duplicated),
         "clusters_carrying_a_duplicate_label": sum(duplicated.values()),
         "labels_spanning_multiple_dimensions": len(cross_dimension),
@@ -214,6 +243,19 @@ def print_metrics(title: str, metrics: Dict[str, Any]) -> None:
     print(f"  clusters                          {metrics['clusters']}")
     print(f"  distinct labels                   {metrics['distinct_labels']}")
     print(f"  max duplication of one label      {metrics['max_duplication']}")
+    print(
+        f"  DISTINCT BASE NAMES               {metrics['distinct_base_names']}"
+        f" ({metrics['base_name_share']:.1%})   <- gate on this, not distinct labels"
+    )
+    print(f"  most labels on one base name      {metrics['max_base_repeat']}")
+    print(f"  labels carrying a suffix          {metrics['suffixed_labels']}")
+    print(
+        f"  labels with a STACKED suffix      {metrics['stacked_suffix_labels']}"
+        f"{'   <- REGRESSION, must be 0' if metrics['stacked_suffix_labels'] else ''}"
+    )
+    if metrics["top_base_names"]:
+        for row in metrics["top_base_names"]:
+            print(f"    {row['count']:>3}x  {row['base']}")
     print(f"  labels used more than once        {metrics['duplicated_labels']}")
     print(f"  clusters carrying a dup label     {metrics['clusters_carrying_a_duplicate_label']}")
     print(f"  dup labels spanning >1 dimension  {metrics['labels_spanning_multiple_dimensions']}")

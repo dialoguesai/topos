@@ -78,6 +78,28 @@ The machine-readable twin of each release is
 
 ### Fixed
 
+- `[S1]` **A repeated cluster name is a repeat even when it arrives suffixed.**
+  Distinctness was checked on the whole label, so a model that answered
+  "Social Connections" where that name was taken was silently given a
+  parenthetical instead of being told it had repeated itself — and because the
+  prompt shows a cluster its siblings' names, the next pass copied the suffixed
+  name back and got a second suffix on top of it. The live node grew
+  "Social Connections (travels) (affirmation) (logically)", and reported 152 of
+  152 labels distinct while only 100 base names existed, eighteen clusters
+  reading "Social Connections (…)". Collision now tests `label_base_name()` —
+  the label with every trailing "(…)" stripped — as well as the whole string,
+  so the repeat earns the retry a bare repeat earns and the model gets a chance
+  to actually rename; and `_disambiguated` strips any suffix already present
+  before adding one, so a label can never carry two. How many labels end up
+  sharing a base is deliberately NOT capped: keeping the term label instead
+  ("https / good / here") trades a weak name for a useless one. It is measured
+  instead — `distinct_base_names` and `max_base_repeat` join the `stats`
+  out-param, and `scripts/eval_cluster_labels.py` reports them alongside
+  `suffixed_labels` and `stacked_suffix_labels` (non-zero is always a
+  regression). **Gate a label change on distinct base names, never on distinct
+  labels** — the latter reads 100% while the map is unreadable.
+  (`topos/features/signal/cluster_labels.py`)
+
 - `[S1]` **Model readiness stops counting jobs ready because they are not LLM
   jobs.** `_model_readiness()` scored every non-LLM job ready unconditionally —
   "HuggingFace task models and rules jobs run in-process on any supported

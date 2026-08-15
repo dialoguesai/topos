@@ -670,6 +670,51 @@ def _normalized_label(label: str) -> str:
     return re.sub(r"[^a-z0-9 ]", "", str(label or "").lower()).strip()
 
 
+#: A trailing "(...)" disambiguator, as minted by :func:`_disambiguated`.
+_TRAILING_PAREN = re.compile(r"\s*\([^()]*\)\s*$")
+
+
+def label_base_name(label: str) -> str:
+    """The label with every trailing disambiguator removed, normalized.
+
+    This — not the full label — is the identity a reader compares on a surface
+    that lists clusters side by side. Counting distinct FULL labels called the
+    live node's 152 clusters 152/152 distinct while only 100 base names existed,
+    because suffixing "(travels)" onto a repeat makes it unique without making
+    it different: eighteen bubbles read "Social Connections (…)".
+
+    Loops, because suffixes stacked once nothing stopped them
+    ("Social Connections (travels) (affirmation) (logically)").
+    """
+    text = str(label or "")
+    while True:
+        stripped = _TRAILING_PAREN.sub("", text).strip()
+        if stripped == text.strip() or not stripped:
+            break
+        text = stripped
+    return _normalized_label(text)
+
+
+def _collides(label: str, used: Dict[str, int]) -> bool:
+    """Taken means a reader could not tell these apart.
+
+    Both the whole label and its base name are checked, because ``used`` carries
+    both keys for everything already assigned — so answering "Social Connections"
+    when that base is spoken for is a collision even though no exact string
+    repeats. Without this the model was never told it had repeated itself; it was
+    silently suffixed instead, and suffixing is what produced the pile.
+    """
+    return _normalized_label(label) in used or label_base_name(label) in used
+
+
+def _register_label(used: Dict[str, int], label: str, index: int) -> None:
+    """Claim a label under both identities it can collide on."""
+    used.setdefault(_normalized_label(label), index)
+    base = label_base_name(label)
+    if base:
+        used.setdefault(base, index)
+
+
 def _rejection_reason(
     label: str,
     used: Dict[str, int],
@@ -680,7 +725,7 @@ def _rejection_reason(
         return "protected"  # first: unpublishable at any distinctness
     if label_is_urlish(label):
         return "url"
-    if _normalized_label(label) in used:
+    if _collides(label, used):
         return "taken"
     if label_is_generic(label):
         return "generic"
@@ -704,7 +749,7 @@ def _label_rank(
     return (
         0 if label_mentions_protected(label, protected_terms) else 1,
         0 if label_is_urlish(label) else 1,
-        0 if _normalized_label(label) in used else 1,
+        0 if _collides(label, used) else 1,
         0 if label_is_generic(label) else 1,
         0 if label_is_wrong_length(label) else 1,
     )
@@ -754,12 +799,25 @@ def _disambiguated(
 
     Same parenthetical shape the term labeler uses (``_disambiguate_labels``),
     so a duplicate never reaches a surface that lists clusters side by side.
+
+    **Never stacks.** Any disambiguator already on the answer is stripped first,
+    so a label carries at most one. The model is shown its siblings' names and
+    copies them back, suffix included, and each pass then appended another — the
+    live node grew "Social Connections (travels) (affirmation) (logically)".
+
+    How many labels end up sharing one base is not capped here: keeping the term
+    label instead ("https / good / here") trades a weak name for a useless one.
+    The pile is bounded by the retry above — which now fires on the base name,
+    so the model is actually told it repeated itself — and measured by
+    ``distinct_base_names`` / ``max_base_repeat`` in the ``stats`` out-param, so
+    a labeler change that regrows it fails its gate instead of shipping.
     """
-    lowered = str(label).lower()
+    stem = _TRAILING_PAREN.sub("", str(label)).strip() or str(label)
+    lowered = stem.lower()
     candidates = [str(t) for t in terms if str(t).lower() not in lowered]
     candidates.append(str(cluster.get("member_count") or len(cluster.get("members") or [])))
     for candidate in candidates:
-        suffixed = f"{label} ({candidate})"
+        suffixed = f"{stem} ({candidate})"
         if len(suffixed) > _MAX_LABEL_CHARS:
             continue
         if _normalized_label(suffixed) not in used:
@@ -837,6 +895,8 @@ def apply_llm_cluster_labels(
     )
     order = labeling_order(clusters) if use_contrast else list(range(len(clusters)))
     assigned: Dict[int, str] = {}
+    #: Claimed identities — both the whole label and its base name, so a repeat
+    #: is caught whether or not it arrives already suffixed.
     used: Dict[str, int] = {}
     relabeled = 0
     retries = Counter()
@@ -918,10 +978,10 @@ def apply_llm_cluster_labels(
             for other, sibling in enumerate(clusters):
                 if other == index or other in assigned:
                     continue
-                carried = _normalized_label(str(sibling.get("label") or ""))
+                carried = str(sibling.get("label") or "")
                 if carried:
-                    blocked.setdefault(carried, other)
-            if _normalized_label(label) in blocked:
+                    _register_label(blocked, carried, other)
+            if _collides(label, blocked):
                 distinct = _disambiguated(label, terms, blocked, cluster)
                 if distinct is None:
                     continue  # keep the term label rather than ship a duplicate
@@ -937,15 +997,23 @@ def apply_llm_cluster_labels(
         cluster["metadata"] = metadata
         cluster["label"] = label
         assigned[index] = label
-        used[_normalized_label(label)] = index
+        _register_label(used, label, index)
         relabeled += 1
     if stats is not None:
+        final_bases = Counter(
+            base for base in (label_base_name(str(c.get("label") or "")) for c in clusters) if base
+        )
         stats.update(
             {
                 "retries_by_reason": dict(retries),
                 "retry_calls": sum(retries.values()),
                 "dropped_urls": dropped_urls,
                 "dropped_protected": dropped_protected,
+                # Distinct FULL labels is the metric that called 152 clusters
+                # 152/152 distinct while 18 of them read "Social Connections
+                # (…)". These are the ones a label change has to be gated on.
+                "distinct_base_names": len(final_bases),
+                "max_base_repeat": max(final_bases.values()) if final_bases else 0,
             }
         )
     if retries or dropped_urls or dropped_protected:

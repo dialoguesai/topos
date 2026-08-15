@@ -24,6 +24,7 @@ from topos.features.signal.cluster_labels import (
     dimension_label_instruction,
     label_is_generic,
     label_is_urlish,
+    label_base_name,
     label_is_wrong_length,
     member_bigrams,
     labeling_order,
@@ -680,3 +681,74 @@ def test_term_labels_are_disambiguated_against_each_other_not_just_counted():
     labels = [c["label"] for c in clusters]
     assert len(set(labels)) == 3, labels
     assert labels[0] == "hello"
+
+
+class TestBaseNameGate:
+    """Distinctness is what a reader can tell apart, not what `set()` can.
+
+    The live node shipped 152 clusters under 152 distinct labels and 100 base
+    names, because a repeat was silently suffixed instead of renamed, and the
+    suffixes then stacked across passes.
+    """
+
+    def test_base_name_strips_every_stacked_suffix(self):
+        from topos.features.signal.cluster_labels import label_base_name
+
+        assert label_base_name("Social Connections") == "social connections"
+        assert label_base_name("Social Connections (travels)") == "social connections"
+        assert (
+            label_base_name("Social Connections (travels) (affirmation) (logically)")
+            == "social connections"
+        )
+        # A name that is only a parenthetical keeps itself rather than vanishing.
+        assert label_base_name("(7)") == "7"
+
+    def test_a_repeat_that_arrives_suffixed_is_still_a_repeat(self):
+        """The model is shown its siblings' names and copies them back, suffix
+        and all — so the collision check has to see through the suffix.
+
+        Before this, "River Kayaking Trips (weekend)" was a brand-new string
+        and shipped unchallenged; now it earns the retry a bare repeat earns,
+        and the model gets a chance to actually rename.
+        """
+        prompts: list[str] = []
+        answers = iter(["River Kayaking Trips", "River Kayaking Trips (weekend)"])
+
+        def _echo_sibling(prompt: str) -> str:
+            prompts.append(prompt)
+            try:
+                return next(answers)
+            except StopIteration:
+                return "Mortgage Refinance Search"
+
+        corpus = _corpus()
+        apply_llm_cluster_labels(corpus, complete=_echo_sibling, mode="on")
+        labels = [c["label"] for c in corpus]
+        assert any("already taken" in p for p in prompts), prompts
+        # The echo was rejected, so the rename the retry produced is what shipped.
+        assert label_base_name(labels[1]) != label_base_name(labels[0]), labels
+
+    def test_a_suffix_is_never_stacked_on_a_suffix(self):
+        def _always_suffixed(prompt: str) -> str:
+            return "River Kayaking (weekend)"
+
+        corpus = _corpus()
+        apply_llm_cluster_labels(corpus, complete=_always_suffixed, mode="on")
+        labels = [c["label"] for c in corpus]
+        for label in labels:
+            assert label.count("(") <= 1, labels
+
+    def test_stats_report_base_names_not_just_distinct_labels(self):
+        stats: dict = {}
+
+        def _always_same(prompt: str) -> str:
+            return "River Kayaking Trips"
+
+        corpus = _corpus()
+        apply_llm_cluster_labels(corpus, complete=_always_same, mode="on", stats=stats)
+        labels = [c["label"] for c in corpus]
+        # Suffixing keeps every label distinct — that is the metric that lied.
+        assert len(set(labels)) == len(labels), labels
+        # The base name is what a reader actually compares, and it does not.
+        assert stats["distinct_base_names"] < len(labels)
+        assert stats["max_base_repeat"] > 1
