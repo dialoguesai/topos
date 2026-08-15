@@ -1,7 +1,43 @@
 # Plan — Local Scope Classifier with LLM Escalation
 
-**Status:** PROPOSED
-**Date:** 2026-08-13
+**Status:** MEASURED THROUGH RUNG 3 — best arm found, NOT installed, blocked on one clause
+**Date:** 2026-08-13 (status refreshed 2026-08-15)
+
+**Where this actually stands** (detail in §9G; this block exists so a reader does not
+have to reconstruct it from 900 lines of experiment log):
+
+| arm | macro-F1 | negatives abstained | scopes >=0.60 |
+|---|---|---|---|
+| prototype, untrained | 0.387 | 0.797 | 1/14 |
+| linear head on frozen MiniLM | 0.369 | 0.859 | 3/14 |
+| mistral:7b (the status quo) | 0.436 | 0.078 | 8/14 |
+| **DistilBERT, rung 3** | **0.446** | **0.937** | 1/14 |
+
+Rung 3 beats every arm including the LLM, and abstains 12x better. It passes two of the
+three §7 clauses and fails the third: 13 of 14 scopes sit below 0.60 recall. Precise and
+insensitive.
+
+**Nothing is installed.** The artifact lives in a scratchpad. Promotion needs the recall
+clause cleared AND a 265 MB RSS decision.
+
+**What is shipped, and it is not the classifier.** `scope_shadow.observe()` is called from
+`query/pipeline.py`, OFF unless `TOPOS_SCOPE_SHADOW` is set, never raises, and decides
+nothing — `classify()` has exactly one caller in the engine and it is that observer. Its
+purpose is the one thing every measurement above still lacks: labelled REAL traffic. Every
+number here comes from template-generated positives, and §9G names that distribution gap
+as where the recall clause fails.
+
+**So the open question is not "fine-tune or stop" — rung 3 is already the answer.** It is
+whether to enable shadow mode long enough to get a benchmark-representative validation
+slice, which §9G names as the first of the two remaining levers and which the promotion
+decision is explicitly meant to be informed by.
+
+**Before that flag is set anywhere:** the shadow log writes raw query text to
+`~/.topos/scope_shadow.jsonl`. It now rotates at 8 MiB keeping one generation
+(`TOPOS_SCOPE_SHADOW_MAX_BYTES`, 0 to disable) — unbounded query history on disk was the
+wrong default for a product whose security page promises the data stays the owner's. See
+also §6.1: that promise is unqualified and constrains OUR training, not just third
+parties'.
 **Related:** [`AUDIT_ROLE_COMPETENCE_CATALOG_V3.md`](AUDIT_ROLE_COMPETENCE_CATALOG_V3.md),
 [`PLAN_ROLE_COMPETENCE_EVAL.md`](PLAN_ROLE_COMPETENCE_EVAL.md)
 
