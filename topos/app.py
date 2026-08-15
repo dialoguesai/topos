@@ -144,6 +144,16 @@ app.include_router(data_commit_routes.router)
 app.include_router(tool_index_routes.router)
 
 
+def _warm_scope_shadow() -> None:
+    """Load the scope head before traffic, if shadow is armed. Never raises."""
+    try:
+        from .query.scope_shadow import warm
+
+        warm()
+    except Exception:  # noqa: BLE001 — telemetry must never block startup
+        logger.debug("scope shadow warm skipped", exc_info=True)
+
+
 @app.on_event("startup")
 async def startup_event() -> None:
     from .runtime_shutdown import clear_shutdown, install_shutdown_signal_hooks
@@ -161,6 +171,11 @@ async def startup_event() -> None:
         bool(importlib.util.find_spec("transformers")),
         bool(importlib.util.find_spec("torch")),
     )
+    # Scope-shadow warm, deliberately HERE: before any request and before the MPS-backed
+    # models load. Loading the head mid-request instead put a 265 MB load in flight next
+    # to live Metal work and tripped a torch GIL/MPS deadlock twelve times on 2026-08-15.
+    # No-ops unless shadow is armed; never raises (see scope_shadow.warm).
+    await asyncio.to_thread(_warm_scope_shadow)
     # Tests may inject an in-memory connection before startup.
     # Avoid initializing file-backed services in that case.
     if state.db_conn is None:

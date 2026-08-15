@@ -203,21 +203,21 @@ def check_gate(metrics: Dict[str, Any], incumbent_macro_f1: float) -> List[str]:
 
 
 def pick_device(requested: str = "auto") -> str:
-    """Prefer Apple Silicon, then CUDA, then CPU.
+    """Training device by capability: CUDA, then MPS, then CPU.
 
-    This project pins ``torch<2.13`` because 2.13 segfaulted on MPS during a first query,
-    so MPS is only reached on a version already known to work here. ``--device cpu``
-    forces the safe path if a run ever misbehaves.
+    CUDA first because it is the faster and better-tested training path where both
+    exist; the previous order asked for MPS first, which on a CUDA box would have
+    picked the weaker accelerator. Shares `scope_head.resolve_device` so runtime and
+    training cannot drift apart — but note the DEFAULTS differ on purpose: training
+    wants the accelerator (`auto`), inference defaults to CPU because a 17 ms head must
+    not contend with the owner's LLM for VRAM (see `resolve_device`'s docstring).
+
+    ``--device cpu`` forces the safe path if a run ever misbehaves; this project pins
+    ``torch<2.13`` after 2.13 segfaulted on MPS.
     """
-    import torch
+    from topos.query.scope_head import resolve_device
 
-    if requested != "auto":
-        return requested
-    if torch.backends.mps.is_available():
-        return "mps"
-    if torch.cuda.is_available():
-        return "cuda"
-    return "cpu"
+    return resolve_device(requested if requested != "auto" else "auto")
 
 
 def report_budget(base: str) -> None:

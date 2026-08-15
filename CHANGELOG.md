@@ -9,6 +9,27 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Changed
+
+- `[E:query]` **Horos ships from Hugging Face, picks its device by capability, and
+  warms at boot.** Three changes with one theme — nothing about the scope head is
+  hardcoded to this machine any more. (1) `load_head` resolves an explicit
+  `TOPOS_SCOPE_HEAD` path, then a staged `~/.topos/models/scope_head`, then falls back
+  to fetching `Dialogues/horos` **at a pinned revision**; a node that cannot reach the
+  hub degrades to prototype routing rather than failing, and `HF_HUB_OFFLINE` plus the
+  local cache make a node network-free after first fetch. (2) New `resolve_device`:
+  explicit override → `auto` (CUDA, else MPS, else CPU) → default `cpu`. The head is
+  no longer implicitly CPU-by-omission, and training's `auto` no longer preferred MPS
+  over CUDA, which would have picked the weaker accelerator on a CUDA box. Inference
+  still defaults to CPU on purpose: 17 ms is fast enough, and the accelerator belongs
+  to the owner's LLM. (3) Shadow warms **once at startup**, single-threaded, before
+  traffic and before the MPS models load — the previous daemon-thread warm put a
+  265 MB load in flight beside live Metal work, and this process carries a torch
+  GIL/MPS deadlock (synchronous dispatch whose block re-acquires the GIL) that wedged
+  the node twelve times on 2026-08-15. A circuit breaker disables observation for the
+  process after 3 slow-or-failed turns: telemetry may cost a millisecond, never a turn.
+
+
 ### Added
 
 - `[E:query]` **Horos, the scope classifier, trained to its spec: multi-label with an

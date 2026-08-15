@@ -169,19 +169,20 @@ def test_cold_cache_is_skipped_rather_than_loaded_inline(monkeypatch, tmp_path) 
 # --- the pipeline wiring ----------------------------------------------------
 
 
-def test_shadow_mode_is_NOT_wired_into_the_product() -> None:
-    """Shadow mode is deliberately not node code — inverted 2026-08-15.
+def test_shadow_is_wired_into_the_query_path_and_safely(tmp_path, monkeypatch) -> None:
+    """Owner decision 2026-08-15: shadow IS in the query path.
 
-    The hook once lived in `QueryPipelineOrchestrator.execute`. Two facts killed it: the
-    deployed node runs a frozen `uv tool` snapshot, so the repo hook never executed on the
-    real node anyway; and the owner asked for shadow collection that ships nothing. It is
-    now `topos-eval/scripts/shadow_offline_report.py`, which reads the node DB read-only.
-
-    This test is the guard. Re-adding the hook should be a decision, not a drive-by.
+    This test replaces an earlier guard asserting the opposite. That guard was written
+    when the hook was deferred for a release and recorded the reason as "the owner asked
+    for shadow collection that ships nothing"; the owner has since asked for in-path
+    collection explicitly, because gold-labelled real traffic is the only measurement
+    that can promote this classifier. The guard now enforces the terms of that decision
+    instead of the decision it replaced: present, off by default, unable to break a turn.
     """
     import inspect
 
     from topos.query import pipeline
+    from topos.query import scope_shadow as ss
 
     cls = next(
         obj for _n, obj in vars(pipeline).items()
@@ -189,10 +190,23 @@ def test_shadow_mode_is_NOT_wired_into_the_product() -> None:
         and obj.__module__ == pipeline.__name__
     )
     src = inspect.getsource(cls.execute)
-    assert "shadow" not in src.lower(), (
-        "shadow mode is back in the query path — that is product code, and the offline "
-        "reporter exists so it does not have to be"
-    )
+    assert "shadow" in src.lower(), "the shadow hook is gone from the query path"
+
+    # Off by default: an unset flag and no flag file must leave the path byte-identical.
+    monkeypatch.delenv(ss.ENV_FLAG, raising=False)
+    monkeypatch.setattr(ss, "FLAG_FILE", tmp_path / "absent")
+    assert ss.enabled() is False
+    assert ss.observe("anything", "health:read") is None
+
+    # And it cannot raise into the caller even when the scorer is broken.
+    (tmp_path / "on").touch()
+    monkeypatch.setattr(ss, "FLAG_FILE", tmp_path / "on")
+    monkeypatch.setattr(ss, "_breaker_faults", 0)
+
+    def _boom(_text):
+        raise RuntimeError("scorer exploded")
+
+    assert ss.observe("q", "health:read", classify_fn=_boom, force=True) is None
 
 
 def test_the_shadow_library_still_works_standalone(tmp_path) -> None:
@@ -217,41 +231,50 @@ def test_flag_file_enables_shadow_without_env(tmp_path, monkeypatch) -> None:
     assert ss.enabled() is True
 
 
-def test_cold_head_warms_off_thread_then_observes(tmp_path, monkeypatch) -> None:
-    """With a head installed, the old prototypes-only guard skipped EVERY observation
-    forever (retrieval warms a different slot). Now: first call skips and warms on a
-    daemon thread; once resident, observation proceeds with no inline load."""
-    import time as _time
+def test_cold_scorer_skips_and_never_loads_from_the_request_path(tmp_path, monkeypatch) -> None:
+    """The daemon-thread warm is GONE. It put a 265 MB load in flight next to the
+    engine's MPS work and tripped a torch GIL/MPS deadlock that wedged the node twelve
+    times on 2026-08-15. Cold now means skip; `warm()` at startup is the only loader."""
+    import threading
 
     from topos.query import scope_classifier as sc
     from topos.query import scope_shadow as ss
 
-    class _Verdict:
-        labels = ("health:read",)
-        confidence = 0.9
-        escalated = False
-        scores = {}
-        reason = ""
-
     sc.reset_cache()
-    monkeypatch.setattr(sc, "load_head", None, raising=False)
-    monkeypatch.setattr(
-        "topos.query.scope_head.load_head", lambda *a, **k: object()
-    )
     monkeypatch.setattr(ss, "FLAG_FILE", tmp_path / "on")
     (tmp_path / "on").touch()
-    observe = ss.observe
-    if getattr(observe, "_warming", None):
-        observe._warming = None
+    before = threading.active_count()
 
     log = ss.ShadowLog(tmp_path / "log.jsonl")
-    first = observe("q", "health:read", log=log, classify_fn=lambda t: _Verdict())
-    assert first is None  # cold: skipped, warming in the background
-    for _ in range(50):
-        if sc._head_cached.cache_info().currsize:
-            break
-        _time.sleep(0.05)
-    second = observe("q", "health:read", log=log, classify_fn=lambda t: _Verdict())
-    assert second is not None and second.verdict == ss.VERDICT_HIT
+    assert ss.observe("q", "health:read", log=log) is None
+    assert threading.active_count() == before, "observation must spawn NO loader thread"
+    assert log.read() == []
     sc.reset_cache()
-    observe._warming = None
+
+
+def test_warm_is_a_noop_when_shadow_is_disarmed(tmp_path, monkeypatch) -> None:
+    from topos.query import scope_shadow as ss
+
+    monkeypatch.delenv(ss.ENV_FLAG, raising=False)
+    monkeypatch.setattr(ss, "FLAG_FILE", tmp_path / "absent")
+    assert ss.warm() is False
+
+
+def test_breaker_disables_observation_after_repeated_faults(tmp_path, monkeypatch) -> None:
+    """Observation is telemetry: it may cost a millisecond, never a turn."""
+    from topos.query import scope_shadow as ss
+
+    monkeypatch.setattr(ss, "FLAG_FILE", tmp_path / "on")
+    (tmp_path / "on").touch()
+    monkeypatch.setattr(ss, "_breaker_faults", 0)
+    monkeypatch.setattr(ss, "_breaker_announced", False)
+
+    def _boom(_text):
+        raise RuntimeError("scorer exploded")
+
+    log = ss.ShadowLog(tmp_path / "log.jsonl")
+    for _ in range(ss.BREAKER_LIMIT):
+        assert ss.observe("q", "health:read", log=log, classify_fn=_boom, force=True) is None
+    assert ss._breaker_tripped() is True
+    # Tripped: even a working scorer is no longer consulted on the normal path.
+    assert ss.observe("q", "health:read", log=log) is None
