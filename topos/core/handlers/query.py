@@ -109,7 +109,17 @@ async def handle_query(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     payload = message.get("payload") or {}
     raw_manifest = payload.get("manifest") or {}
     scope_id = str(payload.get("scope_id") or raw_manifest.get("scope_id") or "")
-    intent = str(payload.get("intent") or payload.get("query") or "")
+    # `query` (the owner's words) OUTRANKS `intent` (a keyword digest). It used to be
+    # the other way round, which meant home chat's stopword-stripped fingerprint —
+    # "how did I sleep this week?" arriving as "sleep week" — became the query text
+    # every downstream stage saw. Measured cost of that on 2026-08-16: the planner's
+    # `\bthis week\b` regex no longer matched, so the turn lost its time window
+    # entirely; the scope classifier, trained on questions, read keyword soup and
+    # abstained; and vector ranking embedded a fragment instead of a sentence.
+    # Nothing wanted the digest: retrieval's own `_query_tokens` strips stopwords
+    # where a bag of words is actually needed. Callers that send only `intent`
+    # (MCP clients) are unaffected — it is still the fallback.
+    intent = str(payload.get("query") or payload.get("intent") or "")
     logger.info(
         "query request: scope=%r mode=%r intent_chars=%d requester=%r",
         scope_id,
