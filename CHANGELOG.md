@@ -9,6 +9,23 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+
+- `[E]` **Place references extract again: `PlaceContext` is declared for the
+  `places` dimension.** The artifact router has always written `PlaceContext`
+  objects for place `EntityRef` artifacts, but `places.json` never declared the
+  type, so `SignalObjectStore._validate_object_type` rejected every write and
+  `dimension_summary` DEGRADED on any batch containing a place reference
+  (observed on grow_data_file, 2026-08-15: every batch queued for retry with
+  derived data MISSING). Every other router-written type (RelationshipEdge,
+  SkillNode, ExperienceNode, Goal) was declared — places was the one gap. The
+  static write-site sweep in test_dimension_definitions was blind to it because
+  its regex only matched snake_case object types and only checked
+  `signal_objects`; it now matches CamelCase entity types and checks the same
+  allowlist the store enforces (entity ids + signal_objects + gate_objects).
+  A `rerun-places-dimension-summary` upgrade step re-runs the failed job where
+  derived output is missing.
+
 ### Changed
 
 - `[E]` **Ingest models are no longer steered by the model pack.** The pack's
