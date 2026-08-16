@@ -46,7 +46,8 @@ ENV_HEAD_REVISION = "TOPOS_SCOPE_HEAD_REVISION"
 #: not change under an owner because someone pushed to `main`. Bumping the model is a
 #: release, not a fetch.
 HF_REPO = "Dialogues/horos"
-HF_REVISION = "257f5bd3cfcfa68c11ddcdae794b4c9a247dd806"
+#: v2, 2026-08-16 (macro-F1 0.613, was v1's 0.512).
+HF_REVISION = "1873a1b667dc2d1bd630835f1f4f47025f3864d9"
 
 #: Licences a training corpus may carry. Anything else means the head saw data we have
 #: promised not to train on, or data we cannot ship a model from, and it will not load.
