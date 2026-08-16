@@ -134,12 +134,40 @@ class TestSwitchProfile:
         # Nothing moved.
         assert (tmp_path / ".env").exists()
 
-    def test_refuses_during_rebuild_lock(self, tmp_path):
+    def test_a_leftover_lock_file_does_not_block_forever(self, tmp_path):
+        # The rebuild lock is an advisory flock that is never deleted: the OS
+        # drops the lock when the child exits, the file stays. Refusing on the
+        # file's existence blocked switching permanently on every machine that
+        # had ever rebuilt its graph — found by hand on a week-old empty lock.
         _seed_active(tmp_path)
         _seed_profile(tmp_path, "work")
         (tmp_path / "database.db.rebuild.lock").touch()
-        with pytest.raises(profiles.ProfileError, match="rebuild"):
-            profiles.switch_profile("work", tmp_path)
+        result = profiles.switch_profile("work", tmp_path)
+        assert result["activated"] == "work"
+
+    def test_refuses_while_a_rebuild_actually_holds_the_lock(self, tmp_path):
+        import fcntl
+
+        _seed_active(tmp_path)
+        _seed_profile(tmp_path, "work")
+        lock_path = tmp_path / "database.db.rebuild.lock"
+        with open(lock_path, "a+") as held:
+            fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with pytest.raises(profiles.ProfileError, match="rebuild"):
+                profiles.switch_profile("work", tmp_path)
+        # Released: the same machine may now switch.
+        assert profiles.switch_profile("work", tmp_path)["activated"] == "work"
+
+    def test_rebuild_probe_reports_holder_liveness(self, tmp_path):
+        import fcntl
+
+        lock_path = tmp_path / "database.db.rebuild.lock"
+        assert profiles.rebuild_in_progress(tmp_path) is False  # no file at all
+        lock_path.touch()
+        assert profiles.rebuild_in_progress(tmp_path) is False  # stale leftover
+        with open(lock_path, "a+") as held:
+            fcntl.flock(held.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            assert profiles.rebuild_in_progress(tmp_path) is True
 
 
 class TestCrashRecovery:

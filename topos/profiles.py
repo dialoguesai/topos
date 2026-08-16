@@ -178,16 +178,50 @@ def node_is_running(port: int = 9000) -> bool:
         return False
 
 
+def rebuild_in_progress(base: Path) -> bool:
+    """Whether a graph rebuild currently HOLDS the lock beside the database.
+
+    Presence of the file means nothing. ``rebuild_subprocess`` takes an
+    advisory ``flock`` on it and never deletes it — the OS drops the *lock*
+    when the child exits, but the *file* stays behind forever. Treating the
+    file as the signal therefore blocks profile switching on every machine
+    that has ever rebuilt its graph, permanently; the machine this was found
+    on had a week-old empty lock and a switch that could never succeed.
+
+    So ask the OS: if the lock can be taken, nobody holds it. Taken
+    non-blocking and released immediately — the point is the answer, not the
+    lock. A file that cannot be opened at all is not treated as a rebuild;
+    refusing on an unreadable file would be the same permanent block by
+    another route.
+    """
+    lock_path = base / REBUILD_LOCK_FILENAME
+    if not lock_path.exists():
+        return False
+    try:
+        import fcntl
+    except ImportError:  # non-POSIX: presence is the only signal available
+        return True
+    try:
+        with open(lock_path, "a+") as handle:
+            try:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                return True  # somebody holds it: a real rebuild is running
+            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            return False
+    except OSError:
+        return False
+
+
 def _assert_safe_to_mutate(base: Path, *, port: int, skip_node_check: bool = False) -> None:
     if not skip_node_check and node_is_running(port):
         raise ProfileError(
             f"A Topos node is running on port {port}. Stop it first "
             "(Quit Topos Node in the menu bar), then retry."
         )
-    if (base / REBUILD_LOCK_FILENAME).exists():
+    if rebuild_in_progress(base):
         raise ProfileError(
-            "A database rebuild is in progress (database.db.rebuild.lock present). "
-            "Wait for it to finish before switching profiles."
+            "A database rebuild is running. Wait for it to finish, then retry."
         )
 
 
