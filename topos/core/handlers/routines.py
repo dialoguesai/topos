@@ -8,6 +8,7 @@ from .common import (
     Dict,
     Optional,
     run_db_read,
+    run_db_write,
 )
 from .registry import handles
 
@@ -82,8 +83,8 @@ async def handle_create_routine(message: Dict[str, Any]) -> Optional[Dict[str, A
     if not user_id or not engine_id:
         return {"id": req_id, "status": "error", "error": "user_id and engine_id required"}
     try:
-        row = routines_store.create_routine(
-            conn,
+        row = await run_db_write(
+            routines_store.create_routine,
             owner_user_id=user_id,
             engine_id=engine_id,
             payload=body,
@@ -106,8 +107,8 @@ async def handle_patch_routine(message: Dict[str, Any]) -> Optional[Dict[str, An
     body = pl.get("body") if isinstance(pl.get("body"), dict) else {}
     if not user_id or not routine_id:
         return {"id": req_id, "status": "error", "error": "user_id and routine_id required"}
-    row = routines_store.patch_routine(
-        conn,
+    row = await run_db_write(
+        routines_store.patch_routine,
         owner_user_id=user_id,
         routine_id=routine_id,
         payload=body,
@@ -129,8 +130,8 @@ async def handle_delete_routine(message: Dict[str, Any]) -> Optional[Dict[str, A
     routine_id = str(pl.get("routine_id") or "").strip()
     if not user_id or not routine_id:
         return {"id": req_id, "status": "error", "error": "user_id and routine_id required"}
-    deleted = routines_store.soft_delete_routine(
-        conn,
+    deleted = await run_db_write(
+        routines_store.soft_delete_routine,
         owner_user_id=user_id,
         routine_id=routine_id,
     )

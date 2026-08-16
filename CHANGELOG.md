@@ -11,6 +11,43 @@ The machine-readable twin of each release is
 
 ### Fixed
 
+- `[O]` **The event loop stops taking the SQLite write gate on the hottest
+  paths.** The gate is a blocking OS lock, so acquiring it inside a coroutine
+  stalls every other coroutine — including the control-plane keepalive, which
+  is the node-side half of the 2026-08-15 relay outage: relayed requests
+  (healthcheck, `get_device_info`) answered late or not at all during heavy
+  enrichment, and only the `control_plane_client` snapshot fallback kept device
+  info alive. The engine's own `[WRITE_GATE] acquired on the event-loop thread`
+  guard named the call sites; this fixes the ones that fired most (147, 134 and
+  107 times in a single log), in two shapes:
+  - **Moved off the loop** (`asyncio.to_thread`, resolving the worker's own
+    connection — a `sqlite3.Connection` holds one transaction state, so handing
+    the loop's handle to a worker is the corruption `get_db_connection` was made
+    thread-local to prevent): the Usage Inbox dedupe lookups and delivery
+    record in `app_ingest`/`check_inbox_write`, the whole `install_service`
+    surface behind the sources API (install/list/patch/uninstall/rehydrate), the
+    six routine write handlers, and both gated sections of the platform privacy
+    layer (the `canonical_nsfw_v1` migration and the batched disclosure/NSFW
+    write pass). A new `run_db_write` helper next to `run_db_read` makes the
+    handler-layer conversions one line each and resolves the connection through
+    the hub, so tests that monkeypatch `get_db_connection` still bind the
+    worker's handle.
+  - **No longer taking the gate at all**: `CanonicalTablesManager._ensure_tables`
+    and `source_settings.ensure_table` re-ran idempotent DDL on every
+    construction and every settings read respectively. Both now probe first
+    (`sqlite_master` / `PRAGMA table_info` — plain reads), so the steady state
+    costs no gate. Deliberately not memoized on `id(conn)`: addresses are reused
+    once a handle is collected, which reports DDL as done on a brand-new empty
+    database.
+
+  `run_privacy_disclosure_layer` accepts `conn=None` (what the ingest pipeline
+  now passes) to mean "resolve per worker"; a caller-pinned connection keeps its
+  thread affinity and runs inline, because test fixtures open theirs with
+  `check_same_thread=True`. Remaining loop-thread acquisitions are lower
+  frequency and structural — the biggest is `get_signal_service`, which hands
+  the caller's connection to a long-lived `SignalService`, so it needs a
+  connection-lifecycle change rather than a `to_thread` wrapper.
+
 - `[E]` **Place references extract again: `PlaceContext` is declared for the
   `places` dimension.** The artifact router has always written `PlaceContext`
   objects for place `EntityRef` artifacts, but `places.json` never declared the

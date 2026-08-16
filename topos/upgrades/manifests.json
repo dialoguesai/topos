@@ -419,7 +419,8 @@
       "notes": [
         "Deploying this build requires reinstalling the node (frozen uv tool snapshot) \u2014 a plain restart runs the old code and leaves the browser lanes dark.",
         "Existing clusters keep their old labels until relabel-topic-clusters runs: the labeler runs at cluster write time, and this release changes the prompt, not the partition.",
-        "Nodes whose github raw retention was purged keep NULL content on their old push rows; new pushes carry commit messages from this build on. Browser rows written before this release keep NULL content/hostname until they are re-ingested \u2014 no raw-retention re-map step is declared for them because the plugin re-pushes visits organically."
+        "Nodes whose github raw retention was purged keep NULL content on their old push rows; new pushes carry commit messages from this build on. Browser rows written before this release keep NULL content/hostname until they are re-ingested \u2014 no raw-retention re-map step is declared for them because the plugin re-pushes visits organically.",
+        "Write-gate/event-loop fix is code-only ([O]): no schema migration, no derived invalidation, no step. Ingest dedupe, the install_service sources surface, the routine write handlers and both gated sections of the privacy layer now run in asyncio.to_thread on the worker's own connection, and the ai_chat / source_settings DDL probes before taking the gate instead of re-running idempotent CREATEs. Existing rows and derived outputs are untouched \u2014 the same statements run, on a different thread."
       ]
     }
   ]
