@@ -14,6 +14,11 @@ from ...db.write_gate import commit_connection, with_db_write
 
 logger = logging.getLogger("topos.storage.canonical.ai_chat.tables")
 
+#: Tables whose presence means this connection's canonical DDL already ran.
+#: They are created together in one gated, committed block, so either both are
+#: there or the DDL never completed.
+_CANONICAL_TABLES = ("ai_chat_conversations", "ai_chat_messages")
+
 
 class CanonicalTablesManager:
     """Manages canonical tables for unified data models."""
@@ -27,7 +32,18 @@ class CanonicalTablesManager:
         ensure_migrations_applied(conn)
 
     def _ensure_tables(self) -> None:
-        """Ensure canonical tables exist. Creates them if they don't exist."""
+        """Ensure canonical tables exist, skipping the gate once they do.
+
+        This manager is constructed per request — every signal handler builds
+        one through AdapterFactory — and re-running idempotent DDL made it the
+        busiest write-gate acquisition on the event-loop thread (134 in one
+        log). The probe is a plain read, so the steady state costs no gate at
+        all. Deliberately NOT memoized on ``id(conn)``: connection addresses are
+        reused once the old handle is collected, which reports DDL as done on a
+        brand-new empty database.
+        """
+        if self._tables_present():
+            return
         try:
             # DDL takes SQLite's write lock at execute time — gate it with the commit.
             with with_db_write():
@@ -80,6 +96,16 @@ class CanonicalTablesManager:
         except Exception as e:
             self.conn.rollback()
             logger.error("Failed to ensure canonical tables: %s", e)
+
+    def _tables_present(self) -> bool:
+        try:
+            rows = self.conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name IN (?, ?)",
+                _CANONICAL_TABLES,
+            ).fetchall()
+            return len(rows) == len(_CANONICAL_TABLES)
+        except Exception:  # noqa: BLE001 — a failed probe just means "run the DDL"
+            return False
 
     def write_conversations_batch(
         self,

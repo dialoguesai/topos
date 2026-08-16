@@ -44,6 +44,16 @@ def _has_posture_column(conn) -> bool:
 
 
 def ensure_table(conn) -> None:
+    """Create the settings table, skipping the gate once it is there.
+
+    Every read and write here calls this first, so re-running idempotent DDL put
+    a plain settings lookup behind the write gate — a blocking OS lock — on
+    whatever thread asked, the event loop included. The probe is a PRAGMA read,
+    and it doubles as the posture-column check, so a fully-migrated table costs
+    no gate at all.
+    """
+    if _has_posture_column(conn):
+        return
     # DDL takes SQLite's write lock at execute time — gate it with the commit.
     with with_db_write():
         conn.execute(f"""
