@@ -199,8 +199,15 @@ def rebuild_in_progress(base: Path) -> bool:
         return False
     try:
         import fcntl
-    except ImportError:  # non-POSIX: presence is the only signal available
-        return True
+    except ImportError:
+        # Non-POSIX. `_acquire_rebuild_lock` has no fcntl either and falls back
+        # to a plain open, so nothing ever holds this file on Windows and its
+        # existence says nothing at all. Reporting a rebuild here would block
+        # switching permanently on the first machine that ever rebuilt — the
+        # very bug this function exists to fix, reintroduced one platform over.
+        # The node must be stopped for a switch regardless, which is the real
+        # protection.
+        return False
     try:
         with open(lock_path, "a+") as handle:
             try:
