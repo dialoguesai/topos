@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.17] — 2026-08-16
+
 ### Fixed
 
 - `[O]` A finished rebuild no longer blocks Select Topos forever. The lock
