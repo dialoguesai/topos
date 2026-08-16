@@ -11,6 +11,15 @@ The machine-readable twin of each release is
 
 ### Fixed
 
+- `[O]` A finished rebuild no longer blocks Select Topos forever. The lock
+  beside the database is an advisory `flock` that is created on first rebuild
+  and never deleted — the OS drops the *lock* when the child exits, the *file*
+  stays — so refusing a profile switch on the file's existence blocked
+  switching permanently on every machine that had ever rebuilt its entity
+  graph. The guard now asks the OS whether the lock is actually held. Found by
+  hand on a node carrying a week-old empty lock, under an error telling its
+  owner to wait for a rebuild that had finished eight days earlier.
+
 - `[O]` **The event loop stops taking the SQLite write gate on the hottest
   paths.** The gate is a blocking OS lock, so acquiring it inside a coroutine
   stalls every other coroutine — including the control-plane keepalive, which
