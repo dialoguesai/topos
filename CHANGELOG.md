@@ -18,7 +18,10 @@ The machine-readable twin of each release is
   switching permanently on every machine that had ever rebuilt its entity
   graph. The guard now asks the OS whether the lock is actually held. Found by
   hand on a node carrying a week-old empty lock, under an error telling its
-  owner to wait for a rebuild that had finished eight days earlier.
+  owner to wait for a rebuild that had finished eight days earlier. On a
+  platform without `flock` the answer is "no rebuild", not "yes": the engine
+  takes no lock there either, so the file carries no information and claiming
+  otherwise would rebuild the same permanent block one platform over.
 - `[E:query]` **The owner's actual question reaches the query path again.** The
   handler read `intent` before `query`, so home chat's stopword-stripped
   fingerprint became the query text for every downstream stage: "how did I sleep

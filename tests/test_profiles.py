@@ -158,6 +158,24 @@ class TestSwitchProfile:
         # Released: the same machine may now switch.
         assert profiles.switch_profile("work", tmp_path)["activated"] == "work"
 
+    def test_a_platform_without_flock_does_not_block_forever(self, tmp_path, monkeypatch):
+        # Windows has no fcntl, and the engine's acquire path has none either —
+        # it falls back to a plain open, so nothing ever holds the file there
+        # and its existence carries no information. Reporting a rebuild would
+        # rebuild this very bug one platform over.
+        import builtins
+
+        real_import = builtins.__import__
+
+        def no_fcntl(name, *args, **kwargs):
+            if name == "fcntl":
+                raise ImportError("no fcntl on this platform")
+            return real_import(name, *args, **kwargs)
+
+        (tmp_path / "database.db.rebuild.lock").touch()
+        monkeypatch.setattr(builtins, "__import__", no_fcntl)
+        assert profiles.rebuild_in_progress(tmp_path) is False
+
     def test_rebuild_probe_reports_holder_liveness(self, tmp_path):
         import fcntl
 
