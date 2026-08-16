@@ -19,6 +19,16 @@ The machine-readable twin of each release is
   graph. The guard now asks the OS whether the lock is actually held. Found by
   hand on a node carrying a week-old empty lock, under an error telling its
   owner to wait for a rebuild that had finished eight days earlier.
+- `[E:query]` **The owner's actual question reaches the query path again.** The
+  handler read `intent` before `query`, so home chat's stopword-stripped
+  fingerprint became the query text for every downstream stage: "how did I sleep
+  this week?" arrived as "sleep week". Measured cost — the planner's `\bthis week\b`
+  never matched, so the turn silently lost its time window; vector ranking embedded
+  a fragment instead of a sentence; and the scope classifier, trained on questions,
+  abstained on keyword soup. Nothing wanted the digest (retrieval's `_query_tokens`
+  already strips stopwords where a bag of words is needed), and the clients were
+  never at fault: home chat has always sent both fields. One-line precedence flip;
+  callers that send only `intent` are unaffected.
 
 - `[O]` **The event loop stops taking the SQLite write gate on the hottest
   paths.** The gate is a blocking OS lock, so acquiring it inside a coroutine
