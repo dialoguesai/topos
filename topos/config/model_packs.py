@@ -28,15 +28,26 @@ logger = logging.getLogger("topos.config.model_packs")
 
 ENGINE_CONFIG_KEY_MODEL_PACKS_CACHE = "model_packs_cache"
 
-#: Mirrors control_plane/model_pack_roles.py::ROLES. Duplicated rather than
-#: imported — the node and control plane are deployed independently — and
-#: asserted against the control-plane copy in test_model_packs_cache.py.
-ROLES: Tuple[str, ...] = ("primary", "reasoning", "tool", "classify")
+#: Mirrors control_plane/model_pack_roles.py::ROLES — the QUERY-TIME roles only.
+#: Duplicated rather than imported (the node and control plane deploy
+#: independently) and asserted against the control-plane copy in
+#: test_model_packs_cache.py. `scope` = scope routing: raw text → UMA scope set,
+#: bound to the on-device `scope-head` provider by default.
+ROLES: Tuple[str, ...] = ("primary", "reasoning", "tool", "scope")
+
+#: Retired 2026-08-15: `classify` selected INGEST models (facts, conversation
+#: context, emotion/topic jobs) from inside a query-time pack. Those functions
+#: have their own selectors (engine_config, surfaced as Node functions); their
+#: usage rows now carry no pack role, which is accurate — enrichment spend is
+#: not pack spend.
+LEGACY_ROLE_CLASSIFY = "classify"
+
+#: The one non-LLM provider; only the `scope` role may bind it. The node serves it
+#: from `topos.query.scope_head` (ModelSlot.SCOPE_HEAD), never through an LLM adapter.
+SCOPE_HEAD_PROVIDER = "scope-head"
 
 #: Mirrors control_plane/model_pack_roles.py::FUNCTION_ROLES for attribution.
 FUNCTION_ROLES: Dict[str, str] = {
-    "facts": "classify",
-    "conversation_context": "classify",
     "signal_extraction": "tool",
     "sanitization": "tool",
     "routine_orchestration": "tool",
@@ -44,17 +55,24 @@ FUNCTION_ROLES: Dict[str, str] = {
     "home_chat": "primary",
 }
 
+#: Ingest/enrichment subtypes: attributed to the active pack but to NO role. Their
+#: models are chosen under Node functions, so labelling their spend with a pack role
+#: (the old `classify`, or the generic `primary` fallback) would bill the pack for a
+#: decision it did not make.
+ENRICHMENT_SUBTYPES = frozenset({
+    "facts",
+    "fact_llm_extract",
+    "conversation_context",
+    "topic_extraction",
+    "goal_extraction",
+    "emotion_classification",
+    "emo_27",
+})
+
 #: Subtype / task labels → pack role for ledger attribution (S6).
 SUBTYPE_ROLES: Dict[str, str] = {
-    "fact_llm_extract": "classify",
-    "facts": "classify",
-    "conversation_context": "classify",
     "signal_extraction": "tool",
     "sanitization": "tool",
-    "topic_extraction": "classify",
-    "goal_extraction": "classify",
-    "emotion_classification": "classify",
-    "emo_27": "classify",
     "query_inference": "primary",
     "truth_verdict": "reasoning",
     "brief_update": "primary",
@@ -429,8 +447,15 @@ def attribution_for_engine_call(
     role = SUBTYPE_ROLES.get(key)
     if role is None:
         role = FUNCTION_ROLES.get(key)
-    if role is None and str(task_type or "").strip().lower() == "enrichment":
-        role = "classify"
+    if role is None and (
+        key in ENRICHMENT_SUBTYPES
+        or str(task_type or "").strip().lower() == "enrichment"
+    ):
+        # Deliberately ROLE-LESS since the `classify` role's retirement
+        # (2026-08-15) — see ENRICHMENT_SUBTYPES. Matching on the subtype as well
+        # as task_type matters: fact_llm_extract arrives with only a subtype, and
+        # the generic pack fallback below would otherwise label it `primary`.
+        return pack_id, None
     if pack_id and role is None:
         role = "primary"
     return pack_id, role

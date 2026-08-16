@@ -178,14 +178,41 @@ async def run_privacy_disclosure_layer(
     progress_callback: Optional[Callable[[int, int], None]] = None,
     nsfw_only: bool = False,
 ) -> Dict[str, Any]:
-    """Mandatory post-canonical Platform Privacy Layer: PII disclosure + NSFW tags."""
+    """Mandatory post-canonical Platform Privacy Layer: PII disclosure + NSFW tags.
+
+    ``conn`` may be None, and the pipeline passes None deliberately — see
+    :func:`_run_db` for what that buys.
+    """
     from ..config.settings import settings
     from ..storage.db.migrations.canonical_nsfw_v1 import apply_canonical_nsfw_v1_up
 
+    async def _run_db(fn):
+        """Run one gated section, off the event loop where possible.
+
+        With no pinned connection (the ingest pipeline) the work hops to a
+        worker thread that resolves its OWN handle: the write gate is a blocking
+        OS lock, so holding it on the loop stalls every coroutine including the
+        control-plane keepalive, and borrowing the loop's connection instead
+        would put two threads on one transaction state.
+
+        A caller-pinned connection keeps its thread affinity and runs inline, as
+        before — test fixtures open theirs with ``check_same_thread=True``, and
+        those callers drive this function to completion with nothing else on the
+        loop, so there is no keepalive to starve.
+        """
+        if conn is not None:
+            return fn(conn)
+        from ..core.state import get_db_connection
+
+        return await asyncio.to_thread(lambda: fn(get_db_connection()))
+
     # Migration entry point invoked outside the gated runner; it writes and
     # commits internally, so the whole call holds the gate.
-    with with_db_write():
-        apply_canonical_nsfw_v1_up(conn)
+    def _apply_nsfw_migration(target) -> None:
+        with with_db_write():
+            apply_canonical_nsfw_v1_up(target)
+
+    await _run_db(_apply_nsfw_migration)
 
     if not getattr(settings, "platform_privacy_via_engine", True):
         logger.debug("[PIPELINE:PRIVACY] skipped: platform_privacy_via_engine=false")
@@ -345,21 +372,29 @@ async def run_privacy_disclosure_layer(
                 )
 
     # Gated write pass: batch commits at exit (unconditionally, so no implicit
-    # transaction outlives this call).
-    with batched_writes(conn):
-        for table, record_id, patches, model_id in disclosure_ops:
-            if upsert_disclosure_fields(conn, table, record_id, patches, model_id=model_id):
-                updated += 1
-        for table, record_id, is_nsfw, score, model_id in nsfw_ops:
-            if upsert_nsfw_fields(
-                conn,
-                table,
-                record_id,
-                is_nsfw=is_nsfw,
-                score=score,
-                model_id=model_id,
-            ):
-                nsfw_tagged += 1
+    # transaction outlives this call). Runs on a worker thread — this section
+    # holds the gate for the whole batch, which on the loop thread is what left
+    # relayed control-plane requests unanswered during heavy enrichment.
+    def _apply_writes(target) -> tuple[int, int]:
+        disclosed = tagged = 0
+        with batched_writes(target):
+            for table, record_id, patches, model_id in disclosure_ops:
+                if upsert_disclosure_fields(target, table, record_id, patches, model_id=model_id):
+                    disclosed += 1
+            for table, record_id, is_nsfw, score, model_id in nsfw_ops:
+                if upsert_nsfw_fields(
+                    target,
+                    table,
+                    record_id,
+                    is_nsfw=is_nsfw,
+                    score=score,
+                    model_id=model_id,
+                ):
+                    tagged += 1
+        return disclosed, tagged
+
+    disclosed_count, nsfw_tagged = await _run_db(_apply_writes)
+    updated += disclosed_count
 
     duration_ms = int((time.perf_counter() - started) * 1000)
     logger.debug(

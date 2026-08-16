@@ -78,10 +78,15 @@ async def handle_app_ingest(message: Dict[str, Any]) -> Optional[Dict[str, Any]]
                 record_delivery,
             )
 
-            prior = get_prior_delivery(write_id)
+            # Each of these opens the dedupe schema (DDL under the write gate —
+            # a blocking OS lock), so they run off the event-loop thread. They
+            # resolve their own connection internally, which is what makes the
+            # hop safe: get_db_connection is thread-local.
+            prior = await asyncio.to_thread(get_prior_delivery, write_id)
             if prior is not None:
-                if not is_derivation_complete(write_id):
-                    ensure_derivation_enqueued(
+                if not await asyncio.to_thread(is_derivation_complete, write_id):
+                    await asyncio.to_thread(
+                        ensure_derivation_enqueued,
                         write_id,
                         source_id=source_id,
                     )
@@ -283,7 +288,10 @@ async def handle_app_ingest(message: Dict[str, Any]) -> Optional[Dict[str, Any]]
         if write_id and processed > 0:
             from ...ingestion.usage_inbox_dedupe import record_delivery
 
-            record_delivery(
+            # Writes + purge under the write gate; own connection resolved in
+            # the worker (see _enqueue_inbox_job above).
+            await asyncio.to_thread(
+                record_delivery,
                 write_id,
                 records_processed=processed,
                 records_total=records_total,
@@ -329,7 +337,8 @@ async def handle_check_inbox_write(message: Dict[str, Any]) -> Optional[Dict[str
         }
     from ...ingestion.usage_inbox_dedupe import get_prior_delivery
 
-    prior = get_prior_delivery(write_id)
+    # Opens the dedupe schema under the write gate — off the loop thread.
+    prior = await asyncio.to_thread(get_prior_delivery, write_id)
     response_payload = {
         "write_id": write_id,
         "delivered": prior is not None,

@@ -18,6 +18,11 @@
       "id": "TripSpan",
       "description": "A period away from the usual range, as a destination label and span.",
       "fields": ["destination_label", "span_band", "started_at", "ended_at"]
+    },
+    {
+      "id": "PlaceContext",
+      "description": "A place reference extracted from a record (journal entry, event), keyed by anonymized entity, before visit aggregation.",
+      "fields": ["entity_key", "entity_kind", "display_band", "event_at", "activity_band"]
     }
   ],
   "signal_objects": [

@@ -41,6 +41,13 @@ logger = logging.getLogger(__name__)
 
 ENV_FLAG = "TOPOS_SCOPE_SHADOW"
 
+#: File-based twin of the env flag. The node under the macOS app shell inherits no
+#: shell environment and nothing loads ~/.topos/.env into os.environ, so an env-only
+#: opt-in is unreachable exactly where real traffic happens. Touching this file is the
+#: operator gesture; deleting it turns shadow off at the next check. It lives in
+#: ~/.topos so it is discoverable next to the log it produces.
+FLAG_FILE = Path.home() / ".topos" / "scope_shadow.on"
+
 #: Agreement between what the classifier predicted and the scope the caller supplied.
 VERDICT_HIT = "hit"           # predicted exactly the supplied scope
 VERDICT_OVER = "over"         # predicted it, plus scopes nobody asked for
@@ -50,7 +57,71 @@ VERDICT_ESCALATE = "escalate"  # sat in the uncertain band
 
 
 def enabled() -> bool:
-    return os.environ.get(ENV_FLAG, "").strip().lower() in {"1", "true", "yes", "on"}
+    if os.environ.get(ENV_FLAG, "").strip().lower() in {"1", "true", "yes", "on"}:
+        return True
+    try:
+        return FLAG_FILE.is_file()
+    except OSError:  # a broken home dir must not break the query path
+        return False
+
+
+#: Circuit breaker. Observation is telemetry — it may cost a millisecond, never a turn.
+#: After this many slow-or-failed observations the shadow disables itself for the life of
+#: the process and says so once. Restarting re-arms it; the flag file is untouched, so an
+#: operator's intent survives a trip.
+BREAKER_LIMIT = 3
+#: An observation slower than this is not "shadow mode changes nothing" any more.
+BREAKER_SLOW_MS = 1500.0
+_breaker_faults = 0
+_breaker_announced = False
+
+
+def _breaker_tripped() -> bool:
+    return _breaker_faults >= BREAKER_LIMIT
+
+
+def _breaker_fault(why: str) -> None:
+    global _breaker_faults, _breaker_announced
+    _breaker_faults += 1
+    if _breaker_tripped() and not _breaker_announced:
+        _breaker_announced = True
+        logger.warning(
+            "scope shadow DISABLED for this process after %d faults (last: %s). "
+            "Routing is unaffected; restart the node to re-arm.",
+            _breaker_faults, why,
+        )
+
+
+def warm() -> bool:
+    """Load the scorer ONCE, at startup, before the node serves traffic.
+
+    This is the whole safety design. The head is 265 MB and loading it holds the GIL in
+    C-level stretches; doing that mid-request, alongside the engine's MPS work, can trip
+    a live torch deadlock (synchronous Metal dispatch whose block re-acquires the GIL) —
+    observed wedging this node twelve times on 2026-08-15. Called from app startup, the
+    load happens single-threaded, before any MPS model exists and before the first
+    request, so there is nothing to contend with.
+
+    Never raises and never blocks startup on a failure: shadow is telemetry, and a node
+    that cannot load a head simply does not observe.
+    """
+    if not enabled():
+        return False
+    try:
+        started = time.perf_counter()
+        from .scope_classifier import _head_cached
+
+        head = _head_cached()
+        elapsed = (time.perf_counter() - started) * 1000.0
+        if head is None:
+            logger.info("scope shadow armed, but no head is installed — nothing to warm")
+            return False
+        logger.info("scope shadow armed: head warm in %.0f ms", elapsed)
+        return True
+    except Exception:  # noqa: BLE001 — startup must not fail because telemetry cannot
+        logger.warning("scope shadow warm failed; observation stays off", exc_info=True)
+        _breaker_fault("warm failed")
+        return False
 
 
 def default_log_path() -> Path:
@@ -68,6 +139,10 @@ class ShadowRecord:
     latency_ms: float
     text: str = ""
     ts: float = 0.0
+    #: Which ladder branch fired (REBUILD §B0a): "" | "ambiguity" | "ignorance" |
+    #: "confident-none". Distinguishes "decided nothing" from "no idea" in the log —
+    #: the whole point of the four-branch ladder, so the shadow must not flatten it.
+    reason: str = ""
 
     def as_local_row(self) -> Dict[str, Any]:
         return {
@@ -77,6 +152,7 @@ class ShadowRecord:
             "predicted": list(self.predicted),
             "confidence": round(self.confidence, 4),
             "latency_ms": round(self.latency_ms, 2),
+            "reason": self.reason,
             "text": self.text,
         }
 
@@ -138,21 +214,31 @@ def observe(
     Returns the record when shadowing ran, ``None`` when it was off or failed. Callers
     ignore the return value — it exists for tests.
     """
+    if _breaker_tripped() and not force:
+        return None
     if not (force or enabled()):
         return None
     try:
-        from .scope_classifier import _prototypes_cached, classify
+        from .scope_classifier import _head_cached, _prototypes_cached, classify
 
-        if not force and _prototypes_cached.cache_info().currsize == 0:
-            # Cold cache means this call would load the embedding model INLINE in the
-            # request path — measured at 10.5s on a first observation. "Shadow mode
-            # changes nothing" has to mean latency too, so skip until something else
-            # (retrieval, normally) has warmed the slot.
-            return None
+        if not force:
+            # Never load a model INLINE in the request path. Warming used to happen on a
+            # daemon thread here; that put a 265 MB load in flight ALONGSIDE the engine's
+            # MPS work, and this process carries a live torch/MPS deadlock (a synchronous
+            # Metal dispatch whose block re-acquires the GIL) that wedged the node twelve
+            # times on 2026-08-15. Warming now happens once at startup via `warm()`,
+            # single-threaded, before traffic and before the MPS models load. If a scorer
+            # is still cold here, skip the turn rather than load anything.
+            if _head_cached.cache_info().currsize == 0 and _prototypes_cached.cache_info().currsize == 0:
+                return None
 
         started = time.perf_counter()
         verdict_obj = (classify_fn or classify)(query_text)
         elapsed = (time.perf_counter() - started) * 1000.0
+        if elapsed > BREAKER_SLOW_MS and not force:
+            # Slow enough that the owner would feel it. Record the fault, still log the
+            # observation — a slow verdict is data about the node, not a reason to lose it.
+            _breaker_fault(f"observation took {elapsed:.0f} ms")
         record = ShadowRecord(
             verdict=compare(
                 verdict_obj.labels, true_scope, escalated=verdict_obj.escalated
@@ -163,11 +249,13 @@ def observe(
             latency_ms=elapsed,
             text=query_text,
             ts=time.time(),
+            reason=str(getattr(verdict_obj, "reason", "") or ""),
         )
         (log or ShadowLog()).append(record)
         return record
     except Exception:  # noqa: BLE001 — shadowing must never affect the query path
         logger.debug("scope shadow observation failed", exc_info=True)
+        _breaker_fault("observation raised")
         return None
 
 

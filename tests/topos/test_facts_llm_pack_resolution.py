@@ -47,10 +47,13 @@ class _Settings:
     ollama_query_model = "query-default:latest"
 
 
-def test_pack_classify_role_used_when_no_device_override():
+def test_the_pack_is_IGNORED_these_are_ingest_functions():
+    """Inverted 2026-08-15 with the `classify` role's retirement: a query-time
+    pack must not steer an ingest model. The seeded pack below names a model
+    the resolver must now walk straight past, to the settings default."""
     conn = _memory_conn()
     _seed_pack(conn, provider="ollama", model="phi3:latest")
-    assert resolve_facts_llm_model(_Settings(), conn) == "phi3:latest"
+    assert resolve_facts_llm_model(_Settings(), conn) == _Settings().ollama_extraction_model
 
 
 def test_device_override_wins_over_pack():

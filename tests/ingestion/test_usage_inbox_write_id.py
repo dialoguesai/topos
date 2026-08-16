@@ -17,7 +17,11 @@ pytestmark = pytest.mark.asyncio
 @pytest.fixture
 def sqlite_conn(tmp_path, monkeypatch):
     db_path = tmp_path / "test.db"
-    conn = sqlite3.connect(str(db_path))
+    # check_same_thread=False matches how core.state opens the real connection.
+    # The dedupe lookups run in asyncio.to_thread (their write gate must not be
+    # taken on the event loop), so a thread-affine handle here would fail inside
+    # the worker, get swallowed, and silently read as "never delivered".
+    conn = sqlite3.connect(str(db_path), check_same_thread=False)
     monkeypatch.setattr(
         "topos.ingestion.usage_inbox_dedupe.get_db_connection",
         lambda: conn,

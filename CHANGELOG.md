@@ -9,6 +9,151 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+
+- `[O]` **The event loop stops taking the SQLite write gate on the hottest
+  paths.** The gate is a blocking OS lock, so acquiring it inside a coroutine
+  stalls every other coroutine — including the control-plane keepalive, which
+  is the node-side half of the 2026-08-15 relay outage: relayed requests
+  (healthcheck, `get_device_info`) answered late or not at all during heavy
+  enrichment, and only the `control_plane_client` snapshot fallback kept device
+  info alive. The engine's own `[WRITE_GATE] acquired on the event-loop thread`
+  guard named the call sites; this fixes the ones that fired most (147, 134 and
+  107 times in a single log), in two shapes:
+  - **Moved off the loop** (`asyncio.to_thread`, resolving the worker's own
+    connection — a `sqlite3.Connection` holds one transaction state, so handing
+    the loop's handle to a worker is the corruption `get_db_connection` was made
+    thread-local to prevent): the Usage Inbox dedupe lookups and delivery
+    record in `app_ingest`/`check_inbox_write`, the whole `install_service`
+    surface behind the sources API (install/list/patch/uninstall/rehydrate), the
+    six routine write handlers, and both gated sections of the platform privacy
+    layer (the `canonical_nsfw_v1` migration and the batched disclosure/NSFW
+    write pass). A new `run_db_write` helper next to `run_db_read` makes the
+    handler-layer conversions one line each and resolves the connection through
+    the hub, so tests that monkeypatch `get_db_connection` still bind the
+    worker's handle.
+  - **No longer taking the gate at all**: `CanonicalTablesManager._ensure_tables`
+    and `source_settings.ensure_table` re-ran idempotent DDL on every
+    construction and every settings read respectively. Both now probe first
+    (`sqlite_master` / `PRAGMA table_info` — plain reads), so the steady state
+    costs no gate. Deliberately not memoized on `id(conn)`: addresses are reused
+    once a handle is collected, which reports DDL as done on a brand-new empty
+    database.
+
+  `run_privacy_disclosure_layer` accepts `conn=None` (what the ingest pipeline
+  now passes) to mean "resolve per worker"; a caller-pinned connection keeps its
+  thread affinity and runs inline, because test fixtures open theirs with
+  `check_same_thread=True`. Remaining loop-thread acquisitions are lower
+  frequency and structural — the biggest is `get_signal_service`, which hands
+  the caller's connection to a long-lived `SignalService`, so it needs a
+  connection-lifecycle change rather than a `to_thread` wrapper.
+
+- `[E]` **Place references extract again: `PlaceContext` is declared for the
+  `places` dimension.** The artifact router has always written `PlaceContext`
+  objects for place `EntityRef` artifacts, but `places.json` never declared the
+  type, so `SignalObjectStore._validate_object_type` rejected every write and
+  `dimension_summary` DEGRADED on any batch containing a place reference
+  (observed on grow_data_file, 2026-08-15: every batch queued for retry with
+  derived data MISSING). Every other router-written type (RelationshipEdge,
+  SkillNode, ExperienceNode, Goal) was declared — places was the one gap. The
+  static write-site sweep in test_dimension_definitions was blind to it because
+  its regex only matched snake_case object types and only checked
+  `signal_objects`; it now matches CamelCase entity types and checks the same
+  allowlist the store enforces (entity ids + signal_objects + gate_objects).
+  A `rerun-places-dimension-summary` upgrade step re-runs the failed job where
+  derived output is missing.
+
+### Changed
+
+- `[E]` **Ingest models are no longer steered by the model pack.** The pack's
+  `classify` role selected the models for facts extraction and conversation-context
+  tagging — ingest functions that run when data arrives, not when the owner asks
+  something, and that already have their own selectors (engine_config, surfaced as
+  Node functions). The role is retired repo-wide: `resolve_facts_llm_model` and
+  `resolve_context_llm_model` are now device-override → settings default with no
+  pack rung, and enrichment usage (`ENRICHMENT_SUBTYPES`) is attributed to the
+  active pack with NO role — the old chain fell through to a generic `primary`
+  label, billing the pack for a decision it did not make. The engine ROLES mirror
+  is (primary, reasoning, tool, scope). Guards inverted: the J-B10 wiring test now
+  asserts these two functions make NO pack-resolver call at all.
+
+### Fixed
+
+- `[E]` **The node stopped wedging: torch's thread pool is bounded and every model's
+  device is resolved in one place.** Twelve event-loop deadlocks on 2026-08-15, always
+  the same stack — `TensorImpl::incref_pyobject → gil_scoped_acquire → take_gil`, with
+  26 threads resident in libtorch and the loop blocked behind them. Torch's intra-op
+  pool is one thread per core and each can need the GIL to refcount a Python-owned
+  tensor; in an asyncio server that already runs DB work and job workers on threads,
+  the pool and the loop deadlock. New `topos/engine/torch_runtime.py` bounds intra-op
+  to 2 and inter-op to 1 at startup, before the first model loads. It also owns device
+  selection for embeddings, NER, rerank, the privacy filter and the scope head, which
+  previously each guessed for themselves: sentence-transformers took no device argument
+  at all and silently chose MPS on any Mac (and CUDA nowhere), while the privacy filter
+  ran its own capability ladder that had drifted from it. One resolver now: explicit
+  `TOPOS_ML_DEVICE`/`engine_ml_device` → `auto` (CUDA, else MPS, else CPU) → CPU, so a
+  CUDA host uses CUDA without a code change and any host can be pinned by name.
+  Device is part of each model's cache key, so switching it reloads instead of serving
+  a handle pinned to the old device. **`auto` does not select MPS**: bounding threads
+  alone did not stop the wedge — the node hung again on the next burst of MPS
+  embedding calls with the pool at two — so while the torch bug stands, MPS is opt-in
+  by name (`ENGINE_ML_DEVICE=mps`). These models are small (MiniLM 22M, NER 125M) and
+  CPU-fast on Apple silicon; the cost is far smaller than a hung node.
+
+
+### Changed
+
+- `[E:query]` **Horos ships from Hugging Face, picks its device by capability, and
+  warms at boot.** Three changes with one theme — nothing about the scope head is
+  hardcoded to this machine any more. (1) `load_head` resolves an explicit
+  `TOPOS_SCOPE_HEAD` path, then a staged `~/.topos/models/scope_head`, then falls back
+  to fetching `Dialogues/horos` **at a pinned revision**; a node that cannot reach the
+  hub degrades to prototype routing rather than failing, and `HF_HUB_OFFLINE` plus the
+  local cache make a node network-free after first fetch. (2) New `resolve_device`:
+  explicit override → `auto` (CUDA, else MPS, else CPU) → default `cpu`. The head is
+  no longer implicitly CPU-by-omission, and training's `auto` no longer preferred MPS
+  over CUDA, which would have picked the weaker accelerator on a CUDA box. Inference
+  still defaults to CPU on purpose: 17 ms is fast enough, and the accelerator belongs
+  to the owner's LLM. (3) Shadow warms **once at startup**, single-threaded, before
+  traffic and before the MPS models load — the previous daemon-thread warm put a
+  265 MB load in flight beside live Metal work, and this process carries a torch
+  GIL/MPS deadlock (synchronous dispatch whose block re-acquires the GIL) that wedged
+  the node twelve times on 2026-08-15. A circuit breaker disables observation for the
+  process after 3 slow-or-failed turns: telemetry may cost a millisecond, never a turn.
+
+
+### Added
+
+- `[E:query]` **Horos, the scope classifier, trained to its spec: multi-label with an
+  explicit `none` class and a four-branch ladder.** `classify()` now escalates on
+  UNCERTAINTY (ambiguity or ignorance), never on cardinality — a confident
+  `{availability, schedule}` set is acted on, and a new `reason` field keeps the
+  branches measurable apart. The trained head is published as `Dialogues/horos`
+  (macro-F1 0.512 on classify-8 vs mistral:7b's 0.495; hybrid-with-escalation 0.550
+  at ~1/6th the LLM calls). Pre-`none` artifacts keep the legacy two-threshold path.
+  New `scope` pack role (engine mirror): on-device `scope-head` provider, optional
+  and engine-defaulted so stored packs stay valid. Dimension definitions gain
+  `WorkItem`, `BrowseTrail`, `ProfileSurface` — the classifier's dead zone was
+  partly a schema gap. Shadow mode gains a `~/.topos/scope_shadow.on` flag-file
+  switch (the app-shell node inherits no env) and an off-thread model warm so a
+  cold head never loads inline in the request path.
+
+
+### Fixed
+
+- `[S1]` **The Lab's "apply preferred model" for entities is applied, not just
+  stored.** Overrides are saved per JOB id but looked up per engine SUBTYPE via
+  `SUBTYPE_TO_JOB`, and `entities_job` emits `entity_extraction_batch` while the
+  map carried only the bare `entity_extraction` — so picking a preferred NER
+  model in the Enrichment Lab wrote the override, displayed it, and never used
+  it. emo_27 hit the identical hole at its `_batch` rename and was patched by
+  hand; entities was missed. Both forms are mapped now, and a new test derives
+  the required entries from the Lab's own factory dict and each job module's
+  actual `run_engine_task(subtype=...)` literals, so the next subtype rename
+  fails a test instead of silently orphaning an override.
+  (`topos/enrichment/model_overrides.py`,
+  `tests/enrichment/test_model_override_subtypes.py`)
+
 ## [1.3.16] — 2026-08-15
 
 ### Added
