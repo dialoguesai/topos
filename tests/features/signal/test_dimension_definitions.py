@@ -131,9 +131,14 @@ def test_every_signal_write_site_is_declared() -> None:
 
     root = Path(__file__).resolve().parents[3] / "topos"
     pairs: set[tuple[str, str, str]] = set()
+    # Object types may be snake_case signal objects OR CamelCase entity types —
+    # the artifact router writes entity types (RelationshipEdge, PlaceContext, …).
+    # A lowercase-only character class here is how PlaceContext shipped
+    # undeclared and failed every places dimension_summary at runtime
+    # (grow_data_file, 2026-08-15).
     patterns = (
-        r'upsert_object\(\s*\n?\s*"([a-z_]+)",\s*\n?\s*"([a-z_]+)"',
-        r'dimension="([a-z_]+)",\s*\n?[^)]*?object_type="([a-z_]+)"',
+        r'upsert_object\(\s*\n?\s*"([a-z_]+)",\s*\n?\s*"([A-Za-z_]+)"',
+        r'dimension="([a-z_]+)",\s*\n?[^)]*?object_type="([A-Za-z_]+)"',
     )
     for path in glob.glob(str(root / "**" / "*.py"), recursive=True):
         if "build/lib" in path:
@@ -142,15 +147,25 @@ def test_every_signal_write_site_is_declared() -> None:
         for pat in patterns:
             for m in re.finditer(pat, src):
                 pairs.add((m.group(1), m.group(2), path))
-        for m in re.finditer(r'object_type="([a-z_]+)",\s*\n?\s*dimension="([a-z_]+)"', src):
+        for m in re.finditer(r'object_type="([A-Za-z_]+)",\s*\n?\s*dimension="([a-z_]+)"', src):
             pairs.add((m.group(2), m.group(1), path))
 
     assert pairs, "sweep found no write sites — the regex drifted from the call shape"
+
+    def _allowed(dim: str) -> set[str]:
+        defn = get_definition(dim)
+        entity_ids = {
+            str(item.get("id") or "")
+            for item in (defn.get("primary_entity_types") or [])
+            if isinstance(item, dict)
+        }
+        # Mirrors SignalObjectStore._validate_object_type's allowlist.
+        return entity_ids | set(defn.get("signal_objects") or []) | set(defn.get("gate_objects") or [])
+
     undeclared = [
         (dim, obj, path)
         for dim, obj, path in sorted(pairs)
-        if dim in set(list_definition_ids())
-        and obj not in set(get_definition(dim)["signal_objects"])
+        if dim in set(list_definition_ids()) and obj not in _allowed(dim)
     ]
     assert undeclared == [], f"undeclared signal writes: {undeclared}"
 

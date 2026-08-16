@@ -80,6 +80,32 @@ async def run_db_read(fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
     return await asyncio.to_thread(fn, *args, **kwargs)
 
 
+async def run_db_write(fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
+    """Run a sync SQLite write off the loop, on the worker's OWN connection.
+
+    ``fn`` is called as ``fn(conn, *args, **kwargs)``. Writes take the write
+    gate, a blocking OS lock: holding it on the event-loop thread stalls every
+    coroutine including the control-plane keepalive, which is how the node reads
+    as offline mid-enrichment. Read-only-looking handlers need this too whenever
+    their store opens its schema first — ``CREATE TABLE IF NOT EXISTS`` is a
+    write.
+
+    Unlike :func:`run_db_read`, the connection is resolved INSIDE the worker and
+    must not be threaded through by the caller: a ``sqlite3.Connection`` holds
+    one transaction state, so sharing the loop thread's handle with a worker is
+    the corruption ``get_db_connection`` was made thread-local to prevent.
+    Resolved through the hub so tests that monkeypatch
+    ``topos.core.handlers.get_db_connection`` still bind the worker's handle.
+    """
+
+    def _call() -> _T:
+        import topos.core.handlers as hub
+
+        return fn(hub.get_db_connection(), *args, **kwargs)
+
+    return await asyncio.to_thread(_call)
+
+
 def _resource_owner_for_mcp_log(conn: Any) -> Optional[str]:
     if conn is None:
         return None

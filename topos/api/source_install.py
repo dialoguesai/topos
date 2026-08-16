@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from typing import Any, Dict, Optional
@@ -104,7 +105,8 @@ def _resolve_active_source_definition(source_id: str, scope: Dict[str, Any]) -> 
 
 
 async def _install_source_core(payload: Dict[str, Any]) -> Dict[str, Any]:
-    record = install_service.install_source(
+    record = await asyncio.to_thread(
+        install_service.install_source,
         source_definition_json=payload.get("source_definition_json")
         if isinstance(payload.get("source_definition_json"), dict)
         else None,
@@ -120,7 +122,8 @@ async def _install_source_core(payload: Dict[str, Any]) -> Dict[str, Any]:
 async def _list_install_status_core(payload: Dict[str, Any]) -> Dict[str, Any]:
     scope = _scope_from_payload(payload)
     source_id = str(payload.get("source_id")).strip() if payload.get("source_id") else None
-    installs = install_service.list_installs(
+    installs = await asyncio.to_thread(
+        install_service.list_installs,
         scope=scope,
         source_id=source_id,
     )
@@ -130,8 +133,11 @@ async def _list_install_status_core(payload: Dict[str, Any]) -> Dict[str, Any]:
 async def _list_sources_core(payload: Dict[str, Any]) -> Dict[str, Any]:
     scope = _scope_from_payload(payload)
     _require_scope_fields(scope, required=("user_id", "dataset_id", "topos_id"))
-    install_service.rehydrate_active_installs_runtime()
-    installs = install_service.list_installs(scope=scope)
+    # Both ensure the install schema, which is DDL under the write gate — a
+    # blocking OS lock the event loop must never take. install_service resolves
+    # its own connection per call, so the worker thread gets its own handle.
+    await asyncio.to_thread(install_service.rehydrate_active_installs_runtime)
+    installs = await asyncio.to_thread(install_service.list_installs, scope=scope)
     # Keep one active source definition per source_id.
     active_by_source: Dict[str, Dict[str, Any]] = {}
     for rec in installs:
@@ -153,7 +159,8 @@ async def _patch_source_install_core(payload: Dict[str, Any]) -> Dict[str, Any]:
     partial = payload.get("source_definition_json")
     if not isinstance(partial, dict):
         raise ValueError("source_definition_json object is required")
-    record = install_service.patch_source_install(
+    record = await asyncio.to_thread(
+        install_service.patch_source_install,
         source_id=source_id,
         scope=_scope_from_payload(payload),
         source_definition_json=partial,
@@ -166,7 +173,9 @@ async def _uninstall_source_core(payload: Dict[str, Any]) -> Dict[str, Any]:
     if not source_id:
         raise ValueError("source_id is required")
     # delete_source_tables is deprecated; maps to scrub-lite (no brief refresh).
-    result = install_service.uninstall_source(
+    # Drops tables and purges rows — a long gated section, never on the loop.
+    result = await asyncio.to_thread(
+        install_service.uninstall_source,
         source_id=source_id,
         scope=_scope_from_payload(payload),
         delete_source_tables=bool(payload.get("delete_source_tables")),

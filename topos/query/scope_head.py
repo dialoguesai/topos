@@ -37,6 +37,16 @@ logger = logging.getLogger(__name__)
 
 FORMAT = "topos-scope-head-1"
 ENV_HEAD_PATH = "TOPOS_SCOPE_HEAD"
+ENV_HEAD_DEVICE = "TOPOS_SCOPE_HEAD_DEVICE"
+ENV_HEAD_REPO = "TOPOS_SCOPE_HEAD_REPO"
+ENV_HEAD_REVISION = "TOPOS_SCOPE_HEAD_REVISION"
+
+#: Where the published head comes from when nothing is staged locally. PINNED to a
+#: revision on purpose: this component decides which data a question touches, so it must
+#: not change under an owner because someone pushed to `main`. Bumping the model is a
+#: release, not a fetch.
+HF_REPO = "Dialogues/horos"
+HF_REVISION = "257f5bd3cfcfa68c11ddcdae794b4c9a247dd806"
 
 #: Licences a training corpus may carry. Anything else means the head saw data we have
 #: promised not to train on, or data we cannot ship a model from, and it will not load.
@@ -52,6 +62,13 @@ DENIED_LICENCE_MARKERS = ("-SA", " SA", "sharealike", "share-alike", "NonCommerc
 
 KIND_LINEAR = "linear"      # logistic weights over a frozen sentence embedding
 KIND_ENCODER = "encoder"    # a fine-tuned encoder directory (rung 3)
+
+#: Reserved sentinel label: "confidently no scope needed". NOT a registry scope and never
+#: reaches the pipeline as one — it exists because 77.6% of training rows are negatives,
+#: and without a named none-class "confidently nothing" and "no idea" are the same
+#: all-zero vector, which makes the router's ignorance branch unimplementable
+#: (PLAN_SCOPE_CLASSIFIER_REBUILD.md §B0a).
+NONE_LABEL = "none"
 
 
 class ScopeHeadError(RuntimeError):
@@ -82,11 +99,83 @@ class ScopeHead:
         ]
 
 
-def default_head_path() -> Path:
+def resolve_device(preferred: Optional[str] = None) -> str:
+    """Pick an inference device by CAPABILITY, never by assumption.
+
+    Order: explicit argument → ``TOPOS_SCOPE_HEAD_DEVICE`` → the default.
+
+    ``auto`` means CUDA, else MPS, else CPU — so a CUDA box and an Apple box each get
+    their own accelerator without a code change.
+
+    **The default is ``cpu``, deliberately.** The head is 265 MB and scores a question in
+    ~17 ms on CPU; putting it on the accelerator buys nothing measurable and costs two
+    things that matter. It would contend for VRAM with the owner's LLM, which is the
+    model that actually needs it. And on this project's own hardware an accelerator-
+    resident head sits inside a live torch/MPS deadlock (a synchronous Metal dispatch
+    whose block re-acquires the GIL) that wedged the node repeatedly on 2026-08-15 —
+    a routing nicety must never be able to hang the query path. Owners who want the
+    accelerator can ask for it by name; nothing here is hardcoded to one vendor.
+    """
+    choice = (preferred or os.environ.get(ENV_HEAD_DEVICE) or "cpu").strip().lower()
+    if choice != "auto":
+        return choice or "cpu"
+    try:
+        import torch
+
+        if torch.cuda.is_available():
+            return "cuda"
+        if getattr(torch.backends, "mps", None) is not None and torch.backends.mps.is_available():
+            return "mps"
+    except Exception:  # noqa: BLE001 — a probe must never break loading
+        logger.debug("device probe failed; falling back to cpu", exc_info=True)
+    return "cpu"
+
+
+def default_head_path() -> Optional[Path]:
+    """Where the head lives, in resolution order — or None when it must be fetched.
+
+    1. ``TOPOS_SCOPE_HEAD`` — an explicit local directory. The air-gap escape hatch:
+       set it and nothing ever contacts a network.
+    2. ``~/.topos/models/scope_head`` — a manually staged head, if present.
+    3. Otherwise ``None``, meaning "fetch the pinned published revision".
+    """
     override = os.environ.get(ENV_HEAD_PATH)
     if override:
         return Path(override)
-    return Path.home() / ".topos" / "models" / "scope_head"
+    staged = Path.home() / ".topos" / "models" / "scope_head"
+    if (staged / "head.json").is_file():
+        return staged
+    return None
+
+
+def fetch_published_head() -> Optional[Path]:
+    """Download the pinned published head, or return None if it cannot be had.
+
+    Returns None rather than raising: no head is the shipping default, and a node that
+    cannot reach Hugging Face must degrade to prototype routing, not fail to answer.
+    Honours ``HF_HUB_OFFLINE``; after the first fetch the local cache serves it, so a
+    node is network-free from then on.
+    """
+    repo = os.environ.get(ENV_HEAD_REPO, HF_REPO)
+    revision = os.environ.get(ENV_HEAD_REVISION, HF_REVISION)
+    try:
+        from huggingface_hub import snapshot_download
+
+        path = snapshot_download(
+            repo_id=repo,
+            revision=revision,
+            # Weights + metadata only. The card and diagram are for humans reading the
+            # hub page; a node has no use for them and they are pure download cost.
+            allow_patterns=["head.json", "model/*"],
+        )
+        logger.info("scope head fetched: %s@%s", repo, revision[:12])
+        return Path(path)
+    except Exception:  # noqa: BLE001 — offline, rate-limited, gated: all degrade the same
+        logger.warning(
+            "could not fetch scope head %s@%s; falling back to prototype routing",
+            repo, revision[:12], exc_info=True,
+        )
+        return None
 
 
 def _check_manifest(manifest: Dict[str, Any]) -> None:
@@ -124,7 +213,15 @@ def _check_labels(labels: Sequence[str]) -> None:
     if legacy:
         raise ScopeHeadError(f"head emits legacy scope ids {legacy} (PLAN §6A.2)")
     live = set(live_scope_ids())
-    unknown = sorted(set(labels) - live)
+    if NONE_LABEL in live:
+        # The sentinel is only safe while no real scope claims the name. If the registry
+        # ever grows a scope literally called "none", every trained artifact becomes
+        # ambiguous — refuse loudly rather than guess which meaning was intended.
+        raise ScopeHeadError(
+            f"the live registry contains a scope named {NONE_LABEL!r}, which collides "
+            f"with the head's reserved abstain sentinel (REBUILD §B0a)"
+        )
+    unknown = sorted(set(labels) - live - {NONE_LABEL})
     if unknown:
         raise ScopeHeadError(
             f"head emits {unknown}, absent from the live registry — the taxonomy moved "
@@ -166,14 +263,19 @@ def _encoder_predictor(
 
     model_dir = str(path / "model")
     max_length = int(meta.get("max_length", 64))
+    device = resolve_device()
 
     def _load():
         tokenizer = AutoTokenizer.from_pretrained(model_dir)
         model = AutoModelForSequenceClassification.from_pretrained(model_dir)
         model.eval()
+        if device != "cpu":
+            model.to(device)
         return model, tokenizer
 
-    handle, _ = get_model_cache().acquire(ModelSlot.SCOPE_HEAD, model_dir, _load)
+    # Keyed by dir AND device: switching device must reload rather than silently serve a
+    # handle pinned to the previous one.
+    handle, _ = get_model_cache().acquire(ModelSlot.SCOPE_HEAD, f"{model_dir}@{device}", _load)
     model, tokenizer = handle
 
     def _predict(texts: Sequence[str]) -> List[List[float]]:
@@ -183,9 +285,11 @@ def _encoder_predictor(
             list(texts), padding=True, truncation=True,
             max_length=max_length, return_tensors="pt",
         )
+        if device != "cpu":
+            batch = {k: v.to(device) for k, v in batch.items()}
         with torch.no_grad():
             logits = model(**batch).logits
-        return torch.sigmoid(logits).tolist()
+        return torch.sigmoid(logits.float().cpu()).tolist()
 
     return _predict
 
@@ -249,6 +353,10 @@ def load_head(
     refused head is a fact the operator needs, not a fallback to paper over.
     """
     root = Path(path) if path else default_head_path()
+    if root is None:
+        root = fetch_published_head()
+        if root is None:
+            return None
     meta_file = root / "head.json"
     if not meta_file.is_file():
         return None

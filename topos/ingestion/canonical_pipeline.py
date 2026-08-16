@@ -827,8 +827,11 @@ async def run_post_canonical_pipeline(
         if conn and canon_table and canonical_records:
             for rec in canonical_records:
                 rec.setdefault("_table", canon_table)
+            # conn is the availability check only — None is passed so the
+            # layer's gated sections resolve their own connection on the worker
+            # thread they run in, rather than borrowing this one.
             outcome["privacy_disclosure_layer"] = await run_privacy_disclosure_layer(
-                conn,
+                None,
                 canonical_records,
                 source_group=getattr(source_def, "canonical_group_id", None),
             )

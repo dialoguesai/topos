@@ -243,3 +243,118 @@ def test_describe_reports_what_is_installed(tmp_path) -> None:
     assert info["source"] == "head"
     assert "AmazonScience/massive" in info["corpora"]
     assert info["metrics"]["macro_f1"] == 0.61
+
+
+# --- the four-branch ladder (REBUILD §B0/§B0a) ------------------------------
+#
+# Escalate on UNCERTAINTY, never on cardinality: a confident two-scope set is the model
+# doing its job. `none` is a trained output, so "decided nothing" and "no idea" are
+# different branches — before B0a they were the same all-zero vector, and 54.6% of all
+# failures hid inside that identity.
+
+
+class _StubHead:
+    tau_high = 0.60
+    tau_low = 0.30
+
+    def __init__(self, scores):
+        self._scores = dict(scores)
+
+    def predict(self, texts):
+        return [dict(self._scores) for _ in texts]
+
+
+def _scores(none=0.02, **over):
+    base = {s: 0.02 for s in sc.live_scope_ids()}
+    base["none"] = none
+    base.update(over)
+    return base
+
+
+def test_confident_multi_scope_set_is_ACTED_on_not_escalated() -> None:
+    """Jonny's B0 ruling: cardinality is not uncertainty."""
+    head = _StubHead(_scores(**{"availability:read": 0.91, "schedule:read": 0.84}))
+    verdict = sc.classify("am I free after lunch Friday according to my calendar?", head=head)
+    assert verdict.escalated is False
+    assert set(verdict.labels) == {"availability:read", "schedule:read"}
+    assert verdict.reason == ""
+
+
+def test_a_banded_scope_escalates_as_ambiguity() -> None:
+    head = _StubHead(_scores(**{"health:read": 0.45}))
+    verdict = sc.classify("anything", head=head)
+    assert verdict.escalated is True and verdict.labels == ()
+    assert verdict.reason == "ambiguity"
+
+
+def test_high_none_is_a_DECIDED_abstain() -> None:
+    head = _StubHead(_scores(none=0.88))
+    verdict = sc.classify("what's the capital of France?", head=head)
+    assert verdict.abstained is True and verdict.escalated is False
+    assert verdict.reason == "confident-none"
+
+
+def test_no_signal_anywhere_escalates_as_ignorance_not_abstain() -> None:
+    """The branch that could not exist before `none` was trained: all-low used to be
+    indistinguishable from confident-none and silently abstained."""
+    head = _StubHead(_scores())  # everything 0.02, none included
+    verdict = sc.classify("show my attention heatmap", head=head)
+    assert verdict.escalated is True and verdict.labels == ()
+    assert verdict.reason == "ignorance"
+
+
+def test_none_and_a_scope_both_confident_is_ambiguity() -> None:
+    head = _StubHead(_scores(none=0.85, **{"schedule:read": 0.85}))
+    verdict = sc.classify("anything", head=head)
+    assert verdict.escalated is True and verdict.reason == "ambiguity"
+
+
+def test_an_implausibly_wide_set_is_ambiguity_not_confidence() -> None:
+    wide = {s: 0.95 for s in list(sc.live_scope_ids())[:5]}
+    head = _StubHead(_scores(**wide))
+    verdict = sc.classify("anything", head=head)
+    assert verdict.escalated is True and verdict.reason == "ambiguity"
+
+
+def test_none_never_reaches_labels() -> None:
+    head = _StubHead(_scores(none=0.99, **{"health:read": 0.95}))
+    verdict = sc.classify("anything", head=head)
+    assert "none" not in verdict.labels
+
+
+def test_pre_b0a_heads_keep_the_legacy_two_threshold_ladder(tmp_path) -> None:
+    """An artifact without a trained `none` cannot tell ignorance from confident-none;
+    pretending otherwise would relabel every abstention as an escalation."""
+    head = load_head(_write_head(tmp_path, tau_high=1.1, tau_low=1.05), embed=_embed)
+    verdict = sc.classify("anything", head=head)
+    assert verdict.abstained is True and verdict.reason == ""
+
+
+# --- the pack seam (REBUILD: scope is a bound role, not hardwired) -----------
+
+
+def test_scope_binding_defaults_to_the_head_when_no_pack_binds_it() -> None:
+    b = sc.resolve_scope_binding(None)
+    assert b == {"provider": "scope-head", "model": "", "source": "engine_default"}
+
+
+def test_scope_binding_honours_an_explicit_pack_binding(monkeypatch) -> None:
+    class _B:
+        provider = "ollama"
+        model = "mistral:7b"
+
+    import topos.config.model_packs as mp
+
+    monkeypatch.setattr(mp, "resolve_role_binding", lambda conn, role: _B() if role == "scope" else None)
+    b = sc.resolve_scope_binding(object())
+    assert b == {"provider": "ollama", "model": "mistral:7b", "source": "pack"}
+
+
+def test_scope_binding_never_raises_on_a_broken_cache(monkeypatch) -> None:
+    import topos.config.model_packs as mp
+
+    def _boom(conn, role):
+        raise RuntimeError("corrupt cache")
+
+    monkeypatch.setattr(mp, "resolve_role_binding", _boom)
+    assert sc.resolve_scope_binding(object())["source"] == "engine_default"

@@ -7,17 +7,40 @@
     {
       "id": "SkillNode",
       "description": "A skill or competency with proficiency band.",
-      "fields": ["label", "proficiency_band", "evidence_count"]
+      "fields": [
+        "label",
+        "proficiency_band",
+        "evidence_count"
+      ]
     },
     {
       "id": "ExperienceNode",
       "description": "Role or employment episode.",
-      "fields": ["title_band", "organization_band", "seniority_band", "started_at", "ended_at"]
+      "fields": [
+        "title_band",
+        "organization_band",
+        "seniority_band",
+        "started_at",
+        "ended_at"
+      ]
     },
     {
       "id": "Credential",
       "description": "Certification, degree, or public credential.",
-      "fields": ["credential_kind", "label", "issuer_band"]
+      "fields": [
+        "credential_kind",
+        "label",
+        "issuer_band"
+      ]
+    },
+    {
+      "id": "ProfileSurface",
+      "description": "A public surface itself: the about text, where the profile is visible, what a reader would find on it.",
+      "fields": [
+        "surface_label",
+        "visibility",
+        "mention_label"
+      ]
     }
   ],
   "signal_objects": [
@@ -35,28 +58,44 @@
   "canonical_contributions": {
     "profile_records": {
       "primary_weight": 1.0,
-      "secondary_dimensions": ["work"]
+      "secondary_dimensions": [
+        "work"
+      ]
     },
     "public_bio": {
       "primary_weight": 1.0
     },
     "skill": {
       "primary_weight": 1.0,
-      "secondary_dimensions": ["work"]
+      "secondary_dimensions": [
+        "work"
+      ]
     },
     "experience": {
       "primary_weight": 1.0,
-      "secondary_dimensions": ["work"]
+      "secondary_dimensions": [
+        "work"
+      ]
     },
     "activity_events": {
       "primary_weight": 0.3,
-      "secondary_dimensions": ["interests"]
+      "secondary_dimensions": [
+        "interests"
+      ]
     },
     "journal_entries": {
       "primary_weight": 0.45,
-      "secondary_dimensions": ["work", "intentions", "wellbeing"]
+      "secondary_dimensions": [
+        "work",
+        "intentions",
+        "wellbeing"
+      ]
     }
   },
-  "view_types": ["skill_tags", "public_bio", "narrative_brief_optional"],
+  "view_types": [
+    "skill_tags",
+    "public_bio",
+    "narrative_brief_optional"
+  ],
   "extraction_hints": "Focus on professional background, skills themes, and affiliations — no exact employer unless clearly public."
 }

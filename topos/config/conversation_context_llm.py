@@ -47,75 +47,37 @@ def device_context_llm_model(conn: Optional[sqlite3.Connection]) -> str:
 
 
 def resolve_context_llm_model(settings: Any, conn: Optional[sqlite3.Connection] = None) -> str:
-    override = device_context_llm_model(conn)
+    """Device override → engine default. Deliberately NO pack rung.
 
-    # Resolution order (PLAN_MODEL_PACKS.md M3 / S6): device override → pack
-    # `classify` role → engine default, via the one node resolver.
-    engine_default = ""
+    Until 2026-08-15 the pack's `classify` binding sat between these two. It is
+    gone with the role: conversation-context tagging is an INGEST function — it
+    runs when data arrives, not when the owner asks something — and its model is
+    chosen under Settings → Models → Node functions (the device override below),
+    not by the query-time pack. A query pack steering an ingest model was the
+    exact confusion the query-only pack schema removes.
+    """
+    override = device_context_llm_model(conn)
+    if override:
+        return override
     for attr in ("ollama_extraction_model", "ollama_query_model"):
         value = str(getattr(settings, attr, "") or "").strip()
         if value:
-            engine_default = value
-            break
-
-    if conn is not None:
-        from .model_packs import (
-            SOURCE_OVERRIDE,
-            SOURCE_PACK,
-            active_pack_dict,
-            installed_local_models,
-            resolve_model,
-        )
-
-        # See facts_llm: a pack tag the machine never pulled must fall to the
-        # engine default here rather than 404 on first use (§1.4).
-        installed = installed_local_models()
-
-        resolved = resolve_model(
-            role="classify",
-            override=override or None,
-            pack=active_pack_dict(conn),
-            engine_default=(
-                {"provider": "ollama", "model": engine_default} if engine_default else None
-            ),
-            installed_local_models=installed,
-        )
-        if resolved.source == SOURCE_OVERRIDE and resolved.model:
-            return resolved.model
-        if resolved.source == SOURCE_PACK and resolved.provider != "ollama":
-            resolved = resolve_model(
-                role="classify",
-                engine_default=(
-                    {"provider": "ollama", "model": engine_default} if engine_default else None
-                ),
-                installed_local_models=installed,
-            )
-        if resolved.model:
-            return resolved.model
-
-    return override or engine_default
+            return value
+    return ""
 
 
 def resolve_context_llm_params(
     conn: Optional[sqlite3.Connection], model: str
 ) -> Optional["RoleBinding"]:
-    """The pack's `classify` binding, but only for the model it was set on.
+    """Always None since 2026-08-15: the pack `classify` rung is retired.
 
-    Picking the model and picking its parameters are one decision, so they live
-    together: `resolve_context_llm_model` can return a device override or a
-    settings default instead of the pack's model, and applying another
-    binding's `thinking`/`context` to that model would run it at settings its
-    owner never chose for it.
+    Conversation-context tagging is an ingest function; its model is chosen by
+    `resolve_context_llm_model` (device override → settings default), and a
+    query-time pack must not steer its inference knobs sideways. Kept as a seam
+    so callers keep one shape while per-function parameters grow their own home
+    under Node functions.
     """
-    if conn is None or not model:
-        return None
-
-    from .model_packs import resolve_role_binding
-
-    binding = resolve_role_binding(conn, "classify")
-    if binding is None or binding.provider != "ollama" or binding.model != model:
-        return None
-    return binding
+    return None
 
 
 def normalize_put_model(payload: Any) -> str:

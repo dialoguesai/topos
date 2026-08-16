@@ -23,6 +23,16 @@
         "member_count",
         "dominant_context"
       ]
+    },
+    {
+      "id": "ContactRecord",
+      "description": "A saved way to reach someone: the name held and the identifiers under it.",
+      "fields": [
+        "display_name",
+        "identifier",
+        "identifier_type",
+        "last_verified_at"
+      ]
     }
   ],
   "signal_objects": [

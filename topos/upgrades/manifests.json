@@ -408,8 +408,28 @@
     {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
-      "steps": [],
-      "notes": []
+      "steps": [
+        {
+          "id": "rerun-places-dimension-summary",
+          "kind": "enrichment_reprocess",
+          "title": "Re-run dimension_summary where undeclared PlaceContext writes failed the whole job",
+          "why": "The artifact router writes PlaceContext objects into the places dimension for every place EntityRef, but places.json never declared the type, so SignalObjectStore rejected the write and dimension_summary DEGRADED on any batch containing a place reference \u2014 the derivation-retry ledger recorded the debt but nothing consumes it automatically. Observed on grow_data_file 2026-08-15: every manual-enrichment batch (171 records) queued for retry with derived data MISSING. places.json now declares PlaceContext, so a re-run succeeds where the same records failed.",
+          "params": {
+            "job_names": [
+              "dimension_summary"
+            ],
+            "include_signal": true
+          },
+          "progress": "per-source progress via GET /v1/upgrade/status",
+          "idempotent": "coverage-driven row selection (only records whose dimension_summary output is missing); signal object upserts are (dimension, object_type, object_key)-keyed and supersede in place, so re-running converges",
+          "consent": "auto",
+          "cost": "local models only, no network; scoped to records whose derived output is missing \u2014 the failed grow_data_file batches on the affected node, minutes; unaffected sources no-op on the coverage check",
+          "order": 5
+        }
+      ],
+      "notes": [
+        "Write-gate/event-loop fix is code-only ([O]): no schema migration, no derived invalidation, no step. Ingest dedupe, the install_service sources surface, the routine write handlers and both gated sections of the privacy layer now run in asyncio.to_thread on the worker's own connection, and the ai_chat / source_settings DDL probes before taking the gate instead of re-running idempotent CREATEs. Existing rows and derived outputs are untouched \u2014 the same statements run, on a different thread."
+      ]
     }
   ]
 }
