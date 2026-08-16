@@ -1,5 +1,5 @@
 {
-  "$comment": "Per-release derived-data upgrade manifests. Schema migrations handle table SHAPE; entries here declare which DERIVED layers a release invalidates and how to recompute them. Consumed by steps_between(installed, shipped) — see topos/upgrades/__init__.py. Steps MUST be idempotent and safe to re-run after interruption.",
+  "$comment": "Per-release derived-data upgrade manifests. Schema migrations handle table SHAPE; entries here declare which DERIVED layers a release invalidates and how to recompute them. Consumed by steps_between(installed, shipped) \u2014 see topos/upgrades/__init__.py. Steps MUST be idempotent and safe to re-run after interruption.",
   "releases": [
     {
       "version": "1.1.0",
@@ -26,7 +26,7 @@
           },
           "progress": "TUI progress bar on the node + GET /v1/upgrade/status",
           "idempotent": "record_mention is INSERT OR IGNORE; re-running converges",
-          "estimated_duration": "~10–20 min per 1.5k records (CPU-bound NER); node stays usable, serves stale graph meanwhile; signal/LLM lane stays off (graph rebuild is the next step)",
+          "estimated_duration": "~10\u201320 min per 1.5k records (CPU-bound NER); node stays usable, serves stale graph meanwhile; signal/LLM lane stays off (graph rebuild is the next step)",
           "order": 1
         },
         {
@@ -58,8 +58,8 @@
       "notes": [
         "No re-embedding: the embedding model is unchanged in 1.2.0 (signal_embeddings remain valid).",
         "No canonical re-ingest: raw and canonical rows are untouched by every 1.2.0 change.",
-        "Extraction default model moved to the quality tier (qwen3.5:9b-mlx) — affects FUTURE extractions only; small-RAM devices surface tier=stress in model recommendations and should downsize via settings.",
-        "Fleet skew: 1.1.0 nodes lack the signal_entity_graph_search handler — CPs must treat it as optional until the fleet is on 1.2.0."
+        "Extraction default model moved to the quality tier (qwen3.5:9b-mlx) \u2014 affects FUTURE extractions only; small-RAM devices surface tier=stress in model recommendations and should downsize via settings.",
+        "Fleet skew: 1.1.0 nodes lack the signal_entity_graph_search handler \u2014 CPs must treat it as optional until the fleet is on 1.2.0."
       ]
     },
     {
@@ -89,7 +89,7 @@
           },
           "progress": "TUI progress bar on the node + GET /v1/upgrade/status",
           "idempotent": "verdicts are (day, record_id) upserts; signal objects no-op when unchanged",
-          "estimated_duration": "seconds–minutes depending on day span; CPU-bound instruments, no LLM (signal lane off)",
+          "estimated_duration": "seconds\u2013minutes depending on day span; CPU-bound instruments, no LLM (signal lane off)",
           "order": 1
         }
       ],
@@ -97,7 +97,7 @@
         "No re-embedding and no canonical re-ingest: raw/canonical rows and signal_embeddings remain valid.",
         "Time-signal flex/rhythm/commitment objects fill on the next scope materialization (dimension_summary / structured signal path); no dedicated rematerialize endpoint is wired into the upgrade runner yet.",
         "Conversation context_tag columns are additive empty; owner API + local-LLM auto-label fill going forward (owner stamps always win).",
-        "Fact-extraction think suppression and claim-verify handlers affect FUTURE LLM passes only — existing signal_facts are not invalidated.",
+        "Fact-extraction think suppression and claim-verify handlers affect FUTURE LLM passes only \u2014 existing signal_facts are not invalidated.",
         "New WS handlers (signal_attention_dashboard, signal_set_worn_badge, verify_claim, conversation_context*, facts_llm_config*, truth_*, put_fact_verdict): CPs must treat as optional until the fleet is on 1.3.0; bump engine-compat when the app depends on them."
       ]
     },
@@ -120,38 +120,38 @@
       ],
       "notes": [
         "No re-embedding and no canonical re-ingest: raw/canonical rows and signal_embeddings remain valid.",
-        "Blackhole filtering is runtime policy over existing data — no backfill step.",
+        "Blackhole filtering is runtime policy over existing data \u2014 no backfill step.",
         "Complexity snapshots fill via enrichment piggyback going forward; pre-1.3.2 nodes get coverage on the next enrichment pass.",
         "New WS handlers (blackhole_*, complexity_*, signal_timeline_daily): CPs must treat as optional until the fleet is on 1.3.2; bump engine-compat when the app depends on them."
       ]
     },
     {
       "version": "1.3.3",
-      "summary": "Release migration hardening (PLAN_NODE_RELEASE_MIGRATIONS M0–M2) + attention pin/retire intent handlers.",
+      "summary": "Release migration hardening (PLAN_NODE_RELEASE_MIGRATIONS M0\u2013M2) + attention pin/retire intent handlers.",
       "steps": [
         {
           "id": "migration-registry-hardening",
           "kind": "none",
           "title": "Single migration registry + backup + downgrade guard",
-          "why": "PLAN_NODE_RELEASE_MIGRATIONS M0–M2: unify apply/ensure on one MIGRATIONS registry, PRAGMA user_version fast-path, fail-loud on shape failures, pre-migration backup under ~/.topos/backups, downgrade guard when user_version is ahead of this build. No derived-layer invalidation.",
+          "why": "PLAN_NODE_RELEASE_MIGRATIONS M0\u2013M2: unify apply/ensure on one MIGRATIONS registry, PRAGMA user_version fast-path, fail-loud on shape failures, pre-migration backup under ~/.topos/backups, downgrade guard when user_version is ahead of this build. No derived-layer invalidation.",
           "order": 0
         }
       ],
       "notes": [
-        "Code + schema-runner only — raw/canonical/derived rows are untouched.",
+        "Code + schema-runner only \u2014 raw/canonical/derived rows are untouched.",
         "Nodes upgrading into this release get a pre-migration backup when ledger-pending migrations exist.",
         "Also ships signal_pin_intent / signal_retire_intent (protocol + code only; no derived invalidation)."
       ]
     },
     {
       "version": "1.3.4",
-      "summary": "PLAN M3–M4: coverage spec_version stamps, selective anti-join, new upgrade executors + consent, upgrade-matrix CI.",
+      "summary": "PLAN M3\u2013M4: coverage spec_version stamps, selective anti-join, new upgrade executors + consent, upgrade-matrix CI.",
       "steps": [
         {
           "id": "enrichment-spec-version-columns",
           "kind": "none",
           "title": "Coverage spec_version + selective anti-join",
-          "why": "PLAN M3: additive spec_version on coverage tables; catalog JOB_SPEC_VERSIONS; writers stamp; anti-join treats NULL as 0. Current catalog versions all start at 1 — no derived wipe required.",
+          "why": "PLAN M3: additive spec_version on coverage tables; catalog JOB_SPEC_VERSIONS; writers stamp; anti-join treats NULL as 0. Current catalog versions all start at 1 \u2014 no derived wipe required.",
           "cost": "fast",
           "consent": "auto",
           "order": 0
@@ -185,7 +185,7 @@
           "id": "backfill-attention-triage-redo",
           "kind": "enrichment_reprocess",
           "title": "Re-run the attention triage backfill (1.3.0 step was a routing no-op)",
-          "why": "The 1.3.0 backfill-attention-triage step ledgered 'done' on every node without writing a single verdict: attention_triage lives in SIGNAL_DERIVATION_JOBS, but the runner routed it through run_canonical(), which filters job_names against CANONICAL_JOBS and silently dropped it. Nodes that upgraded through 1.3.0–1.3.6 therefore have a green ledger row and zero backfilled triage history. The runner now routes signal-registry jobs down the narrow signal lane; this step re-declares the backfill so already-upgraded nodes are healed too. Days triaged organically since 1.3.0 no-op via the (day, record_id) upserts.",
+          "why": "The 1.3.0 backfill-attention-triage step ledgered 'done' on every node without writing a single verdict: attention_triage lives in SIGNAL_DERIVATION_JOBS, but the runner routed it through run_canonical(), which filters job_names against CANONICAL_JOBS and silently dropped it. Nodes that upgraded through 1.3.0\u20131.3.6 therefore have a green ledger row and zero backfilled triage history. The runner now routes signal-registry jobs down the narrow signal lane; this step re-declares the backfill so already-upgraded nodes are healed too. Days triaged organically since 1.3.0 no-op via the (day, record_id) upserts.",
           "params": {
             "job_names": [
               "attention_triage"
@@ -208,19 +208,19 @@
       "summary": "Stability: ingest/enrichment DB writes off the event loop; statistics job no longer holds an open write lock across the pipeline; graph refresher skips cross-thread dirty bumps; open-txn watchdog (opt-in); DMG in-app update finds bundled uv; control-plane pong deadline restored. Code-only.",
       "steps": [],
       "notes": [
-        "Code-only — no schema migration, no derived-layer invalidation, no consent prompt.",
+        "Code-only \u2014 no schema migration, no derived-layer invalidation, no consent prompt.",
         "Worker-thread write offload + statistics txn hygiene close the database-is-locked / event-loop-stall class that hit repeat ingests after 1.3.7."
       ]
     },
     {
       "version": "1.3.9",
-      "summary": "Derivation-retry repair: the signal_derive_retry executor was never registered, so every recorded derivation debt was claimed and failed as an unknown job kind — the retry meant to repair a lost derivation destroyed the record of it instead. The executor is wired, workers claim only kinds they can execute, and an executor may requeue rather than read as failed. One consent:auto step sweeps debt already parked 'failed', which nothing else would re-queue. Also: public_bio:read / work_context:read gain test cover for the restored profile_records lane, and just harness-gate scores answer quality against a ratcheting floor instead of a 70/70 bar it cannot reach on a signal-less seed DB. No schema change.",
+      "summary": "Derivation-retry repair: the signal_derive_retry executor was never registered, so every recorded derivation debt was claimed and failed as an unknown job kind \u2014 the retry meant to repair a lost derivation destroyed the record of it instead. The executor is wired, workers claim only kinds they can execute, and an executor may requeue rather than read as failed. One consent:auto step sweeps debt already parked 'failed', which nothing else would re-queue. Also: public_bio:read / work_context:read gain test cover for the restored profile_records lane, and just harness-gate scores answer quality against a ratcheting floor instead of a 70/70 bar it cannot reach on a signal-less seed DB. No schema change.",
       "steps": [
         {
           "id": "retry-recorded-derivation-debt",
           "kind": "engine_endpoint",
           "title": "Re-run derivation debt that was failed as an unknown job kind",
-          "why": "record_failed_derivation() has enqueued pipeline rows of kind 'signal_derive_retry' since 1.3.x, but no executor was ever registered for that kind, so the worker claimed each row and immediately failed it with 'Unknown job kind: signal_derive_retry'. The debt record IS the queue row, so the retry meant to repair a lost derivation destroyed the record of it instead — nodes carry silent derivation gaps with a 'failed' row and nothing pointing at them. The executor is registered as of this release, but that does not revive the existing rows: a failed row is only re-queued by the next organic failure of the same (batch, job), and recover_stale_jobs resets 'running' rows, never 'failed' ones. This step sweeps them once on upgrade so the repair happens without an operator remembering to POST /v1/signal/derivation-debt/retry.",
+          "why": "record_failed_derivation() has enqueued pipeline rows of kind 'signal_derive_retry' since 1.3.x, but no executor was ever registered for that kind, so the worker claimed each row and immediately failed it with 'Unknown job kind: signal_derive_retry'. The debt record IS the queue row, so the retry meant to repair a lost derivation destroyed the record of it instead \u2014 nodes carry silent derivation gaps with a 'failed' row and nothing pointing at them. The executor is registered as of this release, but that does not revive the existing rows: a failed row is only re-queued by the next organic failure of the same (batch, job), and recover_stale_jobs resets 'running' rows, never 'failed' ones. This step sweeps them once on upgrade so the repair happens without an operator remembering to POST /v1/signal/derivation-debt/retry.",
           "params": {
             "method": "POST",
             "path": "/v1/signal/derivation-debt/retry",
@@ -244,7 +244,7 @@
     },
     {
       "version": "1.3.11",
-      "summary": "Ingest throughput: the conversation auto-classifier stops re-asking the same unlabelable conversations on every enrichment batch (~20 model calls / ~26s per batch, permanently, for zero progress). An unclear verdict now retires the row instead of being silently dropped. No steps: nothing on-node is invalidated — prompt, model and parse logic are unchanged, so existing auto: tags remain valid, and retired rows self-heal on the next enrichment pass.",
+      "summary": "Ingest throughput: the conversation auto-classifier stops re-asking the same unlabelable conversations on every enrichment batch (~20 model calls / ~26s per batch, permanently, for zero progress). An unclear verdict now retires the row instead of being silently dropped. No steps: nothing on-node is invalidated \u2014 prompt, model and parse logic are unchanged, so existing auto: tags remain valid, and retired rows self-heal on the next enrichment pass.",
       "steps": [],
       "notes": []
     },
@@ -300,7 +300,7 @@
       "steps": [],
       "notes": [
         "Migrations 57-59 delete duplicate and unanswerable entity_review rows and mark the rest stale; approved, dismissed and no_bind rows are never touched.",
-        "Entity labels already minted with a possessive, trailing dash or [NAME] are left in place — they surface through the review queue as ordinary merge decisions rather than being rewritten underneath the owner.",
+        "Entity labels already minted with a possessive, trailing dash or [NAME] are left in place \u2014 they surface through the review queue as ordinary merge decisions rather than being rewritten underneath the owner.",
         "The occurrences count on search results ships in topos-react-app as well."
       ]
     },
@@ -341,7 +341,7 @@
           "id": "backfill-github-activity-commit-content",
           "kind": "canonical_reprocess",
           "title": "Re-map retained GitHub push events so activity rows carry their commit messages",
-          "why": "activity_events.content was NULL on every github push row (one live node: 451/451, and only 11 DISTINCT titles across all 451 — all '{owner}/{repo}: pushed N commit'), because the mapper carried repo/actor and nothing else, and the store's INSERT did not list the content column at all. The commit messages — the only text that says what the work WAS — sat unused in the retained raw payloads. Everything semantic downstream could therefore match on repo NAME alone: goal/interest attachment to engineering work was pure name matching, and a contrastive term extraction over commit-attached items returned nothing but 'pushed'/'commit'. The declared field map and the store fix land in this release, but neither reaches a row already on disk: re-mapping from raw retention is what fills it. Raw retention holds the full PushEvent payloads (461 rows on the same node), so no re-fetch from GitHub is needed.",
+          "why": "activity_events.content was NULL on every github push row (one live node: 451/451, and only 11 DISTINCT titles across all 451 \u2014 all '{owner}/{repo}: pushed N commit'), because the mapper carried repo/actor and nothing else, and the store's INSERT did not list the content column at all. The commit messages \u2014 the only text that says what the work WAS \u2014 sat unused in the retained raw payloads. Everything semantic downstream could therefore match on repo NAME alone: goal/interest attachment to engineering work was pure name matching, and a contrastive term extraction over commit-attached items returned nothing but 'pushed'/'commit'. The declared field map and the store fix land in this release, but neither reaches a row already on disk: re-mapping from raw retention is what fills it. Raw retention holds the full PushEvent payloads (461 rows on the same node), so no re-fetch from GitHub is needed.",
           "params": {
             "from_stage": "raw",
             "source_ids": [
@@ -357,52 +357,69 @@
           "$comment": "CANONICAL ONLY (run_enrichment: false), deliberately. The default fan-out would run this source's baseline signal jobs, and a 458-row batch exceeds topic_clusters' _INCREMENTAL_MAX_BATCH (200), which forces a FULL cluster recompute: on the measured node that repartitions all 152 clusters, and 85 of them (interests 48, wellbeing 27, memory 10) sit in dimensions whose definitions/<dimension>.json is not yet in the tree, so dimension_core_question falls back to the generic prompt silently. Corrected content is what this release owes; derivation over it belongs to the release that lands the topic-dimension work, as one pass with the definitions present rather than two with a repartition in between."
         },
         {
+          "id": "relabel-topic-clusters",
+          "kind": "derived_rebuild",
+          "title": "Rename existing topic clusters with the contrastive, dimension-framed labeler",
+          "why": "Cluster labels were generated one cluster at a time from that cluster's own most frequent terms, under one generic instruction regardless of which signal dimension the cluster was built in. On one live node that left 152 clusters carrying 91 distinct labels \u2014 'personal projects' on fourteen of them spanning five dimensions, 'private notes' on five \u2014 which is what every surface that lists topics showed. The new prompt reaches an existing cluster only through a relabel: nothing about its membership changed, so no other stage will rewrite these names on its own. Labels ONLY, deliberately \u2014 a full recompute would relabel but also repartition (seed-to-seed ARI ~0.52 on the live corpus), churning cluster ids, top_topics facts and UI links for what is a prompt change.",
+          "params": {
+            "targets": [
+              "topic_cluster_labels"
+            ]
+          },
+          "progress": "GET /v1/upgrade/status",
+          "idempotent": "labels and label metadata only \u2014 cluster ids, membership and centroids are untouched, and the deterministic term label is preserved in metadata.term_label. Re-running renames from the same inputs; the local model is sampled, so a second run can word the same clusters differently.",
+          "consent": "prompt",
+          "cost": "one short local-LLM call per cluster, plus one retry per duplicate name; measured ~2s per call on llama3.2:latest (~6 min for 152 clusters). No network. Nodes with no clusters no-op.",
+          "order": 3
+        },
+        {
           "id": "rerun-blackhole-rebuilds",
           "kind": "derived_rebuild",
           "title": "Re-run every black-hole rebuild so it reaches topic cluster labels and member excerpts",
-          "why": "The black-hole rebuild withdraws prose artifacts naming a protected entity, but topic_clusters and topic_cluster_members were never on its list — the label used to be term soup that named nobody, and the contrastive labeler now names the subject (33 of 152 labels on one live node were an entity name). The rebuild also had to learn that the cluster ROW is the producer: closing the derived top_topics object alone is undone by the next cluster pass, which re-mints the fact from topic_clusters.label. Existing black holes are marked 'complete', so run_pending_rebuilds skips exactly the entities carrying the un-withdrawn data: the same live node had five member excerpts still quoting a protected entity under three completed rebuilds. Must run AFTER recompute-topic-clusters-split so it also sees the labels that pass just wrote.",
+          "why": "The black-hole rebuild withdraws prose artifacts naming a protected entity, but topic_clusters and topic_cluster_members were never on its list \u2014 the label used to be term soup that named nobody, and the contrastive labeler now names the subject (33 of 152 labels on one live node were an entity name). The rebuild also had to learn that the cluster ROW is the producer: closing the derived top_topics object alone is undone by the next cluster pass, which re-mints the fact from topic_clusters.label. Existing black holes are marked 'complete', so run_pending_rebuilds skips exactly the entities carrying the un-withdrawn data: the same live node had five member excerpts still quoting a protected entity under three completed rebuilds. Must run AFTER relabel-topic-clusters so it also sees anything that pass just wrote.",
           "params": {
             "targets": [
               "blackhole_rebuilds"
             ]
           },
           "depends_on": [
-            "recompute-topic-clusters-split"
+            "relabel-topic-clusters"
           ],
           "progress": "GET /v1/upgrade/status",
-          "idempotent": "withdrawal is a name scan re-applied to whatever is currently stored; a second run finds nothing left to withdraw. Cluster ids, membership and counts are untouched — only prose (label, centroid preview, member excerpts) is withdrawn.",
+          "idempotent": "withdrawal is a name scan re-applied to whatever is currently stored; a second run finds nothing left to withdraw. Cluster ids, membership and counts are untouched \u2014 only prose (label, centroid preview, member excerpts) is withdrawn.",
           "consent": "auto",
           "cost": "no LLM, no network; a scan of topic_clusters, topic_cluster_members, signal_objects and briefs per protected entity. Seconds. Nodes with no black holes no-op.",
+          "order": 4
+        },
+        {
+          "id": "rerun-places-dimension-summary",
+          "kind": "enrichment_reprocess",
+          "title": "Re-run dimension_summary where undeclared PlaceContext writes failed the whole job",
+          "why": "The artifact router writes PlaceContext objects into the places dimension for every place EntityRef, but places.json never declared the type, so SignalObjectStore rejected the write and dimension_summary DEGRADED on any batch containing a place reference — the derivation-retry ledger recorded the debt but nothing consumes it automatically. Observed on grow_data_file 2026-08-15: every manual-enrichment batch (171 records) queued for retry with derived data MISSING. places.json now declares PlaceContext, so a re-run succeeds where the same records failed.",
+          "params": {
+            "job_names": [
+              "dimension_summary"
+            ],
+            "include_signal": true
+          },
+          "progress": "per-source progress via GET /v1/upgrade/status",
+          "idempotent": "coverage-driven row selection (only records whose dimension_summary output is missing); signal object upserts are (dimension, object_type, object_key)-keyed and supersede in place, so re-running converges",
+          "consent": "auto",
+          "cost": "local models only, no network; scoped to records whose derived output is missing — the failed grow_data_file batches on the affected node, minutes; unaffected sources no-op on the coverage check",
           "order": 5
         },
         {
           "id": "retire-url-classification",
           "kind": "none",
           "title": "url_classification retired; its table and interest tags removed",
-          "why": "The job classified visited pages into DMOZ top-level categories. On the node this was measured on it produced 8,616 rows over six months, 73% of them the single label 'Reference' at an average confidence of 0.961 — HIGHER than any other bucket, so no threshold separates it from filler. The same host drew different labels on different visits (github.com: Reference 720, Computers 125, Kids 5), because the classifier reads the page title and an authenticated app title says almost nothing. DMOZ describes where a site files in a directory, not what a person is doing; 'Reference' is its catch-all. 458 of the interests dimension's 828 signal objects were these tags, 349 of them 'Reference'. Handled by the ledger-guarded migration retire_url_classification_v1 at first boot; listed so release notes and the fleet dashboard show it without a step. Scoped by payload source_kind, so the materializer's keyword-rule tags and the personal fact objects that also live in interests are untouched — verified on a copy of a live node: 828 -> 370 interests objects, facts 6 -> 6, other dimensions 6,580 unchanged.",
+          "why": "The job classified visited pages into DMOZ top-level categories. On the node this was measured on it produced 8,616 rows over six months, 73% of them the single label 'Reference' at an average confidence of 0.961 \u2014 HIGHER than any other bucket, so no threshold separates it from filler. The same host drew different labels on different visits (github.com: Reference 720, Computers 125, Kids 5), because the classifier reads the page title and an authenticated app title says almost nothing. DMOZ describes where a site files in a directory, not what a person is doing; 'Reference' is its catch-all. 458 of the interests dimension's 828 signal objects were these tags, 349 of them 'Reference'. Handled by the ledger-guarded migration retire_url_classification_v1 at first boot; listed so release notes and the fleet dashboard show it without a step. Scoped by payload source_kind, so the materializer's keyword-rule tags and the personal fact objects that also live in interests are untouched \u2014 verified on a copy of a live node: 828 -> 370 interests objects, facts 6 -> 6, other dimensions 6,580 unchanged.",
           "order": 0
-        },
-        {
-          "id": "recompute-topic-clusters-split",
-          "kind": "derived_rebuild",
-          "title": "Recompute topic clusters with the oversized-cluster split and canonical-text labels",
-          "why": "23 clusters of 120+ members held 51% of all members on one live node, and labels were minted from redacted previews ([NAME]/[ACCOUNT]) rather than the canonical text. Both fixes only reach existing clusters through a recompute; rehearsed on a live-DB copy it took mega-clusters 23 -> 14 and their member share 51% -> 33% with 134/167 ids preserved. Subsumes a labels-only relabel: this pass relabels every cluster it writes, so a separate relabel step would spend one local-LLM call per cluster on labels this recompute immediately discards.",
-          "params": {
-            "targets": [
-              "topic_clusters"
-            ]
-          },
-          "progress": "GET /v1/upgrade/status",
-          "idempotent": "full recompute with stable-id matching; re-running converges on the same partition modulo k-means seed",
-          "consent": "prompt",
-          "cost": "one full clustering pass plus one short local-LLM call per cluster (~2s each warm); minutes at personal scale. No network.",
-          "order": 4
         }
       ],
       "notes": [
-        "Deploying this build requires reinstalling the node (frozen uv tool snapshot) — a plain restart runs the old code and leaves the browser lanes dark.",
-        "Existing clusters keep their old labels and their old partition until recompute-topic-clusters-split runs: the labeler runs at cluster write time, and this release changes both the prompt and the partition.",
-        "Nodes whose github raw retention was purged keep NULL content on their old push rows; new pushes carry commit messages from this build on. Browser rows written before this release keep NULL content/hostname until they are re-ingested — no raw-retention re-map step is declared for them because the plugin re-pushes visits organically."
+        "Deploying this build requires reinstalling the node (frozen uv tool snapshot) \u2014 a plain restart runs the old code and leaves the browser lanes dark.",
+        "Existing clusters keep their old labels until relabel-topic-clusters runs: the labeler runs at cluster write time, and this release changes the prompt, not the partition.",
+        "Nodes whose github raw retention was purged keep NULL content on their old push rows; new pushes carry commit messages from this build on. Browser rows written before this release keep NULL content/hostname until they are re-ingested \u2014 no raw-retention re-map step is declared for them because the plugin re-pushes visits organically."
       ]
     }
   ]
