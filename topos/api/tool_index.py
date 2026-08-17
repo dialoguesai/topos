@@ -11,6 +11,7 @@ inference, and FastAPI runs sync handlers in its threadpool.
 
 from __future__ import annotations
 
+import logging
 from typing import List, Optional
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -21,6 +22,7 @@ from ..core.state import get_db_connection
 from ..features.signal.tool_index import index_status, index_tools, retrieve_tools
 from ..rate_limit import rate_limit
 
+logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
@@ -73,6 +75,18 @@ def tools_retrieve(body: RetrieveToolsRequest):
     if not str(body.query or "").strip():
         raise HTTPException(status_code=422, detail="query is required")
     conn = _require_conn()
+    # The twin of the hook in core/handlers/tool_index.py. This route is the
+    # engine-direct entrance — the dev transport — and leaving it unobserved would
+    # make shadow coverage depend on which transport the client happened to use,
+    # which is the kind of gap that gets read later as "the model never sees dev
+    # traffic". Wrapped rather than trusted: telemetry may cost a millisecond,
+    # never the turn.
+    try:
+        from ..query.scope_shadow import observe_turn
+
+        observe_turn(body.query)
+    except Exception:  # noqa: BLE001 — observation must never fail retrieval
+        logger.debug("scope shadow turn observation failed", exc_info=True)
     return retrieve_tools(
         conn,
         body.query,
