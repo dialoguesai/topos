@@ -8,11 +8,20 @@ from typing import List, Optional
 from pydantic import AliasChoices, Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from topos.config.local_model_builds import tag_for_this_machine
+
 # Set before any huggingface_hub import during app/route loading.
 os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
 
 
 DEFAULT_TOPOS_CONTROL_PLANE_URL = "wss://cp.logu3s.com/ws/engine"
+
+#: The 9B local model these defaults settle on, named in its PORTABLE build.
+#: Resolved to this machine's build at Settings() time — Apple Silicon takes
+#: the MLX build, every other platform takes this one. Hardcoding the MLX tag
+#: is what made LLM fact extraction and the privacy judge ask Windows and Linux
+#: nodes for a model that does not exist for them (local_model_builds).
+DEFAULT_LOCAL_9B_MODEL = "qwen3.5:9b"
 
 
 class Settings(BaseSettings):
@@ -98,7 +107,7 @@ class Settings(BaseSettings):
     # llama3.2-3b drops ~49% of goal extractions to malformed JSON; a 9B model parses cleanly.
     # Empty string ⇒ fall back to ollama_query_model (the floor tier keeps the small model).
     ollama_extraction_model: str = Field(
-        "qwen3.5:9b-mlx",
+        default_factory=lambda: tag_for_this_machine(DEFAULT_LOCAL_9B_MODEL),
         validation_alias=AliasChoices(
             "TOPOS_OLLAMA_EXTRACTION_MODEL", "OLLAMA_EXTRACTION_MODEL"
         ),
@@ -130,7 +139,7 @@ class Settings(BaseSettings):
         ),
     )
     privacy_judge_model: str = Field(
-        "qwen3.5:9b-mlx",
+        default_factory=lambda: tag_for_this_machine(DEFAULT_LOCAL_9B_MODEL),
         validation_alias=AliasChoices("TOPOS_PRIVACY_JUDGE_MODEL", "PRIVACY_JUDGE_MODEL"),
     )
 

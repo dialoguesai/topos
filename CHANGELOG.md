@@ -9,6 +9,24 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+
+- `[O]` The engine's local-model defaults name a model the machine can actually
+  pull. `ollama_extraction_model` and `privacy_judge_model` both defaulted to
+  `qwen3.5:9b-mlx`; MLX is Apple's array framework, so that tag exists for
+  Apple-Silicon Macs and for nothing else. On Windows, Linux and Intel Macs the
+  LLM fact pass and the privacy judge asked Ollama for a model it could never
+  serve — and it is the same tag the pack resolver demotes a missing local role
+  *to*, so the safety net and the thing it was catching were one dead model.
+  Both defaults now resolve from the running machine: a curated tag is stored in
+  its portable build and an accelerated build is attached only where one is
+  recorded as published for that exact tag. The axis is (os, arch), not os — an
+  Intel Mac is macOS and still cannot run MLX — and an unrecognised platform
+  takes the portable build rather than a guess. Lane `[O]`: on Apple Silicon
+  both fields resolve to `qwen3.5:9b-mlx` exactly as before, and on the
+  platforms where the value changes the old one produced no output to
+  invalidate, so nothing needs reprocessing.
+
 ## [1.3.17] — 2026-08-16
 
 ### Fixed

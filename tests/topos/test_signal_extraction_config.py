@@ -19,9 +19,10 @@ from topos.config.signal_extraction import (
 )
 
 
-# Deliberately NOT the field defaults ("llama3.2:latest" / "qwen3.5:9b-mlx"):
-# these tests assert env values reach Settings, so a sentinel that collides with
-# the default would pass even if env resolution were completely broken.
+# Deliberately NOT the field defaults ("llama3.2:latest" / the platform build of
+# "qwen3.5:9b"): these tests assert env values reach Settings, so a sentinel that
+# collides with the default would pass even if env resolution were completely
+# broken.
 ENV_QUERY_MODEL = "env-query-model:test"
 ENV_EXTRACTION_MODEL = "env-extraction-model:test"
 
