@@ -22,6 +22,8 @@ import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
+from topos.config.local_model_builds import normalize_platform
+
 logger = logging.getLogger("topos.engine.ollama_install")
 
 STATE_IDLE = "idle"
@@ -191,13 +193,26 @@ def start_install(
     global _JOB
     plat = platform if platform is not None else default_platform()
     if str(plat) != "Darwin":
+        # Still a refusal — Linux wants sudo/systemd a headless node must not
+        # attempt, and Windows ships a GUI installer with no unattended
+        # contract we have tested. But it now names the command for THIS
+        # machine instead of telling the owner what macOS can do and pointing
+        # at a card that showed them Homebrew (`ollama_setup_guidance`).
+        from .ollama_setup_guidance import PLATFORM_UNKNOWN, manual_install_message
+
+        # PLATFORM_UNKNOWN, not None: `normalize_platform` says None for "I do
+        # not recognise this OS", but `install_guidance(None)` means "answer for
+        # the machine I am running on" — so piping one into the other made a
+        # refusal for a foreign platform come back recommending macOS one-click.
+        resolved = normalize_platform(plat, platform_mod.machine()) or PLATFORM_UNKNOWN
         refused = {
             "state": STATE_ERROR,
             "status": "",
-            "error": (
-                "Ollama one-click install is only available on macOS. "
-                "Use the manual steps below."
-            ),
+            # No `guidance` key: `OllamaInstallStatusResponse` does not declare
+            # one, so pydantic drops it at the control plane and no browser ever
+            # sees it. The card reads guidance from the models payload's
+            # `setup_guidance` instead, which is the single source of truth.
+            "error": manual_install_message(resolved),
             "refused": True,
             "reason": REASON_UNSUPPORTED,
         }
