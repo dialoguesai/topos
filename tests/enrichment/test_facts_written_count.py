@@ -17,7 +17,7 @@ async def test_signal_derivation_reports_facts_written(monkeypatch):
     monkeypatch.setattr(fact_job_module, "get_db_connection", lambda: object())
     monkeypatch.setattr(
         "topos.features.facts.extract.extract_facts_from_batch",
-        lambda conn, rows: 7,
+        lambda conn, rows, **_: 7,
     )
 
     orchestrator = SignalDerivationOrchestrator()
@@ -38,7 +38,7 @@ async def test_signal_derivation_facts_zero_written_stays_zero(monkeypatch):
     monkeypatch.setattr(fact_job_module, "get_db_connection", lambda: object())
     monkeypatch.setattr(
         "topos.features.facts.extract.extract_facts_from_batch",
-        lambda conn, rows: 0,
+        lambda conn, rows, **_: 0,
     )
 
     orchestrator = SignalDerivationOrchestrator()
