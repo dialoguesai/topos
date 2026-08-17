@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.19] — 2026-08-17
+
 ### Fixed
 
 - `[E:facts]` **One cancelled fact-extraction batch could disable LLM fact

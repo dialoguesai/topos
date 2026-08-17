@@ -440,6 +440,15 @@
       ]
     },
     {
+      "version": "1.3.19",
+      "summary": "Release 1.3.19.",
+      "steps": [],
+      "notes": [
+        "Code-only ([O] and one [E:facts] bug fix): no schema migration, no derived invalidation, no step. Three groups, none of which invalidates an output. (1) Runtime shutdown is scoped to a generation rather than a process-lifetime flag, and one cancelled fact-extraction batch now stops that batch instead of every later one. Tagged [E:facts] because it is in the facts lane, but it changes WHEN extraction runs, never what it produces \u2014 JOB_SPEC_VERSIONS is unchanged, so no reprocess is owed. (2) Startup's background work (four fire-and-forget tasks, the pipeline worker, the upgrade-runner thread) is now reaped at shutdown, and a migration blocked on SQLite no longer pins the process-wide write gate for the full busy_timeout. Both are lifecycle and locking fixes: the same statements run, on the same data. (3) A shared sqlite handle can no longer be used from the event loop and a worker at once, and /healthcheck now reflects a dead database instead of reporting healthy through it.",
+        "No node-side action. Nothing on disk is re-derived by this release, so an upgrade is install-and-restart with an empty step list."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
