@@ -41,6 +41,16 @@ async def healthcheck(
             or (sync_status or {}).get("connected")
         )
     db_ok, db_error = await probe_db_health()
+    binding = state.active_database
+    if binding is None:
+        # No startup binding recorded (an injected test connection, or a build
+        # that skipped startup): resolve it now, without side effects.
+        from ..storage.db.paths import resolve_active_database
+
+        try:
+            binding = resolve_active_database()
+        except Exception:  # noqa: BLE001 — health never fails on a diagnostic
+            binding = None
     return HealthResponse(
         # Still "ok": this route answering at all is the liveness signal, and the
         # tray/shell treat any response as running. A database verdict is a
@@ -52,6 +62,9 @@ async def healthcheck(
         sync_connection=sync_status,
         db_ok=db_ok,
         db_error=db_error,
+        database_path=str(binding.path) if binding is not None else None,
+        database_source=binding.source if binding is not None else None,
+        active_profile_id=binding.profile_id if binding is not None else None,
     )
 
 

@@ -464,7 +464,11 @@
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
-      "notes": []
+      "notes": [
+        "No re-derivation: the active-database binding fix changes which FILE is opened, not the shape or content of any table. A node already serving the database inside its active Topos sees no change at all.",
+        "A node serving a pre-profile database (~/.topos_engine, Application Support/ToposEngine or .../ToposControlPlane) on a machine that has never used profiles now ADOPTS it: the file is copied into ~/.topos on first start and served from there. The original stays in place as its own backup, so disk use grows by one database copy until the user removes it.",
+        "A node serving such a database on a machine that DOES use profiles now serves the (possibly empty) active slot instead, and logs a warning naming the stray. That data is not lost \u2014 it is where it always was \u2014 but it is no longer served: `topos-node profile adopt` pulls it into the active Topos."
+      ]
     }
   ]
 }

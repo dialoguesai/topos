@@ -24,6 +24,18 @@ class HealthResponse(BaseModel):
     #: exception text — for the corruption above that text is an unrelated SQL
     #: statement and reads as a routines bug.
     db_error: Optional[str] = None
+    #: WHICH database this node serves, and which Topos owns it.
+    #:
+    #: A switch used to be unverifiable from the outside: the shell moved the
+    #: files, restarted the node, and had no way to confirm the node came up on
+    #: the Topos it asked for. On 2026-08-17 one came up on a database from a
+    #: pre-profile install instead, and everything still reported healthy.
+    #: ``database_source`` is "slot"/"new-slot" for a database inside the active
+    #: Topos, "adopted" for one just copied in, "legacy" for one being served
+    #: from outside it, "settings" for an explicit path pin.
+    database_path: Optional[str] = None
+    database_source: Optional[str] = None
+    active_profile_id: Optional[str] = None
 
 
 class GenerationRequest(BaseModel):

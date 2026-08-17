@@ -3,7 +3,9 @@
 The shell apps (macOS/Windows trays) shell out to these commands for every
 mutation so the swap logic lives in exactly one place; they read the profile
 folders directly for menu rendering. ``--json`` exists for those callers.
-All commands run offline — no server import, no database open.
+All commands run offline — no server import. The only database access is
+``switch``'s preflight, which reads ``PRAGMA user_version`` from the archived
+target read-only to refuse a Topos this build is too old to open.
 """
 
 from __future__ import annotations

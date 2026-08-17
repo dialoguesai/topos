@@ -223,6 +223,50 @@ async def _reap_upgrade_runner(timeout_s: float = _UPGRADE_JOIN_TIMEOUT_S) -> No
         )
 
 
+def _log_database_binding() -> None:
+    """Say which database this node is about to serve, once, at startup.
+
+    Nothing used to state this anywhere: a node that resolved to a database
+    outside the active profile looked exactly like one that had not, and
+    ``lsof`` was the only way to tell them apart. This is also the one place
+    that may ADOPT a pre-profile database into the slot — steady-state
+    resolution runs on almost every API call and must stay side-effect free.
+    """
+    try:
+        from .storage.db.paths import (
+            SOURCE_ADOPTED,
+            SOURCE_LEGACY,
+            read_database_user_version,
+            resolve_active_database,
+        )
+
+        binding = resolve_active_database(adopt=True)
+        schema = read_database_user_version(binding.path)
+        logger.info(
+            "Serving database %s (source=%s, profile=%s, schema=%s)",
+            binding.path,
+            binding.source,
+            binding.profile_id or "-",
+            schema if schema is not None else "new",
+        )
+        if binding.source == SOURCE_ADOPTED:
+            logger.info(
+                "Adopted the pre-profile database at %s into the active Topos; "
+                "the original is left in place as a backup",
+                binding.adopted_from,
+            )
+        elif binding.source == SOURCE_LEGACY:
+            logger.warning(
+                "Serving %s, which is outside ~/.topos and belongs to no Topos: "
+                "switching Topoi will not carry this data. Run "
+                "`topos-node profile adopt` to pull it into the active Topos.",
+                binding.path,
+            )
+        state.active_database = binding
+    except Exception:  # noqa: BLE001 — a diagnostic must never block startup
+        logger.debug("Could not resolve the database binding for logging", exc_info=True)
+
+
 @app.on_event("startup")
 async def startup_event() -> None:
     from .runtime_shutdown import begin_runtime, install_shutdown_signal_hooks
@@ -260,6 +304,7 @@ async def startup_event() -> None:
     # Tests may inject an in-memory connection before startup.
     # Avoid initializing file-backed services in that case.
     if state.db_conn is None:
+        _log_database_binding()
         _ = get_services()
     # Stage 9 migrations and source-install rehydration both take the DB write
     # gate; holding it on the event-loop thread stalls every coroutine —
