@@ -175,6 +175,101 @@ class TestLegacyAdoption:
         assert resolved.source == paths.SOURCE_NEW_SLOT
 
 
+class TestTheBindingIsAnnounced:
+    """The binding is decided and stated BEFORE the first connection exists.
+
+    It first lived in `startup_event`, gated on "no connection yet" — but the
+    CLI opens the owner connection before uvicorn starts (to print pending
+    consent steps), so the gate was never true in a real run. The line never
+    appeared on a live node and adoption never got its one useful moment. It
+    now hangs off the code that is about to open the connection.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _fresh_binding(self, monkeypatch):
+        from topos.core import state
+
+        monkeypatch.setattr(state, "_binding_announced", False, raising=False)
+        monkeypatch.setattr(state, "db_conn", None, raising=False)
+        monkeypatch.setattr(state, "active_database", None, raising=False)
+
+    def test_opening_a_connection_announces_the_binding(self, tmp_path, monkeypatch, caplog):
+        import logging
+
+        from topos.core import state
+
+        base = tmp_path / ".topos"
+        _seed_slot(base)
+        (base / paths.DATABASE_FILENAME).write_bytes(b"active")
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+        with caplog.at_level(logging.INFO, logger="topos.core.state"):
+            state.bind_active_database()
+
+        assert "Serving database" in caplog.text
+        assert "source=slot" in caplog.text and "profile=personaldb" in caplog.text
+        assert state.active_database.path == base / paths.DATABASE_FILENAME
+
+    def test_actually_opening_a_connection_triggers_it(self, tmp_path, monkeypatch, caplog):
+        """The WIRING, not just the function.
+
+        The first version of this hung off `startup_event` behind a condition
+        that is never true in a real run, and every test called the function
+        directly — so nothing failed while the live node said nothing at all.
+        This one goes through `get_db_connection`, which is what production
+        does.
+        """
+        import logging
+
+        from topos.core import state
+
+        _seed_slot(tmp_path / ".topos")
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        monkeypatch.setattr(state, "_db_conn_path", None, raising=False)
+        monkeypatch.setattr(state, "_conn_owner_thread", None, raising=False)
+
+        with caplog.at_level(logging.INFO, logger="topos.core.state"):
+            conn = state.get_db_connection()
+        try:
+            assert conn is not None
+            assert "Serving database" in caplog.text
+            assert str(tmp_path) in caplog.text  # the temp home, not the real one
+        finally:
+            if conn is not None:
+                conn.close()
+
+    def test_it_announces_once(self, tmp_path, monkeypatch, caplog):
+        import logging
+
+        from topos.core import state
+
+        _seed_slot(tmp_path / ".topos")
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+        with caplog.at_level(logging.INFO, logger="topos.core.state"):
+            state.bind_active_database()
+            state.bind_active_database()
+
+        assert caplog.text.count("Serving database") == 1
+
+    def test_an_injected_connection_is_left_alone(self, tmp_path, monkeypatch, caplog):
+        """A test harness that supplied its own connection already decided the
+        binding; adopting on top of that would write into a real home."""
+        import logging
+        import sqlite3
+
+        from topos.core import state
+
+        monkeypatch.setattr(state, "db_conn", sqlite3.connect(":memory:"), raising=False)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+
+        with caplog.at_level(logging.INFO, logger="topos.core.state"):
+            state.bind_active_database()
+
+        assert "Serving database" not in caplog.text
+        assert state.active_database is None
+
+
 class TestOneResolver:
     """Every consumer of "which database?" gives the same answer.
 
