@@ -166,3 +166,46 @@ async def test_retrieve_requires_query_and_index_requires_tools(wired_app):
             json={"tools": []},
         )
         assert empty_tools.status_code == 422
+
+
+@pytest.mark.asyncio
+async def test_retrieve_observes_the_turn_on_the_direct_transport(wired_app, monkeypatch):
+    """Shadow coverage must not depend on which transport the client used.
+
+    Two entrances reach tool retrieval: the control-plane handler
+    (`core/handlers/tool_index.py`, prod) and this REST route (engine-direct, dev).
+    Hooking only the first would silently exclude every locally-tested turn from the
+    training signal, and read later as "the model never sees dev traffic".
+    """
+    from topos.query import scope_shadow as ss
+
+    seen: List[str] = []
+    monkeypatch.setattr(ss, "observe_turn", lambda text, **kw: seen.append(text))
+
+    transport = ASGITransport(app=wired_app)
+    async with AsyncClient(transport=transport, base_url="http://t") as client:
+        await client.post("/v1/tools/index", json={"tools": TOOLS},
+                          headers={"Authorization": "Bearer k"})
+        resp = await client.post("/v1/tools/retrieve",
+                                 json={"query": "how did I sleep", "k": 2},
+                                 headers={"Authorization": "Bearer k"})
+    assert resp.status_code == 200
+    assert seen == ["how did I sleep"]
+
+
+@pytest.mark.asyncio
+async def test_retrieve_survives_a_broken_shadow_on_the_direct_transport(wired_app, monkeypatch):
+    from topos.query import scope_shadow as ss
+
+    def _boom(text, **kw):
+        raise RuntimeError("head exploded")
+
+    monkeypatch.setattr(ss, "observe_turn", _boom)
+    transport = ASGITransport(app=wired_app)
+    async with AsyncClient(transport=transport, base_url="http://t") as client:
+        await client.post("/v1/tools/index", json={"tools": TOOLS},
+                          headers={"Authorization": "Bearer k"})
+        resp = await client.post("/v1/tools/retrieve",
+                                 json={"query": "anything", "k": 2},
+                                 headers={"Authorization": "Bearer k"})
+    assert resp.status_code == 200, "a shadow fault must not fail tool retrieval"
