@@ -12,15 +12,31 @@ from .raw_store import RawFile, RawFileRef
 
 logger = logging.getLogger("topos.storage.raw.file_store")
 
+INGESTION_DIRNAME = "ingestion"
+
+
+def active_ingestion_base() -> Path:
+    """Where this Topos keeps its raw ingestion files — one answer, one code path.
+
+    ``~/.topos`` holds the active Topos, and ``ingestion`` is on
+    ``profiles.MOVE_ALLOWLIST``: this directory archives when you switch away and
+    comes back when you switch in. A directory anywhere else belongs to no Topos —
+    no switch carries it and no profile owns it — so nothing here goes looking for
+    one. Readers that used to union in ``~/.topos_engine/ingestion`` surfaced raw
+    records the active Topos did not have.
+    """
+    env_override = os.getenv("TOPOS_INGESTION_BASE_PATH")
+    if env_override:
+        return Path(env_override)
+    return Path.home() / ".topos" / INGESTION_DIRNAME
+
 
 @dataclass(frozen=True)
 class RawFileStore:
     base_path: Path
 
     def __init__(self, base_path: Optional[Path] = None):
-        env_override = os.getenv("TOPOS_INGESTION_BASE_PATH")
-        resolved_base = base_path or (Path(env_override) if env_override else Path.home() / ".topos" / "ingestion")
-        object.__setattr__(self, "base_path", resolved_base)
+        object.__setattr__(self, "base_path", base_path or active_ingestion_base())
         self.base_path.mkdir(parents=True, exist_ok=True)
 
     def get_file_path(self, dataset_id: str, schema_id: str) -> Path:

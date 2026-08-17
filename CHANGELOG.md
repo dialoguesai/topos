@@ -9,6 +9,37 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+
+- `[O]` **The data explorer listed, sized and offered to delete raw records that
+  belonged to no Topos.** Raw ingestion is written to `~/.topos/ingestion`, and
+  `ingestion` is on `profiles.MOVE_ALLOWLIST` — it archives when you switch away
+  from a Topos and comes back when you switch in. But the three explorer
+  handlers (`list_jsonl_files`, `delete_jsonl_file`, `read_jsonl_file`) and
+  `storage_breakdown.raw_ingestion_size_bytes()` also searched
+  `~/.topos_engine/ingestion` and unioned whatever they found there. That
+  directory predates the profile layout by months: no profile owns it, no
+  switch carries it, and its records are not the active Topos's data. The
+  storage readout counted its bytes as this Topos's storage, the explorer
+  listed its files as this Topos's files, and the delete handler accepted paths
+  inside it. Same shape as the database-binding bug — a surface answering for
+  data no Topos owns — and found by looking for the rest of its class.
+  - **One answer.** `storage.raw.file_store.active_ingestion_base()` is the
+    single resolver; the writer and all four readers call it. No reader
+    searches for a directory any more, so what the app shows is what ingestion
+    wrote. Legacy folders are left exactly where they are on disk — untouched,
+    just no longer presented as this Topos's.
+  - **`TOPOS_INGESTION_BASE_PATH` is honoured everywhere.** The writer already
+    respected it; the three explorer handlers hard-coded `~/.topos` and ignored
+    it outright. With the override set, the app listed one directory while
+    ingestion wrote to another, and files written under the override could
+    neither be downloaded nor deleted through the UI — the allowlist did not
+    include the directory the node was actually writing to.
+  - The delete and read handlers shared one copy of the containment check
+    instead of two, and the scope narrowed to a single root: a path is allowed
+    when it is inside the active ingestion directory, and an ingestion
+    directory that does not exist yet denies rather than widens.
+
 ## [1.3.19] — 2026-08-17
 
 ### Fixed

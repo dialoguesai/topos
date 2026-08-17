@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import logging
-import os
 import sqlite3
 from pathlib import Path
 from typing import Any, Dict, Iterable, Optional
 
+from ..raw.file_store import active_ingestion_base
 from .paths import sqlite_on_disk_size_bytes
 
 logger = logging.getLogger("topos.storage.db.storage_breakdown")
@@ -73,25 +73,6 @@ _CATEGORY_ORDER = (
 )
 
 
-def _raw_ingestion_paths() -> list[Path]:
-    paths: list[Path] = []
-    env_override = os.getenv("TOPOS_INGESTION_BASE_PATH")
-    if env_override:
-        paths.append(Path(env_override))
-    paths.append(Path.home() / ".topos" / "ingestion")
-    paths.append(Path.home() / ".topos_engine" / "ingestion")
-
-    seen: set[str] = set()
-    unique: list[Path] = []
-    for path in paths:
-        key = str(path.resolve()) if path.exists() else str(path)
-        if key in seen:
-            continue
-        seen.add(key)
-        unique.append(path)
-    return unique
-
-
 def _directory_size_bytes(root: Path) -> int:
     if not root.exists() or not root.is_dir():
         return 0
@@ -110,17 +91,12 @@ def _directory_size_bytes(root: Path) -> int:
 
 
 def raw_ingestion_size_bytes() -> int:
-    total = 0
-    seen_roots: set[str] = set()
-    for root in _raw_ingestion_paths():
-        if not root.exists():
-            continue
-        key = str(root.resolve())
-        if key in seen_roots:
-            continue
-        seen_roots.add(key)
-        total += _directory_size_bytes(root)
-    return total
+    """On-disk bytes of the ACTIVE Topos's raw files, and nothing else.
+
+    Reports the same directory the ingest writer writes to; a legacy folder
+    outside ``~/.topos`` is not this Topos's storage and is not counted.
+    """
+    return _directory_size_bytes(active_ingestion_base())
 
 
 def _index_target_table(index_name: str, known_tables: set[str]) -> str:
