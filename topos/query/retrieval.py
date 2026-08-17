@@ -102,6 +102,39 @@ _RECENCY_TERMS = frozenset(
      "been", "being", "lately", "nowadays", "these", "days"}
 )
 
+#: ABSOLUTE date framing. `_RECENCY_TERMS` covered relative time ("yesterday",
+#: "lately") but nothing absolute, so "my work goals Aug 11 through Aug 16 2026" kept
+#: `aug`, `2026`, `11`, `16` as discriminative content needles — tokens the retrieved
+#: rows had to literally contain. No goal text contains "aug", so the rare gate
+#: concluded "specific ask, nothing matches" and returned an honest empty lane.
+#:
+#: Live 2026-08-17: work_context:read answered a dateless "what am I working on" with
+#: 25 items including the exact goals the owner wanted ("Keep running install tests for
+#: the new multi Topos installer…", event_at 2026-08-16), and answered the SAME question
+#: scoped to Aug 11–16 with nothing at all. Naming the window destroyed the lane it was
+#: meant to narrow.
+#:
+#: Dates belong to the time-window machinery (`plan.time_range`,
+#: `_prefer_time_window`), which already filters and annotates `in_time_window`. They
+#: must not double as content.
+_MONTH_TOKENS = frozenset(
+    {"january", "february", "march", "april", "may", "june", "july", "august",
+     "september", "october", "november", "december",
+     "jan", "feb", "mar", "apr", "jun", "jul", "aug", "sep", "sept", "oct", "nov", "dec"}
+)
+#: Range connectors, stripped ONLY when the query is date-scoped — "see it through" is
+#: content, "Aug 11 through Aug 16" is framing, and only the surrounding date tells them
+#: apart.
+_DATE_RANGE_TERMS = frozenset({"through", "thru", "until", "till", "between", "during"})
+
+
+def _is_year_token(token: str) -> bool:
+    return len(token) == 4 and token.isdigit() and 1900 <= int(token) <= 2099
+
+
+def _is_day_number_token(token: str) -> bool:
+    return 1 <= len(token) <= 2 and token.isdigit() and 1 <= int(token) <= 31
+
 
 def _surface_intent(table: str, query_lower: str) -> bool:
     return any(term in query_lower for term in _SURFACE_INTENT_TERMS.get(table, ()))
@@ -117,9 +150,20 @@ def _residual_content_tokens(tokens: List[str], tables: Optional[List[str]] = No
     ]
     blobs.append(" ".join(_EXTRA_SURFACE_TERMS))
     surface_blob = " ".join(blobs)
+    # Date-scoped asks: a month name or a year means the bare small integers are day
+    # numbers the date parser already consumed, and the range words are framing. Judged
+    # over the whole token list so "11" is content in "top 11 sites" and framing in
+    # "Aug 11-16" — the surrounding date is the only thing that distinguishes them.
+    date_scoped = any(
+        token in _MONTH_TOKENS or _is_year_token(token) for token in tokens
+    )
     out: List[str] = []
     for token in tokens:
         if token in _RECENCY_TERMS:
+            continue
+        if token in _MONTH_TOKENS or _is_year_token(token):
+            continue
+        if date_scoped and (_is_day_number_token(token) or token in _DATE_RANGE_TERMS):
             continue
         # Plural-insensitive: "goals"/"meetings" name the same surface as
         # "goal"/"meeting".
@@ -1818,8 +1862,8 @@ _MONTHS = {
 }
 
 #: Abbreviation → full name, so range parsing accepts either spelling. "may" has no
-#: abbreviated form here for the same reason the abbrev pattern below omits it: "may" is
-#: a common verb and matching it as a month misreads ordinary sentences.
+#: abbreviated form here because it has none in the wild; the spelled-out form is guarded
+#: instead by `_may_is_month`, since "may" is also a common verb.
 _MONTH_ALIASES = {name: name for name in _MONTHS}
 _MONTH_ALIASES.update({
     "jan": "january", "feb": "february", "mar": "march", "apr": "april",
@@ -1852,6 +1896,44 @@ _DAY_RANGE_RE = re.compile(
     re.I,
 )
 
+#: The day part following a month word: "11", "11th", "11-16", "11th to 16th".
+#: Used only to skip past the day(s) so `_may_is_month` can look at what comes AFTER.
+_DAY_PART_RE = re.compile(
+    r"\.?\s+\d{1,2}(?P<ord1>st|nd|rd|th)?"
+    r"(?:\s*(?:-|--|–|—|to|through|thru|until|til|till)\s*\d{1,2}(?P<ord2>st|nd|rd|th)?)?"
+)
+#: What makes a lowercase "may 11" a date rather than a modal verb plus a quantity:
+#: a date-like comma ("may 11, 2026") or an adjacent year ("may 11 2026").
+_MAY_DATE_CONTEXT_RE = re.compile(r"\s*,|\s*(?:of\s+)?20\d{2}\b", re.I)
+
+
+def _may_is_month(token: str, text: str, token_end: int) -> bool:
+    """Is this "may" the month, or the modal verb?
+
+    "may" is the one month name that is also an everyday verb, so — unlike "march" or
+    "august", which are rare enough as words that a following number settles it — a
+    number is not evidence: "I may 11 times reconsider" is not a date. A false hint here
+    is quiet, not loud: `_explicit_time_range` takes min/max of the hints, so the query
+    still returns a well-formed window and simply looks like thin data (the same failure
+    shape as the `Aug 11-16` range collapse). The *abbreviation* pattern in
+    `_iso_date_hints` has always omitted "may" for this reason; this is that guard, made
+    consistent.
+
+    Anchored on the "may" token rather than on any one pattern's match, so `_DAY_RANGE_RE`
+    and both single-date patterns necessarily agree: a range and its first endpoint can
+    never disagree about whether "may" was a month.
+    """
+    if token.lower() != "may":
+        return True
+    if token[0] == "M":  # "May 11" — the capital is the writer disambiguating for us
+        return True
+    day_part = _DAY_PART_RE.match(text, token_end)
+    if day_part is None:
+        return False
+    if day_part.group("ord1") or day_part.group("ord2"):  # "may 11th" is never a verb
+        return True
+    return _MAY_DATE_CONTEXT_RE.match(text, day_part.end()) is not None
+
 
 def _iso_date_hints(query_text: str) -> List[str]:
     text = query_text or ""
@@ -1870,20 +1952,25 @@ def _iso_date_hints(query_text: str) -> List[str]:
 
     # Ranges first: both endpoints, so a same-month range spans instead of collapsing.
     for range_match in _DAY_RANGE_RE.finditer(text):
+        if not _may_is_month(range_match.group(1), text, range_match.end(1)):
+            continue
         month = _MONTHS[_MONTH_ALIASES[range_match.group(1).lower()]]
         _add(month, int(range_match.group(2)))
         _add(month, int(range_match.group(3)))
 
     for month_match in re.finditer(
-        r"\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})\b",
+        r"\b(january|february|march|april|may|june|july|august|september|october|november|december)"
+        r"\s+(\d{1,2})(?:st|nd|rd|th)?\b",
         text,
         re.I,
     ):
+        if not _may_is_month(month_match.group(1), text, month_match.end(1)):
+            continue
         _add(_MONTHS[month_match.group(1).lower()], int(month_match.group(2)))
-    # Abbreviated month + day ("Mar 13", "jan 5"), skipping bare "may" ambiguity guard:
-    # only fires when the abbreviation is unambiguous month usage followed by a day.
+    # Abbreviated month + day ("Mar 13", "jan 5"). "may" has no abbreviation to list, so
+    # this pattern needs no guard — see `_may_is_month`, which covers the spellings above.
     for abbrev_match in re.finditer(
-        r"\b(jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\.?\s+(\d{1,2})\b",
+        r"\b(jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec)\.?\s+(\d{1,2})(?:st|nd|rd|th)?\b",
         text,
         re.I,
     ):
