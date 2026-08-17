@@ -75,9 +75,44 @@ logger = logging.getLogger("topos.core.handlers")
 _T = TypeVar("_T")
 
 
+def _in_worker(fn: Callable[..., _T], args: Any, kwargs: Any) -> Callable[[], _T]:
+    """Bind ``fn`` to the WORKER thread's own connection, resolved on entry.
+
+    Resolved through the hub (``topos.core.handlers.get_db_connection``) rather
+    than ``core.state`` directly, because tests monkeypatch the hub attribute —
+    going around it would let a test reach the live database.
+    """
+
+    def _call() -> _T:
+        import topos.core.handlers as hub
+
+        return fn(hub.get_db_connection(), *args, **kwargs)
+
+    return _call
+
+
 async def run_db_read(fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
-    """Run a sync SQLite read off the engine event loop (UI/CP RPC responsiveness)."""
-    return await asyncio.to_thread(fn, *args, **kwargs)
+    """Run a sync SQLite read off the engine event loop (UI/CP RPC responsiveness).
+
+    ``fn`` is called as ``fn(conn, *args, **kwargs)`` on the worker's OWN
+    connection. The caller must NOT resolve a connection and pass it in.
+
+    That is not a style preference. A ``sqlite3.Connection`` carries one
+    transaction state AND one statement cache, and the cache is an unsynchronized
+    C structure: on 2026-08-17 a handler resolved the loop thread's connection,
+    handed it to this function, and the worker's ``execute`` raced the loop
+    thread's own writes through that cache. Its LRU eviction path then deleted a
+    key twice and raised ``KeyError(('<sql>',))`` — and kept raising it, for the
+    life of the process, from every unrelated call site sharing the handle. The
+    node stayed up and answered ``/healthcheck`` while its database was dead.
+
+    ``get_db_connection`` was made thread-local precisely to prevent that; a
+    caller-passed handle defeats it. Callers needing a request-scoped object
+    built from the connection (a ``BlackholeGuard``, a store) must build it
+    inside ``fn`` too — one constructed on the loop thread carries the loop
+    thread's handle in with it.
+    """
+    return await asyncio.to_thread(_in_worker(fn, args, kwargs))
 
 
 async def run_db_write(fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
@@ -90,20 +125,10 @@ async def run_db_write(fn: Callable[..., _T], *args: Any, **kwargs: Any) -> _T:
     their store opens its schema first — ``CREATE TABLE IF NOT EXISTS`` is a
     write.
 
-    Unlike :func:`run_db_read`, the connection is resolved INSIDE the worker and
-    must not be threaded through by the caller: a ``sqlite3.Connection`` holds
-    one transaction state, so sharing the loop thread's handle with a worker is
-    the corruption ``get_db_connection`` was made thread-local to prevent.
-    Resolved through the hub so tests that monkeypatch
-    ``topos.core.handlers.get_db_connection`` still bind the worker's handle.
+    Same connection rule as :func:`run_db_read` — resolved INSIDE the worker,
+    never threaded through by the caller.
     """
-
-    def _call() -> _T:
-        import topos.core.handlers as hub
-
-        return fn(hub.get_db_connection(), *args, **kwargs)
-
-    return await asyncio.to_thread(_call)
+    return await asyncio.to_thread(_in_worker(fn, args, kwargs))
 
 
 def _resource_owner_for_mcp_log(conn: Any) -> Optional[str]:
