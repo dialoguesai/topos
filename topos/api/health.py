@@ -8,6 +8,7 @@ from fastapi.security import HTTPAuthorizationCredentials
 from ..__version__ import __version__
 from ..auth import bearer_scheme, require_api_key
 from ..core.api_models import HealthResponse
+from ..core.db_health import probe_db_health
 from ..core import state
 
 router = APIRouter()
@@ -39,12 +40,18 @@ async def healthcheck(
             (cp_status or {}).get("connected")
             or (sync_status or {}).get("connected")
         )
+    db_ok, db_error = await probe_db_health()
     return HealthResponse(
+        # Still "ok": this route answering at all is the liveness signal, and the
+        # tray/shell treat any response as running. A database verdict is a
+        # separate axis — see `db_ok` — not a reason to call the node down.
         status="ok",
         time=time(),
         cloud_connected=cloud_connected,
         control_plane_connection=cp_status,
         sync_connection=sync_status,
+        db_ok=db_ok,
+        db_error=db_error,
     )
 
 

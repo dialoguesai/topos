@@ -273,6 +273,26 @@ def get_db_connection() -> Optional[sqlite3.Connection]:
     return _get_thread_db_connection(owner_path)
 
 
+#: What a ``SELECT 1`` liveness probe treats as "this handle is finished, open a
+#: new one".
+#:
+#: ``KeyError`` is the odd one, and it is load-bearing. CPython's sqlite3 keeps a
+#: per-connection prepared-statement cache whose key is the 1-tuple ``(sql,)``;
+#: the C LRU behind it is unsynchronized, so concurrent use of one Connection can
+#: leave its list and dict disagreeing. The eviction path then deletes a key that
+#: is already gone and ``PyDict_DelItem`` raises ``KeyError(('<sql>',))`` — from
+#: every later ``execute`` on that handle, naming a statement unrelated to the
+#: caller. On 2026-08-17 that killed the node's database for nearly two hours
+#: while ``/healthcheck`` kept answering ok, because nothing recognised the handle
+#: as dead and swapped it.
+#:
+#: The cache cannot simply be turned off: ``cached_statements=0`` is clamped to a
+#: minimum of 5 on CPython 3.10 (measured — 0, 1 and 4 all behave exactly like 5),
+#: so recycling the poisoned handle is the available remedy. Preventing the race
+#: is the job of ``run_db_read``/``run_db_write`` resolving per-worker handles.
+_UNHEALTHY_CONNECTION_ERRORS = (sqlite3.ProgrammingError, sqlite3.OperationalError, KeyError)
+
+
 def _get_thread_db_connection(resolved_path: str) -> Optional[sqlite3.Connection]:
     """A connection to ``resolved_path`` private to the calling thread.
 
@@ -286,7 +306,7 @@ def _get_thread_db_connection(resolved_path: str) -> Optional[sqlite3.Connection
             cached.execute("SELECT 1")
             _ensure_row_factory(cached)
             return cached
-        except (sqlite3.ProgrammingError, sqlite3.OperationalError):
+        except _UNHEALTHY_CONNECTION_ERRORS:
             unregister_connection(cached)
             try:
                 cached.close()
@@ -376,7 +396,7 @@ def _get_owner_db_connection() -> Optional[sqlite3.Connection]:
         if db_conn is not None and settings.topos_database_path and _db_conn_path:
             try:
                 db_conn.execute("SELECT 1")
-            except (sqlite3.ProgrammingError, sqlite3.OperationalError):
+            except _UNHEALTHY_CONNECTION_ERRORS:
                 unregister_connection(db_conn)
                 db_conn = None
                 _db_conn_path = None
@@ -419,7 +439,7 @@ def _get_owner_db_connection() -> Optional[sqlite3.Connection]:
                 if getattr(db_conn, "row_factory", None) is not sqlite3.Row:
                     db_conn.row_factory = sqlite3.Row
                 return db_conn
-            except (sqlite3.ProgrammingError, sqlite3.OperationalError):
+            except _UNHEALTHY_CONNECTION_ERRORS:
                 unregister_connection(db_conn)
                 db_conn = None
                 _db_conn_path = None

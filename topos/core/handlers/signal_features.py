@@ -8,6 +8,7 @@ from .common import (
     Dict,
     Optional,
     run_db_read,
+    run_db_write,
 )
 from .registry import handles
 
@@ -434,17 +435,28 @@ async def handle_signal_list_entities(message: Dict[str, Any]) -> Optional[Dict[
         from ...features.entities.reads import list_entities
         from ...features.lifecycle.blackhole_guard import guard_from_message
 
-        conn = hub.get_db_connection()
-        result = await run_db_read(
-            list_entities,
-            conn,
-            guard=guard_from_message(conn, message),
-            q=payload.get("q"),
-            entity_type=payload.get("entity_type"),
-            contacts_only=bool(payload.get("contacts_only")),
-            limit=min(int(payload.get("limit") or 50), 200),
-            offset=max(0, int(payload.get("offset") or 0)),
-        )
+        # Argument coercion stays on the loop (pure, and a bad value should fail
+        # the request before a worker is spent); the guard is built INSIDE the
+        # worker because it holds the connection it was constructed with and
+        # queries it lazily.
+        q = payload.get("q")
+        entity_type = payload.get("entity_type")
+        contacts_only = bool(payload.get("contacts_only"))
+        limit = min(int(payload.get("limit") or 50), 200)
+        offset = max(0, int(payload.get("offset") or 0))
+
+        def _read(conn):
+            return list_entities(
+                conn,
+                guard=guard_from_message(conn, message),
+                q=q,
+                entity_type=entity_type,
+                contacts_only=contacts_only,
+                limit=limit,
+                offset=offset,
+            )
+
+        result = await run_db_read(_read)
         return {"id": req_id, "status": "ok", "payload": result}
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}
@@ -463,10 +475,11 @@ async def handle_signal_get_entity(message: Dict[str, Any]) -> Optional[Dict[str
         from ...features.entities.reads import get_entity_detail
         from ...features.lifecycle.blackhole_guard import guard_from_message
 
-        conn = hub.get_db_connection()
-        detail = await run_db_read(
-            get_entity_detail, conn, entity_id, guard=guard_from_message(conn, message)
-        )
+        def _read(conn):
+            # Guard built here, not on the loop: it retains this connection.
+            return get_entity_detail(conn, entity_id, guard=guard_from_message(conn, message))
+
+        detail = await run_db_read(_read)
         # Same 404 a never-stored id gets — the protected case must not be
         # distinguishable by status code or message (D5).
         if detail is None:
@@ -486,19 +499,29 @@ async def handle_signal_entity_graph(message: Dict[str, Any]) -> Optional[Dict[s
         from ...features.entities.reads import entity_graph
         from ...features.lifecycle.blackhole_guard import guard_from_message
 
-        conn = hub.get_db_connection()
-        result = await run_db_read(
-            entity_graph,
-            conn,
-            guard=guard_from_message(conn, message),
-            limit_nodes=min(int(payload.get("limit_nodes") or 100), 5000),
-            limit_edges=min(int(payload.get("limit_edges") or 300), 20000),
-            min_weight=float(payload.get("min_weight") or 0.0),
-            include_closed=bool(payload.get("include_closed")),
-            as_of=payload.get("as_of") or None,
-            selection=str(payload.get("selection") or "weight"),
-            offset=max(0, int(payload.get("offset") or 0)),
-        )
+        limit_nodes = min(int(payload.get("limit_nodes") or 100), 5000)
+        limit_edges = min(int(payload.get("limit_edges") or 300), 20000)
+        min_weight = float(payload.get("min_weight") or 0.0)
+        include_closed = bool(payload.get("include_closed"))
+        as_of = payload.get("as_of") or None
+        selection = str(payload.get("selection") or "weight")
+        offset = max(0, int(payload.get("offset") or 0))
+
+        def _read(conn):
+            # Guard built here, not on the loop: it retains this connection.
+            return entity_graph(
+                conn,
+                guard=guard_from_message(conn, message),
+                limit_nodes=limit_nodes,
+                limit_edges=limit_edges,
+                min_weight=min_weight,
+                include_closed=include_closed,
+                as_of=as_of,
+                selection=selection,
+                offset=offset,
+            )
+
+        result = await run_db_read(_read)
         return {"id": req_id, "status": "ok", "payload": result}
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}
@@ -899,14 +922,22 @@ async def handle_signal_blackhole_entity(message: Dict[str, Any]) -> Optional[Di
         from ...features.lifecycle.blackhole import BlackholeStore
         from ...features.lifecycle.blackhole_rebuild import rebuild_for_blackhole
 
-        conn = hub.get_db_connection()
-        result = BlackholeStore(conn).blackhole_entity(
-            entity_ref=entity_id,
-            processing_tier=str(payload.get("processing_tier") or "secure"),
-            note=payload.get("note"),
-        )
+        processing_tier = str(payload.get("processing_tier") or "secure")
+        note = payload.get("note")
+
+        # Both of these WRITE. They ran on the loop / on a caller-passed
+        # connection respectively, which is the pairing that corrupts a shared
+        # handle's statement cache; each now gets the worker's own connection.
+        def _blackhole(conn):
+            return BlackholeStore(conn).blackhole_entity(
+                entity_ref=entity_id,
+                processing_tier=processing_tier,
+                note=note,
+            )
+
+        result = await run_db_write(_blackhole)
         if not result.get("already_blackholed"):
-            result["rebuild"] = (await run_db_read(rebuild_for_blackhole, conn, entity_id)).as_dict()
+            result["rebuild"] = (await run_db_write(rebuild_for_blackhole, entity_id)).as_dict()
         return {"id": req_id, "status": "ok", "payload": result}
     except ValueError as exc:
         return {"id": req_id, "status": "error", "error": str(exc), "code": 400}
