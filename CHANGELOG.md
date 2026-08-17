@@ -9,7 +9,43 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.18] — 2026-08-16
+
 ### Fixed
+
+- `[O]` Local model setup answers for the machine it is running on. Three
+  surfaces asked "how do I get Ollama here" and answered three different ways,
+  all wrong off macOS: the one-click refusal said only "available on macOS", the
+  web card hard-coded `brew install ollama` for every owner, and the terminal
+  path never mentioned Ollama at all — so a `topos-node` owner finished setup
+  with a running node, no model, and nowhere to go but the macOS-flavoured card.
+  One table (`engine/ollama_setup_guidance.py`) now serves all three, keyed on
+  the platform the NODE runs on. macOS moves to the Homebrew CASK: the formula
+  drops a binary and starts nothing, so `:11434` stayed closed and every surface
+  that gates on reachability looped forever telling the owner to run a command
+  they had already run.
+- `[O]` New `topos-node setup-models`: reachability, the install command for this
+  platform, and the starter pull, without leaving the shell. It does not create
+  the pack — the control plane seeds the local family from what the machine
+  actually has, so once a model exists here the next pack read leads with it.
+- `[O]` A pull that did not happen no longer reads as a pull that did. Ollama
+  reports failures as an `error` frame INSIDE a 200 response and nothing looked,
+  so the stream ended cleanly and the record was marked done — a model that was
+  never written, reported as installed, with the setup card advancing to
+  "seeded" and the first chat 404ing. Covers every mid-stream failure, not only
+  the disk-full one that exposed it.
+- `[O]` Model downloads check for disk space. Nothing did, before the largest
+  write this node asks a machine to make. Two layers: a preflight when the size
+  is known up front, and an abort as soon as the stream reports the real total —
+  seconds in rather than at 97%, and before the write that would fill the volume
+  the node's SQLite is on (`runtime_housekeeping`: "ENOSPC mid-write is how
+  databases corrupt"). A remote Ollama is not our disk to judge and an unreadable
+  volume is not a full one; only a real free-space number below a real
+  requirement refuses.
+- `[O]` The setup CLI pulls through the adapter instead of shelling out to
+  `ollama pull`, which downloaded via the local binary while reachability had
+  been probed against `engine_ollama_base_url` — the wrong daemon on a node
+  using a remote host, or no binary at all.
 
 - `[O]` The engine's local-model defaults name a model the machine can actually
   pull. `ollama_extraction_model` and `privacy_judge_model` both defaulted to
