@@ -9,6 +9,31 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+
+- `[E:query]` **"Aug 11–16" searched Aug 11 only, and said the rest of the week
+  was unsynced.** `_iso_date_hints` had patterns for `<month> <day>` but none for
+  a day range inside one month, so the compact spelling yielded a single hint and
+  `_explicit_time_range` — which takes min/max of the hints — collapsed to one
+  day. Nothing looked broken: the window it returned was well-formed, the query
+  succeeded, and the thin result read as missing data rather than a truncated
+  search. Live 2026-08-17: a work report for `Aug 11–16, 2026` returned one day
+  of activity and told the owner to check their sync.
+  - Added a same-month range pattern covering `-`, `--`, en/em dash, and
+    `to|through|thru|until|til|till`, with optional ordinal suffixes
+    (`11th-16th`). The repeated-month (`Aug 11 to Aug 16`) and cross-month
+    (`Aug 28 - Sep 3`) forms already worked, which is exactly why this survived:
+    the broken spelling is the one people type first.
+  - Impossible days are now dropped instead of formatted (`Feb 29-30, 2026`
+    yields nothing rather than an unparseable ISO string), and month
+    abbreviations are resolved through one shared alias table instead of a
+    second inline dict.
+  - **Known, pre-existing and NOT changed here:** the full month-name pattern
+    accepts "may" as a month, so `"I may 11 times"` parses as May 11. The
+    abbreviation list deliberately omits `may` for this reason. Ranges inherit
+    the same treatment rather than a new one, so a future fix applies in one
+    place and covers both forms.
+
 ### Changed
 
 - `[E:query]` **Scope shadow: observe every turn, and stop calling the router's

@@ -1817,10 +1817,40 @@ _MONTHS = {
     "december": 12,
 }
 
+#: Abbreviation → full name, so range parsing accepts either spelling. "may" has no
+#: abbreviated form here for the same reason the abbrev pattern below omits it: "may" is
+#: a common verb and matching it as a month misreads ordinary sentences.
+_MONTH_ALIASES = {name: name for name in _MONTHS}
+_MONTH_ALIASES.update({
+    "jan": "january", "feb": "february", "mar": "march", "apr": "april",
+    "jun": "june", "jul": "july", "aug": "august", "sep": "september",
+    "sept": "september", "oct": "october", "nov": "november", "dec": "december",
+})
+
 
 def _iso_date_hint(query_text: str) -> Optional[str]:
     hints = _iso_date_hints(query_text)
     return hints[0] if hints else None
+
+
+#: A day range inside ONE month: "Aug 11–16", "August 11-16", "Aug 11 to 16".
+#: Without this, only the first endpoint is found and `_explicit_time_range` — which
+#: takes min/max of the hints — collapses to a single day while still returning a
+#: perfectly valid-looking window. Observed 2026-08-17: "a work report for Aug 11–16,
+#: 2026" searched Aug 11 alone and reported the rest of the week as unsynced. The
+#: repeated-month ("Aug 11 to Aug 16") and cross-month ("Aug 28 - Sep 3") forms already
+#: worked, which is what made the gap easy to miss: the failure needs the *compact*
+#: spelling, which is also the one people reach for first.
+_MONTH_NAME_RE = (
+    r"january|february|march|april|may|june|july|august|september|october|november|"
+    r"december|jan|feb|mar|apr|jun|jul|aug|sep|sept|oct|nov|dec"
+)
+_DAY_RANGE_RE = re.compile(
+    rf"\b({_MONTH_NAME_RE})\.?\s+(\d{{1,2}})(?:st|nd|rd|th)?"
+    r"\s*(?:-|--|–|—|to|through|thru|until|til|till)\s*"
+    r"(\d{1,2})(?:st|nd|rd|th)?\b",
+    re.I,
+)
 
 
 def _iso_date_hints(query_text: str) -> List[str]:
@@ -1828,18 +1858,28 @@ def _iso_date_hints(query_text: str) -> List[str]:
     year_match = re.search(r"\b(20\d{2})\b", text)
     year = int(year_match.group(1)) if year_match else datetime.now(timezone.utc).year
     hints: List[str] = []
+
+    def _add(month: int, day: int) -> None:
+        try:
+            datetime(year, month, day)  # "Feb 30" is not a date; drop it silently
+        except ValueError:
+            return
+        iso = f"{year}-{month:02d}-{day:02d}"
+        if iso not in hints:
+            hints.append(iso)
+
+    # Ranges first: both endpoints, so a same-month range spans instead of collapsing.
+    for range_match in _DAY_RANGE_RE.finditer(text):
+        month = _MONTHS[_MONTH_ALIASES[range_match.group(1).lower()]]
+        _add(month, int(range_match.group(2)))
+        _add(month, int(range_match.group(3)))
+
     for month_match in re.finditer(
         r"\b(january|february|march|april|may|june|july|august|september|october|november|december)\s+(\d{1,2})\b",
         text,
         re.I,
     ):
-        month = _MONTHS[month_match.group(1).lower()]
-        day = int(month_match.group(2))
-        iso = f"{year}-{month:02d}-{day:02d}"
-        if iso not in hints:
-            hints.append(iso)
-    if hints:
-        return hints
+        _add(_MONTHS[month_match.group(1).lower()], int(month_match.group(2)))
     # Abbreviated month + day ("Mar 13", "jan 5"), skipping bare "may" ambiguity guard:
     # only fires when the abbreviation is unambiguous month usage followed by a day.
     for abbrev_match in re.finditer(
@@ -1847,21 +1887,17 @@ def _iso_date_hints(query_text: str) -> List[str]:
         text,
         re.I,
     ):
-        abbrev = abbrev_match.group(1).lower()[:3]
-        month = {
-            "jan": 1, "feb": 2, "mar": 3, "apr": 4, "jun": 6, "jul": 7,
-            "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
-        }[abbrev]
-        day = int(abbrev_match.group(2))
-        iso = f"{year}-{month:02d}-{day:02d}"
-        if iso not in hints:
-            hints.append(iso)
+        month = _MONTHS[_MONTH_ALIASES[abbrev_match.group(1).lower()]]
+        _add(month, int(abbrev_match.group(2)))
     for iso_match in re.finditer(r"\b(20\d{2})-(\d{2})-(\d{2})\b", text):
         iso = iso_match.group(0)
         if iso not in hints:
             hints.append(iso)
     # A bare day number without any month is ambiguous — return nothing rather
     # than guessing a month (the old behavior defaulted to March).
+    # Document order, not sorted: `_iso_date_hint` (singular) hands hints[0] to the
+    # meeting planner as a window start, so first-mentioned must stay first-mentioned.
+    # `_explicit_time_range` sorts for itself when it needs min/max.
     return hints
 
 
