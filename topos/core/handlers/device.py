@@ -121,10 +121,27 @@ async def handle_connection_info(message: Dict[str, Any]) -> Optional[Dict[str, 
 
 @handles("healthcheck")
 async def handle_healthcheck(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Liveness, plus a verdict on whether the database can be read.
+
+    This is the healthcheck the app actually sees — the control plane forwards
+    its ``/healthcheck`` route over this socket. It answered ``ok`` without ever
+    consulting SQLite, so a node with a dead database was indistinguishable from
+    a working one and the app rendered a connected Topos over an empty graph.
+
+    ``status`` stays ``ok`` regardless: reaching this handler proves the event
+    loop is alive, which is what liveness means and what the reconnect logic
+    keys on. The database verdict rides alongside it.
+    """
     req_id = message.get("id")
     if not req_id:
         return None
-    return {"id": req_id, "status": "ok", "payload": {"status": "ok"}}
+    from ..db_health import probe_db_health
+
+    db_ok, db_error = await probe_db_health()
+    payload: Dict[str, Any] = {"status": "ok", "db_ok": db_ok}
+    if db_error:
+        payload["db_error"] = db_error
+    return {"id": req_id, "status": "ok", "payload": payload}
 
 @handles("compute_invoke")
 async def handle_compute_invoke(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:

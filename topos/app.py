@@ -225,9 +225,12 @@ async def _reap_upgrade_runner(timeout_s: float = _UPGRADE_JOIN_TIMEOUT_S) -> No
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    from .runtime_shutdown import clear_shutdown, install_shutdown_signal_hooks
+    from .runtime_shutdown import begin_runtime, install_shutdown_signal_hooks
 
-    clear_shutdown()
+    # Mint this run's generation rather than clearing a shared flag. Clearing
+    # would un-stop a previous run's still-draining workers; a fresh generation
+    # leaves theirs retired and gives this run its own.
+    begin_runtime("app_startup")
     install_shutdown_signal_hooks()
     align_uvicorn_loggers()
     _log_runtime_banner()
@@ -558,16 +561,20 @@ async def startup_event() -> None:
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
     from .pipeline.job_runner import stop_pipeline_worker
-    from .runtime_shutdown import request_shutdown
+    from .runtime_shutdown import end_runtime
 
     # Wake cooperative workers (fact_llm / Ollama threads) before awaiting
     # network teardown so Ctrl+C does not wait out a full enrichment batch.
-    request_shutdown("app_shutdown")
-    # Reap what startup launched, BEFORE the network teardown below: these are
-    # the DB writers, and leaving them running is what let one app instance
-    # migrate a database while the next one was starting on it. Ordered
-    # deliberately — the upgrade runner is the heaviest writer, so it gets its
-    # stop signal first and is joined last.
+    # end_runtime retires THIS run's generation — its workers stop for good —
+    # and installs a fresh one, so anything that runs later in this process
+    # (another app run, a CLI command, the next test) does not inherit a
+    # "shutting down" that belongs to a run which has already finished.
+    end_runtime("app_shutdown")
+    # Retiring the generation says "stop"; the handles below are how we WAIT for
+    # them to actually be gone. That distinction is the whole point: the next
+    # app's startup migrates the same database, so "asked to stop" is not good
+    # enough — a writer still draining takes the write gate and stalls it.
+    # Reaped before the network teardown below, because these are the writers.
     if state.upgrade_runner_stop is not None:
         state.upgrade_runner_stop.set()
     await _reap_background_tasks()
