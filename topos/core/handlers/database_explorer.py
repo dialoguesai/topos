@@ -1,6 +1,8 @@
 """Database explorer and JSONL file message handlers."""
 from __future__ import annotations
 
+from pathlib import Path
+
 import topos.core.handlers as hub
 
 from .common import (
@@ -28,6 +30,31 @@ from .common import (
 )
 from .registry import handles
 from ...storage.db.write_gate import batched_writes, commit_connection, with_db_write
+from ...storage.raw.file_store import active_ingestion_base
+
+
+def _ingestion_root() -> Optional[Path]:
+    """The one ingestion directory these handlers may list, read and delete under.
+
+    The same directory the ingest writer writes to. Returns None when it does not
+    exist yet — denying access rather than widening it.
+    """
+    try:
+        root = active_ingestion_base().expanduser().resolve()
+    except (OSError, RuntimeError):
+        return None
+    return root if root.is_dir() else None
+
+
+def _is_under_ingestion_root(target: Path) -> bool:
+    root = _ingestion_root()
+    if root is None:
+        return False
+    try:
+        target.relative_to(root)
+        return True
+    except ValueError:
+        return False
 
 
 def _safe_sql_identifier(name: str) -> bool:
@@ -1525,58 +1552,51 @@ async def handle_list_jsonl_files(message: Dict[str, Any]) -> Optional[Dict[str,
     req_id = message.get("id")
     if not req_id:
         return None
-    """List all JSONL files in ingestion directories."""
+    """List the JSONL files in this Topos's ingestion directory."""
     try:
-        from pathlib import Path
-
         jsonl_files = []
-        
-        # Check multiple potential locations
-        potential_paths = [
-            Path.home() / ".topos_engine" / "ingestion",
-            Path.home() / ".topos" / "ingestion",
-        ]
-        
-        for base_path in potential_paths:
-            if base_path.exists() and base_path.is_dir():
-                # Find all JSONL files recursively
-                for jsonl_file in base_path.rglob("*.jsonl"):
-                    # Skip backup files
-                    if jsonl_file.name.endswith(".backup"):
-                        continue
-                    
+
+        base_path = _ingestion_root()
+        if base_path is not None:
+            # Find all JSONL files recursively
+            for jsonl_file in base_path.rglob("*.jsonl"):
+                # Skip backup files
+                if jsonl_file.name.endswith(".backup"):
+                    continue
+
+                try:
+                    # Get file stats
+                    stat = jsonl_file.stat()
+                    file_size = stat.st_size
+
+                    # Count lines (messages) in file
+                    line_count = 0
                     try:
-                        # Get file stats
-                        stat = jsonl_file.stat()
-                        file_size = stat.st_size
-                        
-                        # Count lines (messages) in file
-                        line_count = 0
-                        try:
-                            with open(jsonl_file, 'r', encoding='utf-8') as f:
-                                line_count = sum(1 for line in f if line.strip())
-                        except Exception:
-                            pass
-                        
-                        # Get relative path from base
-                        relative_path = str(jsonl_file.relative_to(base_path))
-                        
-                        jsonl_files.append({
-                            "path": str(jsonl_file),
-                            "relative_path": relative_path,
-                            "base_path": str(base_path),
-                            "file_name": jsonl_file.name,
-                            "size_bytes": file_size,
-                            "line_count": line_count,
-                            "modified_at": stat.st_mtime,
-                        })
-                    except Exception as e:
-                        logger.warning("Failed to read file info for %s: %s", jsonl_file, e)
-        
+                        with open(jsonl_file, 'r', encoding='utf-8') as f:
+                            line_count = sum(1 for line in f if line.strip())
+                    except Exception:
+                        pass
+
+                    # Get relative path from base
+                    relative_path = str(jsonl_file.relative_to(base_path))
+
+                    jsonl_files.append({
+                        "path": str(jsonl_file),
+                        "relative_path": relative_path,
+                        "base_path": str(base_path),
+                        "file_name": jsonl_file.name,
+                        "size_bytes": file_size,
+                        "line_count": line_count,
+                        "modified_at": stat.st_mtime,
+                    })
+                except Exception as e:
+                    logger.warning("Failed to read file info for %s: %s", jsonl_file, e)
+
         # Sort by modified time (newest first)
         jsonl_files.sort(key=lambda x: x.get("modified_at", 0), reverse=True)
-        
-        return {"id": req_id, "status": "ok", "payload": {"files": jsonl_files, "base_paths": [str(p) for p in potential_paths]}}
+
+        base_paths = [str(base_path)] if base_path is not None else []
+        return {"id": req_id, "status": "ok", "payload": {"files": jsonl_files, "base_paths": base_paths}}
     except Exception as exc:  # noqa: BLE001
         logger.error("Failed to list JSONL files: %s", exc, exc_info=True)
         return {"id": req_id, "status": "error", "error": str(exc)}
@@ -1586,39 +1606,18 @@ async def handle_delete_jsonl_file(message: Dict[str, Any]) -> Optional[Dict[str
     req_id = message.get("id")
     if not req_id:
         return None
-    """Delete a JSONL file under allowed ingestion roots only (absolute path from list_jsonl_files)."""
+    """Delete a JSONL file under this Topos's ingestion root only (absolute path from list_jsonl_files)."""
     try:
-        from pathlib import Path
-
         payload = message.get("payload") or {}
         raw_path = (payload.get("file_path") or "").strip()
         if not raw_path:
             return {"id": req_id, "status": "error", "error": "file_path required"}
-        potential_paths = [
-            Path.home() / ".topos_engine" / "ingestion",
-            Path.home() / ".topos" / "ingestion",
-        ]
         try:
             target = Path(raw_path).expanduser().resolve()
         except (OSError, RuntimeError) as exc:
             return {"id": req_id, "status": "error", "error": f"Invalid file path: {exc}"}
 
-        under_allowed = False
-        for base_path in potential_paths:
-            try:
-                broot = base_path.expanduser().resolve()
-            except (OSError, RuntimeError):
-                continue
-            if not broot.is_dir():
-                continue
-            try:
-                target.relative_to(broot)
-                under_allowed = True
-                break
-            except ValueError:
-                continue
-
-        if not under_allowed:
+        if not _is_under_ingestion_root(target):
             return {"id": req_id, "status": "error", "error": "File path is outside allowed ingestion directories"}
         if not target.name.lower().endswith(".jsonl"):
             return {"id": req_id, "status": "error", "error": "Only .jsonl files may be deleted"}
@@ -1639,40 +1638,19 @@ async def handle_read_jsonl_file(message: Dict[str, Any]) -> Optional[Dict[str, 
     req_id = message.get("id")
     if not req_id:
         return None
-    """Read a JSONL file under allowed ingestion roots (same scope as delete_jsonl_file)."""
+    """Read a JSONL file under this Topos's ingestion root (same scope as delete_jsonl_file)."""
     try:
-        from pathlib import Path
-
         _max_jsonl_download_bytes = 50 * 1024 * 1024
         payload = message.get("payload") or {}
         raw_path = (payload.get("file_path") or "").strip()
         if not raw_path:
             return {"id": req_id, "status": "error", "error": "file_path required"}
-        potential_paths = [
-            Path.home() / ".topos_engine" / "ingestion",
-            Path.home() / ".topos" / "ingestion",
-        ]
         try:
             target = Path(raw_path).expanduser().resolve()
         except (OSError, RuntimeError) as exc:
             return {"id": req_id, "status": "error", "error": f"Invalid file path: {exc}"}
 
-        under_allowed = False
-        for base_path in potential_paths:
-            try:
-                broot = base_path.expanduser().resolve()
-            except (OSError, RuntimeError):
-                continue
-            if not broot.is_dir():
-                continue
-            try:
-                target.relative_to(broot)
-                under_allowed = True
-                break
-            except ValueError:
-                continue
-
-        if not under_allowed:
+        if not _is_under_ingestion_root(target):
             return {"id": req_id, "status": "error", "error": "File path is outside allowed ingestion directories"}
         if not target.name.lower().endswith(".jsonl"):
             return {"id": req_id, "status": "error", "error": "Only .jsonl files may be read"}
