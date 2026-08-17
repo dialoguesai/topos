@@ -49,6 +49,38 @@ The machine-readable twin of each release is
     "there was nothing to extract". Unprocessed rows stay unmarked, so the
     next pass retries them, as before.
 
+- `[O]` **18 tests stopped failing only when the suites run together.**
+  `tests/topos tests/storage tests/core tests/features tests/api
+  tests/disclosure` failed 18 tests that every one of those directories passed
+  on its own — not test-order randomness (`-p no:randomly` reproduced it),
+  three separate pieces of global state leaking out of `tests/topos` and
+  `tests/core`:
+  - The shutdown flag above accounted for 16 of them: any test that ran an app
+    lifespan (`tests/topos/test_smoke.py` and the other `load_topos_app` files)
+    left every later `extract_owner_facts_llm` call inert, and
+    `tests/features/test_fact_extraction_llm.py` with it. Fixed at the source
+    by the generation change rather than papered over in a conftest — an app
+    run's shutdown no longer belongs to the process it ran in.
+  - Five helpers in `tests/topos` re-import the app under fresh env by popping
+    `topos.app` / `topos.config.settings` / `topos.auth` / `topos.core.state`
+    out of `sys.modules` and never putting the originals back. The re-import
+    FORKS those modules — `sys.modules["topos.core.state"]` becomes a new
+    object while `topos.core.handlers.common.get_db_connection`, imported
+    earlier, still reads the old module's globals — so a later test patches one
+    module and the code reads the other. That is
+    `test_attention_dashboard_endpoint`'s 401 (its `dependency_overrides` key
+    was a post-fork `require_api_key`) and
+    `test_affinity_traversal_over_ws_bridge`'s empty result (its injected
+    `:memory:` handle was ignored and the handler opened a fresh guard.db).
+    `tests/topos/conftest.py` now restores module identity after any test that
+    forks one, the same cure `engine_runtime_isolation` already applied to its
+    own purge.
+  - `tests/core/test_enrichment_entrypoint_parity.py` imported the handlers
+    package AFTER patching `topos.core.state.get_db_connection`, so on
+    `pytest tests/core` the package re-exported the patched value and
+    monkeypatch's saved "original" was the test's own lambda — reinstalled at
+    undo for the rest of the session. Imports moved to module scope.
+
 - `[O]` **A node can no longer keep answering "healthy" after its database has
   died.** On 2026-08-17 the node served `/healthcheck` normally for nearly two
   hours while every data read failed and the app showed a connected Topos over
