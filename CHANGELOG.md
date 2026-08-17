@@ -9,6 +9,49 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+
+- `[S1]` **A newly created Topos could bind a database that belonged to no
+  Topos.** Switching to a Topos that has not written yet leaves the active slot
+  without a `database.db` — and the resolver answered that by searching the
+  locations pre-profile installs used, so the node bound
+  `~/Library/Application Support/ToposEngine/database.db` (or `~/.topos_engine`)
+  instead of creating a database in the slot. Observed twice on one machine on
+  2026-08-16 and 2026-08-17: the node migrated that foreign file in place,
+  stamped its upgrade baseline, and served a full session from it. No profile
+  owned it, so archiving the Topos left the data behind, and the next empty
+  Topos would have picked the same file up — two Topoi sharing one database.
+  Nothing said which file was in use; `lsof` was the only way to tell.
+  - **One resolver.** `storage.db.paths.resolve_active_database()` is now the
+    single answer, and `core.state`, the size readout, `discover_databases()`
+    and profile adoption all call it. There were four searches with four
+    different candidate lists and four different orders — `discover_databases()`
+    did not even include `~/.topos/database.db` — so the size shown in the app
+    could describe a different file than the one being read.
+  - **A machine with profiles resolves to its slot, always.** Legacy locations
+    are consulted only where no profile has ever existed, and then the database
+    is ADOPTED — copied into the slot, original left in place as its own
+    backup — rather than served where it lies. A database being served is
+    always a database some Topos owns.
+  - **The binding is now stated.** One startup line names the database, its
+    source (`slot` / `new-slot` / `adopted` / `legacy` / `settings`), the owning
+    profile and the schema version, and a database served from outside `~/.topos`
+    logs a warning naming `profile adopt` as the remedy. `/healthcheck` carries
+    `database_path`, `database_source` and `active_profile_id`, so a switch can
+    finally be verified from the outside instead of assumed.
+  - Removed `migrate_legacy_database()`: dead code (no callers) whose job was to
+    copy a legacy database and pin `database_path` in `config.json` — a fifth
+    way to end up bound to a file outside the active Topos.
+- `[S1]` **Switching into a Topos from a newer engine failed as a broken boot
+  instead of a refused switch.** The downgrade guard fires when the database is
+  OPENED, by which point the switch has already moved every file and the node
+  simply will not start. `switch_profile` now reads the target's
+  `PRAGMA user_version` before anything moves and refuses with "This Topos was
+  last used by a newer version of Topos … Update Topos, then switch again."
+  The check is read-only and fails OPEN: a database it cannot read is not
+  evidence of a version problem, and refusing on "cannot tell" would strand
+  people on the Topos they are trying to leave.
+
 ## [1.3.20] — 2026-08-17
 
 ### Added

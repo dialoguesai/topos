@@ -204,11 +204,27 @@ Both limits are per-instance and in memory, so a CP restart clears them — and 
 restart *between* a user clicking Connect and the app redeeming invalidates that
 code. During QA, a CP deploy mid-pairing is a false failure, not a defect.
 
-## Known rough edge found while writing this
+## Known rough edge found while writing this — FIXED
 
-`topos-node --discover` reports `~/.topos_engine/database.db` (a 0-byte legacy
-stub here) and **not** `~/.topos/database.db`. `discover_databases()` in
-`topos/storage/db/paths.py` checks config.json, Application Support,
-`~/.topos_engine` and `TOPOS_DATABASE_PATH`, but never the `~/.topos` default
-that `state.py` actually loads. A new dev running `--discover` to find their
-database gets the wrong answer.
+`topos-node --discover` used to report `~/.topos_engine/database.db` (a 0-byte
+legacy stub here) and **not** `~/.topos/database.db`: `discover_databases()`
+checked config.json, Application Support, `~/.topos_engine` and
+`TOPOS_DATABASE_PATH`, but never the `~/.topos` default that `state.py`
+actually loads. Four resolvers, four candidate lists, no agreement.
+
+That divergence had a worse consequence than a confusing diagnostic. When the
+active slot held no `database.db` — every newly created Topos, before its first
+write — the connection resolver fell through to those same legacy locations and
+served one, so a new Topos ran against a database no profile owned and no
+switch would ever archive.
+
+Both now go through `resolve_active_database()` in `topos/storage/db/paths.py`:
+`--discover` lists the active database first and then any legacy strays, and a
+machine that uses profiles resolves to its slot and nothing else. What to check
+during a manual install run:
+
+- `topos-node --discover` names `~/.topos/database.db` first.
+- The startup log carries one `Serving database … (source=…, profile=…, schema=…)`
+  line, and `source` is `slot`, `new-slot` or `adopted` — never `legacy`.
+- `GET /healthcheck` reports the same path in `database_path`, with
+  `active_profile_id` matching the Topos you expect.

@@ -34,11 +34,16 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
-PROFILES_DIRNAME = "profiles"
+from .storage.db.paths import (  # one spelling of the layout, shared with the resolver
+    ACTIVE_MARKER_FILENAME,
+    DATABASE_FILENAME,
+    PROFILES_DIRNAME,
+    active_base,
+)
+
 PROFILE_META_FILENAME = "profile.json"
-ACTIVE_MARKER_FILENAME = "active-profile.json"
 JOURNAL_FILENAME = ".profile-switch.json"
-REBUILD_LOCK_FILENAME = "database.db.rebuild.lock"
+REBUILD_LOCK_FILENAME = f"{DATABASE_FILENAME}.rebuild.lock"
 
 # What constitutes "the Topos" and moves on archive/switch. Directories move
 # as a unit. Anything not listed stays at the top level of ~/.topos — user
@@ -96,7 +101,7 @@ class _Journal:
 
 
 def default_base() -> Path:
-    return Path.home() / ".topos"
+    return active_base()
 
 
 def _profiles_dir(base: Path) -> Path:
@@ -386,6 +391,39 @@ def _archive_active(base: Path, journal: _Journal, *, name_hint: Optional[str]) 
     return slug
 
 
+def _assert_openable_by_this_build(target: Path) -> None:
+    """Refuse to activate a Topos that a newer engine has already migrated.
+
+    The engine's downgrade guard fires when the database is OPENED — by then
+    the switch has moved the files and the failure reads as "the node won't
+    start", with no obvious way back. Checking here turns it into a refused
+    switch with an instruction the user can act on. Read-only: it opens the
+    archived database with ``mode=ro`` and closes it again.
+
+    Fails OPEN. A database this cannot read — corrupt, encrypted, mid-write,
+    or not SQLite at all — is not evidence of a version problem, and blocking
+    the switch on "cannot tell" would strand people on the profile they are on.
+    """
+    from .storage.db.paths import read_database_user_version
+
+    target_db = target / DATABASE_FILENAME
+    stamped = read_database_user_version(target_db)
+    if stamped is None:
+        return
+    try:
+        from .storage.db.migrations import max_migration_order
+
+        known = max_migration_order()
+    except Exception:  # noqa: BLE001 — never block a switch on an import
+        return
+    if stamped > known:
+        raise ProfileError(
+            "This Topos was last used by a newer version of Topos "
+            f"(its database is at schema {stamped}, this version understands {known}). "
+            "Update Topos, then switch again."
+        )
+
+
 def new_profile(
     base: Optional[Path] = None,
     *,
@@ -433,6 +471,8 @@ def switch_profile(
         known = ", ".join(p.name for p in _profiles_dir(base).iterdir()) if _profiles_dir(base).is_dir() else ""
         raise ProfileError(f"No profile named '{profile_id}'. Known: {known or '(none)'}")
     _assert_safe_to_mutate(base, port=port, skip_node_check=skip_node_check)
+
+    _assert_openable_by_this_build(target)
 
     target_meta = _read_json(target / PROFILE_META_FILENAME)
     journal = _journal_start(base, "switch")
@@ -549,28 +589,24 @@ def adopt_legacy(base: Optional[Path] = None) -> dict:
     """Fold a pre-profile legacy database into the (empty) active slot.
 
     Old installs left databases at ~/.topos_engine or under Application
-    Support; the engine's resolution fallbacks can silently prefer them over a
-    fresh ~/.topos, which is how a restored folder "doesn't quite work".
+    Support; the engine used to resolve to them in place, which is how a new
+    Topos ended up running against a database no profile owned. Startup now
+    adopts automatically on a machine that has never had a profile; this stays
+    as the manual escape hatch for the case startup deliberately refuses —
+    a machine that DOES use profiles and wants an old database pulled in.
+
     Copies (never moves) the newest legacy database into place, only when the
     active slot has none — the legacy copy stays behind as its own backup.
     """
+    from .storage.db.paths import adopt_into_slot, newest_legacy_database
+
     base = base or default_base()
-    active_db = base / "database.db"
+    active_db = base / DATABASE_FILENAME
     if active_db.exists():
         return {"adopted": None, "reason": "active database already present"}
-    candidates = [
-        Path.home() / ".topos_engine" / "database.db",
-        Path.home() / "Library" / "Application Support" / "ToposEngine" / "database.db",
-        Path.home() / "Library" / "Application Support" / "ToposControlPlane" / "database.db",
-    ]
-    existing = [p for p in candidates if p.is_file()]
-    if not existing:
+    newest = newest_legacy_database()
+    if newest is None:
         return {"adopted": None, "reason": "no legacy database found"}
-    newest = max(existing, key=lambda p: p.stat().st_mtime)
-    base.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(newest, active_db)
-    for suffix in ("-wal", "-shm"):
-        sidecar = newest.with_name(newest.name + suffix)
-        if sidecar.is_file():
-            shutil.copy2(sidecar, base / (active_db.name + suffix))
+    if not adopt_into_slot(newest, active_db):
+        return {"adopted": None, "reason": f"could not copy {newest}"}
     return {"adopted": str(newest), "reason": None}

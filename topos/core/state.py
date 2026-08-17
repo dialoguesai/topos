@@ -212,33 +212,26 @@ background_tasks: set[asyncio.Task] = set()
 upgrade_runner_thread: threading.Thread | None = None
 upgrade_runner_stop: threading.Event | None = None
 
+#: What startup resolved as this node's database, and how. Set once, so the
+#: healthcheck can report an adoption or a legacy binding that a later,
+#: side-effect-free resolution would no longer describe.
+active_database: Any = None
+
 
 def _resolve_database_path_from_settings() -> Optional[Path]:
-    """Pick the SQLite file path from settings and default search order.
+    """Pick the SQLite file path — one resolver, no side effects.
 
-    When ``database_path`` is unset, the first existing file among canonical candidates wins
-    (same order as before). Intentionally does not log: this runs on almost every API call.
+    Delegates to ``storage.db.paths.resolve_active_database``, which every other
+    consumer of "which database?" also calls. This function used to run its own
+    search over legacy locations, and an active slot with no database yet (a new
+    Topos before its first write) silently bound one of them.
+
+    Intentionally does not log and never adopts: this runs on almost every API
+    call. Startup does the adopting and the logging, once.
     """
-    from ..storage.db.paths import get_database_path
-    from ..config.settings import settings
+    from ..storage.db.paths import resolve_active_database
 
-    if settings.topos_database_path:
-        return Path(settings.topos_database_path)
-
-    potential_paths: list[Path] = []
-    potential_paths.append(get_database_path(settings.topos_database_path))
-    if platform.system() == "Darwin":
-        engine_path = Path.home() / "Library" / "Application Support" / "ToposEngine" / "database.db"
-        potential_paths.append(engine_path)
-    legacy_path = Path.home() / ".topos_engine" / "database.db"
-    potential_paths.append(legacy_path)
-    simple_path = Path.home() / ".topos" / "database.db"
-    potential_paths.append(simple_path)
-
-    for path in potential_paths:
-        if path.exists() and path.is_file():
-            return path
-    return get_database_path(settings.topos_database_path)
+    return resolve_active_database().path
 
 
 def get_db_connection() -> Optional[sqlite3.Connection]:
