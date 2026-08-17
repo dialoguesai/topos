@@ -27,12 +27,15 @@ started with.
 from __future__ import annotations
 
 import json
+import logging
 import re
 import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger("topos.profiles")
 
 from .storage.db.paths import (  # one spelling of the layout, shared with the resolver
     ACTIVE_MARKER_FILENAME,
@@ -81,6 +84,13 @@ class ProfileInfo:
     path: str
     size_bytes: int
     active: bool = False
+    #: Stamped at archive time — what this Topos was last used WITH, and which
+    #: Topos it actually is. A menu that shows two rows called "q4" needs the
+    #: fingerprint to say whether that is one Topos or two.
+    key_fingerprint: Optional[str] = None
+    engine_version: Optional[str] = None
+    schema_version: Optional[int] = None
+    last_active_at: Optional[str] = None
 
     def as_dict(self) -> dict:
         return {
@@ -89,6 +99,10 @@ class ProfileInfo:
             "path": self.path,
             "size_bytes": self.size_bytes,
             "active": self.active,
+            "key_fingerprint": self.key_fingerprint,
+            "engine_version": self.engine_version,
+            "schema_version": self.schema_version,
+            "last_active_at": self.last_active_at,
         }
 
 
@@ -330,7 +344,60 @@ def current_profile(base: Optional[Path] = None) -> Optional[ProfileInfo]:
         path=str(base),
         size_bytes=_active_size_bytes(base),
         active=True,
+        # Cheap facts only: the live database belongs to the running node, and
+        # /healthcheck is what reports on it.
+        key_fingerprint=key_fingerprint(base / ".env"),
+        engine_version=_engine_version(),
+        last_active_at=(
+            str(marker["activated_at"]) if marker.get("activated_at") else None
+        ),
     )
+
+
+def _engine_version() -> Optional[str]:
+    try:
+        from .__version__ import __version__
+
+        return str(__version__)
+    except Exception:  # noqa: BLE001 — a label, never a gate
+        return None
+
+
+def _archived_profiles(base: Path) -> list[ProfileInfo]:
+    """Every archived profile, by directory name.
+
+    Reads only ``profile.json`` — no database is opened. The stamps it carries
+    were written at archive time precisely so that listing profiles (which the
+    tray does on every menu render) stays a folder read.
+    """
+    result: list[ProfileInfo] = []
+    profiles = _profiles_dir(base)
+    if not profiles.is_dir():
+        return result
+    for entry in sorted(profiles.iterdir(), key=lambda p: p.name):
+        if not entry.is_dir():
+            continue
+        meta = _read_json(entry / PROFILE_META_FILENAME)
+        schema = meta.get("schema_version")
+        result.append(
+            ProfileInfo(
+                profile_id=str(meta.get("profile_id") or entry.name),
+                name=(str(meta["topos_name"]) if meta.get("topos_name") else None),
+                path=str(entry),
+                size_bytes=int(meta.get("size_bytes") or _dir_size_bytes(entry)),
+                key_fingerprint=(
+                    str(meta["key_fingerprint"]) if meta.get("key_fingerprint") else None
+                ),
+                engine_version=(
+                    str(meta["engine_version"]) if meta.get("engine_version") else None
+                ),
+                schema_version=int(schema) if isinstance(schema, int) else None,
+                last_active_at=(
+                    str(meta["last_active_at"]) if meta.get("last_active_at") else None
+                ),
+            )
+        )
+    return result
 
 
 def list_profiles(base: Optional[Path] = None) -> list[ProfileInfo]:
@@ -341,20 +408,7 @@ def list_profiles(base: Optional[Path] = None) -> list[ProfileInfo]:
     active = current_profile(base)
     if active is not None:
         result.append(active)
-    profiles = _profiles_dir(base)
-    if profiles.is_dir():
-        for entry in sorted(profiles.iterdir(), key=lambda p: p.name):
-            if not entry.is_dir():
-                continue
-            meta = _read_json(entry / PROFILE_META_FILENAME)
-            result.append(
-                ProfileInfo(
-                    profile_id=str(meta.get("profile_id") or entry.name),
-                    name=(str(meta["topos_name"]) if meta.get("topos_name") else None),
-                    path=str(entry),
-                    size_bytes=_dir_size_bytes(entry),
-                )
-            )
+    result.extend(_archived_profiles(base))
     return result
 
 
@@ -369,6 +423,103 @@ def _archive_slug_for_active(base: Path, name_hint: Optional[str]) -> str:
     return _unique_slug(base, time.strftime("topos-%Y%m%d-%H%M%S"))
 
 
+#: Every SQLite database file starts with this. Checked before opening one, so
+#: an archive never hands a file we cannot identify to sqlite3.
+_SQLITE_MAGIC = b"SQLite format 3\x00"
+
+
+def _is_sqlite_file(path: Path) -> bool:
+    try:
+        with open(path, "rb") as handle:
+            return handle.read(len(_SQLITE_MAGIC)) == _SQLITE_MAGIC
+    except OSError:
+        return False
+
+
+def _checkpoint_before_archive(db_path: Path) -> None:
+    """Fold the WAL back into the database before it is put away.
+
+    An archived Topos should be ONE self-contained file. Renaming a hot
+    database and its sidecars works, but leaves an archive nothing can read
+    without them: a read-only open of a WAL database with a live ``-shm``
+    fails outright, which is why the switch preflight could not read the
+    schema version of the profile it was about to activate.
+
+    Best effort, and it will not touch a file it cannot identify: opening a
+    non-database through sqlite3 can remove the very sidecars an archive is
+    supposed to carry intact. The node is stopped by the time this runs, so the
+    checkpoint normally has the database to itself — but a database that will
+    not open, or will not checkpoint, is not a reason to refuse an archive.
+    The sidecars move with it either way, exactly as before.
+    """
+    if not db_path.is_file() or not _is_sqlite_file(db_path):
+        return
+    import sqlite3
+
+    try:
+        conn = sqlite3.connect(str(db_path), timeout=5.0)
+        try:
+            conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            conn.close()
+    except sqlite3.Error as exc:
+        logger.warning(
+            "Could not checkpoint %s before archiving (%s); its WAL travels with it",
+            db_path,
+            exc,
+        )
+
+
+def key_fingerprint(env_path: Path) -> Optional[str]:
+    """A short, non-secret identifier for the Topos an .env is bound to.
+
+    The KEY itself never leaves the file. Two profiles carrying the same
+    fingerprint are the same Topos twice — which "Start Fresh" can legitimately
+    produce — and two carrying different ones are different Topoi even when the
+    user gave them the same name, which is the case a menu has to be able to
+    tell apart.
+    """
+    import hashlib
+
+    try:
+        for line in env_path.read_text(encoding="utf-8").splitlines():
+            key, _, value = line.partition("=")
+            if key.strip() == "TOPOS_KEY" and value.strip():
+                digest = hashlib.sha256(value.strip().encode("utf-8")).hexdigest()
+                return digest[:12]
+    except OSError:
+        return None
+    return None
+
+
+def _database_stamps(db_path: Path) -> dict:
+    """``user_version`` and the upgrade baseline of a database at rest.
+
+    Read-only and best effort — these annotate a profile, they do not gate it.
+    """
+    from .storage.db.paths import read_database_user_version
+
+    stamps: dict = {}
+    schema = read_database_user_version(db_path)
+    if schema is not None:
+        stamps["schema_version"] = schema
+    import sqlite3
+
+    try:
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=1.0)
+        try:
+            row = conn.execute(
+                "SELECT value FROM engine_config WHERE key='engine.upgrade.baseline'"
+            ).fetchone()
+        finally:
+            conn.close()
+        if row:
+            stamps["upgrade_baseline"] = str(row[0])
+    except Exception:  # noqa: BLE001 — a database at rest may be anything
+        pass
+    return stamps
+
+
 def _archive_active(base: Path, journal: _Journal, *, name_hint: Optional[str]) -> Optional[str]:
     """Move the active profile into profiles/<slug>/. Returns the slug, or
     None when there was nothing to archive."""
@@ -376,17 +527,39 @@ def _archive_active(base: Path, journal: _Journal, *, name_hint: Optional[str]) 
         return None
     slug = _archive_slug_for_active(base, name_hint)
     dest = _profiles_dir(base) / slug
+    _checkpoint_before_archive(base / DATABASE_FILENAME)
     _move_allowlisted(base, journal, base, dest)
     marker = _read_json(base / ACTIVE_MARKER_FILENAME)
-    _write_json(
-        dest / PROFILE_META_FILENAME,
-        {
-            "profile_id": slug,
-            "topos_name": marker.get("topos_name") or name_hint,
-            "created_at": marker.get("created_at") or _now_iso(),
-            "last_active_at": _now_iso(),
-        },
-    )
+    meta = {
+        "profile_id": slug,
+        "topos_name": marker.get("topos_name") or name_hint,
+        "created_at": marker.get("created_at") or _now_iso(),
+        "last_active_at": _now_iso(),
+        # What this Topos was last used WITH. The switch preflight and the menu
+        # both used to have to open the database to learn any of it.
+        "engine_version": _engine_version(),
+        "size_bytes": _dir_size_bytes(dest),
+    }
+    fingerprint = key_fingerprint(dest / ".env")
+    if fingerprint:
+        meta["key_fingerprint"] = fingerprint
+        twins = [
+            info.profile_id
+            for info in _archived_profiles(base)
+            if info.profile_id != slug and info.key_fingerprint == fingerprint
+        ]
+        if twins:
+            # Legitimate — "Start Fresh" deliberately leaves the old copy bound
+            # to the same key — but a menu showing two rows for one Topos with
+            # no way to tell should say so rather than let the user guess.
+            meta["same_topos_as"] = twins
+            logger.info(
+                "Archived %s shares its Topos key with existing profile(s): %s",
+                slug,
+                ", ".join(twins),
+            )
+    meta.update(_database_stamps(dest / DATABASE_FILENAME))
+    _write_json(dest / PROFILE_META_FILENAME, meta)
     (base / ACTIVE_MARKER_FILENAME).unlink(missing_ok=True)
     return slug
 
@@ -408,6 +581,13 @@ def _assert_openable_by_this_build(target: Path) -> None:
 
     target_db = target / DATABASE_FILENAME
     stamped = read_database_user_version(target_db)
+    if stamped is None:
+        # Falls back to what archiving recorded. Archives are checkpointed now,
+        # so the direct read normally works — but a profile put away by an older
+        # engine, or one whose database will not open read-only, still has its
+        # schema version written beside it.
+        recorded = _read_json(target / PROFILE_META_FILENAME).get("schema_version")
+        stamped = recorded if isinstance(recorded, int) else None
     if stamped is None:
         return
     try:

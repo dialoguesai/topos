@@ -467,7 +467,10 @@
       "notes": [
         "No re-derivation: the active-database binding fix changes which FILE is opened, not the shape or content of any table. A node already serving the database inside its active Topos sees no change at all.",
         "A node serving a pre-profile database (~/.topos_engine, Application Support/ToposEngine or .../ToposControlPlane) on a machine that has never used profiles now ADOPTS it: the file is copied into ~/.topos on first start and served from there. The original stays in place as its own backup, so disk use grows by one database copy until the user removes it.",
-        "A node serving such a database on a machine that DOES use profiles now serves the (possibly empty) active slot instead, and logs a warning naming the stray. That data is not lost \u2014 it is where it always was \u2014 but it is no longer served: `topos-node profile adopt` pulls it into the active Topos."
+        "A node serving such a database on a machine that DOES use profiles now serves the (possibly empty) active slot instead, and logs a warning naming the stray. That data is not lost \u2014 it is where it always was \u2014 but it is no longer served: `topos-node profile adopt` pulls it into the active Topos.",
+        "Pre-migration backups are now named database-pre-v<version>--<profile>-<stamp>.db and pruned per Topos. Backups already on disk carry no profile in the name, form their own group, and are never pruned by a named one \u2014 so a machine upgrading into this keeps every backup it has until the un-named group itself exceeds retention.",
+        "Archiving a Topos now checkpoints its WAL first, so archived profiles are a single self-contained database file. No action needed; profiles archived by older engines keep their sidecars and still restore correctly.",
+        "profile.json gains engine_version, schema_version, upgrade_baseline, size_bytes and key_fingerprint at archive time. Profiles archived before this have none of them: `profile list` falls back to measuring the directory, and the switch preflight falls back to opening the database."
       ]
     }
   ]

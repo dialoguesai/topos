@@ -51,6 +51,45 @@ The machine-readable twin of each release is
   The check is read-only and fails OPEN: a database it cannot read is not
   evidence of a version problem, and refusing on "cannot tell" would strand
   people on the Topos they are trying to leave.
+- `[S1]` **A second Topos migrating deleted the first one's pre-upgrade
+  backups.** Every Topos takes its turn in the same active slot, so all of them
+  write into one `~/.topos/backups` under names that named no owner — and
+  retention kept "the newest 2" across the whole directory. Switching to
+  another Topos and letting it migrate therefore destroyed the safety net of a
+  Topos that was not even running, silently. Backups are now
+  `database-pre-v<version>--<profile>-<stamp>.db` and pruning only ever
+  considers one Topos's own. The name is parsed rather than globbed: a glob for
+  `--q4-*` also matches `--q4-2-…`, which would have been the same cross-Topos
+  deletion one level down. Backups written before this carry no owner, form
+  their own group, and are never pruned by a named one — nothing can prove
+  which Topos they came from.
+- `[S1]` **An archived Topos kept a hot WAL, so it could not be read without
+  its sidecars.** Archiving renamed the database and its `-wal`/`-shm`, which
+  works but leaves a file that a read-only open refuses — which is exactly why
+  the switch preflight above could not read the schema version of the profile
+  it was about to activate. Archiving now checkpoints (`wal_checkpoint
+  (TRUNCATE)`) first, so an archived Topos is one self-contained file. It will
+  not open a file it cannot identify as SQLite: sqlite3 can delete the sidecars
+  of a file it fails to parse, and an archive must not lose bytes it could not
+  read.
+
+### Added
+
+- `[S1]` **Archived Topoi record what they were last used with.** `profile.json`
+  now carries `engine_version`, `schema_version`, `upgrade_baseline`,
+  `size_bytes` and a `key_fingerprint` (a 12-char SHA-256 prefix — the key
+  itself never leaves `.env`). Three things follow: `profile list` and the tray
+  menu can label a Topos without opening a database (listing stays a folder
+  read, and no longer walks a 500 MB directory to size it), the switch
+  preflight has a fallback when the archived database will not open, and two
+  profiles that share a display name can finally be told apart — the machine
+  this came from has two archived Topoi both called "q4", bound to different
+  keys. When an archive DOES share a key with an existing profile — which
+  "Start Fresh" deliberately produces — it records `same_topos_as` instead of
+  leaving two identical-looking rows.
+- `[S1]` `/healthcheck` gained `database_path`, `database_source` and
+  `active_profile_id`; the macOS tray uses them to verify that a switch landed
+  on the Topos it asked for (shell `1a4d79b`).
 
 ## [1.3.20] — 2026-08-17
 
