@@ -33,10 +33,14 @@ The machine-readable twin of each release is
     is ADOPTED — copied into the slot, original left in place as its own
     backup — rather than served where it lies. A database being served is
     always a database some Topos owns.
-  - **The binding is now stated.** One startup line names the database, its
-    source (`slot` / `new-slot` / `adopted` / `legacy` / `settings`), the owning
-    profile and the schema version, and a database served from outside `~/.topos`
-    logs a warning naming `profile adopt` as the remedy. `/healthcheck` carries
+  - **The binding is now stated.** One line names the database, its source
+    (`slot` / `new-slot` / `adopted` / `legacy` / `settings`), the owning profile
+    and the schema version, and a database served from outside `~/.topos` logs a
+    warning naming `profile adopt` as the remedy. It hangs off the code about to
+    OPEN the connection, not off `startup_event`: the CLI opens the owner
+    connection before uvicorn starts (printing pending consent steps), so
+    anything in startup conditioned on "no connection yet" is already too late
+    to say — or decide — anything. Adoption has the same one useful moment. `/healthcheck` carries
     `database_path`, `database_source` and `active_profile_id`, so a switch can
     finally be verified from the outside instead of assumed.
   - Removed `migrate_legacy_database()`: dead code (no callers) whose job was to

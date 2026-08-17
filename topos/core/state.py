@@ -370,6 +370,65 @@ def close_thread_db_connection() -> None:
     _thread_state.path = None
 
 
+_binding_announced = False
+
+
+def bind_active_database() -> None:
+    """Resolve, adopt if needed, and ANNOUNCE this node's database. Once.
+
+    Called from the one place that is guaranteed to run before a connection
+    exists: the code about to open it. Startup is not that place — the CLI
+    prints pending consent steps before uvicorn is up, and that call opens the
+    owner connection, so anything conditioned on "no connection yet" inside
+    ``startup_event`` is already too late to say (or decide) anything.
+
+    Adoption in particular has exactly one useful moment: before the first
+    open. After it, the process is already serving whatever was resolved.
+    """
+    global _binding_announced
+
+    if _binding_announced or db_conn is not None:
+        # An existing connection means the binding was decided elsewhere —
+        # a test injecting an in-memory handle, most often. Never adopt on
+        # top of someone else's decision.
+        return
+    _binding_announced = True
+    try:
+        from ..storage.db.paths import (
+            SOURCE_ADOPTED,
+            SOURCE_LEGACY,
+            read_database_user_version,
+            resolve_active_database,
+        )
+
+        binding = resolve_active_database(adopt=True)
+        schema = read_database_user_version(binding.path)
+        logger.info(
+            "Serving database %s (source=%s, profile=%s, schema=%s)",
+            binding.path,
+            binding.source,
+            binding.profile_id or "-",
+            schema if schema is not None else "new",
+        )
+        if binding.source == SOURCE_ADOPTED:
+            logger.info(
+                "Adopted the pre-profile database at %s into the active Topos; "
+                "the original is left in place as a backup",
+                binding.adopted_from,
+            )
+        elif binding.source == SOURCE_LEGACY:
+            logger.warning(
+                "Serving %s, which is outside ~/.topos and belongs to no Topos: "
+                "switching Topoi will not carry this data. Run "
+                "`topos-node profile adopt` to pull it into the active Topos.",
+                binding.path,
+            )
+        global active_database
+        active_database = binding
+    except Exception:  # noqa: BLE001 — a diagnostic never blocks a connection
+        logger.debug("Could not resolve the database binding", exc_info=True)
+
+
 def _get_owner_db_connection() -> Optional[sqlite3.Connection]:
     """Establish/validate the owner connection (migrations run here, once).
 
@@ -381,6 +440,8 @@ def _get_owner_db_connection() -> Optional[sqlite3.Connection]:
     closed at the swap.
     """
     global db_conn, _db_conn_path, _conn_owner_thread
+
+    bind_active_database()
 
     from ..config.settings import settings
 
