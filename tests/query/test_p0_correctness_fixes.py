@@ -83,6 +83,73 @@ class TestHybridSimilarityScale:
         assert {i.get("record_id") for i in surviving} == {"rec_vec", "rec_fts"}
 
 
+class TestSameMonthDayRanges:
+    """A day range inside one month must span, not collapse to its first day.
+
+    Live failure 2026-08-17: "generate a personal work report for Aug 11-16, 2026"
+    searched Aug 11 alone, found little, and reported the rest of the week as unsynced
+    data. The window it returned was well-formed, so nothing looked broken. The
+    repeated-month and cross-month spellings already worked, which is what let the
+    compact form - the one people actually type - stay broken.
+    """
+
+    @pytest.mark.parametrize("text", [
+        "Aug 11\u201316, 2026",      # en dash, as pasted from most editors
+        "Aug 11\u201416, 2026",      # em dash
+        "Aug 11-16, 2026",
+        "August 11-16, 2026",
+        "Aug 11 to 16, 2026",
+        "Aug 11 through 16 2026",
+        "August 11th-16th, 2026",
+    ])
+    def test_compact_range_yields_both_endpoints(self, text: str) -> None:
+        assert _iso_date_hints(text) == ["2026-08-11", "2026-08-16"]
+
+    @pytest.mark.parametrize("text", [
+        "Aug 11 through Aug 16 2026",
+        "August 11 to August 16, 2026",
+    ])
+    def test_repeated_month_forms_are_unchanged(self, text: str) -> None:
+        assert _iso_date_hints(text) == ["2026-08-11", "2026-08-16"]
+
+    def test_cross_month_range_is_unchanged(self) -> None:
+        assert _iso_date_hints("Aug 28 - Sep 3, 2026") == ["2026-08-28", "2026-09-03"]
+
+    def test_the_planner_spans_the_whole_range(self) -> None:
+        from topos.query.planner import _explicit_time_range
+
+        assert _explicit_time_range("a work report for Aug 11\u201316, 2026") == (
+            "2026-08-11T00:00:00+00:00",
+            "2026-08-16T23:59:59+00:00",
+        )
+
+    def test_a_bare_number_range_is_not_a_date(self) -> None:
+        """The range pattern must need a month; "11-16" alone is a quantity."""
+        assert _iso_date_hints("what did I spend 11-16 dollars on") == []
+
+    def test_may_ranges_behave_like_may_single_dates(self) -> None:
+        """Ranges inherit the existing "may" treatment rather than inventing a new one.
+
+        `"I may 11 times"` already yields 2026-05-11 on the single-date path — the full
+        month-name pattern accepts "may" even though the *abbreviation* list deliberately
+        omits it. That over-match predates day ranges and is a real (separate) bug; what
+        matters here is that the range form is not MORE permissive than the single form,
+        so a fix applies to one place and covers both.
+        """
+        assert _iso_date_hints("I may 11-16 times reconsider") == [
+            "2026-05-11",
+            "2026-05-16",
+        ]
+        # Consistency with the single-date path, which has behaved this way all along.
+        assert _iso_date_hints("I may 11 times reconsider") == ["2026-05-11"]
+        # The guard that does hold: no digits, no date.
+        assert _iso_date_hints("I may go running") == []
+
+    def test_impossible_days_are_dropped_not_fabricated(self) -> None:
+        assert _iso_date_hints("Feb 29-30, 2026") == []
+        assert _iso_date_hints("Aug 15-99, 2026") == ["2026-08-15"]
+
+
 class TestDateHints:
     def test_month_name_day_still_parses(self) -> None:
         assert _iso_date_hints("Compare March 13 vs March 16 2026") == [
