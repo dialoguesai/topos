@@ -156,9 +156,12 @@ def _warm_scope_shadow() -> None:
 
 @app.on_event("startup")
 async def startup_event() -> None:
-    from .runtime_shutdown import clear_shutdown, install_shutdown_signal_hooks
+    from .runtime_shutdown import begin_runtime, install_shutdown_signal_hooks
 
-    clear_shutdown()
+    # Mint this run's generation rather than clearing a shared flag. Clearing
+    # would un-stop a previous run's still-draining workers; a fresh generation
+    # leaves theirs retired and gives this run its own.
+    begin_runtime("app_startup")
     install_shutdown_signal_hooks()
     align_uvicorn_loggers()
     _log_runtime_banner()
@@ -467,11 +470,15 @@ async def startup_event() -> None:
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
-    from .runtime_shutdown import request_shutdown
+    from .runtime_shutdown import end_runtime
 
     # Wake cooperative workers (fact_llm / Ollama threads) before awaiting
     # network teardown so Ctrl+C does not wait out a full enrichment batch.
-    request_shutdown("app_shutdown")
+    # end_runtime retires THIS run's generation — its workers stop for good —
+    # and installs a fresh one, so anything that runs later in this process
+    # (another app run, a CLI command, the next test) does not inherit a
+    # "shutting down" that belongs to a run which has already finished.
+    end_runtime("app_shutdown")
     await stop_runtime_update_monitor()
     if state.engine_presence_task:
         state.engine_presence_task.cancel()

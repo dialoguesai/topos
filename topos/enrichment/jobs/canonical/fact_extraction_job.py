@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import threading
 from typing import Any, Callable, Dict, List, Optional
 
 from ..base import BaseEnrichmentJob
@@ -45,19 +46,25 @@ class FactExtractionJob(BaseEnrichmentJob):
             return [{"_deferred": True, "error": "database_unavailable"}]
         from ....features.facts.extract import extract_facts_from_batch
 
-        # Offload the full sync path (rules + fact_llm). extract_facts_from_batch
-        # may block for tens of seconds on Ollama; running it on the event-loop
-        # thread starves CP ping/pong and UI signal RPCs.
+        # Cancellation is scoped to THIS batch. Cancelling the await does not
+        # kill the worker thread, so it still needs a cooperative signal — but
+        # that signal must not outlive the batch. This used to call
+        # runtime_shutdown.request_shutdown(), a process-lifetime flag only an
+        # app startup could clear: one cancelled batch left every later batch
+        # returning 0 facts, with the job still reporting success, until the
+        # node was restarted.
+        cancel = threading.Event()
+        llm_stats: Dict[str, Any] = {}
         try:
             written = await asyncio.to_thread(
-                extract_facts_from_batch, conn, canonical_messages
+                extract_facts_from_batch,
+                conn,
+                canonical_messages,
+                cancel=cancel,
+                llm_stats=llm_stats,
             )
         except asyncio.CancelledError:
-            from ....runtime_shutdown import request_shutdown
-
-            # Cancelling the await does not kill the worker thread; the shutdown
-            # flag lets fact_llm stop scheduling further Ollama calls.
-            request_shutdown("fact_extraction_cancelled")
+            cancel.set()
             raise
         if progress_callback:
             progress_callback(len(canonical_messages), len(canonical_messages))
@@ -66,4 +73,17 @@ class FactExtractionJob(BaseEnrichmentJob):
         # carries the count so orchestrator records_created reflects the real
         # writes instead of a hardcoded 0 (nothing here goes through
         # write_signal_records).
-        return [{"_written": int(written or 0)}]
+        result: Dict[str, Any] = {"_written": int(written or 0)}
+        if llm_stats.get("stopped"):
+            # A batch that stopped early is not a batch that found nothing —
+            # say so in the job record rather than letting a quiet lane read as
+            # a successful empty pass.
+            result["_facts_llm_stopped"] = True
+            result["_facts_llm_stop_reason"] = str(llm_stats.get("stop_reason") or "stopped")
+            result["_facts_llm_unprocessed"] = int(llm_stats.get("unprocessed") or 0)
+            logger.warning(
+                "[PIPELINE:FACTS] LLM pass stopped early (%s); %d row(s) left for the next pass",
+                result["_facts_llm_stop_reason"],
+                result["_facts_llm_unprocessed"],
+            )
+        return [result]

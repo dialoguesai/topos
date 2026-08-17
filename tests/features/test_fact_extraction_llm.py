@@ -357,7 +357,7 @@ class TestGracefulDegradation:
         def _dead_extractor(prompt, row):
             raise RuntimeError("Ollama request failed: connection refused")
 
-        monkeypatch.setattr(llm, "_make_ollama_extractor", lambda model, conn=None: _dead_extractor)
+        monkeypatch.setattr(llm, "_make_ollama_extractor", lambda model, conn=None, **_: _dead_extractor)
 
         rows = [_ai_chat_owner("I work at Dialogues these days")]
         # Must not raise; rules floor writes works_at.
@@ -377,7 +377,7 @@ class TestGracefulDegradation:
         def _dead(prompt, row):
             raise RuntimeError("urlopen error [Errno 61] Connection refused")
 
-        monkeypatch.setattr(llm, "_make_ollama_extractor", lambda model, conn=None: _dead)
+        monkeypatch.setattr(llm, "_make_ollama_extractor", lambda model, conn=None, **_: _dead)
         # Fact-bearing content so the pre-filter passes and the LLM is actually
         # attempted (short "a"/"b"/"c" rows would be pre-filtered before any call).
         rows = [
@@ -429,7 +429,7 @@ class TestAssertIntegration:
                 {"predicate": "prefers", "object": "cold brew"},  # new
             ]
 
-        monkeypatch.setattr(llm, "_make_ollama_extractor", lambda model, conn=None: _extractor)
+        monkeypatch.setattr(llm, "_make_ollama_extractor", lambda model, conn=None, **_: _extractor)
 
         rows = [_ai_chat_owner("I work at Dialogues these days")]
         extract_facts_from_batch(conn, rows)

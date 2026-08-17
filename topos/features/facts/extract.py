@@ -10,6 +10,7 @@ from __future__ import annotations
 import inspect
 import re
 import sqlite3
+import threading
 from typing import Any, Dict, List, Optional
 
 from ...storage.db.write_gate import commit_connection, with_db_write
@@ -444,8 +445,17 @@ _EXTRACTORS = {
 def extract_facts_from_batch(
     conn: sqlite3.Connection,
     rows: List[Dict[str, Any]],
+    *,
+    cancel: Optional[threading.Event] = None,
+    llm_stats: Optional[Dict[str, Any]] = None,
 ) -> int:
-    """Extract and assert facts about the owner from a canonical batch."""
+    """Extract and assert facts about the owner from a canonical batch.
+
+    ``cancel``: scoped to THIS call — the caller sets it when its own task is
+    cancelled, which stops this batch's LLM pass and nothing else. ``llm_stats``:
+    optional out-dict describing the LLM pass (see ``extract_owner_facts_llm``),
+    so a caller can tell "no facts here" from "stopped before finishing".
+    """
     from ..lifecycle.exclusions import excluded_record_ids
 
     store = FactStore(conn)
@@ -508,7 +518,9 @@ def extract_facts_from_batch(
         from .llm_extract import extract_owner_facts_llm, facts_llm_enabled
 
         if facts_llm_enabled(conn=conn):
-            written += extract_owner_facts_llm(conn, rows)
+            written += extract_owner_facts_llm(
+                conn, rows, cancel=cancel, stats=llm_stats
+            )
     except Exception as exc:  # noqa: BLE001 — ingestion must never crash on the LLM pass
         import logging
 

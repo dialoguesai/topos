@@ -11,6 +11,44 @@ The machine-readable twin of each release is
 
 ### Fixed
 
+- `[E:facts]` **One cancelled fact-extraction batch could disable LLM fact
+  extraction for the life of the node.** `FactExtractionJob` answered
+  `asyncio.CancelledError` with `runtime_shutdown.request_shutdown(
+  "fact_extraction_cancelled")` — a process-lifetime flag that only an
+  `app.startup_event` could clear. Every later batch in that process then
+  returned 0 on entry ("LLM fact pass skipped; engine shutting down"), the
+  rules floor kept writing, the job kept reporting success, and
+  `/healthcheck` stayed green: a lane going dark with nothing to see, the same
+  signature as the `db_ok` outage below. Nothing cancels enrichment today
+  (no `wait_for` in `enrichment/`/`pipeline/`, and the pipeline worker task is
+  never cancelled), so this was latent, not firing — but it was one job
+  timeout or cancel button away, and the flag's scope was wrong regardless.
+  Three changes, prevention plus detection:
+  - **Cancelling one batch is now scoped to that batch.** The job passes a
+    `threading.Event` down through `extract_facts_from_batch(cancel=…)` into
+    `extract_owner_facts_llm(cancel=…)` and sets it in its own
+    `except CancelledError`. It cannot reach any other batch, or the run.
+  - **`runtime_shutdown` tracks a generation, not a boolean.** A generation is
+    one runtime run: an app lifespan, or the ambient generation of a process
+    that never starts one (CLI, scripts, tests). `begin_runtime()` at startup
+    mints a fresh one; `end_runtime()` at shutdown retires it — its own
+    workers stop and STAY stopped — and installs a fresh, unset one for
+    whatever comes next. Workers capture the generation they started under and
+    poll that, so a run that ends mid-batch still stops the batch it started,
+    and a run that ends cannot leave a later, unrelated caller reading
+    "shutting down". The old `clear_shutdown()`-at-startup did the opposite:
+    it un-stopped the previous run's still-draining workers. `begin_runtime`
+    also retires an outgoing generation, so a run that dies without
+    `end_runtime` cannot strand workers polling a flag nobody will set.
+    `is_shutdown_requested()` / `request_shutdown()` keep their signatures and
+    their meaning for the signal path.
+  - **A stop is reported, not silent.** `extract_owner_facts_llm(stats=…)`
+    fills an out-dict with `written`/`eligible`/`stopped`/`stop_reason`/
+    `unprocessed`, and the job carries `_facts_llm_stopped` into its result and
+    logs at WARNING. "Stopped with 12 rows left" no longer reads as
+    "there was nothing to extract". Unprocessed rows stay unmarked, so the
+    next pass retries them, as before.
+
 - `[O]` **A node can no longer keep answering "healthy" after its database has
   died.** On 2026-08-17 the node served `/healthcheck` normally for nearly two
   hours while every data read failed and the app showed a connected Topos over
