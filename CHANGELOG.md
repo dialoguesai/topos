@@ -90,6 +90,11 @@ The machine-readable twin of each release is
 - `[S1]` `/healthcheck` gained `database_path`, `database_source` and
   `active_profile_id`; the macOS tray uses them to verify that a switch landed
   on the Topos it asked for (shell `1a4d79b`).
+- `[S1]` Adopting a pre-profile database written by a NEWER engine — what a
+  machine that downgraded its node has — now logs what is about to happen
+  before it happens. The adoption still proceeds and the downgrade guard still
+  refuses to open it: starting the node on an empty Topos instead would read as
+  data loss, which is the exact silence this release is curing.
 - `[S1]` `topos-node --discover` now answers the question people actually run
   it for: it names the database being SERVED and the Topos that owns it, then
   lists databases from older installs as "not served", and warns outright when

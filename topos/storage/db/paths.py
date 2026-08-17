@@ -223,6 +223,36 @@ def _pinned_database_path() -> Optional[str]:
         return os.getenv("TOPOS_DATABASE_PATH") or None
 
 
+def _warn_if_written_by_a_newer_build(legacy: Path) -> None:
+    """Say so BEFORE adopting a database this build cannot open.
+
+    A machine that downgraded its node has a pre-profile database stamped by a
+    newer engine. Adoption still happens — refusing would start the node on an
+    empty Topos, which reads as data loss and is the silence this whole area is
+    being cured of — but the ``DowngradeGuardError`` that follows deserves to
+    be pre-explained rather than arriving as a bare startup failure.
+    """
+    stamped = read_database_user_version(legacy)
+    if stamped is None:
+        return
+    try:
+        from .migrations import max_migration_order
+
+        known = max_migration_order()
+    except Exception:  # noqa: BLE001 — never block startup on a diagnostic
+        return
+    if stamped > known:
+        logger.warning(
+            "The database at %s was written by a NEWER version of Topos "
+            "(schema %s; this build understands %s). Adopting it anyway — the node "
+            "will refuse to open it until Topos is updated, which is better than "
+            "starting on an empty Topos and looking like the data is gone.",
+            legacy,
+            stamped,
+            known,
+        )
+
+
 def resolve_active_database(
     base: Optional[Path] = None, *, adopt: bool = False
 ) -> ActiveDatabase:
@@ -260,6 +290,7 @@ def resolve_active_database(
         # disagree until the next start.
         return ActiveDatabase(legacy, source=SOURCE_LEGACY)
 
+    _warn_if_written_by_a_newer_build(legacy)
     if adopt_into_slot(legacy, slot):
         return ActiveDatabase(
             slot, source=SOURCE_ADOPTED, profile_id=profile_id, adopted_from=legacy
