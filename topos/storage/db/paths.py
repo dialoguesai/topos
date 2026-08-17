@@ -157,7 +157,10 @@ class ActiveDatabase:
         return self.source in (SOURCE_SLOT, SOURCE_NEW_SLOT, SOURCE_ADOPTED)
 
 
-def _active_profile_id(base: Path) -> Optional[str]:
+def active_profile_id(base: Optional[Path] = None) -> Optional[str]:
+    """Which Topos owns the active slot, per its marker. None before the first
+    switch — a machine that has only ever had one Topos never wrote one."""
+    base = base or active_base()
     marker = base / ACTIVE_MARKER_FILENAME
     try:
         payload = json.loads(marker.read_text(encoding="utf-8"))
@@ -165,6 +168,11 @@ def _active_profile_id(base: Path) -> Optional[str]:
         return None
     profile_id = payload.get("profile_id")
     return str(profile_id) if profile_id else None
+
+
+def active_profile_id_for(db_path: Path) -> Optional[str]:
+    """The owning Topos of a database, inferred from the marker beside it."""
+    return active_profile_id(db_path.parent)
 
 
 def uses_profile_layout(base: Optional[Path] = None) -> bool:
@@ -231,7 +239,7 @@ def resolve_active_database(
         return ActiveDatabase(Path(pinned), source=SOURCE_SETTINGS)
 
     slot = base / DATABASE_FILENAME
-    profile_id = _active_profile_id(base)
+    profile_id = active_profile_id(base)
 
     if slot.is_file():
         return ActiveDatabase(slot, source=SOURCE_SLOT, profile_id=profile_id)
