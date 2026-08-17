@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -56,6 +57,12 @@ MOVE_ALLOWLIST: tuple[str, ...] = (
 # profile worth archiving. ``config.yaml`` alone does not — a fresh install
 # can carry one before it is ever paired or ingests a byte.
 ACTIVE_SIGNIFIERS: tuple[str, ...] = (".env", "database.db")
+
+# What may be deleted from an archived profile alongside the Topos itself.
+# ``.DS_Store`` is there because Finder writes one into any folder a user
+# opens, and refusing to delete a Topos over a Finder artefact is refusing
+# over nothing.
+REMOVABLE_EXTRAS: tuple[str, ...] = (PROFILE_META_FILENAME, ".DS_Store")
 
 
 class ProfileError(Exception):
@@ -455,6 +462,72 @@ def switch_profile(
     return {"activated": profile_id, "archived_as": archived_as}
 
 
+def remove_profile(profile_id: str, base: Optional[Path] = None) -> dict:
+    """Delete an archived Topos and its data from this machine, permanently.
+
+    The one profile operation that does not move files, and therefore the only
+    one that cannot be rolled back: there is no journal here because there is
+    nothing left to roll back to. That asymmetry is the whole reason callers
+    put a confirmation in front of it.
+
+    Deliberately does NOT require the node to be stopped. Every other mutation
+    moves the ACTIVE slot out from under a running engine; this one touches
+    only ``profiles/<id>/``, which by construction nothing has open. Making
+    someone quit Topos to delete a Topos they are not using would be ceremony,
+    and the restart would cost them a graph rebuild.
+
+    Refuses rather than guesses: a file inside the profile that is not part of
+    a Topos is named back to the caller and nothing at all is deleted — the
+    same principle as the move allowlist, for the stronger reason that this
+    folder is somebody's only copy.
+    """
+    base = base or default_base()
+    recover_interrupted_switch(base)
+
+    # A profile id names one folder inside profiles/, never a path. Without
+    # this, '../..' resolves to the active Topos — or to anything else on disk.
+    if profile_id != Path(profile_id).name or profile_id in ("", ".", ".."):
+        raise ProfileError(f"'{profile_id}' is not a profile name.")
+
+    target = _profiles_dir(base) / profile_id
+    if not target.is_dir():
+        active = current_profile(base)
+        if active is not None and active.profile_id == profile_id:
+            raise ProfileError(
+                f"'{profile_id}' is the Topos this machine is using now. Switch to "
+                "another one first, or disconnect this Mac, and then remove it."
+            )
+        known = (
+            ", ".join(p.name for p in _profiles_dir(base).iterdir())
+            if _profiles_dir(base).is_dir()
+            else ""
+        )
+        raise ProfileError(f"No profile named '{profile_id}'. Known: {known or '(none)'}")
+
+    removable = set(MOVE_ALLOWLIST) | set(REMOVABLE_EXTRAS)
+    unknown = sorted(entry.name for entry in target.iterdir() if entry.name not in removable)
+    if unknown:
+        raise ProfileError(
+            f"'{profile_id}' also holds files that are not part of a Topos: "
+            f"{', '.join(unknown)}. Nothing was deleted — move those out first "
+            "if you meant to delete this Topos."
+        )
+
+    meta = _read_json(target / PROFILE_META_FILENAME)
+    freed = _dir_size_bytes(target)
+    for entry in sorted(target.iterdir()):
+        if entry.is_dir():
+            shutil.rmtree(entry)
+        else:
+            entry.unlink()
+    target.rmdir()
+    return {
+        "removed": profile_id,
+        "name": (str(meta["topos_name"]) if meta.get("topos_name") else None),
+        "freed_bytes": freed,
+    }
+
+
 def set_active_name(name: str, base: Optional[Path] = None) -> None:
     """Record the bound Topos's user-chosen name on the active marker.
 
@@ -494,8 +567,6 @@ def adopt_legacy(base: Optional[Path] = None) -> dict:
     if not existing:
         return {"adopted": None, "reason": "no legacy database found"}
     newest = max(existing, key=lambda p: p.stat().st_mtime)
-    import shutil
-
     base.mkdir(parents=True, exist_ok=True)
     shutil.copy2(newest, active_db)
     for suffix in ("-wal", "-shm"):

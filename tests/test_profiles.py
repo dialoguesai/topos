@@ -265,6 +265,77 @@ class TestQueries:
         assert infos[1].size_bytes > 0
 
 
+class TestRemoveProfile:
+    """The only profile operation that destroys data, so most of these are the
+    cases where it must refuse."""
+
+    def test_removes_archived_profile_and_reports_freed_bytes(self, tmp_path):
+        _seed_active(tmp_path)
+        target = _seed_profile(tmp_path, "work", name="Work")
+        (target / "ingestion").mkdir()
+        (target / "ingestion" / "raw.txt").write_text("payload")
+
+        result = profiles.remove_profile("work", tmp_path)
+
+        assert result["removed"] == "work"
+        assert result["name"] == "Work"
+        assert result["freed_bytes"] > 0
+        assert not target.exists()
+        # The active Topos is untouched.
+        assert (tmp_path / "database.db").read_bytes() == b"sqlite-bytes"
+        assert [i.profile_id for i in profiles.list_profiles(tmp_path) if not i.active] == []
+
+    def test_refuses_the_active_topos_by_name(self, tmp_path):
+        _seed_active(tmp_path)
+        profiles.set_active_name("Mine", tmp_path)
+
+        with pytest.raises(profiles.ProfileError, match="using now"):
+            profiles.remove_profile("mine", tmp_path)
+
+        assert (tmp_path / "database.db").exists()
+
+    def test_refuses_unknown_profile(self, tmp_path):
+        with pytest.raises(profiles.ProfileError, match="No profile named 'nope'"):
+            profiles.remove_profile("nope", tmp_path)
+
+    def test_refuses_a_path_instead_of_a_name(self, tmp_path):
+        _seed_active(tmp_path)
+        for attempt in ("../..", "../database.db", "work/.."):
+            with pytest.raises(profiles.ProfileError):
+                profiles.remove_profile(attempt, tmp_path)
+        assert (tmp_path / "database.db").exists()
+
+    def test_refuses_and_deletes_nothing_when_unrecognised_files_are_present(self, tmp_path):
+        target = _seed_profile(tmp_path, "work")
+        (target / "notes-i-put-here.txt").write_text("mine")
+
+        with pytest.raises(profiles.ProfileError, match="not part of a Topos"):
+            profiles.remove_profile("work", tmp_path)
+
+        # Nothing at all was deleted — not even the recognised files.
+        assert (target / "database.db").exists()
+        assert (target / ".env").exists()
+        assert (target / "notes-i-put-here.txt").exists()
+
+    def test_finder_artefacts_do_not_block_removal(self, tmp_path):
+        target = _seed_profile(tmp_path, "work")
+        (target / ".DS_Store").write_bytes(b"finder")
+
+        profiles.remove_profile("work", tmp_path)
+
+        assert not target.exists()
+
+    def test_does_not_require_the_node_to_be_stopped(self, tmp_path, monkeypatch):
+        # An archived Topos is not the one a running engine has open, so unlike
+        # new/switch this must work without asking anyone to quit Topos.
+        monkeypatch.setattr(profiles, "node_is_running", lambda port=9000: True)
+        _seed_profile(tmp_path, "work")
+
+        profiles.remove_profile("work", tmp_path)
+
+        assert not (tmp_path / "profiles" / "work").exists()
+
+
 class TestCli:
     def test_list_and_switch_json(self, tmp_path):
         _seed_active(tmp_path)
@@ -284,6 +355,30 @@ class TestCli:
     def test_switch_error_is_clean_not_traceback(self, tmp_path):
         runner = CliRunner()
         result = runner.invoke(profile_group, ["switch", "nope", "--base", str(tmp_path)])
+        assert result.exit_code != 0
+        assert "No profile named 'nope'" in result.output
+
+    def test_remove_needs_yes_when_nobody_can_answer_the_prompt(self, tmp_path):
+        _seed_profile(tmp_path, "work", name="Work")
+        runner = CliRunner()
+
+        # No TTY and no --yes: click aborts rather than deleting on a guess.
+        refused = runner.invoke(profile_group, ["remove", "work", "--base", str(tmp_path)])
+        assert refused.exit_code != 0
+        assert (tmp_path / "profiles" / "work").exists()
+
+        removed = runner.invoke(
+            profile_group, ["remove", "work", "--yes", "--json", "--base", str(tmp_path)]
+        )
+        assert removed.exit_code == 0, removed.output
+        payload = json.loads(removed.output)
+        assert payload["removed"] == "work"
+        assert payload["name"] == "Work"
+        assert not (tmp_path / "profiles" / "work").exists()
+
+    def test_remove_error_is_clean_not_traceback(self, tmp_path):
+        runner = CliRunner()
+        result = runner.invoke(profile_group, ["remove", "nope", "--yes", "--base", str(tmp_path)])
         assert result.exit_code != 0
         assert "No profile named 'nope'" in result.output
 

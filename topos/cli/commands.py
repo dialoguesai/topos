@@ -246,7 +246,7 @@ def main(
 
     Subcommands:
       reprocess   Re-run raw→canonical for a source (recovery utility).
-      profile     Manage multiple Topoi on this machine (list, new, switch).
+      profile     Manage multiple Topoi on this machine (list, new, switch, remove).
     """
     if ctx.invoked_subcommand is not None:
         return
