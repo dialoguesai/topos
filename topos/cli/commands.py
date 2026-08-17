@@ -370,9 +370,11 @@ def main(
 
 from topos.cli.reprocess_cmd import reprocess_command  # noqa: E402
 from topos.cli.profile_cmd import profile_group  # noqa: E402
+from topos.cli.setup_models_cmd import setup_models_command  # noqa: E402
 
 main.add_command(reprocess_command)
 main.add_command(profile_group)
+main.add_command(setup_models_command)
 
 
 if __name__ == "__main__":

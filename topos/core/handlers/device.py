@@ -393,9 +393,20 @@ async def handle_ollama_list_models(message: Dict[str, Any]) -> Optional[Dict[st
     # empty. The CP refuses to default `reachable` without it — an older node
     # answering `{models: []}` must read as unknown, not "Ollama up, empty".
     _schema = {"ollama_models_schema": 1}
+    # The setup card needs to name an install command, and the command depends
+    # on the machine the NODE runs on — not the browser's. Carried on the
+    # payload the card already polls so it never has to guess from a user agent
+    # (topos/engine/ollama_setup_guidance.py).
+    from ...engine.ollama_setup_guidance import install_guidance
+
+    _platform = {"setup_guidance": install_guidance()}
     try:
         result = await get_services().llm.list_ollama_models()
-        return {"id": req_id, "status": "ok", "payload": {"reachable": True, **_schema, **result}}
+        return {
+            "id": req_id,
+            "status": "ok",
+            "payload": {"reachable": True, **_schema, **_platform, **result},
+        }
     except HTTPException as exc:
         detail = exc.detail
         err_msg = detail if isinstance(detail, str) else str(detail)
@@ -412,6 +423,7 @@ async def handle_ollama_list_models(message: Dict[str, Any]) -> Optional[Dict[st
                     "models": [],
                     "detail": err_msg,
                     **_schema,
+                    **_platform,
                 },
             }
         return {
@@ -432,7 +444,18 @@ async def handle_ollama_pull_model(message: Dict[str, Any]) -> Optional[Dict[str
     try:
         from ...engine.ollama_pull import start_pull
 
-        return {"id": req_id, "status": "ok", "payload": start_pull(str(payload.get("model") or ""))}
+        # `size_bytes` lets the caller be refused before the transfer starts
+        # rather than partway in. The setup card knows the curated starter's
+        # size; anything else is caught by the mid-stream check once Ollama
+        # reports the real total.
+        return {
+            "id": req_id,
+            "status": "ok",
+            "payload": start_pull(
+                str(payload.get("model") or ""),
+                known_size_bytes=payload.get("size_bytes"),
+            ),
+        }
     except ValueError as exc:
         return {"id": req_id, "status": "error", "error": str(exc), "error_code": 400}
     except Exception as exc:  # noqa: BLE001

@@ -68,6 +68,27 @@ def _temperature_for_subtype(subtype: str) -> Optional[float]:
     return None
 
 
+class OllamaPullFailed(RuntimeError):
+    """Ollama reported a failed download.
+
+    Its streaming endpoints answer 200 and then emit `{"error": "..."}` mid
+    stream, so a failure is not an HTTP error and `urlopen` does not raise. A
+    caller that only watches for exceptions therefore saw a clean end-of-stream
+    and recorded the model as installed. This is the type that says otherwise.
+    """
+
+
+class PullAborted(RuntimeError):
+    """A progress callback asked to stop the transfer.
+
+    Distinct from every other callback exception, which `pull_model` swallows on
+    purpose: an incidental failure in a progress hook must not kill a healthy
+    multi-gigabyte download. This one is not incidental — it is the caller
+    saying the download cannot succeed (no disk space, cancelled) — so it is
+    re-raised and the transfer ends.
+    """
+
+
 class OllamaAdapter:
     """BackendAdapter for Ollama (http://localhost:11434)."""
 
@@ -208,12 +229,24 @@ class OllamaAdapter:
                         event = json.loads(line.decode())
                     except json.JSONDecodeError:
                         continue
+                    # Ollama reports a failed pull as an `error` frame INSIDE a
+                    # 200 response — a full disk, a bad tag, a registry outage.
+                    # Nothing here looked, so the loop ran to the end of the
+                    # stream and the caller marked the download DONE: a model
+                    # that was never written, reported as installed.
+                    failure = str(event.get("error") or "").strip()
+                    if failure:
+                        raise OllamaPullFailed(failure)
                     status = event.get("status", "")
                     total = event.get("total") or 0
                     completed = event.get("completed") or 0
                     if on_progress is not None:
                         try:
                             on_progress(event)
+                        except PullAborted:
+                            # The caller knows this download cannot finish.
+                            # Stopping now is the point — see PullAborted.
+                            raise
                         except Exception as exc:  # noqa: BLE001
                             logger.debug("pull progress callback failed: %s", exc)
                     if total and total > 0 and completed >= 0:
@@ -233,7 +266,10 @@ class OllamaAdapter:
                         logger.debug("Pulling model %s: %s", model_name, status)
                 logger.info("Model %s (ollama) pull complete.", model_name)
             else:
-                json.loads(resp.read().decode())
+                payload = json.loads(resp.read().decode())
+                failure = str((payload or {}).get("error") or "").strip()
+                if failure:
+                    raise OllamaPullFailed(failure)
                 logger.info("Model %s (ollama) pull complete.", model_name)
 
     def delete_model(self, model_name: str) -> None:
