@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.20] — 2026-08-17
+
 ### Added
 
 - `[O]` **`topos-node profile remove <id>` — a Topos can finally be taken off a

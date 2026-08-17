@@ -449,15 +449,22 @@
       ]
     },
     {
-      "version": "unreleased",
-      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "version": "1.3.20",
+      "summary": "profile remove: an archived Topos can be deleted from a machine; the data explorer stops reading raw ingestion that belongs to no Topos.",
       "steps": [],
       "notes": [
         "No re-derivation: the raw-ingestion binding fix changes which DIRECTORY the data explorer and storage breakdown read, not the shape or content of anything stored. Ingest already wrote to ~/.topos/ingestion, so no raw file moves and no record is reprocessed.",
-        "A node whose raw files live in ~/.topos/ingestion — every node, since that has been the ingest destination since before the profile layout — sees no change beyond the storage readout no longer double-counting.",
-        "On a machine that still carries a pre-profile ~/.topos_engine/ingestion, those JSONL files are no longer listed in the data explorer, no longer counted in the storage breakdown, and no longer deletable or downloadable through the UI. Nothing is moved or removed: the files stay where they are, and that directory belongs to no Topos — it is not carried by a profile switch and never was.",
-        "TOPOS_INGESTION_BASE_PATH now applies to reads as well as writes. A deployment that sets it (the LongMemEval adapter, and any test harness pointing ingestion at a scratch directory) will find the explorer and the storage breakdown following it instead of reporting on ~/.topos/ingestion."
+        "A node whose raw files live in ~/.topos/ingestion \u2014 every node, since that has been the ingest destination since before the profile layout \u2014 sees no change beyond the storage readout no longer double-counting.",
+        "On a machine that still carries a pre-profile ~/.topos_engine/ingestion, those JSONL files are no longer listed in the data explorer, no longer counted in the storage breakdown, and no longer deletable or downloadable through the UI. Nothing is moved or removed: the files stay where they are, and that directory belongs to no Topos \u2014 it is not carried by a profile switch and never was.",
+        "TOPOS_INGESTION_BASE_PATH now applies to reads as well as writes. A deployment that sets it (the LongMemEval adapter, and any test harness pointing ingestion at a scratch directory) will find the explorer and the storage breakdown following it instead of reporting on ~/.topos/ingestion.",
+        "`profile remove` is a new offline CLI command; it re-derives nothing and no upgrade step runs it. It deletes an archived profile only when a person asks it to, which is its purpose \u2014 nothing here touches ~/.topos/profiles/."
       ]
+    },
+    {
+      "version": "unreleased",
+      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "steps": [],
+      "notes": []
     }
   ]
 }
