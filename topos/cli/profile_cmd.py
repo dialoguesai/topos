@@ -25,6 +25,12 @@ def _base_from(base: Optional[str]) -> Optional[Path]:
     return Path(base) if base else None
 
 
+def _human_size(size_bytes: int) -> str:
+    """Whole MB below a tenth of a GB, so a small Topos does not read '0.0 GB'."""
+    size_gb = size_bytes / 1_000_000_000
+    return f"{size_gb:.1f} GB" if size_gb >= 0.1 else f"{size_bytes // 1_000_000} MB"
+
+
 _BASE_OPTION = click.option(
     "--base",
     default=None,
@@ -39,7 +45,7 @@ _PORT_OPTION = click.option(
 
 @click.group("profile")
 def profile_group() -> None:
-    """Manage multiple Topoi on this machine (list, new, switch)."""
+    """Manage multiple Topoi on this machine (list, new, switch, remove)."""
 
 
 @profile_group.command("list")
@@ -51,10 +57,11 @@ def profile_list(as_json: bool, base: Optional[str]) -> None:
     payload = {"profiles": [i.as_dict() for i in infos]}
     lines = []
     for info in infos:
-        size_gb = info.size_bytes / 1_000_000_000
-        size = f"{size_gb:.1f} GB" if size_gb >= 0.1 else f"{info.size_bytes // 1_000_000} MB"
         marker = "* " if info.active else "  "
-        lines.append(f"{marker}{info.profile_id}  {info.name or '(unnamed)'}  {size}")
+        lines.append(
+            f"{marker}{info.profile_id}  {info.name or '(unnamed)'}  "
+            f"{_human_size(info.size_bytes)}"
+        )
     _echo(payload, as_json, "\n".join(lines) or "(no profiles)")
 
 
@@ -110,6 +117,49 @@ def profile_switch(profile_id: str, port: int, as_json: bool, base: Optional[str
     if result["archived_as"]:
         human += f" (previous Topos archived as '{result['archived_as']}')"
     _echo(result, as_json, human + ". Start the node to use it.")
+
+
+@profile_group.command("remove")
+@click.argument("profile_id")
+@click.option("--yes", is_flag=True, help="Skip the confirmation prompt (for shells).")
+@_JSON_OPTION
+@_BASE_OPTION
+def profile_remove(profile_id: str, yes: bool, as_json: bool, base: Optional[str]) -> None:
+    """Permanently delete an archived Topos and its data from this machine.
+
+    Unlike `new` and `switch`, which move data and can be undone by moving it
+    back, this deletes it. The active Topos cannot be removed — switch to
+    another one, or disconnect this Mac, first.
+
+    The node does not need to be stopped: an archived Topos is not the one the
+    running engine has open.
+    """
+    base_path = _base_from(base)
+    if not yes:
+        info = next(
+            (
+                p
+                for p in profiles.list_profiles(base_path)
+                if p.profile_id == profile_id and not p.active
+            ),
+            None,
+        )
+        label = (info.name or profile_id) if info else profile_id
+        size = _human_size(info.size_bytes) if info else "unknown size"
+        click.confirm(
+            f"Permanently delete '{label}' and its data ({size}) from this machine?",
+            abort=True,
+        )
+    try:
+        result = profiles.remove_profile(profile_id, base_path)
+    except profiles.ProfileError as exc:
+        raise click.ClickException(str(exc)) from exc
+    _echo(
+        result,
+        as_json,
+        f"Deleted '{result['name'] or result['removed']}' and freed "
+        f"{_human_size(result['freed_bytes'])}.",
+    )
 
 
 @profile_group.command("adopt")

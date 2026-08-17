@@ -9,6 +9,31 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+
+- `[O]` **`topos-node profile remove <id>` — a Topos can finally be taken off a
+  machine.** Every profile operation so far moved data: `new` and `switch`
+  archive it into `~/.topos/profiles/<id>/`, and "Disconnect this Mac" in the
+  menu bar is `new` under another name. Nothing deleted anything, and neither
+  did the web app — its Archive button soft-deletes the control-plane record and
+  never touches the machine. So a Topos a user was finished with stayed on their
+  disk, in full, with `rm -rf` as the only way out. On a product whose claim is
+  that the data lives on your own machine, "take this one off my machine" was
+  the missing verb.
+  - Refuses rather than guesses. The active Topos is rejected by name (switch
+    away or disconnect first, and the error says so); a profile id containing a
+    path is rejected before anything resolves; and a profile holding a file that
+    is not part of a Topos is reported back with the filenames and **nothing is
+    deleted** — not even the files that were recognised. Same principle as the
+    move allowlist, for the stronger reason that this folder is somebody's only
+    copy. `.DS_Store` does not count as a stranger.
+  - Does not require the node to be stopped, unlike `new` and `switch`. Those
+    move the ACTIVE slot out from under a running engine; this touches only an
+    archived profile, which nothing has open. Quitting Topos to delete a Topos
+    you are not using would be ceremony, and the restart costs a graph rebuild.
+  - `--yes` for shells; without it and without a terminal to answer, it aborts
+    instead of deleting on a guess. Reports the bytes it freed.
+
 ### Fixed
 
 - `[O]` **The data explorer listed, sized and offered to delete raw records that
