@@ -1,5 +1,7 @@
 import os
 import sys
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -149,9 +151,78 @@ def pytest_runtest_logfinish(nodeid: str) -> None:
             )
             _LEAK_BASELINE[key] = now  # report each leak once, not once per later test
 
+    leaked = _leaked_engine_threads()
+    if leaked:
+        _THREAD_LEAK_FINDINGS.append((nodeid, f"still alive: {', '.join(leaked)}"))
+
+
+#: Engine threads that must not outlive the test that started them.
+#:
+#: A leaked writer is not a tidiness problem: it keeps writing while the NEXT
+#: app instance runs its startup migrations, and a migration that takes the
+#: process-wide write gate and then blocks on SQLite pins that gate for the full
+#: 30s busy_timeout. Every other writer queues, app startup among them, and the
+#: victim fails its own 30s lifespan budget reporting itself as the problem. In
+#: CI that read as an unexplained flake in whichever test happened to be
+#: starting — never the one that leaked.
+#:
+#: Prefixes, not exact names, because the two upgrade threads differ
+#: (`topos-upgrade-runner` / `topos-upgrade-stamp`).
+_THREAD_LEAK_PREFIXES = ("topos-upgrade-", "topos-startup-db")
+
+#: Threads get a moment to finish after teardown before being called a leak — a
+#: thread already on its way out is not what this is looking for.
+_THREAD_EXIT_GRACE_S = 2.0
+
+_THREAD_LEAK_FINDINGS: list[tuple[str, str]] = []
+
+#: Thread identities already reported. One leak is attributable to the test that
+#: created it and to no other; without this, a single leaked thread reappears in
+#: every later test's check and buries the one finding that matters under a
+#: cascade of innocent ones.
+_REPORTED_THREADS: set[int] = set()
+
+
+def _leaked_engine_threads() -> list[str]:
+    deadline = time.monotonic() + _THREAD_EXIT_GRACE_S
+    while True:
+        leaked = [
+            t
+            for t in threading.enumerate()
+            if t.is_alive()
+            and t.name.startswith(_THREAD_LEAK_PREFIXES)
+            and t.ident not in _REPORTED_THREADS
+        ]
+        if not leaked or time.monotonic() >= deadline:
+            for t in leaked:
+                if t.ident is not None:
+                    _REPORTED_THREADS.add(t.ident)
+            return sorted(t.name for t in leaked)
+        time.sleep(0.05)
+
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:
     del exitstatus, config
+    if _THREAD_LEAK_FINDINGS:
+        terminalreporter.section("engine threads outlived their test", red=True, bold=True)
+        for nodeid, detail in _THREAD_LEAK_FINDINGS:
+            terminalreporter.write_line(f"{nodeid}\n    {detail}")
+        terminalreporter.write_line("")
+        terminalreporter.write_line(
+            "A thread still alive here keeps writing during LATER tests. When it"
+        )
+        terminalreporter.write_line(
+            "takes the write gate and blocks on SQLite it pins every other writer"
+        )
+        terminalreporter.write_line(
+            "for busy_timeout (30s), which fails an unrelated test's app startup."
+        )
+        terminalreporter.write_line(
+            "Give the thread a stop event, hold it in topos.core.state, and set +"
+        )
+        terminalreporter.write_line(
+            "join it in the app's shutdown_event — see _reap_upgrade_runner."
+        )
     if not _LEAK_FINDINGS:
         return
     terminalreporter.section("module state leaked between tests", red=True, bold=True)
@@ -178,7 +249,7 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:
 def pytest_sessionfinish(session, exitstatus) -> None:
     """Red the run on a leak, so the gate cannot pass while one is live."""
     del exitstatus
-    if _LEAK_FINDINGS:
+    if _LEAK_FINDINGS or _THREAD_LEAK_FINDINGS:
         session.exitstatus = 1
 
 

@@ -77,6 +77,17 @@ configure_logging()
 load_extensions()
 logger = logging.getLogger("topos.app")
 
+#: How long shutdown waits for the upgrade-runner thread to notice its stop
+#: event. Its waits poll in 50ms slices, so this only runs long if the thread is
+#: already inside `run_pending_upgrades`.
+_UPGRADE_JOIN_TIMEOUT_S = 10.0
+
+#: Ceiling on the startup DB section (stage 9 migrations + source-install
+#: rehydration). It runs on its own thread and startup awaits it; with no
+#: timeout, a write gate held elsewhere turned that await into an unbounded
+#: hang that surfaced only as the caller's lifespan timeout, naming no cause.
+_STARTUP_DB_TIMEOUT_S = 20.0
+
 app = FastAPI(
     title="Topos",
     description="Topos node: Topos Database (data plane) and Topos Engine (compute plane), typically co-deployed in this process.",
@@ -152,6 +163,64 @@ def _warm_scope_shadow() -> None:
         warm()
     except Exception:  # noqa: BLE001 — telemetry must never block startup
         logger.debug("scope shadow warm skipped", exc_info=True)
+
+
+def _spawn_background(coro, *, name: str) -> "asyncio.Task":
+    """Start a startup task and keep a handle so shutdown can cancel it.
+
+    Every fire-and-forget `asyncio.create_task` in startup used to outlive its
+    app. In-process that meant a task still writing while the NEXT app instance
+    ran its startup migrations, and the write-gate convoy that produced took
+    exactly the SQLite busy_timeout (30s) — the same 30s as the test lifespan
+    budget, which is why it surfaced as "App startup did not complete within
+    30s" on whichever test happened to be starting.
+
+    Also keeps a strong reference: the event loop only holds a weak one, so an
+    untracked task can be garbage-collected mid-flight.
+    """
+    task = asyncio.create_task(coro, name=name)
+    state.background_tasks.add(task)
+    task.add_done_callback(state.background_tasks.discard)
+    return task
+
+
+async def _reap_background_tasks() -> None:
+    """Cancel and await every task from :func:`_spawn_background`."""
+    tasks = [t for t in state.background_tasks if not t.done()]
+    state.background_tasks.clear()
+    for task in tasks:
+        task.cancel()
+    for task in tasks:
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        except Exception as exc:  # noqa: BLE001 — teardown never raises
+            logger.debug("background task %s ended with %s", task.get_name(), exc)
+
+
+async def _reap_upgrade_runner(timeout_s: float = _UPGRADE_JOIN_TIMEOUT_S) -> None:
+    """Stop the upgrade runner thread and wait for it to actually exit."""
+    stop = state.upgrade_runner_stop
+    thread = state.upgrade_runner_thread
+    state.upgrade_runner_stop = None
+    state.upgrade_runner_thread = None
+    if stop is not None:
+        stop.set()
+    if thread is None or not thread.is_alive():
+        return
+    # Joined off the loop: the thread may be mid-`run_pending_upgrades`, and a
+    # blocking join here would stall every coroutine for as long as that takes.
+    await asyncio.to_thread(thread.join, timeout_s)
+    if thread.is_alive():
+        # Daemon thread, so it cannot block interpreter exit — but it CAN still
+        # be writing, so say so rather than let the next startup discover it as
+        # an unexplained lock.
+        logger.warning(
+            "upgrade runner thread did not exit within %.1fs; it may still hold "
+            "the write gate",
+            timeout_s,
+        )
 
 
 @app.on_event("startup")
@@ -268,7 +337,23 @@ async def startup_event() -> None:
                 pass  # Loop already closed (cancelled startup) — nobody is waiting.
 
     threading.Thread(target=_startup_db_work, name="topos-startup-db", daemon=True).start()
-    await startup_db_done.wait()
+    # Bounded, and it says who to blame. Unbounded, a write gate held by anything
+    # else (an earlier app instance's upgrade runner, a stuck transaction) made
+    # this await hang until the CALLER's timeout fired — in tests a bare
+    # "App startup did not complete within 30s" that pointed at the event loop
+    # while the real holder went unnamed. Startup continues on timeout: stage 9
+    # and rehydration are both non-fatal, and the thread cleans up after itself.
+    try:
+        await asyncio.wait_for(startup_db_done.wait(), timeout=_STARTUP_DB_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        from .storage.db.write_gate import describe_gate_holder
+
+        logger.warning(
+            "Startup DB section (stage 9 + source-install rehydration) did not "
+            "finish within %.0fs; continuing without it. Write gate: %s",
+            _STARTUP_DB_TIMEOUT_S,
+            describe_gate_holder(),
+        )
     # Upgrade runner is armed later — after control-plane / local readiness —
     # so the React UI can fetch bootstrap data before enrichment reprocess
     # contends for SQLite / Ollama / MPS. See _arm_upgrade_runner below.
@@ -300,7 +385,7 @@ async def startup_event() -> None:
                 except Exception as exc:  # noqa: BLE001
                     logger.warning("Pipeline recovery/graph reconcile at startup failed (non-fatal): %s", exc)
 
-            asyncio.create_task(_recover_and_reconcile())
+            _spawn_background(_recover_and_reconcile(), name="startup-recover-reconcile")
             start_pipeline_worker(_get_conn_for_pipeline)
     except Exception as e:
         logger.warning("Pipeline worker at startup failed (non-fatal): %s", e)
@@ -313,7 +398,7 @@ async def startup_event() -> None:
             except Exception as prewarm_exc:  # noqa: BLE001
                 logger.warning("Sanitization prewarm at startup failed (non-fatal): %s", prewarm_exc)
 
-        asyncio.create_task(_prewarm_sanitization())
+        _spawn_background(_prewarm_sanitization(), name="startup-prewarm-sanitization")
     if settings.topos_control_plane_url:
         if settings.hosted_pool_lease_enabled:
             try:
@@ -377,7 +462,7 @@ async def startup_event() -> None:
             except Exception as seed_exc:  # noqa: BLE001
                 logger.warning("Device-info snapshot seed failed (non-fatal): %s", seed_exc)
 
-        asyncio.create_task(_seed_device_info_snapshot())
+        _spawn_background(_seed_device_info_snapshot(), name="startup-seed-device-info")
         if settings.wait_for_control_plane_on_startup:
             connected = await state.control_plane_client.wait_until_connected(
                 timeout_s=settings.connection_readiness_timeout_seconds
@@ -422,11 +507,16 @@ async def startup_event() -> None:
         _upgrade_conn = state.db_conn if state.db_conn is not None else _get_conn_for_upgrades()
         if _upgrade_conn is not None:
             _upgrade_ready = threading.Event()
-            _start_upgrades(
+            # Held in state so shutdown can stop this runner specifically. The
+            # handle used to be discarded, so nothing could reap the thread even
+            # if it wanted to.
+            state.upgrade_runner_stop = threading.Event()
+            state.upgrade_runner_thread = _start_upgrades(
                 _upgrade_conn,
                 ready_event=_upgrade_ready,
                 ui_grace_s=_upgrade_ui_grace(),
                 ready_timeout_s=_upgrade_ready_timeout(),
+                stop_event=state.upgrade_runner_stop,
             )
 
             async def _signal_upgrade_ui_ready() -> None:
@@ -440,7 +530,7 @@ async def startup_event() -> None:
                 finally:
                     _upgrade_ready.set()
 
-            asyncio.create_task(_signal_upgrade_ui_ready())
+            _spawn_background(_signal_upgrade_ui_ready(), name="startup-upgrade-ui-ready")
     except Exception as e:
         logger.warning("Upgrade runner at startup failed (non-fatal): %s", e)
 
@@ -467,11 +557,22 @@ async def startup_event() -> None:
 
 @app.on_event("shutdown")
 async def shutdown_event() -> None:
+    from .pipeline.job_runner import stop_pipeline_worker
     from .runtime_shutdown import request_shutdown
 
     # Wake cooperative workers (fact_llm / Ollama threads) before awaiting
     # network teardown so Ctrl+C does not wait out a full enrichment batch.
     request_shutdown("app_shutdown")
+    # Reap what startup launched, BEFORE the network teardown below: these are
+    # the DB writers, and leaving them running is what let one app instance
+    # migrate a database while the next one was starting on it. Ordered
+    # deliberately — the upgrade runner is the heaviest writer, so it gets its
+    # stop signal first and is joined last.
+    if state.upgrade_runner_stop is not None:
+        state.upgrade_runner_stop.set()
+    await _reap_background_tasks()
+    await stop_pipeline_worker()
+    await _reap_upgrade_runner()
     await stop_runtime_update_monitor()
     if state.engine_presence_task:
         state.engine_presence_task.cancel()

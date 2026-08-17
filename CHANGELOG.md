@@ -9,6 +9,38 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+
+- `[O]` App shutdown now reaps the background work app startup launched. Four
+  fire-and-forget `asyncio.create_task` calls, the pipeline worker and the
+  upgrade-runner thread all outlived their app: the runner's handle was
+  discarded outright, and its ready-wait and UI grace were uninterruptible
+  sleeps, so it stayed alive ~80s past shutdown and then ran migrations against
+  a database the next app instance was already migrating. Each is tracked in
+  `core.state` now and stopped in `shutdown_event`; the runner takes a stop
+  event of its own — deliberately not `runtime_shutdown`, because startup calls
+  `clear_shutdown()` and a starting app would erase the previous app's stop
+  signal, which is the exact overlap at fault.
+- `[O]` A migration blocked on SQLite no longer pins the process-wide write
+  gate. `ensure_migrations_applied` took the gate and then issued a write that
+  could wait out the full 30s `busy_timeout`, so every other writer queued
+  behind a holder that was itself only waiting. The wait inside the gate is now
+  bounded and retried with the gate released between attempts; worst-case total
+  is unchanged, but it is no longer spent blocking the rest of the process.
+- `[O]` The startup DB section (stage 9 + source-install rehydration) is bounded
+  and names the write-gate holder when it times out, instead of awaiting an
+  event that nothing was going to set. `write_gate` tracks its current holder
+  (site, thread, duration) — an RLock names neither — and the test lifespan
+  timeout reports it, so the failure stops pointing at the event loop and starts
+  pointing at whoever is holding.
+- `[O]` Together these end an intermittent CI failure that surfaced as
+  `App startup did not complete within 30s` on a rotating cast of tests in
+  `tests/topos/test_ingestion_sources.py`. It was never event-loop starvation
+  and never that test's fault: the two 30s figures — SQLite's `busy_timeout` and
+  the lifespan budget — are the same number by coincidence. New guards in
+  `tests/topos/test_startup_background_reaping.py`, plus a conftest check that
+  reds the run when an engine thread outlives its test.
+
 ## [1.3.18] — 2026-08-16
 
 ### Fixed

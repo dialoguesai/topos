@@ -36,6 +36,64 @@ def db_write_lock() -> threading.RLock:
     return _WRITE_LOCK
 
 
+class _Holder(NamedTuple):
+    site: str
+    ident: int
+    thread: str
+    since: float
+
+
+#: Who currently holds the gate. An RLock names neither its owner nor the call
+#: site, so "everything is blocked on the write gate" used to be the end of the
+#: diagnosis rather than the start of it: the victim times out and reports
+#: itself, while the holder is never named anywhere.
+#:
+#: Only ever mutated while ``_WRITE_LOCK`` is held, so there is no cross-thread
+#: race; ``_holder_lock`` exists so readers (diagnostics on other threads) see a
+#: consistent tuple.
+_holder: Optional[_Holder] = None
+_holder_depth = 0
+_holder_lock = threading.Lock()
+
+
+def _set_holder(site: str) -> None:
+    global _holder, _holder_depth
+    ident = threading.get_ident()
+    with _holder_lock:
+        # The gate is reentrant. Keep the OUTERMOST site — that is the one that
+        # has actually been holding for the reported duration — and count depth
+        # so an inner release does not clear a hold that is still live.
+        if _holder is not None and _holder.ident == ident:
+            _holder_depth += 1
+            return
+        _holder = _Holder(site, ident, threading.current_thread().name, time.monotonic())
+        _holder_depth = 1
+
+
+def _clear_holder() -> None:
+    global _holder, _holder_depth
+    ident = threading.get_ident()
+    with _holder_lock:
+        if _holder is None or _holder.ident != ident:
+            return
+        _holder_depth -= 1
+        if _holder_depth <= 0:
+            _holder = None
+            _holder_depth = 0
+
+
+def describe_gate_holder() -> str:
+    """Human-readable description of the current gate holder, for diagnostics."""
+    with _holder_lock:
+        held = _holder
+    if held is None:
+        return "not held"
+    return (
+        f"held by {held.site} on thread {held.thread!r} "
+        f"for {time.monotonic() - held.since:.1f}s"
+    )
+
+
 #: Threshold above which holding the gate is reported. A rebuild that holds it
 #: for 77s (observed 2026-07-30) starves every other writer, and if the event
 #: loop is one of them the control-plane websocket misses its keepalive and the
@@ -177,9 +235,11 @@ def with_db_write() -> Iterator[None]:
     with _WRITE_LOCK:
         waited = time.monotonic() - waited_at
         held_at = time.monotonic()
+        _set_holder(_caller_site())
         try:
             yield
         finally:
+            _clear_holder()
             held = time.monotonic() - held_at
             if held >= _SLOW_HOLD_WARN_S or waited >= _SLOW_HOLD_WARN_S:
                 # Name the section: an anonymous "held=109.2s" (2026-08-08)
@@ -191,6 +251,42 @@ def with_db_write() -> Iterator[None]:
                     waited,
                     held,
                 )
+
+
+@contextmanager
+def bounded_busy_timeout(conn, timeout_ms: int) -> Iterator[None]:
+    """Temporarily shorten this connection's SQLite ``busy_timeout``.
+
+    Guards against a lock-order inversion. Taking the gate and THEN issuing a
+    write that blocks on SQLite pins the process-wide gate for the whole
+    busy_timeout — 30s by default — while every other writer queues behind a
+    holder that is itself only waiting. Observed in CI as
+    ``ensure_migrations_applied: waited=0.0s held=30.0s``, which stalled an app
+    startup on another thread into its 30s lifespan timeout.
+
+    Shortening the timeout inside the gated section converts that into a prompt
+    ``database is locked`` the caller can release the gate on and retry, so the
+    stall is bounded by ``timeout_ms`` instead of by busy_timeout.
+
+    Restores the previous value on exit. Never raises for a connection that
+    cannot report or set the pragma.
+    """
+    previous: Optional[int] = None
+    try:
+        row = conn.execute("PRAGMA busy_timeout").fetchone()
+        if row is not None:
+            previous = int(row[0])
+        conn.execute(f"PRAGMA busy_timeout={int(timeout_ms)}")
+    except Exception:  # noqa: BLE001 — diagnostics must never break a write
+        previous = None
+    try:
+        yield
+    finally:
+        if previous is not None:
+            try:
+                conn.execute(f"PRAGMA busy_timeout={previous}")
+            except Exception:  # noqa: BLE001
+                pass
 
 
 class WriteGateDeferred(Exception):
@@ -231,6 +327,7 @@ def with_db_write_cooperative(
             break
     waited = time.monotonic() - waited_at
     held_at = time.monotonic()
+    _set_holder(_caller_site())
     try:
         # A derivation that started during the final acquire slice would now
         # queue behind this whole section — the exact convoy this exists to
@@ -239,6 +336,7 @@ def with_db_write_cooperative(
             raise WriteGateDeferred("higher-priority writer started while waiting")
         yield
     finally:
+        _clear_holder()
         _WRITE_LOCK.release()
         held = time.monotonic() - held_at
         if held >= _SLOW_HOLD_WARN_S or waited >= _SLOW_HOLD_WARN_S:

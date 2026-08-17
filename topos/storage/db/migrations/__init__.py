@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 import threading
+import time
 from typing import Dict, List, Optional, Tuple
 
 from .backup import (
@@ -191,6 +192,49 @@ def apply_all_migrations(conn: sqlite3.Connection) -> None:
     _stamp_user_version(conn, max_migration_order())
 
 
+#: Inside the gate, wait this long for SQLite rather than the connection's full
+#: busy_timeout. Long enough to ride out an ordinary concurrent commit, short
+#: enough that a stuck writer does not pin the process-wide gate.
+_MIGRATION_LOCK_WAIT_MS = 2_000
+
+#: Attempts per migration. Total worst-case wait is unchanged (~30s), but it is
+#: spent with the gate RELEASED between tries instead of held throughout.
+_MIGRATION_LOCK_ATTEMPTS = 15
+_MIGRATION_RETRY_SLEEP_S = 0.1
+
+
+def _apply_one_migration(conn: sqlite3.Connection, spec) -> None:
+    """Run one migration under the gate, without pinning it on a locked database.
+
+    The gate is released between attempts. Holding it across the full SQLite
+    busy_timeout made a blocked migration block every other writer in the
+    process for 30s — including app startup, which then failed its own lifespan
+    budget and reported itself as the problem.
+    """
+    # Local, matching the existing import inside ensure_migrations_applied.
+    from ..write_gate import bounded_busy_timeout, is_busy_error, with_db_write
+
+    last_busy: Optional[Exception] = None
+    for attempt in range(_MIGRATION_LOCK_ATTEMPTS):
+        try:
+            with with_db_write():
+                with bounded_busy_timeout(conn, _MIGRATION_LOCK_WAIT_MS):
+                    spec.fn(conn)
+            return
+        except Exception as exc:  # noqa: BLE001
+            if not is_busy_error(exc):
+                raise
+            last_busy = exc
+            if attempt + 1 < _MIGRATION_LOCK_ATTEMPTS:
+                logger.debug(
+                    "migration %s: database locked, retrying with the gate released "
+                    "(attempt %d/%d)",
+                    spec.id, attempt + 1, _MIGRATION_LOCK_ATTEMPTS,
+                )
+                time.sleep(_MIGRATION_RETRY_SLEEP_S)
+    raise last_busy if last_busy is not None else RuntimeError("migration retry loop exhausted")
+
+
 def ensure_migrations_applied(
     conn: sqlite3.Connection,
     *,
@@ -247,8 +291,7 @@ def ensure_migrations_applied(
             if not spec.always_run:
                 continue
             try:
-                with with_db_write():
-                    spec.fn(conn)
+                _apply_one_migration(conn, spec)
             except Exception as exc:  # noqa: BLE001
                 raise MigrationError(
                     f"always-run migration {spec.id!r} failed: {exc}"
@@ -271,8 +314,7 @@ def ensure_migrations_applied(
         if not _needs_apply(conn, spec):
             continue
         try:
-            with with_db_write():
-                spec.fn(conn)
+            _apply_one_migration(conn, spec)
         except Exception as exc:  # noqa: BLE001
             hint = f" Restore from {backup_path}." if backup_path else ""
             raise MigrationError(
