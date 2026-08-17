@@ -76,14 +76,34 @@ async def handle_tools_retrieve(message: Dict[str, Any]) -> Optional[Dict[str, A
     try:
         from ...features.signal.tool_index import retrieve_tools
 
-        result = await asyncio.to_thread(
-            retrieve_tools,
-            _conn(),
-            query,
-            connector_scope=payload.get("connector_scope"),
-            k=int(payload.get("k") or 8),
-            extra_identity_names=identity_tools,
+        # Shadow-observe the owner's text HERE, not only at query time. This handler is
+        # the earliest per-turn event carrying the raw message, and — unlike
+        # QueryPipeline.execute — it fires whether or not the turn goes on to query
+        # anything. Turns that retrieve tools and then query nothing were invisible to
+        # the shadow, and they are where the interesting failures are (2026-08-17: three
+        # of four turns in one session). Concurrent with retrieval, so it costs no
+        # wall-clock; never raises; off unless the operator armed it.
+        from ...query.scope_shadow import observe_turn
+
+        # return_exceptions=True is load-bearing: observe_turn swallows its own failures
+        # today, but "telemetry may cost a millisecond, never the turn" must not depend on
+        # a promise made in another module. Without it, a raising hook fails retrieval.
+        result, observed = await asyncio.gather(
+            asyncio.to_thread(
+                retrieve_tools,
+                _conn(),
+                query,
+                connector_scope=payload.get("connector_scope"),
+                k=int(payload.get("k") or 8),
+                extra_identity_names=identity_tools,
+            ),
+            asyncio.to_thread(observe_turn, query),
+            return_exceptions=True,
         )
+        if isinstance(observed, BaseException):
+            logger.debug("[TOOL_INDEX] scope shadow turn observation failed: %s", observed)
+        if isinstance(result, BaseException):
+            raise result
         return {"id": req_id, "status": "ok", "payload": result}
     except Exception as exc:  # noqa: BLE001
         logger.error("[TOOL_INDEX] tools_retrieve error: %s", exc)

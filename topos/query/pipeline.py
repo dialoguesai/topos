@@ -406,12 +406,15 @@ class QueryPipelineOrchestrator:
         intent_hash = compute_intent_hash(scope_id=scope_id, access_mode=access_mode, query_text=query_text)
         turn = QueryTurn(query_text=query_text, scope_id=scope_id, access_mode=access_mode, intent_hash=intent_hash)
 
-        # Shadow-mode scope classification. OFF unless TOPOS_SCOPE_SHADOW=1, never raises,
-        # and changes nothing below this line. The caller has already told us the correct
-        # scope_id, so predicting alongside it yields labelled real traffic for free —
-        # the test set PLAN_SCOPE_CLASSIFIER.md §6.5 requires and §9A-§9F never had.
-        # Observation only: §9F measured the trained head BELOW the untrained prototype,
-        # so nothing here is fit to decide a scope.
+        # Shadow-mode scope classification. OFF unless armed, never raises, and changes
+        # nothing below this line. Records the head's prediction beside the scope the
+        # INCUMBENT ROUTER chose — which is not ground truth, and is why the field is
+        # `router_scope`: the router is a heuristic that has been observed picking
+        # schedule+work_context for a meta-question that should have queried nothing.
+        # Treating this as labels would teach the head to reproduce that.
+        #
+        # This hook fires only for turns that reached a query. The turn-arrival hook in
+        # handlers/tool_index.py catches the rest; both are needed and neither suffices.
         from .scope_shadow import observe as _shadow_observe
 
         _shadow_observe(query_text, scope_id)

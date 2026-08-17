@@ -1,18 +1,33 @@
-"""Shadow-mode scope classification — the flywheel, with zero behavioural change.
+"""Shadow-mode scope classification — real traffic, observed, with zero behavioural change.
 
 PLAN_SCOPE_CLASSIFIER.md open decision #1 and §6.5g. Every number in §9A–§9F is
 synthetic-vs-synthetic, because the only test set that predicts production — real traffic
 — has never existed. This is what produces it.
 
-**The trick is that the caller already knows the answer.** ``QueryPipeline.execute``
-receives ``query_text`` *and* ``scope_id``: something upstream has already decided which
-scope this question needs. So running the classifier alongside it and comparing yields
-**labelled real traffic for free** — no annotation, no user prompt, no behavioural change.
+**What this log is not: ground truth.** An earlier version of this docstring claimed the
+caller "already knows the answer", so comparing against ``scope_id`` yielded *labelled*
+traffic for free. That was wrong, and the field was called ``true_scope`` for a while on
+the strength of it. ``scope_id`` is whichever scope the **incumbent router** picked, and
+the incumbent is a heuristic that is sometimes wrong in ways worth catching. Observed
+2026-08-17: for *"what is a good prompt we could ask of our work, schedule…"* — a
+meta-question about prompt writing that should have retrieved nothing — the router chose
+``schedule:read`` and ``work_context:read``, and this log would have recorded both as
+truth. Train on that and the head learns to reproduce the router, mistakes included.
+So the field is ``router_scope``, agreement is ``agreement_rate``, and turning any of it
+into labels needs adjudication that happens elsewhere.
 
-Shadow mode is the only responsible first wiring. §9F measured the trained head at 0.369
-against an untrained prototype's 0.387, and §7's gate needs per-scope recall ≥ 0.60 on all
-fourteen; nothing here is fit to *decide* anything. Observing costs nothing and is
-reversible; deciding is neither.
+**Two record kinds, because the interesting failures make no query at all.** Observation
+used to live only inside ``QueryPipeline.execute``, which runs *after* something decided a
+scope — so a turn that queried nothing was invisible. In the session above, one turn of
+four queried; the three that named data sources explicitly and then retrieved nothing were
+absent from this log entirely. So:
+
+* ``kind="turn"`` — logged when the user's text arrives (tool retrieval, once per turn),
+  before any routing. No ``router_scope``: nothing has decided yet.
+* ``kind="route"`` — logged per scope the router actually queried, as before.
+
+Join them on ``text``: a ``turn`` row with no ``route`` rows *is* the no-query case, and
+``turn_coverage()`` counts them. That population is the reason this exists.
 
 Three hard rules, each a test:
 
@@ -23,8 +38,8 @@ Three hard rules, each a test:
   before that guard, which would have made "changes nothing" false in the way users
   actually notice.
 * **Same two-serializer split as M1.** ``as_local_row`` keeps the text; ``as_telemetry``
-  carries counts and closed-set enums only. The comparison to truth is the valuable part
-  and it is a *label*, not content.
+  carries counts and closed-set enums only. The comparison to the router is the valuable
+  part and it is a *label*, not content.
 """
 
 from __future__ import annotations
@@ -48,12 +63,23 @@ ENV_FLAG = "TOPOS_SCOPE_SHADOW"
 #: ~/.topos so it is discoverable next to the log it produces.
 FLAG_FILE = Path.home() / ".topos" / "scope_shadow.on"
 
-#: Agreement between what the classifier predicted and the scope the caller supplied.
-VERDICT_HIT = "hit"           # predicted exactly the supplied scope
-VERDICT_OVER = "over"         # predicted it, plus scopes nobody asked for
+#: **Agreement with the incumbent router** — not correctness. See the module docstring:
+#: the router is a heuristic and a "miss" may well be the head being right. These strings
+#: are values in an existing on-disk log, so they stay stable even though "hit"/"miss"
+#: read more like grades than they should.
+VERDICT_HIT = "hit"           # predicted exactly the scope the router used
+VERDICT_OVER = "over"         # predicted it, plus scopes the router did not use
 VERDICT_MISS = "miss"         # predicted some other scope entirely
 VERDICT_ABSTAIN = "abstain"   # predicted nothing
 VERDICT_ESCALATE = "escalate"  # sat in the uncertain band
+
+#: Turn-kind records have no router scope to agree or disagree with, so they carry the
+#: head's own branch instead: this, ABSTAIN, or ESCALATE.
+VERDICT_ACT = "act"           # would have routed to >=1 scope, unprompted
+
+#: Record kinds. See the module docstring — ``TURN`` is the population that was missing.
+KIND_TURN = "turn"
+KIND_ROUTE = "route"
 
 
 # 8 MiB of JSONL is on the order of 40k observations — far more than the
@@ -145,10 +171,12 @@ def default_log_path() -> Path:
 
 @dataclass(frozen=True)
 class ShadowRecord:
-    """One prediction measured against the scope the caller actually used."""
+    """One prediction, either standalone (``kind="turn"``) or beside a routed scope."""
 
     verdict: str
-    true_scope: str
+    #: The scope the **incumbent router** used — emphatically not a label. Empty for
+    #: ``kind="turn"`` records, where nothing has decided a scope yet.
+    router_scope: str
     predicted: Tuple[str, ...]
     confidence: float
     latency_ms: float
@@ -158,12 +186,14 @@ class ShadowRecord:
     #: "confident-none". Distinguishes "decided nothing" from "no idea" in the log —
     #: the whole point of the four-branch ladder, so the shadow must not flatten it.
     reason: str = ""
+    kind: str = KIND_ROUTE
 
     def as_local_row(self) -> Dict[str, Any]:
         return {
             "ts": self.ts,
+            "kind": self.kind,
             "verdict": self.verdict,
-            "true_scope": self.true_scope,
+            "router_scope": self.router_scope,
             "predicted": list(self.predicted),
             "confidence": round(self.confidence, 4),
             "latency_ms": round(self.latency_ms, 2),
@@ -174,22 +204,38 @@ class ShadowRecord:
     def as_telemetry(self) -> Dict[str, Any]:
         """Counts and scope ids only. Adding a field here is a privacy decision."""
         return {
+            "kind": self.kind,
             "verdict": self.verdict,
-            "true_scope": self.true_scope,
+            "router_scope": self.router_scope,
             "predicted": list(self.predicted),
             "n_predicted": len(self.predicted),
         }
 
 
-def compare(predicted: Sequence[str], true_scope: str, *, escalated: bool) -> str:
+def row_router_scope(row: Dict[str, Any]) -> str:
+    """Read the router scope from a log row, old field name included.
+
+    Rows written before 2026-08-17 spell it ``true_scope``. They are the same data under a
+    name that overclaimed, so they stay readable rather than being migrated or dropped.
+    """
+    value = row.get("router_scope")
+    if value is None:
+        value = row.get("true_scope")
+    return str(value or "")
+
+
+def compare(predicted: Sequence[str], router_scope: str, *, escalated: bool) -> str:
+    """Agreement with the router. For ``kind="turn"`` pass ``router_scope=""``."""
     if escalated:
         return VERDICT_ESCALATE
     pred = set(predicted)
     if not pred:
         return VERDICT_ABSTAIN
-    if pred == {true_scope}:
+    if not router_scope:
+        return VERDICT_ACT
+    if pred == {router_scope}:
         return VERDICT_HIT
-    if true_scope in pred:
+    if router_scope in pred:
         return VERDICT_OVER
     return VERDICT_MISS
 
@@ -248,15 +294,37 @@ class ShadowLog:
         return out
 
 
-def observe(
+def observe_turn(
     query_text: str,
-    true_scope: str,
     *,
     log: Optional[ShadowLog] = None,
     classify_fn: Optional[Callable[..., Any]] = None,
     force: bool = False,
 ) -> Optional[ShadowRecord]:
-    """Predict, compare against the scope the caller supplied, log. Never raises.
+    """Observe the user's text as it arrives, before anything has decided a scope.
+
+    This is the only hook that sees turns which go on to query **nothing** — the
+    population the route-time hook structurally cannot see, and where the failures we
+    care about live (module docstring). No comparison is made because there is nothing
+    yet to compare to; the verdict is the head's own branch.
+    """
+    return observe(query_text, "", log=log, classify_fn=classify_fn, force=force,
+                   kind=KIND_TURN)
+
+
+def observe(
+    query_text: str,
+    router_scope: str,
+    *,
+    log: Optional[ShadowLog] = None,
+    classify_fn: Optional[Callable[..., Any]] = None,
+    force: bool = False,
+    kind: str = KIND_ROUTE,
+) -> Optional[ShadowRecord]:
+    """Predict, compare against the scope the router used, log. Never raises.
+
+    ``router_scope`` is the incumbent's choice, not ground truth — see the module
+    docstring before treating any of this as labels.
 
     Returns the record when shadowing ran, ``None`` when it was off or failed. Callers
     ignore the return value — it exists for tests.
@@ -288,15 +356,16 @@ def observe(
             _breaker_fault(f"observation took {elapsed:.0f} ms")
         record = ShadowRecord(
             verdict=compare(
-                verdict_obj.labels, true_scope, escalated=verdict_obj.escalated
+                verdict_obj.labels, router_scope, escalated=verdict_obj.escalated
             ),
-            true_scope=true_scope,
+            router_scope=router_scope,
             predicted=tuple(verdict_obj.labels),
             confidence=float(verdict_obj.confidence),
             latency_ms=elapsed,
             text=query_text,
             ts=time.time(),
             reason=str(getattr(verdict_obj, "reason", "") or ""),
+            kind=kind,
         )
         (log or ShadowLog()).append(record)
         return record
@@ -313,7 +382,12 @@ class ShadowReport:
     by_scope: Dict[str, Dict[str, int]] = field(default_factory=dict)
     confusion: Dict[str, int] = field(default_factory=dict)
 
-    def accuracy(self) -> float:
+    def agreement_rate(self) -> float:
+        """Share of routed observations that matched the router exactly.
+
+        Named for what it measures. It was ``accuracy()``, which invited reading router
+        agreement as correctness — the misreading this module now exists to prevent.
+        """
         return self.by_verdict.get(VERDICT_HIT, 0) / self.total if self.total else float("nan")
 
     def as_telemetry(self) -> Dict[str, Any]:
@@ -321,25 +395,62 @@ class ShadowReport:
         return {
             "total": self.total,
             "by_verdict": dict(self.by_verdict),
-            "hit_rate": round(self.accuracy(), 4) if self.total else None,
-            "confusion": dict(
+            "agreement_rate": round(self.agreement_rate(), 4) if self.total else None,
+            "divergence": dict(
                 sorted(self.confusion.items(), key=lambda kv: -kv[1])[:15]
             ),
         }
 
 
 def summarize(rows: Sequence[Dict[str, Any]]) -> ShadowReport:
-    """Roll the node-local log into the text-free shape that may leave the node."""
+    """Roll the node-local log into the text-free shape that may leave the node.
+
+    Route-kind rows only: turn-kind rows have no router scope to agree with, and folding
+    them in would silently deflate every rate here. They get ``turn_coverage()``.
+    """
     report = ShadowReport()
     for row in rows:
+        if str(row.get("kind") or KIND_ROUTE) != KIND_ROUTE:
+            continue
         report.total += 1
         verdict = str(row.get("verdict") or "?")
         report.by_verdict[verdict] = report.by_verdict.get(verdict, 0) + 1
-        true_scope = str(row.get("true_scope") or "?")
-        bucket = report.by_scope.setdefault(true_scope, {})
+        router_scope = row_router_scope(row) or "?"
+        bucket = report.by_scope.setdefault(router_scope, {})
         bucket[verdict] = bucket.get(verdict, 0) + 1
         if verdict == VERDICT_MISS:
             for predicted in row.get("predicted") or []:
-                pair = f"{true_scope} -> {predicted}"
+                pair = f"{router_scope} -> {predicted}"
                 report.confusion[pair] = report.confusion.get(pair, 0) + 1
     return report
+
+
+def turn_coverage(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """How many observed turns retrieved **no data at all**, and what the head thought.
+
+    The metric this module was re-wired to produce. Turns are joined to routes on text
+    because no turn id crosses the control-plane boundary; that is coarse — two identical
+    questions in a session merge — and still enough to size the population.
+
+    ``would_have_routed`` is the interesting cell: turns where the router queried nothing
+    and the head would have named a scope. Those are candidate recoveries, not proven
+    ones — the head could be wrong too, which is what adjudication is for.
+    """
+    turns = [r for r in rows if str(r.get("kind") or "") == KIND_TURN]
+    routed_texts = {
+        str(r.get("text") or "")
+        for r in rows
+        if str(r.get("kind") or KIND_ROUTE) == KIND_ROUTE
+    }
+    no_query = [r for r in turns if str(r.get("text") or "") not in routed_texts]
+    return {
+        "turns_observed": len(turns),
+        "turns_with_no_query": len(no_query),
+        "no_query_rate": round(len(no_query) / len(turns), 4) if turns else None,
+        "would_have_routed": sum(1 for r in no_query if r.get("predicted")),
+        "head_also_silent": sum(1 for r in no_query if not r.get("predicted")),
+        "by_reason": {
+            reason: sum(1 for r in no_query if str(r.get("reason") or "") == reason)
+            for reason in sorted({str(r.get("reason") or "") for r in no_query})
+        },
+    }
