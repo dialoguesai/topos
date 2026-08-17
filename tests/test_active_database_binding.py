@@ -127,6 +127,31 @@ class TestLegacyAdoption:
         assert not resolved.in_active_slot
         assert not (base / paths.DATABASE_FILENAME).exists()
 
+    def test_a_newer_databases_adoption_is_explained_first(self, tmp_path, monkeypatch, caplog):
+        """A machine that downgraded its node still gets its data — and a
+        warning that pre-explains the downgrade guard, instead of a bare
+        startup failure. Adopting beats starting empty: an empty Topos looks
+        like the data is gone."""
+        import logging
+
+        from topos.storage.db.migrations import max_migration_order
+
+        base = tmp_path / ".topos"
+        legacy = tmp_path / "legacy" / paths.DATABASE_FILENAME
+        legacy.parent.mkdir(parents=True)
+        conn = sqlite3.connect(legacy)
+        try:
+            conn.execute(f"PRAGMA user_version = {max_migration_order() + 7}")
+        finally:
+            conn.close()
+        monkeypatch.setattr(paths, "legacy_database_candidates", lambda: [legacy])
+
+        with caplog.at_level(logging.WARNING, logger="topos.storage.db.paths"):
+            resolved = paths.resolve_active_database(base, adopt=True)
+
+        assert resolved.source == paths.SOURCE_ADOPTED
+        assert "written by a NEWER version" in caplog.text
+
     def test_newest_legacy_database_wins(self, tmp_path, monkeypatch):
         older = tmp_path / "legacy" / "a" / paths.DATABASE_FILENAME
         newer = tmp_path / "legacy" / "b" / paths.DATABASE_FILENAME
