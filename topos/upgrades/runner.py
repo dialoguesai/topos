@@ -801,10 +801,11 @@ def start_background(
     down, then runs migrations against a database the next app instance is also
     migrating — the write-gate convoy that timed out app startup in CI.
 
-    Deliberately a per-runner event and NOT ``runtime_shutdown``: app startup
-    calls ``clear_shutdown()``, so a newly starting app would erase the stop
-    signal of the previous app's still-running runner — precisely the overlap
-    this exists to end.
+    A per-runner event rather than ``runtime_shutdown``'s generation because
+    the caller needs to JOIN this thread, not merely signal it: the next app
+    instance migrates the same database, so shutdown has to know the runner is
+    actually gone. The two compose — the generation retires this run's workers,
+    this event is the handle that waits for THIS one.
     """
     if not _enabled():
         return None
