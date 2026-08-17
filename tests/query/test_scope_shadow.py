@@ -14,7 +14,10 @@ import pytest
 from topos.query.scope_classifier import SOURCE_PROTOTYPE, ScopeVerdict
 from topos.query.scope_shadow import (
     ENV_FLAG,
+    KIND_ROUTE,
+    KIND_TURN,
     VERDICT_ABSTAIN,
+    VERDICT_ACT,
     VERDICT_ESCALATE,
     VERDICT_HIT,
     VERDICT_MISS,
@@ -24,7 +27,9 @@ from topos.query.scope_shadow import (
     compare,
     enabled,
     observe,
+    observe_turn,
     summarize,
+    turn_coverage,
 )
 
 SENTINEL = "zzqx-what-did-my-therapist-say"
@@ -107,10 +112,11 @@ def test_observe_records_the_comparison(tmp_path) -> None:
     )
     assert record is not None
     assert record.verdict == VERDICT_MISS
-    assert record.true_scope == "health:read"
+    assert record.router_scope == "health:read"
     assert record.predicted == ("attention:read",)
     rows = log.read()
-    assert len(rows) == 1 and rows[0]["true_scope"] == "health:read"
+    assert len(rows) == 1 and rows[0]["router_scope"] == "health:read"
+    assert rows[0]["kind"] == KIND_ROUTE
 
 
 # --- the telemetry boundary -------------------------------------------------
@@ -118,7 +124,7 @@ def test_observe_records_the_comparison(tmp_path) -> None:
 
 def test_telemetry_carries_no_user_text() -> None:
     record = ShadowRecord(
-        verdict=VERDICT_MISS, true_scope="health:read", predicted=("places:read",),
+        verdict=VERDICT_MISS, router_scope="health:read", predicted=("places:read",),
         confidence=0.44, latency_ms=9.1, text=SENTINEL, ts=1.0,
     )
     blob = json.dumps(record.as_telemetry())
@@ -129,12 +135,12 @@ def test_telemetry_carries_no_user_text() -> None:
 
 def test_summary_telemetry_is_counts_and_scope_ids_only(tmp_path) -> None:
     log = ShadowLog(tmp_path / "s.jsonl")
-    for true_scope, predicted in (
+    for router_scope, predicted in (
         ("health:read", ("health:read",)),
         ("health:read", ("attention:read",)),
         ("schedule:read", ("availability:read",)),
     ):
-        observe(SENTINEL, true_scope, log=log,
+        observe(SENTINEL, router_scope, log=log,
                 classify_fn=lambda t, p=predicted: _verdict(p), force=True)
 
     report = summarize(log.read())
@@ -144,15 +150,27 @@ def test_summary_telemetry_is_counts_and_scope_ids_only(tmp_path) -> None:
     blob = json.dumps(report.as_telemetry())
     assert SENTINEL not in blob
     # §6.5g: the node reports which pairs it cannot separate, as counts.
-    assert report.as_telemetry()["confusion"]["schedule:read -> availability:read"] == 1
+    assert report.as_telemetry()["divergence"]["schedule:read -> availability:read"] == 1
 
 
-def test_hit_rate_is_reported() -> None:
+def test_agreement_rate_is_reported() -> None:
+    rows = [
+        {"verdict": VERDICT_HIT, "router_scope": "health:read", "predicted": ["health:read"]},
+        {"verdict": VERDICT_MISS, "router_scope": "health:read", "predicted": ["places:read"]},
+    ]
+    assert summarize(rows).agreement_rate() == pytest.approx(0.5)
+
+
+def test_legacy_true_scope_rows_still_read() -> None:
+    """67 rows on disk predate the rename. They are the same data, not a different kind."""
     rows = [
         {"verdict": VERDICT_HIT, "true_scope": "health:read", "predicted": ["health:read"]},
         {"verdict": VERDICT_MISS, "true_scope": "health:read", "predicted": ["places:read"]},
     ]
-    assert summarize(rows).accuracy() == pytest.approx(0.5)
+    report = summarize(rows)
+    assert report.total == 2
+    assert report.by_scope["health:read"][VERDICT_HIT] == 1
+    assert "?" not in report.by_scope
 
 
 def test_cold_cache_is_skipped_rather_than_loaded_inline(monkeypatch, tmp_path) -> None:
@@ -278,3 +296,57 @@ def test_breaker_disables_observation_after_repeated_faults(tmp_path, monkeypatc
     assert ss._breaker_tripped() is True
     # Tripped: even a working scorer is no longer consulted on the normal path.
     assert ss.observe("q", "health:read", log=log) is None
+
+
+# --- turn-arrival observation ----------------------------------------------
+#
+# The route-time hook only ever sees turns that reached a query. On 2026-08-17 three of
+# four turns in one session retrieved tools, queried nothing, and answered from nothing —
+# invisible here. These cover the population that was missing.
+
+
+def test_observe_turn_records_without_a_router_scope(tmp_path) -> None:
+    log = ShadowLog(tmp_path / "s.jsonl")
+    record = observe_turn(
+        "what should I ask my team about", log=log,
+        classify_fn=lambda t: _verdict(("work_context:read",)), force=True,
+    )
+    assert record is not None
+    assert record.kind == KIND_TURN
+    assert record.router_scope == ""
+    # No scope to agree or disagree with, so the verdict is the head's own branch.
+    assert record.verdict == VERDICT_ACT
+    assert log.read()[0]["kind"] == KIND_TURN
+
+
+def test_turn_rows_do_not_dilute_the_agreement_rates(tmp_path) -> None:
+    """A turn row has no router scope; counting it as a non-hit would fake a regression."""
+    log = ShadowLog(tmp_path / "s.jsonl")
+    observe(SENTINEL, "health:read", log=log,
+            classify_fn=lambda t: _verdict(("health:read",)), force=True)
+    observe_turn(SENTINEL, log=log,
+                 classify_fn=lambda t: _verdict(("health:read",)), force=True)
+    report = summarize(log.read())
+    assert report.total == 1
+    assert report.agreement_rate() == pytest.approx(1.0)
+
+
+def test_turn_coverage_finds_turns_that_queried_nothing(tmp_path) -> None:
+    log = ShadowLog(tmp_path / "s.jsonl")
+    # Turn 1: asked, and the router queried something.
+    observe_turn("asked and routed", log=log,
+                 classify_fn=lambda t: _verdict(("schedule:read",)), force=True)
+    observe("asked and routed", "schedule:read", log=log,
+            classify_fn=lambda t: _verdict(("schedule:read",)), force=True)
+    # Turn 2: asked, the router queried NOTHING, and the head would have named a scope.
+    observe_turn("asked and dropped", log=log,
+                 classify_fn=lambda t: _verdict(("places:read",)), force=True)
+    # Turn 3: asked, nothing queried, head also silent — not a recoverable case.
+    observe_turn("chitchat", log=log, classify_fn=lambda t: _verdict(()), force=True)
+
+    cov = turn_coverage(log.read())
+    assert cov["turns_observed"] == 3
+    assert cov["turns_with_no_query"] == 2
+    assert cov["no_query_rate"] == pytest.approx(2 / 3, abs=1e-4)
+    assert cov["would_have_routed"] == 1
+    assert cov["head_also_silent"] == 1

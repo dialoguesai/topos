@@ -9,6 +9,37 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Changed
+
+- `[E:query]` **Scope shadow: observe every turn, and stop calling the router's
+  guess "truth".** Two defects in the shadow log, found while diagnosing a
+  session where three of four turns answered with no data at all.
+  - **The blind spot was structural.** `observe()` ran inside
+    `QueryPipeline.execute`, i.e. only *after* something had already chosen a
+    scope. A turn that retrieved tools and then queried nothing never reached
+    it — so the log could only ever see the turns that already worked well
+    enough to route, and the failures were invisible by construction.
+    `handlers/tool_index.py` (`tools_retrieve`) now observes the owner's raw
+    text as it arrives, once per turn, before any routing. It runs concurrently
+    with retrieval so it costs no wall-clock, and `return_exceptions=True` keeps
+    a telemetry fault from failing the turn — a red-first test asserts that,
+    because the first wiring did fail it.
+  - **`true_scope` was never truth.** It is whichever scope the incumbent
+    heuristic router picked. Observed 2026-08-17: for *"what is a good prompt we
+    could ask of our work, schedule…"* — a meta-question that should have
+    retrieved nothing — the router chose `schedule:read` **and**
+    `work_context:read`, and the log recorded both as gold. Training on that
+    teaches the head to reproduce the router, mistakes included. Renamed to
+    `router_scope`; `ShadowReport.accuracy()` is now `agreement_rate()`;
+    telemetry `confusion` is now `divergence`. Rows written under the old name
+    still read (`row_router_scope`), since they are the same data.
+  - **New `turn_coverage()`** reports the population this was built for: turns
+    observed, turns that queried nothing, and — among those — how many the head
+    would have routed anyway. Those are recovery *candidates*, not proven
+    recoveries; the head can be wrong too.
+  - Records now carry `kind` (`"turn"` | `"route"`). `summarize()` counts only
+    `route` rows, so turn rows cannot silently deflate the agreement rates.
+
 ### Fixed
 
 - `[D]` **A topic cluster could name an off-limits entity in

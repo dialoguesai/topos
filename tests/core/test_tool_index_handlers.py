@@ -122,3 +122,55 @@ async def test_tools_handlers_validate_input(wired):
         {"id": "e2", "type": "tools_retrieve", "payload": {"query": "  "}}
     )
     assert empty_query["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_tools_retrieve_shadow_observes_the_turn(wired, tmp_path, monkeypatch):
+    """The turn-arrival shadow hook fires here, and cannot break retrieval.
+
+    This handler is the only per-turn event that sees the owner's text whether or not the
+    turn goes on to query anything, so it is where no-query turns become visible. A
+    refactor that drops the hook silently restores the blind spot that motivated it.
+    """
+    from topos.core.handlers import handle_control_plane_request
+    from topos.query import scope_shadow as ss
+
+    monkeypatch.setenv(ss.ENV_FLAG, "1")
+    monkeypatch.setattr(ss, "default_log_path", lambda: tmp_path / "shadow.jsonl")
+    seen: list[str] = []
+
+    def _fake_observe_turn(text, **kwargs):
+        seen.append(text)
+        return None
+
+    monkeypatch.setattr(ss, "observe_turn", _fake_observe_turn)
+
+    await handle_control_plane_request(
+        {"id": "s0", "type": "tools_index",
+         "payload": {"tools": [{"name": "query_scope", "description": "Query synced data"}]}}
+    )
+    retrieved = await handle_control_plane_request(
+        {"id": "s1", "type": "tools_retrieve", "payload": {"query": "how did I sleep", "k": 3}}
+    )
+    assert retrieved["status"] == "ok"
+    assert seen == ["how did I sleep"], "the turn-arrival hook must see the raw text"
+
+
+@pytest.mark.asyncio
+async def test_tools_retrieve_survives_a_broken_shadow(wired, monkeypatch):
+    """Telemetry may cost a millisecond, never the turn."""
+    from topos.core.handlers import handle_control_plane_request
+    from topos.query import scope_shadow as ss
+
+    def _boom(text, **kwargs):
+        raise RuntimeError("head exploded")
+
+    monkeypatch.setattr(ss, "observe_turn", _boom)
+    await handle_control_plane_request(
+        {"id": "b0", "type": "tools_index",
+         "payload": {"tools": [{"name": "query_scope", "description": "Query synced data"}]}}
+    )
+    retrieved = await handle_control_plane_request(
+        {"id": "b1", "type": "tools_retrieve", "payload": {"query": "anything", "k": 3}}
+    )
+    assert retrieved["status"] == "ok", "a shadow fault must not fail tool retrieval"
