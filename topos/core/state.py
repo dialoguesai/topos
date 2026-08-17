@@ -198,6 +198,19 @@ engine_presence_task: asyncio.Task | None = None
 hosted_pool_lease_client: Any = None
 hosted_pool_lease_task: asyncio.Task | None = None
 
+#: Fire-and-forget tasks spawned by app startup, held so shutdown can cancel
+#: them. Untracked `asyncio.create_task(...)` survived its app: the task kept
+#: running against a database the NEXT app instance was already migrating, and
+#: the resulting write-gate convoy timed out app startup in CI. Anything
+#: startup launches and does not await belongs in here.
+background_tasks: set[asyncio.Task] = set()
+
+#: The upgrade runner's thread and ITS OWN stop handle. Not `runtime_shutdown`:
+#: startup calls `clear_shutdown()`, so a starting app would erase the stop
+#: signal of the previous app's runner.
+upgrade_runner_thread: threading.Thread | None = None
+upgrade_runner_stop: threading.Event | None = None
+
 
 def _resolve_database_path_from_settings() -> Optional[Path]:
     """Pick the SQLite file path from settings and default search order.

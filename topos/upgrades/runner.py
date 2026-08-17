@@ -45,6 +45,10 @@ _BOOTSTRAP_BASELINE = "1.1.0"
 _DEFAULT_UI_GRACE_SECONDS = 20.0
 _DEFAULT_READY_TIMEOUT_SECONDS = 60.0
 
+#: Slice for polling ``stop_event`` while waiting on the UI-ready event. Short
+#: enough that shutdown does not wait out the remaining ready-timeout.
+_STOP_POLL_SLICE_S = 0.05
+
 ExecutorFn = Callable[[Dict[str, Any], sqlite3.Connection], Dict[str, Any]]
 
 # Status snapshot for the /upgrade/status surface (module-level, single node).
@@ -629,8 +633,16 @@ def run_pending_upgrades(
     conn: sqlite3.Connection,
     shipped: Optional[str] = None,
     executors: Optional[Dict[str, ExecutorFn]] = None,
+    stop_event: Optional[threading.Event] = None,
 ) -> Dict[str, Any]:
-    """Execute the planned steps sequentially. Returns a summary dict."""
+    """Execute the planned steps sequentially. Returns a summary dict.
+
+    ``stop_event`` is checked at each step boundary so app shutdown can end the
+    run without waiting out the remaining plan. Steps are not interrupted
+    mid-flight — the boundary is the safe point — so a long step still finishes.
+    Unset steps stay pending and are retried on the next boot, which is already
+    how a failed or consent-blocked step behaves.
+    """
     if not _enabled():
         logger.info("upgrade runner disabled (TOPOS_UPGRADE_RUNNER=off)")
         return {"disabled": True, "steps_run": 0, "steps_failed": 0}
@@ -654,7 +666,16 @@ def run_pending_upgrades(
     steps = list(plan["steps"])
     steps_total = len(steps)
     declared = declaring_versions()
+    stopped_early = False
     for step_index, step in enumerate(steps):
+        if stop_event is not None and stop_event.is_set():
+            logger.info(
+                "upgrade run stopped at step %d/%d (app shutdown); remaining steps "
+                "stay pending for the next boot",
+                step_index + 1, steps_total,
+            )
+            stopped_early = True
+            break
         step_id = str(step["id"])
         ledger_v = _ledger_version(step_id, shipped_v, declared)
         status = _effective_status(conn, step_id, ledger_v)
@@ -752,6 +773,7 @@ def run_pending_upgrades(
         "steps_failed": failed,
         "steps_pending_consent": pending_consent,
         "baseline_advanced": all_done,
+        "stopped_early": stopped_early,
     }
     _set_runner_state(last_result=result)
     return result
@@ -763,6 +785,7 @@ def start_background(
     ready_event: Optional[threading.Event] = None,
     ui_grace_s: Optional[float] = None,
     ready_timeout_s: Optional[float] = None,
+    stop_event: Optional[threading.Event] = None,
 ) -> Optional[threading.Thread]:
     """Boot entrypoint: plan quickly; heavy steps wait for UI, then run off-loop.
 
@@ -770,18 +793,35 @@ def start_background(
     to serve the React app's initial bootstrap. A grace window then lets those
     requests finish before enrichment reprocess contends for SQLite / Ollama /
     MPS. Fresh installs stamp-and-skip on a short-lived thread.
+
+    ``stop_event`` is the caller's shutdown handle for THIS runner. Pass it and
+    the thread becomes promptly joinable: every wait below wakes on it, and the
+    upgrade will not start once it is set. Without it the thread sleeps out the
+    full ready-timeout + grace (80s by default) after its app has already shut
+    down, then runs migrations against a database the next app instance is also
+    migrating — the write-gate convoy that timed out app startup in CI.
+
+    Deliberately a per-runner event and NOT ``runtime_shutdown``: app startup
+    calls ``clear_shutdown()``, so a newly starting app would erase the stop
+    signal of the previous app's still-running runner — precisely the overlap
+    this exists to end.
     """
     if not _enabled():
         return None
+
+    def _stopping() -> bool:
+        return stop_event is not None and stop_event.is_set()
+
     plan = plan_upgrade(conn)
     if plan["fresh_install"] or not plan["steps"]:
         # Cheap (stamp or no-op), but the stamp still commits under the write
         # gate — keep it off the event-loop thread that calls this at startup.
-        thread = threading.Thread(
-            target=lambda: run_pending_upgrades(conn),
-            name="topos-upgrade-stamp",
-            daemon=True,
-        )
+        def _stamp() -> None:
+            if _stopping():
+                return
+            run_pending_upgrades(conn, stop_event=stop_event)
+
+        thread = threading.Thread(target=_stamp, name="topos-upgrade-stamp", daemon=True)
         thread.start()
         return thread
     grace = _DEFAULT_UI_GRACE_SECONDS if ui_grace_s is None else max(0.0, float(ui_grace_s))
@@ -808,22 +848,56 @@ def start_background(
         },
     )
 
+    def _wait_for_ready() -> None:
+        """Block until the UI is ready, the timeout expires, or we are stopped."""
+        if ready_event is None:
+            return
+        timeout = ready_timeout if ready_timeout > 0 else None
+        if stop_event is None:
+            if not ready_event.wait(timeout=timeout):
+                logger.warning(
+                    "upgrade ready-event timed out after %.0fs; starting anyway",
+                    ready_timeout,
+                )
+            return
+        # Poll in slices so a shutdown mid-wait is noticed now rather than up to
+        # ready_timeout later.
+        deadline = None if timeout is None else time.monotonic() + timeout
+        while not stop_event.is_set():
+            remaining = None if deadline is None else deadline - time.monotonic()
+            if remaining is not None and remaining <= 0:
+                logger.warning(
+                    "upgrade ready-event timed out after %.0fs; starting anyway",
+                    ready_timeout,
+                )
+                return
+            slice_s = _STOP_POLL_SLICE_S if remaining is None else min(_STOP_POLL_SLICE_S, remaining)
+            if ready_event.wait(timeout=slice_s):
+                return
+
     def _target() -> None:
         try:
-            if ready_event is not None:
-                signaled = ready_event.wait(timeout=ready_timeout if ready_timeout > 0 else None)
-                if not signaled:
-                    logger.warning(
-                        "upgrade ready-event timed out after %.0fs; starting anyway",
-                        ready_timeout,
-                    )
+            if _stopping():
+                return
+            _wait_for_ready()
+            if _stopping():
+                logger.info("upgrade runner stopped before starting (app shutdown)")
+                return
             if grace > 0:
                 logger.info(
                     "UI grace: deferring upgrade work for %.0fs so bootstrap can finish",
                     grace,
                 )
-                time.sleep(grace)
-            run_pending_upgrades(conn)
+                # Interruptible: a plain time.sleep(grace) held this thread past
+                # its app's shutdown for the whole window.
+                if stop_event is not None:
+                    stop_event.wait(grace)
+                else:
+                    time.sleep(grace)
+            if _stopping():
+                logger.info("upgrade runner stopped during UI grace (app shutdown)")
+                return
+            run_pending_upgrades(conn, stop_event=stop_event)
         finally:
             _set_runner_state(waiting_for_ui=False)
 

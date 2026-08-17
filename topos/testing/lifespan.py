@@ -33,12 +33,29 @@ SHUTDOWN_TIMEOUT_SECONDS = 30
 # diagnosis on the exception so the next one reads as what it is.
 _TIMEOUT_HINT = (
     "App startup did not complete within {seconds}s. This budget is ~120x the "
-    "measured cost of a healthy startup (0.08s-0.24s), so treat it as event-loop "
-    "starvation, not a too-small timeout: something blocking ran on the loop or "
-    "held the GIL. First suspect is a background thread loading/downloading "
-    "models (SANITIZATION_PREWARM_ON_STARTUP is off for tests by default — check "
-    "it was not re-enabled); second is a write-gate holder or a locked guard DB."
+    "measured cost of a healthy startup (0.08s-0.24s), so it is contention, not "
+    "a too-small timeout — widening it buys a longer wait for the same failure. "
+    "WRITE GATE: {holder}. "
+    "The gate is the first suspect, and the holder above names it when one is "
+    "live: a writer that takes the process-wide gate and then blocks on SQLite "
+    "pins every other writer for the full 30s busy_timeout, and this startup is "
+    "one of them. That reads as a startup problem while the real culprit is "
+    "another test's leaked background work — an upgrade runner or pipeline "
+    "worker still writing after its own app shut down. Second suspect is a "
+    "background thread loading/downloading models "
+    "(SANITIZATION_PREWARM_ON_STARTUP is off for tests by default — check it "
+    "was not re-enabled)."
 )
+
+
+def _describe_gate() -> str:
+    """Name the write-gate holder, if the engine is importable and one exists."""
+    try:
+        from topos.storage.db.write_gate import describe_gate_holder
+
+        return describe_gate_holder()
+    except Exception:  # noqa: BLE001 — a diagnostic must never mask the timeout
+        return "unavailable"
 
 
 class LifespanManager(_LifespanManager):
@@ -60,8 +77,12 @@ class LifespanManager(_LifespanManager):
             await super().__aenter__()
         except TimeoutError as exc:
             # The base __aenter__ already unwound its exit stack before raising.
+            # Read the holder HERE, not at module import: it is only meaningful
+            # at the moment the timeout fires.
             raise TimeoutError(
-                _TIMEOUT_HINT.format(seconds=self.startup_timeout)
+                _TIMEOUT_HINT.format(
+                    seconds=self.startup_timeout, holder=_describe_gate()
+                )
             ) from exc
         return self
 

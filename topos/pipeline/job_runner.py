@@ -452,6 +452,41 @@ def start_pipeline_worker(conn_factory: Callable[[], Any]) -> None:
         _worker_task = loop.create_task(_worker_loop(conn_factory))
 
 
+async def stop_pipeline_worker() -> None:
+    """Cancel the worker loop started by :func:`start_pipeline_worker`.
+
+    Without this the task outlived its app. ``start_pipeline_worker`` skips when
+    ``_worker_task`` is not ``done()``, and a task left pending on a closed loop
+    never becomes done — so the FIRST app instance in a process owned the worker
+    forever and every later one silently ran without one. Clearing the global is
+    the part that matters; the cancel just stops a live loop from writing during
+    the next app's startup.
+    """
+    global _worker_task
+    with _worker_lock:
+        task = _worker_task
+        _worker_task = None
+    if task is None or task.done():
+        return
+    try:
+        running = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    if task.get_loop() is not running:
+        # Belongs to an earlier app instance's loop, which is already closed:
+        # awaiting it here raises "attached to a different loop". Dropping the
+        # reference above is both all we can do and all that is needed — a
+        # closed loop is not running it.
+        return
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+    except Exception:  # noqa: BLE001 — teardown never raises
+        pass
+
+
 def recover_pipeline_jobs(conn) -> int:
     if conn is None:
         return 0

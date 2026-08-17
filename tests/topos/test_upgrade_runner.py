@@ -353,7 +353,10 @@ def test_start_background_waits_for_ready_event(conn, monkeypatch):
     _seed_data(conn)
     ran = threading.Event()
 
-    def fake_run(conn_, shipped=None, executors=None):
+    # Mirrors run_pending_upgrades, stop_event included: start_background passes
+    # it now, and a fake that rejects the kwarg raises inside the runner thread,
+    # where it surfaces only as an unhandled-thread warning and a never-set event.
+    def fake_run(conn_, shipped=None, executors=None, stop_event=None):
         ran.set()
         return {"steps_run": 0, "steps_failed": 0}
 
