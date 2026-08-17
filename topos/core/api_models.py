@@ -11,6 +11,19 @@ class HealthResponse(BaseModel):
     cloud_connected: Optional[bool] = None
     control_plane_connection: Optional[Dict[str, Any]] = None
     sync_connection: Optional[Dict[str, Any]] = None
+    #: Can this node actually READ its database right now?
+    #:
+    #: ``status: "ok"`` only ever meant "the event loop answered". A node whose
+    #: database handle is unusable answers healthcheck perfectly and then fails
+    #: every data request — which is what a poisoned statement cache looked like
+    #: on 2026-08-17: green dot, empty graph, no way to tell from the outside.
+    #: ``None`` means the probe did not run (an older engine, or no database
+    #: configured); only ``False`` is a positive claim that reads are failing.
+    db_ok: Optional[bool] = None
+    #: Why ``db_ok`` is false, for the log and the UI tooltip. Never the raw
+    #: exception text — for the corruption above that text is an unrelated SQL
+    #: statement and reads as a routines bug.
+    db_error: Optional[str] = None
 
 
 class GenerationRequest(BaseModel):

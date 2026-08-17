@@ -262,4 +262,10 @@ async def test_unknown_message_type_returns_error_naming_type():
 @pytest.mark.asyncio
 async def test_known_type_dispatches():
     result = await handle_control_plane_request({"id": "req-2", "type": "healthcheck"})
-    assert result == {"id": "req-2", "status": "ok", "payload": {"status": "ok"}}
+    assert result["id"] == "req-2"
+    assert result["status"] == "ok"
+    assert result["payload"]["status"] == "ok"
+    # `db_ok` rides alongside the liveness verdict (see tests/topos/test_db_health.py).
+    # Asserted loosely here because this test is about dispatch, and whether a
+    # database happens to be configured in this environment is not its subject.
+    assert "db_ok" in result["payload"]

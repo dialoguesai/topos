@@ -10,6 +10,7 @@ import sqlite3
 from typing import Any, Dict, List, Optional
 
 from .model import CanonicalAIChatMessage, CanonicalAIChatConversation
+from ...db.schema_probe import UnusableConnection, describe_unusable, probe_bool
 from ...db.write_gate import commit_connection, with_db_write
 
 logger = logging.getLogger("topos.storage.canonical.ai_chat.tables")
@@ -42,7 +43,14 @@ class CanonicalTablesManager:
         reused once the old handle is collected, which reports DDL as done on a
         brand-new empty database.
         """
-        if self._tables_present():
+        try:
+            if self._tables_present():
+                return
+        except UnusableConnection as exc:
+            # Do NOT fall through to the DDL. It cannot succeed on a connection
+            # that cannot answer a sqlite_master read, and taking the write gate
+            # to find that out blocks the event loop (and the CP keepalive).
+            logger.error("Canonical DDL skipped: %s", describe_unusable(exc))
             return
         try:
             # DDL takes SQLite's write lock at execute time — gate it with the commit.
@@ -98,14 +106,21 @@ class CanonicalTablesManager:
             logger.error("Failed to ensure canonical tables: %s", e)
 
     def _tables_present(self) -> bool:
-        try:
+        """True when both canonical tables exist.
+
+        Raises :class:`UnusableConnection` when the probe itself cannot run —
+        ``sqlite_master`` always exists, so a failure here is the connection,
+        not the schema.
+        """
+
+        def _read() -> bool:
             rows = self.conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name IN (?, ?)",
                 _CANONICAL_TABLES,
             ).fetchall()
             return len(rows) == len(_CANONICAL_TABLES)
-        except Exception:  # noqa: BLE001 — a failed probe just means "run the DDL"
-            return False
+
+        return probe_bool(_read, what="canonical ai_chat tables")
 
     def write_conversations_batch(
         self,

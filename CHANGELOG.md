@@ -11,6 +11,39 @@ The machine-readable twin of each release is
 
 ### Fixed
 
+- `[O]` **A node can no longer keep answering "healthy" after its database has
+  died.** On 2026-08-17 the node served `/healthcheck` normally for nearly two
+  hours while every data read failed and the app showed a connected Topos over
+  an empty graph. Root cause: `run_db_read` accepted a `sqlite3.Connection`
+  resolved by the caller on the event-loop thread and then ran the work on an
+  `asyncio.to_thread` worker. Loop thread and worker executed on that one
+  Connection at the same time, and CPython's per-connection prepared-statement
+  cache — an unsynchronized C LRU keyed by the 1-tuple `(sql,)` — went
+  inconsistent. Its eviction path deleted a key that was already gone, and from
+  then on **every** `execute` on that handle raised `KeyError(('<sql>',))`,
+  quoting a statement the caller had never issued. Reproduced on the shipped
+  interpreter (3.10.16). Five changes:
+  - `run_db_read` now resolves the connection INSIDE the worker, exactly as
+    `run_db_write` does; all 15 call sites stopped passing one in. Request-scoped
+    objects built from a connection (`BlackholeGuard`) are constructed in the
+    worker too — one built on the loop carries the loop's handle in with it.
+  - The routine handlers that still wrote inline on the loop (`create_run`,
+    `update_run`, `advance_next_run_at`) go through `run_db_write`. Those were
+    the writes racing the read at 07:00:16.
+  - Schema probes distinguish "not created yet" from "connection unusable"
+    (`storage/db/schema_probe.py`). Both probes previously swallowed every
+    exception and answered "absent", so a broken connection took the write gate
+    ON THE EVENT LOOP to run DDL that could never succeed — silently undoing the
+    gate work above.
+  - `SELECT 1` liveness probes in `core/state.py` now treat `KeyError` as an
+    unhealthy handle and open a fresh one, so a poisoned connection stops being
+    fatal for the life of the process. (`cached_statements=0` does not help:
+    CPython 3.10 clamps the cache to a minimum of 5 — measured, 0/1/4 all behave
+    exactly like 5.)
+  - Prevention is not detection, so `/healthcheck` and the relayed `healthcheck`
+    handler now carry `db_ok` (a `SELECT 1`, off the loop, on the worker's own
+    connection). `status: "ok"` never meant more than "the event loop answered".
+
 - `[E:query]` **The owner's actual question reaches the query path again.** The
   handler read `intent` before `query`, so home chat's stopword-stripped
   fingerprint became the query text for every downstream stage: "how did I sleep
