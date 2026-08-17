@@ -25,7 +25,7 @@ async def handle_list_home_chat_sessions(message: Dict[str, Any]) -> Optional[Di
     engine_id = str(pl.get("engine_id") or "").strip()
     if not user_id or not engine_id:
         return {"id": req_id, "status": "error", "error": "user_id and engine_id required"}
-    rows = await run_db_read(hc_store.list_sessions, conn, user_id=user_id, engine_id=engine_id)
+    rows = await run_db_read(hc_store.list_sessions, user_id=user_id, engine_id=engine_id)
     return {"id": req_id, "status": "ok", "payload": {"sessions": rows}}
 
 @handles("get_home_chat_session")
@@ -41,7 +41,7 @@ async def handle_get_home_chat_session(message: Dict[str, Any]) -> Optional[Dict
     session_id = str(pl.get("session_id") or "").strip()
     if not user_id or not session_id:
         return {"id": req_id, "status": "error", "error": "user_id and session_id required"}
-    row = await run_db_read(hc_store.get_session, conn, user_id=user_id, session_id=session_id)
+    row = await run_db_read(hc_store.get_session, user_id=user_id, session_id=session_id)
     if not row:
         return {"id": req_id, "status": "error", "error": "Session not found"}
     return {"id": req_id, "status": "ok", "payload": row}

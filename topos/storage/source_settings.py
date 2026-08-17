@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 from typing import Optional
 
+from .db.schema_probe import UnusableConnection, describe_unusable, probe_bool
 from .db.write_gate import commit_connection, with_db_write
 
 logger = logging.getLogger("topos.storage.source_settings")
@@ -36,11 +37,19 @@ def _normalize_posture(posture) -> Optional[str]:
 
 
 def _has_posture_column(conn) -> bool:
-    try:
+    """True once the table exists AND carries the posture column.
+
+    Raises :class:`UnusableConnection` when the PRAGMA itself cannot run — a
+    missing table returns zero rows rather than raising, so a raise here means
+    the connection is broken and the DDL below would only take the write gate to
+    discover that.
+    """
+
+    def _read() -> bool:
         cols = {r[1] for r in conn.execute(f"PRAGMA table_info({TABLE})").fetchall()}
         return "posture" in cols
-    except Exception:  # noqa: BLE001
-        return False
+
+    return probe_bool(_read, what=f"{TABLE}.posture")
 
 
 def ensure_table(conn) -> None:
@@ -51,9 +60,17 @@ def ensure_table(conn) -> None:
     whatever thread asked, the event loop included. The probe is a PRAGMA read,
     and it doubles as the posture-column check, so a fully-migrated table costs
     no gate at all.
+
+    A probe that cannot RUN is not a missing table. Falling through to the DDL
+    on a broken connection takes the blocking gate — on the event loop, if that
+    is who asked — to reach a failure that was already certain.
     """
-    if _has_posture_column(conn):
-        return
+    try:
+        if _has_posture_column(conn):
+            return
+    except UnusableConnection as exc:
+        logger.warning("source settings DDL skipped: %s", describe_unusable(exc))
+        raise
     # DDL takes SQLite's write lock at execute time — gate it with the commit.
     with with_db_write():
         conn.execute(f"""
