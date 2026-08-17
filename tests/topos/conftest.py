@@ -56,6 +56,71 @@ def _reset_db_singleton() -> None:
     core_state._db_conn_path = None
 
 
+def _topos_modules() -> dict:
+    return {
+        name: module
+        for name, module in list(sys.modules.items())
+        if name == "topos" or name.startswith("topos.")
+    }
+
+
+@pytest.fixture(autouse=True)
+def _repair_forked_topos_modules():
+    """Put back any ``topos.*`` module a test popped out of ``sys.modules``.
+
+    Five helpers in this package re-import the app under fresh env by popping
+    modules and never restoring them: ``load_topos_app`` in test_auth.py,
+    test_smoke.py, test_app_routes.py and test_user_identity.py, and
+    ``_reload_modules`` in test_manual_enrichment_trigger_flow.py. The
+    re-import FORKS those modules — ``sys.modules['topos.core.state']`` becomes
+    a new object while ``topos.core.handlers.common.get_db_connection``,
+    imported earlier, still reads the OLD module's globals. Later suites then
+    monkeypatch one module while the code under test reads the other:
+
+      * tests/core/test_graph_cypher_handler.py injects a ``:memory:`` handle
+        as ``state.db_conn`` and the ws handler opens a fresh guard.db anyway,
+        so the traversal returns no rows;
+      * tests/features/test_attention_triage.py registers
+        ``topos.auth.require_api_key`` in ``dependency_overrides`` and gets
+        401, because the router still depends on the pre-fork function object.
+
+    Both pass alone and fail after tests/topos. Same disease and cure as
+    ``engine_runtime_isolation`` below and ``module_reload_isolation`` in the
+    root conftest — hoisted to autouse so a sixth copy of ``load_topos_app``
+    cannot quietly re-introduce it. Inert (a dict comparison) for the ~650
+    tests here that fork nothing.
+    """
+    snapshot = _topos_modules()
+    yield
+    forked = {
+        name: module for name, module in snapshot.items() if sys.modules.get(name) is not module
+    }
+    if not forked:
+        return
+    # Close the fork's own database handle before dropping it: it points at a
+    # tmp_path DB this test is about to have deleted.
+    forked_state = sys.modules.get("topos.core.state")
+    if forked_state is not None and forked_state is not snapshot.get("topos.core.state"):
+        conn = getattr(forked_state, "db_conn", None)
+        if conn is not None:
+            try:
+                conn.close()
+            except Exception:  # noqa: BLE001
+                pass
+            forked_state.db_conn = None
+            forked_state._db_conn_path = None
+    sys.modules.update(forked)
+    # Re-point parent-package attributes too: pytest's monkeypatch resolves
+    # dotted targets by getattr traversal (topos.core → .state), not through
+    # sys.modules, so a stale parent attr still hands out the forked module.
+    for name, module in forked.items():
+        parent_name, _, child = name.rpartition(".")
+        parent = sys.modules.get(parent_name) if parent_name else None
+        if parent is not None:
+            setattr(parent, child, module)
+    _reset_db_singleton()
+
+
 @pytest.fixture
 def engine_runtime_isolation():
     original_env = {key: os.environ.get(key) for key in _ENV_KEYS}

@@ -11,6 +11,76 @@ The machine-readable twin of each release is
 
 ### Fixed
 
+- `[E:facts]` **One cancelled fact-extraction batch could disable LLM fact
+  extraction for the life of the node.** `FactExtractionJob` answered
+  `asyncio.CancelledError` with `runtime_shutdown.request_shutdown(
+  "fact_extraction_cancelled")` — a process-lifetime flag that only an
+  `app.startup_event` could clear. Every later batch in that process then
+  returned 0 on entry ("LLM fact pass skipped; engine shutting down"), the
+  rules floor kept writing, the job kept reporting success, and
+  `/healthcheck` stayed green: a lane going dark with nothing to see, the same
+  signature as the `db_ok` outage below. Nothing cancels enrichment today
+  (no `wait_for` in `enrichment/`/`pipeline/`, and the pipeline worker task is
+  never cancelled), so this was latent, not firing — but it was one job
+  timeout or cancel button away, and the flag's scope was wrong regardless.
+  Three changes, prevention plus detection:
+  - **Cancelling one batch is now scoped to that batch.** The job passes a
+    `threading.Event` down through `extract_facts_from_batch(cancel=…)` into
+    `extract_owner_facts_llm(cancel=…)` and sets it in its own
+    `except CancelledError`. It cannot reach any other batch, or the run.
+  - **`runtime_shutdown` tracks a generation, not a boolean.** A generation is
+    one runtime run: an app lifespan, or the ambient generation of a process
+    that never starts one (CLI, scripts, tests). `begin_runtime()` at startup
+    mints a fresh one; `end_runtime()` at shutdown retires it — its own
+    workers stop and STAY stopped — and installs a fresh, unset one for
+    whatever comes next. Workers capture the generation they started under and
+    poll that, so a run that ends mid-batch still stops the batch it started,
+    and a run that ends cannot leave a later, unrelated caller reading
+    "shutting down". The old `clear_shutdown()`-at-startup did the opposite:
+    it un-stopped the previous run's still-draining workers. `begin_runtime`
+    also retires an outgoing generation, so a run that dies without
+    `end_runtime` cannot strand workers polling a flag nobody will set.
+    `is_shutdown_requested()` / `request_shutdown()` keep their signatures and
+    their meaning for the signal path.
+  - **A stop is reported, not silent.** `extract_owner_facts_llm(stats=…)`
+    fills an out-dict with `written`/`eligible`/`stopped`/`stop_reason`/
+    `unprocessed`, and the job carries `_facts_llm_stopped` into its result and
+    logs at WARNING. "Stopped with 12 rows left" no longer reads as
+    "there was nothing to extract". Unprocessed rows stay unmarked, so the
+    next pass retries them, as before.
+
+- `[O]` **18 tests stopped failing only when the suites run together.**
+  `tests/topos tests/storage tests/core tests/features tests/api
+  tests/disclosure` failed 18 tests that every one of those directories passed
+  on its own — not test-order randomness (`-p no:randomly` reproduced it),
+  three separate pieces of global state leaking out of `tests/topos` and
+  `tests/core`:
+  - The shutdown flag above accounted for 16 of them: any test that ran an app
+    lifespan (`tests/topos/test_smoke.py` and the other `load_topos_app` files)
+    left every later `extract_owner_facts_llm` call inert, and
+    `tests/features/test_fact_extraction_llm.py` with it. Fixed at the source
+    by the generation change rather than papered over in a conftest — an app
+    run's shutdown no longer belongs to the process it ran in.
+  - Five helpers in `tests/topos` re-import the app under fresh env by popping
+    `topos.app` / `topos.config.settings` / `topos.auth` / `topos.core.state`
+    out of `sys.modules` and never putting the originals back. The re-import
+    FORKS those modules — `sys.modules["topos.core.state"]` becomes a new
+    object while `topos.core.handlers.common.get_db_connection`, imported
+    earlier, still reads the old module's globals — so a later test patches one
+    module and the code reads the other. That is
+    `test_attention_dashboard_endpoint`'s 401 (its `dependency_overrides` key
+    was a post-fork `require_api_key`) and
+    `test_affinity_traversal_over_ws_bridge`'s empty result (its injected
+    `:memory:` handle was ignored and the handler opened a fresh guard.db).
+    `tests/topos/conftest.py` now restores module identity after any test that
+    forks one, the same cure `engine_runtime_isolation` already applied to its
+    own purge.
+  - `tests/core/test_enrichment_entrypoint_parity.py` imported the handlers
+    package AFTER patching `topos.core.state.get_db_connection`, so on
+    `pytest tests/core` the package re-exported the patched value and
+    monkeypatch's saved "original" was the test's own lambda — reinstalled at
+    undo for the rest of the session. Imports moved to module scope.
+
 - `[O]` **A node can no longer keep answering "healthy" after its database has
   died.** On 2026-08-17 the node served `/healthcheck` normally for nearly two
   hours while every data read failed and the app showed a connected Topos over

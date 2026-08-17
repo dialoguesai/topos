@@ -7,26 +7,26 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+# Module scope on purpose. These used to be imported INSIDE the tests, after
+# `monkeypatch.setattr("topos.core.state.get_db_connection", ...)` had already
+# run. When this file was the first to import the handlers package in a process
+# (`pytest tests/core`), `topos/core/handlers/__init__.py` re-exported the
+# *patched* value, so the "original" monkeypatch saved for
+# `handlers_hub.get_db_connection` was the test's own lambda — and undo put that
+# lambda back for the rest of the session. test_graph_cypher_handler.py then
+# reached a torn-down tmp DB through it and answered 503. Binding before any
+# patch runs makes the saved original the real function.
+import topos.core.handlers as handlers_hub
 from topos.api.enrichment import _process_enrichment_core
+from topos.core.handlers.enrichment import handle_enrichment_progress
+from topos.pipeline.job_runner import _execute_enrichment_process_source
+from topos.pipeline.job_store import enqueue_job, update_job_progress
 from topos.storage.db.migrations.pipeline_jobs_v1 import apply_pipeline_jobs_v1_up
-
-# Imported HERE, at module scope, and deliberately not inside the tests below.
-# topos.core.handlers re-exports get_db_connection by value (via .common), so
-# whatever topos.core.state.get_db_connection happens to be at first-import time
-# is what the package binds — permanently. A test that patches state and only
-# then triggers that first import bakes its own lambda into the package;
-# monkeypatch then "restores" the poisoned value it recorded, and every later
-# test in the session gets this test's closed connection. That is what made
-# tests/core/test_graph_cypher_handler.py fail with "SQLite objects created in
-# a thread can only be used in that same thread" when run after this file.
-import topos.core.handlers as _handlers_hub  # noqa: E402,F401
-import topos.core.handlers.enrichment as _handlers_enrichment  # noqa: E402,F401
-import topos.core.handlers.ingest as _handlers_ingest  # noqa: E402,F401
 
 
 @pytest.mark.asyncio
 async def test_ws_executor_uses_process_enrichment_core_with_signal(monkeypatch, tmp_path) -> None:
-    conn = sqlite3.connect(str(tmp_path / "parity.db"), check_same_thread=False)
+    conn = sqlite3.connect(str(tmp_path / "parity.db"))
     apply_pipeline_jobs_v1_up(conn)
     monkeypatch.setattr("topos.core.state.get_db_connection", lambda: conn)
 
@@ -38,8 +38,6 @@ async def test_ws_executor_uses_process_enrichment_core_with_signal(monkeypatch,
     }
     mock_core = AsyncMock(return_value=expected)
     monkeypatch.setattr("topos.api.enrichment._process_enrichment_core", mock_core)
-
-    from topos.pipeline.job_runner import _execute_enrichment_process_source
 
     result = await _execute_enrichment_process_source(
         {
@@ -56,15 +54,13 @@ async def test_ws_executor_uses_process_enrichment_core_with_signal(monkeypatch,
 
 @pytest.mark.asyncio
 async def test_enrichment_progress_reads_sqlite_not_memory(monkeypatch, tmp_path) -> None:
-    conn = sqlite3.connect(str(tmp_path / "progress.db"), check_same_thread=False)
+    conn = sqlite3.connect(str(tmp_path / "progress.db"))
     apply_pipeline_jobs_v1_up(conn)
     monkeypatch.setattr("topos.core.state.get_db_connection", lambda: conn)
-    monkeypatch.setattr(_handlers_hub, "get_db_connection", lambda: conn)
-    monkeypatch.setattr(_handlers_ingest.hub, "get_db_connection", lambda: conn)
-    monkeypatch.setattr(_handlers_enrichment.hub, "get_db_connection", lambda: conn)
-
-    from topos.core.handlers.enrichment import handle_enrichment_progress
-    from topos.pipeline.job_store import enqueue_job, update_job_progress
+    # handlers.ingest and handlers.enrichment both do `import topos.core.handlers
+    # as hub`, so all three former patch targets were this one object; patch it
+    # once.
+    monkeypatch.setattr(handlers_hub, "get_db_connection", lambda: conn)
 
     job_id = enqueue_job(
         conn,
