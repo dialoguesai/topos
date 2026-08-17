@@ -56,6 +56,11 @@ VERDICT_ABSTAIN = "abstain"   # predicted nothing
 VERDICT_ESCALATE = "escalate"  # sat in the uncertain band
 
 
+# 8 MiB of JSONL is on the order of 40k observations — far more than the
+# evaluation needs, and small enough that two generations stay unremarkable.
+_DEFAULT_MAX_LOG_BYTES = 8 * 1024 * 1024
+
+
 def enabled() -> bool:
     if os.environ.get(ENV_FLAG, "").strip().lower() in {"1", "true", "yes", "on"}:
         return True
@@ -124,6 +129,16 @@ def warm() -> bool:
         return False
 
 
+def max_log_bytes() -> int:
+    """Size at which the shadow log rotates. 0 disables rotation."""
+    raw = os.environ.get("TOPOS_SCOPE_SHADOW_MAX_BYTES", "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return _DEFAULT_MAX_LOG_BYTES
+    return value if value >= 0 else _DEFAULT_MAX_LOG_BYTES
+
+
 def default_log_path() -> Path:
     return Path.home() / ".topos" / "scope_shadow.jsonl"
 
@@ -184,9 +199,41 @@ class ShadowLog:
         self.path = Path(path) if path else default_log_path()
 
     def append(self, record: ShadowRecord) -> None:
+        """Append one observation, rotating before the file can grow unbounded.
+
+        The local row carries the raw query text — that is the point of shadow
+        mode, and it never leaves the node (`as_telemetry` strips it). But
+        "node-local" is not the same as "unbounded is fine": an append-only log
+        of every query a person ever ran, with no cap, is the wrong default for
+        a product whose security page says the data stays theirs. One rotation
+        keeps a bounded window of recent traffic, which is all the evaluation
+        in PLAN_SCOPE_CLASSIFIER.md §6.5 needs, and drops the rest.
+        """
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._rotate_if_needed()
         with self.path.open("a", encoding="utf-8") as fh:
             fh.write(json.dumps(record.as_local_row(), ensure_ascii=False) + "\n")
+
+    def _rotate_if_needed(self) -> None:
+        """Roll to a single `.1` sibling once the live file passes the cap.
+
+        One generation, not N: two files bound the raw text on disk at 2x the
+        cap, and a rotation scheme that keeps ten of them just means ten times
+        as much query history to reason about. Best effort — a log that cannot
+        rotate must not take the query path down with it, which is the same
+        rule `observe()` applies to everything else here.
+        """
+        cap = max_log_bytes()
+        if cap <= 0:  # explicitly disabled; 0 must mean off, not "rotate always"
+            return
+        try:
+            if not self.path.is_file() or self.path.stat().st_size < cap:
+                return
+            previous = self.path.with_suffix(self.path.suffix + ".1")
+            previous.unlink(missing_ok=True)
+            self.path.rename(previous)
+        except OSError:
+            return
 
     def read(self) -> List[Dict[str, Any]]:
         if not self.path.is_file():
