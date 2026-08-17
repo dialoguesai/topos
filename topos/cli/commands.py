@@ -258,13 +258,36 @@ def main(
         return
 
     if discover:
-        databases = discover_databases()
-        if databases:
-            click.echo("Discovered databases:")
-            for db in databases:
+        # Says which database is SERVED and flags any that belong to no Topos.
+        # A bare list of paths was the wrong shape for the question people ask
+        # this: it named a legacy stray first and never mentioned the active
+        # slot, so the answer was not just incomplete, it was misleading.
+        from topos.storage.db.paths import (
+            SOURCE_LEGACY,
+            existing_legacy_databases,
+            resolve_active_database,
+        )
+
+        active = resolve_active_database()
+        owner = f" — Topos '{active.profile_id}'" if active.profile_id else ""
+        state = "" if active.path.is_file() else "  (not created yet)"
+        click.echo(f"Active database: {active.path}{owner}{state}")
+        if active.source == SOURCE_LEGACY:
+            click.echo(
+                "  WARNING: this database is outside ~/.topos and belongs to no Topos. "
+                "Switching Topoi will not carry it. Run `topos-node profile adopt` "
+                "to pull it into the active Topos."
+            )
+        strays = [p for p in existing_legacy_databases() if p != active.path]
+        if strays:
+            click.echo("Databases from older installs (not served):")
+            for db in strays:
                 click.echo(f"  - {db}")
-        else:
-            click.echo("No existing databases found")
+        other = [
+            db for db in discover_databases() if db != active.path and db not in strays
+        ]
+        for db in other:
+            click.echo(f"Also on disk: {db}")
         return
 
     if skip_update_check:

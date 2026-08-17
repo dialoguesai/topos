@@ -90,6 +90,11 @@ The machine-readable twin of each release is
 - `[S1]` `/healthcheck` gained `database_path`, `database_source` and
   `active_profile_id`; the macOS tray uses them to verify that a switch landed
   on the Topos it asked for (shell `1a4d79b`).
+- `[S1]` `topos-node --discover` now answers the question people actually run
+  it for: it names the database being SERVED and the Topos that owns it, then
+  lists databases from older installs as "not served", and warns outright when
+  the served one is a stray. It used to print a bare list that led with a
+  legacy stub and never mentioned the active slot.
 
 ## [1.3.20] — 2026-08-17
 

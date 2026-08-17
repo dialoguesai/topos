@@ -203,6 +203,27 @@ class TestOneResolver:
         assert _resolve_database_path_from_settings() == base / paths.DATABASE_FILENAME
         assert paths.get_local_database_size_bytes() == 30
 
+    def test_discover_names_the_served_database_and_labels_strays(self, tmp_path, monkeypatch):
+        """``--discover`` is what someone runs to find their database. It used
+        to print a legacy stray first and never mention the active slot at all,
+        which is not merely incomplete — it is the wrong answer."""
+        from click.testing import CliRunner
+
+        from topos.cli.commands import main
+
+        base = tmp_path / ".topos"
+        _seed_slot(base)
+        (base / paths.DATABASE_FILENAME).write_bytes(b"active")
+        legacy = _seed_legacy(tmp_path, monkeypatch)
+        monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path))
+        monkeypatch.setattr(paths, "load_config", dict)
+
+        output = CliRunner().invoke(main, ["--discover"]).output
+
+        assert f"Active database: {base / paths.DATABASE_FILENAME}" in output
+        assert "Topos 'personaldb'" in output
+        assert "not served" in output and str(legacy) in output
+
     def test_discover_lists_the_active_database_then_strays(self, tmp_path, monkeypatch):
         base = tmp_path / ".topos"
         _seed_slot(base)
