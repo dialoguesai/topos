@@ -47,6 +47,7 @@ import logging
 import os
 import re
 import sqlite3
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from typing import Any, Callable, Dict, List, Optional, Tuple
 
@@ -428,6 +429,8 @@ def _likely_has_owner_fact(content: str) -> bool:
 def _make_ollama_extractor(
     model: str,
     conn: Optional[sqlite3.Connection] = None,
+    *,
+    should_stop: Optional[Callable[[], bool]] = None,
 ) -> Callable[[str, Dict[str, Any]], List[Dict[str, Any]]]:
     """Build a synchronous extractor bound to the OllamaAdapter transport.
 
@@ -455,10 +458,14 @@ def _make_ollama_extractor(
     num_predict = binding.max_tokens if (binding and binding.max_tokens) else _NUM_PREDICT
 
     def _extract(prompt: str, row: Dict[str, Any]) -> List[Dict[str, Any]]:
+        # Last gate before an expensive Ollama call. `should_stop` carries this
+        # batch's cancel as well as the run's shutdown; without one, fall back
+        # to the current run so a directly-built extractor still honours Ctrl+C.
         from ...runtime_shutdown import is_shutdown_requested
 
-        if is_shutdown_requested():
-            raise InterruptedError("engine shutting down")
+        gate = should_stop if should_stop is not None else is_shutdown_requested
+        if gate():
+            raise InterruptedError("fact_llm extraction stopped")
         # temp 0 => deterministic; bounded output; keep_alive default so the
         # model stays warm across the batch. The adapter adapts `think` per
         # model capability, so non-thinking models are unaffected either way.
@@ -628,7 +635,10 @@ def _mark_record_processed(
         logger.debug("fact_llm progress mark failed for %s (%s)", record_id, exc)
 
 
-def _run_coro_blocking(coro: "asyncio.Future") -> Any:
+def _run_coro_blocking(
+    coro: "asyncio.Future",
+    should_stop: Optional[Callable[[], bool]] = None,
+) -> Any:
     """Drive an async coroutine to completion from SYNCHRONOUS code.
 
     extract_owner_facts_llm is sync (called inside extract_facts_from_batch).
@@ -646,26 +656,29 @@ def _run_coro_blocking(coro: "asyncio.Future") -> Any:
 
     from ...runtime_shutdown import is_shutdown_requested
 
+    if should_stop is None:
+        should_stop = is_shutdown_requested
+
     try:
         asyncio.get_running_loop()
     except RuntimeError:
         return asyncio.run(coro)
     # A loop is already running on this thread: offload to a fresh thread+loop.
-    # Poll with a short timeout so Ctrl+C / shutdown can interrupt the wait
-    # instead of parking forever on Future.result().
+    # Poll with a short timeout so Ctrl+C / shutdown / cancel can interrupt the
+    # wait instead of parking forever on Future.result().
     with ThreadPoolExecutor(max_workers=1) as pool:
         fut = pool.submit(lambda: asyncio.run(coro))
         while True:
             try:
                 return fut.result(timeout=0.25)
             except FuturesTimeoutError:
-                if is_shutdown_requested():
+                if should_stop():
                     # Cooperative fan-out should finish shortly; don't wait forever.
                     try:
                         return fut.result(timeout=min(5.0, FACTS_LLM_HTTP_TIMEOUT))
                     except FuturesTimeoutError as exc:
                         raise InterruptedError(
-                            "engine shutting down during fact_llm fan-out"
+                            "fact_llm fan-out stopped before it drained"
                         ) from exc
 
 
@@ -677,16 +690,23 @@ async def _extract_and_apply(
         [int, Optional[List[Dict[str, Any]]], Optional[Exception], bool],
         Tuple[int, bool],
     ],
+    should_stop: Optional[Callable[[], bool]] = None,
 ) -> int:
     """Fan out LLM calls; apply each completed row immediately.
 
     ``apply_row(index, triples, error, ran) -> (facts_written, halt)`` runs on
     the event-loop thread (sqlite-safe). ``ran=False`` means the extractor was
     never invoked (shutdown / cancel) — those rows are left unmarked so a
-    restart retries them. Completed LLM work is always applied even after
-    shutdown is requested (cost already paid).
+    restart retries them. Completed LLM work is always applied even after a stop
+    is requested (cost already paid).
     """
     from ...runtime_shutdown import is_shutdown_requested
+
+    # Assigned back onto the parameter deliberately: the loop below binds a
+    # local `stop` from apply_row's return, so a second short name here would
+    # shadow the predicate with a bool.
+    if should_stop is None:
+        should_stop = is_shutdown_requested
 
     sem = asyncio.Semaphore(concurrency)
     written = 0
@@ -696,10 +716,10 @@ async def _extract_and_apply(
         index: int, prompt: str, row: Dict[str, Any]
     ) -> Tuple[int, Optional[List[Dict[str, Any]]], Optional[Exception], bool]:
         nonlocal stop_scheduling
-        if stop_scheduling or is_shutdown_requested():
+        if stop_scheduling or should_stop():
             return (index, None, None, False)
         async with sem:
-            if stop_scheduling or is_shutdown_requested():
+            if stop_scheduling or should_stop():
                 return (index, None, None, False)
             try:
                 triples = await asyncio.to_thread(extractor, prompt, row)
@@ -793,6 +813,8 @@ def extract_owner_facts_llm(
     settings: Any = None,
     concurrency: Optional[int] = None,
     resume: bool = True,
+    cancel: Optional[threading.Event] = None,
+    stats: Optional[Dict[str, Any]] = None,
 ) -> int:
     """Additive LLM fact pass over a canonical batch. Returns facts written.
 
@@ -815,14 +837,52 @@ def extract_owner_facts_llm(
     ``resume``: when True (default), skip records already marked
     ``fact_llm_pass``. Ops timing / re-extract passes set False to re-pay
     Ollama even for previously marked rows.
+
+    ``cancel``: a ``threading.Event`` scoped to THIS call. The caller sets it
+    when its own task is cancelled — cancelling one batch must not touch any
+    other batch, which is exactly what routing a cancel through the process-wide
+    shutdown flag used to do (one cancelled batch, LLM facts dark until the node
+    restarted, job still reporting success).
+
+    ``stats``: optional out-dict, filled with ``written`` / ``eligible`` /
+    ``stopped`` / ``stop_reason`` / ``unprocessed`` (rows the extractor was
+    never invoked for) so the caller can tell "no facts in this batch" from
+    "stopped before finishing it". The return value stays a plain int, so the
+    existing call sites are untouched.
     """
-    from ...runtime_shutdown import is_shutdown_requested
+    from ...runtime_shutdown import current_generation, stop_checker, stop_reason
+
+    # Capture the run this batch belongs to. Polling the *current* run instead
+    # would let a run that ends mid-batch hand the batch a fresh generation and
+    # carry on working through a shutdown.
+    generation = current_generation()
+    should_stop = stop_checker(generation, cancel)
+
+    def _record(written: int, eligible: int, unprocessed: int) -> int:
+        if stats is not None:
+            stopped = should_stop()
+            stats.update(
+                {
+                    "written": int(written),
+                    "eligible": int(eligible),
+                    "stopped": bool(stopped),
+                    "stop_reason": stop_reason(generation, cancel) if stopped else "",
+                    "unprocessed": int(unprocessed),
+                }
+            )
+        return int(written)
 
     if not rows:
-        return 0
-    if is_shutdown_requested():
-        logger.info("LLM fact pass skipped; engine shutting down")
-        return 0
+        return _record(0, 0, 0)
+    if should_stop():
+        # Not silent: a lane that declines to run says so with its reason, so a
+        # stop that is NOT an ordinary shutdown is visible in the log.
+        logger.info(
+            "LLM fact pass skipped for %d row(s); reason=%s",
+            len(rows),
+            stop_reason(generation, cancel) or "stopped",
+        )
+        return _record(0, 0, len(rows))
     if settings is None:
         from ...config.settings import settings as _settings
 
@@ -833,10 +893,10 @@ def extract_owner_facts_llm(
         resolved_model = str(model or _resolved_extraction_model(settings, conn) or "").strip()
         if not resolved_model:
             logger.debug("LLM fact pass: no extraction model configured; inert")
-            return 0
+            return _record(0, 0, 0)
 
         def real_extractor_factory() -> Callable[[str, Dict[str, Any]], List[Dict[str, Any]]]:
-            return _make_ollama_extractor(resolved_model, conn)
+            return _make_ollama_extractor(resolved_model, conn, should_stop=should_stop)
 
     from ..lifecycle.exclusions import excluded_record_ids
 
@@ -854,7 +914,7 @@ def extract_owner_facts_llm(
             active_extractor = real_extractor_factory()
         except Exception as exc:  # noqa: BLE001
             logger.warning("LLM fact pass: extractor init failed (%s); skipping", exc)
-            return 0
+            return _record(0, 0, 0)
 
     from ..signal.embed_context import is_derivable_content
 
@@ -898,7 +958,7 @@ def extract_owner_facts_llm(
         )
 
     if not eligible:
-        return 0
+        return _record(0, 0, 0)
 
     # Resume: skip records whose LLM pass already finished (incl. empty).
     if resume:
@@ -914,12 +974,14 @@ def extract_owner_facts_llm(
                     len(eligible),
                 )
     if not eligible:
-        return 0
+        return _record(0, 0, 0)
 
     # ----- Phase 2: LLM fan-out + incremental writes. Each completed row is
     # asserted and progress-marked immediately so Ctrl+C keeps finished work.
-    # Stop scheduling on shutdown / unreachable; still apply in-flight results
-    # that already returned. ------------------------------------------------------
+    # Stop scheduling on shutdown / cancel / unreachable; still apply in-flight
+    # results that already returned. ----------------------------------------------
+    eligible_count = len(eligible)
+    processed = 0
     tasks = [(i, item["prompt"], item["row"]) for i, item in enumerate(eligible)]
     bound = FACTS_LLM_CONCURRENCY if concurrency is None else int(concurrency)
     fanout = max(1, min(bound, len(tasks)))
@@ -930,6 +992,7 @@ def extract_owner_facts_llm(
         error: Optional[Exception],
         ran: bool,
     ) -> Tuple[int, bool]:
+        nonlocal processed
         item = eligible[index]
         record_id = item["record_id"]
 
@@ -937,6 +1000,7 @@ def extract_owner_facts_llm(
             # Extractor never ran (shutdown / cancel) — leave unmarked for retry.
             # Signal stop-scheduling only; in-flight paid work must still apply.
             return 0, True
+        processed += 1
 
         if error is not None:
             if isinstance(error, InterruptedError):
@@ -960,26 +1024,44 @@ def extract_owner_facts_llm(
             source_id=item["row"].get("source_id"),
             facts_written=row_written,
         )
-        # Keep draining in-flight results after shutdown; just stop new starts.
-        return row_written, is_shutdown_requested()
+        # Keep draining in-flight results after a stop; just stop new starts.
+        return row_written, should_stop()
 
     try:
         written = _run_coro_blocking(
-            _extract_and_apply(active_extractor, tasks, fanout, _apply_row)
+            _extract_and_apply(
+                active_extractor, tasks, fanout, _apply_row, should_stop=should_stop
+            ),
+            should_stop=should_stop,
         )
     except InterruptedError:
-        logger.info("LLM fact pass interrupted during shutdown")
-        return 0
+        logger.info(
+            "LLM fact pass interrupted after %d/%d row(s); reason=%s",
+            processed,
+            eligible_count,
+            stop_reason(generation, cancel) or "interrupted",
+        )
+        return _record(0, eligible_count, eligible_count - processed)
     except Exception as exc:  # noqa: BLE001 — the fan-out harness must never crash ingest
         logger.warning("LLM fact pass: concurrent extraction failed (%s); skipping", exc)
-        return 0
+        return _record(0, eligible_count, eligible_count - processed)
 
-    if is_shutdown_requested():
-        logger.info(
-            "LLM fact pass stopping early on shutdown; wrote %d facts so far",
+    unprocessed = max(0, eligible_count - processed)
+    if should_stop() and unprocessed:
+        # WARNING, not INFO: this batch left rows on the floor, so the count
+        # above is NOT "there was nothing to extract". They stay unmarked, so
+        # the next pass retries them — but a lane that keeps landing here is
+        # quietly under-extracting and must be visible while that is true.
+        logger.warning(
+            "LLM fact pass stopped early; wrote %d fact(s) from %d/%d row(s), "
+            "%d never attempted; reason=%s",
             written,
+            processed,
+            eligible_count,
+            unprocessed,
+            stop_reason(generation, cancel) or "stopped",
         )
-    return int(written or 0)
+    return _record(int(written or 0), eligible_count, unprocessed)
 
 
 # Predicates that describe intimate wellbeing/place facts default to a tighter

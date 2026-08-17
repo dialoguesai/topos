@@ -102,7 +102,7 @@ async def test_fact_extraction_enrich_keeps_event_loop_responsive(monkeypatch):
 
     work_seconds = 0.35
 
-    def _slow_extract(_conn, _rows):
+    def _slow_extract(_conn, _rows, **_):
         time.sleep(work_seconds)
         return 0
 
