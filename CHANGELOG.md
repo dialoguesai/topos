@@ -23,7 +23,11 @@ The machine-readable twin of each release is
     text as it arrives, once per turn, before any routing. It runs concurrently
     with retrieval so it costs no wall-clock, and `return_exceptions=True` keeps
     a telemetry fault from failing the turn — a red-first test asserts that,
-    because the first wiring did fail it.
+    because the first wiring did fail it. **Both** entrances to tool retrieval
+    are hooked: the control-plane handler (prod) and `POST /v1/tools/retrieve`
+    (engine-direct, the dev transport). Hooking only the first would have made
+    shadow coverage depend on the client's transport and quietly excluded every
+    locally-tested turn.
   - **`true_scope` was never truth.** It is whichever scope the incumbent
     heuristic router picked. Observed 2026-08-17: for *"what is a good prompt we
     could ask of our work, schedule…"* — a meta-question that should have
