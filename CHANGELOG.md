@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.21] — 2026-08-17
+
 ### Fixed
 
 - `[S1]` **A newly created Topos could bind a database that belonged to no

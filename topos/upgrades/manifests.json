@@ -461,8 +461,8 @@
       ]
     },
     {
-      "version": "unreleased",
-      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "version": "1.3.21",
+      "summary": "Release 1.3.21.",
       "steps": [],
       "notes": [
         "No re-derivation: the active-database binding fix changes which FILE is opened, not the shape or content of any table. A node already serving the database inside its active Topos sees no change at all.",
@@ -472,6 +472,12 @@
         "Archiving a Topos now checkpoints its WAL first, so archived profiles are a single self-contained database file. No action needed; profiles archived by older engines keep their sidecars and still restore correctly.",
         "profile.json gains engine_version, schema_version, upgrade_baseline, size_bytes and key_fingerprint at archive time. Profiles archived before this have none of them: `profile list` falls back to measuring the directory, and the switch preflight falls back to opening the database."
       ]
+    },
+    {
+      "version": "unreleased",
+      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "steps": [],
+      "notes": []
     }
   ]
 }
