@@ -128,20 +128,24 @@ class TestSameMonthDayRanges:
         assert _iso_date_hints("what did I spend 11-16 dollars on") == []
 
     def test_may_ranges_behave_like_may_single_dates(self) -> None:
-        """Ranges inherit the existing "may" treatment rather than inventing a new one.
+        """A range and its first endpoint never disagree about whether "may" was a month.
 
-        `"I may 11 times"` already yields 2026-05-11 on the single-date path — the full
-        month-name pattern accepts "may" even though the *abbreviation* list deliberately
-        omits it. That over-match predates day ranges and is a real (separate) bug; what
-        matters here is that the range form is not MORE permissive than the single form,
-        so a fix applies to one place and covers both.
+        "may" is the one month name that is also an everyday verb, so a following number
+        is not evidence: "I may 11 times reconsider" is not a date. `_may_is_month`
+        anchors that judgement on the "may" token rather than on any one pattern's match,
+        which is what keeps the range form and both single-date forms in step — the point
+        this test exists to hold. A false hint here would be quiet rather than loud:
+        `_explicit_time_range` takes min/max of the hints, so the query would still return
+        a well-formed window and simply look like thin data.
         """
-        assert _iso_date_hints("I may 11-16 times reconsider") == [
-            "2026-05-11",
-            "2026-05-16",
-        ]
-        # Consistency with the single-date path, which has behaved this way all along.
-        assert _iso_date_hints("I may 11 times reconsider") == ["2026-05-11"]
+        assert _iso_date_hints("I may 11-16 times reconsider") == []
+        assert _iso_date_hints("I may 11 times reconsider") == []
+
+        # What does settle it: a capital, a date-like comma, an adjacent year, an ordinal.
+        assert _iso_date_hints("May 11-16, 2026") == ["2026-05-11", "2026-05-16"]
+        assert _iso_date_hints("may 11, 2026") == ["2026-05-11"]
+        assert _iso_date_hints("may 11 2026") == ["2026-05-11"]
+        assert _iso_date_hints("may 11th") == ["2026-05-11"]
         # The guard that does hold: no digits, no date.
         assert _iso_date_hints("I may go running") == []
 

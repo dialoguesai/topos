@@ -28,11 +28,13 @@ The machine-readable twin of each release is
     yields nothing rather than an unparseable ISO string), and month
     abbreviations are resolved through one shared alias table instead of a
     second inline dict.
-  - **Known, pre-existing and NOT changed here:** the full month-name pattern
-    accepts "may" as a month, so `"I may 11 times"` parses as May 11. The
-    abbreviation list deliberately omits `may` for this reason. Ranges inherit
-    the same treatment rather than a new one, so a future fix applies in one
-    place and covers both forms.
+  - Fixed alongside it: the full month-name pattern accepted "may" as a month, so
+    `"I may 11 times reconsider"` parsed as May 11 — "may" is the one month name
+    that is also an everyday verb, and a following number is not evidence (the
+    abbreviation list had always omitted `may` for exactly this reason). The
+    guard is anchored on the "may" token rather than on any one pattern's match,
+    so a range and its first endpoint can never disagree. A capital, a date-like
+    comma, an adjacent year or an ordinal still settle it as the month.
 
 ### Changed
 
