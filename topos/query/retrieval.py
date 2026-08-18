@@ -2829,6 +2829,7 @@ def _blackhole_policy_for_clusters(
 
 def _build_summary_items(
     *,
+    needle_text: str = "",
     manifest: ScopeResolutionManifest,
     adapters: AdapterBundle,
     query_text: str,
@@ -2846,6 +2847,7 @@ def _build_summary_items(
     to be sure a future third path cannot bypass it.
     """
     items = _build_summary_items_unfiltered(
+        needle_text=needle_text,
         manifest=manifest,
         adapters=adapters,
         query_text=query_text,
@@ -2865,6 +2867,7 @@ def _build_summary_items(
 
 def _build_summary_items_unfiltered(
     *,
+    needle_text: str = "",
     manifest: ScopeResolutionManifest,
     adapters: AdapterBundle,
     query_text: str,
@@ -2910,7 +2913,7 @@ def _build_summary_items_unfiltered(
     # Specific-ask detection: the discriminative (rare-in-corpus) content tokens
     # of the query. If the query carries these and nothing matches them, the
     # honest result is empty — see the rare gate in _rrf_fuse_summary_lists.
-    query_tokens = _query_tokens(query_text)
+    query_tokens = _query_tokens(needle_text or query_text)
     residual_tokens = _residual_content_tokens(query_tokens)
     rare_query_tokens = _rare_tokens(bundle_conn, residual_tokens)
     if first_person and rare_query_tokens:
@@ -3517,6 +3520,11 @@ class DefaultSignalRetrievalAdapter:
         self.retrieve_call_count += 1
         manifest: ScopeResolutionManifest = request.manifest
         query_text = str(request.query_text or "").strip()
+        # What the rare gate treats as discriminative needles. Defaults to the owner's
+        # words; a caller that can phrase the SUBJECT better than the request does (home
+        # chat, which holds the raw prompt AND the distilled version) may narrow it. The
+        # planner, the embeddings and the classifier below deliberately keep query_text.
+        needle_text = str(request.needle_text or "").strip() or query_text
         if request.skip_retrieval:
             self._last_stores = []
             return RetrievalBundle(context_packet={}, stores_touched=[], record_counts={})
@@ -3646,7 +3654,7 @@ class DefaultSignalRetrievalAdapter:
                 try:
                     raw_conn_for_df = getattr(self._adapters.signal, "_conn", None)
                     raw_rare_tokens = _rare_tokens(
-                        raw_conn_for_df, _residual_content_tokens(_query_tokens(query_text))
+                        raw_conn_for_df, _residual_content_tokens(_query_tokens(needle_text))
                     )
                 except Exception:
                     raw_rare_tokens = []
@@ -3711,6 +3719,7 @@ class DefaultSignalRetrievalAdapter:
             # signal store never touched on browse-mode summary reads).
             if query_text:
                 summaries = _build_summary_items(
+                    needle_text=needle_text,
                     manifest=manifest,
                     adapters=self._adapters,
                     query_text=query_text,
@@ -3783,7 +3792,7 @@ class DefaultSignalRetrievalAdapter:
                 try:
                     inference_rare = _rare_tokens(
                         getattr(self._adapters.signal, "_conn", None),
-                        _residual_content_tokens(_query_tokens(query_text)),
+                        _residual_content_tokens(_query_tokens(needle_text)),
                     )
                 except Exception:
                     inference_rare = []
