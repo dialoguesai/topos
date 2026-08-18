@@ -65,6 +65,21 @@ def _topos_modules() -> dict:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_uv_tool_dir(monkeypatch, tmp_path_factory):
+    """Keep tests out of the developer's real uv installation.
+
+    ``runtime_update.local_install_source()`` reads uv's tool receipt to decide
+    whether this engine can be upgraded from PyPI at all. On a machine whose
+    engine was deployed from a working copy — which is what the deploy lane
+    does — that receipt makes every update test take the local-install path and
+    fail for a reason that has nothing to do with the code under test. CI has no
+    uv tool install, so without this the failure appears only for developers,
+    which is the worst place for it to appear.
+    """
+    monkeypatch.setenv("UV_TOOL_DIR", str(tmp_path_factory.mktemp("uv-tools-empty")))
+
+
+@pytest.fixture(autouse=True)
 def _repair_forked_topos_modules():
     """Put back any ``topos.*`` module a test popped out of ``sys.modules``.
 

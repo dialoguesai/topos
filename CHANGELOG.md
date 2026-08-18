@@ -11,6 +11,34 @@ The machine-readable twin of each release is
 
 ### Fixed
 
+- `[O]` **The update button could be pressed forever and never install
+  anything.** Reported live 2026-08-18: the menu offered "Update to v1.3.21",
+  said "Installing update…", the node restarted, and it came back on 1.3.20 —
+  offering 1.3.21 again. Nothing had failed. The engine on that machine was
+  installed from a working copy (`uv tool install ~/.topos/deploy-head`, which
+  is what the deploy lane does), so `uv tool upgrade` faithfully re-resolved
+  that same directory, rebuilt the same version, and exited 0. The node took
+  exit 0 as proof and logged "Update installed"; the restart then wiped the
+  in-memory update state, so even the menu's "Update failed — click to retry"
+  never appeared. Every layer reported success and the version never moved.
+  - `check_for_update` no longer offers a PyPI release to an engine that did
+    not come from PyPI. uv's own tool receipt says where it came from; an
+    install carrying a `directory`, `path`, `editable`, `url` or `git`
+    requirement cannot be moved by a published release, and offering one
+    anyway is a button whose only possible outcome is nothing.
+  - `apply_package_update` refuses such an install outright rather than running
+    uv to no effect, and — for every other install — now reads the version back
+    off disk afterwards and reports failure when it did not move. An exit code
+    of 0 was never proof that anything was installed.
+  - The version is read from the tool's own `dist-info` rather than
+    `importlib.metadata`, because this check runs inside the very process uv
+    just rewrote, whose metadata was resolved at import time. When it cannot be
+    read at all the update is still reported as success: an unknown must not be
+    dressed up as a failure.
+  - Machines running the deploy lane now see no update offer at all, which is
+    the truth, with the reason logged once at startup and the one command that
+    puts them back on PyPI (`uv tool install --force topos-node`).
+
 - `[E:query]` **"Aug 11–16" searched Aug 11 only, and said the rest of the week
   was unsynced.** `_iso_date_hints` had patterns for `<month> <day>` but none for
   a day range inside one month, so the compact spelling yielded a single hint and
