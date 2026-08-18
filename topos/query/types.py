@@ -58,6 +58,11 @@ class RetrievalRequest:
     # a fixed now (pipeline.execute(now=...) or TOPOS_QUERY_NOW) so month
     # arithmetic is reproducible.
     now: Optional[Any] = None
+    #: Optional `narrowing.NarrowingLedger`, mutated in place by whichever stages
+    #: shrink this request. Absent (the default) means every path behaves exactly as
+    #: it did before — the ledger records what already happens, it never decides
+    #: anything. Typed `Any` to keep `types` free of a query-module import.
+    ledger: Optional[Any] = None
 
 
 @dataclass

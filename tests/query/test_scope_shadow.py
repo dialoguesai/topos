@@ -207,7 +207,11 @@ def test_shadow_is_wired_into_the_query_path_and_safely(tmp_path, monkeypatch) -
         if inspect.isclass(obj) and hasattr(obj, "execute")
         and obj.__module__ == pipeline.__name__
     )
-    src = inspect.getsource(cls.execute)
+    # The WHOLE orchestrator, not just `execute`: the turn body has since moved into
+    # `_execute_turn` so the narrowing ledger could wrap every exit from it in one
+    # place. Reading the class keeps this guard about the invariant (the hook is on
+    # the query path) rather than about which method currently holds the body.
+    src = inspect.getsource(cls)
     assert "shadow" in src.lower(), "the shadow hook is gone from the query path"
 
     # Off by default: an unset flag and no flag file must leave the path byte-identical.

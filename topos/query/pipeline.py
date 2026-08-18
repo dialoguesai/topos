@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import re
 import uuid
@@ -19,6 +20,8 @@ from .inference import run_query_inference
 from .intent import compute_intent_hash
 from .manifest import ScopeResolutionManifest
 from .minimizer import DisclosureMinimizer
+from .narrowing import NarrowingLedger, result_is_empty
+from . import narrowing as _N
 from .negotiation import DEFAULT_MAX_ROUNDS, build_narrow_request_response, qualify_intent
 from .retrieval import DefaultSignalRetrievalAdapter, resolve_retrieval_source_ids
 from .session import QueryArtifact, QuerySession, TurnOutcome
@@ -26,6 +29,55 @@ from .session_utils import build_cache_key, validate_public_result
 from .source_generation import get_data_health_version, list_installed_source_ids
 from .turn_classifier import TurnClassifierLite
 from .types import AccessMode, QueryTurn, RetrievalError, RetrievalRequest
+
+logger = logging.getLogger(__name__)
+
+#: Turn outcomes that ended the turn without retrieving anything. An empty answer
+#: here means "we never looked", which is the commonest false "no data" of all.
+_NOT_QUERIED_OUTCOMES = frozenset(
+    {
+        TurnOutcome.EXPAND_BOUNDARY.value,
+        TurnOutcome.REQUALIFY.value,
+        TurnOutcome.NARROW_REQUEST.value,
+    }
+)
+
+
+def _attach_narrowing(result: Dict[str, Any], ledger: NarrowingLedger) -> Dict[str, Any]:
+    """Put the ledger on the response, and attribute any empty the body did not.
+
+    Reads the turn outcome rather than trusting each return site to have recorded
+    its own cause: a denial is a denial whichever of the ten early returns produced
+    it, and a memory hit replays a cause that was written into the stored artifact.
+    """
+    if not isinstance(result, dict):
+        return result
+    try:
+        outcome = str(result.get("turn_outcome") or "")
+        public = result.get("public_result")
+        if outcome == TurnOutcome.DENIED.value:
+            ledger.empty(
+                _N.CAUSE_SCOPE_DENIED,
+                stage=_N.STAGE_GRANT,
+                reason=str(result.get("deny_reason") or "denied"),
+            )
+        elif outcome in _NOT_QUERIED_OUTCOMES:
+            ledger.empty(
+                _N.CAUSE_NOT_QUERIED,
+                stage=_N.STAGE_GRANT,
+                reason=outcome,
+            )
+        elif isinstance(public, dict) and public.get("empty_cause"):
+            # Replayed from a cached artifact (memory hit) — the cause outlives the
+            # turn that discovered it.
+            ledger.empty(str(public["empty_cause"]))
+        result["narrowing"] = {
+            **ledger.as_public(),
+            "result_empty": result_is_empty(public),
+        }
+    except Exception as exc:  # noqa: BLE001 — telemetry may never cost a turn
+        logger.debug("narrowing ledger attach skipped: %s", exc)
+    return result
 
 
 def _ddr_debug_enabled() -> bool:
@@ -272,9 +324,29 @@ class QueryPipelineOrchestrator:
     def _session_store(self):
         return self._adapters.query_session
 
-    async def execute(
+    async def execute(self, **kwargs: Any) -> Dict[str, Any]:
+        """Run one turn and hand back what narrowed it.
+
+        The turn body is `_execute_turn`; this wrapper owns the ledger, which is the
+        one thing every exit from that body has in common. Ten early returns end a
+        turn — a mode ceiling, a classifier denial, an approval boundary, a session
+        requalification, a retrieval error — and attributing each of them at its own
+        return site would leave the eleventh unattributed the day someone adds it.
+        Reading the outcome here catches every path, including future ones.
+        """
+        ledger = NarrowingLedger()
+        try:
+            result = await self._execute_turn(ledger=ledger, **kwargs)
+        except TypeError:
+            # An unknown keyword is the caller's bug, not the ledger's: re-raise it
+            # from the real signature rather than from this wrapper.
+            raise
+        return _attach_narrowing(result, ledger)
+
+    async def _execute_turn(
         self,
         *,
+        ledger: Optional[NarrowingLedger] = None,
         query_text: str,
         scope_id: str,
         access_mode: AccessMode,
@@ -577,6 +649,7 @@ class QueryPipelineOrchestrator:
                     # Wall clock by default; eval harnesses inject a fixed now so
                     # the planner's month/as-of arithmetic is reproducible.
                     now=now,
+                    ledger=ledger,
                 )
             )
         except RetrievalError as exc:
@@ -603,6 +676,7 @@ class QueryPipelineOrchestrator:
             field_transforms=field_transforms,
             access_mode=access_mode,
             disclosure_tier=disclosure_tier,
+            ledger=ledger,
         )
         timings.deterministic_filter_ms = now_ms() - _t0
 
@@ -644,6 +718,12 @@ class QueryPipelineOrchestrator:
             timings.inference_ms = now_ms() - _t0
 
         public_dict = public.to_dict()
+        # The model that writes the owner's answer reads `public_result`, not the
+        # envelope — so the cause of an empty lane has to be IN it, or the answer is
+        # "no data" again. Stored on the artifact too, so a memory hit replays the
+        # cause instead of losing it.
+        if ledger is not None and ledger.empty_cause and result_is_empty(public_dict):
+            public_dict["empty_cause"] = ledger.empty_cause
         validate_public_result(public_dict)
 
         timings.total_ms = now_ms() - turn_start_ms
@@ -714,6 +794,10 @@ class QueryPipelineOrchestrator:
         )
         audit["disclosure_tier"] = disclosure_tier
         audit["disclosure_decision_record"] = ddr
+        if ledger is not None and ledger:
+            # Counts and enums only — the audit trail leaves the node.
+            audit["narrowing"] = ledger.as_telemetry()
+            logger.debug("narrowing ledger: %s", ledger.as_local())
         result = {
             "turn_outcome": TurnOutcome.LIVE_QUERY.value,
             "public_result": public_dict,

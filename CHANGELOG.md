@@ -9,6 +9,47 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+
+- `[E:query]` **A narrowing ledger, and four causes where "empty" had one
+  message.** A request crosses eight stages over three codebases and six of them
+  can make the search smaller; until now none of them said so. On 2026-08-17 ten
+  independent defects were found in one afternoon, every one of them returning a
+  well-formed result and not one of them logging a warning. The most useful
+  diagnostic available all day was `stores_touched` missing the string
+  `"signal"` — a field that exists for unrelated reasons.
+  - **Every narrowing stage now appends `{stage, action, reason, dropped}`** to
+    an optional `narrowing.NarrowingLedger`, threaded by reference. The planner
+    records the window it scoped to and the rows the soft window set aside; the
+    rare-token gate records that it vetoed a lane and how many candidates it
+    dropped; fusion records the item cap; the disclosure filter records what tier
+    policy and the black-hole guard removed; the grant path records a denial. The
+    ledger comes back on the query response as `narrowing`.
+  - **Every empty result now carries WHY it is empty.** `store_empty` (nothing
+    has ever been stored for this scope — one `SELECT 1 … LIMIT 1` per canonical
+    table, run only when a result is already empty and only when a ledger asked),
+    `no_match` (candidates existed, none matched), `gate_vetoed` (the ask named
+    something the corpus does not contain), `not_queried` (no retrieval ran), and
+    `scope_denied` (permission, mode ceiling, selector suppression). The cause
+    lands on `public_result.empty_cause`, because the model that writes the
+    owner's answer reads that and not the envelope — and it is stored on the
+    session artifact, so a memory hit replays the cause instead of losing it. The
+    fifth cause is the point: reporting `store_empty` for data that is present but
+    unmatched is exactly the false absence that told an owner their journal "may
+    not be synced" while it sat indexed.
+  - **Additive, optional, and mute by construction.** Every function that takes a
+    ledger takes `None`, and `None` leaves the path byte-identical — nothing here
+    decides anything, it records what was already happening. `record` never
+    raises. Public fields are closed-set enums passed through a slug filter, so a
+    call site that hands `reason` a fragment of the owner's question cannot leak
+    it; anything worth keeping goes in `detail`, which `as_public` never
+    serializes and only on-node debug logging reads. Same two-serializer split as
+    `scope_shadow`.
+  - The turn body moved from `QueryPipelineOrchestrator.execute` to
+    `_execute_turn`, with `execute` as a thin wrapper that owns the ledger. Ten
+    early returns end a turn; attributing each at its own return site would leave
+    the eleventh unattributed the day someone adds it.
+
 ### Fixed
 
 - `[E:query]` **"Aug 11–16" searched Aug 11 only, and said the rest of the week

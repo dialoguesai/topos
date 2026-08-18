@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from ..storage.adapters.factory import AdapterBundle
+from . import narrowing as _N
 from .manifest import ScopeResolutionManifest
 from .types import (
     MODE_RANK,
@@ -2567,6 +2568,7 @@ def _rrf_fuse_summary_lists(
     context_sources: frozenset = frozenset(),
     rare_tokens: Optional[List[str]] = None,
     min_per_source: Optional[Dict[str, int]] = None,
+    ledger: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
     """Fuse ordered contributor lists with weighted reciprocal rank fusion.
 
@@ -2586,6 +2588,13 @@ def _rrf_fuse_summary_lists(
     justify a non-empty result by themselves. And when the query carried
     `rare_tokens` (a specific ask), at least one evidence item must actually
     contain one of them, or the honest answer is nothing.
+
+    Three of those returns are empty and they are NOT the same empty: nothing was
+    ever a candidate, or candidates existed and the rare gate vetoed them. Told
+    apart they are "connect a source" and "you asked about something your data does
+    not mention"; conflated they are both "no data", which is how a report came to
+    tell the owner their journal "may not be synced" while it sat indexed. `ledger`
+    (optional, never load-bearing) is where that distinction is written down.
     """
     from ..features.signal.vector_settings import (
         fusion_recency_enabled,
@@ -2599,6 +2608,12 @@ def _rrf_fuse_summary_lists(
         for item in ordered
     ]
     if not evidence_items:
+        if ledger is not None:
+            ledger.empty(
+                _N.CAUSE_STORE_EMPTY,
+                stage=_N.STAGE_RETRIEVAL,
+                reason="no_evidence_lane_returned_rows",
+            )
         return []
     if rare_tokens:
         rare_dfs: Dict[str, int] = (
@@ -2617,7 +2632,17 @@ def _rrf_fuse_summary_lists(
         # not exist. Answer-shape vocabulary ('cadence', 'frequency') is
         # excluded upstream by the token stoplist — it describes the aggregate
         # wanted, not row content.
-        if any(df <= 2 and not _evidenced(t) for t, df in rare_dfs.items()):
+        unevidenced = [t for t, df in rare_dfs.items() if df <= 2 and not _evidenced(t)]
+        if unevidenced:
+            if ledger is not None:
+                ledger.empty(
+                    _N.CAUSE_GATE_VETOED,
+                    stage=_N.STAGE_RARE_GATE,
+                    reason="rare_token_unevidenced",
+                    dropped=len(evidence_items),
+                    # Local only — the tokens are the owner's words.
+                    detail={"tokens": unevidenced, "n_rare": len(rare_dfs)},
+                )
             return []
         # A query with SEVERAL rare tokens is a specific ask even when stem
         # collisions keep each df nonzero ('years as a competitive falconer':
@@ -2626,6 +2651,14 @@ def _rrf_fuse_summary_lists(
         # token ('journaling' df 5, 'cadence' df 1) never vetoes alone — the
         # derived layers may answer it without containing the word.
         if len(rare_dfs) >= 2 and not any(_evidenced(t) for t in rare_dfs):
+            if ledger is not None:
+                ledger.empty(
+                    _N.CAUSE_GATE_VETOED,
+                    stage=_N.STAGE_RARE_GATE,
+                    reason="no_rare_token_evidenced",
+                    dropped=len(evidence_items),
+                    detail={"tokens": sorted(rare_dfs), "n_rare": len(rare_dfs)},
+                )
             return []
 
     decay_on = fusion_recency_enabled()
@@ -2657,6 +2690,13 @@ def _rrf_fuse_summary_lists(
     max_score = max(scores.values()) or 1.0
     ranked = sorted(scores.items(), key=lambda pair: pair[1], reverse=True)
     selected = [key for key, _ in ranked[:cap]]
+    if ledger is not None and len(ranked) > cap:
+        ledger.record(
+            _N.STAGE_RETRIEVAL,
+            "capped",
+            "summary_item_cap",
+            dropped=len(ranked) - cap,
+        )
 
     # Per-lane diversity floor: weighted RRF buries a lane whose evidence is
     # genuinely relevant but appears in ONLY that lane (authored goals for "what
@@ -2839,6 +2879,7 @@ def _build_summary_items(
     disclosure_tier: str = "owner_raw",
     plan=None,
     now: Optional[datetime] = None,
+    ledger: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
     """Assemble summary items, then apply the black-hole policy to every exit.
 
@@ -2857,12 +2898,24 @@ def _build_summary_items(
         disclosure_tier=disclosure_tier,
         plan=plan,
         now=now,
+        ledger=ledger,
     )
-    return _blackhole_policy_for_summary(
+    kept = _blackhole_policy_for_summary(
         items,
         conn=getattr(adapters.signal, "_conn", None),
         disclosure_tier=disclosure_tier,
     )
+    # An off-limits entity emptying the lane is a policy decision, not an absence.
+    if ledger is not None and len(kept) < len(items):
+        ledger.record(
+            _N.STAGE_DISCLOSURE,
+            "dropped_items",
+            "blackhole_policy",
+            dropped=len(items) - len(kept),
+        )
+        if items and not kept:
+            ledger.empty(_N.CAUSE_SCOPE_DENIED, reason="blackhole_policy")
+    return kept
 
 
 def _build_summary_items_unfiltered(
@@ -2877,6 +2930,7 @@ def _build_summary_items_unfiltered(
     disclosure_tier: str = "owner_raw",
     plan=None,
     now: Optional[datetime] = None,
+    ledger: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
     from ..features.signal.vector_settings import fusion_rrf_enabled, vector_evidence_min
 
@@ -2954,9 +3008,19 @@ def _build_summary_items_unfiltered(
         conn=bundle_conn,
         exposure_visible=exposure_visible,
     )
+    _canonical_before_window = len(canonical_items)
     canonical_items = _prefer_time_window(
         canonical_items, getattr(plan, "time_range", None) if plan else None
     )
+    if ledger is not None and len(canonical_items) < _canonical_before_window:
+        # The soft window kept only the in-range rows. Nothing was lost that the
+        # owner asked for, but the search DID get smaller and the count says by how much.
+        ledger.record(
+            _N.STAGE_PLANNER,
+            "windowed",
+            "prefer_time_window",
+            dropped=_canonical_before_window - len(canonical_items),
+        )
 
     # Interaction browse ("who do I talk to"): contacts + co-participation
     # edges. Contacts alone greened IMB7 as a workaround (mention-only names
@@ -3346,6 +3410,7 @@ def _build_summary_items_unfiltered(
             rare_tokens=rare_query_tokens,
             now=now,
             min_per_source=min_per,
+            ledger=ledger,
         )
 
     # Legacy path (TOPOS_FUSION_RRF=off): incomparable absolute scores.
@@ -3428,6 +3493,37 @@ def _build_cohort_aggregate_summary(
         "entity_ids": [],
         "aggregate_only": True,
     }
+
+
+_SAFE_TABLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _scope_stores_are_empty(conn: Optional[Any], manifest: ScopeResolutionManifest) -> Optional[bool]:
+    """Do the canonical tables backing this scope hold ANY row at all?
+
+    The difference between "you had a quiet week" and "nothing has ever synced here"
+    — on this node `calendar_events` and `financial_transactions` both hold zero rows,
+    and their empty answer was worded identically to a genuine absence of activity.
+    One `SELECT 1 … LIMIT 1` per table, run ONLY when a result already came back
+    empty and only when a ledger asked, so no existing caller pays for it.
+
+    `None` when it cannot be determined (no connection, no tables, a failed probe) —
+    an unknown must not masquerade as either answer.
+    """
+    tables = [t for t in (manifest.canonical_tables or []) if _SAFE_TABLE_RE.match(str(t or ""))]
+    if conn is None or not tables:
+        return None
+    seen_any = False
+    for table in tables:
+        try:
+            row = conn.execute(f"SELECT 1 FROM {table} LIMIT 1").fetchone()
+        except Exception as exc:  # noqa: BLE001 — a missing table is not an error here
+            logger.debug("store-empty probe skipped for %s: %s", table, exc)
+            continue
+        seen_any = True
+        if row is not None:
+            return False
+    return False if not seen_any else True
 
 
 class DefaultSignalRetrievalAdapter:
@@ -3525,11 +3621,26 @@ class DefaultSignalRetrievalAdapter:
         # chat, which holds the raw prompt AND the distilled version) may narrow it. The
         # planner, the embeddings and the classifier below deliberately keep query_text.
         needle_text = str(request.needle_text or "").strip() or query_text
+        #: Optional narrowing ledger — mutated in place by the stages below. `None`
+        #: (every caller that does not opt in) leaves this method byte-identical.
+        ledger = request.ledger
         if request.skip_retrieval:
             self._last_stores = []
+            if ledger is not None:
+                ledger.empty(
+                    _N.CAUSE_NOT_QUERIED,
+                    stage=_N.STAGE_RETRIEVAL,
+                    reason="skip_retrieval_requested",
+                )
             return RetrievalBundle(context_packet={}, stores_touched=[], record_counts={})
 
         if not _mode_allowed(request.access_mode, manifest.access_mode_ceiling):
+            if ledger is not None:
+                ledger.empty(
+                    _N.CAUSE_SCOPE_DENIED,
+                    stage=_N.STAGE_GRANT,
+                    reason="mode_ceiling_exceeded",
+                )
             raise RetrievalError("mode_ceiling_exceeded", f"{request.access_mode} exceeds ceiling {manifest.access_mode_ceiling}")
 
         touched: List[str] = []
@@ -3555,6 +3666,15 @@ class DefaultSignalRetrievalAdapter:
                 packet["answer_type"] = "summary"
                 packet["summaries"] = []
             retrieval_meta["retrieval_strategy"] = "selector_suppressed"
+            if ledger is not None:
+                # The empty is indistinguishable from absence BY DESIGN (CQE). The
+                # cause is recorded for the node's own audit trail, and the public
+                # ledger carries the same closed-set enum a genuine denial does.
+                ledger.empty(
+                    _N.CAUSE_SCOPE_DENIED,
+                    stage=_N.STAGE_GRANT,
+                    reason="selector_suppressed",
+                )
             self._last_stores = []
             return RetrievalBundle(
                 context_packet=packet, stores_touched=[], record_counts={},
@@ -3585,6 +3705,15 @@ class DefaultSignalRetrievalAdapter:
                 if query_planner_enabled():
                     plan = build_query_plan(get_db_connection(), query_text, now=plan_now)
                     retrieval_meta["query_plan"] = plan.to_meta()
+                    if ledger is not None and plan.time_range:
+                        # The one stage that already reported its narrowing. It now
+                        # reports it in the same shape as the other seven.
+                        ledger.record(
+                            _N.STAGE_PLANNER,
+                            "scoped",
+                            "time_range_parsed",
+                            detail={"time_range": list(plan.time_range)},
+                        )
             except Exception as exc:
                 logger.debug("query planner skipped: %s", exc)
 
@@ -3729,6 +3858,7 @@ class DefaultSignalRetrievalAdapter:
                     disclosure_tier=request.disclosure_tier,
                     plan=plan,
                     now=plan_now,
+                    ledger=ledger,
                 )
                 if summaries:
                     touched.append("signal")
@@ -3869,6 +3999,30 @@ class DefaultSignalRetrievalAdapter:
 
         retrieval_meta["vector_hits"] = len(semantic_hits)
         retrieval_meta["clusters_returned"] = len(ranked_clusters)
+
+        # Why is this lane empty? Four causes had one message, and two of six
+        # sections in a real report chose the wrong one out loud. Anything a stage
+        # above already attributed (a gate veto, a denial) wins — this is the
+        # fallback for "we looked and there was nothing", which still splits two
+        # ways: nothing has ever been stored here, or nothing matched.
+        if ledger is not None and _N.result_is_empty(packet):
+            if ledger.empty_cause is None:
+                stores_empty = _scope_stores_are_empty(
+                    getattr(self._adapters.signal, "_conn", None), manifest
+                )
+                if stores_empty is True:
+                    ledger.empty(
+                        _N.CAUSE_STORE_EMPTY,
+                        stage=_N.STAGE_RETRIEVAL,
+                        reason="scope_stores_hold_no_rows",
+                    )
+                else:
+                    ledger.empty(
+                        _N.CAUSE_NO_MATCH,
+                        stage=_N.STAGE_RETRIEVAL,
+                        reason="no_row_matched_the_request",
+                    )
+            retrieval_meta["empty_cause"] = ledger.empty_cause
 
         self._last_stores = sorted(set(touched))
         return RetrievalBundle(
