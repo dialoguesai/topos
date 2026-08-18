@@ -10,6 +10,7 @@ from shared.filtering import FieldTransform, filter_manifest_from_storage
 
 from ..disclosure.tier import strip_ingest_pii_transforms
 from ..uma_filters import apply_filter_manifest, extract_field_transforms
+from . import narrowing as _N
 from .types import FilteredContext, RetrievalBundle
 
 _EMAIL_RE = re.compile(r"[\w.-]+@[\w.-]+\.\w+")
@@ -123,6 +124,11 @@ class DisclosureFilterPipeline:
         field_transforms: Optional[List[Any]] = None,
         access_mode: str = "raw",
         disclosure_tier: str = "owner_raw",
+        #: Optional `narrowing.NarrowingLedger`. Filtering is narrowing: a grantee
+        #: whose every summary was NSFW-dropped gets the same empty packet as one
+        #: whose scope holds nothing. Absent (the default) → this method behaves
+        #: exactly as before.
+        ledger: Optional[Any] = None,
     ) -> FilteredContext:
         applied: List[str] = []
         packet = copy.deepcopy(bundle.context_packet or {})
@@ -174,5 +180,16 @@ class DisclosureFilterPipeline:
                 if isinstance(seq, list) and seq:
                     packet[key] = _scrub_grantee_text_items(seq)
                     applied.append(f"grantee_scrub_{key}")
+                    if ledger is not None and len(packet[key]) < len(seq):
+                        ledger.record(
+                            _N.STAGE_DISCLOSURE,
+                            "dropped_items",
+                            f"grantee_scrub_{key}",
+                            dropped=len(seq) - len(packet[key]),
+                        )
+                        if not packet[key]:
+                            ledger.empty(
+                                _N.CAUSE_SCOPE_DENIED, reason=f"grantee_scrub_{key}"
+                            )
 
         return FilteredContext(context_packet=packet, filters_applied=applied)
