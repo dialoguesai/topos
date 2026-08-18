@@ -279,6 +279,26 @@ class QueryPipelineOrchestrator:
         scope_id: str,
         access_mode: AccessMode,
         manifest: ScopeResolutionManifest,
+        #: What RETRIEVAL should match on, when the caller can say it better than the
+        #: raw text can. `query_text` stays the owner's actual words — it is what the
+        #: scope shadow classifies (Horos was trained on natural questions, not keyword
+        #: bags) and what the audit trail records. This is the search string.
+        #:
+        #: The two diverge because a request is not a query: "summarize achievements …
+        #: with any adjustments made" hands `_residual_content_tokens` a set of rare
+        #: needles that no stored row contains, and the rare gate then correctly returns
+        #: an empty lane. Measured live 2026-08-17 on one node, one window, one scope —
+        #: 0 summaries for the full prompt, 25 for the same question distilled.
+        #:
+        #: Deliberately narrow: this feeds the rare-gate needles and NOTHING else. The
+        #: planner, the vector ranking and the scope classifier keep the owner's
+        #: sentence, because 2026-08-16 already measured what happens when they get a
+        #: keyword digest instead — lost time windows, an abstaining classifier, and an
+        #: embedding of a fragment (see handlers/query.py).
+        #:
+        #: None (the default) means "same as query_text", so every existing caller and
+        #: every MCP client that never sends it is byte-identical.
+        retrieval_text: Optional[str] = None,
         query_session_id: Optional[str] = None,
         filter_manifest: Optional[Dict[str, Any]] = None,
         field_transforms: Optional[list] = None,
@@ -541,6 +561,11 @@ class QueryPipelineOrchestrator:
                     manifest=manifest,
                     access_mode=access_mode,
                     query_text=query_text,
+                    # Needle matching ONLY — see RetrievalRequest.needle_text. The
+                    # planner, the embeddings and the classifier all keep the sentence.
+                    needle_text=str(retrieval_text).strip() or None
+                    if retrieval_text
+                    else None,
                     filter_manifest=filter_manifest,
                     field_transforms=field_transforms,
                     skip_retrieval=False,

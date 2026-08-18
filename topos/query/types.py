@@ -23,6 +23,20 @@ class RetrievalRequest:
     manifest: Any
     access_mode: AccessMode
     query_text: Optional[str] = None
+    #: What the RARE GATE should treat as discriminative needles, when the caller can
+    #: say it better than the raw text can. Defaults to `query_text`.
+    #:
+    #: `_residual_content_tokens` turns every non-surface, non-recency token into a word
+    #: the retrieved rows must contain, and a rare needle matching nothing empties the
+    #: lane — correctly, for a specific ask. But an instruction is not an ask: "summarize
+    #: achievements … with any adjustments made" gates the very lanes it is asking about.
+    #: Measured live 2026-08-17, one node / window / scope: 0 summaries for the full
+    #: prompt, 25 for the same question distilled.
+    #:
+    #: Needles ONLY. The planner, vector ranking and scope classifier keep `query_text` —
+    #: handing them a keyword digest was measured on 2026-08-16 to lose time windows and
+    #: make the classifier abstain on keyword soup.
+    needle_text: Optional[str] = None
     filter_manifest: Optional[Dict[str, Any]] = None
     field_transforms: Optional[List[Any]] = None
     skip_retrieval: bool = False
