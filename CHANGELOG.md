@@ -9,6 +9,21 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Changed
+
+- `[E:query]` **The fourth text: embed the subject, not the instruction.** The
+  planner strips *time* framing ("this week") and leaves instructional framing
+  alone, so a structured request embedded its own instructions — measured
+  2026-08-18, the weekly-report prompt sent all 315 characters of "generate a
+  personal work report … summarize achievements … with any adjustments made" to
+  the encoder, which is a vector query for the *shape* of a request rather than
+  its subject. When the caller supplied `retrieval_text` the semantic query now
+  uses it, and records `embedded_subject_not_instruction` in the ledger.
+  - Self-limiting by construction: `retrieval_text` is only ever sent when
+    distillation removed something, so a plain question is untouched and the
+    sentence still reaches the encoder — which is what 2026-08-16 measured that
+    it needs.
+
 ### Added
 
 - `[E:query]` **Why a scope holds nothing, not just that it does.** `store_empty`
