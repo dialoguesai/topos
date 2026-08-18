@@ -20,7 +20,7 @@ from topos.query.scope_shadow import ShadowLog, ShadowRecord, max_log_bytes
 def _record(text: str) -> ShadowRecord:
     return ShadowRecord(
         verdict="hit",
-        true_scope="messages:read:summary",
+        router_scope="messages:read:summary",
         predicted=("messages:read:summary",),
         confidence=0.9,
         latency_ms=1.0,
