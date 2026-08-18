@@ -1,0 +1,44 @@
+{
+  "$comment": "Fields that must survive the client -> control plane -> engine round trip. Every seam on that path rebuilds its payload from a hand-written allow-list, so a field can be declared at one end, sent faithfully, and vanish in the middle with nothing failing and nothing logged. Twice in one day on 2026-08-17: `sourceRefs` died in the front end's bootstrap options, `retrieval_text` in the control plane's payload builder. Adding a field here makes every seam's contract test fail until that seam forwards it.",
+  "version": 1,
+  "request": {
+    "$comment": "Client -> engine. `required_forward` fields must be forwarded by every intermediary that builds an engine payload.",
+    "required_forward": [
+      "scope_id",
+      "access_mode",
+      "intent",
+      "query",
+      "retrieval_text",
+      "query_session_id",
+      "now",
+      "filter_manifest",
+      "requester_id",
+      "owner_user_id",
+      "is_grantee_request",
+      "disclosure_ceiling",
+      "dataset_id"
+    ],
+    "notes": {
+      "query": "the owner's own words — planner window, vector ranking and the scope classifier all need a sentence",
+      "retrieval_text": "the SUBJECT, for rare-gate needles only; never a replacement for `query`",
+      "now": "caller-local ISO instant so relative dates resolve against the owner's calendar day"
+    }
+  },
+  "response": {
+    "$comment": "Engine -> client. `required_return` fields must survive every normalisation step on the way back, including the front end's own.",
+    "required_return": [
+      "turn_outcome",
+      "public_result",
+      "scope_id",
+      "access_mode",
+      "query_session_id",
+      "game_layer_strategy",
+      "deny_reason",
+      "narrowing"
+    ],
+    "notes": {
+      "narrowing": "the ledger: what each stage removed and why. Two return-path allow-lists would have swallowed it silently.",
+      "public_result.empty_cause": "which of five reasons a lane came back empty; carried inside public_result so it reaches synthesis"
+    }
+  }
+}
