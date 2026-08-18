@@ -9,6 +9,29 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+
+- `[D]` **A topic cluster could name an off-limits entity in
+  `related_entities`.** Found on a live node by the install QA's b19 probe: the
+  cluster's *label* was clean — that surface has refused protected names since
+  1.3.16 — while the list beside it named the same person, and `query_aliases`,
+  derived from it, carried the name again.
+  - **Why this surface needs the producer, not a read-time filter.** The
+    black-hole guard filters by `entity_id`, and `entity_edges` (both ends),
+    context vectors and affinity all rely on that. A bare NAME inside a cluster
+    payload has no id to filter on, so no read path can catch it — and this one
+    is not merely displayed: `fact_materializer` resolves each name into an
+    entity node and a `discusses` edge. `_load_related_entities` now refuses
+    protected names where they would be minted, so they never reach the payload
+    or anything derived from it.
+  - **And the other direction of time.** Clusters minted before an entity was
+    protected still carried it, so the black-hole rebuild now withdraws
+    name-bearing metadata (`related_entities`, `query_aliases`) alongside the
+    label and previews it already handled. Blackholing an entity today cleans
+    this surface immediately rather than at the next recompute.
+  - The cap is applied after the refusal, so protecting one entity no longer
+    silently shortens every list that mentions them.
+
 ## [1.3.21] — 2026-08-17
 
 ### Fixed

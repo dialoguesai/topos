@@ -182,6 +182,33 @@ def _remove_context_vector(conn: sqlite3.Connection, entity_id: str) -> int:
         return 0
 
 
+#: Cluster metadata lists that carry entity NAMES rather than ids. A read-time
+#: guard filters by ``entity_id`` and cannot see these, which is why the label
+#: needs a producer-side refusal — and why these need withdrawing here, for the
+#: rows minted before the entity was protected.
+_NAME_BEARING_METADATA_KEYS = ("related_entities", "query_aliases")
+
+
+def _strip_metadata_names(metadata: dict, terms: Set[str]) -> bool:
+    """Drop protected names from a cluster's metadata lists, in place.
+
+    Returns True when anything was removed. ``query_aliases`` is derived from
+    ``related_entities``, so a name left in either one is still served.
+    """
+    if not isinstance(metadata, dict):
+        return False
+    changed = False
+    for key in _NAME_BEARING_METADATA_KEYS:
+        values = metadata.get(key)
+        if not isinstance(values, list) or not values:
+            continue
+        kept = [v for v in values if not _mentions(str(v), terms)]
+        if len(kept) != len(values):
+            metadata[key] = kept
+            changed = True
+    return changed
+
+
 def _withdraw_cluster_labels(conn: sqlite3.Connection, terms: Set[str]) -> int:
     """Take the protected name out of topic cluster labels and previews.
 
@@ -208,20 +235,26 @@ def _withdraw_cluster_labels(conn: sqlite3.Connection, terms: Set[str]) -> int:
     for cluster_id, label, centroid_preview, metadata_json in rows:
         label_hit = _mentions(label, terms)
         preview_hit = _mentions(centroid_preview, terms)
-        if not label_hit and not preview_hit:
+        try:
+            metadata = json.loads(metadata_json or "{}")
+        except json.JSONDecodeError:
+            metadata = {}
+        metadata_hit = _strip_metadata_names(metadata, terms)
+        if not label_hit and not preview_hit and not metadata_hit:
             continue
         new_label = str(label or "")
         if label_hit:
-            try:
-                metadata = json.loads(metadata_json or "{}")
-            except json.JSONDecodeError:
-                metadata = {}
             term_label = str((metadata or {}).get("term_label") or "")
             new_label = term_label if term_label and not _mentions(term_label, terms) else "topic cluster"
         conn.execute(
-            "UPDATE topic_clusters SET label=?, centroid_preview=?, updated_at=datetime('now')"
-            " WHERE cluster_id=?",
-            (new_label, "" if preview_hit else centroid_preview, cluster_id),
+            "UPDATE topic_clusters SET label=?, centroid_preview=?, metadata_json=?,"
+            " updated_at=datetime('now') WHERE cluster_id=?",
+            (
+                new_label,
+                "" if preview_hit else centroid_preview,
+                json.dumps(metadata) if metadata_hit else metadata_json,
+                cluster_id,
+            ),
         )
         cleaned += 1
     return cleaned

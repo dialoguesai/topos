@@ -476,8 +476,25 @@
     {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
-      "steps": [],
-      "notes": []
+      "steps": [
+        {
+          "id": "rerun-blackhole-rebuilds-metadata-names",
+          "kind": "derived_rebuild",
+          "title": "Re-run black-hole rebuilds so they reach cluster metadata names",
+          "why": "topic_clusters.metadata_json carries related_entities and query_aliases as NAME strings. The read-side guard filters by entity_id and cannot see them, and the rebuild only knew about labels and previews \u2014 so a cluster minted before an entity was protected kept naming it, and fact_materializer turned that name into a graph edge. The producer refuses it now; this withdraws the ones already stored.",
+          "params": {
+            "targets": [
+              "blackhole_rebuilds"
+            ]
+          },
+          "cost": "fast",
+          "consent": "auto",
+          "order": 0
+        }
+      ],
+      "notes": [
+        "No recompute: clusters keep their partition and their labels. Only protected NAMES are removed from related_entities/query_aliases, and only on nodes that have marked an entity off-limits \u2014 a node with no black holes has nothing to withdraw and the step is a no-op."
+      ]
     }
   ]
 }
