@@ -9,6 +9,20 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+
+- `[E:query]` **`retrieval_text` is part of a turn's retrieval identity, so it is
+  part of its intent hash.** It steers the rare-gate needles and (since P2) the
+  semantic query, so two calls sharing session + scope + mode + query but
+  differing in `retrieval_text` retrieve different things — and used to collide
+  in `compute_intent_hash`, at which point the artifact cache returned the first
+  call's `public_result` verbatim as the second's, stamped `memory_hit`. A
+  healthy-looking, per-section fabrication, strictly worse than an honest empty.
+  Latent today; P3's per-section retrieval would have made it reachable, which is
+  why the design review ordered this fix first. Absent or query-equal
+  `retrieval_text` hashes byte-identically to the old formula, so every existing
+  caller and every cached artifact keeps its key.
+
 ### Changed
 
 - `[E:query]` **The fourth text: embed the subject, not the instruction.** The

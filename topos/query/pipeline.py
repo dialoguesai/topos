@@ -495,7 +495,12 @@ class QueryPipelineOrchestrator:
 
         session = _session_from_store(session_id, session_data, requester_id) if session_data else None
 
-        intent_hash = compute_intent_hash(scope_id=scope_id, access_mode=access_mode, query_text=query_text)
+        intent_hash = compute_intent_hash(
+            scope_id=scope_id,
+            access_mode=access_mode,
+            query_text=query_text,
+            retrieval_text=str(retrieval_text or ""),
+        )
         turn = QueryTurn(query_text=query_text, scope_id=scope_id, access_mode=access_mode, intent_hash=intent_hash)
 
         # Shadow-mode scope classification. OFF unless armed, never raises, and changes
