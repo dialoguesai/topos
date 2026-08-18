@@ -755,9 +755,36 @@ def _build_cluster(cluster_id: str, members: List[Dict[str, Any]], *, cluster_in
     }
 
 
+def _names_protected_entity(name: str, terms) -> bool:
+    """Does this surface name someone the owner put off limits?
+
+    Same normalize-and-contain test the preview scrubber and the labeler use,
+    so one blackhole means one answer across every cluster surface.
+    """
+    if not terms:
+        return False
+    try:
+        from ..lifecycle.blackhole import normalize_entity_name
+    except Exception:  # noqa: BLE001 — no blackhole feature, nothing to protect
+        return False
+    blob = normalize_entity_name(str(name or ""))
+    return bool(blob) and any(term and term in blob for term in terms)
+
+
 def _load_related_entities(conn, members: List[Dict[str, Any]]) -> List[str]:
+    """The entities this cluster is about — never one the owner put off limits.
+
+    Filtered at the producer rather than on the way out, because this list is
+    not only displayed: `fact_materializer` resolves each name into an entity
+    node and a `discusses` edge, so a protected name here becomes a second
+    surface in the graph that no read-side redaction of the cluster API would
+    reach. The label already refuses to name a protected entity; this is the
+    same refusal for the list beside it, which had none — and which is what
+    `related_entities` was found leaking on a live node on 2026-08-17.
+    """
     if conn is None or not members:
         return []
+    protected = _protected_name_terms(conn)
     entity_counter: Counter[str] = Counter()
     for member in members:
         record_id = member.get("record_id")
@@ -775,7 +802,11 @@ def _load_related_entities(conn, members: List[Dict[str, Any]]) -> List[str]:
             text = str(row[0] or "").strip()
             if text:
                 entity_counter[text] += 1
-    return [name for name, _ in entity_counter.most_common(10)]
+    return [
+        name
+        for name, _ in entity_counter.most_common()
+        if not _names_protected_entity(name, protected)
+    ][:10]
 
 
 def _load_related_goals(conn, distinctive_terms: Sequence[str]) -> List[str]:
