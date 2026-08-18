@@ -3526,6 +3526,68 @@ def _scope_stores_are_empty(conn: Optional[Any], manifest: ScopeResolutionManife
     return False if not seen_any else True
 
 
+#: Why a scope holds nothing. `store_empty` already separates "nothing has ever been
+#: stored" from "you had a quiet week"; these separate the three ways the first happens,
+#: because they have three different remedies and only one of them is the owner's to act on.
+SUPPLY_NO_SOURCE = "no_source_connected"      # nothing installed feeds this scope
+SUPPLY_NEVER_DELIVERED = "connected_never_delivered"  # a feed exists, it has never landed
+SUPPLY_DELIVERED_THEN_EMPTIED = "delivered_then_emptied"  # it landed once; the tables are bare now
+
+
+def _scope_supply_state(
+    conn: Optional[Any],
+    manifest: ScopeResolutionManifest,
+    installed_source_ids: Optional[List[str]] = None,
+) -> Optional[str]:
+    """WHY does this scope hold nothing? Only meaningful once emptiness is established.
+
+    "Your calendar is empty" is true and useless. The owner needs to know whether to
+    connect Google Calendar, wait for a first sync, or go looking for what deleted the
+    rows — three different actions behind one identical answer today (doc gap G4, Q6).
+
+    Read from `scope_source_generation`, which records per (scope, source) that data
+    actually landed, cross-checked against what this node has installed. `None` when it
+    cannot be told — an unknown must not be dressed up as a diagnosis.
+    """
+    if conn is None:
+        return None
+    scope_id = str(getattr(manifest, "scope_id", "") or "").strip()
+    if not scope_id:
+        return None
+    try:
+        delivered = conn.execute(
+            "SELECT 1 FROM scope_source_generation WHERE scope_id = ? AND generation > 0 LIMIT 1",
+            (scope_id,),
+        ).fetchone()
+    except Exception as exc:  # noqa: BLE001 — an older DB without the table is not an error
+        logger.debug("supply-state probe skipped for %s: %s", scope_id, exc)
+        return None
+    if delivered is not None:
+        # Rows arrived at some point and the canonical tables are bare now. Never
+        # silently call this "not connected" — that sends the owner to re-add a
+        # connector that is working.
+        return SUPPLY_DELIVERED_THEN_EMPTIED
+    # `manifest.default_source_ids` is NOT the feeding list — it is a narrower default,
+    # and using it said "no source connected" for a scope with a calendar connector
+    # installed. `get_sources_by_scope` is the authority: static registry plus active
+    # runtime installs, the same mapping the catalog reports to clients.
+    try:
+        from ..sources.registry import get_sources_by_scope
+
+        feeds = {str(s).strip() for s in get_sources_by_scope(scope_id) if str(s or "").strip()}
+    except Exception as exc:  # noqa: BLE001 — a registry read failure is not a diagnosis
+        logger.debug("supply-state feed lookup skipped for %s: %s", scope_id, exc)
+        return None
+    if not feeds:
+        return SUPPLY_NO_SOURCE
+    installed = {str(s).strip() for s in (installed_source_ids or []) if str(s or "").strip()}
+    if not installed:
+        # We know what could feed this scope but not what this node installed. Claiming
+        # "nothing connected" from that is a guess, and the owner acts on it.
+        return None
+    return SUPPLY_NEVER_DELIVERED if (feeds & installed) else SUPPLY_NO_SOURCE
+
+
 class DefaultSignalRetrievalAdapter:
     """Retrieve minimum necessary data per access mode and manifest."""
 
@@ -4011,10 +4073,16 @@ class DefaultSignalRetrievalAdapter:
                     getattr(self._adapters.signal, "_conn", None), manifest
                 )
                 if stores_empty is True:
+                    # The remedy differs per case, so the cause carries which one.
                     ledger.empty(
                         _N.CAUSE_STORE_EMPTY,
                         stage=_N.STAGE_RETRIEVAL,
-                        reason="scope_stores_hold_no_rows",
+                        reason=_scope_supply_state(
+                            getattr(self._adapters.signal, "_conn", None),
+                            manifest,
+                            request.installed_source_ids,
+                        )
+                        or "scope_stores_hold_no_rows",
                     )
                 else:
                     ledger.empty(
