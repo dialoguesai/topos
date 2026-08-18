@@ -11,6 +11,32 @@ The machine-readable twin of each release is
 
 ### Added
 
+- `[E:query]` **Why a scope holds nothing, not just that it does.** `store_empty`
+  already separated "nothing has ever been stored" from "you had a quiet week";
+  it did not say which of three things went wrong, and the remedies differ —
+  connect a source, wait for a first sync, or find what emptied the tables. Only
+  one of those is the owner's to act on, and the old answer sent them to the
+  wrong one. The cause now carries `no_source_connected`,
+  `connected_never_delivered` or `delivered_then_emptied`, read from
+  `scope_source_generation` cross-checked against installed sources.
+  - Which sources feed a scope comes from `get_sources_by_scope` — the static
+    registry plus active runtime installs. A first pass used the manifest's
+    `default_source_ids` and reported "no source connected" for a scope whose
+    calendar connector *was* installed, which sends the owner to add something
+    they already have.
+  - An undeterminable state returns `None` rather than guessing. A wrong remedy
+    is worse than none, because the owner acts on it.
+- `[E:query]` **A declared field contract across the client → CP → engine path.**
+  `topos/protocol/query_field_contract.json` names every field that must survive
+  the round trip, in both directions. Five seams on that path rebuild their
+  payload from hand-written allow-lists and two of them are on the way *back*, so
+  a field can be declared at one end, sent faithfully, and vanish in the middle
+  with nothing failing — `sourceRefs` and `retrieval_text` were each lost that way
+  on 2026-08-17. The engine, the control plane and the front end now each test
+  their own seam against this one file.
+
+### Added
+
 - `[E:query]` **A narrowing ledger, and four causes where "empty" had one
   message.** A request crosses eight stages over three codebases and six of them
   can make the search smaller; until now none of them said so. On 2026-08-17 ten
