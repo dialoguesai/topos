@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.22] — 2026-08-18
+
 ### Fixed
 
 - `[O]` **The update button could be pressed forever and never install
