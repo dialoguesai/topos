@@ -3780,8 +3780,27 @@ class DefaultSignalRetrievalAdapter:
                 logger.debug("query planner skipped: %s", exc)
 
         time_range = plan.time_range if plan else None
+        # The fourth text. The planner strips TIME framing ("this week") and leaves
+        # instructional framing alone, so a structured request embeds its own
+        # instructions: measured 2026-08-18, the weekly-report prompt embedded all 315
+        # characters of "generate a personal work report … summarize achievements …
+        # with any adjustments made", which is a vector query for the shape of a
+        # request rather than its subject.
+        #
+        # `needle_text` is only ever sent when distillation actually removed something,
+        # so its presence is the caller saying "this request carried bulk". Absent — a
+        # plain question — nothing changes, and the sentence still reaches the encoder,
+        # which is what 2026-08-16 measured that it needs.
         semantic_query = query_text
-        if plan and plan.semantic_residual and len(plan.semantic_residual) >= 6:
+        if needle_text and needle_text != query_text:
+            semantic_query = needle_text
+            if ledger is not None:
+                ledger.record(
+                    stage=_N.STAGE_RETRIEVAL,
+                    action="rewrote",
+                    reason="embedded_subject_not_instruction",
+                )
+        elif plan and plan.semantic_residual and len(plan.semantic_residual) >= 6:
             semantic_query = plan.semantic_residual
 
         # The vector/cluster services read the GLOBAL db connection. When this
