@@ -6,7 +6,9 @@ import asyncio
 import json
 import logging
 import os
+import re
 import shutil
+from pathlib import Path
 from typing import Optional
 import subprocess
 import sys
@@ -27,6 +29,7 @@ _logger = logging.getLogger("topos.runtime_update")
 _lock = threading.Lock()
 _update_info: UpdateInfo | None = None
 _announcement_logged = False
+_local_install_logged = False
 _monitor_task: asyncio.Task[None] | None = None
 _hotkey_thread: threading.Thread | None = None
 
@@ -113,7 +116,94 @@ def check_for_update(package_name: str = DEFAULT_PACKAGE_NAME) -> UpdateInfo | N
     if not latest or not _is_newer_version(installed, latest):
         return None
 
+    # An install that did not come from PyPI cannot be moved by a PyPI release.
+    # Offering the update anyway is what produced an update button that could
+    # be pressed forever with nothing to show for it.
+    source = local_install_source(package_name)
+    if source is not None:
+        _log_local_install_once(package_name, source)
+        return None
+
     return UpdateInfo(package_name=package_name, installed=installed, latest=latest)
+
+
+# uv records what a tool was installed FROM in its receipt. A plain
+# `name = "topos-node"` requirement came from an index; anything carrying a
+# path, url or git ref did not, and `uv tool upgrade` will faithfully reinstall
+# THAT source no matter what PyPI publishes.
+_LOCAL_REQUIREMENT_RE = re.compile(r'\b(directory|editable|path|url|git)\s*=\s*"([^"]+)"')
+
+
+def _uv_tool_receipt(package_name: str = DEFAULT_PACKAGE_NAME) -> Path:
+    """Where uv keeps the record of how this tool was installed."""
+    base = os.getenv("UV_TOOL_DIR")
+    if not base:
+        data_home = os.getenv("XDG_DATA_HOME") or os.path.join(os.path.expanduser("~"), ".local", "share")
+        base = os.path.join(data_home, "uv", "tools")
+    return Path(base) / package_name / "uv-receipt.toml"
+
+
+def local_install_source(package_name: str = DEFAULT_PACKAGE_NAME) -> Optional[str]:
+    """The local path this engine was installed from, or None if it came from PyPI.
+
+    The deploy lane installs the engine from a working copy
+    (`uv tool install ~/.topos/deploy-head`), and that is a perfectly good way
+    to run a build that is not on PyPI yet. What it is not is upgradable:
+    `uv tool upgrade` re-resolves that same directory, rebuilds the same
+    version, and exits 0. Reported live 2026-08-18 as "the installer is
+    broken" — the menu offered 1.3.21, said "Installing update…", restarted,
+    came back on 1.3.20, and offered 1.3.21 again, forever. Nothing failed;
+    the update simply could never have applied, and nothing said so.
+
+    Parsed with a regex rather than tomllib: the receipt is small, uv owns its
+    shape, and tomllib does not exist on the 3.10 this package still supports.
+    """
+    try:
+        text = _uv_tool_receipt(package_name).read_text(encoding="utf-8")
+    except OSError:
+        return None  # no receipt: not a uv tool install, so nothing to warn about
+    match = _LOCAL_REQUIREMENT_RE.search(text)
+    return match.group(2) if match else None
+
+
+def _installed_version_on_disk(package_name: str = DEFAULT_PACKAGE_NAME) -> Optional[str]:
+    """What is in the tool's site-packages right now, read fresh from disk.
+
+    Deliberately not `importlib.metadata`: this runs inside the very process
+    uv just rewrote underneath, whose own metadata was resolved at import time.
+    The question after an upgrade is what is on disk now, not what this
+    interpreter loaded minutes ago.
+
+    Returns None when it cannot tell, so an unknown is never mistaken for an
+    unchanged version — the caller must not turn "I could not read it" into
+    "the update failed".
+    """
+    tool_dir = _uv_tool_receipt(package_name).parent
+    distribution = package_name.replace("-", "_")
+    try:
+        matches = sorted(tool_dir.glob(f"lib/python*/site-packages/{distribution}-*.dist-info"))
+    except OSError:
+        return None
+    if not matches:
+        return None
+    stem = matches[-1].name[: -len(".dist-info")]
+    return stem[len(distribution) + 1 :] or None
+
+
+def _log_local_install_once(package_name: str, source: str) -> None:
+    global _local_install_logged
+    with _lock:
+        if _local_install_logged:
+            return
+        _local_install_logged = True
+    _logger.info(
+        "%s was installed from %s, not from PyPI, so published releases do not "
+        "apply to it and no update is offered. To follow PyPI again: "
+        "`uv tool install --force %s`.",
+        package_name,
+        source,
+        package_name,
+    )
 
 
 def resolve_uv_binary() -> Optional[str]:
@@ -149,6 +239,20 @@ def resolve_uv_binary() -> Optional[str]:
 
 def apply_package_update(package_name: str = DEFAULT_PACKAGE_NAME) -> bool:
     """Install the latest PyPI release via `uv tool upgrade`. Returns True on success."""
+    source = local_install_source(package_name)
+    if source is not None:
+        # `uv tool upgrade` would exit 0 here and change nothing, which is the
+        # one outcome this function must never report as success.
+        _logger.error(
+            "Update refused: %s is installed from %s, not from PyPI, so a published "
+            "release cannot replace it. Reinstall from the index with "
+            "`uv tool install --force %s`, or update that working copy and reinstall it.",
+            package_name,
+            source,
+            package_name,
+        )
+        return False
+    before = _installed_version_on_disk(package_name) or get_installed_package_version(package_name)
     uv = resolve_uv_binary()
     if uv is None:
         _logger.error(
@@ -177,6 +281,19 @@ def apply_package_update(package_name: str = DEFAULT_PACKAGE_NAME) -> bool:
             package_name,
             result.returncode,
             (result.stderr or result.stdout or "").strip()[:500],
+        )
+        return False
+    # Exit 0 is not proof the version moved: uv is content to reinstall what is
+    # already there. Read it back rather than trusting the return code — a
+    # "success" that leaves the same version is how this looked broken.
+    after = _installed_version_on_disk(package_name)
+    if before and after and after == before:
+        _logger.error(
+            "Update ran but %s is still %s. `uv tool upgrade` exited 0 without "
+            "changing anything, so nothing was installed. Output: %s",
+            package_name,
+            before,
+            (result.stdout or result.stderr or "").strip()[:500],
         )
         return False
     _logger.info("Update installed: %s. Restart Topos to run it.", package_name)
