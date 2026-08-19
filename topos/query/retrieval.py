@@ -7,7 +7,7 @@ import logging
 import os
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..storage.adapters.factory import AdapterBundle
 from . import narrowing as _N
@@ -1198,6 +1198,99 @@ def _route_canonical_rows(
     return []
 
 
+def _canonical_row_to_item(
+    table: str,
+    row: Dict[str, Any],
+    *,
+    manifest: ScopeResolutionManifest,
+    query_text: str,
+    conn: Optional[Any],
+    first_person: bool,
+    belief_intent: bool,
+    exposure_visible: bool,
+    role_cache: Dict[str, Optional[bool]],
+    display_cache: Dict[str, str],
+    highlight_cache: Dict[str, str],
+    retrieval_source: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """One disclosed canonical row → one summary item, or ``None`` if it may not be shown.
+
+    Extracted from :func:`_load_canonical_summary_items` so that every lane which
+    turns a canonical row into an item shares ONE copy of the row-level guards —
+    the belief/identity owner-authorship filter, the scope redaction, the
+    exposure-profile rule for un-engaged browse rows, and the speaker labelling.
+    A second lane with its own transcription of these is a privacy regression
+    waiting for the two copies to drift; there is now nothing to drift.
+
+    `retrieval_source` names the contributing lane (default `canonical:<table>`).
+    It changes provenance only — never what survives.
+    """
+    owner: Optional[bool] = None
+    if first_person and table in _MESSAGE_TABLES:
+        owner = _message_row_owner(table, row, conn, role_cache)
+        if belief_intent and owner is not True:
+            return None  # belief/identity composition: owner-authored only
+    clean = _redact_row_for_scope(manifest.scope_id, table, row)
+    text = _row_summary_text(table, clean, scope_id=manifest.scope_id)
+    # IMB9 / P2.1: an engaged browser row (highlight/star) carries the
+    # owner's Annotate-grade span in metadata_json.highlight, which the
+    # canonical list adapter never selects — pull it in so the needle
+    # ("copper still method") is retrievable. page_excerpt (the page
+    # author's words) is deliberately never surfaced by the lookup.
+    if table == "activity_events":
+        event_id = str(clean.get("record_id") or clean.get("event_id") or "")
+        span = _activity_highlight_text(conn, event_id, clean, highlight_cache)
+        if span:
+            text = f"{span} — {text}".strip(" —") if text else span
+        elif not exposure_visible:
+            # P1.5: exposure profile off — a non-engaged browse row is
+            # exposure-only (never the owner's expression); it must not
+            # answer an interest/identity ask. Engaged rows (span set)
+            # are Annotate-grade expression and always survive.
+            return None
+    if not text:
+        return None
+    if belief_intent and owner is True and table in _MESSAGE_TABLES and _belief_about_other(text):
+        return None  # owner-authored but about a third party — not the owner's belief
+    speaker = ""
+    if first_person and owner is False:
+        if table == "ai_chat_messages":
+            speaker = str(row.get("sender_type") or "assistant").strip() or "assistant"
+        else:
+            speaker = _sender_display(
+                conn, str(row.get("sender_id") or ""), display_cache
+            )
+        if speaker:
+            text = f"[{speaker}] {text}"
+    item = {
+        "topic": text[:120],
+        "summary_text": text,
+        "record_id": clean.get("record_id")
+        or clean.get("event_id")
+        or clean.get("contact_id")
+        or clean.get("message_id"),
+        "source_id": clean.get("source_id"),
+        "relevance_score": round(_canonical_relevance(text, query_text), 4),
+        "retrieval_source": retrieval_source or f"canonical:{table}",
+    }
+    # B8 / GEN-judged IMB: speaker_label + owner_authored survive inference
+    # stripping of topic/summary_text so the generative answer can attribute
+    # non-owner evidence without a raw-content side channel.
+    if speaker:
+        item["speaker_label"] = speaker
+    # Per-table event-time column (same keys the recency sort in
+    # _list_canonical_rows uses); without it canonical rows can neither
+    # decay in fusion nor answer a date-scoped ask.
+    for ts_key in ("event_at", "starts_at", "occurred_at", "entry_at"):
+        ts_val = clean.get(ts_key) or row.get(ts_key)
+        if ts_val:
+            item["event_at"] = ts_val
+            break
+    if owner is not None:
+        item["owner_authored"] = owner
+    return item
+
+
 def _load_canonical_summary_items(
     *,
     manifest: ScopeResolutionManifest,
@@ -1239,76 +1332,330 @@ def _load_canonical_summary_items(
             browse_fallback=browse_fallback,
         )
         for row in rows:
-            owner: Optional[bool] = None
-            if first_person and table in _MESSAGE_TABLES:
-                owner = _message_row_owner(table, row, conn, role_cache)
-                if belief_intent and owner is not True:
-                    continue  # belief/identity composition: owner-authored only
-            clean = _redact_row_for_scope(manifest.scope_id, table, row)
-            text = _row_summary_text(table, clean, scope_id=manifest.scope_id)
-            # IMB9 / P2.1: an engaged browser row (highlight/star) carries the
-            # owner's Annotate-grade span in metadata_json.highlight, which the
-            # canonical list adapter never selects — pull it in so the needle
-            # ("copper still method") is retrievable. page_excerpt (the page
-            # author's words) is deliberately never surfaced by the lookup.
-            if table == "activity_events":
-                event_id = str(clean.get("record_id") or clean.get("event_id") or "")
-                span = _activity_highlight_text(conn, event_id, clean, highlight_cache)
-                if span:
-                    text = f"{span} — {text}".strip(" —") if text else span
-                elif not exposure_visible:
-                    # P1.5: exposure profile off — a non-engaged browse row is
-                    # exposure-only (never the owner's expression); it must not
-                    # answer an interest/identity ask. Engaged rows (span set)
-                    # are Annotate-grade expression and always survive.
-                    continue
-            if not text:
-                continue
-            if belief_intent and owner is True and table in _MESSAGE_TABLES and _belief_about_other(text):
-                continue  # owner-authored but about a third party — not the owner's belief
-            speaker = ""
-            if first_person and owner is False:
-                if table == "ai_chat_messages":
-                    speaker = str(row.get("sender_type") or "assistant").strip() or "assistant"
-                else:
-                    speaker = _sender_display(
-                        conn, str(row.get("sender_id") or ""), display_cache
-                    )
-                if speaker:
-                    text = f"[{speaker}] {text}"
-            item = {
-                "topic": text[:120],
-                "summary_text": text,
-                "record_id": clean.get("record_id")
-                or clean.get("event_id")
-                or clean.get("contact_id")
-                or clean.get("message_id"),
-                "source_id": clean.get("source_id"),
-                "relevance_score": round(_canonical_relevance(text, query_text), 4),
-                "retrieval_source": f"canonical:{table}",
-            }
-            # B8 / GEN-judged IMB: speaker_label + owner_authored survive inference
-            # stripping of topic/summary_text so the generative answer can attribute
-            # non-owner evidence without a raw-content side channel.
-            if speaker:
-                item["speaker_label"] = speaker
-            # Per-table event-time column (same keys the recency sort in
-            # _list_canonical_rows uses); without it canonical rows can neither
-            # decay in fusion nor answer a date-scoped ask.
-            for ts_key in ("event_at", "starts_at", "occurred_at", "entry_at"):
-                ts_val = clean.get(ts_key) or row.get(ts_key)
-                if ts_val:
-                    item["event_at"] = ts_val
-                    break
-            if owner is not None:
-                item["owner_authored"] = owner
-            items.append(item)
+            item = _canonical_row_to_item(
+                table,
+                row,
+                manifest=manifest,
+                query_text=query_text,
+                conn=conn,
+                first_person=first_person,
+                belief_intent=belief_intent,
+                exposure_visible=exposure_visible,
+                role_cache=role_cache,
+                display_cache=display_cache,
+                highlight_cache=highlight_cache,
+            )
+            if item is not None:
+                items.append(item)
     items.sort(key=lambda item: float(item.get("relevance_score") or 0.0), reverse=True)
     if first_person:
         # Strong downweight, not a drop: owner-authored rows first, exempt
         # (non-message) rows keep relative order, other-authored rows last.
         items.sort(key=lambda item: _owner_rank(item.get("owner_authored")))
     return items[:_SUMMARY_ITEM_CAP]
+
+
+# --- entity-keyed retrieval (the entity-thread lane) ----------------------------------
+#
+# Everything above routes by SCOPE and filters by TIME. A question about a PERSON or a
+# RECORD ("what happened with the Anthropic thread") is answered by whether the query's
+# own words happen to appear in a row — keyword luck — while the entity graph that knows
+# exactly which rows belong to that subject sits one join away and unreachable from the
+# query path. This lane closes that: an entity already resolved from the request
+# contributes ITS records as one more candidate source beside the scope routes.
+#
+# It is a contributor, not an access mode. Every plane still applies, and the code below
+# is arranged so that it cannot be otherwise:
+#
+#   * disclosure tier — rows are only ever obtained from `_list_canonical_rows`, i.e.
+#     `adapters.canonical.list(..., disclosure_tier=...)`, the same disclosed path the
+#     canonical lane uses. `CanonicalStore.get()` would fetch a row BY ID with no tier
+#     applied at all; this lane deliberately never calls it. The mention table supplies
+#     an id SET which selects from disclosed rows — it never fetches around them.
+#   * scope ceiling — only `manifest.canonical_tables` are scanned, so the lane can
+#     reach nothing the scope does not already authorize.
+#   * row-level guards — items come from `_canonical_row_to_item`, the one shared copy.
+#   * black hole / exclusions / rare gate / time window — items join the same packet at
+#     the same point as every other lane and are subject to all of them; the fields the
+#     exclusion filter matches on (`canonical_table`, `entity_id`, `record_id`) are set
+#     explicitly so a "but not X" cannot be walked around by arriving through this lane.
+
+#: Rows pulled per canonical table per prefilter page. The prefilter is a superset of the
+#: mention join (see `_load_entity_thread_items`); this bounds work, not membership.
+_ENTITY_THREAD_SCAN_LIMIT = 200
+#: Distinct surfaces that build that prefilter. `Dialogues` carries 722 mention rows on
+#: this node and the surfaces repeat, so the first handful is the whole vocabulary.
+_ENTITY_THREAD_SURFACE_CAP = 12
+#: Mention rows read per request across all resolved entities, newest first.
+_ENTITY_THREAD_MENTION_LIMIT = 600
+#: Items the lane may contribute. A thread is evidence beside the scope routes, never a
+#: replacement for them: an entity with hundreds of linked rows must not own the packet.
+_ENTITY_THREAD_CAP = 8
+
+
+def _entity_thread_entities(
+    conn: Optional[Any],
+    linked: List[Dict[str, Any]],
+    *,
+    manifest: ScopeResolutionManifest,
+) -> Tuple[List[str], Dict[str, int]]:
+    """Which resolved entities may contribute a thread — and a tally of who may not.
+
+    Two entities are refused, both because of artefacts this node has actually produced:
+
+    ``is_self`` — the owner's own entity links on ordinary first-person phrasing, and its
+    "thread" is not a subject, it is the corpus. Contributing it would turn every question
+    that happens to name the owner into an undirected dump. On this node the self row
+    carries zero mentions, so the guard costs nothing today; it is here for the day the
+    resolver starts attaching them.
+
+    An entity outside an ACTIVE selector allow-list. The pipeline already suppresses a
+    grantee query that names an unauthorized *person* before retrieval runs, but that
+    check is person-shaped and this lane is not: under an active policy, an org or place
+    thread would otherwise pull rows the requester's own words never matched. When a
+    selector policy is in force this lane contributes only for explicitly accessible
+    entities, and nothing at all if the read of `is_self` fails — an unverifiable
+    resolution is not a resolution.
+    """
+    skipped: Dict[str, int] = {}
+    ids = [str(e.get("entity_id") or "").strip() for e in linked or []]
+    ids = [i for i in ids if i]
+    if not ids or conn is None:
+        return [], skipped
+
+    placeholders = ",".join("?" for _ in ids)
+    try:
+        rows = conn.execute(
+            f"SELECT entity_id, COALESCE(is_self, 0) FROM entities "
+            f"WHERE entity_id IN ({placeholders})",
+            ids,
+        ).fetchall()
+    except Exception as exc:  # noqa: BLE001 — fail closed: no lane rather than a blind one
+        logger.debug("entity thread self-check unavailable: %s", exc)
+        skipped["self_check_unavailable"] = len(ids)
+        return [], skipped
+    self_flags = {str(r[0]): bool(r[1]) for r in rows}
+
+    policy_active = bool(getattr(manifest, "entity_selector_policy_active", False))
+    accessible = {
+        str(x).strip()
+        for x in (getattr(manifest, "accessible_entity_ids", None) or [])
+    }
+
+    kept: List[str] = []
+    for entity_id in ids:
+        if entity_id not in self_flags:
+            skipped["unresolved"] = skipped.get("unresolved", 0) + 1
+            continue
+        if self_flags[entity_id]:
+            skipped["is_self"] = skipped.get("is_self", 0) + 1
+            continue
+        if policy_active and entity_id not in accessible:
+            skipped["selector_not_accessible"] = skipped.get("selector_not_accessible", 0) + 1
+            continue
+        kept.append(entity_id)
+    return kept, skipped
+
+
+def _entity_thread_mentions(
+    conn: Optional[Any],
+    entity_ids: List[str],
+    *,
+    tables: List[str],
+) -> Tuple[Dict[str, Set[str]], Set[str], List[str], Dict[str, str]]:
+    """The mention join: which records belong to these entities, and where they live.
+
+    Returns ``(by_table, untabled, surfaces, entity_by_record)``.
+
+    ``canonical_table`` is NULL on a real share of this node's mention rows (619 of
+    4313). Those records are not dropped — they are carried in ``untabled`` and offered
+    to every scanned table, where the record-id match decides. A mention that cannot say
+    which table it came from is still a mention.
+
+    ``surfaces`` are the observed mention strings, used ONLY to build a SQL prefilter.
+    They never decide membership; the record-id sets above do.
+    """
+    by_table: Dict[str, Set[str]] = {}
+    untabled: Set[str] = set()
+    surfaces: List[str] = []
+    entity_by_record: Dict[str, str] = {}
+    if conn is None or not entity_ids:
+        return by_table, untabled, surfaces, entity_by_record
+
+    allowed = {str(t) for t in (tables or [])}
+    placeholders = ",".join("?" for _ in entity_ids)
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT entity_id, record_id, canonical_table, surface_text
+            FROM entity_mentions
+            WHERE entity_id IN ({placeholders})
+            ORDER BY COALESCE(event_at, created_at) DESC
+            LIMIT ?
+            """,
+            [*entity_ids, _ENTITY_THREAD_MENTION_LIMIT],
+        ).fetchall()
+    except Exception as exc:  # noqa: BLE001 — no mention table → no thread lane
+        logger.debug("entity thread mention join unavailable: %s", exc)
+        return by_table, untabled, surfaces, entity_by_record
+
+    seen_surface: Set[str] = set()
+    for entity_id, record_id, canonical_table, surface_text in rows:
+        rid = str(record_id or "").strip()
+        if not rid:
+            continue
+        entity_by_record.setdefault(rid, str(entity_id))
+        table = str(canonical_table or "").strip()
+        if not table:
+            untabled.add(rid)
+        elif table in allowed:
+            by_table.setdefault(table, set()).add(rid)
+        surface = str(surface_text or "").strip().lower()
+        if (
+            surface
+            and len(surface) >= 3
+            and surface not in seen_surface
+            and len(surfaces) < _ENTITY_THREAD_SURFACE_CAP
+        ):
+            seen_surface.add(surface)
+            surfaces.append(surface)
+    return by_table, untabled, surfaces, entity_by_record
+
+
+def _load_entity_thread_items(
+    *,
+    manifest: ScopeResolutionManifest,
+    adapters: AdapterBundle,
+    conn: Optional[Any],
+    linked: List[Dict[str, Any]],
+    query_text: str,
+    source_ids: List[str],
+    disclosure_tier: str,
+    first_person: bool,
+    belief_intent: bool,
+    exposure_visible: bool,
+    plan=None,
+    ledger: Optional[Any] = None,
+) -> List[Dict[str, Any]]:
+    """The entity's own records, contributed beside the scope routes.
+
+    Two disclosed pages are read per scanned table and unioned:
+
+    1. a ``contains`` prefilter on the entity's observed surfaces — a SQL scan of the
+       WHOLE table, which is what lets an old thread record be reached at all; and
+    2. a plain recency page, because the prefilter is only a superset of the join while
+       the surface actually lives in a filtered column. Where it does not, page 1 is
+       silently a subset — page 2 is the floor that stops that being invisible.
+
+    Both go through `_list_canonical_rows`, so both are already disclosed to
+    `disclosure_tier`. The record-id intersection then decides membership. Rows the
+    entity does not own are dropped here and never enter the packet.
+    """
+    tables = [str(t) for t in (manifest.canonical_tables or [])]
+    if not tables or not linked or conn is None:
+        return []
+
+    entity_ids, skipped = _entity_thread_entities(conn, linked, manifest=manifest)
+    if ledger is not None:
+        for reason, count in sorted(skipped.items()):
+            ledger.record(
+                _N.STAGE_RETRIEVAL,
+                "dropped_items",
+                f"entity_thread_{reason}",
+                dropped=count,
+            )
+    if not entity_ids:
+        return []
+
+    by_table, untabled, surfaces, entity_by_record = _entity_thread_mentions(
+        conn, entity_ids, tables=tables
+    )
+    if not by_table and not untabled:
+        return []
+
+    items: List[Dict[str, Any]] = []
+    seen: Set[str] = set()
+    role_cache: Dict[str, Optional[bool]] = {}
+    display_cache: Dict[str, str] = {}
+    highlight_cache: Dict[str, str] = {}
+    wanted_total = 0
+    for table in tables:
+        wanted = set(by_table.get(table) or set()) | untabled
+        if not wanted:
+            continue
+        wanted_total += len(by_table.get(table) or set())
+        rows: List[Dict[str, Any]] = []
+        if surfaces:
+            rows += _list_canonical_rows(
+                adapters,
+                table,
+                source_ids=source_ids,
+                limit=_ENTITY_THREAD_SCAN_LIMIT,
+                disclosure_tier=disclosure_tier,
+                contains=surfaces,
+            )
+        rows += _list_canonical_rows(
+            adapters,
+            table,
+            source_ids=source_ids,
+            limit=_ENTITY_THREAD_SCAN_LIMIT,
+            disclosure_tier=disclosure_tier,
+        )
+        for row in rows:
+            rid = str(row.get("record_id") or row.get("message_id") or "").strip()
+            if not rid or rid not in wanted:
+                continue
+            key = f"{table}|{rid}"
+            if key in seen:
+                continue
+            seen.add(key)
+            item = _canonical_row_to_item(
+                table,
+                row,
+                manifest=manifest,
+                query_text=query_text,
+                conn=conn,
+                first_person=first_person,
+                belief_intent=belief_intent,
+                exposure_visible=exposure_visible,
+                role_cache=role_cache,
+                display_cache=display_cache,
+                highlight_cache=highlight_cache,
+                retrieval_source=f"entity_thread:{table}",
+            )
+            if item is None:
+                continue
+            # The keys the exclusion filter matches on. An "everything about the
+            # install rewrite but not Anthropic" ask has to be able to reach a row
+            # that arrived because of an entity, by the same entity.
+            item["canonical_table"] = table
+            entity_id = entity_by_record.get(rid)
+            if entity_id:
+                item["entity_id"] = entity_id
+            items.append(item)
+
+    items = _prefer_time_window(items, getattr(plan, "time_range", None) if plan else None)
+    items.sort(key=lambda item: float(item.get("relevance_score") or 0.0), reverse=True)
+    kept = items[:_ENTITY_THREAD_CAP]
+    if ledger is not None:
+        # The lane's own coverage line: how many of the thread's records the scan
+        # actually reached. `matched` short of `linked` is the honest shape of a
+        # truncated scan — the alternative is a thread that quietly answers with part
+        # of itself and says nothing about the rest.
+        ledger.record(
+            _N.STAGE_RETRIEVAL,
+            "contributed",
+            "entity_thread_lane",
+            dropped=max(0, len(items) - len(kept)),
+            detail={
+                "entities": len(entity_ids),
+                "linked_records": wanted_total,
+                "matched": len(items),
+                "contributed": len(kept),
+                "tables": sorted(by_table),
+            },
+        )
+    return kept
 
 
 def _load_emotion_summary_items(
@@ -2617,6 +2964,16 @@ def _fusion_item_key(item: Dict[str, Any]) -> str:
     if record_id and retrieval == "user_goal":
         goal_id = str(item.get("goal_id") or item.get("summary_text") or "")[:80]
         return f"rec:{record_id}|goal:{goal_id}"
+    # entity_mention rows are POINTERS, not content: `entity_context_items` emits
+    # "<surface> in <table>" for a record it never reads. Collapsing them under
+    # rec:{id} lets the pointer win the payload — `best_item` keeps the FIRST lane
+    # to claim a key and `entities` fuses ahead of `canonical` — so whenever a
+    # mention happens to point at a record, the owner's actual sentence is replaced
+    # by "2026-03-13 — Anthropic". That was already true of the canonical lane
+    # before the entity-thread lane existed; both are shadowed identically. Third
+    # instance of the two cases above, and the same remedy.
+    if record_id and retrieval == "entity_mention":
+        return f"rec:{record_id}|mention:{str(item.get('entity_id') or '')}"
     if record_id:
         return f"rec:{record_id}"
     cluster_id = str(item.get("cluster_id") or "")
@@ -3404,6 +3761,7 @@ def _build_summary_items_unfiltered(
     raw_conn = bundle_conn
 
     entity_items: List[Dict[str, Any]] = []
+    entity_thread_items: List[Dict[str, Any]] = []
     fact_store_items: List[Dict[str, Any]] = []
     if query_text:
         try:
@@ -3433,6 +3791,25 @@ def _build_summary_items_unfiltered(
                     manifest=manifest,
                     temporal_shift=temporal_shift,
                     as_of=getattr(plan, "as_of", None) if plan else None,
+                )
+                # P4: the same resolution, one join further. `entity_context_items`
+                # above contributes what the graph SAYS about the entity (a dossier
+                # line, four mention surfaces); this contributes the entity's actual
+                # RECORDS — the thread — which no lane could otherwise reach without
+                # the query happening to contain the right word.
+                entity_thread_items = _load_entity_thread_items(
+                    manifest=manifest,
+                    adapters=adapters,
+                    conn=conn,
+                    linked=linked,
+                    query_text=query_text,
+                    source_ids=source_ids,
+                    disclosure_tier=disclosure_tier,
+                    first_person=first_person,
+                    belief_intent=belief_intent,
+                    exposure_visible=exposure_visible,
+                    plan=plan,
+                    ledger=ledger,
                 )
         except Exception as exc:
             logger.debug("entity linking skipped: %s", exc)
@@ -3534,6 +3911,10 @@ def _build_summary_items_unfiltered(
                 ("stat_insights", 2.0, stat_items),
                 ("facts_store", 1.5, fact_store_items),
                 ("entities", 1.5, entity_items),
+                # Beside the scope routes, never above them: a thread record is
+                # ordinary canonical evidence that arrived by a different key, so
+                # it fuses at the canonical lane's own weight.
+                ("entity_thread", 1.0, entity_thread_items),
                 ("goals", goals_weight, goals_for_fuse),
                 ("emotions", emotions_weight, emotion_items),
                 ("canonical", canonical_weight, canonical_items),
@@ -3563,6 +3944,7 @@ def _build_summary_items_unfiltered(
         stat_items
         + fact_store_items
         + entity_items
+        + entity_thread_items
         + goal_items
         + emotion_items
         + canonical_items

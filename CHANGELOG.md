@@ -9,7 +9,67 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+
+- `[E:query]` **A question about a subject can now reach that subject's records.**
+  Every lane in the query path routes by SCOPE and filters by TIME. Nothing routed by
+  WHO or WHAT, so "what happened with the Anthropic thread" was answered by whether
+  the owner's words happened to appear in a row — while the entity graph that knows
+  exactly which rows belong to that subject sat one join away and unreachable from the
+  query path. `_load_entity_thread_items` closes that: the entities
+  `link_query_entities` already resolves for a request (the same resolver the dossier
+  lane uses — no new one) contribute their linked records as an additional fusion
+  contributor, `entity_thread`, at the canonical lane's own weight. It contributes
+  **beside** the scope routes and never replaces them; it is not a new access mode and
+  does not require the graph query surface.
+  - **It selects from disclosed rows; it does not fetch around them.** The obvious
+    implementation — turn each mention row into a record with `CanonicalStore.get()` —
+    would be a privacy incident, because `get(table, record_id)` takes no
+    `disclosure_tier` and applies none. So the mention table supplies an id **set**,
+    and the rows come from `CanonicalStore.list(..., disclosure_tier=…)`: two disclosed
+    pages per table (a `contains` prefilter over the whole table, plus a plain recency
+    page as the floor for surfaces that do not live in a filtered column), intersected
+    by record id. A test spies on `get` and asserts it is never called for the turn.
+  - **Every existing plane still binds.** Only `manifest.canonical_tables` are scanned,
+    so an entity linking a `journal_entries` row contributes nothing under
+    `messages:read` — including when the mention's `canonical_table` is NULL, which it
+    is for 619 of this node's 4313 mention rows. Rows convert through the same
+    `_canonical_row_to_item` the canonical lane uses (extracted, not transcribed, so
+    the two cannot drift), carrying the belief/identity authorship filter, the scope
+    redaction, the exposure-profile rule and speaker labelling. Items are stamped with
+    `canonical_table` and `entity_id` so set 6's exclusions can reach a row by the very
+    entity that contributed it. The soft time window, the black-hole policy, the rare
+    gate and the disclosure filter all run over the result unchanged.
+  - **`is_self` and unconsolidated aliases.** The owner's own entity is refused: its
+    "thread" is not a subject, it is the corpus, and a first-person phrasing that links
+    it would become an undirected dump. Duplicate `normalized_name` rows are real and
+    heavy on this node (`topos` ×7, `personal projects` ×13); the lane keys on the
+    resolved ids whatever their number and dedupes on `(table, record_id)`, so an
+    unconsolidated subject contributes its whole thread exactly once. An unverifiable
+    resolution fails closed, and under an active entity-selector policy the lane
+    contributes only for explicitly accessible entities — the pipeline's existing
+    suppression is person-shaped and this lane also threads orgs and places.
+  - **It declares itself.** One `retrieval / contributed / entity_thread_lane` ledger
+    entry per turn carries `linked_records` vs `matched` vs `contributed`, so a
+    truncated scan is visible rather than silently answering with part of a thread;
+    refusals record `entity_thread_is_self` and friends, because a declined thread and
+    an empty one are different answers. Counts and closed-set slugs only — the entity
+    name, the table names and the record text stay in local-only `detail`.
+
 ### Fixed
+
+- `[E:query]` **An entity mention pointer shadowed the record it pointed at.**
+  `entity_context_items` emits a pointer item (`"2026-03-13 — Anthropic"`) carrying the
+  record's id for a record it never reads. `_fusion_item_key` collapsed it with the
+  record itself under `rec:{id}`, and `_rrf_fuse_summary_lists` keeps the FIRST lane to
+  claim a key — `entities` fuses ahead of `canonical`. So whenever a mention happened
+  to point at a row the canonical lane also returned, the owner's actual sentence was
+  replaced in the packet by the surface text and the date. The id was present, the
+  content was gone, and `fusion_sources` listed `canonical` the whole time. Mention
+  pointers now take their own fusion key, so the pointer and the record coexist. Third
+  instance of a documented pattern (`contact_identifiers`, `user_goal`) and the same
+  remedy; found because the entity-thread lane above was shadowed identically and
+  appeared to contribute nothing.
 
 - `[E:query]` **The rare-token gate was dead on multi-part requests; it now runs per
   part.** One needle set derived from a whole multi-part request cannot gate any
