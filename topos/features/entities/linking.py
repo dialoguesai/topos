@@ -126,6 +126,7 @@ def entity_context_items(
     conn: sqlite3.Connection,
     linked: List[Dict[str, Any]],
     *,
+    manifest: Any,
     max_per_entity: int = 4,
     temporal_shift: str | None = None,
 ) -> List[Dict[str, Any]]:
@@ -134,10 +135,37 @@ def entity_context_items(
     temporal_shift='past' (planner belief-revision signal) widens the edge
     read to CLOSED revisions: ended relationships render with the
     "no longer current" marker instead of being invisible (B2.2/T7).
+
+    ``manifest`` is REQUIRED, and it bounds the mention lane. A mention row is a
+    POINTER — it names a canonical table and a record id without ever reading
+    the record — and this lane emitted one for whatever table the graph happened
+    to know about, whatever the grant authorized. Measured: ``availability:read``
+    declares ``canonical_tables=[]`` and still received a row reading
+    ``"Anthropic in conversation_messages"`` carrying that record's id. A pointer
+    is a disclosure: it says the record exists, which table it lives in, and when
+    it happened.
+
+    So the mention lane scans the manifest's tables and no others — the same
+    bound ``_load_entity_thread_items`` applies one join further on — and the
+    pointer it emits now carries the keys the other planes match on:
+    ``canonical_table`` (what an exclusion category tests) and
+    ``object_type``/``disclosure`` (what the tier filter tests, and which mention
+    items previously declared neither of, so they crossed the tier untouched).
+
+    A mention whose ``canonical_table`` is NULL is dropped rather than offered
+    to every table. The thread lane can afford to carry an untabled mention
+    because a record-id intersection against already-disclosed rows decides its
+    membership; a pointer has no such second opinion, so a mention that cannot
+    say which table it came from cannot show it came from an authorized one.
     """
     from .dossier import ensure_dossier, format_connection_label, load_dossier_for_entity
     from .edges import EDGE_SEMANTIC_AFFINITY, top_edges
 
+    allowed_tables = {
+        str(t).strip()
+        for t in (getattr(manifest, "canonical_tables", None) or [])
+        if str(t).strip()
+    }
     include_closed = temporal_shift == "past"
     items: List[Dict[str, Any]] = []
     for entity in linked:
@@ -220,23 +248,30 @@ def entity_context_items(
                     }
                 )
 
+        if not allowed_tables:
+            continue
+        placeholders = ",".join("?" for _ in allowed_tables)
         mention_rows = conn.execute(
-            """
+            f"""
             SELECT record_id, canonical_table, surface_text, event_at, source_id
-            FROM entity_mentions WHERE entity_id=?
+            FROM entity_mentions
+            WHERE entity_id=? AND canonical_table IN ({placeholders})
             ORDER BY COALESCE(event_at, created_at) DESC LIMIT ?
             """,
-            (entity_id, max_per_entity),
+            (entity_id, *sorted(allowed_tables), max_per_entity),
         ).fetchall()
         for record_id, table, surface, event_at, source_id in mention_rows:
             items.append(
                 {
-                    "topic": f"{entity['canonical_name']} in {table or 'records'}",
+                    "topic": f"{entity['canonical_name']} in {table}",
                     "summary_text": f"{str(event_at or '')[:10]} — {surface}",
                     "record_id": record_id,
                     "source_id": source_id,
                     "entity_id": entity_id,
+                    "canonical_table": table,
                     "retrieval_source": "entity_mention",
+                    "object_type": "entity_mention",
+                    "disclosure": "owner_only",
                 }
             )
     return items

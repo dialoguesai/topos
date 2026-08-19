@@ -1522,6 +1522,63 @@ def _entity_thread_mentions(
     return by_table, untabled, surfaces, entity_by_record
 
 
+def _blackhole_filter_thread_mentions(
+    by_table: Dict[str, Set[str]],
+    untabled: Set[str],
+    *,
+    conn: Optional[Any],
+    owner_view: bool,
+) -> Tuple[Dict[str, Set[str]], Set[str]]:
+    """THE BLACK HOLE, AT SOURCE — wire A of two.
+
+    Every other plane on this lane withholds CONTENT; this one withholds
+    EXISTENCE, so it cannot be applied to the rows on the way out — the protected
+    records must never be read at all. For a lane that reaches rows through
+    ``entity_mentions``, the honest place to stop is the mention set itself, and
+    that is precisely the question ``BlackholeGuard.blocked_record_ids()``
+    answers, from the same join, so it is asked rather than re-derived.
+
+    Filtering RECORDS rather than entities is deliberate and is the whole filter:
+    a record linked to both a protected entity and a visible one arrives under
+    the visible entity's id, so dropping protected entities from ``entity_ids``
+    would sail straight past it. The record set covers that case and the plain
+    one together.
+
+    Deliberately NOT recorded in the ledger, unlike every other refusal on this
+    lane. ``as_public()`` leaves the node, and a narrowing line reading "an entity
+    was withheld" is itself the confirmation of existence D5 exists to deny — the
+    same reason the guard returns empty rows rather than raising, and the same
+    reason the exit policy's own receipt is suppressed for non-owners in
+    ``_build_summary_items``.
+
+    **Why this is not a redundant copy of the exit filter.** Wire B
+    (``_blackhole_policy_for_summary``) catches the same rows on the way out, so
+    severing this one leaves the packet clean and every leak assertion green.
+    What it does not leave alone is the RECEIPT: with this wire cut, the lane
+    loads the protected records, and then records
+    ``stage=retrieval, action=contributed, reason=entity_thread_lane`` in the
+    PUBLIC ledger before wire B empties the answer. A grantee handed nothing plus
+    a line saying the entity's thread lane contributed has been told, in a
+    closed-set slug whose meaning the protocol guarantees, that the entity exists
+    and has records. That converts hiding-by-absence into hiding-by-denial. It is
+    factored out here so a test can sever exactly this wire and watch the ledger
+    property go red — which is the only way the two wires are distinguishable.
+    """
+    if owner_view or conn is None:
+        return by_table, untabled
+    blocked_records = _blackhole_blocked_record_ids(conn)
+    if not blocked_records:
+        return by_table, untabled
+    filtered = {
+        table: ids
+        for table, ids in (
+            (table, ids - blocked_records) for table, ids in by_table.items()
+        )
+        if ids
+    }
+    return filtered, untabled - blocked_records
+
+
 def _load_entity_thread_items(
     *,
     manifest: ScopeResolutionManifest,
@@ -1574,36 +1631,11 @@ def _load_entity_thread_items(
     if not by_table and not untabled:
         return []
 
-    if not owner_view:
-        # THE BLACK HOLE, AT SOURCE. Every other plane on this lane withholds
-        # CONTENT; this one withholds EXISTENCE, so it cannot be applied to the
-        # rows on the way out — the protected records must never be read at all.
-        # For a lane that reaches rows through `entity_mentions`, the honest
-        # place to stop is the mention set itself, and that is precisely the
-        # question `BlackholeGuard.blocked_record_ids()` answers, from the same
-        # join, so it is asked rather than re-derived.
-        #
-        # Filtering RECORDS rather than entities is deliberate and is the whole
-        # filter: a record linked to both a protected entity and a visible one
-        # arrives under the visible entity's id, so dropping protected entities
-        # from `entity_ids` would sail straight past it. The record set covers
-        # that case and the plain one together.
-        #
-        # Deliberately NOT recorded in the ledger, unlike every other refusal in
-        # this function. `as_public()` leaves the node, and a narrowing line
-        # reading "an entity was withheld" is itself the confirmation of
-        # existence D5 exists to deny — the same reason the guard returns empty
-        # rows rather than raising, and the same reason the exit policy's own
-        # receipt is suppressed for non-owners in `_build_summary_items`.
-        blocked_records = _blackhole_blocked_record_ids(conn)
-        if blocked_records:
-            by_table = {
-                table: (ids - blocked_records) for table, ids in by_table.items()
-            }
-            by_table = {table: ids for table, ids in by_table.items() if ids}
-            untabled = untabled - blocked_records
-            if not by_table and not untabled:
-                return []
+    by_table, untabled = _blackhole_filter_thread_mentions(
+        by_table, untabled, conn=conn, owner_view=owner_view
+    )
+    if not by_table and not untabled:
+        return []
 
     items: List[Dict[str, Any]] = []
     seen: Set[str] = set()
@@ -2668,6 +2700,10 @@ def _load_ranked_clusters_unfiltered(
 _OWNER_ONLY_GRANTS = {
     "stat_insight": "stat_insights",
     "entity_dossier": "entity_dossiers",
+    # A mention pointer is the entity plane's own artefact, shipped beside the
+    # dossier line, so it rides the same grant. Without an entry here it would
+    # fall to the default (`stat_insights`) and an unrelated grant would unlock it.
+    "entity_mention": "entity_dossiers",
     "fact": "owner_facts",
 }
 
@@ -3721,7 +3757,18 @@ def _build_summary_items_unfiltered(
     if manifest.scope_id == "work_context:read" and query_text:
         lowered = query_text.lower()
         if any(token in lowered for token in ("employer", "company", "prior", "before", "previous")):
-            for row in _list_canonical_rows(adapters, "profile_records", source_ids=source_ids, limit=50):
+            # The tier is NOT optional here. `_list_canonical_rows` defaults to
+            # `owner_raw`, and this was the one call site out of nine that took
+            # the default — so a grantee's work-context ask reached this lane's
+            # rows at the owner's tier, past the NSFW exclusion and the
+            # disclosure-column swap the other eight get for free.
+            for row in _list_canonical_rows(
+                adapters,
+                "profile_records",
+                source_ids=source_ids,
+                limit=50,
+                disclosure_tier=disclosure_tier,
+            ):
                 if str(row.get("record_type") or "").lower() != "experience":
                     continue
                 text = _row_summary_text("profile_records", row, scope_id=manifest.scope_id)
@@ -3878,15 +3925,20 @@ def _build_summary_items_unfiltered(
             if conn is not None:
                 linked = link_query_entities(conn, query_text)
                 temporal_shift = getattr(plan, "temporal_shift", None) if plan else None
-                try:
-                    # T7 pass-through (B2.2): past-tense asks widen the edge
-                    # read to closed revisions ("no longer current" marker).
-                    raw_entity_items = entity_context_items(
-                        conn, linked, temporal_shift=temporal_shift
-                    )
-                except TypeError:
-                    # Pre-M1 linking without the kwarg — current-edges only.
-                    raw_entity_items = entity_context_items(conn, linked)
+                # T7 pass-through (B2.2): past-tense asks widen the edge read to
+                # closed revisions ("no longer current" marker). `manifest` bounds
+                # the mention lane to the grant's tables — the pointer it emits
+                # names a table and a record id, which is a disclosure whether or
+                # not the record is ever read.
+                #
+                # The `except TypeError` that used to wrap this call is gone. It
+                # guarded a pre-M1 `linking` that cannot exist in this tree, and
+                # it would have swallowed exactly the signature error a missing
+                # `manifest=` raises — turning a required bound into a silently
+                # unbounded lane, which is the defect it sits on top of.
+                raw_entity_items = entity_context_items(
+                    conn, linked, manifest=manifest, temporal_shift=temporal_shift
+                )
                 entity_items = [
                     item
                     for item in raw_entity_items
@@ -4355,6 +4407,30 @@ class DefaultSignalRetrievalAdapter:
             retrieval_meta["cohort_person_count"] = person_count
         if peer_count is not None:
             retrieval_meta["cohort_peer_count"] = peer_count
+
+        # This bundle returns from `retrieve` BEFORE the exclusion plane at the foot
+        # of the method, so "…but nothing from X" used to leave no trace at all here:
+        # not enforced, and not reported as un-enforced either. That silence is the
+        # exact false-claim-of-enforcement shape `exclusion.py` exists to prevent —
+        # the caller cannot tell an honoured exclusion from a skipped one.
+        #
+        # It is not routed through the item filter, because there is no item. The
+        # packet holds ONE derived count over cohort membership, computed above
+        # before any row existed; the filter would match nothing, report
+        # `enforced=True, dropped=0`, and leave `person_count` still counting the
+        # excluded members. So the plane is told this is aggregate-only and records
+        # `not_applied` honestly instead.
+        exclusion_block = _enforce_request_exclusions(
+            packet,
+            query_text=str(request.query_text or "").strip(),
+            conn=db_conn,
+            ledger=getattr(request, "ledger", None),
+            aggregate_only=True,
+        )
+        if exclusion_block:
+            packet["exclusion"] = exclusion_block
+            retrieval_meta.update(_exclusion_meta(exclusion_block))
+
         self._last_stores = ["entities"] if person_count is not None else []
         return RetrievalBundle(
             context_packet=packet,
@@ -4725,6 +4801,17 @@ class DefaultSignalRetrievalAdapter:
                 packet["topic_clusters"] = ranked_clusters
             # D1.8: do not attach legacy graph_nodes/graph_edges furniture.
             # Product graph answers use entity_edges; dual-graph store is GC-deprecated.
+            #
+            # A scope's declared `must_not_retrieve` bound one mode out of three.
+            # `raw` applied it to its rows and `inference` to the whole packet;
+            # summary — the mode most scopes actually answer in — never applied it
+            # at all. `availability:read` is the live case: it declares
+            # `calendar_events.title`, `conversation_messages.content` and
+            # `content`, its ceiling is `inference`, and `summary` outranks that
+            # ceiling, so the reachable mode was the unenforced one. Applied to
+            # the whole packet, exactly as inference does, so the restriction
+            # covers the lanes that grow later as well as the ones here today.
+            packet = _strip_forbidden(packet, manifest.must_not_retrieve)
         elif mode == "inference":
             scores: List[Dict[str, Any]] = []
             inference_rare: List[str] = []

@@ -92,6 +92,69 @@ The machine-readable twin of each release is
 
 ### Fixed
 
+- `[E:query]` **Four planes the rest of the engine treats as total each had a lane running
+  outside them.** A partial boundary reads exactly like a whole one from the call site,
+  which is the property all four share and the reason none of them showed up as a failure.
+  - **The mention pointer ignored the manifest.** `entity_context_items` took no manifest
+    at all, so its mention lane offered whatever canonical table the entity graph happened
+    to know about. Measured: a request on `availability:read`, whose resolved manifest
+    declares `canonical_tables == []`, came back holding `{'topic': 'Anthropic in
+    conversation_messages', 'record_id': 'msg-thread-1'}`. A mention row is a POINTER — it
+    names a table and a record id without ever reading the record — and that is still a
+    disclosure: it says the record exists, which table holds it, and when it happened. The
+    lane now scans the manifest's tables and no others (the bound
+    `_load_entity_thread_items` already applied one join further on), and the pointer it
+    emits carries the keys the other planes match on: `canonical_table`, which an exclusion
+    category tests, and `object_type`/`disclosure`, which the tier filter tests and which
+    mention items declared neither of, so they crossed the tier untouched. `entity_mention`
+    is registered against the `entity_dossiers` grant rather than falling to the default. A
+    mention whose `canonical_table` is NULL is dropped rather than offered to every table:
+    the thread lane can carry an untabled mention because a record-id intersection against
+    already-disclosed rows decides its membership, and a pointer has no such second opinion.
+  - **`must_not_retrieve` bound one access mode out of three.** `raw` applied a scope's
+    declared restrictions to its rows and `inference` to the whole packet; `summary` — the
+    mode most scopes actually answer in — never applied them. `availability:read` is the
+    live case: it declares `calendar_events.title`, `conversation_messages.content` and
+    `content`, its ceiling is `inference`, and `MODE_RANK` puts `summary` below that
+    ceiling, so the reachable mode was the unenforced one. Applied to the whole summary
+    packet, as `inference` does, so it covers the fusion lanes that grow later.
+  - **One canonical read out of nine used the owner's tier.** `_list_canonical_rows`
+    defaults `disclosure_tier` to `owner_raw`; the legacy employer heuristic over
+    `profile_records` was the only call site taking that default, so a grantee's
+    work-context ask read that table at the owner's tier — past the NSFW row exclusion and
+    the disclosure-column swap the other eight get for free. It now passes the request's
+    tier. (On SQLite `profile_records` has no disclosure spec, so the wrong tier was inert
+    there and live in the in-memory store; the test asserts on the argument for that
+    reason.)
+  - **The cohort rollup skipped the exclusion plane in silence.** `_cohort_aggregate_bundle`
+    returns from `retrieve` before the enforced-exclusion call at the foot of the method,
+    so "…but nothing from my journal" left no trace: not enforced, and not reported as
+    un-enforced either, which is indistinguishable from an honoured exclusion. It is
+    deliberately NOT routed through the item filter — the packet holds one derived count
+    over cohort membership computed before any row exists, so the filter would match
+    nothing, report `enforced=true, dropped=0`, and leave the count still counting the
+    excluded members. `enforce_request_exclusions(..., aggregate_only=True)` reports
+    `requested=true, enforced=false` with every compiled target counted as un-applied, and
+    records `stage=disclosure, action=not_applied, reason=exclusion_aggregate_unfilterable`.
+    The compiled targets go in `detail`, which does not leave the node.
+  - **The black hole's source wire had no property of its own.** The fix has two wires: the
+    source filter in `_load_entity_thread_items` and the exit filter at the packet
+    boundary. Every existing assertion is a LEAK assertion, and the exit filter satisfies
+    all of them alone — severing the source wire leaves the packet clean and all 34
+    entity-thread tests green. It is not a redundant copy: it is what stops the lane
+    recording, in the PUBLIC ledger, that it found rows for the entity before the exit
+    filter removes them, converting hiding-by-absence into hiding-by-denial. Verified by
+    severing it: the packet stayed clean and the public ledger gained `{stage: retrieval,
+    action: contributed, reason: entity_thread_lane}` for a protected entity. The wire is
+    now `_blackhole_filter_thread_mentions`, a named seam a test can sever, and the ledger
+    property is asserted against both the intact and the severed wire.
+  - **A fallback that would have disabled the new bound.** The `except TypeError` around
+    the `entity_context_items` call guarded a pre-M1 `linking` that cannot exist in this
+    tree, and it caught exactly the error a missing `manifest=` raises — so the day the
+    bound was added it would have turned a required argument into a silently unbounded
+    lane. Removed, and the test that pinned it replaced by one pinning that the call site
+    hands linking the request's manifest.
+
 - `[E:query]` **A black-holed entity still existed, if you asked the entity lane.** The
   P4 lane reaches records through `entity_mentions` — by construction it returns rows
   whose text never names the subject — and the only black-hole filter on the way out was

@@ -19,6 +19,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from topos.query.manifest_validation import resolve_scope_manifest
 from topos.storage.db.migrations import apply_all_migrations
 from topos.storage.db.migrations.entity_edges_validity_v1 import (
     apply_entity_edges_validity_v1_up,
@@ -307,7 +308,12 @@ class TestEntityContextPastShift:
         from topos.features.entities.linking import entity_context_items
 
         self._seed_closed_edge(conn)
-        items = entity_context_items(conn, self._linked(), temporal_shift="past")
+        items = entity_context_items(
+            conn,
+            self._linked(),
+            manifest=resolve_scope_manifest("messages:read"),
+            temporal_shift="past",
+        )
         # Query-time ensure_dossier prefers entity_dossier; closed edges still
         # render with the T7 staleness marker on that path.
         spine = [
@@ -325,7 +331,9 @@ class TestEntityContextPastShift:
         from topos.features.entities.linking import entity_context_items
 
         self._seed_closed_edge(conn)
-        items = entity_context_items(conn, self._linked())
+        items = entity_context_items(
+            conn, self._linked(), manifest=resolve_scope_manifest("messages:read")
+        )
         assert all("no longer current" not in (i.get("summary_text") or "") for i in items)
         assert all("Brindle" not in (i.get("summary_text") or "") for i in items)
 
@@ -337,7 +345,12 @@ class TestEntityContextPastShift:
         _seed_entity(conn, "ent-b", "Brindle Cassavetes")
         update_edge(conn, src_entity_id="ent-a", dst_entity_id="ent-b", edge_type="worked_with")
         conn.commit()
-        items = entity_context_items(conn, self._linked(), temporal_shift="past")
+        items = entity_context_items(
+            conn,
+            self._linked(),
+            manifest=resolve_scope_manifest("messages:read"),
+            temporal_shift="past",
+        )
         spine = [
             i
             for i in items
