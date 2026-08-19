@@ -11,6 +11,8 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from ..storage.adapters.factory import AdapterBundle
 from . import narrowing as _N
+from .exclusion import enforce_request_exclusions as _enforce_request_exclusions
+from .exclusion import summarize_for_meta as _exclusion_meta
 from .manifest import ScopeResolutionManifest
 from .types import (
     MODE_RANK,
@@ -4325,6 +4327,24 @@ class DefaultSignalRetrievalAdapter:
 
         retrieval_meta["vector_hits"] = len(semantic_hits)
         retrieval_meta["clusters_returned"] = len(ranked_clusters)
+
+        # ENFORCED EXCLUSION. "…but nothing from the therapy journal" is compiled to
+        # category / tier / entity filters and applied HERE, inside the retrieval
+        # boundary — not as a line in the synthesis prompt. A model asked nicely not
+        # to mention something has already been shown it; this drops the content
+        # before the disclosure filter, the game layer, the stored artifact and the
+        # prompt ever see it, on the same plane the tiers and the black-hole policy
+        # already run. An exclusion that cannot be compiled is reported as NOT
+        # applied rather than passed through as though it had been honoured.
+        exclusion_block = _enforce_request_exclusions(
+            packet,
+            query_text=query_text,
+            conn=getattr(self._adapters.signal, "_conn", None),
+            ledger=ledger,
+        )
+        if exclusion_block:
+            packet["exclusion"] = exclusion_block
+            retrieval_meta.update(_exclusion_meta(exclusion_block))
 
         # Why is this lane empty? Four causes had one message, and two of six
         # sections in a real report chose the wrong one out loud. Anything a stage

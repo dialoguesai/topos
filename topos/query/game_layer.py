@@ -175,6 +175,16 @@ class DefaultGameLayer:
             payload["answer_type"] = "raw"
             payload["rows"] = context_packet.get("rows") or []
 
+        # Enforced exclusion (retrieval plane). Carried on EVERY mode because the
+        # claim it makes is about the whole turn: what the owner asked to be left
+        # out, whether it actually was, and how much it removed. The block is closed
+        # -set slugs and integers — the excluded entity's name is never in it. It
+        # travels because the alternative is an answer that quietly reads as though
+        # an exclusion the engine could not compile had been honoured.
+        exclusion = context_packet.get("exclusion")
+        if isinstance(exclusion, dict) and exclusion:
+            payload["exclusion"] = exclusion
+
         return PublicResult(payload=payload, strategy=strategy.value)
 
 
