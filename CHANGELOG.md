@@ -11,6 +11,49 @@ The machine-readable twin of each release is
 
 ### Added
 
+- `[E:query]` **The narrowing ledger's vocabulary is a closed set now, closed by the
+  mechanism rather than by every call site's care.** `narrowing.py`'s docstring credited
+  "enums by construction, not by care". An independent pass tested that by hand on
+  2026-08-19 and it was false: `_slug` is a character filter with a 64-character cap, so
+  it sanitizes and does not constrain membership, and
+  `record("scope_routing", "dropped", "Sarah Chen divorce lawyer meeting")` arrived in
+  `as_public()` — the serializer that, per its own docstring, is what leaves the node —
+  as `sarah_chen_divorce_lawyer_meeting`. A name and a legal matter, fully legible. All
+  three implementations (this one, the control plane's `slug`, the front end's
+  `slugNarrowingToken`) had the same shape. There was no leak on the day, because every
+  live call site passed a literal or a module constant; the guarantee rested entirely on
+  every *future* call site, which is exactly what the docstring said it did not.
+  - **`STAGES`, `ACTIONS` and `REASONS` are declared, and `_member` enforces them.** A
+    value outside its set becomes `UNRECOGNIZED` (`"unrecognized"`). A coercion rather
+    than a drop or a raise, because three properties have to hold at once: the entry
+    still testifies that a stage narrowed the search, telemetry still cannot cost a turn,
+    and the owner's sentence still cannot reach a public field. The sentinel is a member
+    of every set, so coercion is idempotent across the merge hops.
+  - **Enforced in `NarrowingEntry.__post_init__`, not in `record()`.** `as_public()`
+    serializes the dataclass and the dataclass is public, so a `record()`-only check
+    would have left the direct-construction path open — and `extend_public()` merges
+    entries written by another codebase, which is precisely the careless-upstream case.
+  - **The members are what the tree already emits.** Enumerated from the real call sites
+    in all three repos (26 engine, 16 control plane, 13 front end), including the dynamic
+    ones: `ManifestValidationError` codes, `_NOT_QUERIED_OUTCOMES`, the `grantee_scrub_*`
+    and `entity_thread_*` families, and the `_scope_supply_state` returns. Nothing was
+    invented. Tests walk `exclusion.py`, `negotiation.py` and `manifest_validation.py`'s
+    AST so a rename there fails here instead of silently emitting `unrecognized` in
+    production.
+  - **`topos/protocol/narrowing_vocabulary.json` publishes the sets**, beside
+    `query_field_contract.json` and located the same way. The control plane and the front
+    end cannot import Python from here, so they test against the file; the engine's set
+    is the reference and neither may emit a member it lacks. A drift test beats a comment
+    saying "keep in sync".
+  - **The tests that covered this were the reason it survived.**
+    `test_public_fields_cannot_carry_the_owners_words` asserted the *slugged* owner text
+    and called that safe; the front end's `ledgerCoverageAgreement.test.ts` asserted
+    `how_often_do_i_go_to_the_gym` appears in the synthesis prompt, as the correct
+    outcome. Both now assert the sentinel. `tests/query/test_narrowing_vocabulary.py`
+    runs the verification's probe verbatim. Sabotage-checked in all three repos: swapping
+    the membership check back for the bare slug turns 8 engine, 10 control-plane and 8
+    front-end tests red.
+
 - `[E:query]` **Keyword scope routing now has a retirement path, and a measurement that
   says it is not time yet.** The rule pile — ~24 regex predicates plus ~10 composite
   recipes, mirrored in the control plane and the front end — has only ever grown, because
