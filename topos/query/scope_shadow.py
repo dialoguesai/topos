@@ -425,6 +425,145 @@ def summarize(rows: Sequence[Dict[str, Any]]) -> ShadowReport:
     return report
 
 
+def _routed_turns(rows: Sequence[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Collapse per-scope ``route`` rows back into the turns that produced them.
+
+    ``observe()`` is called once per scope the router queried, so a two-scope turn
+    writes two rows and each is compared against ONE ``router_scope``. That is right
+    for :func:`summarize`, which asks "did the head agree about *this scope*", and
+    wrong for "would the head have routed *this turn*": a head that correctly named
+    ``{availability, schedule}`` scores one ``hit`` and one ``over`` there, and a head
+    that named neither scores two ``abstain``. Routing is a decision about a SET, so
+    the set has to be reassembled before it can be judged as one.
+
+    Grouped by ``text`` because no turn id crosses the control-plane boundary — the
+    same coarseness, and the same caveat, as :func:`turn_coverage`.
+    """
+    grouped: Dict[str, Dict[str, Any]] = {}
+    for row in rows:
+        if str(row.get("kind") or KIND_ROUTE) != KIND_ROUTE:
+            continue
+        text = str(row.get("text") or "")
+        entry = grouped.get(text)
+        if entry is None:
+            entry = {
+                "router": set(),
+                # The head saw the same text for every row of the turn, so its
+                # prediction is identical across them; the first row carries it.
+                "predicted": {str(x) for x in (row.get("predicted") or [])},
+                "escalated": str(row.get("verdict") or "") == VERDICT_ESCALATE,
+                "reason": str(row.get("reason") or ""),
+            }
+            grouped[text] = entry
+        scope = row_router_scope(row)
+        if scope:
+            entry["router"].add(scope)
+    return list(grouped.values())
+
+
+#: Verdicts for a whole-turn routing comparison. Deliberately NOT the per-row
+#: ``hit``/``miss`` vocabulary — these are set relations over a different population,
+#: and sharing the words would invite averaging the two together.
+ROUTE_EXACT = "exact"          # head named exactly the rules' scope set
+ROUTE_SUBSET = "subset"        # head named some of them and nothing else (under-routes)
+ROUTE_SUPERSET = "superset"    # head named all of them and more (over-routes)
+ROUTE_OVERLAP = "overlap"      # head named some of them plus others
+ROUTE_DISJOINT = "disjoint"    # head acted and shares NOTHING with the rules
+ROUTE_DEAD = "dead"            # head named nothing where the rules routed
+ROUTE_ESCALATE = "escalate"    # head handed off; something else decides
+
+
+def _rate(numerator: int, denominator: int) -> Optional[float]:
+    """A rate, or ``None`` when it is unmeasurable. Never ``0.0`` for "no data".
+
+    ``0.0`` and "never observed" print identically and read identically, and a gate
+    that cannot tell them apart passes on an empty log — which is exactly the state
+    a promotion gate is most likely to be evaluated in.
+    """
+    return round(numerator / denominator, 4) if denominator else None
+
+
+def routing_comparison(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
+    """Turn-level "would the head have routed this the way the rules did?".
+
+    Reported in the **model card's own vocabulary**: ``exact``, ``dead_rate``,
+    ``disjoint_rate`` and the per-scope recall behind ``scopes_below_floor`` mean here
+    exactly what ``scripts/train_scope_head.py:evaluate`` means by them. That is the
+    point — the card's held-out numbers and these real-traffic numbers can then be read
+    side by side, and the synthetic-to-real gap becomes visible instead of assumed.
+
+    **These are agreement rates, not accuracy.** ``router_scope`` is the incumbent
+    keyword router's choice and the incumbent is a heuristic (module docstring); a
+    ``disjoint`` turn may well be the head being right, and an ``exact`` turn may be
+    both being wrong together. What the numbers do support is the *promotion*
+    question, which is directional: a head that goes ``dead`` on a turn the rules
+    routed removes data from an answer, and that is a regression whether or not the
+    rules were ideal.
+
+    Text-free by construction — counts and scope ids only, the same rule
+    ``as_telemetry`` follows. Safe to paste into a note or a model card.
+    """
+    turns = _routed_turns(rows)
+    by_verdict: Dict[str, int] = {}
+    per_scope: Dict[str, List[int]] = {}
+    divergence: Dict[str, int] = {}
+    acted = 0
+    disjoint = 0
+
+    for turn in turns:
+        router = set(turn["router"])
+        predicted = set(turn["predicted"])
+        if turn["escalated"]:
+            verdict = ROUTE_ESCALATE
+        elif not predicted:
+            verdict = ROUTE_DEAD
+        elif predicted == router:
+            verdict = ROUTE_EXACT
+        elif predicted < router:
+            verdict = ROUTE_SUBSET
+        elif predicted > router:
+            verdict = ROUTE_SUPERSET
+        elif predicted & router:
+            verdict = ROUTE_OVERLAP
+        else:
+            verdict = ROUTE_DISJOINT
+        by_verdict[verdict] = by_verdict.get(verdict, 0) + 1
+
+        if predicted and not turn["escalated"]:
+            acted += 1
+            if router and not (predicted & router):
+                disjoint += 1
+                for scope in sorted(predicted):
+                    for source in sorted(router):
+                        pair = f"{source} -> {scope}"
+                        divergence[pair] = divergence.get(pair, 0) + 1
+        for scope in router:
+            bucket = per_scope.setdefault(scope, [0, 0])
+            bucket[1] += 1
+            bucket[0] += int(scope in predicted)
+
+    total = len(turns)
+    return {
+        "turns": total,
+        "by_verdict": dict(sorted(by_verdict.items())),
+        # Named `exact` to match the card. `ShadowReport.agreement_rate` is the
+        # per-ROW twin over a different population; they are not interchangeable.
+        "exact": _rate(by_verdict.get(ROUTE_EXACT, 0), total),
+        "dead_rate": _rate(by_verdict.get(ROUTE_DEAD, 0), total),
+        "escalation_rate": _rate(by_verdict.get(ROUTE_ESCALATE, 0), total),
+        "disjoint_rate": _rate(disjoint, acted),
+        "per_scope_recall": {
+            scope: round(hit / seen, 4)
+            for scope, (hit, seen) in sorted(per_scope.items())
+            if seen
+        },
+        "scope_turns": {scope: seen for scope, (_hit, seen) in sorted(per_scope.items())},
+        "divergence": dict(sorted(divergence.items(), key=lambda kv: -kv[1])[:15]),
+        "multi_scope_turns": sum(1 for t in turns if len(t["router"]) > 1),
+        "multi_scope_predicted": sum(1 for t in turns if len(t["predicted"]) > 1),
+    }
+
+
 def turn_coverage(rows: Sequence[Dict[str, Any]]) -> Dict[str, Any]:
     """How many observed turns retrieved **no data at all**, and what the head thought.
 

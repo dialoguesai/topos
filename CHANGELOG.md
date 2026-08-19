@@ -11,6 +11,40 @@ The machine-readable twin of each release is
 
 ### Added
 
+- `[E:query]` **Keyword scope routing now has a retirement path, and a measurement that
+  says it is not time yet.** The rule pile — ~24 regex predicates plus ~10 composite
+  recipes, mirrored in the control plane and the front end — has only ever grown, because
+  nothing measured what deleting a rule would cost. `topos/query/scope_arbiter.py` builds
+  the path: keyword rules become `RulePrior`s, the Horos head produces a routing
+  decision, and `arbitrate()` is the one written-down arbitration between them.
+  - **Default OFF, and a test says so.** `TOPOS_SCOPE_HEAD_ROUTES` is unset everywhere in
+    the package (a test walks the tree to prove it), and with the flag off `arbitrate()`
+    returns the rule priors byte-identically. This release does not flip production
+    routing; it ships the machinery, the gates and the measurement that would justify
+    flipping it later.
+  - **The head can only add a scope, never empty one, never widen disclosure.** Escalation
+    (`ambiguity`/`ignorance`) and `confident-none` both defer to the priors, because the
+    head's measured failure on real traffic is choosing *nothing*, not choosing wrongly. A
+    scope the head names that no rule predicted is queried at `summary` — routing is not
+    authorization, and a model with no disclosure signal does not get to raise an access
+    mode.
+  - **Promotion is arithmetic, not a call.** `RoutingGates` states the bar in the Horos
+    card's own metric names (`exact`, `dead_rate`, `disjoint_rate`, per-scope recall) and
+    `evaluate_promotion()` returns the failed clauses. Unmeasurable fails rather than
+    passes: `routing_comparison()` returns `None`, never `0.0`, for a rate with no
+    denominator, so an empty log cannot greenlight anything.
+  - **Measured now, on the traffic that already exists.**
+    `scope_shadow.routing_comparison()` regroups the per-scope shadow rows back into
+    turns — routing is a decision about a *set*, and judging it row by row gives a head
+    that correctly names both scopes of a compound ask partial credit for a right answer.
+    On 52 routed turns of this node's captured traffic the head's `exact` agreement with
+    the rules is **0.173** and its `dead_rate` is **0.596**, against a card `dead_rate` of
+    0.149 on held-out synthetic data. Six of seven gates fail. The head is not ready, the
+    numbers and their method are in `NOTES_HOROS_ROUTING_ENDGAME.md`, and
+    `scripts/horos_routing_endgame.py` regenerates them read-only.
+  - **No keyword rule was retired.** Retirement is what the gates authorise, and the gates
+    need traffic that does not exist yet.
+
 - `[E:query]` **A question about a subject can now reach that subject's records.**
   Every lane in the query path routes by SCOPE and filters by TIME. Nothing routed by
   WHO or WHAT, so "what happened with the Anthropic thread" was answered by whether
