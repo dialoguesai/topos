@@ -439,25 +439,38 @@ class TestEntityContextPassThrough:
         self._seed_entity(conn)
         seen = {}
 
-        def recorder(conn_, linked, *, max_per_entity=4, temporal_shift=None):
+        def recorder(conn_, linked, *, manifest, max_per_entity=4, temporal_shift=None):
             seen["temporal_shift"] = temporal_shift
             return []
 
         self._retrieve(conn, monkeypatch, recorder)
         assert seen.get("temporal_shift") == "past"
 
-    def test_pre_m1_linking_signature_falls_back(self, conn, monkeypatch) -> None:
-        """A linking module without the kwarg must not break retrieval."""
-        self._seed_entity(conn)
-        calls = []
+    def test_the_call_site_hands_linking_the_requests_manifest(
+        self, conn, monkeypatch
+    ) -> None:
+        """The mention lane inside `entity_context_items` emits POINTERS — a table
+        name and a record id — so it is bounded by the caller's grant, and the bound
+        only exists if the grant actually arrives. Pinned on the argument because the
+        lane can be empty for a dozen unrelated reasons.
 
-        def legacy(conn_, linked, *, max_per_entity=4):
-            calls.append(True)
+        This replaces a test that pinned an `except TypeError` fallback around this
+        call, kept for a pre-M1 `linking` that cannot exist in this tree. That guard
+        caught exactly the error a MISSING `manifest=` raises, so the day the bound
+        was added it would have turned a required argument into a silently unbounded
+        lane — the defect it sat on top of.
+        """
+        self._seed_entity(conn)
+        seen = {}
+
+        def recorder(conn_, linked, *, manifest, max_per_entity=4, temporal_shift=None):
+            seen["manifest"] = manifest
             return []
 
-        result = self._retrieve(conn, monkeypatch, legacy)
-        assert calls, "legacy entity_context_items was never invoked"
-        assert result.error is None
+        self._retrieve(conn, monkeypatch, recorder)
+        got = seen.get("manifest")
+        assert got is not None, "the entity lane was called with no grant to bound it"
+        assert got.scope_id == "relationship_context:read"
 
 
 # --- interaction browse (IMB7) -----------------------------------------------------------

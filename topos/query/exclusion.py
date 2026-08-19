@@ -63,6 +63,9 @@ REASON_TIER = "exclusion_tier"
 REASON_ENTITY = "exclusion_entity"
 REASON_UNCOMPILABLE = "exclusion_uncompilable"
 REASON_ENFORCED = "exclusion_enforced"
+#: The fragment compiled fine — there was simply nothing item-shaped to apply it
+#: to. See :func:`enforce_request_exclusions` (``aggregate_only``).
+REASON_AGGREGATE = "exclusion_aggregate_unfilterable"
 
 ACTION_EXCLUDED = "excluded"
 ACTION_NOT_APPLIED = "not_applied"
@@ -703,17 +706,56 @@ def _record(outcome: ExclusionOutcome, ledger: Optional[Any]) -> None:
         logger.debug("exclusion ledger record skipped: %s", exc)
 
 
+def _record_aggregate_not_applied(spec: ExclusionSpec, ledger: Optional[Any]) -> None:
+    """One ``not_applied`` entry for a packet the item filter cannot reach.
+
+    ``detail`` carries the compiled kinds/slugs (local only, and an entity slug is
+    already the owner's word for it) so a local reader can see WHAT went
+    un-applied; the public entry carries only the closed-set reason and a count.
+    """
+    if ledger is None:
+        return
+    try:
+        detail: Dict[str, Any] = {
+            "targets": [{"kind": t.kind, "target": t.slug} for t in spec.targets],
+            "packet": "cohort_aggregate",
+        }
+        if spec.unresolved:
+            detail["fragments"] = list(spec.unresolved)
+        ledger.record(
+            _N.STAGE_DISCLOSURE,
+            ACTION_NOT_APPLIED,
+            REASON_AGGREGATE,
+            dropped=0,
+            detail=detail,
+        )
+    except Exception as exc:  # noqa: BLE001 — telemetry may never cost a turn
+        logger.debug("exclusion ledger record skipped: %s", exc)
+
+
 def enforce_request_exclusions(
     packet: Dict[str, Any],
     *,
     query_text: str,
     conn: Optional[sqlite3.Connection] = None,
     ledger: Optional[Any] = None,
+    aggregate_only: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Parse, apply, record. Returns the public exclusion block, or ``None``.
 
     The single call site the retrieval adapter needs. ``None`` (no exclusion in the
     request) leaves the packet byte-identical.
+
+    ``aggregate_only`` marks a packet whose content is a DERIVED COUNT, not a set of
+    items — the cohort rollup, which reports "N people" computed over cohort
+    membership before any row exists to match a category, a tier or an entity id
+    against. Running the item filter over it would remove nothing and therefore
+    report ``enforced=True, dropped=0`` while the count itself still includes the
+    excluded members: a claim of enforcement over a number that was never filtered,
+    which is the shape the module docstring forbids. So this path claims nothing.
+    It reports the exclusion as REQUESTED and NOT APPLIED, counts every compiled
+    target as un-applied alongside the fragments that would not compile, and says
+    so in the ledger — the same fail-loud record an uncompilable fragment gets.
     """
     try:
         spec = parse_exclusions(query_text, conn)
@@ -724,6 +766,15 @@ def enforce_request_exclusions(
         return None
     if not spec.requested:
         return None
+    if aggregate_only:
+        _record_aggregate_not_applied(spec, ledger)
+        return {
+            "requested": True,
+            "enforced": False,
+            "applied": [],
+            "not_applied": len(spec.targets) + len(spec.unresolved),
+            "dropped": 0,
+        }
     outcome = apply_exclusions(packet, spec, conn=conn, ledger=ledger)
     if ledger is not None and outcome.dropped and _packet_is_empty(packet):
         # An exclusion that emptied the answer is a policy decision, not an absence —
