@@ -31,8 +31,11 @@ Join them on ``text``: a ``turn`` row with no ``route`` rows *is* the no-query c
 
 Three hard rules, each a test:
 
-* **Off by default.** ``TOPOS_SCOPE_SHADOW=1`` opts in. An unset env var must leave the
-  query path byte-identical.
+* **Off by default, and off on request.** ``TOPOS_SCOPE_SHADOW=1`` opts in and an unset
+  env var must leave the query path byte-identical — but ``TOPOS_SCOPE_SHADOW=0`` must
+  also opt *out*, beating the flag file. For a while it could not: the env could only
+  turn shadow on, so on an operator machine holding the file, any subprocess that ran
+  the query path observed and appended to their real log with no way to decline.
 * **Never raises, and never blocks.** Any failure is swallowed, and a cold prototype
   cache is skipped rather than loaded — the first observation measured 10.5s inline
   before that guard, which would have made "changes nothing" false in the way users
@@ -56,11 +59,21 @@ logger = logging.getLogger(__name__)
 
 ENV_FLAG = "TOPOS_SCOPE_SHADOW"
 
+#: Redirects the log. See ``default_log_path()`` for why a harness needs this.
+ENV_LOG_PATH = "TOPOS_SCOPE_SHADOW_LOG"
+
+#: The closed sets ``ENV_FLAG`` is read against. Anything else is not a vote either way
+#: and falls through to ``FLAG_FILE``, exactly as an unset var does.
+_TRUTHY = frozenset({"1", "true", "yes", "on"})
+_FALSY = frozenset({"0", "false", "no", "off"})
+
 #: File-based twin of the env flag. The node under the macOS app shell inherits no
 #: shell environment and nothing loads ~/.topos/.env into os.environ, so an env-only
 #: opt-in is unreachable exactly where real traffic happens. Touching this file is the
 #: operator gesture; deleting it turns shadow off at the next check. It lives in
-#: ~/.topos so it is discoverable next to the log it produces.
+#: ~/.topos so it is discoverable next to the log it produces. It is the *weaker* of the
+#: two switches: an explicit ``TOPOS_SCOPE_SHADOW=0`` overrides it, because a subprocess
+#: has no other way to decline a file it inherited. See ``enabled()``.
 FLAG_FILE = Path.home() / ".topos" / "scope_shadow.on"
 
 #: **Agreement with the incumbent router** — not correctness. See the module docstring:
@@ -88,8 +101,22 @@ _DEFAULT_MAX_LOG_BYTES = 8 * 1024 * 1024
 
 
 def enabled() -> bool:
-    if os.environ.get(ENV_FLAG, "").strip().lower() in {"1", "true", "yes", "on"}:
+    """Env first, in BOTH directions; the file only when the env says nothing.
+
+    The asymmetry this replaced was reachable in one place and it was the worst one: a
+    subprocess harness (release smoke, the upgrade matrix, a demo script) inherits the
+    operator's home directory, so ``FLAG_FILE`` is armed for it whether or not anyone
+    meant the harness to observe, and the environment is the only channel it has to say
+    otherwise. Under the old check ``TOPOS_SCOPE_SHADOW=0`` fell through to the file and
+    the file won, which is how synthetic traffic ends up interleaved in an operator's
+    real ``~/.topos/scope_shadow.jsonl``. Tests are covered by a fixture; a fixture does
+    not cross a process boundary.
+    """
+    raw = os.environ.get(ENV_FLAG, "").strip().lower()
+    if raw in _TRUTHY:
         return True
+    if raw in _FALSY:
+        return False
     try:
         return FLAG_FILE.is_file()
     except OSError:  # a broken home dir must not break the query path
@@ -166,6 +193,17 @@ def max_log_bytes() -> int:
 
 
 def default_log_path() -> Path:
+    """Where observations land; ``TOPOS_SCOPE_SHADOW_LOG`` redirects them.
+
+    Same reason as the falsy env value in ``enabled()``, one notch finer: that one is
+    for a harness that wants no observation at all, this one is for a harness that wants
+    observation and wants it somewhere disposable, rather than appended to the log a
+    real person's query history lives in. Spelled like ``TOPOS_LOG_FILE`` in
+    ``core/logging.py`` — stripped, ``~`` expanded, blank means unset.
+    """
+    raw = (os.environ.get(ENV_LOG_PATH) or "").strip()
+    if raw:
+        return Path(raw).expanduser()
     return Path.home() / ".topos" / "scope_shadow.jsonl"
 
 
