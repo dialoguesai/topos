@@ -11,6 +11,65 @@ The machine-readable twin of each release is
 
 ### Added
 
+- `[E:query]` `[E:storage]` **A turn can now say what it cost.** §09 shipped four quality
+  metrics and no latency metric; `query_artifacts` had no duration column, so the redesign's
+  price per request was unknown by construction. This release measures it and changes
+  nothing else — nothing here is an optimization, and no execution model moved.
+  - **Per-stage durations on the narrowing ledger.** `NarrowingEntry` gains an optional
+    `elapsed_ms: Optional[int]`. A whole non-negative integer carries no text, so it rides
+    `as_public()` without touching the privacy argument that the rest of the ledger rests
+    on. `_duration()` coerces in `__post_init__` for the same reason `_member()` does — the
+    dataclass is a public constructor and `as_public()` serializes whatever the object
+    holds, so a float, a string or a negative clock reading must not reach the wire. The
+    key is **omitted** when a stage did not time itself, which is today's normal case:
+    absent means unmeasured, present means measured, and an unconditional key would have
+    silently rewritten every existing entry on the day this shipped. `as_telemetry()` sums
+    per *stage* rather than listing per entry, and likewise omits the map when it is empty —
+    `tests/query/test_narrowing_ledger.py:96` asserts an exact dict, and it is still green
+    unchanged. `extend_public()` carries the field across the seam; the control plane's
+    `merge_narrowing()` and the front end's `mergeNarrowingRecords()` rebuild entries
+    field-by-field, so a missing carry loses the measurement with no error at either end.
+    All three now carry it, and all three have a test that goes red when the carry is
+    removed.
+  - **A turn-level total on the one durable per-turn record.** New migration
+    `query_artifacts_duration_ms_v1` (order 62) adds a nullable `duration_ms INTEGER` to
+    `query_artifacts`. A **new** migration rather than an edit to `wiki_mvp_phase0`: the
+    live node's `user_version` is already past it, and editing an applied migration in
+    place strands exactly the machine the measurement is for. Nullable rather than `0`,
+    because a row written before this shipped was genuinely never timed and a zero would
+    read as a fast turn. `pipeline.py` times the whole retrieve-to-persist path — retrieval,
+    disclosure filtering, the minimizer, the game layer, inference, DDR assembly, session
+    write — which is later and more complete than the DDR's own `timings.total_ms`. It
+    cannot include the INSERT that carries it; a value cannot time its own write.
+  - **The fifth §09 metric exists as a script, and it was run.**
+    `scripts/query_latency_percentiles.py` computes end-to-end p50/p95 per entrance,
+    read-only (`mode=ro` plus `PRAGMA query_only`), printing sample count and window beside
+    every number. Nearest-rank percentile, so every figure printed is a duration some real
+    request actually took. **Run against this node on 2026-08-19, 30-day window: home chat
+    0 samples; routines 77 samples, p50 59306 ms, p95 124148 ms, max 168793 ms; engine
+    per-scope-query 0 samples.** The zeros are the correct output and the script says so in
+    its own footer rather than being read as a failure — the column shipped empty today and
+    fills from the next turn onward.
+    - Two defects were found by running it rather than by reading it, and both are recorded
+      in the source. Timing routine runs from `payload_json.created_at` gave a p95 of
+      86,429,354 ms, because `created_at` is stamped when a run is *scheduled* and the delta
+      was measuring a cron interval; it times from `started_at` now. Runs closed by the
+      stale-run reaper then left a 23.8-hour maximum, because their `completed_at` is the
+      reaper's clock and not the work's; `--stale-run-minutes` (default 60, mirroring
+      `control_plane/config.py:577`) excludes them and reports them as `abandoned_runs`
+      rather than dropping them silently.
+    - Entrance is **not** attributable from `query_artifacts`: `requester_id` holds a grant
+      identity or the literal `"mcp"`, and the routines bridge sends `requester_id=None`.
+      The script derives the two entrances from `routine_runs` and from the front end's step
+      trace instead, and says so where a future reader would otherwise assume a split
+      exists.
+  - **Sabotage-checked.** Removing the `__post_init__` coercion, the `extend_public()`
+    carry, the store's coercion or the migration's idempotence guard turns 9 + 1 engine
+    tests red; the two control-plane carries turn 12 red; five separate sabotages of the
+    percentile script (empty-series returning `0`, `created_at` for `started_at`, no stale
+    ceiling, no leg-membership check, NULL folded in as zero) turn 6 red. All restored and
+    re-confirmed green.
+
 - `[E:query]` **The narrowing ledger's vocabulary is a closed set now, closed by the
   mechanism rather than by every call site's care.** `narrowing.py`'s docstring credited
   "enums by construction, not by care". An independent pass tested that by hand on
