@@ -243,6 +243,38 @@ def _rare_tokens(conn, tokens: List[str]) -> Dict[str, int]:
     return rare
 
 
+def _needle_token_groups(
+    needle_text: str, needle_parts: Optional[List[str]] = None
+) -> List[List[str]]:
+    """Residual content tokens PER PART of the request.
+
+    A multi-part request ("1) what did I ship 2) how did I sleep") has one needle set
+    per part, not one flattened set. The flattened set is what killed the gate in
+    production: `_rrf_fuse_summary_lists` vetoes when ANY token is unevidenced, so a
+    specific ask in part A empties the lane part B was asking about — the gate fires on
+    everything or nothing, and never on the one section it was meant to protect.
+
+    No parts (every caller today) → exactly one group from `needle_text`, which is the
+    pre-existing single-needle behaviour token-for-token.
+    """
+    parts = [str(p or "").strip() for p in (needle_parts or [])]
+    parts = [p for p in parts if p]
+    if not parts:
+        parts = [needle_text] if str(needle_text or "").strip() else []
+    return [_residual_content_tokens(_query_tokens(part)) for part in parts]
+
+
+def _rare_token_groups(conn, groups: List[List[str]]) -> List[Dict[str, int]]:
+    """`_rare_tokens` per group, over ONE df pass on the union.
+
+    Per-part gating must not cost a df lookup per part: the frequency of a token does
+    not depend on which part asked for it, so the union is looked up once and split.
+    """
+    union = list(dict.fromkeys(token for group in groups for token in group))
+    rare = _rare_tokens(conn, union)
+    return [{t: rare[t] for t in group if t in rare} for group in groups]
+
+
 def _item_text_blob(item: Dict[str, Any]) -> str:
     # `tag` carries a stat insight's entire content; omitting it meant NO stat
     # item could ever evidence a rare token, so aggregate asks with a low-df
@@ -740,6 +772,45 @@ def _prefer_time_window(
     return items
 
 
+def _label_time_windows(
+    items: List[Dict[str, Any]],
+    windows: Optional[List[Tuple[str, str]]],
+) -> int:
+    """Stamp each item with WHICH of a differenced ask's two windows it fell in.
+
+    Returns the number of items labelled. Without this, "what changed between last week
+    and this week" retrieves the union span and hands synthesis one undifferentiated
+    pile — the model then has to infer the split from per-item timestamps, which is the
+    same inference that produced "nothing from 2026-07-16" claims about indexed data.
+
+    The labels are the closed set `baseline` / `current` (earlier / later), never the
+    owner's phrasing, so they are safe on anything that leaves the node. Items dated
+    into the gap between the windows, and undated items, are left unlabelled: they
+    evidence neither side.
+    """
+    if not windows or len(windows) < 2 or not items:
+        return 0
+    from .planner import WINDOW_BASELINE, WINDOW_CURRENT
+
+    bounds = []
+    for label, (raw_start, raw_end) in zip((WINDOW_BASELINE, WINDOW_CURRENT), windows):
+        start, end = _parse_instant(raw_start), _parse_instant(raw_end)
+        if start is None or end is None:
+            return 0
+        bounds.append((label, start, end))
+    labelled = 0
+    for item in items:
+        ts = _parse_row_timestamp(item)
+        if ts is None:
+            continue
+        for label, start, end in bounds:
+            if start <= ts <= end:
+                item["time_window_label"] = label
+                labelled += 1
+                break
+    return labelled
+
+
 def _apply_filter_manifest_rows(
     rows: List[Dict[str, Any]],
     filter_manifest: Optional[Dict[str, Any]],
@@ -1031,6 +1102,7 @@ def _route_canonical_rows(
     limit: int,
     disclosure_tier: str,
     rare_query_tokens: Optional[List[str]] = None,
+    rare_query_token_groups: Optional[List[Dict[str, int]]] = None,
     browse_fallback: bool = False,
 ) -> List[Dict[str, Any]]:
     """Router: content tokens must MATCH rows (full-table SQL filter); a query
@@ -1095,12 +1167,25 @@ def _route_canonical_rows(
     # (df ≤ 2 — zero, or a porter-stem collision) — a term the corpus does not
     # contain means the specific thing isn't there. Weakly-rare df>2 framing
     # ('spend') and answer-shape words (stoplisted upstream) must not block.
-    rare_dfs = (
-        dict(rare_query_tokens)
-        if isinstance(rare_query_tokens, dict)
-        else {t: 0 for t in (rare_query_tokens or [])}
-    )
-    if any(df <= 2 and t in residual for t, df in rare_dfs.items()):
+    # Per part of a multi-part request: a term ABSENT from the corpus means only that
+    # part's specific thing isn't there. Blocking the browse for the whole table on it
+    # would let one part's unanswerable ask silently empty every other part's lane —
+    # the same flattening that disabled the fusion gate. Blocked only when every part
+    # is blocked; a part carrying no rare tokens is never blocked, so it keeps browse
+    # alive on its own.
+    if rare_query_token_groups is not None:
+        groups = [dict(g) for g in rare_query_token_groups]
+    else:
+        groups = [
+            dict(rare_query_tokens)
+            if isinstance(rare_query_tokens, dict)
+            else {t: 0 for t in (rare_query_tokens or [])}
+        ]
+
+    def _blocks(rare_dfs: Dict[str, int]) -> bool:
+        return any(df <= 2 and t in residual for t, df in rare_dfs.items())
+
+    if groups and all(_blocks(group) for group in groups):
         return []
     work_profile = manifest.scope_id == "work_context:read" and table == "profile_records"
     if _surface_intent(table, query_lower) or work_profile or browse_fallback:
@@ -1119,6 +1204,7 @@ def _load_canonical_summary_items(
     source_ids: List[str],
     disclosure_tier: str = "owner_raw",
     rare_query_tokens: Optional[List[str]] = None,
+    rare_query_token_groups: Optional[List[Dict[str, int]]] = None,
     browse_fallback: bool = False,
     plan=None,
     conn: Optional[Any] = None,
@@ -1147,6 +1233,7 @@ def _load_canonical_summary_items(
             limit=50,
             disclosure_tier=disclosure_tier,
             rare_query_tokens=rare_query_tokens,
+            rare_query_token_groups=rare_query_token_groups,
             browse_fallback=browse_fallback,
         )
         for row in rows:
@@ -2567,6 +2654,7 @@ def _rrf_fuse_summary_lists(
     now: Optional[datetime] = None,
     context_sources: frozenset = frozenset(),
     rare_tokens: Optional[List[str]] = None,
+    rare_token_groups: Optional[List[Dict[str, int]]] = None,
     min_per_source: Optional[Dict[str, int]] = None,
     ledger: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
@@ -2588,6 +2676,13 @@ def _rrf_fuse_summary_lists(
     justify a non-empty result by themselves. And when the query carried
     `rare_tokens` (a specific ask), at least one evidence item must actually
     contain one of them, or the honest answer is nothing.
+
+    `rare_token_groups` runs that gate ONCE PER PART of a multi-part request and vetoes
+    only when EVERY part is vetoed. The flat `rare_tokens` form is the one-part case and
+    is evaluated identically — but a multi-part request handed the flat form is a gate
+    that cannot work: one unevidenced token anywhere empties every part's lane, so a
+    report's specific section takes down its ordinary sections and the sections most in
+    need of the gate are exactly the ones it can never fire for.
 
     Three of those returns are empty and they are NOT the same empty: nothing was
     ever a candidate, or candidates existed and the rare gate vetoed them. Told
@@ -2615,51 +2710,81 @@ def _rrf_fuse_summary_lists(
                 reason="no_evidence_lane_returned_rows",
             )
         return []
-    if rare_tokens:
-        rare_dfs: Dict[str, int] = (
+    groups: List[Dict[str, int]] = []
+    if rare_token_groups is not None:
+        groups = [dict(g) for g in rare_token_groups]
+    elif rare_tokens:
+        groups = [
             dict(rare_tokens) if isinstance(rare_tokens, dict)
             else {t: 1 for t in rare_tokens}
-        )
+        ]
+    if groups:
         blobs = [_item_text_blob(item) for item in evidence_items]
 
         def _evidenced(token: str) -> bool:
             # Variant-aware: items saying 'journal' evidence a 'journaling' ask.
             return any(v in blob for v in _token_variants(token) for blob in blobs)
 
-        # Every effectively-absent token (df ≤ 2: zero, or a porter-stem
-        # collision like 'falconer'→'falcon' df 1) must be evidenced by the
-        # returned items themselves, or the ask is about something that does
-        # not exist. Answer-shape vocabulary ('cadence', 'frequency') is
-        # excluded upstream by the token stoplist — it describes the aggregate
-        # wanted, not row content.
-        unevidenced = [t for t, df in rare_dfs.items() if df <= 2 and not _evidenced(t)]
-        if unevidenced:
+        def _veto_for(rare_dfs: Dict[str, int]) -> Optional[Tuple[str, List[str]]]:
+            """(reason_slug, offending_tokens) if THIS part's ask is unanswerable."""
+            if not rare_dfs:
+                # No needles in this part — it never carried a specific ask, so it has
+                # nothing to be unanswerable about (a pure date-scoped "my week" is
+                # narrowed by its window alone).
+                return None
+            # Every effectively-absent token (df ≤ 2: zero, or a porter-stem
+            # collision like 'falconer'→'falcon' df 1) must be evidenced by the
+            # returned items themselves, or the ask is about something that does
+            # not exist. Answer-shape vocabulary ('cadence', 'frequency') is
+            # excluded upstream by the token stoplist — it describes the aggregate
+            # wanted, not row content.
+            unevidenced = [t for t, df in rare_dfs.items() if df <= 2 and not _evidenced(t)]
+            if unevidenced:
+                return "rare_token_unevidenced", unevidenced
+            # A query with SEVERAL rare tokens is a specific ask even when stem
+            # collisions keep each df nonzero ('years as a competitive falconer':
+            # falconer→'falcon' df 1, competitive df 26): if NONE of them is
+            # evidenced, nothing retrieved is about the ask. A single weakly-rare
+            # token ('journaling' df 5, 'cadence' df 1) never vetoes alone — the
+            # derived layers may answer it without containing the word.
+            if len(rare_dfs) >= 2 and not any(_evidenced(t) for t in rare_dfs):
+                return "no_rare_token_evidenced", sorted(rare_dfs)
+            return None
+
+        vetoes = [_veto_for(group) for group in groups]
+        if all(veto is not None for veto in vetoes):
+            # Every part is unanswerable — the same honest empty as before. The
+            # reported reason is the first part's, which for a one-part request is
+            # byte-identical to the pre-multi-needle ledger entry.
+            reason, tokens = vetoes[0]  # type: ignore[misc]
             if ledger is not None:
                 ledger.empty(
                     _N.CAUSE_GATE_VETOED,
                     stage=_N.STAGE_RARE_GATE,
-                    reason="rare_token_unevidenced",
+                    reason=reason,
                     dropped=len(evidence_items),
                     # Local only — the tokens are the owner's words.
-                    detail={"tokens": unevidenced, "n_rare": len(rare_dfs)},
+                    detail={
+                        "tokens": tokens,
+                        "n_rare": len(groups[0]),
+                        "parts_vetoed": len(groups),
+                        "n_parts": len(groups),
+                    },
                 )
             return []
-        # A query with SEVERAL rare tokens is a specific ask even when stem
-        # collisions keep each df nonzero ('years as a competitive falconer':
-        # falconer→'falcon' df 1, competitive df 26): if NONE of them is
-        # evidenced, nothing retrieved is about the ask. A single weakly-rare
-        # token ('journaling' df 5, 'cadence' df 1) never vetoes alone — the
-        # derived layers may answer it without containing the word.
-        if len(rare_dfs) >= 2 and not any(_evidenced(t) for t in rare_dfs):
-            if ledger is not None:
-                ledger.empty(
-                    _N.CAUSE_GATE_VETOED,
-                    stage=_N.STAGE_RARE_GATE,
-                    reason="no_rare_token_evidenced",
-                    dropped=len(evidence_items),
-                    detail={"tokens": sorted(rare_dfs), "n_rare": len(rare_dfs)},
-                )
-            return []
+        if ledger is not None and any(veto is not None for veto in vetoes):
+            # SOME part was unanswerable and the rest were not. Before per-part
+            # needles this was an empty answer for all of them; now it is a narrowing
+            # worth naming, so a section that genuinely has nothing can still say so.
+            ledger.record(
+                _N.STAGE_RARE_GATE,
+                "scoped",
+                "rare_gate_partial_veto",
+                detail={
+                    "parts_vetoed": [i for i, v in enumerate(vetoes) if v is not None],
+                    "n_parts": len(groups),
+                },
+            )
 
     decay_on = fusion_recency_enabled()
     half_life = fusion_recency_half_life_days()
@@ -2870,6 +2995,7 @@ def _blackhole_policy_for_clusters(
 def _build_summary_items(
     *,
     needle_text: str = "",
+    needle_parts: Optional[List[str]] = None,
     manifest: ScopeResolutionManifest,
     adapters: AdapterBundle,
     query_text: str,
@@ -2889,6 +3015,7 @@ def _build_summary_items(
     """
     items = _build_summary_items_unfiltered(
         needle_text=needle_text,
+        needle_parts=needle_parts,
         manifest=manifest,
         adapters=adapters,
         query_text=query_text,
@@ -2921,6 +3048,7 @@ def _build_summary_items(
 def _build_summary_items_unfiltered(
     *,
     needle_text: str = "",
+    needle_parts: Optional[List[str]] = None,
     manifest: ScopeResolutionManifest,
     adapters: AdapterBundle,
     query_text: str,
@@ -2979,6 +3107,17 @@ def _build_summary_items_unfiltered(
             for t, df in rare_query_tokens.items()
             if t not in _FIRST_PERSON_SHAPE_TOKENS
         }
+    # The same needles, split per part, for the gates below. One df pass over the
+    # union — the flat set above stays exactly what it was, so a single-part request
+    # produces one group holding the identical tokens.
+    rare_groups = _rare_token_groups(
+        bundle_conn, _needle_token_groups(needle_text or query_text, needle_parts)
+    )
+    if first_person and rare_groups:
+        rare_groups = [
+            {t: df for t, df in group.items() if t not in _FIRST_PERSON_SHAPE_TOKENS}
+            for group in rare_groups
+        ]
 
     goal_items: List[Dict[str, Any]] = []
     if prefer_goals or work_scope:
@@ -3004,6 +3143,7 @@ def _build_summary_items_unfiltered(
         source_ids=source_ids,
         disclosure_tier=disclosure_tier,
         rare_query_tokens=rare_query_tokens,
+        rare_query_token_groups=rare_groups,
         plan=plan,
         conn=bundle_conn,
         exposure_visible=exposure_visible,
@@ -3408,6 +3548,7 @@ def _build_summary_items_unfiltered(
                 | (set() if recency_intent else {"recent"})
             ),
             rare_tokens=rare_query_tokens,
+            rare_token_groups=rare_groups,
             now=now,
             min_per_source=min_per,
             ledger=ledger,
@@ -3741,6 +3882,15 @@ class DefaultSignalRetrievalAdapter:
         # chat, which holds the raw prompt AND the distilled version) may narrow it. The
         # planner, the embeddings and the classifier below deliberately keep query_text.
         needle_text = str(request.needle_text or "").strip() or query_text
+        # The same needles PER PART. Empty (every caller that does not opt in) →
+        # `_needle_token_groups` yields the single whole-request group, so the gates
+        # below behave exactly as they did before multi-needle.
+        needle_parts = [
+            str(p or "").strip()
+            for p in (getattr(request, "needle_parts", None) or [])
+            if str(p or "").strip()
+        ]
+        needle_groups = _needle_token_groups(needle_text, needle_parts)
         #: Optional narrowing ledger — mutated in place by the stages below. `None`
         #: (every caller that does not opt in) leaves this method byte-identical.
         ledger = request.ledger
@@ -3918,14 +4068,17 @@ class DefaultSignalRetrievalAdapter:
         if mode == "raw":
             rows: List[Dict[str, Any]] = []
             raw_rare_tokens: List[str] = []
+            raw_rare_groups: Optional[List[Dict[str, int]]] = None
             if query_text:
                 try:
                     raw_conn_for_df = getattr(self._adapters.signal, "_conn", None)
                     raw_rare_tokens = _rare_tokens(
                         raw_conn_for_df, _residual_content_tokens(_query_tokens(needle_text))
                     )
+                    raw_rare_groups = _rare_token_groups(raw_conn_for_df, needle_groups)
                 except Exception:
                     raw_rare_tokens = []
+                    raw_rare_groups = None
             for table in manifest.canonical_tables:
                 table_rows = _route_canonical_rows(
                     self._adapters,
@@ -3936,6 +4089,7 @@ class DefaultSignalRetrievalAdapter:
                     limit=100,
                     disclosure_tier=request.disclosure_tier,
                     rare_query_tokens=raw_rare_tokens,
+                    rare_query_token_groups=raw_rare_groups,
                 )
                 table_rows = [_redact_row_for_scope(manifest.scope_id, table, row) for row in table_rows]
                 touched.append("canonical")
@@ -3988,6 +4142,7 @@ class DefaultSignalRetrievalAdapter:
             if query_text:
                 summaries = _build_summary_items(
                     needle_text=needle_text,
+                    needle_parts=needle_parts,
                     manifest=manifest,
                     adapters=self._adapters,
                     query_text=query_text,
@@ -4012,6 +4167,32 @@ class DefaultSignalRetrievalAdapter:
                         window["from"], window["to"] = plan.time_range
                     if plan.as_of:
                         window["as_of"] = plan.as_of
+                    # R2: a differenced ask names both sides, and each item says which
+                    # side it evidences. Synthesis can then difference them instead of
+                    # inferring the split from timestamps it was never told the meaning
+                    # of. `from`/`to` above stay the union span, so a consumer that
+                    # ignores `windows` sees the period that was actually searched.
+                    planned_windows = list(getattr(plan, "time_windows", None) or [])
+                    if len(planned_windows) >= 2:
+                        from .planner import WINDOW_BASELINE, WINDOW_CURRENT
+
+                        labelled = _label_time_windows(summaries, planned_windows)
+                        window["comparison"] = True
+                        window["windows"] = [
+                            {"label": label, "from": bounds[0], "to": bounds[1]}
+                            for label, bounds in zip(
+                                (WINDOW_BASELINE, WINDOW_CURRENT), planned_windows
+                            )
+                        ]
+                        retrieval_meta["comparison_windows"] = len(window["windows"])
+                        retrieval_meta["comparison_items_labelled"] = labelled
+                        if ledger is not None:
+                            ledger.record(
+                                _N.STAGE_PLANNER,
+                                "scoped",
+                                "multi_window_comparison",
+                                detail={"windows": [list(w) for w in planned_windows]},
+                            )
                     packet["time_window"] = window
             else:
                 summaries = []
@@ -4057,14 +4238,19 @@ class DefaultSignalRetrievalAdapter:
         elif mode == "inference":
             scores: List[Dict[str, Any]] = []
             inference_rare: List[str] = []
+            inference_rare_groups: Optional[List[Dict[str, int]]] = None
             if query_text:
                 try:
                     inference_rare = _rare_tokens(
                         getattr(self._adapters.signal, "_conn", None),
                         _residual_content_tokens(_query_tokens(needle_text)),
                     )
+                    inference_rare_groups = _rare_token_groups(
+                        getattr(self._adapters.signal, "_conn", None), needle_groups
+                    )
                 except Exception:
                     inference_rare = []
+                    inference_rare_groups = None
             try:
                 from ..config.settings import exposure_profile_visible as _exposure_visible
 
@@ -4081,6 +4267,7 @@ class DefaultSignalRetrievalAdapter:
                 source_ids=source_ids,
                 disclosure_tier=request.disclosure_tier,
                 rare_query_tokens=inference_rare,
+                rare_query_token_groups=inference_rare_groups,
                 browse_fallback=True,
                 plan=plan,
                 conn=getattr(self._adapters.signal, "_conn", None),

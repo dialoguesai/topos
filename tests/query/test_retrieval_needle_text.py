@@ -68,6 +68,25 @@ class TestTheSeparationHolds:
             "will keep gating lanes empty there"
         )
 
+    def test_the_per_part_site_opts_in_by_name(self) -> None:
+        """The FOURTH site, added deliberately by P3 multi-needle.
+
+        `_needle_token_groups` tokenises each PART instead of the whole request, so it
+        cannot use the `needle_text` literal the three counted sites use — which is
+        exactly why it is asserted separately rather than by relaxing the count above.
+        It must still be fed the needles, never the raw request text.
+        """
+        src = self._retrieval_source()
+        assert "def _needle_token_groups(" in src
+        assert "_residual_content_tokens(_query_tokens(part))" in src
+        # It is reached only via the needles, in `retrieve` and in the summary builder.
+        assert "_needle_token_groups(needle_text, needle_parts)" in src
+        assert "_needle_token_groups(needle_text or query_text, needle_parts)" in src
+        assert "_needle_token_groups(query_text" not in src, (
+            "the per-part site reads the raw request text; every part would carry the "
+            "instructional words the second field exists to strip"
+        )
+
     def test_the_pipeline_keeps_the_shadow_on_the_raw_text(self) -> None:
         from pathlib import Path
 
@@ -79,3 +98,39 @@ class TestTheSeparationHolds:
             "measured to make it abstain, and it would poison the shadow training set"
         )
         assert "_shadow_observe(retrieval_text" not in src
+
+
+class TestThePartsAreTheSameSecondField:
+    """`needle_parts` splits the needles; it must not become a third text that reaches
+    the planner, the embedding or the classifier. Same separation, per part."""
+
+    def test_the_field_is_optional_and_defaults_to_none(self) -> None:
+        req = RetrievalRequest(manifest=object(), access_mode="summary", query_text="q")
+        assert req.needle_parts is None
+
+    def test_absent_parts_are_one_part_from_the_needles(self) -> None:
+        from topos.query.retrieval import _needle_token_groups
+
+        assert _needle_token_groups("dialogues topos", None) == _needle_token_groups(
+            "dialogues topos", []
+        )
+        assert len(_needle_token_groups("dialogues topos", None)) == 1
+
+    def test_parts_never_reach_the_planner_or_the_embedding(self) -> None:
+        from pathlib import Path
+
+        import topos.query.retrieval as module
+
+        src = Path(module.__file__).read_text()
+        assert "build_query_plan(get_db_connection(), needle_parts" not in src
+        assert "semantic_query = needle_parts" not in src
+
+    def test_the_pipeline_sends_parts_only_to_the_needles(self) -> None:
+        from pathlib import Path
+
+        import topos.query.pipeline as module
+
+        src = Path(module.__file__).read_text()
+        assert "needle_parts=needle_parts or None" in src
+        assert "_shadow_observe(retrieval_parts" not in src
+        assert "query_text=retrieval_parts" not in src

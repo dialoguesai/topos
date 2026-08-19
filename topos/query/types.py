@@ -37,6 +37,21 @@ class RetrievalRequest:
     #: handing them a keyword digest was measured on 2026-08-16 to lose time windows and
     #: make the classifier abstain on keyword soup.
     needle_text: Optional[str] = None
+    #: The SAME needles, split PER PART of a multi-part request. One flattened needle
+    #: set cannot gate a multi-part request: the rare gate vetoes the whole answer when
+    #: ANY token is unevidenced, so part A's specific ask ("the Threnody-7 rewrite")
+    #: empties part B's lane ("how did I sleep"). On a six-section report that is the
+    #: gate silently off — it fires on every section or none, and the sections that
+    #: needed protection from filler are exactly the ones it cannot reach.
+    #:
+    #: Each entry is the subject of one part, in request order. The gate runs once per
+    #: entry and the request is vetoed only when EVERY part is vetoed. Absent (the
+    #: default) means one part — `needle_text or query_text` — which is byte-identical
+    #: to the pre-multi-needle behaviour.
+    #:
+    #: Same separation as `needle_text`: needles ONLY. The planner, the embeddings and
+    #: the scope classifier keep the owner's sentence.
+    needle_parts: Optional[List[str]] = None
     filter_manifest: Optional[Dict[str, Any]] = None
     field_transforms: Optional[List[Any]] = None
     skip_retrieval: bool = False
