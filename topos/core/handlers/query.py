@@ -139,6 +139,20 @@ async def handle_query(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                 filter_manifest=filter_manifest,
             )
         except ManifestValidationError as exc:
+            # The one denial that never reaches the orchestrator, so nothing downstream
+            # of here writes its ledger or its session id — this allow-list is the whole
+            # response. It used to emit four keys and the contract declares eight; the
+            # two it silently omitted (`query_session_id`, `narrowing`) are the two a
+            # client needs to say WHY, which is the opacity the ledger exists to end.
+            # `deny_reason` stays at top level: that is where every pipeline denial puts
+            # it, and this path writes no audit block for a seam to recover it from.
+            from ...query.narrowing import CAUSE_SCOPE_DENIED, NarrowingLedger, STAGE_GRANT
+
+            session_id = payload.get("query_session_id") or payload.get("session_id")
+            ledger = NarrowingLedger()
+            # `exc.code` is a closed-set slug (`missing_scope`, `unknown_scope`,
+            # `scope_mismatch`, ...) and `record` re-slugs it regardless.
+            ledger.empty(CAUSE_SCOPE_DENIED, stage=STAGE_GRANT, reason=exc.code)
             return {
                 "id": req_id,
                 "status": "ok",
@@ -146,7 +160,9 @@ async def handle_query(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
                     "turn_outcome": "denied",
                     "deny_reason": exc.code,
                     "public_result": None,
-                    "session_id": payload.get("query_session_id") or payload.get("session_id"),
+                    "session_id": session_id,
+                    "query_session_id": session_id,
+                    "narrowing": {**ledger.as_public(), "result_empty": True},
                 },
             }
         # Client-supplied reference instant (offset-aware ISO): "yesterday"

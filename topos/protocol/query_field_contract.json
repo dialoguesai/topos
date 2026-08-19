@@ -33,7 +33,7 @@
     }
   },
   "response": {
-    "$comment": "Engine -> client. `required_return` fields must survive every normalisation step on the way back, including the front end's own.",
+    "$comment": "Engine -> client. `required_return` fields must survive every normalisation step on the way back, including the front end's own. Each repo drives its own return-path guard off THIS list — a literal spelled in a test file can never fail when the list grows, which is how `deny_reason` sat declared and uncovered in all three repos while the engine's manifest-denial path dropped it on every real denial.",
     "required_return": [
       "turn_outcome",
       "public_result",
@@ -44,8 +44,19 @@
       "deny_reason",
       "narrowing"
     ],
+    "originates": {
+      "$comment": "Which field is emitted by the ENGINE and which is echoed by the transport. Both must survive every seam — that is what `required_return` means — but only the engine-originated ones can be asserted on an engine payload. Recorded here rather than skipped in test code, for the same reason `consumed_before_handler` is: an exemption argued in the protocol is one somebody decided, and the next one has to be argued too.",
+      "scope_id": "transport — the engine answers inside a scope it was told; the control plane echoes it from the request it routed",
+      "access_mode": "transport — the disclosure tier is the caller's; the control plane echoes it back beside the answer"
+    },
+    "deny_reason_location": {
+      "$comment": "Canonical location of `deny_reason` on an engine payload: TOP LEVEL. Every denial the pipeline returns puts it there (`pipeline.py` — session mismatch, empty query, negotiation exhausted, mode ceiling, classifier, retrieval error) and so does the handler's manifest-validation denial. `audit.deny_reason` is a secondary copy written by `build_query_audit_event`, and it is absent entirely on the manifest-validation path — a seam that recovers the reason ONLY from the audit block drops it on exactly the denial the owner is most likely to hit.",
+      "canonical": "top_level",
+      "fallback": "audit.deny_reason"
+    },
     "notes": {
       "narrowing": "the ledger: what each stage removed and why. Two return-path allow-lists would have swallowed it silently.",
+      "deny_reason": "why the turn was refused. A denial without it is the opacity this redesign exists to end: an ungranted scope reads exactly like a scope with no data.",
       "public_result.empty_cause": "which of five reasons a lane came back empty; carried inside public_result so it reaches synthesis"
     }
   }
