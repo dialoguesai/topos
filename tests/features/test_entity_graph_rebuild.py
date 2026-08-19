@@ -304,3 +304,32 @@ def test_rebuild_holds_gate_only_for_write_phases(conn, monkeypatch):
     assert observed.get("gate_held_during_write") is True, (
         "edge rewrite ran without the write gate — writes must stay serialized"
     )
+
+
+def test_rebuild_sweeps_stale_materialized_edges_and_reports_count(conn):
+    """End-to-end mz lifecycle through rebuild_entity_graph: a goal materializes
+    into owner-pursues; retracting it at source removes the edge on the NEXT
+    rebuild via the end-of-run sweep (mz_swept in the report), never by an
+    up-front wipe that would leave mid-rebuild readers a goal-less graph."""
+    r = EntityResolver(conn)
+    owner = r._create_entity("Owner", "person")
+    conn.execute("UPDATE entities SET is_self=1 WHERE entity_id=?", (owner,))
+    conn.execute(
+        "INSERT INTO user_goals (goal_id, record_id, source_id, goal_text, payload_json) "
+        "VALUES ('g1', 'rec-g', 'chatgpt_file_ingestion', 'Ship the graph fix', '{}')"
+    )
+    conn.commit()
+
+    report = rebuild_entity_graph(conn)
+    assert report["goal_edges"] >= 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM entity_edges WHERE edge_type='pursues' AND valid_to IS NULL"
+    ).fetchone()[0] == 1
+
+    conn.execute("DELETE FROM user_goals WHERE goal_id='g1'")
+    conn.commit()
+    report_after = rebuild_entity_graph(conn)
+    assert report_after["mz_swept"] >= 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM entity_edges WHERE edge_type='pursues'"
+    ).fetchone()[0] == 0
