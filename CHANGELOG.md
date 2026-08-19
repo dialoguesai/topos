@@ -94,6 +94,45 @@ The machine-readable twin of each release is
 
 ### Added
 
+- `[E:query]` **Exclusion is enforced in the retrieval plane.** The product shows
+  exclusion off as a headline capability — *"everything about my week, but nothing
+  from the therapy journal"*, *"exclude anything involving Sarah"* — and the engine
+  had nowhere for that sentence to become a decision. The only place it could
+  plausibly have gone is the synthesis prompt, and a model that has been shown the
+  journal entry and asked nicely to ignore it is not an enforcement mechanism: the
+  entry is one paraphrase from the answer, and it has already entered the context
+  packet, the stored artifact and the audit trail. `topos/query/exclusion.py`
+  compiles the prose into a closed typed structure and applies it inside
+  `retrieve()`, alongside the disclosure tiers, the black-hole policy and
+  `_strip_forbidden` — the plane that already runs before synthesis — rather than as
+  a second enforcement plane beside it. Excluded content is gone before the
+  disclosure filter, the game layer, the artifact cache and the prompt.
+  - **Closed vocabulary, or nothing.** A fragment compiles to a `category` (a slug
+    over the scope registry's canonical tables, dimensions and source ids), a `tier`
+    (a row-level content class that actually exists — today `nsfw`, via the ingest
+    flag `exclude_nsfw_rows_for_grantee` already reads), or an `entity` resolved
+    through the same entity plane the black-hole feature uses, filtered by both
+    halves of it: the `entity_mentions` join and the normalized text scan.
+  - **Ambiguity is a refusal to guess.** A fragment that compiles to none of those
+    is reported as *not applied* on the packet (`exclusion.enforced: false`, plus a
+    `not_applied` count) and in the ledger, and the answer is told. A name the entity
+    plane cannot bind is *not* turned into a bare substring filter — that would drop
+    rows on a common word and claim enforcement, which is worse than not enforcing.
+  - The ledger records `disclosure / excluded / exclusion_{category,tier,entity}`
+    with a dropped count, so the owner can see the exclusion was honoured and how
+    much it removed; an exclusion that empties the turn declares `scope_denied`, the
+    same call the black-hole policy makes, because "no data" would be a lie about the
+    owner's own instruction. Public entries are closed-set slugs and integers: an
+    excluded person is `named_entity`, never a name, and uncompiled fragments live
+    only in the local-only `detail`.
+  - Cache-safe by construction rather than by a new key: the exclusion is parsed from
+    `query_text`, which `compute_intent_hash` already covers, so an unexcluded
+    artifact can never be replayed for an excluded ask.
+  - A request with no exclusion leaves the packet byte-identical and gains no block.
+    The negation leads are deliberately explicit (a bare "no X" is not an exclusion),
+    because a false positive here is silent under-retrieval on an ordinary question.
+  - No migration: parse and filter only, nothing stored changes shape.
+
 - `[E:query]` **A differenced question keeps both of its windows.** "What changed
   between last week and this week" resolved to a single time range, because
   `_relative_time_range` returns the *first* relative phrase it matches and stops —
