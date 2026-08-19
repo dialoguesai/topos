@@ -30,6 +30,13 @@ The machine-readable twin of each release is
   - Latent, not live: `scripts/release_smoke_test.py` was checked on 2026-08-18
     and never reaches the query path (`/`, `/healthcheck`, `/version` only) —
     the log's mtime and size were unchanged across a full run.
+  - `scripts/run_query_eval.py` was the one harness genuinely exposed — its
+    engine path runs `QueryPipeline` in-process against the operator's own
+    `~/.topos` database — and now declines observation for itself. Absent or
+    blank is read as "no opinion" there, the same way `enabled()` reads it, so
+    an explicit `TOPOS_SCOPE_SHADOW=1` still opts a run in. It governs the
+    in-process engine path only: under `--mcp` the observing happens in the
+    node's process, under the node's own flag.
 
 ## [1.3.22] — 2026-08-18
 
