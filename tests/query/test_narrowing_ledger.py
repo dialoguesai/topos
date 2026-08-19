@@ -240,6 +240,56 @@ class TestTheResponseCarriesIt:
         assert (result.get("narrowing") or {}).get("empty_cause") == N.CAUSE_SCOPE_DENIED
 
     @pytest.mark.asyncio
+    async def test_a_result_that_is_not_empty_carries_no_empty_cause(self) -> None:
+        """The turn-level verdict may not contradict the payload it travels with.
+
+        ``empty_cause`` answers "why did this come back with nothing". A stage can
+        empty its own lane without emptying the turn — the rare gate returns ``[]``
+        for evidence while the derived lanes still produce summaries — and publishing
+        ``gate_vetoed`` beside a payload that has summaries in it is the ledger and
+        the result telling two stories about one turn. The front end's coverage map
+        believes the ledger by construction, so it would label that section "not
+        retrieved" over data sitting in the same response: the false-absence bug,
+        re-entered through the fix for it.
+
+        The gate's ledger ENTRY survives — only the turn-level claim is withheld.
+        """
+        from topos.query.pipeline import _attach_narrowing
+
+        ledger = NarrowingLedger()
+        ledger.empty(
+            N.CAUSE_GATE_VETOED, stage=N.STAGE_RARE_GATE, reason="rare_token_unevidenced"
+        )
+        assert ledger.empty_cause == N.CAUSE_GATE_VETOED
+
+        result = _attach_narrowing(
+            {
+                "turn_outcome": "live_query",
+                "public_result": {"summaries": [{"topic": "sleep"}]},
+            },
+            ledger,
+        )
+        narrowing = result["narrowing"]
+        assert narrowing["result_empty"] is False
+        assert "empty_cause" not in narrowing
+        # The stage still admits what it did; only the turn-level verdict is withheld.
+        assert [e["stage"] for e in narrowing["ledger"]] == [N.STAGE_RARE_GATE]
+
+    @pytest.mark.asyncio
+    async def test_an_empty_result_still_publishes_its_cause(self) -> None:
+        from topos.query.pipeline import _attach_narrowing
+
+        ledger = NarrowingLedger()
+        ledger.empty(
+            N.CAUSE_GATE_VETOED, stage=N.STAGE_RARE_GATE, reason="rare_token_unevidenced"
+        )
+        result = _attach_narrowing(
+            {"turn_outcome": "live_query", "public_result": {"summaries": []}}, ledger
+        )
+        assert result["narrowing"]["result_empty"] is True
+        assert result["narrowing"]["empty_cause"] == N.CAUSE_GATE_VETOED
+
+    @pytest.mark.asyncio
     async def test_the_ledger_never_carries_query_text(self, orchestrator) -> None:
         from topos.query.manifest_validation import resolve_scope_manifest
 
