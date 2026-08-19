@@ -11,6 +11,24 @@ The machine-readable twin of each release is
 
 ### Fixed
 
+- `[E:graph]` **Goals (and every materialized edge) no longer vanish from the
+  graph while a rebuild runs.** The materialized-edge lifecycle deleted every
+  mz-tagged edge up front (`fact_materializer`), then re-created facts, goals,
+  places and conversations lane by lane — and the goal lane alone takes minutes
+  (it embeds every goal text to cluster near-duplicates). Each enrichment
+  completion arms the debounced graph refresh, so a busy node rebuilds nearly
+  back-to-back and the committed graph spent a large share of wall-clock time
+  with **no `pursues`/`relates_to`/`located_at`/`mentions` edges at all**: any
+  `/entities/graph` read in that window rendered a goal-less graph and a bare
+  owner node (observed live: 462 edges mid-rebuild vs 3,041 after). The
+  lifecycle is now upsert-then-sweep — lanes update surviving edges in place
+  and record what they touched, and `rebuild_entity_graph` sweeps stale mz
+  edges once at the END, only after every lane succeeded (a failed lane
+  retains its old edges rather than losing them to a wipe it never followed).
+  Readers now see at worst a few-minutes-stale edge, never a missing one.
+  Same discipline `rebuild_evidence_edges` already applied to co-occurrence
+  ("the delete and insert share one hold"). Report gains `mz_swept`.
+
 - `[E:query]` **The scope-shadow env flag is authoritative in both directions.**
   `enabled()` checked the truthy spellings of `TOPOS_SCOPE_SHADOW` and otherwise
   fell through to the `~/.topos/scope_shadow.on` flag file, so

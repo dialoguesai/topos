@@ -12,8 +12,11 @@ derived stores the owner expects to SEE on their graph:
                              entity mentions, conversation -mentions-> entity,
                              person -participates_in-> conversation.
 
-All edges are mz-tagged so the materializer's full-refresh cycle owns their
-lifecycle, carry actor_role for the attribution overlay (goals are authored —
+All edges are mz-tagged so the rebuild's upsert-then-sweep cycle owns their
+lifecycle (fact_materializer.sweep_stale_materialized_edges removes whatever a
+finished rebuild no longer asserts — nothing is wiped up front, so readers
+never catch the graph with its goals missing), carry actor_role for the
+attribution overlay (goals are authored —
 they come from role-gated extraction of the owner's own words; presence and
 participation are participated; witnessed conversation content is observed),
 and every enricher skips cleanly when its feed table is absent. Node kinds
@@ -171,7 +174,10 @@ def _cluster_goal_keys(grouped: Dict[str, Dict], embed_fn) -> Dict[str, list]:
 
 
 def _materialize_goals(
-    conn: sqlite3.Connection, owner: Optional[str], goal_embed_fn=None
+    conn: sqlite3.Connection,
+    owner: Optional[str],
+    goal_embed_fn=None,
+    touched_edges: Optional[set] = None,
 ) -> int:
     if not _table_exists(conn, "user_goals"):
         return 0
@@ -203,6 +209,11 @@ def _materialize_goals(
     clusters = _cluster_goal_keys(grouped, goal_embed_fn)
 
     edges = 0
+
+    def _record_touched(edge_id: Optional[str]) -> None:
+        if touched_edges is not None and edge_id:
+            touched_edges.add(edge_id)
+
     # Only the edge/node writes hold the gate — the goal read + embedding
     # cluster above ran ungated (that cluster held the gate 104.9s on
     # 2026-08-08 when this whole function sat inside one caller-side hold).
@@ -232,13 +243,13 @@ def _materialize_goals(
             first_at = events[0] if events else None
             last_at = events[-1] if events else None
             if owner:
-                _upsert_materialized_edge(
+                _record_touched(_upsert_materialized_edge(
                     conn, src=owner, dst=node_id, edge_type=EDGE_PURSUES,
                     weight=min(_MZ_WEIGHT_FLOOR + 0.25 * (occurrences - 1), 6.0),
                     valid_from=first_at, valid_to=None, last_event_at=last_at,
                     statement=f"pursues: {rep['text'][:80]}" + (f" (×{occurrences})" if occurrences > 1 else ""),
                     source_object_id=rep["goal_id"], actor_role="authored",
-                )
+                ))
                 edges += 1
             # Entities mentioned on the goal's provenance records relate to the goal.
             seen_entities: Dict[str, str] = {}
@@ -255,12 +266,12 @@ def _materialize_goals(
                     elif prev is None:
                         seen_entities.setdefault(str(ent_id), "")
             for ent_id, ev in seen_entities.items():
-                _upsert_materialized_edge(
+                _record_touched(_upsert_materialized_edge(
                     conn, src=node_id, dst=ent_id, edge_type=EDGE_RELATES_TO,
                     weight=_MZ_WEIGHT_FLOOR, valid_from=ev or first_at, valid_to=None,
                     statement="goal relates to (from its source record)",
                     source_object_id=rep["goal_id"], actor_role="authored",
-                )
+                ))
                 edges += 1
         # Commit before releasing: an open write transaction that outlives the
         # hold inverts lock order against the next gate holder.
@@ -268,13 +279,21 @@ def _materialize_goals(
     return edges
 
 
-def _materialize_places(conn: sqlite3.Connection, owner: Optional[str]) -> int:
+def _materialize_places(
+    conn: sqlite3.Connection,
+    owner: Optional[str],
+    touched_edges: Optional[set] = None,
+) -> int:
     if not owner or not _table_exists(conn, "location_events"):
         return 0
     from .resolver import EntityResolver, is_valid_entity_surface
 
     resolver = EntityResolver(conn)
     edges = 0
+
+    def _record_touched(edge_id: Optional[str]) -> None:
+        if touched_edges is not None and edge_id:
+            touched_edges.add(edge_id)
     rows = conn.execute(
         """
         SELECT place_name, COUNT(*), MIN(event_at), MAX(event_at)
@@ -298,12 +317,12 @@ def _materialize_places(conn: sqlite3.Connection, owner: Optional[str]) -> int:
                 continue
             # Repeat presence outweighs a single text mention: scale with visits.
             weight = min(_MZ_WEIGHT_FLOOR + float(visits) * 0.25, 10.0)
-            _upsert_materialized_edge(
+            _record_touched(_upsert_materialized_edge(
                 conn, src=owner, dst=place_id, edge_type="located_at",
                 weight=weight, valid_from=first_at, valid_to=None,
                 statement=f"visited {name} ×{visits}", source_object_id=f"loc:{name[:40]}",
                 actor_role="participated",
-            )
+            ))
             conn.execute(
                 """
                 UPDATE entity_edges
@@ -317,10 +336,16 @@ def _materialize_places(conn: sqlite3.Connection, owner: Optional[str]) -> int:
     return edges
 
 
-def _materialize_conversations(conn: sqlite3.Connection) -> int:
+def _materialize_conversations(
+    conn: sqlite3.Connection, touched_edges: Optional[set] = None
+) -> int:
     if not _table_exists(conn, "conversations") or not _table_exists(conn, "conversation_messages"):
         return 0
     edges = 0
+
+    def _record_touched(edge_id: Optional[str]) -> None:
+        if touched_edges is not None and edge_id:
+            touched_edges.add(edge_id)
     # Conversations that actually mention entities get a node; empty ones don't
     # clutter the graph.
     rows = conn.execute(
@@ -337,13 +362,13 @@ def _materialize_conversations(conn: sqlite3.Connection) -> int:
             label = conv_id if len(conv_id) <= 40 else conv_id[:37] + "…"
             _ensure_node(conn, f"conv_{conv_id}", label, "conversation")
         for conv_id, entity_id, count, last_at in rows:
-            _upsert_materialized_edge(
+            _record_touched(_upsert_materialized_edge(
                 conn, src=f"conv_{conv_id}", dst=str(entity_id), edge_type=EDGE_MENTIONS,
                 weight=min(_MZ_WEIGHT_FLOOR + float(count) * 0.25, 8.0),
                 valid_from=last_at, valid_to=None,
                 statement=f"mentioned in conversation ×{count}",
                 source_object_id=f"conv:{conv_id}", actor_role="observed",
-            )
+            ))
             edges += 1
         if _table_exists(conn, "conversation_participants"):
             for conv_id, contact_id in conn.execute(
@@ -357,30 +382,34 @@ def _materialize_conversations(conn: sqlite3.Connection) -> int:
                 ).fetchone()
                 if not ent:
                     continue
-                _upsert_materialized_edge(
+                _record_touched(_upsert_materialized_edge(
                     conn, src=str(ent[0]), dst=f"conv_{conv_id}", edge_type=EDGE_PARTICIPATES,
                     weight=_MZ_WEIGHT_FLOOR, valid_from=None, valid_to=None,
                     statement="participated in conversation",
                     source_object_id=f"conv:{conv_id}", actor_role="participated",
-                )
+                ))
                 edges += 1
         commit_connection(conn)
     return edges
 
 
 def materialize_graph_enrichments(
-    conn: sqlite3.Connection, goal_embed_fn=None
+    conn: sqlite3.Connection, goal_embed_fn=None, touched_edges: Optional[set] = None
 ) -> Dict[str, int]:
     """Materialize goals + places + conversations. Idempotent (mz upserts).
 
     ``goal_embed_fn`` overrides the goal-clustering embedder (tests); None
     uses the node's embedding model, falling back to token similarity.
+    ``touched_edges`` collects every written edge_id for the rebuild's
+    end-of-run stale sweep (see fact_materializer.sweep_stale_materialized_edges).
     """
     owner = _owner_entity(conn)
     out = {
-        "goal_edges": _materialize_goals(conn, owner, goal_embed_fn=goal_embed_fn),
-        "place_edges": _materialize_places(conn, owner),
-        "conversation_edges": _materialize_conversations(conn),
+        "goal_edges": _materialize_goals(
+            conn, owner, goal_embed_fn=goal_embed_fn, touched_edges=touched_edges
+        ),
+        "place_edges": _materialize_places(conn, owner, touched_edges=touched_edges),
+        "conversation_edges": _materialize_conversations(conn, touched_edges=touched_edges),
     }
     # Each phase committed inside its own hold; this only catches a stray
     # implicit transaction.
