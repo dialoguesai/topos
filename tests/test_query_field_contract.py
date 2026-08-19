@@ -31,15 +31,32 @@ def test_the_contract_is_well_formed() -> None:
     assert CONTRACT["response"]["required_return"]
 
 
+#: Addressing, not question: declared so every seam forwards them, resolved before the
+#: handler rather than by it. Read off the contract instead of spelled here, so an
+#: exception is a decision recorded in the protocol rather than a line added to a test.
+BEFORE_HANDLER = set(CONTRACT["request"].get("consumed_before_handler") or {}) - {"$comment"}
+
+
+def test_the_exemptions_are_declared_in_the_contract_not_invented_here() -> None:
+    """The exemption list is only honest while it is small and justified in the contract.
+
+    Each entry needs a stated reason there; an undocumented one is how "the handler does
+    not read it" quietly becomes "nothing reads it anywhere".
+    """
+    declared = CONTRACT["request"].get("consumed_before_handler") or {}
+    for field in BEFORE_HANDLER:
+        assert field in CONTRACT["request"]["required_forward"], (
+            f"{field!r} is exempted from the handler check but is not on the forward "
+            "list — it is exempting nothing"
+        )
+        assert str(declared[field]).strip(), f"{field!r} is exempted with no reason given"
+
+
 @pytest.mark.parametrize("field", CONTRACT["request"]["required_forward"])
 def test_every_forwarded_request_field_is_read_by_the_handler(field: str) -> None:
-    """A field nobody reads is a field the contract should not be promising.
-
-    `dataset_id` is the one legitimate exception — it is consumed by the transport layer
-    to pick the database before the handler runs.
-    """
-    if field == "dataset_id":
-        pytest.skip("consumed by the transport when selecting the dataset, not by the handler")
+    """A field nobody reads is a field the contract should not be promising."""
+    if field in BEFORE_HANDLER:
+        pytest.skip("declared consumed_before_handler in the contract, not by the handler")
     assert re.search(rf'payload\.get\("{re.escape(field)}"', HANDLER), (
         f"{field!r} is promised by the contract but never read in handlers/query.py — "
         "either the handler regressed or the contract is aspirational"

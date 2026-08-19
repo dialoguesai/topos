@@ -188,6 +188,50 @@ The machine-readable twin of each release is
   - No parts — every caller today — yields exactly one group and is token-for-token
     what the single-needle path did. No migration.
 
+- `[E:query]` **The per-part rare gate had no caller; it does now.** The entry above
+  shipped `RetrievalRequest.needle_parts` and the wire field `retrieval_parts`, and
+  closed on the sentence "No parts — every caller today". That stayed literally true:
+  nothing anywhere sent the field, so every multi-part request still arrived as one
+  flattened needle set and the per-part veto was off in production on exactly the
+  requests it was written for. A correct mechanism with no sender is an absent
+  mechanism, and the release note read as if the bug were fixed. The senders exist
+  now, end to end, on both entrances:
+  - **Front end.** `buildRetrievalQueryParts` (`lib/mcp/scopeQueryRouter.ts`) segments
+    with `segmentRequestParts` — the *same* function the coverage map labels sections
+    with, so the sections synthesis names and the sections the gate reasons about
+    cannot disagree — and `buildQueryToolArguments` puts them on every scope query the
+    turn issues. It segments the **pre-cap** text: sections are precisely what the
+    500-character cut removes.
+  - **Control plane, both paths.** `prepare_engine_query_payload` rebuilds the engine
+    request field by field, so a field it does not name dies silently there; it names
+    `retrieval_parts` now. The home-chat path reaches it through the `query_scope` /
+    `shared_query_scope` MCP tools, the scheduled path through
+    `scope_query_router.build_query_tool_arguments` → `forward_routine_tool`. The
+    weekly report is the motivating case and it goes through the second path.
+  - **The preamble is not a section.** "Using my journal entries, write me a report:"
+    distills to instruction words with no rare token, `_veto_for` returns no verdict
+    for an empty needle set, and — because the full veto requires *every* part to be
+    vetoed — one unvetoable part turns the veto off for all the real ones. Both
+    segmenters drop it, and fewer than two surviving parts sends nothing at all,
+    which is byte-identically the pre-change path.
+  - **Two-field separation untouched.** Parts are needles; `query` remains the owner's
+    sentence for the planner window, the embedding and the scope classifier. Asserted
+    at each hop rather than assumed.
+
+- `[E:protocol]` **The query field contract now covers `retrieval_parts` and
+  `resource_id`, and its exemptions are declared rather than hardcoded.**
+  `topos/protocol/query_field_contract.json` is what the three seam guards read, so a
+  field absent from it is a field no guard can miss. Both are declared in
+  `required_forward` now. The engine's own guard used to carry a bare
+  `if field == "dataset_id": skip` — an exemption with no stated reason, which is how
+  the next one gets added silently; exemptions live in a `consumed_before_handler`
+  block with a reason each, and a test asserts every exemption names a field that is
+  actually in the contract and gives a non-empty reason.
+  - Found while wiring the guards: the control plane's `shared_query_scope` tool
+    accepted neither `retrieval_text` nor `retrieval_parts`, while the front end's one
+    call builder emits them for shared routes too — so a grantee turn lost the subject
+    at the *tool signature*, one seam before the allow-list that usually gets blamed.
+
 - `[E:query]` **`empty_cause` may not contradict the payload it travels with.**
   `_attach_narrowing` published the ledger's turn-level verdict unconditionally,
   but a stage can empty its own lane without emptying the turn: the rare gate

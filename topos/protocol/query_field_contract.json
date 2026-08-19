@@ -9,6 +9,7 @@
       "intent",
       "query",
       "retrieval_text",
+      "retrieval_parts",
       "query_session_id",
       "now",
       "filter_manifest",
@@ -16,11 +17,18 @@
       "owner_user_id",
       "is_grantee_request",
       "disclosure_ceiling",
-      "dataset_id"
+      "dataset_id",
+      "resource_id"
     ],
+    "consumed_before_handler": {
+      "$comment": "Declared so every seam forwards them, but NOT read by `handlers/query.py` — they are addressing rather than question. Listing them here is what keeps the engine guard's 'is this field actually read' check honest: the alternative was an `if field == ...` skip in test code, which is a place a second exception gets added without anyone deciding to.",
+      "dataset_id": "picks which database the request runs against; resolved on the way in, never by the query handler",
+      "resource_id": "the UMA resource a grantee turn is aimed at; the control plane validates the grant from it and the node carries it for provenance"
+    },
     "notes": {
       "query": "the owner's own words — planner window, vector ranking and the scope classifier all need a sentence",
       "retrieval_text": "the SUBJECT, for rare-gate needles only; never a replacement for `query`",
+      "retrieval_parts": "the SAME needles, one entry per section of a multi-part request, in request order. The rare gate runs once per entry and vetoes only when every entry is unanswerable, so one section's specific ask cannot empty another section's lane. Absent means one part and is byte-identical to before. Needles only — `query` stays the owner's sentence.",
       "now": "caller-local ISO instant so relative dates resolve against the owner's calendar day"
     }
   },
