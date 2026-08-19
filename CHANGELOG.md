@@ -130,6 +130,25 @@ The machine-readable twin of each release is
     linked to the protected entity by mention only, text that never names it, and its
     RECORD ID planted as a canary token in its own right, because the identifiers were
     what leaked while the body was correctly withheld.
+  - **…and that new surface was still blind, one layer down.** A reader that calls
+    `retrieve()` is not the same as a reader that reaches the lane. The corpus seeded its
+    entities at the column default `mention_count = 0` and its rows under
+    `source_id = 'src-a'`, and either alone is disqualifying: `link_query_entities` reads
+    `FROM entities WHERE mention_count > 0 OR contact_id IS NOT NULL`, so nothing linked
+    and the P4 lane never ran; and `resolve_retrieval_source_ids` intersects the caller's
+    installed sources with the scope manifest's own defaults and *silently falls back to
+    those defaults* when the intersection is empty, so every canonical lane read sources
+    the corpus had never written. Severing both black-hole wires in `retrieval.py` — the
+    exact pre-fix state — left the battery at 26 passed, 0 failed. BHLR = 0 was a
+    statement about an empty packet. The corpus now backfills `mention_count` from its own
+    mention rows and seeds under a real connector id, and under the same severing the
+    battery goes red and names `query_retrieval` as the leaking surface.
+  - **The blindness is now itself a failure.** Two probes assert the lane RAN rather than
+    that it leaked nothing: the owner's packet must carry an `entity_thread` item for the
+    mention-linked record whose text names nobody, stamped `blackhole_protected`; and no
+    non-owner caller may receive that `record_id` or `entity_id` on any item. An empty
+    packet leaks nothing, so a leak gate can never notice a surface going quiet — only a
+    non-vacuity assertion can.
 
 - `[E:query]` **An entity mention pointer shadowed the record it pointed at.**
   `entity_context_items` emits a pointer item (`"2026-03-13 — Anthropic"`) carrying the

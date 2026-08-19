@@ -25,6 +25,7 @@ from topos.features.lifecycle.blackhole_guard import CallerClass, guard_for
 from tests.evals.privacy.blackhole.corpus import (
     BH_ALIAS_A,
     BH_CANONICAL,
+    BH_THREAD_RECORD_ID,
     build_blackhole_corpus,
 )
 from tests.evals.privacy.blackhole.surfaces import SURFACES, read_all, serialize
@@ -134,6 +135,66 @@ def test_each_surface_is_individually_clean(corpus, surface):
     guard = guard_for(corpus.conn, mcp_source="rpt")
     blob = serialize(SURFACES[surface](corpus.conn, guard))
     assert _leaked_tokens(blob, corpus.all_bh_tokens) == []
+
+
+# ------------------------------------- the query path actually runs (P4)
+#
+# A clean score from a reader that returns nothing is the failure this battery
+# was caught by: `read_query_retrieval` drove `retrieve()` for a corpus whose
+# entities the linker skipped and whose `source_id` no scope manifest listed, so
+# the P4 entity lane never ran and BHLR = 0 was a statement about an empty
+# packet. The gate above cannot notice that — an empty packet leaks nothing.
+# These two assert the lane RAN, so the blindness fails as a test rather than
+# passing as a zero.
+
+
+def _thread_lane_items(packet) -> List[Dict[str, Any]]:
+    return [
+        s
+        for s in (packet or {}).get("summaries") or []
+        if str(s.get("retrieval_source") or "").startswith("entity_thread")
+    ]
+
+
+def test_the_query_path_reaches_the_entity_lane_for_the_owner(corpus):
+    """Non-vacuity for the one surface that calls production.
+
+    The assertion is on the P4 lane's OWN row — the record linked through
+    `entity_mentions` whose text names nobody. Asserting on the record id alone
+    would pass on the `entity_mention` sibling, which carries the same id and
+    does name the entity, and would say nothing about whether the lane ran.
+    """
+    packet = SURFACES["query_retrieval"](
+        corpus.conn, guard_for(corpus.conn, mcp_source="topos_home_chat")
+    )
+    lane = _thread_lane_items(packet)
+    assert lane, "the P4 entity lane contributed nothing — the query surface is blind"
+
+    item = next(
+        (s for s in lane if str(s.get("record_id")) == BH_THREAD_RECORD_ID), None
+    )
+    assert item is not None, "the lane ran but never reached the protected thread record"
+    assert corpus.tokens["thread_record"] in serialize(item)
+    # The owner keeps the row, and the control plane is told it is protected:
+    # without the stamp Gate C on the BYOK route cannot fire.
+    assert item.get("blackhole_protected") is True
+
+
+def test_no_identifier_of_the_protected_thread_record_reaches_a_non_owner(corpus):
+    """The leak was identifiers, not prose — assert on identifiers.
+
+    The disclosure tier held throughout: the body was correctly withheld. What
+    reached the grantee was `record_id`, `entity_id`, `canonical_table` and
+    `event_at`, which together say the entity exists and owns a record. A probe
+    that scans only for content tokens scores that packet clean.
+    """
+    for caller_name, kwargs in NON_OWNER_CALLERS:
+        guard = guard_for(corpus.conn, **kwargs)
+        packet = SURFACES["query_retrieval"](corpus.conn, guard)
+        for item in (packet or {}).get("summaries") or []:
+            assert str(item.get("record_id")) != BH_THREAD_RECORD_ID, caller_name
+            assert str(item.get("entity_id")) != corpus.bh_entity_id, caller_name
+        assert _thread_lane_items(packet) == [], caller_name
 
 
 def test_fact_with_protected_entity_as_object_is_blocked(corpus):

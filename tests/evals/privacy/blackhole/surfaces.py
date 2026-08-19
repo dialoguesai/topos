@@ -296,7 +296,7 @@ def read_query_retrieval(conn: sqlite3.Connection, guard: BlackholeGuard) -> Any
     from topos.query.types import RetrievalRequest
     from topos.storage.adapters.factory import AdapterFactory
 
-    from tests.evals.privacy.blackhole.corpus import BH_CANONICAL
+    from tests.evals.privacy.blackhole.corpus import BH_CANONICAL, SOURCE_ID
 
     adapter = DefaultSignalRetrievalAdapter(
         AdapterFactory.create("local_database", conn=conn)
@@ -308,7 +308,12 @@ def read_query_retrieval(conn: sqlite3.Connection, guard: BlackholeGuard) -> Any
             # Naming the entity is what resolves it and opens the entity lane —
             # a query that never names it exercises nothing.
             query_text=f"what happened with the {BH_CANONICAL} thread",
-            installed_source_ids=["src-a"],
+            # Must be a source the scope manifest actually lists:
+            # `resolve_retrieval_source_ids` intersects these with the manifest's
+            # defaults and silently falls back to the defaults when nothing
+            # matches, which is how a corpus-shaped id turned every canonical
+            # lane into a no-op while this reader still returned a packet.
+            installed_source_ids=[SOURCE_ID],
             disclosure_tier="owner_raw" if guard.sees_everything else "default_disclosure",
         )
     ).context_packet
