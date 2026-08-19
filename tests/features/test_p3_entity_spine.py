@@ -26,7 +26,13 @@ from topos.features.entities.resolver import (
     normalize_name,
     token_set_similarity,
 )
+from topos.query.manifest_validation import resolve_scope_manifest
 from topos.storage.db.migrations import apply_all_migrations
+
+#: `entity_context_items` bounds its mention lane by the caller's grant, so these
+#: direct calls have to name one. `messages:read` authorizes `conversation_messages`,
+#: which is the table the mentions below are recorded against.
+MESSAGES_MANIFEST = resolve_scope_manifest("messages:read")
 
 
 @pytest.fixture()
@@ -438,7 +444,9 @@ class TestDossiers:
         )
         assert payload is not None and "Maya Chen" in payload["summary_text"]
         assert load_dossier_for_entity(conn, maya) is not None
-        items = entity_context_items(conn, link_query_entities(conn, "Who is Maya Chen?"))
+        items = entity_context_items(
+            conn, link_query_entities(conn, "Who is Maya Chen?"), manifest=MESSAGES_MANIFEST
+        )
         assert any(i.get("retrieval_source") == "entity_dossier" for i in items)
 
 
@@ -475,7 +483,9 @@ class TestQueryLinking:
             )
         conn.commit()
         refresh_dossiers(conn)
-        items = entity_context_items(conn, link_query_entities(conn, "Maya Chen"))
+        items = entity_context_items(
+            conn, link_query_entities(conn, "Maya Chen"), manifest=MESSAGES_MANIFEST
+        )
         sources = [i["retrieval_source"] for i in items]
         assert "entity_dossier" in sources and "entity_mention" in sources
 
