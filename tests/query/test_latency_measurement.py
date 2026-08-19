@@ -449,6 +449,42 @@ class TestTheReportAgainstADatabase:
         assert engine["unmeasured_rows"] == 1
         assert engine["p50_ms"] == 400
 
+    def test_test_suite_turns_are_not_reported_as_this_person_s_latency(self, db) -> None:
+        """The pollution that made this series meaningless.
+
+        Until the test lane was made hermetic (docs/testing/TEST_LANES.md) a plain
+        `pytest tests/` ran the owner-database evals against ~/.topos. On
+        2026-08-19 that left 100% of the rows carrying a duration_ms written by
+        the harness, so this number described the eval suite while reading as a
+        statement about the owner's node. Those rows are permanent, so the
+        filter is too.
+        """
+        store = SQLiteQuerySessionStore(db)
+        for session_id, duration in (
+            ("qq-eval-D4-abc123", 9000),
+            ("d13-live-abc123", 9000),
+            ("sel-live-abc123", 9000),
+            ("adv-iter2-raw-open", 9000),
+            ("qs_real-session", 400),
+        ):
+            store.put({"session_id": session_id, "requester_id": "owner", "intent_hash": "i", "envelope_json": {}, "ttl_expires_at": "2099-01-01"})
+            store.append_artifact(session_id, {"artifact_id": f"a-{session_id}", "cache_key": "c", "duration_ms": duration})
+
+        engine = PCT.build_report(db, days=7, stale_minutes=60)["engine_per_scope_query"]
+        assert engine["samples"] == 1, "only the real session counts"
+        assert engine["p50_ms"] == 400, "harness turns must not move the percentile"
+        assert engine["harness_rows_excluded"] == 4
+
+    def test_excluded_harness_rows_are_counted_not_silently_dropped(self, db) -> None:
+        """A filter nobody can see is indistinguishable from missing data."""
+        store = SQLiteQuerySessionStore(db)
+        store.put({"session_id": "qq-eval-x", "requester_id": "owner", "intent_hash": "i", "envelope_json": {}, "ttl_expires_at": "2099-01-01"})
+        store.append_artifact("qq-eval-x", {"artifact_id": "a1", "cache_key": "c", "duration_ms": 100})
+        engine = PCT.build_report(db, days=7, stale_minutes=60)["engine_per_scope_query"]
+        assert engine["samples"] == 0
+        assert engine["harness_rows_excluded"] == 1
+        assert engine["unmeasured_rows"] == 0, "an excluded row is not an untimed one"
+
     def test_a_database_without_the_tables_reports_zero_rather_than_raising(self, tmp_path) -> None:
         # A node that has never opened home chat, or an older DB. Observability may not
         # be the thing that fails.

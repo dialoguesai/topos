@@ -6,6 +6,21 @@ from pathlib import Path
 
 import pytest
 
+# Project root on sys.path for editable installs and `pytest` without install
+# (development). Hoisted above every other import in this file because
+# `tests.live_db_watch` below must be importable before anything else runs.
+ROOT = Path(__file__).resolve().parent.parent
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+# Wrap sqlite3.connect FIRST, before this file imports any topos module: the
+# guard can only see connects made through the object it replaced, so anything
+# that binds the original beforehand is invisible to it. See the module for what
+# it watches and why the `_no_live_db_guard` fixture below cannot cover it.
+from tests import live_db_watch  # noqa: E402
+
+live_db_watch.install()
+
 # Default env so pydantic Settings() can load when tests import topos.* at collection time.
 os.environ.setdefault("TOPOS_KEY", "test-key")
 os.environ.setdefault("OPENAI_API_KEY", "test-openai-key")
@@ -48,11 +63,6 @@ os.environ.setdefault("TOPOS_CLUSTER_LLM_LABELS", "off")
 # directly and never calls prewarm_sanitization_models(). setdefault, so a lane
 # that genuinely wants the prewarm can still export the variable and opt in.
 os.environ.setdefault("SANITIZATION_PREWARM_ON_STARTUP", "false")
-
-# Project root on sys.path for editable installs and `pytest` without install (development).
-ROOT = Path(__file__).resolve().parent.parent
-if str(ROOT) not in sys.path:
-    sys.path.insert(0, str(ROOT))
 
 
 PRIVATE_PATH_HINTS = (
@@ -131,6 +141,17 @@ def pytest_sessionstart(session) -> None:
     _LEAK_BASELINE.update(_leak_snapshot())
 
 
+def pytest_runtest_logstart(nodeid: str, location) -> None:
+    """Attribute every owner-database connect from here on to THIS test.
+
+    Set at logstart rather than in a fixture so setup-time connects (a
+    module-scoped fixture opening an adapter bundle, which is exactly how the
+    live evals do it) are attributed to the test that triggered them.
+    """
+    del location
+    live_db_watch.set_current_test(nodeid)
+
+
 def pytest_runtest_logfinish(nodeid: str) -> None:
     """Compare watched attributes once a test is COMPLETELY done.
 
@@ -201,8 +222,48 @@ def _leaked_engine_threads() -> list[str]:
         time.sleep(0.05)
 
 
+def _hint_if_everything_was_deselected(terminalreporter, config) -> None:
+    """A bare "no tests ran" after naming a live test is a dead end.
+
+    The default `-m` filter in pyproject deselects the data-touching markers, and
+    pytest applies it even when you named the file — deliberately: an exception
+    for "but I typed the path" would let a script or an agent reach the owner's
+    database by accident, which is exactly how this went unnoticed. So the
+    filter stays absolute and the way out gets printed instead of guessed.
+    """
+    if terminalreporter.stats.get("passed") or terminalreporter.stats.get("failed"):
+        return
+    if not getattr(config.option, "markexpr", ""):
+        return
+    if not any(f"not {m}" in config.option.markexpr for m in _LIVE_DB_EXEMPT_MARKERS):
+        return
+    if not terminalreporter.stats.get("deselected"):
+        return
+    terminalreporter.write_line("")
+    terminalreporter.write_line(
+        "everything you selected was deselected by the default lane filter "
+        f"(-m {config.option.markexpr!r})."
+    )
+    terminalreporter.write_line(
+        "Those tests read or write real data, so they are opt-in by MARKER, not "
+        "by path:"
+    )
+    terminalreporter.write_line(
+        "  just test-owner-db-eval    # against a snapshot of ~/.topos, never the original"
+    )
+    terminalreporter.write_line(
+        "  just test-live-node        # against the node running on :9000"
+    )
+    terminalreporter.write_line(
+        "  pytest <path> -m qq_eval   # your own -m replaces the filter entirely"
+    )
+    terminalreporter.write_line("See docs/testing/TEST_LANES.md.")
+
+
 def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:
-    del exitstatus, config
+    del exitstatus
+    _hint_if_everything_was_deselected(terminalreporter, config)
+    _report_owner_database_writes(terminalreporter)
     if _THREAD_LEAK_FINDINGS:
         terminalreporter.section("engine threads outlived their test", red=True, bold=True)
         for nodeid, detail in _THREAD_LEAK_FINDINGS:
@@ -246,11 +307,71 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:
     )
 
 
+def _report_owner_database_writes(terminalreporter) -> None:
+    """Name every test that opened the owner's real database read-write.
+
+    Reported here rather than asserted inside a test because no test can see the
+    whole session: a violation by a test that runs LATER would pass an assertion
+    made earlier. ``tests/test_owner_database_hermeticity.py`` proves the
+    detector works; this is what actually fails the run.
+    """
+    opted_in = live_db_watch.opted_in_opens()
+    if opted_in:
+        paths = sorted({o.path for o in opted_in})
+        terminalreporter.write_line("")
+        terminalreporter.write_line(
+            f"opt-in lane touched owner data: {len(opted_in)} read-write open(s) "
+            f"across {len({o.nodeid for o in opted_in})} test(s) -> {', '.join(paths)}"
+        )
+
+    violations = live_db_watch.violations()
+    if not violations:
+        return
+    terminalreporter.section("tests wrote to the owner's database", red=True, bold=True)
+    for finding in violations:
+        terminalreporter.write_line(str(finding))
+    terminalreporter.write_line("")
+    terminalreporter.write_line(
+        "These opened a real ~/.topos database READ-WRITE without asking for it."
+    )
+    terminalreporter.write_line(
+        "The `_no_live_db_guard` fixture cannot stop this: it pins"
+    )
+    terminalreporter.write_line(
+        "TOPOS_DATABASE_PATH, and these resolve the path themselves at import"
+    )
+    terminalreporter.write_line(
+        "time (when the env var is still unset) and pass it straight to"
+    )
+    terminalreporter.write_line(
+        "AdapterFactory as db_path=. Either seed a tmp database and point the"
+    )
+    terminalreporter.write_line(
+        "module at it, or mark the test `live` (running node) / `qq_eval` (owner"
+    )
+    terminalreporter.write_line(
+        "database) so it is opt-in — see docs/testing/TEST_LANES.md."
+    )
+
+
 def pytest_sessionfinish(session, exitstatus) -> None:
     """Red the run on a leak, so the gate cannot pass while one is live."""
     del exitstatus
-    if _LEAK_FINDINGS or _THREAD_LEAK_FINDINGS:
+    live_db_watch.set_current_test("<session teardown>")
+    if _LEAK_FINDINGS or _THREAD_LEAK_FINDINGS or live_db_watch.violations():
         session.exitstatus = 1
+
+
+# Lanes that legitimately reach a real database; everything else must never
+# touch ~/.topos/database.db (or the other canonical candidates in
+# topos.core.state._resolve_database_path_from_settings).
+#
+# These are OPT-IN, not merely exempt. pyproject's `addopts` deselects all three
+# by default, so carrying one of these markers keeps a test out of the ordinary
+# gate rather than just waiving its guard — which is the half that was missing
+# until 2026-08-19, when a plain `pytest tests/` ran the whole set and wrote 71
+# rows into the owner's query_artifacts.
+_LIVE_DB_EXEMPT_MARKERS = ("live", "e2e", "qq_eval")
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
@@ -261,12 +382,8 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
             item.add_marker(pytest.mark.private)
         else:
             item.add_marker(pytest.mark.public)
-
-
-# Lanes that legitimately reach a real database; everything else must never
-# touch ~/.topos/database.db (or the other canonical candidates in
-# topos.core.state._resolve_database_path_from_settings).
-_LIVE_DB_EXEMPT_MARKERS = ("live", "e2e", "qq_eval")
+        if any(item.get_closest_marker(m) for m in _LIVE_DB_EXEMPT_MARKERS):
+            live_db_watch.mark_opt_in(item.nodeid)
 
 
 @pytest.fixture()

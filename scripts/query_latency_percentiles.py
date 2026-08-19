@@ -23,7 +23,10 @@ ENTRANCES. Two, because the two are measured by different code in different repo
 A THIRD SERIES, printed separately and NOT as an entrance: ``query_artifacts.duration_ms``,
 the engine's own retrieve-to-persist total. One entrance turn issues up to four of these,
 so mixing them into an entrance's percentile would answer a different question with the
-same word. It is reported as what it is — per scope query, not per request.
+same word. It is reported as what it is — per scope query, not per request. Turns written
+by the TEST SUITE are excluded from it and counted separately: on 2026-08-19 every timed
+row in this table was a harness session, so the series described the eval suite while
+reading as a statement about the owner's node. See ``HARNESS_SESSION_PREFIXES``.
 
 WHY THE ENTRANCE CANNOT BE READ OFF THE ARTIFACT. ``query_sessions.requester_id`` is a
 grant identity (or the literal ``"mcp"``), not an entrance label: the routines bridge
@@ -262,25 +265,86 @@ def routine_run_durations(
     return values, abandoned
 
 
-def engine_query_durations(conn: sqlite3.Connection, since: datetime) -> Tuple[List[int], int]:
-    """``query_artifacts.duration_ms`` in the window, plus the count of unmeasured rows.
+#: Session-id prefixes written by the test suite, not by a user's request.
+#:
+#: These are not noise to be tidied away — until 2026-08-19 they were the WHOLE
+#: series. A plain `pytest tests/` ran the owner-database evals against
+#: ~/.topos, and on that date 97% of query_artifacts rows, and 100% of the rows
+#: carrying a duration_ms, came from harness sessions. Reporting them as owner
+#: latency answers "how fast is the eval harness" while appearing to answer "how
+#: fast is this person's node". The lane is hermetic now
+#: (docs/testing/TEST_LANES.md), but the rows already on disk are permanent, so
+#: the filter stays.
+#:
+#: A prefix is the only handle available: query_artifacts has no field
+#: distinguishing a synthetic turn from a real one. Excluded rows are counted
+#: and printed rather than silently dropped.
+HARNESS_SESSION_PREFIXES = (
+    "qq-",       # tests/gap/qq/engine/test_en_qq_eval_queries.py
+    "d13-",      # tests/query/test_d13_grantee_tier_matrix.py (live)
+    "d13t-",     # ...and its seeded twin
+    "sel-",      # tests/query/test_selector_live_entity_grant.py
+    "adv-",      # tests/adversarial/test_scope_break_iteration*
+    "probe",     # scripts/probe_replay.py corpora
+    "gt-",       # ground-truth catalog runs
+    "at5-",      # wiki MVP acceptance
+    "at-",
+    "imb",       # imbalance corpora
+    "pressure-",  # tests/release/iteration*
+    "live-pressure-",
+    "parity",
+    "cer-",      # privacy evals
+    "cermin-",
+    "cerx-",
+    "min-",
+    "neg-",
+    "own-",
+    "inj-",
+    "lme-",      # LongMemEval adapter
+    "ddr-",
+    "deny-",
+    "ep-",
+    "aa-",
+    "a8-",
+    "a8e-",
+    "c1-",
+    "filter-audit",
+    "brand-new",
+    "dbg",
+)
+
+
+def _is_harness_session(session_id: Optional[str]) -> bool:
+    return bool(session_id) and session_id.startswith(HARNESS_SESSION_PREFIXES)
+
+
+def engine_query_durations(
+    conn: sqlite3.Connection, since: datetime
+) -> Tuple[List[int], int, int]:
+    """``query_artifacts.duration_ms`` in the window: (values, unmeasured, harness).
 
     NULL is reported separately rather than folded in as a zero. A turn nobody timed was
     not instant, and counting it as one would pull p50 toward the floor exactly while the
     instrumentation was still rolling out — the failure mode most likely to produce a
     reassuring number from an unmeasured system.
+
+    Test-suite sessions are excluded and counted for the same reason: a p95 that
+    is really the eval harness's p95 is worse than no p95, because it looks like
+    an answer. See :data:`HARNESS_SESSION_PREFIXES`.
     """
     if not _table_exists(conn, "query_artifacts"):
-        return [], 0
+        return [], 0, 0
     cols = {r[1] for r in conn.execute("PRAGMA table_info(query_artifacts)").fetchall()}
     if "duration_ms" not in cols:
-        return [], 0
+        return [], 0, 0
     stamp = since.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     rows = conn.execute(
-        "SELECT duration_ms FROM query_artifacts WHERE created_at >= ?", (stamp,)
+        "SELECT session_id, duration_ms FROM query_artifacts WHERE created_at >= ?",
+        (stamp,),
     ).fetchall()
-    values = [int(r[0]) for r in rows if r[0] is not None]
-    return values, len(rows) - len(values)
+    owner = [r for r in rows if not _is_harness_session(r[0])]
+    values = [int(r[1]) for r in owner if r[1] is not None]
+    return values, len(owner) - len(values), len(rows) - len(owner)
 
 
 # --- report ---------------------------------------------------------------------------
@@ -292,7 +356,7 @@ def build_report(conn: sqlite3.Connection, *, days: int, stale_minutes: int) -> 
     since_ms = int(since.timestamp() * 1000)
 
     legs = home_chat_legs(conn, since_ms)
-    artifacts, unmeasured = engine_query_durations(conn, since)
+    artifacts, unmeasured, harness = engine_query_durations(conn, since)
     routines, abandoned = routine_run_durations(conn, since, stale_minutes=stale_minutes)
 
     return {
@@ -321,8 +385,10 @@ def build_report(conn: sqlite3.Connection, *, days: int, stale_minutes: int) -> 
         "engine_per_scope_query": {
             **summarize(artifacts),
             "unmeasured_rows": unmeasured,
+            "harness_rows_excluded": harness,
             "source": "query_artifacts.duration_ms",
             "note": "one entrance turn issues up to four of these; NOT an entrance total",
+            "caveat": "test-suite sessions excluded by id prefix; see HARNESS_SESSION_PREFIXES",
         },
     }
 
@@ -376,6 +442,11 @@ def print_report(report: Dict[str, Any]) -> None:
         f"p50={_fmt(engine['p50_ms'])}  p95={_fmt(engine['p95_ms'])}  "
         f"unmeasured_rows={engine['unmeasured_rows']}"
     )
+    if engine["harness_rows_excluded"]:
+        print(
+            f"    excluded {engine['harness_rows_excluded']} test-suite row(s) — "
+            "harness turns, not this person's requests"
+        )
 
     unmeasured_series = [
         name
@@ -388,6 +459,12 @@ def print_report(report: Dict[str, Any]) -> None:
     if unmeasured_series:
         print()
         print(f"  0 samples for: {', '.join(unmeasured_series)}.")
+        if engine["samples"] == 0 and engine["harness_rows_excluded"]:
+            print("  For the engine series that is now the OPPOSITE of no data: every timed")
+            print("  row in the window was written by the test suite. Until the lane was made")
+            print("  hermetic, `pytest tests/` ran the owner-database evals against ~/.topos.")
+            print("  Those rows stay on disk forever, so they are excluded by session-id")
+            print("  prefix (HARNESS_SESSION_PREFIXES) rather than reported as your latency.")
         print("  This is the correct output, not a failure. The duration column and the")
         print("  [latency] step lines ship in this change, so nothing on this database was")
         print("  written by instrumented code yet. A number here today would be invented;")

@@ -12,19 +12,36 @@ uv sync --extra dev --extra local
 
 ## Test lanes
 
-- Public lane (default for OSS checks):
+Full reference: [docs/testing/TEST_LANES.md](docs/testing/TEST_LANES.md).
+
+- Default lane — hermetic, temp databases only, nothing on the network:
 
 ```bash
-pytest tests -m "public and not e2e" -q
+pytest tests -q
+```
+
+- Public lane (OSS checks; `just test`) adds the `public` marker:
+
+```bash
+pytest tests -m "public and not e2e and not live and not qq_eval" -q
 ```
 
 - Internal/private lane (architecture-heavy, hosted flows, migration/sprint suites):
   - Marked with `@pytest.mark.private`
   - Not part of default public checks
 
-- End-to-end lane:
-  - Marked with `@pytest.mark.e2e`
-  - Requires external services and explicit environment setup
+- Lanes that reach real data are **opt-in by marker**, and the default filter in
+  `pyproject.toml` deselects all of them:
+  - `@pytest.mark.qq_eval` — query quality/latency eval against the owner
+    database. Run it against a disposable copy with `just test-owner-db-eval`,
+    never against `~/.topos` directly.
+  - `@pytest.mark.live` — needs a real database, and for
+    `tests/release/iteration4` a node running on `:9000` (`just test-live-node`).
+  - `@pytest.mark.e2e` — requires external services and explicit environment setup.
+
+  Naming a file or test id does **not** opt you in; only `-m` does. A test that
+  opens a real `~/.topos` database read-write without a marker fails the run —
+  see `tests/live_db_watch.py`.
 
 ## Deployment assets ownership
 
