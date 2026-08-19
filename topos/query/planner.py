@@ -52,9 +52,17 @@ class QueryPlan:
     interaction_browse: bool = False
     dimensions: List[str] = field(default_factory=list)
     semantic_residual: str = ""
+    # R2 multi-window: "what changed between last week and this week" is ONE plan with
+    # TWO windows, differenced. Empty for every ordinary query (one window or none);
+    # populated only when the ask both names two distinct windows AND asks for the
+    # difference, in which case `time_range` widens to their union span so retrieval
+    # sees both sides and each item can be labelled with the window it fell in.
+    # Labels are a closed set — `_WINDOW_LABELS` — never the owner's words.
+    time_windows: List[Tuple[str, str]] = field(default_factory=list)
+    comparison_intent: bool = False
 
     def to_meta(self) -> Dict[str, Any]:
-        return {
+        meta: Dict[str, Any] = {
             "entities": [e.get("canonical_name") for e in self.entities],
             "time_range": list(self.time_range) if self.time_range else None,
             "aggregate_intent": self.aggregate_intent,
@@ -63,6 +71,10 @@ class QueryPlan:
             "first_person_intent": self.first_person_intent,
             "dimensions": self.dimensions,
         }
+        if self.time_windows:
+            meta["time_windows"] = [list(w) for w in self.time_windows]
+            meta["comparison_intent"] = self.comparison_intent
+        return meta
 
 
 _AGGREGATE_RE = re.compile(
@@ -233,6 +245,91 @@ def _relative_time_range(query_text: str, now: datetime) -> Optional[Tuple[str, 
     return None
 
 
+# --- multi-window differencing (R2) ----------------------------------------------------
+#: The ask is for a DIFFERENCE, not a period. Deliberately narrow: without one of these
+#: verbs, "my week and last week" is a two-window recall and one union window answers it
+#: exactly as before. This is not a temporal algebra — it is the single differenced shape
+#: ("what changed between X and Y"), which is the smallest thing that genuinely answers
+#: the question rather than describing two periods side by side.
+_COMPARE_RE = re.compile(
+    r"\b(compare|compared|comparing|comparison|versus|vs\.?|difference|different(?:ly)?|"
+    r"differ|change|changed|shift|shifted|more or less|better or worse)\b",
+    re.I,
+)
+
+#: Closed-set window labels. The EARLIER window is always `baseline` and the LATER is
+#: always `current`, whatever order the sentence named them in — synthesis differencing
+#: "current minus baseline" must not silently invert because the owner wrote
+#: "this week vs last week" instead of "last week vs this week".
+WINDOW_BASELINE = "baseline"
+WINDOW_CURRENT = "current"
+_WINDOW_LABELS = (WINDOW_BASELINE, WINDOW_CURRENT)
+
+
+def _all_relative_ranges(query_text: str, now: datetime) -> List[Tuple[str, str]]:
+    """Every distinct relative window the sentence names, earliest first.
+
+    `_relative_time_range` returns the FIRST match and stops, which is right for a
+    single-window ask and is exactly why a differenced ask lost its other half.
+    """
+    found: List[Tuple[str, str]] = []
+    for match in re.finditer(r"\blast (\d{1,3}) days\b", query_text, re.I):
+        start = now - timedelta(days=int(match.group(1)))
+        found.append(
+            (
+                start.strftime("%Y-%m-%dT00:00:00+00:00"),
+                now.strftime("%Y-%m-%dT23:59:59+00:00"),
+            )
+        )
+    for pattern, resolver in _RELATIVE_RANGES:
+        if resolver is None:
+            continue
+        if pattern.search(query_text):
+            start, end = resolver(now)
+            found.append(
+                (
+                    start.strftime("%Y-%m-%dT00:00:00+00:00"),
+                    end.strftime("%Y-%m-%dT23:59:59+00:00"),
+                )
+            )
+    # Distinct windows only, ordered earliest-first so `baseline` is genuinely the
+    # earlier side regardless of how the sentence ordered them.
+    return sorted(dict.fromkeys(found))
+
+
+def _comparison_windows(
+    query_text: str, now: datetime
+) -> Optional[List[Tuple[str, str]]]:
+    """The two windows of a differenced ask, or None.
+
+    None whenever the ask is not differenced or names fewer than two distinct windows —
+    both of which are the ordinary single-window path, untouched.
+    """
+    if not _COMPARE_RE.search(query_text):
+        return None
+    windows = _all_relative_ranges(query_text, now)
+    if len(windows) < 2:
+        return None
+    return windows[:2]
+
+
+def comparison_windows(
+    query_text: str, now: Optional[datetime] = None
+) -> List[Tuple[str, str]]:
+    """The differenced ask's two windows, resolvable WITHOUT a database connection.
+
+    `build_query_plan` needs a connection for entity linking; the intent hash is
+    computed before retrieval opens one and still has to cover both windows, because
+    the same sentence asked in two different weeks resolves to two different pairs and
+    must not be served from the earlier week's cached artifact. Pure text + `now`, so
+    the hash and the plan cannot disagree about what was searched.
+    """
+    resolved = _comparison_windows(
+        str(query_text or ""), now or datetime.now(timezone.utc)
+    )
+    return resolved or []
+
+
 def _dimensions_for(query_text: str) -> List[str]:
     lowered = query_text.lower()
     out: List[str] = []
@@ -281,6 +378,16 @@ def build_query_plan(
             plan.entities = []
 
     plan.time_range = _explicit_time_range(q) or _relative_time_range(q, now)
+    # R2: a differenced ask over two named windows keeps BOTH, and widens `time_range`
+    # to their union span so retrieval sees both sides. Without this, `_relative_time_range`
+    # returns whichever window matched first and the other half of the question is
+    # searched over a window that excludes it — the answer then differences one period
+    # against nothing and reads as a confident "no change".
+    comparison = _comparison_windows(q, now)
+    if comparison:
+        plan.time_windows = comparison
+        plan.comparison_intent = True
+        plan.time_range = (comparison[0][0], comparison[-1][1])
     plan.aggregate_intent = bool(_AGGREGATE_RE.search(q))
     if _PAST_RE.search(q):
         plan.temporal_shift = "past"

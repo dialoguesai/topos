@@ -11,6 +11,31 @@ The machine-readable twin of each release is
 
 ### Fixed
 
+- `[E:query]` **The rare-token gate was dead on multi-part requests; it now runs per
+  part.** One needle set derived from a whole multi-part request cannot gate any
+  individual part: `_rrf_fuse_summary_lists` vetoes when *any* needle is unevidenced,
+  so for "1) how did the Threnody-7 rewrite go 2) how did I sleep" the word
+  `threnody` — which the corpus does not contain — emptied the sleep lane too. The
+  consequence is not a degraded gate but an absent one: on a multi-part ask it fires
+  for every part or none, so the sections that most need protection from filler are
+  exactly the ones it can never fire for correctly. `RetrievalRequest.needle_parts`
+  (pipeline and wire `retrieval_parts`) carries the needles split per part;
+  `_needle_token_groups` tokenises each part and `_rare_token_groups` prices them
+  against **one** df pass over the union, so N parts cost one FTS pass, not N. Both
+  gate sites are per part now — the fusion veto and `_route_canonical_rows`'s browse
+  suppression — and a request is vetoed only when *every* part is. A part carrying no
+  needles (a pure date-scoped "my week") is never vetoed: the window alone narrows it.
+  - The two-field separation is untouched. Parts are needles only; the planner, the
+    embedding and the scope classifier still get the owner's sentence, and the
+    absolute-date framing rules (`_MONTH_TOKENS`, year and day-number handling) apply
+    inside each part exactly as they did to the whole request.
+  - A partial veto is now a *narrowing*, not an empty: the ledger records
+    `rare_gate_partial_veto` with the vetoed part indices and no longer declares the
+    turn empty when other parts answered. Tokens stay in local-only `detail`; the
+    public entry is closed-set slugs and integers.
+  - No parts — every caller today — yields exactly one group and is token-for-token
+    what the single-needle path did. No migration.
+
 - `[E:query]` **`empty_cause` may not contradict the payload it travels with.**
   `_attach_narrowing` published the ledger's turn-level verdict unconditionally,
   but a stage can empty its own lane without emptying the turn: the rare gate
@@ -37,6 +62,20 @@ The machine-readable twin of each release is
   why the design review ordered this fix first. Absent or query-equal
   `retrieval_text` hashes byte-identically to the old formula, so every existing
   caller and every cached artifact keeps its key.
+  - `needle_parts` and `time_windows` now extend that identity for the same reason
+    and against the same hazard: P3 gives a request per-part needles and a
+    differenced ask two windows, both of which change what comes back while leaving
+    scope + mode + query + `retrieval_text` identical. Two report sections that
+    differ only in their parts, or one week's comparison and the next's, would
+    otherwise collide — and a collision here is not a stale answer, it is one
+    section's findings served as another's under a `memory_hit` stamp.
+  - Order is significant for both (parts in request order, windows
+    baseline-then-current), and the fields are joined by a control character rather
+    than punctuation, because `normalize_query` only lowercases and collapses
+    whitespace — an owner sentence can contain `|`, and two different requests must
+    never be able to forge one payload. A lone part that merely repeats the needles
+    is the single-part request spelled twice and adds nothing. Absent — every caller
+    today — leaves the payload byte-identical, so no cached artifact is orphaned.
 
 ### Changed
 
@@ -54,6 +93,27 @@ The machine-readable twin of each release is
     it needs.
 
 ### Added
+
+- `[E:query]` **A differenced question keeps both of its windows.** "What changed
+  between last week and this week" resolved to a single time range, because
+  `_relative_time_range` returns the *first* relative phrase it matches and stops —
+  so the second period named in the question was discarded before retrieval, and the
+  answer was drawn from whichever half the planner happened to see first. There is no
+  honest difference to state from one window. `QueryPlan` now carries `time_windows`
+  and `comparison_intent`: when the request uses a difference verb *and* names two
+  resolvable periods, both are kept, sorted earliest-first so `baseline` is always the
+  earlier one regardless of the sentence's order — otherwise "this week vs last week"
+  would silently invert the sign of every finding. `time_range` becomes the union
+  span, so every existing consumer of the single range still sees a range that covers
+  the evidence. Retrieved summaries are stamped `time_window_label` (`baseline` or
+  `current`), and the packet's `time_window` gains `comparison` and `windows`.
+  - Deliberately the smallest thing that answers a differenced ask, not a temporal
+    algebra: two windows, both relative, and only when a difference verb is present.
+    "My work this week and last week" names two periods with no difference asked and
+    stays on the single-window path.
+  - `comparison_windows()` resolves the pair without a database connection, because
+    the intent hash is computed before retrieval opens one and the hash and the plan
+    must agree about which windows a turn is for.
 
 - `[E:query]` **The source listing says which scopes nothing feeds, so a router can
   stop spending a slot on them.** `_scope_supply_state` explains an emptiness that

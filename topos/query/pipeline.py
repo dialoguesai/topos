@@ -384,6 +384,12 @@ class QueryPipelineOrchestrator:
         #: None (the default) means "same as query_text", so every existing caller and
         #: every MCP client that never sends it is byte-identical.
         retrieval_text: Optional[str] = None,
+        #: The same needles, split PER PART of a multi-part request (P3 slice 2). One
+        #: flattened needle set cannot gate a multi-part ask: the rare gate vetoes on
+        #: ANY unevidenced token, so a specific part empties every other part's lane and
+        #: the gate is effectively off on exactly the requests that need it. None (every
+        #: caller today) is one part and is byte-identical to before.
+        retrieval_parts: Optional[list] = None,
         query_session_id: Optional[str] = None,
         filter_manifest: Optional[Dict[str, Any]] = None,
         field_transforms: Optional[list] = None,
@@ -508,11 +514,28 @@ class QueryPipelineOrchestrator:
 
         session = _session_from_store(session_id, session_data, requester_id) if session_data else None
 
+        needle_parts = [
+            str(p or "").strip() for p in (retrieval_parts or []) if str(p or "").strip()
+        ]
+        # Both halves of P3's retrieval identity. The windows are resolved from the
+        # sentence and `now` alone (no connection needed) so the hash covers what the
+        # planner will search: the same differenced question asked in two different
+        # weeks retrieves two different pairs of windows, and serving one from the
+        # other's artifact is a memory_hit fabrication, not a stale answer.
+        try:
+            from .planner import comparison_windows as _comparison_windows
+
+            plan_windows = _comparison_windows(query_text, now)
+        except Exception as exc:  # noqa: BLE001 — hashing must never break a turn
+            logger.debug("comparison window resolution skipped: %s", exc)
+            plan_windows = []
         intent_hash = compute_intent_hash(
             scope_id=scope_id,
             access_mode=access_mode,
             query_text=query_text,
             retrieval_text=str(retrieval_text or ""),
+            needle_parts=needle_parts or None,
+            time_windows=plan_windows or None,
         )
         turn = QueryTurn(query_text=query_text, scope_id=scope_id, access_mode=access_mode, intent_hash=intent_hash)
 
@@ -656,6 +679,9 @@ class QueryPipelineOrchestrator:
                     needle_text=str(retrieval_text).strip() or None
                     if retrieval_text
                     else None,
+                    # Per-part needles: the rare gate runs once per part so no part's
+                    # specific ask can veto another's lane.
+                    needle_parts=needle_parts or None,
                     filter_manifest=filter_manifest,
                     field_transforms=field_transforms,
                     skip_retrieval=False,
