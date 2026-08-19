@@ -40,6 +40,28 @@ The machine-readable twin of each release is
 
 ### Added
 
+- `[E:query]` **The source listing says which scopes nothing feeds, so a router can
+  stop spending a slot on them.** `_scope_supply_state` explains an emptiness that
+  already happened; a router has to decide *before* it commits one of its four
+  route slots, and had no way to ask. `routing_supply_states` answers the same
+  question from the registry and the installed set alone — no query, no data read —
+  and `list_sources` now carries it as `scope_supply`.
+  - It rides the source listing rather than a new endpoint: that response is
+    already the node's answer to "what is connected here", supply state is a
+    projection of the same fact, and a router forced into a second call would
+    either skip it or route on a stale copy. Best effort — a projection failure
+    costs the caller nothing but the key, and an absent key means "not stated",
+    never "nothing is connected".
+  - Deliberately narrower than `_scope_supply_state`, because this one is allowed
+    to make a request retrieve *less*. Only `no_source_connected` is ever
+    reported: `connected_never_delivered` and `delivered_then_emptied` describe
+    connected feeds whose store is empty, which is a real empty answer and must
+    still be queried. The three sub-causes are distinct on purpose and a
+    router-facing map carrying all three would collapse them.
+  - A scope with no feeds at all in the registry is left *out* of the map rather
+    than called unsupplied. `attention:read` and `complexity:read` are computed
+    on-node and register no feeding source, so "no feeds" here means "not knowable
+    from the registry" — and an unknown must never cost a route.
 - `[E:query]` **Why a scope holds nothing, not just that it does.** `store_empty`
   already separated "nothing has ever been stored" from "you had a quiet week";
   it did not say which of three things went wrong, and the remedies differ —
