@@ -92,6 +92,54 @@ The machine-readable twin of each release is
 
 ### Fixed
 
+- `[E:query]` **A denial returned no reason, and the guard that should have caught it was
+  written so that it could not.** `deny_reason` has been on the field contract's
+  `required_return` list since the contract existed. Nothing anywhere covered it.
+  - **The drop.** The handler's `ManifestValidationError` path is the one denial that
+    returns above the orchestrator, so it builds its whole response from a literal
+    allow-list. It emitted four of the eight declared return fields. The control plane
+    then recovered `deny_reason` only out of the `audit` block — which that path never
+    writes, because there is no orchestrator to build one. An owner who asked on an
+    ungranted or misspelled scope got a refusal with no why, which reads exactly like a
+    scope that holds no data. Canonical location is now written down in the contract
+    (`response.deny_reason_location`): TOP LEVEL, where all six pipeline denials already
+    put it, with `audit.deny_reason` as the fallback the control plane reads second.
+  - **The two fields the denial did not carry.** That same allow-list omitted
+    `query_session_id` and `narrowing`. The path now writes its own ledger —
+    `empty_cause: scope_denied`, one `grant` entry whose `reason` is the validation code
+    — so a denial explains itself the way every other denial in the engine does. The
+    codes are closed-set slugs and `record` re-slugs them regardless; a test sends a
+    question full of names and asserts none of it reaches the ledger.
+  - **Why the guard was blind.** All three repos checked the return path against literals
+    spelled in the test file: the engine grepped its handler source for two of the eight
+    declared fields, the front end read the contract for the request half and nothing for
+    the response half, and the control plane's single fixture set `deny_reason: ""` under
+    a `if not value: continue` skip — so the one field with a falsy fixture was the one
+    field with a live drop. Each repo's return guard now reads `required_return` off the
+    contract file, runs two real payloads (a live turn and a manifest denial, because no
+    single response can carry both `public_result` and `deny_reason`), and fails if any
+    fixture value is falsy or any declared field is exercised by neither. Verified by
+    adding a fictional field to `required_return`: red in all three.
+  - **Exemptions are argued in the protocol, not skipped in test code.** `scope_id` and
+    `access_mode` are echoed by the transport, not emitted by the engine. That is now
+    `response.originates` in the contract, with a reason per field and a test in two
+    repos that an exemption naming a field outside `required_return` exempts nothing —
+    the same shape the request half's `consumed_before_handler` already had.
+
+- `[E:query]` **The hop that actually delivers `retrieval_text` and `retrieval_parts` was
+  the one hop no test executed.** Coverage stopped at the orchestrator's keyword arguments
+  on one side and resumed at greps of the retrieval module's source on the other. Between
+  them sits `pipeline.py` building the `RetrievalRequest`, and severing
+  `needle_parts=needle_parts or None` there left 592 query tests green: the field arrives,
+  the pipeline drops it, and the per-part rare gate silently reverts to one flattened
+  needle set — the exact production behaviour multi-needle was added to end. A source grep
+  cannot see it, because the source still says `needle_parts`. The new end-to-end test
+  drives a real `type: "query"` message through a real orchestrator on in-memory adapters
+  and watches both landing sites: the `RetrievalRequest` the pipeline hands to retrieval,
+  and the call to `_needle_token_groups` where the gate turns needles into the groups it
+  vetoes on. Both severings — `needle_text` and `needle_parts` — were run and each turns
+  exactly two of the new tests red while the other 597 stay green.
+
 - `[E:query]` **Four planes the rest of the engine treats as total each had a lane running
   outside them.** A partial boundary reads exactly like a whole one from the call site,
   which is the property all four share and the reason none of them showed up as a failure.
