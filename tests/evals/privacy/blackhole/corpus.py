@@ -34,7 +34,7 @@ from topos.storage.db.migrations import apply_all_migrations
 
 # Bump when the corpus changes — resets comparability of scorecards across runs,
 # same discipline as CORPUS_VERSION in the privacy corpus.
-CORPUS_VERSION = "blackhole-corpus-3"
+CORPUS_VERSION = "blackhole-corpus-4"
 
 # Rare enough that a substring scan cannot false-positive on ordinary prose,
 # name-shaped enough that it exercises the real normalizer.
@@ -51,6 +51,16 @@ BH2_CANONICAL = "Quiet Qx73person"
 # The control: visible under a normal grant. Must survive every filter.
 OK_ID = "ent-ok-sam"
 OK_CANONICAL = "Sam Ok91okoye"
+
+# A REAL connector id, not a fixture-shaped one. The storage readers in
+# `surfaces.py` do not care, but the query path does: `retrieve()` throws the
+# caller's `installed_source_ids` at `resolve_retrieval_source_ids`, which
+# intersects them with the scope manifest's own defaults and falls back to those
+# defaults when the intersection is empty. A corpus seeded under `src-a` is
+# therefore invisible to every canonical lane the query path runs — the P4 lane
+# resolved the entity, asked for its records, and got nothing back, so the query
+# reader scored clean without ever reaching the code it exists to guard.
+SOURCE_ID = "imessage"
 
 # One token per leak surface, keyed by the surface it proves.
 #
@@ -218,17 +228,27 @@ def build_blackhole_corpus(db_path: str, *, rebuild_complete: bool = True) -> Bl
         """
         INSERT INTO entity_mentions
             (mention_id, entity_id, record_id, source_id, canonical_table, surface_text, event_at)
-        VALUES (?, ?, 'rec-1', 'src-a', 'conversation_messages', ?, '2026-07-01T10:00:00Z')
+        VALUES (?, ?, 'rec-1', ?, 'conversation_messages', ?, '2026-07-01T10:00:00Z')
         """,
-        (f"m_{uuid.uuid4().hex[:8]}", BH_ID, f"{BH_CANONICAL} {t['mention_surface']}"),
+        (
+            f"m_{uuid.uuid4().hex[:8]}",
+            BH_ID,
+            SOURCE_ID,
+            f"{BH_CANONICAL} {t['mention_surface']}",
+        ),
     )
     conn.execute(
         """
         INSERT INTO entity_mentions
             (mention_id, entity_id, record_id, source_id, canonical_table, surface_text, event_at)
-        VALUES (?, ?, 'rec-2', 'src-a', 'conversation_messages', ?, '2026-07-01T11:00:00Z')
+        VALUES (?, ?, 'rec-2', ?, 'conversation_messages', ?, '2026-07-01T11:00:00Z')
         """,
-        (f"m_{uuid.uuid4().hex[:8]}", OK_ID, f"{OK_CANONICAL} {c['mention_surface']}"),
+        (
+            f"m_{uuid.uuid4().hex[:8]}",
+            OK_ID,
+            SOURCE_ID,
+            f"{OK_CANONICAL} {c['mention_surface']}",
+        ),
     )
 
     # ----------------------------------------------------------- edges
@@ -415,13 +435,13 @@ def build_blackhole_corpus(db_path: str, *, rebuild_complete: bool = True) -> Bl
         [
             {
                 "record_id": "rec-1",
-                "source_id": "src-a",
+                "source_id": SOURCE_ID,
                 "content": f"see you thursday {BH_CANONICAL} {t['raw_canonical']}",
                 "event_at": "2026-07-01T10:00:00Z",
             },
             {
                 "record_id": "rec-2",
-                "source_id": "src-a",
+                "source_id": SOURCE_ID,
                 "content": f"standup notes {OK_CANONICAL}",
                 "event_at": "2026-07-01T11:00:00Z",
             },
@@ -429,7 +449,7 @@ def build_blackhole_corpus(db_path: str, *, rebuild_complete: bool = True) -> Bl
             # its text naming nobody. A name scan cannot see it; the id join can.
             {
                 "record_id": BH_THREAD_RECORD_ID,
-                "source_id": "src-a",
+                "source_id": SOURCE_ID,
                 "content": f"shipping the compiler rewrite on friday {t['thread_record']}",
                 "event_at": "2026-07-01T12:00:00Z",
             },
@@ -439,9 +459,15 @@ def build_blackhole_corpus(db_path: str, *, rebuild_complete: bool = True) -> Bl
         """
         INSERT INTO entity_mentions
             (mention_id, entity_id, record_id, source_id, canonical_table, surface_text, event_at)
-        VALUES (?, ?, ?, 'src-a', 'conversation_messages', ?, '2026-07-01T12:00:00Z')
+        VALUES (?, ?, ?, ?, 'conversation_messages', ?, '2026-07-01T12:00:00Z')
         """,
-        (f"m_{uuid.uuid4().hex[:8]}", BH_ID, BH_THREAD_RECORD_ID, BH_CANONICAL),
+        (
+            f"m_{uuid.uuid4().hex[:8]}",
+            BH_ID,
+            BH_THREAD_RECORD_ID,
+            SOURCE_ID,
+            BH_CANONICAL,
+        ),
     )
 
     # ------------------------------------------------------- user goal
@@ -487,10 +513,32 @@ def build_blackhole_corpus(db_path: str, *, rebuild_complete: bool = True) -> Bl
             """
             INSERT INTO topic_cluster_members
                 (member_id, cluster_id, record_id, source_id, record_type, text_preview)
-            VALUES (?, ?, ?, 'src-a', 'conversation_message', ?)
+            VALUES (?, ?, ?, ?, 'conversation_message', ?)
             """,
-            (f"m-{cluster_id}", cluster_id, f"rec-{cluster_id}", member_text),
+            (f"m-{cluster_id}", cluster_id, f"rec-{cluster_id}", SOURCE_ID, member_text),
         )
+
+    # ------------------------------------------- make the entities linkable
+    # `link_query_entities` reads `FROM entities WHERE mention_count > 0 OR
+    # contact_id IS NOT NULL`, so an entity left at the column default of 0 is
+    # invisible to the linker no matter how exactly the query names it. That is
+    # not a detail: the query-path reader below resolves the entity by name, and
+    # with nothing linked the P4 entity lane never runs, so `read_query_retrieval`
+    # exercised the retrieval boundary while structurally missing the one lane it
+    # was added to guard. The battery scored BHLR = 0 against a leak it could not
+    # reach — the same shape of blindness one layer down.
+    #
+    # Derived from the mention rows rather than hardcoded, so a surface added
+    # later cannot leave the count stale. The quiet entity has no mentions and so
+    # truthfully stays at 0, which is what makes it the D5 control.
+    conn.execute(
+        """
+        UPDATE entities SET mention_count = (
+            SELECT COUNT(*) FROM entity_mentions em
+            WHERE em.entity_id = entities.entity_id
+        )
+        """
+    )
 
     conn.commit()
 
