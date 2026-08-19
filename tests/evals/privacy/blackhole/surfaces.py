@@ -134,9 +134,9 @@ def read_raw_messages(conn: sqlite3.Connection, guard: BlackholeGuard) -> List[D
         {"record_id": r[0], "content": r[1], "entity_id": r[2] or ""}
         for r in conn.execute(
             """
-            SELECT m.record_id, m.content, COALESCE(em.entity_id, '')
+            SELECT m.message_id, m.content, COALESCE(em.entity_id, '')
             FROM conversation_messages m
-            LEFT JOIN entity_mentions em ON em.record_id = m.record_id
+            LEFT JOIN entity_mentions em ON em.record_id = m.message_id
             """
         )
     ]
@@ -270,6 +270,50 @@ def read_user_goals(conn: sqlite3.Connection, guard: BlackholeGuard) -> List[Dic
     return [r for r in rows if not guard.text_mentions_blackholed(r.get("goal_text"))]
 
 
+# ------------------------------------------------------- the production path
+
+
+def read_query_retrieval(conn: sqlite3.Connection, guard: BlackholeGuard) -> Any:
+    """The only reader here that is not a reference twin: it calls production.
+
+    Every other reader in this module reads storage and applies the guard the way
+    the serving path *must*. That made the battery structurally blind to the
+    query pipeline, whose retrieval boundary applies its own black-hole policy
+    over its own assembled items and asks no reader anything. BHLR = 0 was true
+    and meaningless there — a live existence leak through the P4 entity lane sat
+    under a green battery, because nothing in the battery ever ran a query.
+
+    So this one drives `DefaultSignalRetrievalAdapter.retrieve()`, the function a
+    real turn calls, and returns the context packet the caller would receive.
+
+    `guard` is translated to `disclosure_tier` because that is the only identity
+    signal `RetrievalRequest` carries, and it is the signal the retrieval path
+    genuinely uses. The mapping is the pipeline's own: a caller entitled to
+    protected content is asking at `owner_raw`, and everyone else is not.
+    """
+    from topos.query.manifest_validation import resolve_scope_manifest
+    from topos.query.retrieval import DefaultSignalRetrievalAdapter
+    from topos.query.types import RetrievalRequest
+    from topos.storage.adapters.factory import AdapterFactory
+
+    from tests.evals.privacy.blackhole.corpus import BH_CANONICAL
+
+    adapter = DefaultSignalRetrievalAdapter(
+        AdapterFactory.create("local_database", conn=conn)
+    )
+    return adapter.retrieve(
+        RetrievalRequest(
+            manifest=resolve_scope_manifest("messages:read"),
+            access_mode="summary",
+            # Naming the entity is what resolves it and opens the entity lane —
+            # a query that never names it exercises nothing.
+            query_text=f"what happened with the {BH_CANONICAL} thread",
+            installed_source_ids=["src-a"],
+            disclosure_tier="owner_raw" if guard.sees_everything else "default_disclosure",
+        )
+    ).context_packet
+
+
 # Surface name → reader. The battery iterates this, so adding a surface here is
 # all it takes to bring it under the gate.
 SURFACES: Dict[str, Reader] = {
@@ -288,6 +332,7 @@ SURFACES: Dict[str, Reader] = {
     "attention_digest": read_attention_digest,
     "stat_insights": read_stat_insights,
     "user_goals": read_user_goals,
+    "query_retrieval": read_query_retrieval,
 }
 
 

@@ -1556,6 +1556,7 @@ def _load_entity_thread_items(
         return []
 
     entity_ids, skipped = _entity_thread_entities(conn, linked, manifest=manifest)
+    owner_view = str(disclosure_tier or "") == "owner_raw"
     if ledger is not None:
         for reason, count in sorted(skipped.items()):
             ledger.record(
@@ -1572,6 +1573,37 @@ def _load_entity_thread_items(
     )
     if not by_table and not untabled:
         return []
+
+    if not owner_view:
+        # THE BLACK HOLE, AT SOURCE. Every other plane on this lane withholds
+        # CONTENT; this one withholds EXISTENCE, so it cannot be applied to the
+        # rows on the way out — the protected records must never be read at all.
+        # For a lane that reaches rows through `entity_mentions`, the honest
+        # place to stop is the mention set itself, and that is precisely the
+        # question `BlackholeGuard.blocked_record_ids()` answers, from the same
+        # join, so it is asked rather than re-derived.
+        #
+        # Filtering RECORDS rather than entities is deliberate and is the whole
+        # filter: a record linked to both a protected entity and a visible one
+        # arrives under the visible entity's id, so dropping protected entities
+        # from `entity_ids` would sail straight past it. The record set covers
+        # that case and the plain one together.
+        #
+        # Deliberately NOT recorded in the ledger, unlike every other refusal in
+        # this function. `as_public()` leaves the node, and a narrowing line
+        # reading "an entity was withheld" is itself the confirmation of
+        # existence D5 exists to deny — the same reason the guard returns empty
+        # rows rather than raising, and the same reason the exit policy's own
+        # receipt is suppressed for non-owners in `_build_summary_items`.
+        blocked_records = _blackhole_blocked_record_ids(conn)
+        if blocked_records:
+            by_table = {
+                table: (ids - blocked_records) for table, ids in by_table.items()
+            }
+            by_table = {table: ids for table, ids in by_table.items() if ids}
+            untabled = untabled - blocked_records
+            if not by_table and not untabled:
+                return []
 
     items: List[Dict[str, Any]] = []
     seen: Set[str] = set()
@@ -3221,6 +3253,39 @@ def _rrf_fuse_summary_lists(
     return fused
 
 
+#: Where a summary item keeps the id of the canonical row behind it. The same tuple
+#: the exclusion filter matches on, for the same reason: one row shape, many lanes.
+_BLACKHOLE_RECORD_ID_KEYS = ("record_id", "message_id", "id", "canonical_record_id")
+#: Where it keeps the entity it arrived by. The entity lane sets this explicitly.
+_BLACKHOLE_ENTITY_ID_KEYS = ("entity_id", "subject_entity_id", "object_entity_id")
+
+
+def _blackhole_blocked_record_ids(conn: Optional[Any]) -> Set[str]:
+    """Canonical records linked to a protected entity, by id rather than by name.
+
+    The name scan is a floor: it can only catch a row that SAYS the name. The
+    entity lane's entire purpose is reaching rows that do not — it finds them
+    through `entity_mentions` — so on that lane the scan is structurally the
+    wrong instrument, and a black-holed entity's thread record sailed through it
+    with the body correctly withheld and `record_id`, `entity_id`,
+    `canonical_table` and `event_at` intact. That is the disclosure tier holding
+    while the black hole fails: the caller learned the entity exists, which is
+    the one thing D5 says must be impossible.
+
+    `BlackholeGuard` already answers the id half exactly, from the same mention
+    join the lane used to find the row. It is asked here rather than re-derived.
+
+    The guard is built as a GRANTEE deliberately: this returns the FULL blocked
+    set and the owner/non-owner split is the caller's, because the owner needs
+    the same set to stamp with and a guard that `sees_everything` returns none.
+    """
+    if conn is None:
+        return set()
+    from ..features.lifecycle.blackhole_guard import BlackholeGuard, CallerClass
+
+    return BlackholeGuard(conn, caller_class=CallerClass.GRANTEE).blocked_record_ids()
+
+
 def _blackhole_policy_for_summary(
     items: List[Dict[str, Any]],
     *,
@@ -3231,7 +3296,7 @@ def _blackhole_policy_for_summary(
 
     This is the grantee-facing pipeline, so the rule splits on who is asking:
 
-    * **Not `owner_raw`** — a grantee. Items mentioning a protected entity are
+    * **Not `owner_raw`** — a grantee. Items touching a protected entity are
       dropped outright. `resolve_disclosure_tier` never elevates a grantee to
       `owner_raw`, so this tier check is a sound proxy for "not the owner".
     * **`owner_raw`** — the owner or something running as them (a routine).
@@ -3240,13 +3305,24 @@ def _blackhole_policy_for_summary(
       control plane needs: it cannot detect protected content itself, and
       without it Gate C on the BYOK route can never fire.
 
-    Items carry names as prose with no entity id, so this is a name scan — the
-    same floor described in `blackhole_llm`, not a ceiling.
+    "Touching" is decided by two instruments, and the id half runs first because
+    it is the exact one:
+
+    1. **id** — the row's record id is in `blocked_record_ids()`, or it carries a
+       protected `entity_id`. This catches a row that never says the name, which
+       is precisely what the entity lane retrieves.
+    2. **name** — a scan of the item's prose. This catches a name the resolver
+       never bound to an id, which no join can see.
+
+    Neither is sufficient alone, which is why both run. This is the wrapper every
+    build path exits through, so it is also the backstop for the lanes that do
+    not filter at source.
     """
     if conn is None or not items:
         return items
     try:
         from ..features.lifecycle.blackhole import (
+            blackholed_entity_ids,
             blackholed_name_terms,
             normalize_entity_name,
         )
@@ -3254,26 +3330,45 @@ def _blackhole_policy_for_summary(
         return items
     try:
         terms = blackholed_name_terms(conn)
+        blocked_ids = blackholed_entity_ids(conn)
+        blocked_records = _blackhole_blocked_record_ids(conn) if blocked_ids else set()
     except Exception:  # noqa: BLE001
         # A store that cannot answer must not silently serve protected content
         # to a grantee; the owner's own path is unaffected.
         if str(disclosure_tier or "") == "owner_raw":
             return items
         raise
-    if not terms:
+    if not terms and not blocked_ids:
         return items
 
     owner_view = str(disclosure_tier or "") == "owner_raw"
     kept: List[Dict[str, Any]] = []
     for item in items:
-        blob = normalize_entity_name(_item_text_blob(item))
-        hit = bool(blob) and any(term in blob for term in terms)
+        hit = _blackhole_id_hit(item, blocked_records, blocked_ids)
+        if not hit:
+            blob = normalize_entity_name(_item_text_blob(item))
+            hit = bool(blob) and any(term in blob for term in terms)
         if not hit:
             kept.append(item)
             continue
         if owner_view:
             kept.append({**item, "blackhole_protected": True})
     return kept
+
+
+def _blackhole_id_hit(
+    item: Dict[str, Any], blocked_records: Set[str], blocked_entities: Set[str]
+) -> bool:
+    """Does this item point at a protected entity by an id it carries?"""
+    for key in _BLACKHOLE_RECORD_ID_KEYS:
+        value = item.get(key)
+        if value is not None and str(value) in blocked_records:
+            return True
+    for key in _BLACKHOLE_ENTITY_ID_KEYS:
+        value = item.get(key)
+        if value is not None and str(value) in blocked_entities:
+            return True
+    return False
 
 
 _CLUSTER_TEXT_KEYS = ("label", "centroid_preview", "term_label")
@@ -3391,16 +3486,27 @@ def _build_summary_items(
         conn=getattr(adapters.signal, "_conn", None),
         disclosure_tier=disclosure_tier,
     )
-    # An off-limits entity emptying the lane is a policy decision, not an absence.
-    if ledger is not None and len(kept) < len(items):
-        ledger.record(
-            _N.STAGE_DISCLOSURE,
-            "dropped_items",
-            "blackhole_policy",
-            dropped=len(items) - len(kept),
-        )
-        if items and not kept:
-            ledger.empty(_N.CAUSE_SCOPE_DENIED, reason="blackhole_policy")
+    dropped = len(items) - len(kept)
+    # THE RECEIPT IS THE LEAK. Every other stage here owes the caller an account of
+    # why their answer got smaller, and this one owes them the opposite. `as_public()`
+    # leaves the node, so a line reading `stage=disclosure, action=dropped_items,
+    # reason=blackhole_policy, dropped=1` tells a grantee — in a closed-set slug whose
+    # meaning the protocol guarantees — that the entity they asked about exists, has
+    # records, and is being kept from them. `empty(scope_denied)` says it louder: not
+    # "nothing matched" but "you were refused". That converts hiding-by-absence into
+    # hiding-by-denial, which is the single thing D5 rules out, and it is the reason
+    # `BlackholeGuard` returns empty rows rather than raising.
+    #
+    # It is only ever emitted in the leaking direction: the owner keeps every row and
+    # gets it stamped instead, so `dropped` is 0 on their side and there is nothing to
+    # report anyway. Non-owners get the debug line, which stays on the node.
+    if dropped > 0:
+        if str(disclosure_tier or "") != "owner_raw":
+            logger.debug("blackhole policy withheld %d summary item(s)", dropped)
+        elif ledger is not None:
+            ledger.record(
+                _N.STAGE_DISCLOSURE, "dropped_items", "blackhole_policy", dropped=dropped
+            )
     return kept
 
 
