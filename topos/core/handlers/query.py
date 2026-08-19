@@ -167,6 +167,15 @@ async def handle_query(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             # the subject better than its own request text does. Absent for every client
             # that does not send it, which is every client today except home chat.
             retrieval_text=str(payload.get("retrieval_text") or "").strip() or None,
+            # The same subject, split per PART of a multi-part request. The rare gate
+            # runs once per entry, so one part's specific ask cannot empty another
+            # part's lane. Absent for every client that does not send it.
+            retrieval_parts=[
+                str(p or "").strip()
+                for p in (payload.get("retrieval_parts") or [])
+                if str(p or "").strip()
+            ]
+            or None,
             scope_id=scope_id,
             access_mode=str(payload.get("access_mode") or "summary"),
             manifest=manifest,
