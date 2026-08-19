@@ -429,6 +429,146 @@ class TestTheRareGateStillVetoes:
         )
 
 
+class TestTheBlackHoleHolds:
+    """The plane this file's docstring claimed to exercise and did not.
+
+    A black hole is not a disclosure tier. A tier withholds CONTENT; a black hole
+    withholds EXISTENCE — "indistinguishable from an entity that was never in the
+    store" (blackhole_guard, D5). The entity lane is where the two come apart,
+    because it is the one lane that reaches a row BY ID: the row it retrieves is
+    by construction one whose text never names the entity, so the name scan in
+    `_blackhole_policy_for_summary` has nothing to match and waves it through
+    with the body withheld and the identifiers intact.
+
+    The counterfactual that motivated these: with the lane on, a grantee asking
+    about a black-holed entity received one summary carrying `record_id`,
+    `entity_id`, `canonical_table` and `event_at`; with the lane off, zero. The
+    body never leaked — the tier held — and the entity's existence did.
+
+    Every assertion below is on the packet a caller receives from
+    `DefaultSignalRetrievalAdapter.retrieve()`, not on the filter helper: the
+    filter has been correct and unreached before.
+    """
+
+    @pytest.fixture()
+    def blackholed(self, conn):
+        from topos.features.lifecycle.blackhole import BlackholeStore
+
+        store = BlackholeStore(conn)
+        store.blackhole_entity(entity_ref="ent-anthropic")
+        store.mark_rebuild_complete("ent-anthropic")
+        conn.commit()
+        return conn
+
+    def test_a_grantee_learns_nothing_of_a_black_holed_entitys_records(
+        self, blackholed
+    ) -> None:
+        """The leak, stated as the packet. Not one identifier may survive."""
+        bundle = _retrieve(blackholed, QUERY, disclosure_tier="default_disclosure")
+        blob = str(bundle.context_packet)
+        assert THREAD_ID not in blob, "a black-holed entity's record id reached a grantee"
+        assert "ent-anthropic" not in blob, "the black-holed entity id reached a grantee"
+        assert _thread_items(bundle) == []
+
+    def test_the_grantee_result_matches_an_entity_that_never_existed(
+        self, blackholed
+    ) -> None:
+        """D5, as an equality rather than an absence. 'Protected' and 'never stored'
+        must produce the same packet — a shorter answer for the real entity is itself
+        the confirmation the black hole exists to deny."""
+        protected = _retrieve(blackholed, QUERY, disclosure_tier="default_disclosure")
+        absent = _retrieve(
+            blackholed,
+            "what happened with the Qx71neverstored thread",
+            disclosure_tier="default_disclosure",
+        )
+        assert _thread_items(protected) == _thread_items(absent) == []
+        assert len(_summaries(protected)) == len(_summaries(absent))
+
+    def test_the_black_hole_is_not_the_tier_doing_the_work(self, blackholed) -> None:
+        """The control that stops the test above passing for the wrong reason. Take
+        the black hole away and the same grantee gets the row back — identifiers and
+        all. If this ever fails, the assertions above prove nothing about black holes."""
+        from topos.features.lifecycle.blackhole import BlackholeStore
+
+        BlackholeStore(blackholed).unblackhole_entity(entity_ref="ent-anthropic")
+        blackholed.commit()
+        bundle = _retrieve(blackholed, QUERY, disclosure_tier="default_disclosure")
+        assert THREAD_ID in str(bundle.context_packet)
+
+    def test_a_visible_entitys_thread_is_untouched(self, blackholed) -> None:
+        """Surgical, not a blanket denial: protecting one entity must not cost another
+        its thread."""
+        other = _message("msg-thread-visible", "the visible thread record")
+        _seed_messages(blackholed, [other])
+        _add_entity(blackholed, "ent-visible", "Quokka", mention_count=4)
+        _add_mention(blackholed, "m-vis", "ent-visible", "msg-thread-visible")
+        blackholed.commit()
+
+        bundle = _retrieve(
+            blackholed,
+            "what happened with the Quokka thread",
+            disclosure_tier="default_disclosure",
+        )
+        assert "msg-thread-visible" in str(bundle.context_packet)
+
+    def test_the_owner_keeps_the_row_and_it_is_stamped_protected(
+        self, blackholed
+    ) -> None:
+        """The owner is entitled to their own protected records, but the control plane
+        cannot detect protected content itself — the stamp is the taint feed that lets
+        Gate C fire on the BYOK route. An unstamped row is an untainted row."""
+        bundle = _retrieve(blackholed, QUERY, disclosure_tier="owner_raw")
+        # The lane's own row, not a sibling: `entity_mention` and `entity_dossier`
+        # carry the same record id and DO name the entity, so the name scan already
+        # stamps them. Asserting on `record_id` alone passes on those and says
+        # nothing about the row that arrived by id.
+        item = next(
+            (s for s in _thread_items(bundle) if str(s.get("record_id")) == THREAD_ID),
+            None,
+        )
+        assert item is not None, "the owner lost their own record"
+        assert item.get("blackhole_protected") is True
+
+    def test_the_ledger_does_not_announce_the_withholding(self, blackholed) -> None:
+        """Denial by receipt is still denial.
+
+        The exit filter is honest about its own work: when it drops rows it records
+        `stage=disclosure, action=dropped_items, reason=blackhole_policy, dropped=N`
+        (retrieval.py:3491). That is right for every other plane — a caller should
+        be told the scope ceiling or an exclusion narrowed their answer — and it is
+        exactly wrong for this one, because `as_public()` LEAVES THE NODE. A grantee
+        who receives that line has been told, in a closed-set slug the protocol
+        guarantees the meaning of, that the entity they asked about exists and has
+        records. It converts hiding-by-absence into hiding-by-denial, which is the
+        one thing D5 forbids, and the `dropped` integer even counts them.
+
+        So the source-level drop in `_load_entity_thread_items` is not a redundant
+        second copy of the exit filter. It is the half that makes the exit filter
+        find NOTHING to report: the protected entity is never resolved, the lane
+        never loads its rows, and the ledger stays silent. Remove it and the packet
+        still looks clean while the receipt beside it does the leaking.
+        """
+        ledger = NarrowingLedger()
+        _retrieve(
+            blackholed, QUERY, disclosure_tier="default_disclosure", ledger=ledger
+        )
+        public = str(ledger.as_public())
+        assert "blackhole" not in public, (
+            "the narrowing ledger told a grantee that something was withheld"
+        )
+        assert ledger.empty_cause != _N.CAUSE_SCOPE_DENIED
+
+    def test_the_owner_is_told_the_same_nothing(self, blackholed) -> None:
+        """The control for the above: it must pass because nothing was dropped, not
+        because the ledger line was deleted. The owner keeps their rows, so the
+        exit filter drops none of them and there is nothing to record either way —
+        which is what makes the grantee's identical ledger non-informative."""
+        ledger = NarrowingLedger()
+        _retrieve(blackholed, QUERY, disclosure_tier="owner_raw", ledger=ledger)
+        assert "blackhole" not in str(ledger.as_public())
+
+
 class TestTheEntityPlanesOwnArtefacts:
     """DO 4. Both of these have produced artefacts on this node."""
 

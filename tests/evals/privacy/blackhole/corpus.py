@@ -29,11 +29,12 @@ from dataclasses import dataclass, field
 from typing import Dict, List
 
 from topos.features.lifecycle.blackhole import BlackholeStore
+from topos.storage.canonical.conversations_tables import ConversationsTablesManager
 from topos.storage.db.migrations import apply_all_migrations
 
 # Bump when the corpus changes — resets comparability of scorecards across runs,
 # same discipline as CORPUS_VERSION in the privacy corpus.
-CORPUS_VERSION = "blackhole-corpus-2"
+CORPUS_VERSION = "blackhole-corpus-3"
 
 # Rare enough that a substring scan cannot false-positive on ordinary prose,
 # name-shaped enough that it exercises the real normalizer.
@@ -84,7 +85,24 @@ TOKENS: Dict[str, str] = {
     # from it — so it is a name-string surface in its own right.
     "cluster_label": "BHCLUSTERqx18",
     "cluster_preview": "BHPREVIEWqx19",
+    # The entity-lane hazard, and the only token here whose row does NOT name the
+    # protected entity. Every other canonical probe carries the name, so a filter
+    # that is a pure name scan passes all of them — which is how the query path
+    # served a black-holed entity's record id, table and timestamp to a grantee
+    # while scoring BHLR = 0. The link lives only in `entity_mentions`, so the
+    # only instrument that can reach this row is the id join.
+    "thread_record": "BHTHREADqx20",
+    # The record ID, planted as a token in its own right. This is the shape the
+    # leak actually took: the body WAS correctly withheld by the disclosure tier
+    # and the identifiers were not, so a probe that scans only for content tokens
+    # scores the packet clean while the caller learns the entity exists, which
+    # record it owns, in which table, and when. An identifier is a leak.
+    "thread_record_id": "rec-BHRECIDqx21",
 }
+
+#: The record id of that row — the same string as the token above, named because
+#: the corpus plants it in two places (the canonical row and the mention join).
+BH_THREAD_RECORD_ID = TOKENS["thread_record_id"]
 
 # Control tokens — these must SURVIVE for every non-owner caller.
 CONTROL_TOKENS: Dict[str, str] = {
@@ -139,25 +157,31 @@ def _obj(
     )
 
 
-def _aux_tables(conn: sqlite3.Connection) -> None:
-    """Surfaces whose real DDL lives outside the wiki migrations.
+def _seed_messages(conn: sqlite3.Connection, rows: List[Dict[str, str]]) -> None:
+    """Canonical messages, through the real ingest manager.
 
-    Created here so the corpus can plant in them without dragging the whole
-    ingest pipeline into a unit-speed battery.
+    This used to be a four-column hand-rolled table, and that shortcut was load
+    bearing in the wrong direction: the query pipeline's canonical adapter reads
+    the *real* schema, so a corpus that faked it could not be handed to
+    `retrieve()` at all — which is why the battery had no reader on the query
+    path, and why a live existence leak there sat under a green BHLR.
     """
-    # conversation_messages is created by the legacy _ensure_tables path rather
-    # than by a migration, so the battery stands it up itself. Every other
-    # surface uses the real migrated schema.
-    conn.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS conversation_messages (
-            record_id TEXT PRIMARY KEY,
-            source_id TEXT,
-            content TEXT,
-            event_at TEXT
-        );
-        """
-    )
+    mgr = ConversationsTablesManager(conn)
+    for row in rows:
+        mgr.upsert_message_batch(
+            [
+                {
+                    "message_id": row["record_id"],
+                    "thread_id": "thread-bh",
+                    "content": row["content"],
+                    "ts": row["event_at"],
+                    "sender_type": "contact",
+                }
+            ],
+            dataset_id="user:default:device",
+            source_id=row["source_id"],
+            sync_batch_id=f"batch-{row['record_id']}",
+        )
 
 
 def build_blackhole_corpus(db_path: str, *, rebuild_complete: bool = True) -> BlackholeCorpus:
@@ -168,7 +192,6 @@ def build_blackhole_corpus(db_path: str, *, rebuild_complete: bool = True) -> Bl
     """
     conn = sqlite3.connect(db_path)
     apply_all_migrations(conn)
-    _aux_tables(conn)
 
     t = TOKENS
     c = CONTROL_TOKENS
@@ -387,20 +410,38 @@ def build_blackhole_corpus(db_path: str, *, rebuild_complete: bool = True) -> Bl
     )
 
     # -------------------------------------------------- raw canonical
-    conn.execute(
-        "INSERT INTO conversation_messages (record_id, source_id, content, event_at)"
-        " VALUES (?,?,?,?)",
-        (
-            "rec-1",
-            "src-a",
-            f"see you thursday {BH_CANONICAL} {t['raw_canonical']}",
-            "2026-07-01T10:00:00Z",
-        ),
+    _seed_messages(
+        conn,
+        [
+            {
+                "record_id": "rec-1",
+                "source_id": "src-a",
+                "content": f"see you thursday {BH_CANONICAL} {t['raw_canonical']}",
+                "event_at": "2026-07-01T10:00:00Z",
+            },
+            {
+                "record_id": "rec-2",
+                "source_id": "src-a",
+                "content": f"standup notes {OK_CANONICAL}",
+                "event_at": "2026-07-01T11:00:00Z",
+            },
+            # The entity-lane row: linked to the protected entity by mention only,
+            # its text naming nobody. A name scan cannot see it; the id join can.
+            {
+                "record_id": BH_THREAD_RECORD_ID,
+                "source_id": "src-a",
+                "content": f"shipping the compiler rewrite on friday {t['thread_record']}",
+                "event_at": "2026-07-01T12:00:00Z",
+            },
+        ],
     )
     conn.execute(
-        "INSERT INTO conversation_messages (record_id, source_id, content, event_at)"
-        " VALUES (?,?,?,?)",
-        ("rec-2", "src-a", f"standup notes {OK_CANONICAL}", "2026-07-01T11:00:00Z"),
+        """
+        INSERT INTO entity_mentions
+            (mention_id, entity_id, record_id, source_id, canonical_table, surface_text, event_at)
+        VALUES (?, ?, ?, 'src-a', 'conversation_messages', ?, '2026-07-01T12:00:00Z')
+        """,
+        (f"m_{uuid.uuid4().hex[:8]}", BH_ID, BH_THREAD_RECORD_ID, BH_CANONICAL),
     )
 
     # ------------------------------------------------------- user goal

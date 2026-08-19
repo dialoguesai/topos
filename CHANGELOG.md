@@ -92,6 +92,45 @@ The machine-readable twin of each release is
 
 ### Fixed
 
+- `[E:query]` **A black-holed entity still existed, if you asked the entity lane.** The
+  P4 lane reaches records through `entity_mentions` — by construction it returns rows
+  whose text never names the subject — and the only black-hole filter on the way out was
+  a NAME SCAN. So a grantee asking about a protected entity got a summary item back with
+  `record_id`, `entity_id`, `canonical_table` and `event_at` all intact and only the body
+  withheld. The disclosure tier was holding perfectly; the black hole was not. That is
+  the one outcome D5 rules out — a protected entity must be indistinguishable from one
+  that was never stored, and this told the caller it exists, which records it owns, in
+  which table, and when. `BlackholeGuard.blocked_record_ids()` had the exact answer and
+  had no production caller anywhere in the engine.
+  - **Filtered by id, at source.** `_load_entity_thread_items` now subtracts
+    `blocked_record_ids()` from the mention set before it reads any canonical row, so
+    for a non-owner the protected records are never resolved. Records are filtered
+    rather than entities on purpose: a record linked to both a protected entity and a
+    visible one arrives under the visible entity's id and would sail past an
+    entity-level drop.
+  - **The name scan is now the backstop, not the floor.** `_blackhole_policy_for_summary`
+    matches `record_id`/`entity_id` first and falls back to scanning text, which keeps
+    the lanes that have no source to filter at covered.
+  - **The owner keeps their rows and they are stamped.** Entity-lane items now carry
+    `blackhole_protected: true` for `owner_raw`, matching their `entity_dossier` and
+    `entity_mention` siblings. The control plane cannot detect protected content itself;
+    an unstamped row is an untainted row.
+  - **The receipt was leaking too.** The narrowing ledger recorded
+    `stage=disclosure, action=dropped_items, reason=blackhole_policy, dropped=N` and,
+    when it emptied the lane, `empty_cause=scope_denied`. `as_public()` leaves the node,
+    so that line told a grantee in a guaranteed-meaning slug that something about the
+    entity they asked for was being withheld — hiding-by-denial in place of
+    hiding-by-absence, with a count attached. Non-owners now get a debug line that stays
+    on the node; the owner, whose rows are stamped rather than dropped, is unaffected.
+  - **The BHLR battery was structurally blind to all of it.** Every reader in the battery
+    read storage and applied the guard itself, so no reader had ever run a query: a live
+    existence leak through the retrieval path sat under a green BHLR = 0. The battery
+    gains a `query_retrieval` surface that drives
+    `DefaultSignalRetrievalAdapter.retrieve()`, and the corpus gains a P4-shaped record —
+    linked to the protected entity by mention only, text that never names it, and its
+    RECORD ID planted as a canary token in its own right, because the identifiers were
+    what leaked while the body was correctly withheld.
+
 - `[E:query]` **An entity mention pointer shadowed the record it pointed at.**
   `entity_context_items` emits a pointer item (`"2026-03-13 — Anthropic"`) carrying the
   record's id for a record it never reads. `_fusion_item_key` collapsed it with the
