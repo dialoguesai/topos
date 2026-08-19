@@ -110,6 +110,19 @@ include = ["topos*", "shared*"]
 # locked roots behind; topos.runtime_housekeeping sweeps those on node start.
 tmp_path_retention_count = 1
 tmp_path_retention_policy = "failed"
+# The DEFAULT lane is hermetic. Without this, a plain `pytest tests/` selects
+# every marker, and the three lanes below are the ones that read and WRITE the
+# developer's own ~/.topos/database.db or drive the node running on :9000 —
+# `tests/conftest.py::_no_live_db_guard` waives its protection for exactly these
+# markers, which only makes sense if the ordinary gate never selects them.
+# On 2026-08-19 it did: one `pytest tests/ -q` run inserted 71 rows into the
+# owner's query_artifacts and reported two environment-dependent 500s from the
+# live node as suite failures.
+#
+# `-m` is last-one-wins, so any explicit `-m ...` on the command line replaces
+# this filter wholesale — that is how the opt-in lanes are entered
+# (`just test-live`, `just test-owner-db-eval`; see docs/testing/TEST_LANES.md).
+addopts = ["-m", "not live and not e2e and not qq_eval"]
 filterwarnings = [
   "ignore::DeprecationWarning:pydantic.*",
   "ignore:on_event is deprecated.*:DeprecationWarning:fastapi.*",
