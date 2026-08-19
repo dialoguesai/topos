@@ -500,8 +500,26 @@
     {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
-      "steps": [],
-      "notes": []
+      "steps": [
+        {
+          "id": "rebuild-entity-graph-centrality",
+          "kind": "derived_rebuild",
+          "title": "Rebuild the entity graph so centrality + community labels stamp immediately",
+          "why": "compute_communities now stamps centrality {degree, eigen, betweenness} and community_label into entities.metadata_json, but only when it runs. Without this step the stamps appear at the next enrichment-triggered debounced rebuild; running it once at upgrade lights up structural node sizing and named communities in the graph UI right away instead of whenever new data next arrives.",
+          "params": {
+            "targets": [
+              "entity_graph"
+            ]
+          },
+          "cost": "no LLM, no network; the rebuild runs in a subprocess so the node's event loop stays live",
+          "consent": "auto",
+          "order": 0
+        }
+      ],
+      "notes": [
+        "Additive derived data only: centrality and community_label are new metadata_json keys on entities the community pass already stamps community_id onto. Nothing changes shape, no table migrates, and a node that skips the step simply shows mention-count node sizing and numbered communities until its next organic rebuild stamps the new keys.",
+        "An entity that has left the graph sheds community_id, centrality and community_label together in the same sweep that previously removed community_id alone."
+      ]
     }
   ]
 }
