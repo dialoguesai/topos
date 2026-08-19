@@ -26,12 +26,16 @@ from topos.query.narrowing import NarrowingLedger
 
 class TestTheLedgerItself:
     def test_an_entry_is_stage_action_reason_dropped(self) -> None:
+        # `emptied`, not the `vetoed` this test used to invent: the gate's real veto
+        # goes through `empty()`, which writes `emptied`, and a fixture that speaks a
+        # verb no production call site emits is not evidence about the production path.
+        # It is also now a non-member, so the ledger would have collapsed it.
         led = NarrowingLedger()
-        led.record(N.STAGE_RARE_GATE, "vetoed", "rare_token_unevidenced", dropped=25)
+        led.record(N.STAGE_RARE_GATE, "emptied", "rare_token_unevidenced", dropped=25)
         assert led.as_public()["ledger"] == [
             {
                 "stage": "rare_gate",
-                "action": "vetoed",
+                "action": "emptied",
                 "reason": "rare_token_unevidenced",
                 "dropped": 25,
             }
@@ -48,17 +52,27 @@ class TestTheLedgerItself:
         assert led.empty_cause is None
 
     def test_public_fields_cannot_carry_the_owners_words(self) -> None:
-        """The privacy guarantee is structural, not a call-site convention."""
+        """The privacy guarantee is structural, not a call-site convention.
+
+        This test used to assert the slugged text — ``how_often_do_i_go_to_the_gym`` —
+        and call that safe, which is how it stayed green while the mechanism was a
+        character filter. It asserts membership now: the words are gone, not merely
+        punctuated differently.
+        """
         led = NarrowingLedger()
         led.record("gate", "vetoed", "How often do I go to the gym? (Threnody-7)")
-        reason = led.as_public()["ledger"][0]["reason"]
-        assert reason == "how_often_do_i_go_to_the_gym_threnody-7"[: len(reason)]
-        assert " " not in reason and "?" not in reason and "(" not in reason
-        assert len(reason) <= 64
+        entry = led.as_public()["ledger"][0]
+        assert entry == {
+            "stage": N.UNRECOGNIZED,
+            "action": N.UNRECOGNIZED,
+            "reason": N.UNRECOGNIZED,
+        }
 
     def test_detail_stays_on_the_node(self) -> None:
         led = NarrowingLedger()
-        led.record("rare_gate", "vetoed", "unevidenced", detail={"tokens": ["threnody"]})
+        led.record(
+            "rare_gate", "emptied", "rare_token_unevidenced", detail={"tokens": ["threnody"]}
+        )
         assert "detail" not in led.as_public()["ledger"][0]
         assert led.as_local()["ledger"][0]["detail"] == {"tokens": ["threnody"]}
 
@@ -74,7 +88,9 @@ class TestTheLedgerItself:
 
     def test_telemetry_is_counts_and_enums(self) -> None:
         led = NarrowingLedger()
-        led.record("rare_gate", "vetoed", "unevidenced", detail={"tokens": ["threnody"]})
+        led.record(
+            "rare_gate", "emptied", "rare_token_unevidenced", detail={"tokens": ["threnody"]}
+        )
         led.empty(N.CAUSE_GATE_VETOED)
         tel = led.as_telemetry()
         assert tel == {"n_entries": 1, "stages": {"rare_gate": 1}, "empty_cause": "gate_vetoed"}
