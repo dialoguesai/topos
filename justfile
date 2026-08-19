@@ -80,6 +80,39 @@ app-install-test *args="status":
 test:
     uv run pytest tests -m "public and not e2e and not live and not qq_eval" -q
 
+# The owner-database query/latency eval, against a SNAPSHOT of ~/.topos.
+#
+# These cases are only meaningful on real data, so they are not seeded — but
+# every turn they run persists a query_artifacts row, and pointed at the live
+# file that write-back lands in the owner's database (2026-08-19: 97% of that
+# table, and 100% of its timed rows, were harness sessions, so
+# `just latency-percentiles` was reporting the test suite's latency as the
+# owner's). The snapshot keeps the data and throws away the writes.
+#
+# Takes a ~488MB online backup first; that is the price of a lane that cannot
+# corrupt or pollute the thing it measures.
+# --ignore, because `live` currently spans two different needs: these modules
+# resolve the database from TOPOS_DATABASE_PATH and so follow the snapshot,
+# while tests/release/iteration4 talks HTTP to the node on :9000 and would
+# ignore it — see `just test-live-node`.
+test-owner-db-eval *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    snap="$(uv run python scripts/snapshot_owner_db.py)"
+    trap 'rm -f "$snap" "$snap"-wal "$snap"-shm' EXIT
+    echo "snapshot: $snap"
+    TOPOS_DATABASE_PATH="$snap" uv run pytest tests -m "qq_eval or live" \
+        --ignore=tests/release/iteration4 -q {{args}}
+
+# Live-node lane: drives the engine actually running on :9000 with a real key.
+#
+# Deselected from every other lane on purpose. It is environment-dependent by
+# construction — a 500 here is a statement about this machine's node, not about
+# the code under test — and it reads and writes whichever database that node
+# has open, which no env var in THIS process can redirect.
+test-live-node *args:
+    uv run pytest tests/release/iteration4 -m "live" -q {{args}}
+
 # Per-release privacy evaluation → version-stamped scorecard in eval_reports/<version>.json
 # (+ history.jsonl trend). Exits non-zero if a tier-1 privacy gate regresses. Run right after
 # the version bump so the report is stamped with the version being shipped.

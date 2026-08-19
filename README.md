@@ -161,8 +161,12 @@ Run tests:
 
 ```bash
 pip install -e ".[dev,engine]"
-pytest tests -m "public and not e2e" -q
+pytest tests -q
 ```
+
+The default lane is hermetic — temp databases only. Tests that read your own
+`~/.topos` database or drive a running node are deselected unless you ask for
+them by marker; see [docs/testing/TEST_LANES.md](docs/testing/TEST_LANES.md).
 
 ## Plugins
 

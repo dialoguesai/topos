@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from functools import lru_cache
 
 import pytest
 
@@ -32,7 +33,19 @@ from topos.storage.db.migrations import apply_all_migrations
 #: `entity_context_items` bounds its mention lane by the caller's grant, so these
 #: direct calls have to name one. `messages:read` authorizes `conversation_messages`,
 #: which is the table the mentions below are recorded against.
-MESSAGES_MANIFEST = resolve_scope_manifest("messages:read")
+#:
+#: LAZY, and it has to stay lazy. Resolving a manifest is not the pure lookup it
+#: looks like: `manifest_from_scope_entry` asks `get_sources_by_scope` which
+#: installed sources back that scope, and that reads `source_runtime_installs`
+#: through `core.state.get_db_connection()`. Called at MODULE scope this runs
+#: during collection, before any fixture exists — so `_no_live_db_guard`, which
+#: is per-test, has not pinned TOPOS_DATABASE_PATH yet and the unset path
+#: resolves to the developer's own ~/.topos/database.db. That is a read-write
+#: open of owner data on a plain `pytest tests/`, caught by
+#: `tests/live_db_watch.py` on 2026-08-19.
+@lru_cache(maxsize=1)
+def messages_manifest():
+    return resolve_scope_manifest("messages:read")
 
 
 @pytest.fixture()
@@ -445,7 +458,7 @@ class TestDossiers:
         assert payload is not None and "Maya Chen" in payload["summary_text"]
         assert load_dossier_for_entity(conn, maya) is not None
         items = entity_context_items(
-            conn, link_query_entities(conn, "Who is Maya Chen?"), manifest=MESSAGES_MANIFEST
+            conn, link_query_entities(conn, "Who is Maya Chen?"), manifest=messages_manifest()
         )
         assert any(i.get("retrieval_source") == "entity_dossier" for i in items)
 
@@ -484,7 +497,7 @@ class TestQueryLinking:
         conn.commit()
         refresh_dossiers(conn)
         items = entity_context_items(
-            conn, link_query_entities(conn, "Maya Chen"), manifest=MESSAGES_MANIFEST
+            conn, link_query_entities(conn, "Maya Chen"), manifest=messages_manifest()
         )
         sources = [i["retrieval_source"] for i in items]
         assert "entity_dossier" in sources and "entity_mention" in sources

@@ -238,6 +238,62 @@ The machine-readable twin of each release is
 
 ### Fixed
 
+- `[O]` **The documented test gate wrote to the developer's own database.** `pytest tests/`
+  was not hermetic: it opened `~/.topos/database.db` read-write, and on 2026-08-19 a single
+  run inserted 71 rows into the owner's `query_artifacts` and reported two
+  environment-dependent 500s from the node on `:9000` as suite failures.
+  - **The markers were doing half a job.** `live` / `e2e` / `qq_eval` exempted a test from
+    the `_no_live_db_guard` fixture, but nothing *deselected* them, so the ordinary gate ran
+    the whole set against the owner's data. `pyproject.toml` now carries
+    `addopts = ["-m", "not live and not e2e and not qq_eval"]`. Naming a file or a node id
+    does **not** opt you in — only `-m` does, deliberately, because a script or an agent
+    reaching that database by muscle memory is exactly how this went unnoticed for three
+    weeks. A conftest hint prints the way back in when everything you selected was
+    deselected.
+  - **The fixture could not have covered it anyway.** It pins `TOPOS_DATABASE_PATH`, and
+    five modules resolve the path themselves —
+    `LIVE_DB_PATH = Path(os.environ.get("TOPOS_DATABASE_PATH", Path.home() / ".topos" / ...))`
+    evaluated at COLLECTION time, when the variable is still unset, then handed to
+    `AdapterFactory` as `db_path=`. `tests/live_db_watch.py` closes that from the other end:
+    it wraps `sqlite3.connect` for the whole session, records every read-write open of a real
+    `~/.topos` (the tree, so archived profiles count) or legacy database, and reds the run
+    naming the test, the path, and six frames of blame. `mode=ro` and `immutable=1` are not
+    recorded — reading owner data is what the live evals are for and it changes nothing on
+    disk.
+  - **A third shape nobody had described, found by that guard's first full run.**
+    `tests/features/test_p3_entity_spine.py` held
+    `MESSAGES_MANIFEST = resolve_scope_manifest("messages:read")` at module scope. Resolving
+    a manifest reads as a registry lookup, but `manifest_from_scope_entry` asks
+    `get_sources_by_scope` which installed sources back the scope, and that reads
+    `source_runtime_installs` through `core.state.get_db_connection()`. At module scope it
+    ran during **collection** — where no fixture exists to redirect anything — so the unset
+    path resolved to the developer's database before the first test started. Made lazy, and
+    `test_no_test_module_reaches_the_database_at_import_time` now walks each module's AST for
+    database-reaching calls at import scope (module body, class bodies, and decorator
+    arguments, since a `parametrize` argument is evaluated during collection like any other).
+    Second-order trap worth stating: once `core.state.db_conn` is cached, later calls reuse
+    the handle and open nothing, so one recorded open is not evidence of one offender.
+  - **The lanes that do need real data are named and disposable.**
+    `just test-owner-db-eval` takes a point-in-time online backup
+    (`scripts/snapshot_owner_db.py`, SQLite's backup API rather than `cp` — the node runs WAL
+    and a byte copy can miss committed pages, and a torn snapshot reads as a retrieval
+    regression) and points the lane at it: the reads are real, the writes are thrown away.
+    `just test-live-node` is the `:9000` lane, whose database no environment variable in the
+    pytest process can redirect. Both documented in `docs/testing/TEST_LANES.md`; README and
+    CONTRIBUTING no longer print a filter that lets these through.
+  - **Measured.** Three full `pytest tests -q` runs: 3883 passed, 6 skipped, 32 deselected,
+    **zero** owner-database opens, `query_artifacts` unchanged at 1518 rows.
+
+- `[O]` **The latency script was reporting the test suite's latency as the owner's.** The
+  same leak filled `query_artifacts`: 1473 of its 1518 rows were harness sessions, and
+  **100% of the 85 rows carrying a `duration_ms` were synthetic**, so
+  `scripts/query_latency_percentiles.py`'s engine series described the eval harness while
+  reading as a statement about this person's node. Those rows are permanent, so they are now
+  excluded by session-id prefix (`HARNESS_SESSION_PREFIXES`) with the excluded count printed
+  beside the sample count — a filter nobody can see is indistinguishable from missing data.
+  The honest reading of that series today is `samples=0`, and the script says so in those
+  words rather than letting an absent number imply an un-instrumented system.
+
 - `[E:query]` **A denial returned no reason, and the guard that should have caught it was
   written so that it could not.** `deny_reason` has been on the field contract's
   `required_return` list since the contract existed. Nothing anywhere covered it.
