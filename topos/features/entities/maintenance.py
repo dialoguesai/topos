@@ -29,10 +29,15 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import time
 import uuid
 from typing import Callable, Dict, Iterable, Iterator, List, Optional, Set, Tuple
 
 logger = logging.getLogger("topos.features.entities.maintenance")
+
+# Betweenness source-sample size (Brandes with k pivots ≈ O(k·m)). Exact below
+# this node count; sampled above it. ~2k-node personal graphs finish in seconds.
+_BETWEENNESS_SAMPLE_K = 256
 
 # Canonical message tables that carry a sender we can attribute a
 # communicates_with edge to. Maps table -> sender column name.
@@ -620,14 +625,18 @@ def rebuild_evidence_edges(
 
 
 def compute_communities(conn: sqlite3.Connection) -> Dict[str, int]:
-    """Louvain neighborhoods over the active entity graph (the witcher-network
-    recipe: community_louvain.best_partition on the weighted co-occurrence
-    graph).
+    """Louvain neighborhoods + structural analytics over the active entity
+    graph (the witcher-network recipe: community_louvain.best_partition on the
+    weighted co-occurrence graph, plus degree / eigenvector / betweenness).
 
     Community ids are re-ranked by size (0 = largest neighborhood) so colors
     stay reasonably stable across rebuilds, and stamped into
-    entities.metadata_json.community_id; entities no longer in the graph get
-    the stale label removed. random_state pins the partition for determinism.
+    entities.metadata_json.community_id. The same pass stamps
+    ``centrality`` = {degree, eigen, betweenness} per node and
+    ``community_label`` (the highest-eigenvector member's canonical name) so
+    graph UIs can size by structure and name neighborhoods. Entities no longer
+    in the graph get every stale stamp removed. random_state pins the
+    partition for determinism.
     """
     try:
         import networkx as nx
@@ -664,26 +673,104 @@ def compute_communities(conn: sqlite3.Connection) -> Dict[str, int]:
         for i, (comm, _n) in enumerate(sorted(sizes.items(), key=lambda kv: (-kv[1], kv[0])))
     }
 
+    # Structural analytics over the same in-memory graph: degree (connections),
+    # weighted eigenvector (influence), sampled betweenness (bridging). Also
+    # pure CPU, also outside the gate. A failure here must never cost the
+    # community stamp — analytics degrade to whatever the last rebuild stamped.
+    t0 = time.perf_counter()
+    centrality: Dict[str, Tuple[int, float, float]] = {}
+    labels_by_rank: Dict[int, Optional[str]] = {}
+    try:
+        degree = dict(G.degree())
+        strength = dict(G.degree(weight="weight"))
+        try:
+            eigen = nx.eigenvector_centrality(G, weight="weight", max_iter=500, tol=1e-6)
+        except nx.NetworkXException:
+            # Disconnected/pathological spectra: PageRank is the standard
+            # robust stand-in for the same "influence" reading.
+            eigen = nx.pagerank(G, weight="weight")
+        n = G.number_of_nodes()
+        # Edge weights are affinities (higher = closer), not distances, so
+        # betweenness runs unweighted; sampling keeps Brandes at O(k·m).
+        k = None if n <= _BETWEENNESS_SAMPLE_K else _BETWEENNESS_SAMPLE_K
+        betweenness = nx.betweenness_centrality(G, k=k, normalized=True, seed=42)
+        for node in G.nodes:
+            centrality[str(node)] = (
+                int(degree.get(node, 0)),
+                round(float(eigen.get(node, 0.0)), 6),
+                round(float(betweenness.get(node, 0.0)), 6),
+            )
+        # Auto-label each community after its most central member; ties break
+        # by strength then id so labels hold still across rebuilds.
+        names: Dict[str, str] = {}
+        ids = list(partition.keys())
+        for start in range(0, len(ids), 400):
+            chunk = ids[start : start + 400]
+            for row in conn.execute(
+                "SELECT entity_id, canonical_name FROM entities "
+                f"WHERE entity_id IN ({','.join('?' * len(chunk))})",
+                chunk,
+            ):
+                names[str(row[0])] = str(row[1] or "")
+        for comm, members in enumerate(community_sets):
+            ranked = sorted(
+                (str(m) for m in members),
+                key=lambda eid: (eigen.get(eid, 0.0), strength.get(eid, 0.0), eid),
+                reverse=True,
+            )
+            labels_by_rank[rank[comm]] = next(
+                (names[eid] for eid in ranked if names.get(eid, "").strip()), None
+            )
+        logger.info(
+            "graph structural analytics: %d nodes / %d edges, betweenness k=%s, %.2fs",
+            n,
+            G.number_of_edges(),
+            k if k is not None else n,
+            time.perf_counter() - t0,
+        )
+    except Exception:
+        logger.exception("graph centrality failed; stamping communities only")
+        centrality = {}
+        labels_by_rank = {}
+
     from ...storage.db.write_gate import with_db_write
 
     with with_db_write():
         for entity_id, comm in partition.items():
+            patch: Dict[str, object] = {"community_id": rank[comm]}
+            tri = centrality.get(entity_id)
+            if tri is not None:
+                patch["centrality"] = {
+                    "degree": tri[0],
+                    "eigen": tri[1],
+                    "betweenness": tri[2],
+                }
+                # json_patch is RFC 7396: a null value REMOVES the key, so a
+                # community with no nameable member sheds any stale label.
+                patch["community_label"] = labels_by_rank.get(rank[comm])
             conn.execute(
                 "UPDATE entities SET metadata_json=json_patch(COALESCE(metadata_json,'{}'), ?) "
                 "WHERE entity_id=?",
-                (json.dumps({"community_id": rank[comm]}), entity_id),
+                (json.dumps(patch), entity_id),
             )
-        # Drop stale labels from entities that left the graph.
+        # Drop stale stamps from entities that left the graph.
         placeholders = ",".join("?" for _ in partition) or "''"
         conn.execute(
-            f"UPDATE entities SET metadata_json=json_remove(metadata_json, '$.community_id') "
+            f"UPDATE entities SET metadata_json="
+            f"json_remove(metadata_json, '$.community_id', '$.centrality', '$.community_label') "
             f"WHERE metadata_json IS NOT NULL "
-            f"AND json_extract(metadata_json, '$.community_id') IS NOT NULL "
+            f"AND (json_extract(metadata_json, '$.community_id') IS NOT NULL "
+            f"OR json_extract(metadata_json, '$.centrality') IS NOT NULL "
+            f"OR json_extract(metadata_json, '$.community_label') IS NOT NULL) "
             f"AND entity_id NOT IN ({placeholders})",
             tuple(partition.keys()),
         )
         conn.commit()
-    return {"communities": len(sizes), "nodes_labeled": len(partition)}
+    return {
+        "communities": len(sizes),
+        "nodes_labeled": len(partition),
+        "community_labels": sum(1 for v in labels_by_rank.values() if v),
+    }
 
 
 def _count_active_edges(conn: sqlite3.Connection) -> int:

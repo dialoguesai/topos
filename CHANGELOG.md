@@ -9,6 +9,29 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+
+- `[E:graph] [D]` **The community pass now stamps structural analytics: every
+  graph rebuild writes `centrality` = {degree, eigen, betweenness} and a
+  human-readable `community_label` into `entities.metadata_json`.** Node
+  prominence in the graph UI has only ever encoded extraction volume
+  (mention_count); the witcher-network measures — connections (degree),
+  influence (weighted eigenvector; PageRank stands in when power iteration
+  diverges on a disconnected spectrum), bridging (betweenness, unweighted
+  because edge weights are affinities not distances, Brandes-sampled at
+  k=256 sources past 256 nodes, seeded) — are computed over the same
+  in-memory graph `compute_communities` already builds for Louvain, outside
+  the write gate. Each community is auto-named after its highest-eigenvector
+  member's canonical name (ties break by weighted degree then id, so labels
+  hold still across rebuilds): the legend can say "Ada" instead of
+  "Community 3". Entities that leave the graph shed all three stamps in the
+  same sweep that removed community_id; an analytics failure logs and
+  degrades to community stamping alone, never blocking the rebuild.
+  `graph_snapshot` passes the new keys through node metadata unchanged.
+  Upgrade manifest: `rebuild-entity-graph-centrality` (fast, auto) rebuilds
+  once so existing nodes light up at upgrade rather than at their next
+  enrichment-triggered rebuild.
+
 ### Fixed
 
 - `[E:graph]` **Goals (and every materialized edge) no longer vanish from the
