@@ -11,6 +11,50 @@ The machine-readable twin of each release is
 
 ### Added
 
+- `[E:query]` **`relationship_context:read` declares the canonical table it was already
+  reading.** The previous release bounded the entity-mention lane by the manifest's
+  `canonical_tables`, which was the right rule applied to an under-specified grant: this
+  scope declared `canonical_tables: []`, so the rule read it as authorizing no canonical
+  table and the lane correctly emitted nothing. Eval D4 ("Who is Marcus?", asserted at
+  `tests/gap/qq/engine/query_eval_cases.py:288-292`, requires at least one `entity_mention`
+  item at this scope) went red on exactly that. The eval was not wrong. Before the bound
+  existed the scope was **already** emitting those pointers — undeclared, because nothing
+  was checking. This adds `canonical_tables: ["conversation_messages"]`, which converts a
+  de-facto grant into a declared, tier-gated one. **Measured relative to shipped
+  behaviour this is not a widening; it is the same behaviour, finally stated**, and stating
+  it is what puts the lane under the exclusion and disclosure planes that a silent grant
+  routed around.
+  - **`conversation_messages` alone, deliberately.** Measured read-only against the live
+    node: the probe entity yields 2 `entity_mention` items from that table alone, where D4
+    requires ≥ 1. `journal_entries` was considered and **excluded** — it is the most
+    sensitive store on the node and the canonical example the enforced-exclusion feature is
+    written around, and a relationship scope that reads the journal to name a collaborator
+    would be a real widening rather than a declaration. The owner expects to point this
+    grant at further data later; that will be its own decision carrying its own evidence,
+    and nothing here is built in advance of it.
+  - **The registry is one artifact in four places, and they now agree.**
+    `control_plane/uma/scope_registry.json` is canonical; this engine copy, the wiki's
+    `scope_registry_mvp.json` and the front end's `scopeCatalog.ts` are generated from it by
+    `just sync-scope-registry`. The canonical copy had been given
+    `["conversation_messages", "journal_entries"]` while this copy carried only
+    `["conversation_messages"]`, so the narrow value shipped here and the wide value shipped
+    to the control plane's own resolver — a registry that disagrees across repos is worse
+    than the gap it was patching. Reconciled at the source to the narrow value and re-synced;
+    `just sync-scope-registry-check` and the `scope-registry` quality gate (`sync-check`,
+    `parity-backend`, `parity-frontend`) are green. `canonical_tables` is deliberately not
+    projected into `scopeCatalog.ts`, which is a consent-UI surface and carries no table
+    manifest, so that file is byte-identical.
+  - **Sabotage-checked, and the guards that motivated the bound re-run green.** Reverting
+    this scope to `canonical_tables: []` turns D4 red with `dossier present but no
+    supporting mentions` — the eval's own words, its assertion untouched. The property the
+    bound exists to create survives intact: a scope still declaring `canonical_tables: []`
+    receives **zero** mention pointers, asserted by
+    `test_a_grant_with_no_tables_gets_no_pointers` and re-confirmed live by that same
+    sabotage. A grantee still learns **zero** identifiers of a black-holed entity
+    (`test_a_grantee_learns_nothing_of_a_black_holed_entitys_records`), and the exclusion
+    red-checks still bite — no-op'ing `apply_exclusions` turns 11 of them red. 142 guard
+    tests and 676 tests across the entity/exclusion/disclosure/retrieval surface pass.
+
 - `[E:query]` `[E:storage]` **A turn can now say what it cost.** §09 shipped four quality
   metrics and no latency metric; `query_artifacts` had no duration column, so the redesign's
   price per request was unknown by construction. This release measures it and changes
