@@ -1126,10 +1126,12 @@ class SQLiteQuerySessionStore:
                 "public_result_json": json.loads(r[2]) if r[2] else None,
                 "retrieval_fingerprint": r[3],
                 "game_layer_strategy": r[4],
+                "duration_ms": r[5],
             }
             for r in self._conn.execute(
                 """
-                SELECT artifact_id, cache_key, public_result_json, retrieval_fingerprint, game_layer_strategy
+                SELECT artifact_id, cache_key, public_result_json, retrieval_fingerprint,
+                       game_layer_strategy, duration_ms
                 FROM query_artifacts WHERE session_id=? ORDER BY created_at
                 """,
                 (session_id,),
@@ -1175,13 +1177,20 @@ class SQLiteQuerySessionStore:
         artifact_id = str(artifact.get("artifact_id") or uuid.uuid4())
         if public_result is not None and not isinstance(public_result, str):
             public_result = json.dumps(public_result)
+        # NULL when the caller did not time the turn — an absent measurement, which is
+        # what the percentile script must count as absent rather than as a fast turn.
+        try:
+            raw_duration = artifact.get("duration_ms")
+            duration_ms = max(0, int(raw_duration)) if raw_duration is not None else None
+        except (TypeError, ValueError):
+            duration_ms = None
         with with_db_write():
             self._conn.execute(
                 """
                 INSERT INTO query_artifacts (
                     artifact_id, session_id, cache_key, public_result_json,
-                    retrieval_fingerprint, game_layer_strategy
-                ) VALUES (?, ?, ?, ?, ?, ?)
+                    retrieval_fingerprint, game_layer_strategy, duration_ms
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     artifact_id,
@@ -1190,6 +1199,7 @@ class SQLiteQuerySessionStore:
                     public_result,
                     artifact.get("retrieval_fingerprint"),
                     artifact.get("game_layer_strategy"),
+                    duration_ms,
                 ),
             )
             commit_connection(self._conn)

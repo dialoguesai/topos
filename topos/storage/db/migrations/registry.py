@@ -42,6 +42,10 @@ from .journal_origin_dimension_v1 import (
     MIGRATION_ID as JOURNAL_ORIGIN_DIMENSION_V1_ID,
     apply_journal_origin_dimension_v1_up,
 )
+from .query_artifacts_duration_ms_v1 import (
+    MIGRATION_ID as QUERY_ARTIFACTS_DURATION_MS_V1_ID,
+    apply_query_artifacts_duration_ms_v1_up,
+)
 from .signal_dimension_backfill_v1 import (
     MIGRATION_ID as SIGNAL_DIMENSION_BACKFILL_V1_ID,
     apply_signal_dimension_backfill_v1_up,
@@ -331,6 +335,7 @@ MIGRATIONS: List[MigrationSpec] = [
     _spec(59, ENTITY_REVIEW_CANDIDATE_BAR_V1_ID, apply_entity_review_candidate_bar_v1_up),
     _spec(60, RETIRE_URL_CLASSIFICATION_V1_ID, apply_retire_url_classification_v1_up),
     _spec(61, JOURNAL_ORIGIN_DIMENSION_V1_ID, apply_journal_origin_dimension_v1_up),
+    _spec(62, QUERY_ARTIFACTS_DURATION_MS_V1_ID, apply_query_artifacts_duration_ms_v1_up),
 ]
 
 

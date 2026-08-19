@@ -815,6 +815,17 @@ class QueryPipelineOrchestrator:
                 "ttl_expires_at": ttl,
             }
         )
+        # Turn-level total, in whole milliseconds, on the one durable per-turn record.
+        # Spans the whole retrieve-to-persist path: retrieval, disclosure filtering,
+        # the minimizer, the game layer, inference, DDR assembly and session write.
+        # It cannot include the artifact INSERT that carries it — a value cannot time
+        # its own write — so it is the turn's cost up to the moment of persistence.
+        #
+        # `timings.total_ms` (the DDR's) stops earlier, before the DDR is built and the
+        # session is written; this is deliberately the later, more complete reading,
+        # because the question it answers is what the *request* cost, not what the
+        # measured stages summed to.
+        turn_duration_ms = max(0, int(round(now_ms() - turn_start_ms)))
         store.append_artifact(
             session_id,
             {
@@ -823,6 +834,7 @@ class QueryPipelineOrchestrator:
                 "public_result_json": public_dict,
                 "retrieval_fingerprint": fingerprint,
                 "game_layer_strategy": public.strategy,
+                "duration_ms": turn_duration_ms,
             },
         )
 
