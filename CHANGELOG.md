@@ -9,6 +9,28 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+
+- `[E:query]` **The scope-shadow env flag is authoritative in both directions.**
+  `enabled()` checked the truthy spellings of `TOPOS_SCOPE_SHADOW` and otherwise
+  fell through to the `~/.topos/scope_shadow.on` flag file, so
+  `TOPOS_SCOPE_SHADOW=0` did not turn shadow off — the file won. The flag file
+  exists because the node under the macOS app shell inherits no shell
+  environment, and that same inheritance is what made the asymmetry reachable in
+  the one place it mattered: a subprocess harness (release smoke, the upgrade
+  matrix, a demo script) inherits the *operator's* home directory, so an armed
+  flag file arms the harness too, and running the query path appends synthetic
+  traffic to a real person's `~/.topos/scope_shadow.jsonl` with no way to decline
+  from the environment. Tests are covered by an autouse guard fixture; a fixture
+  does not cross a process boundary. An explicit `0`/`false`/`no`/`off` now
+  returns `False` before the file is consulted, and the file stays the opt-in
+  gesture for when the env says nothing — unset, blank, or a value in neither
+  closed set. `TOPOS_SCOPE_SHADOW_LOG` redirects the log, for a harness that
+  wants observation somewhere disposable rather than none at all.
+  - Latent, not live: `scripts/release_smoke_test.py` was checked on 2026-08-18
+    and never reaches the query path (`/`, `/healthcheck`, `/version` only) —
+    the log's mtime and size were unchanged across a full run.
+
 ## [1.3.22] — 2026-08-18
 
 ### Fixed
