@@ -149,7 +149,25 @@ async def _list_sources_core(payload: Dict[str, Any]) -> Dict[str, Any]:
             continue
         active_by_source[sid] = with_source_capabilities(source_def)
     sources = list(active_by_source.values())
-    return {"status": "ok", "sources": sources}
+    return {"status": "ok", "sources": sources, "scope_supply": _scope_supply(list(active_by_source))}
+
+
+def _scope_supply(installed_source_ids: list[str]) -> Dict[str, str]:
+    """Which scopes nothing installed feeds — the routing half of the supply state.
+
+    Rides the source listing rather than a new endpoint: this response is already the
+    node's answer to "what is connected here", the supply state is a projection of the
+    same fact, and a router that had to make a second call would either skip it or
+    route on a stale copy. Best effort — a failure here must not cost the caller its
+    source list, and an absent key means "not stated", never "nothing is connected".
+    """
+    try:
+        from ..query.retrieval import routing_supply_states
+
+        return routing_supply_states(installed_source_ids)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[SOURCE_INSTALL] scope supply projection skipped: %s", exc)
+        return {}
 
 
 async def _patch_source_install_core(payload: Dict[str, Any]) -> Dict[str, Any]:

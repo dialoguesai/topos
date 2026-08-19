@@ -22,6 +22,7 @@ from topos.query.retrieval import (
     SUPPLY_NEVER_DELIVERED,
     SUPPLY_NO_SOURCE,
     _scope_supply_state,
+    routing_supply_states,
 )
 
 
@@ -123,6 +124,106 @@ class TestItNeverRaises:
                 raise RuntimeError("db is on fire")
 
         assert _scope_supply_state(Boom(), manifest(sources=["x"]), ["x"]) is None
+
+
+class TestTheRoutingHalf:
+    """`routing_supply_states` answers the same question BEFORE a query is spent.
+
+    The explanation half tells an owner why a scope came back empty. The routing half
+    has to be usable one step earlier — while the router is choosing which four scopes
+    to spend its slots on — so it reads the registry and the installed set only, with
+    no connection and no data read.
+    """
+
+    def _feeds_map(self, monkeypatch, mapping):
+        import topos.sources.registry as reg
+
+        monkeypatch.setattr(
+            reg, "get_sources_by_scope", lambda scope_id: list(mapping.get(scope_id, []))
+        )
+
+    def test_a_scope_no_installed_source_feeds_is_reported(self, monkeypatch) -> None:
+        self._feeds_map(monkeypatch, {"schedule:read": ["gcal_events"]})
+        states = routing_supply_states(["grow_journal"], ["schedule:read"])
+        assert states == {"schedule:read": SUPPLY_NO_SOURCE}
+
+    def test_a_scope_with_an_installed_feed_is_absent(self, monkeypatch) -> None:
+        """Connected-but-empty is a real empty answer and must still be queried."""
+        self._feeds_map(monkeypatch, {"schedule:read": ["gcal_events"]})
+        assert routing_supply_states(["gcal_events"], ["schedule:read"]) == {}
+
+    def test_only_no_source_connected_is_ever_reported(self, monkeypatch) -> None:
+        """The other two sub-causes describe connected feeds. A router that could see
+        them would drop scopes that hold a genuine empty answer."""
+        self._feeds_map(monkeypatch, {"schedule:read": ["gcal_events"]})
+        states = routing_supply_states(["gcal_events", "grow_journal"], ["schedule:read"])
+        assert SUPPLY_NEVER_DELIVERED not in states.values()
+        assert SUPPLY_DELIVERED_THEN_EMPTIED not in states.values()
+
+    def test_a_scope_with_no_registered_feeds_is_left_out(self, monkeypatch) -> None:
+        """`attention:read` and `complexity:read` are computed on-node and register no
+        feeding source. "No feeds" there means unknowable, and an unknown must never
+        cost a route — the explanation half may call it no_source_connected because it
+        only speaks after emptiness is established."""
+        self._feeds_map(monkeypatch, {"attention:read": []})
+        assert routing_supply_states(["grow_journal"], ["attention:read"]) == {}
+
+    def test_an_unknown_installed_set_reports_nothing(self, monkeypatch) -> None:
+        self._feeds_map(monkeypatch, {"schedule:read": ["gcal_events"]})
+        assert routing_supply_states(None, ["schedule:read"]) == {}
+        assert routing_supply_states([], ["schedule:read"]) == {}
+
+    def test_it_never_raises(self, monkeypatch) -> None:
+        import topos.sources.registry as reg
+
+        def boom(_scope_id):
+            raise RuntimeError("registry is on fire")
+
+        monkeypatch.setattr(reg, "get_sources_by_scope", boom)
+        assert routing_supply_states(["grow_journal"], ["schedule:read"]) == {}
+
+    def test_it_defaults_to_the_whole_scope_registry(self, monkeypatch) -> None:
+        """Absent an explicit list the router gets every scope it could route to —
+        anything it cannot see, it cannot skip."""
+        from topos.query.scope_registry_loader import list_scopes
+
+        import topos.sources.registry as reg
+
+        monkeypatch.setattr(reg, "get_sources_by_scope", lambda _s: ["gcal_events"])
+        states = routing_supply_states(["grow_journal"])
+        assert {e["scope_id"] for e in list_scopes()} == set(states)
+
+
+class TestTheListingCarriesIt:
+    """The map rides the source listing — the node's existing answer to "what is
+    connected here" — rather than a new endpoint the router would call second and
+    stale."""
+
+    def test_list_sources_reports_scope_supply(self, monkeypatch) -> None:
+        import asyncio
+
+        from topos.api import source_install
+
+        monkeypatch.setattr(
+            source_install.install_service, "rehydrate_active_installs_runtime", lambda: None
+        )
+        monkeypatch.setattr(source_install.install_service, "list_installs", lambda **_: [])
+        payload = asyncio.run(
+            source_install._list_sources_core(
+                {"user_id": "u", "dataset_id": "d", "topos_id": "t"}
+            )
+        )
+        assert payload["status"] == "ok"
+        assert isinstance(payload["scope_supply"], dict)
+
+    def test_a_projection_failure_never_costs_the_source_list(self, monkeypatch) -> None:
+        def boom(*_a, **_k):
+            raise RuntimeError("registry is on fire")
+
+        monkeypatch.setattr("topos.query.retrieval.routing_supply_states", boom)
+        from topos.api import source_install
+
+        assert source_install._scope_supply(["grow_journal"]) == {}
 
 
 class TestTheCallSiteItself:
