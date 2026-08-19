@@ -35,8 +35,25 @@ Three rules, each a test:
 * **Two serializers, same split as ``scope_shadow``.** ``as_public`` carries closed-set
   enums and integers and is what travels off the node. ``as_local`` keeps the
   ``detail`` payload for on-node logs. Every public string is passed through
-  :func:`_slug`, so a caller that hands ``reason`` a fragment of the owner's
-  question cannot leak it even by accident — enums by construction, not by care.
+  :func:`_member`, which slugs it and then requires the result to be a declared member
+  of :data:`STAGES`, :data:`ACTIONS` or :data:`REASONS` — anything else becomes
+  :data:`UNRECOGNIZED`. Content that must be kept goes in ``detail``, which never
+  leaves the node: enums by construction, not by care.
+
+  Until 2026-08-19 that last clause was a promise this module did not keep. ``_slug``
+  is a character filter — it sanitizes, it does not constrain membership — so
+  ``record("scope_routing", "dropped", "Sarah Chen divorce lawyer meeting")`` arrived
+  in ``as_public`` as ``sarah_chen_divorce_lawyer_meeting``: a name and a legal matter,
+  fully legible, off the node. Every call site in the tree passed a constant, so there
+  was no leak; the guarantee rested entirely on every *future* call site, which is
+  exactly what this paragraph claimed it did not.
+
+**The vocabulary is shared, and this module owns it.** Three codebases append to one
+ledger that merges on the response, so their sets have to agree or the merged ledger is
+not comparable. ``topos/protocol/narrowing_vocabulary.json`` publishes these sets for
+the control plane and the front end, which cannot import Python from here;
+``tests/query/test_narrowing_vocabulary.py`` fails when the file and this module drift.
+A member is added here first, and only then emitted anywhere.
 """
 
 from __future__ import annotations
@@ -62,6 +79,34 @@ STAGE_PLANNER = "planner"                # the parsed time window
 STAGE_RETRIEVAL = "retrieval"            # lane filters, fusion cap, soft window
 STAGE_RARE_GATE = "rare_gate"            # the rare-token veto
 STAGE_DISCLOSURE = "disclosure"          # tier / filter-manifest removal
+STAGE_COMPOSE = "compose"                # (CP/FE) building the request; the query-text cap
+STAGE_RECOVERY = "recovery"              # (CP/FE) a retry after a thin or limited answer
+STAGE_PART_ROUTING = "part_routing"      # (FE) which section of a multi-part ask got covered
+
+#: Every stage name the merged ledger may carry. A stage outside this set is not a
+#: stage — :func:`_member` turns it into :data:`UNRECOGNIZED` rather than letting it
+#: through, because "whatever the caller passed" is precisely how the owner's words got
+#: into a public field.
+STAGES = frozenset(
+    {
+        STAGE_SOURCE_PIN,
+        STAGE_SCOPE_ROUTING,
+        STAGE_BOOTSTRAP,
+        STAGE_TRANSPORT,
+        STAGE_GRANT,
+        STAGE_PLANNER,
+        STAGE_RETRIEVAL,
+        STAGE_RARE_GATE,
+        STAGE_DISCLOSURE,
+        STAGE_COMPOSE,
+        STAGE_RECOVERY,
+        STAGE_PART_ROUTING,
+        # The sentinel is a member of every set, so coercion is idempotent: an entry
+        # merged in from another codebase that already collapsed stays collapsed rather
+        # than being re-flagged on each hop.
+        "unrecognized",
+    }
+)
 
 # --- empty causes -------------------------------------------------------------------
 #: The stores backing this scope hold nothing at all — no candidate ever existed.
@@ -92,19 +137,171 @@ _CAUSE_PRECEDENCE = (
 
 EMPTY_CAUSES = frozenset(_CAUSE_PRECEDENCE)
 
+# --- the sentinel -------------------------------------------------------------------
+#: What a non-member becomes. Dropping the entry instead would hide the fact that a
+#: stage narrowed at all, which is the opacity the ledger exists to end; raising would
+#: let telemetry cost a turn. So the entry survives and says, truthfully, that its own
+#: vocabulary is unknown here — a diagnostic that points at the call site rather than at
+#: the data.
+UNRECOGNIZED = "unrecognized"
+
+# --- actions ------------------------------------------------------------------------
+#: What a stage did to the search, enumerated from the call sites that exist. This is a
+#: description of the tree, not a design: a new verb is added here in the same commit as
+#: the call site that emits it, and until it is, that call site records
+#: :data:`UNRECOGNIZED` and the drift test in the emitting repo goes red.
+ACTIONS = frozenset(
+    {
+        # engine — retrieval.py, disclosure.py, exclusion.py, pipeline.py
+        "capped",
+        "contributed",
+        "dropped_items",
+        "emptied",
+        "excluded",
+        "not_applied",
+        "rewrote",
+        "scoped",
+        "windowed",
+        # control plane — mcp_query.py, routines_executor.py, scope_query_router.py
+        "declined_routes",
+        "defaulted",
+        "dropped_field",
+        "dropped_sources",
+        "pinned",
+        "replaced_candidates",
+        "requeried",
+        "skipped",
+        "truncated",
+        # front end — scopeQueryRouter.ts, scopeRoutingRules.ts, homeChatAgent.ts
+        "dropped",
+        "released",
+        "segmented",
+        "uncovered",
+        UNRECOGNIZED,
+    }
+)
+
+# --- reasons ------------------------------------------------------------------------
+#: Why the stage did it. The longest of the three sets and the one that actually leaked:
+#: ``reason`` is where a call site is most tempted to be helpful, and being helpful with
+#: the owner's own words is the failure mode. Grouped by owning repo; the engine's own
+#: producers are re-asserted against this set by ``tests/query/test_narrowing_vocabulary.py``
+#: so a rename in ``exclusion.py`` or ``negotiation.py`` cannot silently start emitting
+#: :data:`UNRECOGNIZED`.
+REASONS = frozenset(
+    {
+        # --- engine: retrieval lanes, gates and caps
+        "blackhole_policy",
+        "embedded_subject_not_instruction",
+        "entity_thread_is_self",
+        "entity_thread_lane",
+        "entity_thread_selector_not_accessible",
+        "entity_thread_self_check_unavailable",
+        "entity_thread_unresolved",
+        "multi_window_comparison",
+        "no_evidence_lane_returned_rows",
+        "no_rare_token_evidenced",
+        "no_row_matched_the_request",
+        "prefer_time_window",
+        "rare_gate_partial_veto",
+        "rare_token_unevidenced",
+        "scope_stores_hold_no_rows",
+        "selector_suppressed",
+        "skip_retrieval_requested",
+        "summary_item_cap",
+        "time_range_parsed",
+        # --- engine: supply states (`_scope_supply_state`)
+        "connected_never_delivered",
+        "delivered_then_emptied",
+        "no_source_connected",
+        # --- engine: the grantee content filter, one per scrubbed artifact list
+        "grantee_scrub_facts",
+        "grantee_scrub_scores",
+        "grantee_scrub_semantic_hits",
+        "grantee_scrub_summaries",
+        # --- engine: exclusion.py's REASON_* constants
+        "exclusion_aggregate_unfilterable",
+        "exclusion_category",
+        "exclusion_enforced",
+        "exclusion_entity",
+        "exclusion_tier",
+        "exclusion_uncompilable",
+        # --- engine: denial codes (manifest_validation, pipeline, negotiation)
+        "approval_required",
+        "ceiling_escalation",
+        "denied",
+        "empty_query",
+        "intent_scope_change",
+        "intent_too_broad",
+        "legacy_scope",
+        "missing_scope",
+        "mode_above_ceiling",
+        "mode_ceiling_exceeded",
+        "negotiation_exhausted",
+        "purpose_missing",
+        "scope_mismatch",
+        "session_requester_mismatch",
+        "time_window_required",
+        "unknown_scope",
+        # --- engine: turn outcomes that ended the turn without retrieving
+        "expand_boundary",
+        "narrow_request",
+        "requalify",
+        # --- the empty causes, which double as reasons when `empty()` gets no other
+        *_CAUSE_PRECEDENCE,
+        # --- control plane: the payload allow-list, routing and recovery
+        "bootstrap_failed",
+        "exclusive_composite_recipe",
+        "expand_boundary_downgrade",
+        "first_source_ref_only",
+        "max_scope_routes",
+        "no_scope_rule_matched",
+        "now",
+        "query_text_capped",
+        "retrieval_parts",
+        "retrieval_text",
+        "single_call_bootstrap",
+        "source_has_live_tools",
+        "source_ref",
+        "summary_enrichment",
+        # --- control plane: refusals that never reach the node. The human-readable
+        # sentence stays on the response's own `deny_reason`; the ledger carries the code.
+        "access_mode_above_ceiling",
+        "access_mode_invalid",
+        "engine_error",
+        "engine_response_invalid",
+        "engine_unreachable",
+        "scope_id_invalid",
+        "scope_not_granted",
+        # --- front end: chips, routes, recovery profiles and part coverage
+        "message_typography",
+        "multi_domain_question",
+        "resolved_self",
+        "scope_not_selected",
+        "shared_grant_pinned",
+        "shared_resource_discovered",
+        "shared_target_resolved",
+        "source_chip",
+        "source_chips",
+        "stale_empty_cache",
+        "unmatched_route",
+        UNRECOGNIZED,
+    }
+)
+
 _SLUG_RE = re.compile(r"[^a-z0-9_.:-]+")
 _SLUG_MAX = 64
 
 
 def _slug(value: Any) -> str:
-    """Lower-case, closed-character token. The privacy guarantee of ``as_public``.
+    """Lower-case, closed-character token. The *first* half of ``as_public``'s guarantee.
 
-    Public ledger fields are enums. Rather than trusting every call site to pass one,
-    anything that is not ``[a-z0-9_.:-]`` collapses to ``_`` and the result is cut at
-    64 characters — so a caller that mistakenly passes a slice of the owner's question
-    emits ``how_often_do_i_go_to_the_gym`` shaped noise at worst, and more usually
-    nothing recognisable. Content that must be kept goes in ``detail``, which never
-    leaves the node.
+    Anything that is not ``[a-z0-9_.:-]`` collapses to ``_`` and the result is cut at 64
+    characters. On its own that is a sanitizer and nothing more — ``"Sarah Chen divorce
+    lawyer meeting"`` survives it intact as ``sarah_chen_divorce_lawyer_meeting``, which
+    is the whole reason :func:`_member` exists. Kept as a separate step because the
+    membership check needs a normalised token to compare, and because ``empty()``'s
+    cause check has always used it that way.
     """
     try:
         text = str(value or "").strip().lower()
@@ -113,9 +310,28 @@ def _slug(value: Any) -> str:
     return _SLUG_RE.sub("_", text)[:_SLUG_MAX].strip("_")
 
 
+def _member(value: Any, allowed: frozenset) -> str:
+    """Slug, then require membership. The *second* half, and the one that closes the set.
+
+    A value outside ``allowed`` becomes :data:`UNRECOGNIZED`. That is a coercion rather
+    than a drop or a raise: the entry still testifies that a stage narrowed the search,
+    ``record`` still cannot cost a turn, and the owner's sentence still cannot reach
+    ``as_public`` — the three properties this module has to hold at once.
+    """
+    token = _slug(value)
+    return token if token in allowed else UNRECOGNIZED
+
+
 @dataclass
 class NarrowingEntry:
-    """One stage's admission that it made the search smaller."""
+    """One stage's admission that it made the search smaller.
+
+    The three public fields are narrowed to their declared sets in ``__post_init__``
+    rather than only in :meth:`NarrowingLedger.record`, because ``as_public`` serializes
+    whatever this object holds and ``NarrowingEntry(...)`` is a public constructor. A
+    guarantee that only holds when the entry was built the usual way is the same
+    convention-not-mechanism this module was caught relying on.
+    """
 
     stage: str
     action: str
@@ -124,6 +340,11 @@ class NarrowingEntry:
     #: On-node only: token counts, lane names, raw window strings. Never serialized
     #: by ``as_public``; ``as_local`` keeps it for debug logging.
     detail: Optional[Dict[str, Any]] = None
+
+    def __post_init__(self) -> None:
+        self.stage = _member(self.stage, STAGES)
+        self.action = _member(self.action, ACTIONS)
+        self.reason = _member(self.reason, REASONS)
 
     def as_public(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {
@@ -167,22 +388,35 @@ class NarrowingLedger:
         dropped: Optional[int] = None,
         detail: Optional[Dict[str, Any]] = None,
     ) -> None:
-        """Append one entry. Never raises — a failed record costs a debug line."""
+        """Append one entry. Never raises — a failed record costs a debug line.
+
+        ``stage``, ``action`` and ``reason`` are narrowed to their declared sets here,
+        at record time rather than at serialization time, so an entry that never reaches
+        ``as_public`` — one read only by an on-node log — is held to the same vocabulary.
+        A non-member is logged at debug with the call site's value, which is where the
+        fix belongs; the value itself does not survive into the entry.
+        """
         try:
             count: Optional[int]
             try:
                 count = int(dropped) if dropped is not None else None
             except (TypeError, ValueError):
                 count = None
-            self.entries.append(
-                NarrowingEntry(
-                    stage=_slug(stage),
-                    action=_slug(action),
-                    reason=_slug(reason),
-                    dropped=count,
-                    detail=dict(detail) if isinstance(detail, dict) else None,
-                )
+            entry = NarrowingEntry(
+                stage=stage,
+                action=action,
+                reason=reason,
+                dropped=count,
+                detail=dict(detail) if isinstance(detail, dict) else None,
             )
+            if UNRECOGNIZED in (entry.stage, entry.action, entry.reason):
+                logger.debug(
+                    "narrowing ledger: unrecognized vocabulary (stage=%r action=%r reason=%r)",
+                    stage,
+                    action,
+                    reason,
+                )
+            self.entries.append(entry)
         except Exception as exc:  # noqa: BLE001
             logger.debug("narrowing ledger record skipped: %s", exc)
 
