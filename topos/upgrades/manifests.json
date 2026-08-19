@@ -493,7 +493,8 @@
         }
       ],
       "notes": [
-        "No recompute: clusters keep their partition and their labels. Only protected NAMES are removed from related_entities/query_aliases, and only on nodes that have marked an entity off-limits \u2014 a node with no black holes has nothing to withdraw and the step is a no-op."
+        "No recompute: clusters keep their partition and their labels. Only protected NAMES are removed from related_entities/query_aliases, and only on nodes that have marked an entity off-limits \u2014 a node with no black holes has nothing to withdraw and the step is a no-op.",
+        "No step for the narrowing-ledger empty_cause fix: _attach_narrowing now withholds a turn-level empty_cause when the result is not empty, which is response serialization only. Nothing stored changes shape and no cached artifact needs rebuilding \u2014 a replayed artifact re-derives the field on the way out."
       ]
     }
   ]

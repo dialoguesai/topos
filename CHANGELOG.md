@@ -11,6 +11,21 @@ The machine-readable twin of each release is
 
 ### Fixed
 
+- `[E:query]` **`empty_cause` may not contradict the payload it travels with.**
+  `_attach_narrowing` published the ledger's turn-level verdict unconditionally,
+  but a stage can empty its own lane without emptying the turn: the rare gate
+  returns `[]` for evidence while the derived lanes still produce summaries, so a
+  response could arrive carrying `empty_cause: gate_vetoed` *and* a
+  `public_result` with rows in it. The ledger and the result then tell two stories
+  about one turn, and a consumer that believes the ledger — the front end's
+  coverage map now derives its section labels from exactly this field — reports
+  absent data that is sitting in the same response. That is the false-absence bug
+  re-entered through the fix for it. The cause is now published only when
+  `result_empty` is true, which is the condition `pipeline.py`'s other publish
+  site already used. The emptying stage's ledger *entry* is unaffected; only the
+  turn-level claim is withheld. No migration: serialization only, nothing stored
+  changes shape.
+
 - `[E:query]` **`retrieval_text` is part of a turn's retrieval identity, so it is
   part of its intent hash.** It steers the rare-gate needles and (since P2) the
   semantic query, so two calls sharing session + scope + mode + query but

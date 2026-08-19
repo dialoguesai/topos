@@ -49,6 +49,18 @@ def _attach_narrowing(result: Dict[str, Any], ledger: NarrowingLedger) -> Dict[s
     Reads the turn outcome rather than trusting each return site to have recorded
     its own cause: a denial is a denial whichever of the ten early returns produced
     it, and a memory hit replays a cause that was written into the stored artifact.
+
+    ``empty_cause`` is published only when the result really is empty. The cause is a
+    turn-level verdict — *why this came back with nothing* — while the entries are
+    stage-level admissions, and a stage can empty its own lane without emptying the
+    turn: the rare gate returns ``[]`` for the evidence lane while summaries and
+    scores from the derived lanes still reach the caller. Publishing
+    ``gate_vetoed`` beside a result that has rows in it is the ledger and the payload
+    telling two stories about one turn, and a consumer that believes the ledger —
+    the front end's coverage map does, by construction — then reports absent data
+    that is sitting in the same response. The gate's ledger ENTRY stays either way;
+    only the turn-level claim is withheld. ``pipeline.py``'s other publish site
+    already gates on exactly this condition.
     """
     if not isinstance(result, dict):
         return result
@@ -71,10 +83,11 @@ def _attach_narrowing(result: Dict[str, Any], ledger: NarrowingLedger) -> Dict[s
             # Replayed from a cached artifact (memory hit) — the cause outlives the
             # turn that discovered it.
             ledger.empty(str(public["empty_cause"]))
-        result["narrowing"] = {
-            **ledger.as_public(),
-            "result_empty": result_is_empty(public),
-        }
+        empty = result_is_empty(public)
+        record = ledger.as_public()
+        if not empty:
+            record.pop("empty_cause", None)
+        result["narrowing"] = {**record, "result_empty": empty}
     except Exception as exc:  # noqa: BLE001 — telemetry may never cost a turn
         logger.debug("narrowing ledger attach skipped: %s", exc)
     return result
