@@ -322,6 +322,24 @@ def _member(value: Any, allowed: frozenset) -> str:
     return token if token in allowed else UNRECOGNIZED
 
 
+def _duration(value: Any) -> Optional[int]:
+    """Coerce a duration to whole non-negative milliseconds, or ``None``.
+
+    Applied in ``__post_init__`` for the same reason ``_member`` is: ``NarrowingEntry``
+    is a public constructor and ``as_public`` serializes whatever the object holds. A
+    float, a string or a ``timedelta``-shaped mistake must not reach the wire as a
+    non-integer, and a negative reading — only ever a clock bug — clamps to zero rather
+    than travelling as a nonsense measurement.
+    """
+    if value is None:
+        return None
+    try:
+        out = int(value)
+    except (TypeError, ValueError):
+        return None
+    return out if out >= 0 else 0
+
+
 @dataclass
 class NarrowingEntry:
     """One stage's admission that it made the search smaller.
@@ -337,6 +355,11 @@ class NarrowingEntry:
     action: str
     reason: str
     dropped: Optional[int] = None
+    #: Wall clock this stage spent, in whole milliseconds. Optional by design: a stage
+    #: that does not time itself omits it and its entry is byte-identical to before.
+    #: An integer carries no text, so it rides ``as_public`` without widening the
+    #: privacy guarantee — which is the only reason a duration is allowed here at all.
+    elapsed_ms: Optional[int] = None
     #: On-node only: token counts, lane names, raw window strings. Never serialized
     #: by ``as_public``; ``as_local`` keeps it for debug logging.
     detail: Optional[Dict[str, Any]] = None
@@ -345,6 +368,7 @@ class NarrowingEntry:
         self.stage = _member(self.stage, STAGES)
         self.action = _member(self.action, ACTIONS)
         self.reason = _member(self.reason, REASONS)
+        self.elapsed_ms = _duration(self.elapsed_ms)
 
     def as_public(self) -> Dict[str, Any]:
         out: Dict[str, Any] = {
@@ -354,6 +378,8 @@ class NarrowingEntry:
         }
         if self.dropped is not None:
             out["dropped"] = self.dropped
+        if self.elapsed_ms is not None:
+            out["elapsed_ms"] = self.elapsed_ms
         return out
 
     def as_local(self) -> Dict[str, Any]:
@@ -386,6 +412,7 @@ class NarrowingLedger:
         reason: str,
         *,
         dropped: Optional[int] = None,
+        elapsed_ms: Optional[int] = None,
         detail: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Append one entry. Never raises — a failed record costs a debug line.
@@ -407,6 +434,7 @@ class NarrowingLedger:
                 action=action,
                 reason=reason,
                 dropped=count,
+                elapsed_ms=elapsed_ms,
                 detail=dict(detail) if isinstance(detail, dict) else None,
             )
             if UNRECOGNIZED in (entry.stage, entry.action, entry.reason):
@@ -427,6 +455,7 @@ class NarrowingLedger:
         stage: Optional[str] = None,
         reason: Optional[str] = None,
         dropped: Optional[int] = None,
+        elapsed_ms: Optional[int] = None,
         detail: Optional[Dict[str, Any]] = None,
     ) -> None:
         """Declare why a result came back empty, and optionally log the stage that did it.
@@ -450,6 +479,7 @@ class NarrowingLedger:
                     "emptied",
                     reason or candidate,
                     dropped=dropped,
+                    elapsed_ms=elapsed_ms,
                     detail=detail,
                 )
         except Exception as exc:  # noqa: BLE001
@@ -470,6 +500,7 @@ class NarrowingLedger:
                     raw.get("action") or "",
                     raw.get("reason") or "",
                     dropped=raw.get("dropped"),
+                    elapsed_ms=raw.get("elapsed_ms"),
                 )
         except Exception as exc:  # noqa: BLE001
             logger.debug("narrowing ledger merge skipped: %s", exc)
@@ -500,15 +531,31 @@ class NarrowingLedger:
         return out
 
     def as_telemetry(self) -> Dict[str, Any]:
-        """Counts and enums only — adding a field here is a privacy decision."""
+        """Counts and enums only — adding a field here is a privacy decision.
+
+        ``elapsed_ms`` sums per stage rather than listing per entry: the question it
+        answers is "where did the turn go", and a per-entry list would grow with the
+        number of narrowings rather than with the fixed stage vocabulary.
+
+        The key is OMITTED when no stage timed itself, which is today's normal case.
+        That is not tidiness — an unconditional ``"elapsed_ms": {}`` would change the
+        telemetry record for every existing caller and consumer on the day this shipped,
+        for a map that says nothing. Absent means unmeasured; present means measured.
+        """
         stages: Dict[str, int] = {}
+        elapsed: Dict[str, int] = {}
         for entry in self.entries:
             stages[entry.stage] = stages.get(entry.stage, 0) + 1
-        return {
+            if entry.elapsed_ms is not None:
+                elapsed[entry.stage] = elapsed.get(entry.stage, 0) + entry.elapsed_ms
+        out: Dict[str, Any] = {
             "n_entries": len(self.entries),
             "stages": stages,
             "empty_cause": self._cause,
         }
+        if elapsed:
+            out["elapsed_ms"] = elapsed
+        return out
 
 
 def result_is_empty(public_result: Optional[Dict[str, Any]]) -> bool:
