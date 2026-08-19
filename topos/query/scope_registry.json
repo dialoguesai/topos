@@ -305,6 +305,9 @@
         "Relationships"
       ],
       "raw_tables": [],
+      "canonical_tables": [
+        "conversation_messages"
+      ],
       "signal_objects": [
         "relationship_edges",
         "relationship_scores"
