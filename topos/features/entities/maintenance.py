@@ -740,24 +740,49 @@ def rebuild_entity_graph(
 
     mz = {"topic_edges": 0, "fact_edges": 0}
     enrich = {"goal_edges": 0, "place_edges": 0, "conversation_edges": 0}
+    mz_swept = 0
     if materialize_facts:
+        # Upsert-then-sweep: no lane deletes up front, so the committed graph
+        # never loses its goal/place/conversation edges while the slow lanes
+        # (goal clustering embeds every goal text) are still running — the
+        # old up-front wipe left every read in that multi-minute window with
+        # a goal-less graph and a bare owner node. The sweep below drops
+        # whatever no lane re-asserted, and only after ALL lanes succeeded:
+        # sweeping after a failed lane would delete edges it never got to touch.
+        mz_touched: set = set()
+        mz_lanes_ok = True
         try:
             from .fact_materializer import materialize_signal_objects_to_graph
 
             with with_db_write():
-                mz = materialize_signal_objects_to_graph(conn)  # commits internally
+                # commits internally
+                mz = materialize_signal_objects_to_graph(conn, touched_edges=mz_touched)
         except Exception as exc:  # materialization is best-effort
+            mz_lanes_ok = False
             logger.warning("fact materialization during rebuild failed: %s", exc)
         try:
             from .graph_enrichers import materialize_graph_enrichments
 
-            # After the facts refresh (which drops ALL mz edges) so enricher
-            # edges live in the same lifecycle. Gates its own write sections —
-            # wrapping it here put the goal-clustering EMBEDDING compute under
-            # the gate (104.9s hold observed 2026-08-08).
-            enrich = materialize_graph_enrichments(conn)
+            # Gates its own write sections — wrapping it here put the
+            # goal-clustering EMBEDDING compute under the gate (104.9s hold
+            # observed 2026-08-08).
+            enrich = materialize_graph_enrichments(conn, touched_edges=mz_touched)
         except Exception as exc:
+            mz_lanes_ok = False
             logger.warning("graph enrichment during rebuild failed: %s", exc)
+        if mz_lanes_ok:
+            from .fact_materializer import sweep_stale_materialized_edges
+
+            with with_db_write():
+                mz_swept = sweep_stale_materialized_edges(conn, mz_touched)
+                conn.commit()
+            if mz_swept:
+                logger.info("rebuild swept %d stale materialized edges", mz_swept)
+        else:
+            logger.warning(
+                "skipping materialized-edge sweep after a failed lane; "
+                "stale mz edges retained until the next successful rebuild"
+            )
 
     # Neighborhoods over the final edge set (evidence + materialized).
     # Gates only its label-write phase; Louvain runs outside the gate.
@@ -785,6 +810,7 @@ def rebuild_entity_graph(
         "goal_edges": enrich["goal_edges"],
         "place_edges": enrich["place_edges"],
         "conversation_edges": enrich["conversation_edges"],
+        "mz_swept": mz_swept,
         "orphans_pruned": len(orphaned),
         "facts_closed_dangling": facts_closed,
         "communities": communities["communities"],
