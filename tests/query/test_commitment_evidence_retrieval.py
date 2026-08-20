@@ -36,8 +36,10 @@ as well as the owner path.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import sqlite3
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import pytest
@@ -45,7 +47,9 @@ import pytest
 from topos.query.game_layer import DefaultGameLayer
 from topos.query.manifest_validation import resolve_scope_manifest
 from topos.query.narrowing import NarrowingLedger
+from topos.query.pipeline import QueryPipelineOrchestrator
 from topos.query.retrieval import DefaultSignalRetrievalAdapter
+from topos.query.session_utils import validate_public_result
 from topos.query.types import RetrievalRequest
 from topos.storage.adapters.factory import AdapterFactory
 from topos.storage.canonical.conversations_tables import ConversationsTablesManager
@@ -216,7 +220,7 @@ def _goal(bundle, goal_id: str) -> Dict[str, Any]:
 
 
 def _evidence_ids(bundle, goal_id: str) -> List[str]:
-    return [str(e.get("record_id")) for e in (_goal(bundle, goal_id).get("evidence") or [])]
+    return [str(e.get("record_id")) for e in (_goal(bundle, goal_id).get("evidence_records") or [])]
 
 
 def _summary_ids(bundle) -> List[str]:
@@ -252,12 +256,12 @@ class TestTheCommitmentIsJoinedToItsEvidence:
         assert kept["status"] == "evidence_found"
         assert _evidence_ids(bundle, "goal-kept") == [EVIDENCE_KEPT[0]]
         assert kept["evidence_count"] == 1
-        assert all(e.get("record_id") for e in kept["evidence"])
+        assert all(e.get("record_id") for e in kept["evidence_records"])
 
     def test_a_goal_with_no_follow_through_says_so_and_cites_nothing(self, conn) -> None:
         dropped = _goal(_retrieve(conn), "goal-dropped")
         assert dropped["status"] == "no_evidence"
-        assert dropped["evidence"] == []
+        assert dropped["evidence_records"] == []
         assert dropped["evidence_count"] == 0
         assert dropped["empty_cause"] == "no_match"
 
@@ -277,7 +281,7 @@ class TestTheCommitmentIsJoinedToItsEvidence:
         summary_ids = set(_summary_ids(bundle))
         for entry in _report(bundle)["goals"]:
             assert str(entry["record_id"]) in summary_ids
-            for cited in entry.get("evidence") or []:
+            for cited in entry.get("evidence_records") or []:
                 assert str(cited["record_id"]) in summary_ids
 
     def test_the_report_reaches_synthesis(self, conn) -> None:
@@ -399,7 +403,7 @@ class TestTheReportInheritsEveryPlaneAndOwnsNone:
             assert EVIDENCE_KEPT[0] not in _summary_ids(bundle)
             return
         assert EVIDENCE_KEPT[0] not in [
-            c["record_id"] for c in (entry.get("evidence") or [])
+            c["record_id"] for c in (entry.get("evidence_records") or [])
         ]
         assert entry["status"] == "no_evidence"
 
@@ -446,7 +450,7 @@ class TestTheReportInheritsEveryPlaneAndOwnsNone:
         bundle = _retrieve(conn, manifest=_no_store_manifest())
         assert _report(bundle)["stores"] == []
         for entry in _report(bundle)["goals"]:
-            assert entry["evidence"] == []
+            assert entry["evidence_records"] == []
 
     def test_the_report_never_fetches_a_record_by_id(self, conn) -> None:
         """`CanonicalStore.get()` takes no disclosure tier, so a single call to it is a
@@ -525,7 +529,7 @@ class TestTheGranteePathIsTheSameFeature:
         assert owner["entity_ids"] == [KEPT_ENTITY]
         assert "entity_ids" not in grantee
         assert grantee["entity_count"] == 1
-        for cited in grantee.get("evidence") or []:
+        for cited in grantee.get("evidence_records") or []:
             assert "entity_id" not in cited
 
 
@@ -546,3 +550,155 @@ class TestTheModeDoesNotFireOnEverythingElse:
         assert _retrieve(conn, "did I finish anything").context_packet.get(
             "commitment_report"
         ) is None
+
+
+# ======================================================= the turn it actually ships in
+#
+# Everything above calls `DefaultSignalRetrievalAdapter.retrieve` directly. That is the
+# right level for the JOIN and for the planes, and 21 tests at that level were green
+# while the mode was DEAD on every real turn: `_attach_commitment_report` named the
+# per-goal citation list `evidence`, which is in `FORBIDDEN_ARTIFACT_KEYS`, and
+# `_execute_turn` runs `validate_public_result` over `public_result` RECURSIVELY with no
+# try/except. So the first goal the lane kept raised ValueError and took the whole turn
+# down — not the report, the TURN, including the summaries the owner would have got
+# without the feature. A retrieval-level test cannot see that, because the contract it
+# broke lives two layers up.
+#
+# So this block drives `QueryPipelineOrchestrator.execute()` — the production entry
+# point, past the disclosure filter, the minimizer and the game layer — and asserts the
+# turn survives. The rule the fix restates: `commitment_report` is a POINTER structure.
+# Record ids, tables, timestamps and closed-set slugs that point AT `summaries`; no key
+# on it may be one the artifact contract reserves for internal blobs.
+
+
+@pytest.fixture()
+def db_path(conn, tmp_path) -> Path:
+    """The seeded fixture addressed as a FILE.
+
+    The orchestrator builds its own adapter bundle, so it needs a path rather than the
+    open handle. Same rows, same seed, one writer — this reads the database the `conn`
+    fixture just committed."""
+    conn.commit()
+    return tmp_path / "commitment.db"
+
+
+def _turn(
+    path: Path,
+    query_text: str = QUERY,
+    *,
+    session: str = "qs-commitment",
+    **kwargs: Any,
+) -> Dict[str, Any]:
+    """One whole turn, exactly as `handle_query` runs it."""
+    orchestrator = QueryPipelineOrchestrator(
+        adapters=AdapterFactory.create("local_database", db_path=path)
+    )
+    return asyncio.run(
+        orchestrator.execute(
+            query_text=query_text,
+            scope_id="messages:read",
+            access_mode="summary",
+            manifest=_manifest(),
+            query_session_id=session,
+            now=NOW,
+            **kwargs,
+        )
+    )
+
+
+def _public_report(result: Dict[str, Any]) -> Dict[str, Any]:
+    return ((result.get("public_result") or {}).get("commitment_report")) or {}
+
+
+def _public_goal(result: Dict[str, Any], goal_id: str) -> Dict[str, Any]:
+    for entry in _public_report(result).get("goals") or []:
+        if str(entry.get("goal_id")) == goal_id:
+            return entry
+    return {}
+
+
+class TestTheModeSurvivesTheTurnItShipsIn:
+    def test_the_owner_turn_completes(self, db_path) -> None:
+        """THE REGRESSION. Before the fix this call did not return a denial or an empty
+        answer — it raised out of `execute()`, so the owner got a 500 on a question the
+        engine had all the data for. A goal that was KEPT was enough to trigger it."""
+        result = _turn(db_path)
+        assert result["turn_outcome"] == "live_query", result.get("deny_reason")
+        assert result["public_result"] is not None
+
+    def test_the_report_reaches_the_model_that_writes_the_answer(self, db_path) -> None:
+        """Synthesis reads `public_result`, not the context packet. If the report stops
+        at the packet the model is back to matching a goal's wording against a journal
+        entry's wording, which is the confident-wrong answer the mode exists to remove."""
+        report = _public_report(_turn(db_path))
+        assert report.get("goal_count") == 2
+        assert report.get("goals_with_evidence") == 1
+        assert report.get("goals_without_evidence") == 1
+
+    def test_a_kept_goal_arrives_with_its_sources(self, db_path) -> None:
+        """Traceability survives the trip: the progress claim still carries the record id
+        it rests on, so the owner can go and check it."""
+        kept = _public_goal(_turn(db_path), "goal-kept")
+        assert kept.get("status") == "evidence_found"
+        assert [c["record_id"] for c in kept["evidence_records"]] == [EVIDENCE_KEPT[0]]
+
+    def test_a_dropped_goal_arrives_saying_which_kind_of_nothing(self, db_path) -> None:
+        """"No evidence found" has to survive the trip too. A goal that reaches synthesis
+        with its status stripped is a goal the model will fill in from the wording."""
+        from topos.query import narrowing as _N
+
+        dropped = _public_goal(_turn(db_path), "goal-dropped")
+        assert dropped.get("status") == "no_evidence"
+        assert dropped.get("evidence_records") == []
+        assert dropped.get("empty_cause") in _N.EMPTY_CAUSES
+
+    def test_the_result_carries_no_reserved_artifact_key(self, db_path) -> None:
+        """The contract the shipped bug broke, asserted as a contract rather than as one
+        field name. `validate_public_result` is the exact call `_execute_turn` makes; a
+        future field on this report named `evidence`, `source_rows` or `vector` fails
+        here instead of taking a live turn down."""
+        result = _turn(db_path)
+        validate_public_result(result["public_result"])
+
+    def test_the_report_itself_is_pointers_and_never_the_owners_words(self, db_path) -> None:
+        """Why the reserved keys are reserved. The report cites rows; it must not become
+        a second copy of their text — the summaries beside it are the disclosed copy, and
+        they went through the filter this structure did not."""
+        blob = str(_public_report(_turn(db_path)))
+        assert EVIDENCE_KEPT[1] not in blob
+        assert GOAL_KEPT[1] not in blob
+        assert "rewrite" not in blob.lower()
+
+
+class TestTheGranteeTurnSurvivesItToo:
+    """A mode that works on the owner path but not the grantee path is unfinished — and
+    the forbidden-key crash was tier-blind, so both paths were down."""
+
+    def _grantee(self, path: Path) -> Dict[str, Any]:
+        return _turn(
+            path,
+            session="qs-commitment-grantee",
+            requester_id="grantee-anon",
+            owner_id="owner",
+            is_grantee_request=True,
+        )
+
+    def test_the_grantee_turn_completes_and_carries_the_report(self, db_path) -> None:
+        result = self._grantee(db_path)
+        assert result["turn_outcome"] == "live_query", result.get("deny_reason")
+        assert result["disclosure_tier"] == "default_disclosure"
+        assert _public_report(result).get("goal_count")
+
+    def test_the_grantee_result_carries_no_reserved_artifact_key(self, db_path) -> None:
+        validate_public_result(self._grantee(db_path)["public_result"])
+
+    def test_the_grantee_gets_counted_entities_not_named_ones(self, db_path) -> None:
+        """The owner-only rule has to hold at the wire, not just in the packet. The entity
+        lane leaked existence in exactly this shape once."""
+        kept = _public_goal(self._grantee(db_path), "goal-kept")
+        assert kept, "the grantee lost the per-goal answer entirely"
+        assert "entity_ids" not in kept
+        assert kept.get("entity_count") == 1
+        for cited in kept.get("evidence_records") or []:
+            assert "entity_id" not in cited
+        assert KEPT_ENTITY not in str(kept)

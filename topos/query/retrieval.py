@@ -2768,7 +2768,14 @@ def _attach_commitment_report(
         if evidence:
             with_evidence += 1
             entry["status"] = "evidence_found"
-            entry["evidence"] = [
+            # `evidence_records`, NOT `evidence`. The bare key is in
+            # FORBIDDEN_ARTIFACT_KEYS and `validate_public_result` walks the payload
+            # RECURSIVELY, so naming it `evidence` killed every turn that kept a goal
+            # — the whole turn, at pipeline.py's unguarded validate call. The ban is
+            # aimed at internal evidence BLOBS (raw rows, prompts, vectors); this list
+            # is pointers — record ids, tables and timestamps already carried in
+            # `summaries` beside it. Keep it pointer-shaped and keep the name distinct.
+            entry["evidence_records"] = [
                 {
                     "record_id": c["record_id"],
                     "canonical_table": c["canonical_table"],
@@ -2783,7 +2790,7 @@ def _attach_commitment_report(
 
         # --- no evidence. Say which kind of nothing. -------------------------------
         entry["status"] = "no_evidence"
-        entry["evidence"] = []
+        entry["evidence_records"] = []
         entry["evidence_count"] = 0
         refusal = state.get("unresolved_reason")
         if refusal:
