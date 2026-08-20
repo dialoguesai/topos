@@ -76,9 +76,34 @@ sandbox *args:
 app-install-test *args="status":
     bash scripts/local/app-install-test.sh {{args}}
 
-# Run test suites.
+# Run test suites. TWO pytest sessions, on purpose — see test-privacy-battery.
 test:
     uv run pytest tests -m "public and not e2e and not live and not qq_eval" -q
+    just test-privacy-battery
+
+# The privacy firewall battery: UAR/CER zero-leak probes, the black-hole leak
+# tests, minimality, the negotiation ratchet, dense sparsification, redaction
+# idempotence and the release-eval gates. Hermetic and deterministic — no live
+# LLM, no owner database, ~40s for 305 tests.
+#
+# Reached by PATH, not by marker, because everything under tests/evals/privacy
+# is auto-marked `private` (tests/conftest.py PRIVATE_PATH_HINTS) and `just
+# test`'s `-m public and ...` therefore deselects all of it. `private` means
+# "not part of the lane an OSS fork's CI runs" — a packaging statement. It was
+# being read as a statement about importance, and these are the most productive
+# tests in the repo: they caught the black-hole existence leak, the SG1
+# access-mode ceiling gap, and both of Q7's roster leaks.
+#
+# Until 2026-08-20 only ci.yml reached them (its "Privacy firewall + eval gates"
+# step, which this mirrors), so `just test` and `just gate` were both green on a
+# machine where the privacy plane was red — you found out on push, if at all.
+#
+# A second invocation rather than re-marking the battery `public`: `public`
+# decides what the OSS lane runs, so flipping it would drag 305 internal-fixture
+# tests into that lane as a side effect. Naming the path costs one line and
+# changes nothing else.
+test-privacy-battery *args:
+    uv run pytest tests/evals/privacy -q {{args}}
 
 # The owner-database query/latency eval, against a SNAPSHOT of ~/.topos.
 #
@@ -122,12 +147,14 @@ eval-release:
 
 # Release gate: everything ci.yml checks, runnable locally before tagging a
 # release (dep pins in sync, migration checksums, public test lane incl. the
-# handled-message-types protocol snapshot guards, build + release smoke).
+# handled-message-types protocol snapshot guards, the privacy firewall battery,
+# build + release smoke).
 gate:
     uv run python scripts/preflight_release_env.py
     uv run python scripts/sync-dep-pins.py --check
     uv run python scripts/sync_migration_checksums.py --check
     uv run pytest tests -m "public and not e2e and not live and not qq_eval" -q
+    just test-privacy-battery
     uv build
     uv run python scripts/release_smoke_test.py
 

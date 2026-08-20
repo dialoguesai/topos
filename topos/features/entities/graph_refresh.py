@@ -116,6 +116,12 @@ class _Refresher:
                 self._timer.cancel()
             self._timer = threading.Timer(_debounce_seconds(), self._fire)
             self._timer.daemon = True
+            # Named, because this thread does database work minutes after the
+            # call that armed it and every diagnostic that catches it in the act
+            # prints only a thread name. Under the default `Thread-N` a refusal
+            # from the test suite's live-db guard reads as an anonymous thread
+            # inside whichever test was unlucky enough to be running (2026-08-20).
+            self._timer.name = "topos-graph-refresh-debounce"
             self._timer.start()
 
     def _fire(self) -> None:

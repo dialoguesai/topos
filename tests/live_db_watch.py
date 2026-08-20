@@ -21,6 +21,10 @@ and records, per test, any connect that would open owner data READ-WRITE.
 ``mode=ro`` and ``immutable=1`` URIs are not recorded: reading the owner's data
 is what the live evals are for, and it changes nothing on disk.
 
+Since 2026-08-20 it also REFUSES that connect rather than merely noting it (see
+``ALLOW_ENV``). A recorded write is still a write; the report only tells you
+afterwards which of your rows are now somebody's test data.
+
 WHAT COUNTS AS OWNER DATA is snapshotted at import, before any test can
 monkeypatch ``HOME`` or ``Path.home`` — a test that repoints HOME at ``tmp_path``
 must be measured against the real locations, not against its own sandbox. The
@@ -94,11 +98,18 @@ class LiveDbOpen:
     path: str
     origin: str  # repo frames, innermost first, "\n      "-joined
     thread: str
+    #: True when the guard stopped the connect; False when the run had the
+    #: opt-out set and sqlite really was handed the path. Worth carrying rather
+    #: than deriving at print time, because a single session can contain both —
+    #: the opt-out is an env var, and a test may scope it to itself.
+    refused: bool = True
 
     def __str__(self) -> str:  # pragma: no cover - formatting only
         where = f" on thread {self.thread}" if self.thread != "MainThread" else ""
+        verb = "tried to open" if self.refused else "opened"
+        outcome = " (refused)" if self.refused else ""
         return (
-            f"{self.nodeid}{where}\n    opened {self.path} read-write\n"
+            f"{self.nodeid}{where}\n    {verb} {self.path} read-write{outcome}\n"
             f"    at {self.origin}"
         )
 
@@ -114,9 +125,51 @@ _CURRENT_NODEID = "<collection>"
 #: Node ids allowed to reach owner data because they opted in by marker
 #: (live / e2e / qq_eval). Recorded, reported, but not treated as a failure —
 #: a lane you have to ask for by name is a decision, not an accident.
+#:
+#: This exempts a test from the session-end VERDICT, not from the refusal below.
+#: Carrying `live` means "I am allowed to reach a real database"; it does not
+#: establish that the developer meant to reach it on THIS invocation, which is
+#: precisely the gap the 2026-08-19 incident fell through — the markers were all
+#: present and correct, and an explicit `-m` selected them anyway.
 _OPT_IN_NODEIDS: set = set()
 
 _ORIGINAL_CONNECT = None
+
+#: Set to any non-empty value to DOWNGRADE this guard from refusing to recording.
+#:
+#: The guard now refuses by default. Until 2026-08-20 the polarity was the other
+#: way round — raising required ``TOPOS_TEST_DB_GUARD_STRICT``, which no lane, no
+#: just recipe, no CI workflow and no doc ever set. The only enforcement was
+#: therefore the session-end report in ``conftest.py``, and a report cannot stop
+#: the write it describes. pyproject's ``addopts`` ``-m`` filter is last-one-wins,
+#: so a single explicit ``-m`` on the command line (``-m ""`` will do it)
+#: re-selects the live lanes; that is how 18 rows reached the owner's
+#: ``query_artifacts`` while the session still exited 0 for anyone who did not
+#: read to the bottom of the output.
+#:
+#: Refusing costs information — you learn about ONE violation and the run stops,
+#: where the report lists every one. That is what this variable is for: set it,
+#: get the full list, fix them all, unset it. It is not a way to make a lane
+#: pass, and nothing in this repo sets it.
+ALLOW_ENV = "TOPOS_TEST_ALLOW_OWNER_DB_WRITES"
+
+
+def refusal_is_armed() -> bool:
+    """Read per connect, not once at import, so a test can scope the opt-out."""
+    return not os.getenv(ALLOW_ENV)
+
+
+def _refusal_message(hit: str, origin: str) -> str:
+    return (
+        f"live-db guard: refused a read-write open of {hit}\n"
+        f"  by: {_CURRENT_NODEID}\n"
+        f"  at: {origin}\n"
+        "That is the owner's real database, and this process was about to open "
+        "it for writing. Point the code at a temp file instead "
+        "(TOPOS_DATABASE_PATH, or the `pin_db_path` fixture), or open it "
+        "`mode=ro` if you only read. If you genuinely mean to write to it, say "
+        f"so for the whole run: {ALLOW_ENV}=1. See docs/testing/TEST_LANES.md."
+    )
 
 
 def _database_and_uri(args, kwargs):
@@ -213,19 +266,23 @@ def install() -> None:
         except Exception:  # noqa: BLE001 - a guard must never break a connect
             hit = None
         if hit is not None:
+            origin = _origin()
+            refused = refusal_is_armed()
             with _LOCK:
                 _OPENS.append(
                     LiveDbOpen(
-                        _CURRENT_NODEID, hit, _origin(), threading.current_thread().name
+                        _CURRENT_NODEID,
+                        hit,
+                        origin,
+                        threading.current_thread().name,
+                        refused,
                     )
                 )
-            if os.getenv("TOPOS_TEST_DB_GUARD_STRICT"):
-                # One frame of blame is enough to fail a gate, but not to FIX
-                # one: the caller recorded above is whoever called connect, not
-                # whoever decided to. Raising here puts the whole chain in the
-                # traceback. Opt-in, because a run that raises mid-suite tells
-                # you about one violation and hides the rest.
-                raise RuntimeError(f"live-db guard: read-write open of {hit}")
+            # Record first, THEN refuse: the session-end report should still
+            # name this connect in a run that dies on it, and the self-tests
+            # assert both halves happened.
+            if refused:
+                raise RuntimeError(_refusal_message(hit, origin))
         return _ORIGINAL_CONNECT(*args, **kwargs)
 
     sqlite3.connect = _guarded_connect
