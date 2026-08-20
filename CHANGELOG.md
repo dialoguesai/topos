@@ -11,6 +11,47 @@ The machine-readable twin of each release is
 
 ### Added
 
+- `[E:query]` **The `entity_thread` lane now has a ranking floor, and the honest measurement
+  says the lane is very slightly net negative.** Severing the lane (adversarial sweep
+  2026-08-19, probe `r15`) turns **14** tests red, and every one of them is a presence or a
+  privacy assertion: rows were emitted, rows carried the right source tag, rows respected
+  the manifest. Nothing anywhere asked whether the rows make the answer better. **No
+  behaviour change: `topos/query/retrieval.py` is byte-for-byte unchanged, and no retrieval
+  weight, fusion order, or lane scoring was touched.**
+  - **The measurement.** `_load_entity_thread_items` was replaced at RUNTIME with a
+    function returning `[]` — the `r15` severing with no source edit — and both arms were
+    scored with `score_composition` unchanged, against one read-only snapshot of the owner
+    database (`scripts/snapshot_owner_db.py`) plus a freshly built seeded corpus. Exactly
+    **four** of the catalog's 51 cases retrieve anything through this lane, so they are the
+    whole of what it can be judged on: C11 `0.725 → 0.725`, C8 `0.786 → 0.786`,
+    S4 `1.000 → 0.917` (**−0.083**), T7 `0.700 → 0.700`. Catalog aggregate: mean
+    `0.8344 → 0.8327`, **−0.0016**.
+  - **Answer: not net positive.** No case gains. Three are flat — the lane adds a source
+    tag and moves no score, and on C8 it displaces `recent` for no measured gain. One
+    loses: on S4 the lane adds a third item (`n_items` 2 → 3) the oracle does not want, and
+    specificity falls `1.000 → 0.667`. The sweep's attribution of C11 (`0.900 → 0.725`) and
+    C8 (`0.929 → 0.786`) to this lane **does not reproduce**: both sit at the lower number
+    with the lane ON *and* OFF, so whatever moved them, it was not `entity_thread`. C9 and
+    C29 carry no `entity_thread:*` source at all and cannot have been affected either way.
+    Keep, gate, or rework is the owner's call; nothing here was tuned to recover a score.
+  - **The guard**, `tests/gap/qq/engine/test_en_qq_entity_thread_ranking_floor.py`, uses the
+    ratchet idiom already in this repo (`QUALITY_FLOOR` in the justfile): a per-case floor
+    at the high-water mark on THIS environment, failing below, nagging to be raised above,
+    never lowered to make a red go away. The floors pin the **as-shipped** numbers,
+    dilution and all — pinning the lane-OFF numbers would be pinning a wish. Per-case
+    rather than aggregate on purpose: a single `0.83` hides a lane that is flat on three
+    cases and negative on one, which is the exact shape this file exists to expose. Runs in
+    the `qq_eval` lane (`just test-owner-db-eval`, which snapshots `~/.topos` and never
+    writes to it); the seeded half needs no live database.
+  - **Two assertions, proven red independently.** Non-vacuity — the case must still
+    retrieve *something* through `entity_thread:*`, or its floor has silently migrated to
+    another lane's behaviour and stopped being evidence. Then the floor itself. Severing
+    the lane at runtime → `4 failed, 1 passed`, all four on non-vacuity with the composites
+    unmoved. Severing the neighbouring `entity_context_items` lane instead, leaving
+    `entity_thread` alive → `2 failed, 3 passed`, both on the floor with
+    `sources: ['entity_thread:conversation_messages']` still present (T7 `0.250 < 0.700`,
+    S4 `0.000 < 0.917`). Restored: `5 passed`, and the four composites reproduced to the
+    third decimal on a second independent run.
 - `[E:query]` **"Embed the subject, not the instruction" is now guarded at the embedding
   call.** The retrieval rewrite that swaps the owner's sentence for the distilled
   `needle_text` before the vector lane could be deleted outright and **1,058 tests passed
