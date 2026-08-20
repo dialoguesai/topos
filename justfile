@@ -149,14 +149,29 @@ eval-release:
 # release (dep pins in sync, migration checksums, public test lane incl. the
 # handled-message-types protocol snapshot guards, the privacy firewall battery,
 # build + release smoke).
+#
+# EVERY leg runs under the owner-database tripwire. The pytest legs get it from
+# tests/conftest.py; the others get it from scripts/live_db_tripwire.py, which
+# arms the SAME tests/live_db_watch module in the leg and in every Python child
+# it spawns — including one in another virtualenv running another Python, which
+# is what the release smoke test is.
+#
+# It is wired here because the hermeticity work of 2026-08-19/20 stopped at the
+# pytest boundary and leg 7 is one step past it: release_smoke_test.py booted the
+# built wheel against $HOME/.topos/database.db (source=slot, profile=personaldb,
+# schema=62) and ran CREATE TABLE IF NOT EXISTS on it. The pre-release ritual was
+# writing to the owner's Topos. Worse, when the tripwire was first armed at that
+# leg the connect was refused and the leg STILL exited 0 — core.state catches the
+# failure and the app serves /healthcheck degraded — so the tripwire fails the leg
+# from its own journal rather than from the leg's exit code.
 gate:
-    uv run python scripts/preflight_release_env.py
-    uv run python scripts/sync-dep-pins.py --check
-    uv run python scripts/sync_migration_checksums.py --check
+    uv run python scripts/live_db_tripwire.py scripts/preflight_release_env.py
+    uv run python scripts/live_db_tripwire.py scripts/sync-dep-pins.py --check
+    uv run python scripts/live_db_tripwire.py scripts/sync_migration_checksums.py --check
     uv run pytest tests -m "public and not e2e and not live and not qq_eval" -q
     just test-privacy-battery
-    uv build
-    uv run python scripts/release_smoke_test.py
+    uv run python scripts/live_db_tripwire.py --command uv build
+    uv run python scripts/live_db_tripwire.py scripts/release_smoke_test.py
 
 # Home chat Wave A retrieval-quality gates. LOCAL ONLY: these drive
 # demo/signal_dimension_harness, whose fixture data cannot ship in this repo

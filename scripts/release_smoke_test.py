@@ -3,6 +3,22 @@
 
 Creates an isolated virtualenv, pip-installs the wheel (optionally after upgrading
 from a prior PyPI release), then verifies CLI entry points and critical imports.
+
+THE DATABASE IS ALWAYS A SCRATCH FILE. Until 2026-08-20 ``TOPOS_DATABASE_PATH``
+was only set when ``--seeded-db`` was passed, so the ordinary run — the one
+``just gate`` leg 7 does before every release — booted the app with the variable
+unset, and ``resolve_active_database`` then answered with the developer's own
+Topos:
+
+    INFO: Serving database /Users/<owner>/.topos/database.db (source=slot, profile=personaldb, schema=62)
+    DEBUG: Ensured table browser_visits exists
+
+That is a ``CREATE TABLE IF NOT EXISTS`` against live owner data, run by the
+pre-release ritual, on a machine where a node already has that file open in WAL
+mode. The hermeticity work of 2026-08-19/20 fixed the pytest lane; this leg is
+one further down and had no guard on it at all. What this check is actually
+asserting is "the built artifact boots and answers /healthcheck", and a scratch
+database proves that exactly as well.
 """
 
 from __future__ import annotations
@@ -20,6 +36,21 @@ from pathlib import Path
 IMPORT_CHECK_SCRIPT = """
 import importlib
 import sys
+import sysconfig
+
+# Prove we are testing the INSTALLED wheel before testing anything about it.
+# `python -c` puts the working directory on sys.path[0]; run from the repo root,
+# `import topos` resolved to ./topos and every check below described the source
+# tree. Asserting the location costs one import and makes that unrepeatable.
+_topos = importlib.import_module("topos")
+_where = getattr(_topos, "__file__", None) or "<namespace package>"
+_site = sysconfig.get_paths()["purelib"]
+if not _where.startswith(_site):
+    print("wheel_not_under_test", file=sys.stderr)
+    print(f"  imported topos from {_where}", file=sys.stderr)
+    print(f"  expected it under   {_site}", file=sys.stderr)
+    raise SystemExit(1)
+print(f"topos_from_wheel {_where}")
 
 modules = [
     "topos",
@@ -65,13 +96,30 @@ print("app_boot_ok")
 """
 
 
-def _run(cmd: list[str], *, env: dict[str, str] | None = None, timeout: int | None = None) -> None:
+def _run(
+    cmd: list[str],
+    *,
+    env: dict[str, str] | None = None,
+    timeout: int | None = None,
+    cwd: Path | None = None,
+) -> None:
     print("+ " + " ".join(cmd), flush=True)
-    subprocess.run(cmd, check=True, env=env, timeout=timeout)
+    subprocess.run(cmd, check=True, env=env, timeout=timeout, cwd=str(cwd) if cwd else None)
 
 
 def _find_wheel(dist_dir: Path) -> Path:
-    wheels = sorted(dist_dir.glob("topos_node-*.whl"))
+    """Newest by VERSION, not by filename.
+
+    `sorted()` on the paths is lexicographic, so it ranked
+    `topos_node-1.3.9-...whl` above `topos_node-1.3.21-...whl` and the gate
+    smoke-tested whichever old wheel happened to sort last. `dist/` is not
+    cleaned between builds, so on any machine that has built more than once
+    that is not the wheel about to ship.
+    """
+    wheels = sorted(
+        dist_dir.glob("topos_node-*.whl"),
+        key=lambda p: _parse_version(p.name.removeprefix("topos_node-").split("-", 1)[0]),
+    )
     if not wheels:
         raise SystemExit(f"No topos_node wheel found under {dist_dir}")
     return wheels[-1]
@@ -132,19 +180,36 @@ def _install_and_verify(
     env = os.environ.copy()
     env["TOPOS_SKIP_UPDATE_CHECK"] = "1"
     env["TOPOS_KEY"] = "release-smoke-test-key"
+
+    # Pin the database BEFORE anything in the venv runs, and pin it
+    # unconditionally. `_pinned_database_path` (topos/storage/db/paths.py) wins
+    # over every other candidate with source=settings, so this is the one lever
+    # that keeps every subprocess below off ~/.topos — including `--discover`,
+    # which resolves the active database to report on it.
+    scratch_root = work_dir or Path(tempfile.mkdtemp(prefix="topos-smoke-db-"))
+    scratch_db = scratch_root / "smoke-db" / "database.db"
+    scratch_db.parent.mkdir(parents=True, exist_ok=True)
     if seeded_db is not None:
         if not seeded_db.is_file():
             raise SystemExit(f"Seeded DB not found: {seeded_db}")
-        dest_root = work_dir or Path(tempfile.mkdtemp(prefix="topos-seeded-db-"))
-        dest = dest_root / "database.db"
-        shutil.copy2(seeded_db, dest)
-        env["TOPOS_DATABASE_PATH"] = str(dest)
-        print(f"seeded_db → TOPOS_DATABASE_PATH={dest}", flush=True)
+        shutil.copy2(seeded_db, scratch_db)
+        print(f"seeded_db → TOPOS_DATABASE_PATH={scratch_db}", flush=True)
+    else:
+        print(f"scratch db → TOPOS_DATABASE_PATH={scratch_db}", flush=True)
+    env["TOPOS_DATABASE_PATH"] = str(scratch_db)
+
     _run([str(topos_node), "--help"], env=env)
     _run([str(topos_node), "--discover"], env=env)
-    _run([str(python), "-c", IMPORT_CHECK_SCRIPT], env=env)
+    # cwd inside the venv's own tree, NOT the repo checkout. `python -c` puts the
+    # working directory on sys.path[0]; run from the repo root — which is where
+    # `just gate` runs — `import topos` therefore resolved to ./topos, the source
+    # tree, and these two checks silently tested the working copy instead of the
+    # wheel they just installed. The console-script checks above were unaffected
+    # (a venv entry point does not add cwd), which is why nothing looked wrong.
+    venv_cwd = python.parent.parent
+    _run([str(python), "-c", IMPORT_CHECK_SCRIPT], env=env, cwd=venv_cwd)
     # APP_BOOT_CHECK hits /healthcheck (and /, /version); must be 200 with seeded DB.
-    _run([str(python), "-c", APP_BOOT_CHECK], env=env, timeout=120)
+    _run([str(python), "-c", APP_BOOT_CHECK], env=env, timeout=120, cwd=venv_cwd)
 
 
 def main(argv: list[str] | None = None) -> int:
