@@ -450,6 +450,44 @@ The machine-readable twin of each release is
 
 ### Fixed
 
+- `[E:query]` **Q1's per-goal report named its citation list `evidence`, which is a
+  RESERVED artifact key — so every turn the commitment lane answered died, and 21 green
+  tests said it worked.** `_attach_commitment_report` wrote `entry["evidence"]`;
+  `evidence` is in `FORBIDDEN_ARTIFACT_KEYS`, and `_execute_turn` runs
+  `validate_public_result` over `public_result` **recursively** with no `try`/`except`
+  around it. The first goal the lane kept therefore raised
+  `ValueError: public_result contains forbidden keys: ['goals[0].evidence', …]` out of
+  `QueryPipelineOrchestrator.execute()` — not a degraded report, **the whole turn**,
+  including the summaries the owner would have received had the feature never shipped.
+  Both tiers were down; the crash is tier-blind. Renamed to `evidence_records`, which is
+  the same pointer list under a name the artifact contract does not reserve.
+  - **The reserved key is aimed at evidence BLOBS, and this list is not one.** Each entry
+    is `record_id` / `canonical_table` / `event_at` (plus an owner-only `entity_id`) — ids
+    that point *at* `summaries`, never a second copy of their text. The ban is right and
+    stays; the name was wrong. `evidence_count`, `status: evidence_found` and the
+    `commitment_*_evidence_*` empty-reason slugs are untouched: they are not keys the
+    contract reserves, and the mode's vocabulary should stay the owner's vocabulary.
+  - **Every one of Q1's 21 tests called `DefaultSignalRetrievalAdapter.retrieve` and
+    stopped there.** That is the right level for the join and for severing the planes, and
+    it cannot see this class of defect at all, because the contract that was broken lives
+    two layers above the adapter — past the disclosure filter, the minimizer and the game
+    layer. A mode is not shipped when its retrieval lane is green; it is shipped when a
+    **turn** survives.
+  - **Nine new tests drive `QueryPipelineOrchestrator.execute()`, the production entry
+    point** (`TestTheModeSurvivesTheTurnItShipsIn`, `TestTheGranteeTurnSurvivesItToo`).
+    The owner turn returns `live_query` and carries `commitment_report` in
+    `public_result` with the kept goal's source record and the dropped goal's empty-cause;
+    the grantee turn does the same at `default_disclosure` and still gets `entity_count`
+    rather than `entity_ids`. Two of them assert the **contract** rather than the field
+    name, by calling the very `validate_public_result` the pipeline calls — so the next
+    field added to this report that collides with a reserved key fails a test instead of
+    taking a live turn down. **Acceptance: watched fail, then fixed.** With the key
+    restored to `evidence`, all nine fail at `session_utils.py:13`; with the rename, 36
+    pass.
+  - **No ranking effect, by construction.** `_attach_commitment_report` runs at the end of
+    `retrieve()` and writes exactly one packet key. No scorer, weight, fusion order or cap
+    is touched, and no eval catalog case or expected output was added or edited.
+
 - `[E:query]` **The access-mode ceiling had no test, and 336 privacy tests did not
   notice.** `disclosure.py`'s two mode blocks — summary mode dropping `rows`, inference
   mode dropping `rows` / `summaries` / `content` / `messages` — decide *which artifacts*
