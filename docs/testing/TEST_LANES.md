@@ -16,6 +16,7 @@ marker. That is deliberate; see [Why the marker is the only key](#why-the-marker
 | --- | --- | --- |
 | Default | `pytest tests -q` | temp databases only |
 | Public / CI | `just test` | temp databases only |
+| Privacy battery | `just test-privacy-battery` | temp databases only |
 | Release gate | `just gate` | temp databases only |
 | Owner-database eval | `just test-owner-db-eval` | a **snapshot** of `~/.topos/database.db` |
 | Live node | `just test-live-node` | the node running on `:9000`, and whatever database it has open |
@@ -25,6 +26,23 @@ marker. That is deliberate; see [Why the marker is the only key](#why-the-marker
 so the three data-touching markers are deselected unless you ask for them.
 `-m` is last-one-wins: any explicit `-m` on the command line replaces that
 filter wholesale, which is how the opt-in lanes get in.
+
+### Why `just test` runs pytest twice
+
+The second session is the privacy battery, named by **path**. It has to be:
+every file under `tests/evals/privacy` is auto-marked `private`
+(`tests/conftest.py`'s `PRIVATE_PATH_HINTS`), so no `-m "public and ..."`
+selection can reach it. `private` means "outside the lane an OSS fork's CI runs"
+— a packaging statement, not a ranking.
+
+It was being read as a ranking. From the battery's creation until 2026-08-20 it
+ran in exactly one place, `ci.yml`, which names the path; `just test` and
+`just gate` were both green on machines where the privacy plane was red. Those
+305 tests found the black-hole existence leak, the SG1 access-mode ceiling gap
+and both of Q7's roster leaks, and they cost ~40 seconds.
+
+`tests/test_local_gate_composition.py` keeps them wired: it fails if a pytest
+target in `ci.yml` stops being reachable from `just test` or `just gate`.
 
 ## Markers that reach real data
 
@@ -85,14 +103,43 @@ explicit `db_path=` then walks straight past the guard into
 `sqlite3.connect(str(db_path))`. Five modules do this.
 
 **`tests/live_db_watch.py`** closes that hole from the other end. It wraps
-`sqlite3.connect` for the whole session and records every connect that opens
-owner data **read-write**, attributed to the test that caused it. `mode=ro` and
-`immutable=1` URIs are not recorded — reading changes nothing on disk.
+`sqlite3.connect` for the whole session and, for every connect that would open
+owner data **read-write**, records who did it and then **refuses the connect**.
+`mode=ro` and `immutable=1` URIs are neither recorded nor refused — reading
+changes nothing on disk.
 
-A read-write open by a test that did not opt in **fails the run**
+A refused connect by a test that did not opt in also **fails the run**
 (`pytest_sessionfinish` sets a non-zero exit status) and prints the test id, the
-path, and the source line that opened it. Opt-in lanes are reported but not
-failed.
+path, and the source line. Opt-in lanes are still refused; their markers keep
+them out of the default *selection*, and are reported rather than failed at the
+end, but a marker is not consent to write on this particular invocation.
+
+### The opt-out, and why it is an env var and nothing else
+
+```bash
+TOPOS_TEST_ALLOW_OWNER_DB_WRITES=1 pytest ...   # record, do not refuse
+```
+
+Refusing costs information: the run dies at the first violation, where the
+session-end report lists all of them. Set the variable to get the full list, fix
+them, unset it.
+
+Nothing in this repo sets it — no recipe, no workflow, no script — and
+`test_no_lane_in_this_repo_sets_the_opt_out` fails if that changes. That is the
+whole point, because the previous version of this guard had the polarity the
+other way round: raising required `TOPOS_TEST_DB_GUARD_STRICT`, which no lane,
+recipe, workflow or doc ever set, so the guard only ever *reported*. A report
+cannot stop the write it describes. On 2026-08-19 an explicit `-m` replaced the
+`addopts` filter, the live lanes came back into selection, 18 rows landed in the
+owner's `query_artifacts`, and the session exited 0 for anyone who did not read
+to the bottom of the output.
+
+`just test-owner-db-eval` does **not** need the opt-out: it exports
+`TOPOS_DATABASE_PATH` to the snapshot before pytest starts, so the modules that
+resolve the path at collection time freeze to the snapshot and nothing they open
+is owner data. `just test-live-node` does not need it either — that lane drives
+the node over HTTP, and the node's writes happen in the node's process, where
+this guard is not installed.
 
 ### The third shape: import time
 
@@ -119,6 +166,35 @@ one offender.
 module's AST for database-reaching calls at import scope — module body, class
 bodies, and decorator arguments, since a `parametrize` argument is evaluated
 during collection like any other module-scope expression.
+
+### The fourth shape: a timer that fires after teardown
+
+Import time is early. This one is *late*, and it is what the newly-armed refusal
+caught on its first full run.
+
+`mark_graph_dirty()` arms a `threading.Timer` — 90 seconds by default — whose
+callback calls `get_db_connection()`. The test that armed it finishes long
+before that. By the time it fires, `_no_live_db_guard`'s `monkeypatch` has undone
+the `TOPOS_DATABASE_PATH` pin, so the rebuild resolves the path afresh and gets
+the developer's real `~/.topos/database.db`.
+
+Three things made it hard to see:
+
+- **The offender is not the reporter.** The open is attributed to whichever test
+  happens to be running when the timer fires. It surfaced as
+  `tests/storage/test_connection_tuning.py::test_runtime_status_reports_counts`
+  opening owner data through a `graph_refresh` call stack that test does not
+  contain.
+- **Nobody meant to arm it.** Ingestion and enrichment tests arm it as a side
+  effect of doing their real work.
+- **It is silent.** `_fire` swallows every exception on purpose ("refresh must
+  never die"), so before the guard refused, the write simply happened.
+
+`conftest._disarm_graph_refresh_debounce()` cancels any pending timer from
+`pytest_runtest_logfinish` — the same hook that already checks for engine state
+outliving its test. If your feature schedules deferred database work, it needs
+the same treatment: **a background timer is engine state, and the pin it was
+armed under does not travel with it.**
 
 ### What the connect guard cannot see
 
@@ -187,3 +263,12 @@ pytest tests/gap/qq/engine/test_en_qq_eval_queries.py -m qq_eval -q
   the rows carrying a `duration_ms`** — were harness sessions, so
   `scripts/query_latency_percentiles.py` was reporting the test suite's latency
   as the owner's.
+- **2026-08-20** — both halves of that fix turned out to be advisory. The
+  connect guard raised only under `TOPOS_TEST_DB_GUARD_STRICT`, set by nothing,
+  so it reported and let the write through; and the 305-test privacy battery was
+  deselected from `just test` and `just gate` by the `-m public` filter, so only
+  CI ever ran it. The guard now refuses by default with an explicit env-var
+  opt-out, and both recipes run the battery by path. The armed guard's first
+  catch was a real one it had been recording-and-releasing all along: a leaked
+  `graph_refresh` debounce timer opening `~/.topos/database.db` after its test's
+  path pin was undone (see "The fourth shape").

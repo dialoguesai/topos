@@ -2,9 +2,10 @@
 
 Two halves, because one test cannot do both jobs:
 
-* THE ENFORCEMENT is ``tests/live_db_watch`` plus the conftest hooks that report
-  it. Only a session-level hook can see the whole run — an assertion made here
-  would happily pass while a test scheduled AFTER it writes to ~/.topos.
+* THE ENFORCEMENT is ``tests/live_db_watch``, which refuses the connect outright,
+  plus the conftest hooks that report every refusal at session end. Only a
+  session-level hook can see the whole run — an assertion made here would
+  happily pass while a test scheduled AFTER it writes to ~/.topos.
 * THIS FILE proves the detector is armed and classifies correctly, against a
   throwaway database. A hermeticity guard that had to open the real database to
   test itself would be the bug it is guarding against.
@@ -17,6 +18,7 @@ lane deselects those markers.
 from __future__ import annotations
 
 import ast
+import inspect
 import re
 import sqlite3
 from pathlib import Path
@@ -34,16 +36,130 @@ def test_the_guard_is_actually_installed() -> None:
     assert sqlite3.connect is sqlite3.dbapi2.connect
 
 
-def test_a_read_write_open_of_owner_data_is_recorded(tmp_path: Path) -> None:
-    """The positive control. Arm a throwaway file, open it, expect a finding."""
+def test_a_read_write_open_of_owner_data_is_refused_and_recorded(tmp_path: Path) -> None:
+    """The positive control, and the proof that the refusal is armed by default.
+
+    Both halves in one test on purpose, because they are not independent. The
+    refusal is only tolerable if the finding survives it — a run that dies with
+    no record of what it died on is a worse gate than one that records and
+    continues — and the record is only ENFORCEMENT if the connect never happens.
+
+    Note what this does not do: touch ``~/.topos``. ``watching`` arms a
+    throwaway path as owner data for the duration of the block, so the guard is
+    proved against a file nobody cares about. A hermeticity test that had to
+    open the real database to prove itself would be the bug it guards against.
+    """
     db = tmp_path / "pretend-owner.db"
     with live_db_watch.watching(db) as capture:
-        sqlite3.connect(str(db)).close()
+        with pytest.raises(RuntimeError) as excinfo:
+            sqlite3.connect(str(db))
         found = capture.captured()
+
+    assert not db.exists(), "the refusal must land BEFORE sqlite creates the file"
+    assert live_db_watch.ALLOW_ENV in str(excinfo.value), (
+        "the refusal has to name its own escape hatch, or the next person to hit "
+        f"it goes looking for one: {excinfo.value}"
+    )
     assert len(found) == 1, found
     assert found[0].path == str(db.resolve())
-    assert found[0].nodeid.endswith("test_a_read_write_open_of_owner_data_is_recorded")
+    assert found[0].nodeid.endswith(
+        "test_a_read_write_open_of_owner_data_is_refused_and_recorded"
+    )
     assert __file__ in found[0].origin
+
+
+def test_the_refusal_is_armed_unless_the_opt_out_is_set(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The escape hatch works, and is the only thing that disarms the refusal.
+
+    It exists because refusing costs information: the run stops at the FIRST
+    violation, where the session-end report lists every one. Set the variable,
+    get the full list, fix them all, unset it.
+    """
+    assert live_db_watch.refusal_is_armed()
+
+    db = tmp_path / "pretend-owner.db"
+    monkeypatch.setenv(live_db_watch.ALLOW_ENV, "1")
+    assert not live_db_watch.refusal_is_armed()
+    with live_db_watch.watching(db) as capture:
+        sqlite3.connect(str(db)).close()  # recorded, not refused
+        assert len(capture.captured()) == 1
+
+    monkeypatch.delenv(live_db_watch.ALLOW_ENV)
+    assert live_db_watch.refusal_is_armed()
+
+
+def test_no_lane_in_this_repo_sets_the_opt_out() -> None:
+    """An escape hatch wired into a recipe is not an escape hatch, it is a default.
+
+    That is the entire history of this guard: raising used to require
+    ``TOPOS_TEST_DB_GUARD_STRICT``, nothing set it, and so nothing ever raised.
+    The same shape in reverse — a justfile or a workflow quietly exporting the
+    opt-out to turn a red lane green — puts us back where we started, with the
+    difference that it would look deliberate.
+    """
+    searched = [
+        *sorted((REPO_ROOT / ".github" / "workflows").glob("*.yml")),
+        REPO_ROOT / "justfile",
+        *sorted((REPO_ROOT / "scripts").rglob("*.py")),
+        *sorted((REPO_ROOT / "scripts").rglob("*.sh")),
+    ]
+    setters = [
+        str(path.relative_to(REPO_ROOT))
+        for path in searched
+        if path.is_file()
+        and re.search(
+            rf"{re.escape(live_db_watch.ALLOW_ENV)}\s*[=:]",
+            path.read_text(encoding="utf-8", errors="replace"),
+        )
+    ]
+    assert not setters, (
+        f"{live_db_watch.ALLOW_ENV} is set by {setters}. It is a per-run decision "
+        "a human makes at a shell, not a lane setting."
+    )
+
+
+def test_a_pending_graph_refresh_debounce_does_not_outlive_its_test() -> None:
+    """The timer that made the guard's first real catch look like someone else's bug.
+
+    ``mark_graph_dirty()`` arms a 90s ``threading.Timer`` whose callback opens a
+    database connection. Nothing cancels it, so it fires during some LATER test,
+    long after ``_no_live_db_guard`` undid the ``TOPOS_DATABASE_PATH`` pin — and
+    resolves the owner's real ``~/.topos/database.db``. It reported as
+    ``tests/storage/test_connection_tuning.py`` opening owner data through a call
+    stack that test does not contain (2026-08-20).
+
+    Pinned here rather than in the graph-refresh tests because the property is
+    about the test lane, not about refreshing: any test that ingests or enriches
+    arms this, and none of them know they did.
+    """
+    from tests import conftest  # the disarm hook under test
+    from topos.features.entities import graph_refresh
+
+    graph_refresh.reset_for_tests(rebuild_fn=lambda: None)
+    try:
+        graph_refresh._refresher.mark()
+        assert graph_refresh._refresher._timer is not None, (
+            "mark() did not arm a timer, so this test proves nothing"
+        )
+        conftest._disarm_graph_refresh_debounce()
+        assert graph_refresh._refresher._timer is None, (
+            "a debounce timer survived teardown; it will open a database on its "
+            "own thread during an unrelated later test"
+        )
+    finally:
+        graph_refresh.reset_for_tests()
+
+    # ...and that something actually calls it. The disarm works whether or not
+    # it is wired in, which is precisely the shape of defect this whole change
+    # is about: a check nobody runs.
+    logfinish = inspect.getsource(conftest.pytest_runtest_logfinish)
+    assert "_disarm_graph_refresh_debounce()" in logfinish, (
+        "the disarm is no longer called from pytest_runtest_logfinish, so no "
+        "test's pending timer is cancelled and the property above is untested "
+        "in the only run that matters"
+    )
 
 
 def test_a_read_only_open_of_owner_data_is_not_recorded(tmp_path: Path) -> None:

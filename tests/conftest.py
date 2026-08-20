@@ -172,9 +172,42 @@ def pytest_runtest_logfinish(nodeid: str) -> None:
             )
             _LEAK_BASELINE[key] = now  # report each leak once, not once per later test
 
+    _disarm_graph_refresh_debounce()
+
     leaked = _leaked_engine_threads()
     if leaked:
         _THREAD_LEAK_FINDINGS.append((nodeid, f"still alive: {', '.join(leaked)}"))
+
+
+def _disarm_graph_refresh_debounce() -> None:
+    """Cancel any pending graph-refresh debounce timer before the next test.
+
+    ``mark_graph_dirty()`` arms a ``threading.Timer`` (90s by default) that
+    later calls ``get_db_connection()`` on its own thread. The timer outlives
+    the test that armed it, and by the time it fires ``_no_live_db_guard``'s
+    ``monkeypatch`` has already undone the ``TOPOS_DATABASE_PATH`` pin — so the
+    rebuild resolves the path afresh and lands on the developer's real
+    ``~/.topos/database.db``, attributed to whichever unrelated test happened
+    to be running. That is how ``tests/storage/test_connection_tuning.py::
+    test_runtime_status_reports_counts`` was reported as opening the owner's
+    database on 2026-08-20 from a call stack it does not contain.
+
+    Ordinary ingestion and enrichment tests arm it as a side effect of doing
+    their real work, so the fix belongs here rather than in each of them: a
+    debounce timer is engine state, and this is the hook that already exists
+    for engine state outliving its test.
+
+    Looked up in ``sys.modules`` rather than imported, so a run that never
+    touches the feature never pays to load it. Cheap enough for every test: a
+    dict lookup, and on a hit one lock plus ``Timer.cancel()``.
+    """
+    mod = sys.modules.get("topos.features.entities.graph_refresh")
+    if mod is None:
+        return
+    try:
+        mod._refresher.shutdown()
+    except Exception:  # noqa: BLE001 — teardown hygiene must never fail a test
+        pass
 
 
 #: Engine threads that must not outlive the test that started them.
@@ -308,31 +341,60 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config) -> None:
 
 
 def _report_owner_database_writes(terminalreporter) -> None:
-    """Name every test that opened the owner's real database read-write.
+    """Name every test that aimed a read-write connect at the owner's database.
+
+    Since 2026-08-20 ``live_db_watch`` REFUSES those connects, so in a default
+    run these are attempts and not completed writes — the guard raised and
+    sqlite never saw the path. They are still listed and they still red the run:
+    a test that tried is a test that succeeds the moment somebody sets
+    ``TOPOS_TEST_ALLOW_OWNER_DB_WRITES`` while chasing something else.
 
     Reported here rather than asserted inside a test because no test can see the
     whole session: a violation by a test that runs LATER would pass an assertion
     made earlier. ``tests/test_owner_database_hermeticity.py`` proves the
-    detector works; this is what actually fails the run.
+    detector and the refusal work; this is what fails the run as a whole.
     """
     opted_in = live_db_watch.opted_in_opens()
     if opted_in:
         paths = sorted({o.path for o in opted_in})
+        noun = "attempt(s)" if all(o.refused for o in opted_in) else "open(s)"
         terminalreporter.write_line("")
         terminalreporter.write_line(
-            f"opt-in lane touched owner data: {len(opted_in)} read-write open(s) "
+            f"opt-in lane touched owner data: {len(opted_in)} read-write {noun} "
             f"across {len({o.nodeid for o in opted_in})} test(s) -> {', '.join(paths)}"
         )
 
     violations = live_db_watch.violations()
     if not violations:
         return
-    terminalreporter.section("tests wrote to the owner's database", red=True, bold=True)
+    completed = [v for v in violations if not v.refused]
+    terminalreporter.section(
+        "tests wrote to the owner's database"
+        if completed
+        else "tests tried to write to the owner's database",
+        red=True,
+        bold=True,
+    )
     for finding in violations:
         terminalreporter.write_line(str(finding))
     terminalreporter.write_line("")
+    if completed:
+        terminalreporter.write_line(
+            f"{len(completed)} of these REACHED sqlite, because this run set"
+        )
+        terminalreporter.write_line(
+            f"{live_db_watch.ALLOW_ENV}. Rows may now exist in your own database."
+        )
+    else:
+        terminalreporter.write_line(
+            "The guard refused each of these, so nothing was written. Each is"
+        )
+        terminalreporter.write_line(
+            "still a code path that WOULD write, to be fixed rather than waived."
+        )
+    terminalreporter.write_line("")
     terminalreporter.write_line(
-        "These opened a real ~/.topos database READ-WRITE without asking for it."
+        "These aim at a real ~/.topos database READ-WRITE without asking for it."
     )
     terminalreporter.write_line(
         "The `_no_live_db_guard` fixture cannot stop this: it pins"
