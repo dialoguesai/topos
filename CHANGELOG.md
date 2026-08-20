@@ -11,6 +11,38 @@ The machine-readable twin of each release is
 
 ### Added
 
+- `[E:query]` **"Embed the subject, not the instruction" is now guarded at the embedding
+  call.** The retrieval rewrite that swaps the owner's sentence for the distilled
+  `needle_text` before the vector lane could be deleted outright and **1,058 tests passed
+  with zero new reds** (adversarial sweep 2026-08-19, probe `r07b`), while the slug it
+  emits — `embedded_subject_not_instruction` — is declared in **four** places across three
+  repos (`topos/protocol/narrowing_vocabulary.json`, `topos/query/narrowing.py`,
+  `next/lib/mcp/narrowingLedger.ts`, `control_plane/narrowing.py`). Four declarations of a
+  token nothing verified was ever spoken. **No behaviour change: `topos/query/retrieval.py`
+  is byte-for-byte unchanged.** Two independent assertions, in
+  `tests/query/test_retrieval_needle_text.py`:
+  - **The encoder gets the needles.** A spy replaces the embedding backend and records
+    every string handed to it, so the assertion is made AT THE CALL rather than on a
+    return value — the whole failure mode is that the wrong string is embedded and every
+    downstream shape stays plausible, which leaves nothing to assert afterwards. The
+    string is followed through a real `SignalService`: `retrieve()` → `_semantic_hits` →
+    `search_vectors` → encoder, with only the encoder and the vector page faked.
+    Recordings are tagged by lane, because `_load_ranked_clusters` deliberately keeps the
+    owner's sentence and an untagged recorder could be satisfied by either string. The
+    needle-absent case is the control: it proves the spy CAN see the sentence at that
+    seam, so the positive assertion is not vacuously satisfied by a recorder that saw
+    nothing.
+  - **The receipt only fires with the action.** `embedded_subject_not_instruction` is
+    recorded when `needle_text` differs from the sentence, and is ABSENT both when no
+    needles are sent and when they equal it. A receipt that appears without its action is
+    the failure class this programme keeps meeting.
+  - **They fail independently, which is the point.** The ledger class never reads the
+    encoder and the encoder class never reads the ledger, so severing either half turns
+    exactly one of them red. Verified three ways: rewrite removed entirely → `2 failed, 16
+    passed` (one from each class); `ledger.record` removed alone → `1 failed, 17 passed`
+    (slug only); `semantic_query = needle_text` removed alone → `1 failed, 17 passed`
+    (encoder only). Restored to an empty `git diff` on `retrieval.py`: `18 passed`, and
+    `1058 passed, 2 skipped` across `tests/query` + `tests/gap`.
 - `[E:query]` **`relationship_context:read` declares the canonical table it was already
   reading.** The previous release bounded the entity-mention lane by the manifest's
   `canonical_tables`, which was the right rule applied to an under-specified grant: this
