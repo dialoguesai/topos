@@ -238,6 +238,53 @@ The machine-readable twin of each release is
 
 ### Fixed
 
+- `[E:query]` **A node that had never ingested anything 500'd on its owner's first
+  question.** `relationship_context:read` declares `canonical_tables:
+  ["conversation_messages"]` (the entry above) and the entity-mention lane is bounded by
+  that list (the release before it). Neither probed that the table exists. It is created
+  by the writer that first lands a message in it, so a standard init produces 77 tables
+  and this is not one of them — retrieval walked the manifest straight into
+  `canonical.list()`, which built `SELECT COUNT(*) FROM (…)` over a table SQLite has
+  never heard of and died at `storage/adapters/sqlite/stores.py:449` with
+  `sqlite3.OperationalError: no such table: conversation_messages`. On the **owner**
+  path, where nothing is filtered and no grant is involved. Found by an adversarial
+  sweep's severing probes, not by a test: every test in the tree that reaches this scope
+  seeds a message first, so every one of them creates the table on the way in.
+  - **A declared table that does not exist yet is an empty store, not a fault.**
+    `_canonical_table_absent` reads `sqlite_master` deliberately and the lane contributes
+    no rows for a table that is not there. It is **not** a `try`/`except` around the read:
+    a disk error, a locked database or a malformed row still reaches the caller as the
+    failure it is, asserted by `test_a_broken_read_is_not_reported_as_an_empty_store`. It
+    is also narrow the other way — existence that cannot be *established* (a non-SQLite
+    adapter, an unreadable catalog) counts as present, because an unknown must not
+    silently disable a lane, the mirror of the rule `_scope_supply_state` already states
+    for diagnoses. The probe sits in `_list_canonical_rows`, the one funnel every
+    canonical lane goes through (scope routes, the entity-thread lane, the employer
+    heuristic), so a future lane cannot reach around it.
+  - **The owner gets an answer that explains itself, in the vocabulary that already
+    exists.** The absence is recorded on the narrowing ledger as `store_empty` /
+    `connected_never_delivered`, so the empty result carries a cause instead of arriving
+    as a silent nothing — which is the false-absence bug the taxonomy was built to end and
+    which a "does not raise" test would have accepted. **Why that sub-cause of the three:**
+    `delivered_then_emptied` is excluded by the evidence itself — the writer that creates
+    the table has never run, so nothing was ever delivered and then removed.
+    `no_source_connected` is a claim about the *install set*, not about this store, and it
+    is the more actionable of the two remaining: it sends the owner off to add a connector.
+    Saying that to an owner who has connected one and is merely pre-first-sync is the same
+    false absence in a new coat, and `_scope_supply_state` already refuses the symmetric
+    guess for the symmetric reason. What the missing table evidences first-hand is that
+    this store has never received a delivery. `no_source_connected` stays reachable
+    unchanged for every scope whose tables the migrations do create. The table's name rides
+    in local-only `detail`; the public serializer carries closed-set slugs only.
+  - **Red first, on both tiers.** `tests/query/test_fresh_node_absent_canonical_table.py`
+    fails 7 of 13 against the pre-fix code — `test_it_does_not_raise[owner_raw]` and
+    `[default_disclosure]` with the verbatim `sqlite3.OperationalError` above, and the
+    cause/sub-cause assertions with it. Two premise tests guard the setup (a standard init
+    really does omit the table; the scope really does declare it), and two controls guard
+    the fix from itself: a table that exists is still read, and an existing store is never
+    labelled never-delivered. 3562 tests in the public lane and the 301-test privacy
+    battery (run by path — it is deselected from `just test`) pass.
+
 - `[O]` **The documented test gate wrote to the developer's own database.** `pytest tests/`
   was not hermetic: it opened `~/.topos/database.db` read-write, and on 2026-08-19 a single
   run inserted 71 rows into the owner's `query_artifacts` and reported two
