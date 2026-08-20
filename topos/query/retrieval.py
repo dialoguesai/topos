@@ -11,6 +11,13 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..storage.adapters.factory import AdapterBundle
 from . import narrowing as _N
+from .entity_window import (
+    REASON_DERIVED,
+    REFUSAL_UNRESOLVED,
+    DerivedWindow,
+    derive_window_from_days,
+    entity_anchor_intent,
+)
 from .exclusion import enforce_request_exclusions as _enforce_request_exclusions
 from .exclusion import summarize_for_meta as _exclusion_meta
 from .manifest import ScopeResolutionManifest
@@ -1823,6 +1830,248 @@ def _load_entity_thread_items(
             },
         )
     return kept
+
+
+# --- Q3: the entity-anchored window ---------------------------------------------------
+#
+# The lane above answers "which rows belong to this subject". This one answers a
+# question no lane could: *when*. "What did I miss while I was heads-down on the
+# classifier?" names no dates, and every window this pipeline can build is parsed out
+# of the words — an explicit range, a relative phrase, a differenced pair. The period
+# the owner means is in their own activity, so it is read from the subject's mention
+# density (`entity_window.py` holds the method and the refusals; nothing there touches
+# a database).
+#
+# THE SURFACE THE DENSITY MAY SEE. A date is content: "you were busy with X between
+# the 4th and the 11th" is a claim about the owner's life, derived from records. So
+# the mentions that vote are bounded to the record surface THIS GRANT authorizes,
+# proved two ways and never assumed:
+#
+#   * `manifest.canonical_tables` — a mention naming a table the grant does not name
+#     does not vote. A mention with a NULL `canonical_table` cannot prove which table
+#     it came from, so it does not vote either; the thread lane can carry those rows
+#     because a disclosed row later confirms them, and there is no such confirmation
+#     here.
+#   * `triage_verdicts.record_id`, and only for a scope whose own content IS the
+#     triage analytics (`attention_summary` in `signal_objects`). `attention:read`
+#     names zero canonical tables — its content is digests computed over exactly this
+#     record surface — so under the table bound alone the mode would be structurally
+#     unreachable on the one scope that owns the triage it exists to window. The
+#     record ids are the ones the grant's own answers already summarize; the join
+#     reads their mention DATES and nothing else.
+#
+# A scope that authorizes neither surface derives nothing (`entity_window_no_mentions`),
+# which is the fail-closed direction.
+#
+# Then the same planes as any other row, before the arithmetic rather than after it:
+# the entity admission gate (`_entity_thread_entities`: is_self, selector allow-list,
+# fail-closed on an unreadable self flag), the source bound, the black hole at source,
+# and the Q5 request exclusions. Order matters — a window shaped by records the caller
+# may not see is a leak whatever the packet ends up holding, because the DATES leave
+# the node in `packet["time_window"]`.
+
+#: Mention rows read for the density, newest first. Past this node's largest entity
+#: (`Dialogues`, 722 rows), so the cap bounds work and not membership. Where it does
+#: bite it truncates the OLD end of the span, which raises the mean daily rate and
+#: therefore the hot-day threshold: truncation makes the method more reluctant to
+#: name a period, never more confident about one.
+_ENTITY_WINDOW_MENTION_LIMIT = 2000
+
+
+def _entity_window_day_counts(
+    conn: Optional[Any],
+    entity_ids: List[str],
+    *,
+    tables: List[str],
+    source_ids: List[str],
+    analytics_surface: bool,
+    blocked_records: Set[str],
+    excluded_records: Set[str],
+) -> Dict[str, int]:
+    """Mentions per calendar day, over the record surface the grant authorizes.
+
+    The two membership proofs are OR'd in SQL rather than unioned in Python so the
+    ``LIMIT`` applies to ADMITTED rows: a limit applied before the bound would let an
+    unreachable table crowd out the reachable ones and silently thin the density.
+
+    Nothing is returned about what the guards removed. The black-hole drop count is
+    withheld for the same reason ``_blackhole_filter_thread_mentions`` records no
+    ledger line: "n mentions were withheld" is a confirmation of existence, and a
+    count is as good a confirmation as a name.
+    """
+    if conn is None or not entity_ids:
+        return {}
+    allowed_tables = [str(t) for t in (tables or []) if str(t or "").strip()]
+    if not allowed_tables and not analytics_surface:
+        return {}
+
+    params: List[Any] = list(entity_ids)
+    entity_ph = ",".join("?" for _ in entity_ids)
+    surface_clauses: List[str] = []
+    if allowed_tables:
+        table_ph = ",".join("?" for _ in allowed_tables)
+        surface_clauses.append(f"canonical_table IN ({table_ph})")
+        params.extend(allowed_tables)
+    if analytics_surface:
+        surface_clauses.append("record_id IN (SELECT record_id FROM triage_verdicts)")
+    where = [f"entity_id IN ({entity_ph})", "(" + " OR ".join(surface_clauses) + ")"]
+    if source_ids:
+        # An empty `source_ids` is "the grant named no source", not "any source".
+        # A non-empty one is a bound, and a mention that cannot say which source it
+        # came from cannot prove it is inside that bound.
+        source_ph = ",".join("?" for _ in source_ids)
+        where.append(f"source_id IN ({source_ph})")
+        params.extend(str(s) for s in source_ids)
+    params.append(_ENTITY_WINDOW_MENTION_LIMIT)
+
+    try:
+        rows = conn.execute(
+            f"""
+            SELECT record_id, COALESCE(event_at, created_at)
+            FROM entity_mentions
+            WHERE {" AND ".join(where)}
+            ORDER BY COALESCE(event_at, created_at) DESC
+            LIMIT ?
+            """,
+            params,
+        ).fetchall()
+    except Exception as exc:  # noqa: BLE001 — no mention table → no derived window
+        logger.debug("entity window density unavailable: %s", exc)
+        return {}
+
+    counts: Dict[str, int] = {}
+    for record_id, stamp in rows:
+        rid = str(record_id or "").strip()
+        if not rid or rid in blocked_records or rid in excluded_records:
+            continue
+        day = str(stamp or "")[:10]
+        if len(day) != 10:
+            continue
+        counts[day] = counts.get(day, 0) + 1
+    return counts
+
+
+def _derive_entity_anchored_window(
+    *,
+    manifest: ScopeResolutionManifest,
+    conn: Optional[Any],
+    query_text: str,
+    source_ids: List[str],
+    disclosure_tier: str,
+    ledger: Optional[Any] = None,
+) -> Optional[DerivedWindow]:
+    """Resolve "while I was heads-down on X" to a date range, or refuse to.
+
+    ``None`` means *no derivation was attempted* and the turn proceeds exactly as it
+    does today. A :class:`DerivedWindow` carrying a ``refusal`` means the attempt was
+    made and the data would not support a period — which is an answer, and is carried
+    to the caller as one.
+
+    The subject is resolved by ``link_query_entities`` — the one resolver, not a second
+    one — against the connection the density will be READ from, which is deliberately
+    not the planner's. ``build_query_plan`` runs on the global db because the clock and
+    the eval's pinned `now` live there, so on a bundle pointed at another database
+    ``plan.entities`` holds ids from a corpus this window would then count mentions in.
+    That is the cross-db class ``_bundle_is_global_db`` exists to name, and it is why
+    ``_build_summary_items`` re-links the same way for the lanes.
+    """
+    linked: List[Dict[str, Any]] = []
+    if conn is not None and query_text:
+        try:
+            from ..features.entities.linking import link_query_entities
+
+            linked = list(link_query_entities(conn, query_text) or [])
+        except Exception as exc:  # noqa: BLE001 — no resolver → no window
+            logger.debug("entity window linking unavailable: %s", exc)
+    entity_ids, _skipped = _entity_thread_entities(conn, linked, manifest=manifest)
+    if not entity_ids:
+        # The admission gate refused every candidate (unresolved, is_self, or outside
+        # an active selector allow-list). No detail: which of the three it was is the
+        # gate's business, and on the grantee path it is the answer to a question the
+        # grantee is not allowed to ask.
+        if ledger is not None:
+            ledger.record(_N.STAGE_PLANNER, "not_applied", REFUSAL_UNRESOLVED)
+        return DerivedWindow(refusal=REFUSAL_UNRESOLVED)
+
+    excluded_records: Set[str] = set()
+    if query_text:
+        from .exclusion import KIND_ENTITY, _record_ids_mentioning, parse_exclusions
+
+        spec = parse_exclusions(query_text, conn)
+        if spec.requested:
+            if not spec.fully_enforced or any(t.kind != KIND_ENTITY for t in spec.targets):
+                # A category or tier exclusion ("nothing from work", "no private
+                # rows") subtracts records this join cannot identify, and an
+                # unresolved fragment subtracts records nobody can. Either way the
+                # density would be computed over a corpus the owner asked to shrink,
+                # and a window derived from it would be shaped by the very rows they
+                # excluded. Derive nothing rather than derive it wrong.
+                if ledger is not None:
+                    ledger.record(_N.STAGE_PLANNER, "not_applied", "exclusion_enforced")
+                return None
+            for target in spec.targets:
+                excluded_records |= _record_ids_mentioning(conn, target.entity_ids)
+
+    owner_view = str(disclosure_tier or "") == "owner_raw"
+    blocked_records: Set[str] = set()
+    if not owner_view:
+        blocked_records = _blackhole_blocked_record_ids(conn)
+
+    day_counts = _entity_window_day_counts(
+        conn,
+        entity_ids,
+        tables=[str(t) for t in (manifest.canonical_tables or [])],
+        source_ids=[str(s) for s in (source_ids or [])],
+        analytics_surface="attention_summary" in (manifest.signal_objects or []),
+        blocked_records=blocked_records,
+        excluded_records=excluded_records,
+    )
+    window = derive_window_from_days(day_counts, entity_ids=entity_ids)
+
+    if ledger is not None:
+        # The public line is three slugs; the arithmetic and the dates ride `detail`,
+        # which never leaves the node. A derived range IS content — it says when the
+        # owner was busy — and the caller reads it off `packet["time_window"]`, where
+        # a parsed window has always been published and where it can be disputed.
+        detail: Dict[str, Any] = dict(window.as_ledger_public())
+        if window.resolved:
+            detail["time_range"] = [window.start, window.end]
+        ledger.record(
+            _N.STAGE_PLANNER,
+            "windowed" if window.resolved else "not_applied",
+            REASON_DERIVED if window.resolved else (window.refusal or REFUSAL_UNRESOLVED),
+            detail=detail,
+        )
+    return window
+
+
+def _attention_items_in_window(
+    items: List[Dict[str, Any]],
+    window: Optional[DerivedWindow],
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Keep the triage digests that fall inside a derived window.
+
+    The triage itself is NOT reimplemented — `triage_verdicts` already holds the
+    analytics and `_load_attention_summary_items` already shapes the digests computed
+    from them. All that happens here is that a window selects among days that were
+    going to be served anyway, which is the whole of "run the existing triage inside
+    the derived window".
+
+    A digest's day is read off its `record_id`, which is the `signal_objects` key and
+    ends in the date the loader already sorts on. An item whose key carries no
+    readable date is KEPT: a window that silently deleted evidence on a formatting
+    accident would be indistinguishable from a quiet week.
+    """
+    if window is None or not window.resolved or not items:
+        return items, 0
+    kept: List[Dict[str, Any]] = []
+    for item in items:
+        tail = str(item.get("record_id") or "").rsplit(":", 1)[-1]
+        dated = len(tail) == 10 and tail[4] == "-" and tail[7] == "-"
+        if dated and not (window.start <= tail <= window.end):
+            continue
+        kept.append(item)
+    return kept, len(items) - len(kept)
 
 
 # --- Q7: the topic thread ------------------------------------------------------------
@@ -5765,6 +6014,38 @@ class DefaultSignalRetrievalAdapter:
             except Exception as exc:
                 logger.debug("query planner skipped: %s", exc)
 
+        # Q3: the window the sentence did not name. Only when the planner found no
+        # anchor of its own — an explicit range, a relative phrase, a differenced pair
+        # and a point-in-time "in July" all already say which period the owner means,
+        # and this mode may not overrule a period they stated. It writes into
+        # `plan.time_range`, so every existing consumer (the lanes,
+        # `_prefer_time_window`, R2's labelling, the packet's own `time_window` block)
+        # sees it through the path it already uses rather than through a second window
+        # that only some of them know about.
+        derived_window: Optional[DerivedWindow] = None
+        if (
+            plan is not None
+            and not plan.time_range
+            and not plan.as_of
+            and entity_anchor_intent(query_text)
+        ):
+            try:
+                derived_window = _derive_entity_anchored_window(
+                    manifest=manifest,
+                    conn=getattr(self._adapters.signal, "_conn", None),
+                    query_text=query_text,
+                    source_ids=source_ids,
+                    disclosure_tier=request.disclosure_tier,
+                    ledger=ledger,
+                )
+            except Exception as exc:  # noqa: BLE001 — a derived window is an extra
+                logger.debug("entity-anchored window skipped: %s", exc)
+            if derived_window is not None:
+                retrieval_meta["entity_window"] = derived_window.as_packet()
+                if derived_window.resolved:
+                    plan.time_range = derived_window.time_range()
+                    retrieval_meta["query_plan"] = plan.to_meta()
+
         time_range = plan.time_range if plan else None
         # The fourth text. The planner strips TIME framing ("this week") and leaves
         # instructional framing alone, so a structured request embeds its own
@@ -5947,6 +6228,13 @@ class DefaultSignalRetrievalAdapter:
                         window["from"], window["to"] = plan.time_range
                     if plan.as_of:
                         window["as_of"] = plan.as_of
+                    if derived_window is not None and derived_window.resolved:
+                        # Q3: say the dates came from the DATA and show the arithmetic
+                        # that produced them. A derived window the owner cannot see is
+                        # a window they cannot correct, and a wrong one would then
+                        # silently shape every lane in the turn — "I think you meant
+                        # Aug 4-11" is only a possible sentence if Aug 4-11 is shown.
+                        window.update(derived_window.as_packet())
                     # R2: a differenced ask names both sides, and each item says which
                     # side it evidences. Synthesis can then difference them instead of
                     # inferring the split from timestamps it was never told the meaning
@@ -5974,6 +6262,13 @@ class DefaultSignalRetrievalAdapter:
                                 detail={"windows": [list(w) for w in planned_windows]},
                             )
                     packet["time_window"] = window
+                elif derived_window is not None:
+                    # Q3's refusal, published in the same place the window would have
+                    # been. An entity with three scattered mentions has no heads-down
+                    # period, and the honest answer is that no window could be derived
+                    # — which the caller has to be TOLD, or the turn reads as an
+                    # ordinary unwindowed search and the refusal becomes invisible.
+                    packet["time_window"] = derived_window.as_packet()
             else:
                 summaries = []
                 for dim in manifest.primary_dimensions:
@@ -5988,9 +6283,35 @@ class DefaultSignalRetrievalAdapter:
             if manifest.scope_id == "attention:read":
                 attention_items = _load_attention_summary_items(
                     getattr(self._adapters.signal, "_conn", None))
+                # Q3: the existing triage, run inside the derived window. The digests
+                # are the ones this scope always serves, computed by
+                # `features/triage/daily.py` off `triage_verdicts`; the window only
+                # decides which days of them answer. Nothing about the triage is
+                # recomputed here, which is the point — a second scoring path would
+                # be a second set of verdicts to disagree with the first.
+                attention_items, out_of_window = _attention_items_in_window(
+                    attention_items, derived_window
+                )
                 if attention_items:
                     summaries = attention_items + list(summaries)
                     touched.append("signal")
+                    if ledger is not None and out_of_window:
+                        ledger.record(
+                            _N.STAGE_RETRIEVAL,
+                            "windowed",
+                            "entity_window_triage_lane",
+                            dropped=out_of_window,
+                        )
+                elif out_of_window and ledger is not None:
+                    # The window was derived and the triage has nothing in it. That is
+                    # a different empty from "this node runs no triage", and only this
+                    # line can tell them apart.
+                    ledger.empty(
+                        _N.CAUSE_NO_MATCH,
+                        stage=_N.STAGE_RETRIEVAL,
+                        reason="entity_window_no_triage_in_window",
+                        dropped=out_of_window,
+                    )
             if manifest.scope_id == "availability:read":
                 time_items = _load_time_summary_items(
                     getattr(self._adapters.signal, "_conn", None), query_text)

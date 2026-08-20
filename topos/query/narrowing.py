@@ -230,6 +230,20 @@ REASONS = frozenset(
         "topic_thread_not_message_scope",
         "topic_thread_participants_withheld",
         "topic_thread_single_store",
+        # --- engine: entity-anchored windows (Q3) — the window derived from the
+        # SUBJECT's own mention density rather than parsed out of the sentence. The
+        # derived RANGE is content and rides `detail` / the packet's `time_window`;
+        # only the method and the refusals are declared here. Four of the five are
+        # refusals, which is the honest ratio: a sparse node cannot anchor a period,
+        # and saying which kind of "cannot" is the deliverable.
+        "entity_window_density_too_thin",
+        "entity_window_density_uniform",
+        "entity_window_derived",
+        "entity_window_no_mentions",
+        "entity_window_no_triage_in_window",
+        "entity_window_span_too_broad",
+        "entity_window_triage_lane",
+        "entity_window_unresolved",
         # --- engine: supply states (`_scope_supply_state`)
         "connected_never_delivered",
         "delivered_then_emptied",
