@@ -2267,10 +2267,17 @@ def _thread_speaker(
         return {"kind": "owner"}
     if not sender_id:
         return {"kind": "unknown"}
-    label = _sender_display(conn, sender_id, display_cache) or sender_id
+    # `label` IS A NAME OR IT IS EMPTY. `_sender_display` ends in
+    # `name or sender_id`, which is right for owner prose (a quoted message still
+    # needs an attribution when the contact is unnamed) and WRONG for a roster
+    # entry, where the fallback puts a raw phone number or email address under the
+    # one key the disclosure plane treats as a display name. The identifier is
+    # carried separately so `_thread_participants` decides, per tier, whether the
+    # reader is entitled to it.
+    display = _sender_display(conn, sender_id, display_cache)
     return {
         "kind": "person",
-        "label": label,
+        "label": display if display and display != sender_id else "",
         "entity_id": entity_id,
         "sender_id": sender_id,
     }
@@ -2298,7 +2305,15 @@ def _thread_participants(
        than `speaker_label`, which the canonical lane already attaches to prose on a
        first-person plan.
     3. **The selector policy.** Where a grant names accessible entities, those entities
-       may be named below `owner_raw` too — the grant is the naming.
+       may be named below `owner_raw` too — the grant is the naming. It licenses a
+       NAME and nothing else: an entity the grant names but `contacts` does not is
+       still not disclosed, because the only string available for it is a raw
+       identifier and an identifier is not a name.
+
+    Two fields the roster does NOT carry below `owner_raw`, whatever the tier says
+    about naming: `entity_id`, which is a stable pseudonymous join key and therefore
+    owner-only on exactly the rule Q1 applies to it (`_attach_commitment_report`), and
+    `sender_id`, which is the raw phone number or email itself.
 
     `owner_participated` is a boolean and never an entry: the owner does not need to be
     told their own name, and a roster that carries it is one field away from being a
@@ -2347,22 +2362,38 @@ def _thread_participants(
 
         entity_id = str(speaker.get("entity_id") or "") or None
         label = str(speaker.get("label") or "").strip()
+        identifier = str(speaker.get("sender_id") or "").strip()
         if entity_id and entity_id in blocked_ids:
             continue
         if blocked_terms and normalize is not None:
-            blob = normalize(label)
-            if blob and any(term in blob for term in blocked_terms):
+            # Both surfaces, because `label` is now a NAME or nothing: a protected
+            # person with no display name would otherwise reach the roster through
+            # their bare identifier with nothing for the term match to read.
+            if any(
+                blob and any(term in blob for term in blocked_terms)
+                for blob in (normalize(label), normalize(identifier))
+            ):
                 continue
-        key = entity_id or f"sender:{speaker.get('sender_id')}"
+        key = entity_id or f"sender:{identifier}"
         if key in seen:
             continue
         seen.add(key)
         nameable = owner_view or (policy_active and entity_id and entity_id in accessible)
+        # THE IDENTIFIER IS OWNER-ONLY, on the same rule as the name it stands in for.
+        # An unnamed roster entry carrying `entity_id` is a stable pseudonymous JOIN
+        # KEY: a grantee can count distinct counterparties, watch who recurs across
+        # sessions, and — the moment the same id appears in an `accessible_entity_ids`
+        # list on any other grant they hold — resolve the pseudonym and retroactively
+        # de-anonymize every roster that carried it. Q1 gates the identical field the
+        # same way (`_attach_commitment_report`: `if owner_view and c.get("entity_id")`);
+        # this is that rule, not a second one. `sender_id` never enters the roster at
+        # all — it is a raw identifier with no tier that makes it a name.
+        display = label or (identifier if owner_view else "")
         entry: Dict[str, Any] = {"kind": "person"}
-        if entity_id:
+        if owner_view and entity_id:
             entry["entity_id"] = entity_id
-        if nameable and label:
-            entry["label"] = label
+        if nameable and display:
+            entry["label"] = display
         else:
             withheld += 1
         roster.append(entry)

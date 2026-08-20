@@ -69,6 +69,24 @@ _GRANTEE_TEXT_KEYS = (
 )
 
 
+#: Grantee artifacts that are a DICT holding item lists, rather than a list.
+#: `_scrub_grantee_text_items` walks lists, and the call below walked exactly four
+#: top-level list keys — so the P4 joins, which attach dict-shaped blocks, were never
+#: visited by the filter that enforces `_GRANTEE_TEXT_KEYS`. `topic_thread.participants`
+#: carries `label`, a key already IN that tuple, and it reached grantees unscrubbed:
+#: the policy was right and the walk did not reach the container it applied to.
+#: Declared explicitly rather than recursed, so a new artifact has to be listed here and
+#: the listing is the review. The other two P4 blocks are enumerated with their reason:
+#:   * `commitment_report` — `goals[]` carries ids, slugs, counts and timestamps, no
+#:     free text; listed anyway so a text field added later is covered by default.
+#:   * `time_window` — a flat dict of dates, integers and closed-set slugs, no item
+#:     list and no text-bearing key, so there is nothing here to walk.
+_GRANTEE_NESTED_TEXT_CONTAINERS: Dict[str, tuple] = {
+    "topic_thread": ("participants", "items", "decision_points"),
+    "commitment_report": ("goals",),
+}
+
+
 def _scrub_grantee_text_items(items: List[Any]) -> List[Any]:
     """Grantee content policy for non-row artifacts: drop NSFW-flagged items and PII-redact
     every text-bearing field. Unconditional for grantees — a backstop independent of any
@@ -175,7 +193,10 @@ class DisclosureFilterPipeline:
         # exist (in summary/inference mode rows are stripped, so this is the ONLY content
         # filter on the path summaries/scores/facts travel to a grantee).
         if disclosure_tier == "default_disclosure":
-            for key in ("summaries", "scores", "semantic_hits", "facts"):
+            # `topic_clusters` joins the list here for the same reason `topic_thread`
+            # joins the nested walk below: a cluster carries `label`, the key is in
+            # `_GRANTEE_TEXT_KEYS`, and the container was simply never named.
+            for key in ("summaries", "scores", "semantic_hits", "facts", "topic_clusters"):
                 seq = packet.get(key)
                 if isinstance(seq, list) and seq:
                     packet[key] = _scrub_grantee_text_items(seq)
@@ -191,5 +212,14 @@ class DisclosureFilterPipeline:
                             ledger.empty(
                                 _N.CAUSE_SCOPE_DENIED, reason=f"grantee_scrub_{key}"
                             )
+            for key, subkeys in _GRANTEE_NESTED_TEXT_CONTAINERS.items():
+                block = packet.get(key)
+                if not isinstance(block, dict):
+                    continue
+                for subkey in subkeys:
+                    seq = block.get(subkey)
+                    if isinstance(seq, list) and seq:
+                        block[subkey] = _scrub_grantee_text_items(seq)
+                        applied.append(f"grantee_scrub_{key}_{subkey}")
 
         return FilteredContext(context_packet=packet, filters_applied=applied)
