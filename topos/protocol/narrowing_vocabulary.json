@@ -130,6 +130,12 @@
     "summary_item_cap",
     "time_range_parsed",
     "time_window_required",
+    "topic_thread_lane",
+    "topic_thread_no_decision",
+    "topic_thread_no_message_rows",
+    "topic_thread_not_message_scope",
+    "topic_thread_participants_withheld",
+    "topic_thread_single_store",
     "unknown_scope",
     "unmatched_route",
     "unrecognized"

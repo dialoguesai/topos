@@ -1651,6 +1651,7 @@ def _load_entity_thread_items(
     exposure_visible: bool,
     plan=None,
     ledger: Optional[Any] = None,
+    thread_sink: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """The entity's own records, contributed beside the scope routes.
 
@@ -1665,8 +1666,21 @@ def _load_entity_thread_items(
     Both go through `_list_canonical_rows`, so both are already disclosed to
     `disclosure_tier`. The record-id intersection then decides membership. Rows the
     entity does not own are dropped here and never enter the packet.
+
+    `thread_sink` is the Q7 tap. It is filled from INSIDE this loop, with the row and
+    the item both in hand, so a thread entry cannot exist for a record this lane did
+    not itself produce: same entity resolution, same mention join, same black hole at
+    source, same `_list_canonical_rows` disclosure, same `_canonical_row_to_item`
+    guards. It carries ids, timestamps and closed-set labels — never row text — and
+    it is only ever a CANDIDATE set: `_attach_topic_thread` intersects it with the
+    packet's own surviving summaries, so fusion caps, the exit black hole and the
+    request exclusions all subtract from the thread without this function knowing
+    they exist.
     """
     tables = [str(t) for t in (manifest.canonical_tables or [])]
+    if thread_sink is not None:
+        thread_sink["message_tables"] = [t for t in tables if t in _MESSAGE_TABLES]
+        thread_sink["non_message_tables"] = [t for t in tables if t not in _MESSAGE_TABLES]
     if not tables or not linked or conn is None:
         return []
 
@@ -1682,6 +1696,8 @@ def _load_entity_thread_items(
             )
     if not entity_ids:
         return []
+    if thread_sink is not None:
+        thread_sink["entities"] = list(entity_ids)
 
     by_table, untabled, surfaces, entity_by_record = _entity_thread_mentions(
         conn, entity_ids, tables=tables
@@ -1700,6 +1716,7 @@ def _load_entity_thread_items(
     role_cache: Dict[str, Optional[bool]] = {}
     display_cache: Dict[str, str] = {}
     highlight_cache: Dict[str, str] = {}
+    sender_entity_cache: Dict[str, Tuple[Optional[str], bool]] = {}
     wanted_total = 0
     for table in tables:
         wanted = set(by_table.get(table) or set()) | untabled
@@ -1755,6 +1772,26 @@ def _load_entity_thread_items(
             if entity_id:
                 item["entity_id"] = entity_id
             items.append(item)
+            if thread_sink is not None and table in _MESSAGE_TABLES:
+                # The Q7 tap. Speaker and decision marker are read HERE, off the
+                # disclosed row, because neither survives into the item: the item
+                # only carries `speaker_label` on a first-person plan, and a thread
+                # must be able to say who spoke on any phrasing of the question.
+                thread_sink.setdefault("candidates", {})[key] = {
+                    "record_id": rid,
+                    "canonical_table": table,
+                    "entity_id": entity_id,
+                    "event_at": item.get("event_at"),
+                    "speaker": _thread_speaker(
+                        conn,
+                        table,
+                        row,
+                        role_cache=role_cache,
+                        display_cache=display_cache,
+                        entity_cache=sender_entity_cache,
+                    ),
+                    "decision": _decision_marker(item.get("summary_text") or ""),
+                }
 
     items = _prefer_time_window(items, getattr(plan, "time_range", None) if plan else None)
     items.sort(key=lambda item: float(item.get("relevance_score") or 0.0), reverse=True)
@@ -1778,6 +1815,509 @@ def _load_entity_thread_items(
             },
         )
     return kept
+
+
+# --- Q7: the topic thread ------------------------------------------------------------
+#
+# The entity-thread lane above answers "which rows belong to this subject". It does not
+# answer the question the owner actually asks about a subject: *who did I talk to about
+# the classifier, and what did we decide?* Three things are missing from a ranked list
+# and none of them can be recovered downstream:
+#
+#   * ORDER. A thread is a sequence. Ranked by relevance, the reply that settled the
+#     argument can sit above the question that started it, and no consumer can put them
+#     back — `event_at` is on the items, but "these items are one conversation, in this
+#     order" is a claim only retrieval is in a position to make.
+#   * PARTICIPANTS. "Who" is a first-class answer, not something to infer by reading
+#     speaker labels off prose — which are only attached at all on a first-person plan.
+#   * DECISIONS. Where the thread resolved, if it did. "A thread, no identifiable
+#     decision" is a real answer and has to be sayable.
+#
+# THE THREAD IS A PROJECTION, NEVER A SOURCE. Every entry names a record that is already
+# in `packet["summaries"]`: candidates are tapped from inside the entity-thread lane's
+# own loop and then intersected with the packet at the very end of `retrieve()`, after
+# the fusion cap, after the exit black hole, after the request exclusions. There is no
+# code path by which the thread can carry a row the answer does not already carry, which
+# is why it needs no plane of its own — it inherits all of them, and severing any one of
+# them empties the thread with it.
+#
+# The one disclosure the thread makes that the items do not is the PARTICIPANT ROSTER: a
+# person's name derived from `contacts`. That gets its own rule (`_thread_participants`)
+# — named for the owner, counted for everyone else.
+
+#: Thread entries returned. A thread is an outline of the conversation, not a transcript;
+#: the rows themselves are already in `summaries` and are not duplicated here.
+_TOPIC_THREAD_ITEM_CAP = 24
+#: Distinct participants named. Past this the honest shape is a count.
+_TOPIC_THREAD_PARTICIPANT_CAP = 12
+#: Decision points reported. A "thread" with twenty decisions is a lexical false positive
+#: farm, not a decision list.
+_TOPIC_THREAD_DECISION_CAP = 6
+
+#: Conservative, closed, and lexical ON PURPOSE. A decision point is a strong claim about
+#: the owner's own history, and the failure that matters is a false one — telling someone
+#: they decided something they did not. Every phrase here is an explicit performative of
+#: settling; nothing inferential ("maybe we should", "I think we'll") is in the list, and
+#: the marker emitted is a slug from a fixed set, never the matched words.
+_DECISION_MARKERS: Tuple[Tuple[str, str], ...] = (
+    ("we decided", "decided"),
+    ("we've decided", "decided"),
+    ("we have decided", "decided"),
+    ("i decided", "decided"),
+    ("i've decided", "decided"),
+    ("decided to", "decided"),
+    ("the decision is", "decided"),
+    ("we agreed", "agreed"),
+    ("agreed to", "agreed"),
+    ("agreed on", "agreed"),
+    ("we settled on", "settled_on"),
+    ("settled on", "settled_on"),
+    ("let's go with", "chose"),
+    ("lets go with", "chose"),
+    ("we'll go with", "chose"),
+    ("going with", "chose"),
+    ("we chose", "chose"),
+    ("we picked", "chose"),
+    ("signed off", "signed_off"),
+    ("locked in", "locked_in"),
+    ("final call", "final"),
+)
+#: The slugs `_decision_marker` may return. Closed set: a decision point that leaves the
+#: node carries one of these and nothing else.
+DECISION_MARKERS = frozenset(marker for _, marker in _DECISION_MARKERS)
+
+#: The word immediately before a performative can un-say it, and a substring match
+#: cannot see that. "have we decided anything yet?" contains "we decided" and is the
+#: OPPOSITE of a decision — it is the question that gets asked when nothing was settled.
+#: Interrogative auxiliaries, conditionals and negations are the whole of the closed
+#: list; apostrophes are stripped before the comparison so "haven't" lands on "havent".
+_DECISION_DISQUALIFIERS = frozenset(
+    {
+        "before",
+        "did",
+        "didnt",
+        "do",
+        "dont",
+        "had",
+        "hadnt",
+        "has",
+        "hasnt",
+        "have",
+        "havent",
+        "how",
+        "if",
+        "never",
+        "not",
+        "unless",
+        "until",
+        "what",
+        "when",
+        "whether",
+        "why",
+    }
+)
+
+
+def _decision_marker(text: str) -> Optional[str]:
+    """Which closed-set decision marker this row's text carries, if any.
+
+    Every occurrence is checked, not just the first: one hedged mention of a phrase
+    must not suppress a real settling later in the same row.
+    """
+    blob = " ".join(str(text or "").lower().split())
+    if not blob:
+        return None
+    for phrase, marker in _DECISION_MARKERS:
+        start = 0
+        while True:
+            idx = blob.find(phrase, start)
+            if idx < 0:
+                break
+            preceding = blob[:idx].replace("'", "").replace("\u2019", "").split()
+            if not preceding or preceding[-1] not in _DECISION_DISQUALIFIERS:
+                return marker
+            start = idx + 1
+    return None
+
+
+def _sender_entity(
+    conn: Optional[Any],
+    sender_id: str,
+    cache: Dict[str, Tuple[Optional[str], bool]],
+) -> Tuple[Optional[str], bool]:
+    """``sender_id`` → ``(entity_id, is_self)`` through the contact the identifier names.
+
+    This is NOT a second resolver. The topic is resolved by `link_query_entities` and
+    nothing here touches that. This is the entity plane's own `is_self` and alias
+    handling applied to a SPEAKER: the graph already links a contact row to an entity
+    (`entities.contact_id`), and the same join tells us whether the speaker is the
+    owner — which is the difference between "you and Sam" and "you, you and Sam".
+    """
+    key = str(sender_id or "").strip()
+    if not key:
+        return None, False
+    if key in cache:
+        return cache[key]
+    result: Tuple[Optional[str], bool] = (None, False)
+    if conn is not None:
+        try:
+            row = conn.execute(
+                """
+                SELECT e.entity_id, COALESCE(e.is_self, 0)
+                FROM contact_identifiers ci
+                JOIN entities e ON e.contact_id = ci.contact_id
+                WHERE ci.identifier = ?
+                LIMIT 1
+                """,
+                (key,),
+            ).fetchone()
+            if row:
+                result = (str(row[0]), bool(row[1]))
+        except Exception as exc:  # noqa: BLE001 — no contact graph → an unnamed speaker
+            logger.debug("thread speaker entity lookup unavailable: %s", exc)
+    cache[key] = result
+    return result
+
+
+def _thread_speaker(
+    conn: Optional[Any],
+    table: str,
+    row: Dict[str, Any],
+    *,
+    role_cache: Dict[str, Optional[bool]],
+    display_cache: Dict[str, str],
+    entity_cache: Dict[str, Tuple[Optional[str], bool]],
+) -> Dict[str, Any]:
+    """Who spoke this row: ``owner``, ``assistant``, a ``person``, or ``unknown``.
+
+    Ownership is decided by `_message_row_owner` — the same reader the canonical lane
+    uses — and then corroborated by the speaker's own entity: a `sender_id` that
+    resolves to an `is_self` entity is the owner however the row's flags are shaped.
+    The owner is never a named participant of their own thread.
+
+    A model turn is typed `assistant` and is deliberately not a person. Counting one as
+    a participant would answer "who did I talk to about the classifier" with a chatbot.
+    """
+    owner = _message_row_owner(table, row, conn, role_cache)
+    if table == "ai_chat_messages":
+        if owner is True:
+            return {"kind": "owner"}
+        label = str(row.get("sender_type") or "assistant").strip() or "assistant"
+        return {"kind": "assistant", "label": label}
+    sender_id = str(row.get("sender_id") or "").strip()
+    entity_id, is_self = _sender_entity(conn, sender_id, entity_cache)
+    if owner is True or is_self or sender_id.lower() == "self":
+        return {"kind": "owner"}
+    if not sender_id:
+        return {"kind": "unknown"}
+    label = _sender_display(conn, sender_id, display_cache) or sender_id
+    return {
+        "kind": "person",
+        "label": label,
+        "entity_id": entity_id,
+        "sender_id": sender_id,
+    }
+
+
+def _thread_participants(
+    speakers: List[Dict[str, Any]],
+    *,
+    conn: Optional[Any],
+    disclosure_tier: str,
+    manifest: ScopeResolutionManifest,
+) -> Tuple[List[Dict[str, Any]], bool, int]:
+    """The participant set — ``(roster, owner_participated, withheld)``.
+
+    Three planes decide what a roster entry may say, in this order:
+
+    1. **The black hole.** A protected person is removed with no trace: not named, not
+       counted, not ledgered. A roster of two that says "and one withheld" has confirmed
+       the existence of the third, which is the single thing D5 rules out. Applied by id
+       AND by name, because a speaker reaches this function through `contacts` and may
+       never have been bound to an entity id at all.
+    2. **The disclosure tier.** Names are the owner's. At `owner_raw` the roster is
+       named; below it, a person is counted and not named — the grantee learns that the
+       thread had three counterparties, not who they were. This is strictly narrower
+       than `speaker_label`, which the canonical lane already attaches to prose on a
+       first-person plan.
+    3. **The selector policy.** Where a grant names accessible entities, those entities
+       may be named below `owner_raw` too — the grant is the naming.
+
+    `owner_participated` is a boolean and never an entry: the owner does not need to be
+    told their own name, and a roster that carries it is one field away from being a
+    self-identifier in a grantee payload.
+    """
+    owner_view = str(disclosure_tier or "") == "owner_raw"
+    policy_active = bool(getattr(manifest, "entity_selector_policy_active", False))
+    accessible = {
+        str(x).strip() for x in (getattr(manifest, "accessible_entity_ids", None) or [])
+    }
+
+    blocked_ids: Set[str] = set()
+    blocked_terms: Set[str] = set()
+    normalize = None
+    try:
+        from ..features.lifecycle.blackhole import (
+            blackholed_entity_ids,
+            blackholed_name_terms,
+            normalize_entity_name,
+        )
+
+        blocked_ids = set(blackholed_entity_ids(conn) or set())
+        blocked_terms = set(blackholed_name_terms(conn) or set())
+        normalize = normalize_entity_name
+    except Exception as exc:  # noqa: BLE001 — no black-hole store → nothing protected
+        logger.debug("thread participant blackhole read skipped: %s", exc)
+
+    owner_participated = False
+    withheld = 0
+    seen: Set[str] = set()
+    roster: List[Dict[str, Any]] = []
+    for speaker in speakers:
+        kind = str(speaker.get("kind") or "unknown")
+        if kind == "owner":
+            owner_participated = True
+            continue
+        if kind == "unknown":
+            continue
+        if kind == "assistant":
+            key = "assistant"
+            if key in seen:
+                continue
+            seen.add(key)
+            roster.append({"kind": "assistant", "label": speaker.get("label") or "assistant"})
+            continue
+
+        entity_id = str(speaker.get("entity_id") or "") or None
+        label = str(speaker.get("label") or "").strip()
+        if entity_id and entity_id in blocked_ids:
+            continue
+        if blocked_terms and normalize is not None:
+            blob = normalize(label)
+            if blob and any(term in blob for term in blocked_terms):
+                continue
+        key = entity_id or f"sender:{speaker.get('sender_id')}"
+        if key in seen:
+            continue
+        seen.add(key)
+        nameable = owner_view or (policy_active and entity_id and entity_id in accessible)
+        entry: Dict[str, Any] = {"kind": "person"}
+        if entity_id:
+            entry["entity_id"] = entity_id
+        if nameable and label:
+            entry["label"] = label
+        else:
+            withheld += 1
+        roster.append(entry)
+
+    if len(roster) > _TOPIC_THREAD_PARTICIPANT_CAP:
+        roster = roster[:_TOPIC_THREAD_PARTICIPANT_CAP]
+    return roster, owner_participated, withheld
+
+
+def _attach_topic_thread(
+    packet: Dict[str, Any],
+    sink: Optional[Dict[str, Any]],
+    *,
+    conn: Optional[Any],
+    disclosure_tier: str,
+    manifest: ScopeResolutionManifest,
+    ledger: Optional[Any] = None,
+) -> None:
+    """Assemble the thread over the rows the packet actually kept, and attach it.
+
+    Called at the END of `retrieve()` — after the fusion cap, after
+    `_blackhole_policy_for_summary`, after `_enforce_request_exclusions` — precisely so
+    that every one of those subtractions has already happened to the set this reads. The
+    intersection below is the whole privacy argument: a candidate that is not in
+    `packet["summaries"]` is not in the thread, whatever removed it and whether or not
+    this function knows the remover exists.
+    """
+    if not isinstance(sink, dict) or not sink:
+        return
+    summaries = packet.get("summaries")
+    if not isinstance(summaries, list):
+        return
+    entities = [str(e) for e in (sink.get("entities") or [])]
+    if not entities:
+        # The topic never resolved to an entity. `_entity_thread_entities` has already
+        # said why on the ledger (unresolved / is_self / selector); a second line here
+        # would be the same refusal counted twice.
+        return
+
+    message_tables = [str(t) for t in (sink.get("message_tables") or [])]
+    if not message_tables:
+        if ledger is not None:
+            ledger.record(
+                _N.STAGE_RETRIEVAL,
+                "not_applied",
+                "topic_thread_not_message_scope",
+                detail={"tables": [str(t) for t in (sink.get("non_message_tables") or [])]},
+            )
+        return
+
+    surviving: Dict[str, Dict[str, Any]] = {}
+    for item in summaries:
+        rid = str(item.get("record_id") or "").strip()
+        if rid and rid not in surviving:
+            surviving[rid] = item
+
+    candidates = dict(sink.get("candidates") or {})
+    kept: List[Dict[str, Any]] = []
+    for candidate in candidates.values():
+        rid = str(candidate.get("record_id") or "")
+        item = surviving.get(rid)
+        if item is None:
+            continue
+        table = str(item.get("canonical_table") or "")
+        if table and table != candidate.get("canonical_table"):
+            continue
+        kept.append({**candidate, "blackhole_protected": bool(item.get("blackhole_protected"))})
+
+    if not kept:
+        # ONLY reportable when there were candidates to lose. A line saying "the thread
+        # emptied, dropped=0" is emitted on exactly the path where the wire-A black hole
+        # removed the subject's mentions at source, and it tells a grantee — in a slug
+        # whose meaning the protocol guarantees — that the entity they named resolved
+        # and has a thread. That converts hiding-by-absence into hiding-by-denial, the
+        # one thing D5 forbids. With no candidates the entity-thread lane has already
+        # said whatever is sayable; a second line here can only add the leak.
+        if ledger is not None and candidates:
+            ledger.record(
+                _N.STAGE_RETRIEVAL,
+                "emptied",
+                "topic_thread_no_message_rows",
+                dropped=len(candidates),
+                detail={"entities": len(entities), "tables": sorted(message_tables)},
+            )
+        return
+
+    # ORDERING IS THE ANSWER. Ascending, oldest first, because a thread is read
+    # forwards: the question, then the argument, then the decision. A row with no
+    # timestamp cannot be placed in a sequence and is not given a false position — it is
+    # excluded from the ordering and counted, so "three of the eleven rows carry no time"
+    # is visible instead of silently sorting to one end.
+    dated = [entry for entry in kept if str(entry.get("event_at") or "").strip()]
+    undated = len(kept) - len(dated)
+    dated.sort(key=lambda entry: str(entry.get("event_at")))
+    ordered = dated[:_TOPIC_THREAD_ITEM_CAP]
+
+    if not ordered:
+        if ledger is not None:
+            ledger.record(
+                _N.STAGE_RETRIEVAL,
+                "emptied",
+                "topic_thread_no_message_rows",
+                dropped=len(kept),
+                detail={"undated": undated, "entities": len(entities)},
+            )
+        return
+
+    roster, owner_participated, withheld = _thread_participants(
+        [entry.get("speaker") or {} for entry in ordered],
+        conn=conn,
+        disclosure_tier=disclosure_tier,
+        manifest=manifest,
+    )
+
+    thread_items: List[Dict[str, Any]] = []
+    decisions: List[Dict[str, Any]] = []
+    stores: Set[str] = set()
+    for ordinal, entry in enumerate(ordered):
+        table = str(entry.get("canonical_table") or "")
+        stores.add(table)
+        speaker = entry.get("speaker") or {}
+        node: Dict[str, Any] = {
+            "ordinal": ordinal,
+            "record_id": entry.get("record_id"),
+            "canonical_table": table,
+            "event_at": entry.get("event_at"),
+            "speaker_kind": str(speaker.get("kind") or "unknown"),
+        }
+        if entry.get("entity_id"):
+            node["entity_id"] = entry["entity_id"]
+        if entry.get("blackhole_protected"):
+            node["blackhole_protected"] = True
+        marker = entry.get("decision")
+        if marker:
+            node["decision"] = marker
+            if len(decisions) < _TOPIC_THREAD_DECISION_CAP:
+                decisions.append(
+                    {
+                        "ordinal": ordinal,
+                        "record_id": entry.get("record_id"),
+                        "marker": marker,
+                        "event_at": entry.get("event_at"),
+                    }
+                )
+        thread_items.append(node)
+
+    thread: Dict[str, Any] = {
+        "entity_ids": sorted(set(entities)),
+        "stores": sorted(stores),
+        "cross_source": len(stores) > 1,
+        "items": thread_items,
+        "item_count": len(thread_items),
+        "undated_items": undated,
+        "participants": roster,
+        "participant_count": len(roster),
+        "owner_participated": owner_participated,
+        # An empty list is the answer "a thread, no identifiable decision" — it is the
+        # shipped shape, not a missing field, so a consumer cannot read absence as
+        # "not looked for".
+        "decision_points": decisions,
+    }
+    packet["topic_thread"] = thread
+
+    if ledger is None:
+        return
+    ledger.record(
+        _N.STAGE_RETRIEVAL,
+        "contributed",
+        "topic_thread_lane",
+        dropped=max(0, len(candidates) - len(ordered)),
+        detail={
+            "entities": len(entities),
+            "candidates": len(candidates),
+            "in_thread": len(thread_items),
+            "undated": undated,
+            "stores": sorted(stores),
+            "participants": len(roster),
+            "decisions": len(decisions),
+        },
+    )
+    if len(stores) < 2:
+        # THE HONEST SHAPE OF A ONE-STORE THREAD. `messages:read` names
+        # `conversation_messages` and `ai_conversations:read` names `ai_chat_messages`;
+        # no scope in the registry names both, so on today's grants this line fires on
+        # every thread. That is the finding, not a defect in the assembly: the thread
+        # spans exactly the stores the grant reaches, and it says which.
+        ledger.record(
+            _N.STAGE_RETRIEVAL,
+            "scoped",
+            "topic_thread_single_store",
+            detail={
+                "store": sorted(stores)[0] if stores else None,
+                "scope_message_tables": sorted(message_tables),
+            },
+        )
+    if not decisions:
+        ledger.record(
+            _N.STAGE_RETRIEVAL,
+            "scoped",
+            "topic_thread_no_decision",
+            detail={"scanned": len(thread_items)},
+        )
+    if withheld:
+        # Counted, not named. Safe to ledger — unlike the black hole, the existence of a
+        # counterparty is not itself the protected fact here; the grantee already knows
+        # the thread has participants because `participant_count` says so.
+        ledger.record(
+            _N.STAGE_DISCLOSURE,
+            "dropped_items",
+            "topic_thread_participants_withheld",
+            dropped=withheld,
+        )
 
 
 def _load_emotion_summary_items(
@@ -3554,6 +4094,7 @@ def _build_summary_items(
     plan=None,
     now: Optional[datetime] = None,
     ledger: Optional[Any] = None,
+    thread_sink: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Assemble summary items, then apply the black-hole policy to every exit.
 
@@ -3574,6 +4115,7 @@ def _build_summary_items(
         plan=plan,
         now=now,
         ledger=ledger,
+        thread_sink=thread_sink,
     )
     kept = _blackhole_policy_for_summary(
         items,
@@ -3618,6 +4160,7 @@ def _build_summary_items_unfiltered(
     plan=None,
     now: Optional[datetime] = None,
     ledger: Optional[Any] = None,
+    thread_sink: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     from ..features.signal.vector_settings import fusion_rrf_enabled, vector_evidence_min
 
@@ -4027,6 +4570,7 @@ def _build_summary_items_unfiltered(
                     exposure_visible=exposure_visible,
                     plan=plan,
                     ledger=ledger,
+                    thread_sink=thread_sink,
                 )
         except Exception as exc:
             logger.debug("entity linking skipped: %s", exc)
@@ -4585,6 +5129,12 @@ class DefaultSignalRetrievalAdapter:
         source_filter = manifest.default_source_id
         source_ids = _resolve_source_ids(manifest, request.installed_source_ids)
 
+        # Q7: the entity-thread lane's tap. Filled during retrieval, drained after the
+        # exclusion filter below — never before, so the thread can only ever describe
+        # rows that survived every plane. Declared at function scope because the drain
+        # is common to all three modes even though only `summary` fills it.
+        thread_sink: Dict[str, Any] = {}
+
         # One structured parse ahead of retrieval (entities/time/aggregate).
         # The reference instant is threaded, not read from the wall clock here:
         # request.now / TOPOS_QUERY_NOW (eval injection) → None → wall clock
@@ -4778,6 +5328,7 @@ class DefaultSignalRetrievalAdapter:
                     plan=plan,
                     now=plan_now,
                     ledger=ledger,
+                    thread_sink=thread_sink,
                 )
                 if summaries:
                     touched.append("signal")
@@ -4980,6 +5531,27 @@ class DefaultSignalRetrievalAdapter:
         if exclusion_block:
             packet["exclusion"] = exclusion_block
             retrieval_meta.update(_exclusion_meta(exclusion_block))
+
+        # Q7. LAST, deliberately. The thread is a projection of `packet["summaries"]` and
+        # is assembled only once nothing further can be removed from them — so the fusion
+        # cap, the exit black hole and the exclusions above all subtract from the thread
+        # without it having to know they ran. `_strip_forbidden` has already applied the
+        # scope's `must_not_retrieve` to the summaries this reads, and the thread carries
+        # ids, timestamps and closed-set labels rather than row content, so there is no
+        # forbidden column for it to reintroduce.
+        _attach_topic_thread(
+            packet,
+            thread_sink,
+            conn=getattr(self._adapters.signal, "_conn", None),
+            disclosure_tier=request.disclosure_tier,
+            manifest=manifest,
+            ledger=ledger,
+        )
+        if packet.get("topic_thread"):
+            retrieval_meta["topic_thread_items"] = len(packet["topic_thread"]["items"])
+            retrieval_meta["topic_thread_cross_source"] = bool(
+                packet["topic_thread"]["cross_source"]
+            )
 
         # Why is this lane empty? Four causes had one message, and two of six
         # sections in a real report chose the wrong one out loud. Anything a stage

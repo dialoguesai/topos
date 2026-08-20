@@ -11,6 +11,74 @@ The machine-readable twin of each release is
 
 ### Added
 
+- `[E:query]` **Q7 — a topic ask now returns a THREAD: one ordered conversation over the
+  message stores the grant names, with its participant set and its decision points.**
+  "Who did I talk to about the classifier, and what did we decide?" is one question, and
+  the engine answered it with a ranked list — twice, if the owner also held
+  `ai_conversations:read`. Three things were missing and none of them could be recovered
+  downstream: **order** (`event_at` is on every item, but "these items are one
+  conversation, in this order" is a claim only retrieval is positioned to make — ranked by
+  relevance, the reply that ended the argument sits above the question that started it),
+  **participants** (`speaker_label` is attached to prose only on a first-person plan, so on
+  most phrasings the speaker is not in the packet at all), and **decisions** (where the
+  thread settled, if it did). `packet["topic_thread"]` now carries all three, and
+  `DefaultGameLayer` forwards it on the `summary` payload — without that line the mode
+  would be a fourth mechanism computed and never consumed.
+  - **The thread is a PROJECTION of `packet["summaries"]`, never a source.** Candidates are
+    tapped from inside the existing `entity_thread` lane's own loop — same
+    `link_query_entities` resolver, same mention join, same wire-A black hole, same
+    disclosed `CanonicalStore.list()` — and then INTERSECTED with the packet at the very
+    end of `retrieve()`, after the fusion cap, after `_blackhole_policy_for_summary`, after
+    `_enforce_request_exclusions`. There is no path by which the thread can name a row the
+    answer does not already name, which is why it adds no plane of its own: it inherits
+    every plane, and severing any one of them empties the thread with it. Proven by
+    ablation in `tests/query/test_topic_thread_retrieval.py` — excluding the subject
+    ("…but nothing about X") empties it, black-holing the subject empties it, a
+    `journal_entries` row the same entity links is unreachable under a message grant, and
+    replacing `_load_entity_thread_items` with a function returning `[]` empties it
+    entirely. `CanonicalStore.get()` (which takes no `disclosure_tier` at all) is asserted
+    never to be called.
+  - **`cross_source` is honest, and today it is usually `false`.** The assembly spans
+    exactly the message tables the manifest names. No scope in
+    `topos/query/scope_registry.json` names both — `messages:read` →
+    `conversation_messages`, `ai_conversations:read` → `ai_chat_messages` — so **on every
+    grant that exists today the thread is single-store**, and it says so on the ledger as
+    `retrieval/scoped/topic_thread_single_store`. The cross-store assembly is implemented
+    and tested against a two-table manifest; making it reachable in production is a
+    scope-registry decision about what one grant may span, and that decision is the
+    owner's, not this commit's.
+  - **Participants have their own three-plane rule**, because a name off `contacts` is the
+    one thing the thread discloses that the summary items do not. Black hole first and
+    silently (a roster of two that says "and one withheld" has confirmed the third exists);
+    then the disclosure tier — named at `owner_raw`, **counted and not named** below it,
+    with `disclosure/dropped_items/topic_thread_participants_withheld` carrying the integer
+    and never the name; then the selector policy, so a grant that already names an entity
+    may name it. The owner is a boolean (`owner_participated`) and never a roster entry. A
+    model turn is typed `assistant` and is deliberately **not** counted as a person —
+    answering "who did I talk to about the classifier" with a chatbot is a wrong answer,
+    not a lenient one.
+  - **Decision points are lexical, closed, and conservative on purpose.** The failure that
+    matters is the false positive — telling someone they decided something they did not —
+    so only explicit performatives of settling are matched, the emitted `marker` is a slug
+    from a fixed set (`decided` / `agreed` / `settled_on` / `chose` / `signed_off` /
+    `locked_in` / `final`) and never the matched words, and `decision_points` is an empty
+    **list** rather than a missing field so "a thread, no identifiable decision" is a
+    sayable answer (`retrieval/scoped/topic_thread_no_decision`).
+  - **Two things the tests found and the implementation had wrong.** (1) A receipt that was
+    itself a disclosure: `topic_thread_no_message_rows` fired with `dropped: 0` on exactly
+    the path where the wire-A black hole had removed the subject's mentions at source,
+    telling a grantee — in a slug whose meaning the protocol guarantees — that the entity
+    they named resolved and has a thread. It is now emitted only when there were candidates
+    to lose. (2) "have we decided anything yet?" contains "we decided" and is the *opposite*
+    of a decision; a closed list of interrogative auxiliaries, conditionals and negations
+    immediately preceding the phrase now disqualifies it, and every occurrence is checked
+    so one hedge cannot suppress a real settling later in the same row.
+  - **No ranking effect, by construction.** Nothing in `summaries`, `rows`, `scores` or the
+    fusion order changes — the mode adds one new top-level packet key, and
+    `narrowing.result_is_empty()` does not read it, so an empty packet cannot be made to
+    look non-empty by it. The seeded ranking floors reproduce exactly: S4 `0.917` (floor
+    `0.917`), T7 `0.700` (floor `0.700`). `tests/query/` 680 → **716 passed**, no
+    regressions.
 - `[E:query]` **The `entity_thread` lane now has a ranking floor, and the honest measurement
   says the lane is very slightly net negative.** Severing the lane (adversarial sweep
   2026-08-19, probe `r15`) turns **14** tests red, and every one of them is a presence or a
