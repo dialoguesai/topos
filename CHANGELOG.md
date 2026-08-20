@@ -11,6 +11,77 @@ The machine-readable twin of each release is
 
 ### Added
 
+- `[E:query]` **Q3 — a question can now be anchored to a PERIOD THE SENTENCE DOES NOT NAME,
+  derived from the subject's own mention density, and the derivation is returned so the
+  owner can dispute it.** "What did I miss while I was heads-down on the classifier?" was
+  unanswerable, and not for want of data: every window this pipeline could build was parsed
+  out of the WORDS — an explicit range, a relative phrase ("last week"), a differenced pair —
+  and that question contains no dates at all. The period the owner means is in their own
+  activity, and only the node can see it. `topos/query/entity_window.py` resolves the anchor
+  the other way round: **the sentence names a subject, the subject's mention density names
+  the period**, and the existing attention triage then runs INSIDE that derived window.
+  - **The method is stated, not implied — `mention_density_peak_span`.** Mentions are
+    bucketed by calendar day over the entity's observed span; a day is hot when it carries
+    at least the entity's mean daily rate, **floored at one** (without the floor an entity
+    mentioned 20 times across 90 days has a mean of 0.22 and every day it appears on is
+    "above average", which is not a period); hot days join into runs tolerating up to two
+    cold days, because a heads-down stretch survives a weekend, and each run is trimmed to
+    start and end hot; the run carrying the most mentions wins, ties to the most recent
+    because "while I was heads-down" is a recent-past frame. A fixed trailing window (the
+    sentence's window wearing a hat), a changepoint fit (needs more days than this corpus
+    has, and returns a boundary rather than a span a person can read) and a percentile cut
+    (a percentile of five active days is not a statistic) were considered and rejected.
+  - **REFUSING TO GUESS is the feature, and it is three distinct refusals.** An entity with
+    three scattered mentions has no heads-down period.
+    `entity_window_density_too_thin` (under 5 mentions, under 3 active days, or under 3
+    inside the winning run — not enough evidence for a period to exist),
+    `entity_window_density_uniform` (mentions exist and are evenly spread: the run's rate is
+    under 1.5x the rate outside it — a subject you touch every other day for two months is a
+    habit, not a stretch), `entity_window_span_too_broad` (clears every floor but runs
+    longer than 31 days — a "heads-down period" of three months is a guess with a date range
+    stapled to it), plus `entity_window_unresolved` and `entity_window_no_mentions`. Each
+    rides `packet["time_window"]["empty_reason"]` as a lane-level cause on Q1's precedent,
+    so a refusal to date a window can never out-rank a genuine turn-level `store_empty`.
+    **Sparse nodes will hit this constantly and that is correct behaviour, not a degraded
+    mode** — `tests/query/test_entity_anchored_window.py` opens with ten tests that assert
+    a refusal, before any test asserts a window.
+  - **The derived range is DATA, returned to the caller.** `packet["time_window"]` — the
+    same block the parsed window has always been published on, which `DefaultGameLayer`
+    already forwards onto the summary payload — gains `source: "entity_mention_density"`,
+    the method slug, `from`/`to`, `window_days`, `mentions_in_window` and `rate_lift`. "I
+    think you meant Aug 4-11" is only useful if it is shown; a window the owner cannot see
+    is a window they cannot argue with.
+  - **The dates are content and never leave as a slug.** The narrowing ledger records
+    `planner` + `windowed`/`not_applied` + one of eight new closed-set reasons; the range
+    itself goes in the local-only `detail`, and `as_telemetry()` carries neither. The three
+    public fields are enums and integers.
+  - **The density may only see the record surface the grant authorizes.** This is the plane
+    that matters, because a window is derived from records the answer may never contain:
+    the mention scan is bounded to `manifest.canonical_tables` (∩ the request's
+    `source_ids`), plus `triage_verdicts.record_id` for a scope whose `signal_objects` name
+    `attention_summary` — the exact records that scope's own digests are already computed
+    over, which is how `attention:read` (canonical_tables: `[]`) is reachable at all without
+    a special case. A scope authorizing neither derives nothing. Black-holed and
+    request-excluded record ids are removed BEFORE the arithmetic, so a protected subject
+    cannot move the dates; an exclusion the engine cannot compile abandons the derivation
+    rather than deriving around it. `tests/query/test_entity_anchored_window.py` proves each
+    by severing it: dropping the table bound, the source bound, or
+    `_blackhole_blocked_record_ids` each changes the derived dates, and a mention whose
+    `canonical_table` is NULL never votes.
+  - **It composes with the windows that shipped rather than forking them.** The derivation
+    is armed only when the sentence carries BOTH an anchoring frame ("while/when/during …
+    heads-down on / deep in / buried in / working on …") AND a cost half ("miss", "slip",
+    "fell through", "distracted"), and only when the planner found NO window of its own —
+    neither `plan.time_range` nor `plan.as_of`, so "in July 2026" (which parses to an
+    `as_of`, not a range) still wins over the density, as does a differenced two-window ask.
+    When it fires it writes `plan.time_range` and flows through P3's existing window path;
+    every other question takes the byte-identical path it took before.
+  - **The triage is the one that already exists.** `attention:read` items are filtered to
+    the derived window by the day already encoded in their `object_key`, recorded as
+    `retrieval/windowed/entity_window_triage_lane` with the drop count, or as
+    `no_match`/`entity_window_no_triage_in_window` when the window is real and holds no
+    digests. No triage logic is reimplemented; `triage_verdicts` already holds the analytics.
+
 - `[E:query]` **Q1 — "did I actually do it?" is now answered PER GOAL, with the record ids
   the claim rests on, or an explicit statement of which kind of nothing was found.**
   "What did I say I'd do last week, and did I actually do it?" returned a list of goals and
