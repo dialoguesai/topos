@@ -521,6 +521,71 @@ The machine-readable twin of each release is
 
 ### Fixed
 
+- `[O]` **Both of this repo's privacy safety nets turned out to be advisory: the 305-test
+  privacy battery ran nowhere a developer runs, and the live-database guard warned instead
+  of stopping. Neither was a missing check — both checks existed, worked, and had caught
+  real leaks. They were simply not wired into anything that runs by default.**
+  - **The battery was deselected from `just test` and `just gate`.** Both recipes select
+    `-m "public and not e2e and not live and not qq_eval"`, and every file under
+    `tests/evals/privacy` is auto-marked `private` by `tests/conftest.py`'s
+    `PRIVATE_PATH_HINTS`, so all 305 were deselected: the black-hole leak probes, UAR/CER
+    zero-leak, minimality, the negotiation ratchet, dense sparsification, redaction
+    idempotence. Only `ci.yml` reached them, by naming the path. These are the most
+    productive tests in the repo — they found the black-hole existence leak, the SG1
+    access-mode ceiling gap and both of Q7's roster leaks — and they cost 42 seconds, and
+    the local gate was green on a machine where the privacy plane was red. Both recipes
+    now run them as a second pytest session via a new `just test-privacy-battery`.
+    Deliberately NOT by re-marking them `public`: `public` decides what an OSS fork's CI
+    runs, so flipping it would drag 305 internal-fixture tests into that lane as a side
+    effect. **`just test` goes from 3700 tests to 4013** — 3708 in the public lane (3700
+    plus the eight this entry adds) and 305 in the battery, 466s + 42s, both green.
+  - **A lane that only exists in CI is a lane developers discover by breaking it**, so
+    `tests/test_local_gate_composition.py` now fails when a pytest target in `ci.yml` stops
+    being reachable from `just test` or `just gate` — instead of leaving the next drift to
+    be noticed on a red push, which is how this one survived.
+  - **The live-DB guard raised only under `TOPOS_TEST_DB_GUARD_STRICT`, and nothing set
+    it.** No lane, no recipe, no workflow, no doc — so `tests/live_db_watch.py` recorded
+    owner-database opens and then let them through, and the only enforcement was a
+    session-end report. A report cannot stop the write it describes. `addopts`' `-m` filter
+    is last-one-wins, so a single explicit `-m` (`-m ""` will do) re-selects the live lanes;
+    that is how 18 rows reached the owner's `query_artifacts` on 2026-08-19 while the
+    session still exited 0. **The guard now refuses the connect by default**, before
+    `sqlite3` is handed the path, naming the test, the file, the six-frame origin chain and
+    the way out.
+  - **The opt-out is explicit, visible, and set by nothing in this repo.**
+    `TOPOS_TEST_ALLOW_OWNER_DB_WRITES=1` downgrades the refusal to recording. It is worth
+    having, because refusing costs information: the run dies on the FIRST violation where
+    the report lists every one. `test_no_lane_in_this_repo_sets_the_opt_out` fails if a
+    recipe, workflow or script ever sets it, because an escape hatch wired into a lane is
+    the old default wearing a new name. Neither opt-in lane needs it —
+    `just test-owner-db-eval` exports `TOPOS_DATABASE_PATH` to the snapshot before pytest
+    starts, so the modules that freeze the path at collection time freeze to the snapshot
+    (verified: 32 passed, 3 skipped, zero refusals), and `just test-live-node` drives the
+    node over HTTP, where the writes happen in a process this guard is not installed in.
+  - **A marker is not consent.** `live`/`e2e`/`qq_eval` keep a test out of the default
+    SELECTION and out of the session-end verdict; they no longer waive the refusal itself.
+    That is precisely the gap 2026-08-19 fell through: every marker was present and
+    correct, and a widened `-m` selected them anyway.
+  - **Proved, not asserted.** A connect aimed at the real `~/.topos` tree was refused as an
+    unmarked test, refused again as a `qq_eval` test selected by `-m ""`, and reached
+    `sqlite3` only with the opt-out set. The target was a profile path that does not exist,
+    so a regressed guard would have reached `sqlite3` and still created nothing — proving
+    this against `~/.topos/database.db` would mean betting the owner's data on the
+    assertion under test.
+  - **The first thing the armed guard caught was a real one, and it had been invisible.**
+    `mark_graph_dirty()` arms a 90-second `threading.Timer` that opens a database
+    connection when it fires. Nothing cancelled it, so it fired during some later test,
+    minutes after `_no_live_db_guard`'s `monkeypatch` had undone the `TOPOS_DATABASE_PATH`
+    pin — resolved the path afresh, and landed on the developer's real
+    `~/.topos/database.db`. Ordinary ingestion and enrichment tests arm it as a side effect
+    of doing their work, and the graph refresher swallows every exception ("refresh must
+    never die"), so the write left no trace in the run that caused it. `conftest` now
+    cancels any pending debounce at `pytest_runtest_logfinish`, where engine state
+    outliving its test is already checked, and the timer thread is named
+    `topos-graph-refresh-debounce` — under `Thread-318` the refusal read as an anonymous
+    thread inside `tests/storage/test_connection_tuning.py`, through a call stack that
+    test does not contain.
+
 - `[E:query]` **Q7's participant roster handed a grantee two identifiers the rest of the
   answer had already withheld: a stable pseudonymous join key, and a phone number served
   as a display name.** Both were reachable on grants the registry ships today, and both
