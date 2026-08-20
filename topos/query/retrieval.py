@@ -853,7 +853,15 @@ def _load_user_goal_summaries(
     limit: int = _SUMMARY_ITEM_CAP,
     conn: Optional[Any] = None,
     time_range: Optional[Tuple[str, str]] = None,
+    goal_intent: bool = False,
 ) -> List[Dict[str, Any]]:
+    """Q1: `goal_intent` lets a caller assert the ask is ABOUT goals when the words do
+    not say so. "What did I say I'd do last week, and did I actually do it?" contains no
+    member of `_EXTRA_SURFACE_TERMS`, so on the token gate below it loaded no goals at
+    all — the commitment question could not see the commitments. The flag is passed, not
+    added to the surface lexicon, because the lexicon also drives routing and "said i'd"
+    is not a surface.
+    """
     try:
         # Prefer the query's own connection (multi-db verification, seeded evals);
         # the global singleton may point at a different database.
@@ -895,7 +903,7 @@ def _load_user_goal_summaries(
         items: List[Dict[str, Any]] = []
         tokens = _query_tokens(query_text)
         query_lower = (query_text or "").lower()
-        goal_intent = any(term in query_lower for term in _EXTRA_SURFACE_TERMS)
+        goal_intent = goal_intent or any(term in query_lower for term in _EXTRA_SURFACE_TERMS)
         seen_texts: set = set()
         for goal_id, record_id, source_id, goal_text, created_at, event_at in rows:
             text = str(goal_text or "").strip()
@@ -2316,6 +2324,548 @@ def _attach_topic_thread(
             _N.STAGE_DISCLOSURE,
             "dropped_items",
             "topic_thread_participants_withheld",
+            dropped=withheld,
+        )
+
+
+# --- Q1: commitment tracking ---------------------------------------------------------
+#
+# "What did I say I'd do last week, and did I actually do it?"
+#
+# The engine answered that with two lists that have nothing to do with each other: goals
+# out of `user_goals`, journal and message rows out of the scope routes, no join between
+# them. Synthesis was then left to decide which rows were about which goal, and the only
+# tool it has for that is wording — so it matched a goal to a row that sounded like it
+# and reported progress nobody could check. That is the worst failure in the catalog. An
+# empty answer costs the owner a question; a CONFIDENT WRONG one costs them the belief
+# that they did something they did not.
+#
+# THE JOIN IS PER GOAL, NOT ONE BLENDED QUERY. Each stated goal is an ITEM: it has its own
+# `record_id` (the message the owner stated it in) and, through `entity_mentions` on that
+# record, its own entity ids. Evidence is retrieved against THOSE ids, so an evidence row
+# is attached to a goal because the entity graph links them, never because the words
+# rhyme. Every evidence entry names the record it rests on, which is what makes a progress
+# claim checkable: the owner can open the row.
+#
+# "NO EVIDENCE FOUND" IS THE FEATURE, NOT THE FALLBACK. A goal with nothing behind it is
+# reported with a `no_evidence` status and an `empty_cause` drawn from the same five-cause
+# taxonomy the request-level ledger uses, so the answer says WHICH kind of nothing:
+#
+#   not_queried  — no evidence lane ran for this goal at all. Its statement resolved no
+#                  entity (`commitment_goal_unresolved`), it carries no timestamp to
+#                  order evidence against (`commitment_goal_undated`), or the grant names
+#                  no store to look in (`commitment_scope_no_evidence_store`). This is
+#                  emphatically NOT "we looked and found nothing", and the two must never
+#                  collapse — one is a gap in the graph, the other is a fact about the
+#                  owner's week.
+#   store_empty  — the stores that would hold the evidence hold nothing at all, with the
+#                  supply-state sub-cause (`no_source_connected` and friends) saying which
+#                  kind of empty. "Connect a calendar", not "you did nothing".
+#   no_match     — the lane ran against real stores and this goal's ids reached no row.
+#                  The honest "you said this and I can find nothing".
+#   scope_denied — candidates existed and a plane removed them. A goal whose evidence lane
+#                  was VETOED is not a goal with no evidence, and this is the label that
+#                  keeps them apart. Owner-only; see `_attach_commitment_report`.
+#
+# THE REPORT IS A PROJECTION OF `packet["summaries"]`, exactly as Q7's thread is. The lane
+# below contributes its evidence rows to the packet like any other lane, and the report is
+# assembled at the end of `retrieve()` by INTERSECTING the per-goal candidate sets with
+# the summaries that survived the fusion cap, the black-hole exit policy and the request
+# exclusions. A goal that did not itself survive gets no entry; an evidence row that did
+# not survive is not evidence. So the join adds no plane of its own — it inherits every
+# one, and severing any of them subtracts from the report without the report knowing the
+# plane exists.
+#
+# The lane's own planes, which are the entity-thread lane's planes because they are the
+# same code: `manifest.canonical_tables` bounds what may be scanned, `_list_canonical_rows`
+# supplies rows already disclosed to the request's tier (never `CanonicalStore.get()`),
+# `_blackhole_filter_thread_mentions` removes protected records from the mention set AT
+# SOURCE, and `_entity_thread_entities` applies the is-self and selector rules.
+
+#: Goals the join runs for. Past this the answer is a list, not an answer, and each goal
+#: costs a mention join.
+_COMMITMENT_GOAL_CAP = 6
+#: Evidence rows retrieved per goal. Evidence is a citation, not a transcript — the point
+#: is that the claim is checkable, and four records is enough to check.
+_COMMITMENT_EVIDENCE_PER_GOAL_CAP = 4
+#: Evidence rows the lane may contribute in total. Deliberately small: commitment evidence
+#: is a joined minority lane beside the scope routes, never a replacement for them.
+_COMMITMENT_EVIDENCE_CAP = 12
+#: Distinct surfaces across all goals used to build the SQL prefilter. As on the entity
+#: thread, surfaces bound work; the record-id sets decide membership.
+_COMMITMENT_SURFACE_CAP = 16
+
+#: The owner PLACING a commitment. Past tense and first person on purpose: "I'll ship it"
+#: said now is not a thing to check progress against. Both auxiliaries are listed because
+#: the catalog's own phrasing is "what did I SAY I'd do" — the past tense is carried by
+#: "did", so requiring "said" here missed the exact question the mode is for.
+_COMMITMENT_STATED_TERMS: Tuple[str, ...] = (
+    "say i'd",
+    "say i would",
+    "say id ",
+    "said i'd",
+    "said i would",
+    "said id ",
+    "planned to",
+    "promised",
+    "committed to",
+    "commitment",
+    "meant to",
+    "supposed to",
+    "intended to",
+    "told myself",
+    "set out to",
+)
+#: The owner CHECKING it. Both halves are required (`_commitment_intent`), which is what
+#: keeps "what are my goals" — a browse — out of this lane entirely.
+#:
+#: RETROSPECTIVE OR INTERROGATIVE ONLY. The bare infinitives of completion ("finish",
+#: "complete", "get done", "stick to") were here first and were wrong: they are the words
+#: a commitment is MADE of, so "remind me I said I'd finish the rewrite" satisfied both
+#: halves and armed a progress lane on a request that was placing a goal, not auditing
+#: one. Only the past tense and the question forms mean "and then what happened".
+_COMMITMENT_FOLLOWTHROUGH_TERMS: Tuple[str, ...] = (
+    "did i",
+    "have i",
+    "was i",
+    "actually",
+    "followed through",
+    "got done",
+    "finished",
+    "completed",
+    "progress",
+    "made good on",
+    "stuck to",
+)
+
+
+def _commitment_intent(query_text: str) -> bool:
+    """Is this the commitment question, rather than a browse of the goal list?
+
+    TWO markers are required, one from each half, because the cost of a false positive is
+    paid in ranking: the lane contributes items to fusion, so every request it fires on
+    that was not this question is a request whose answer got a little different for no
+    reason. "What am I working on" must take the byte-identical path it took before, and
+    with only one half required it would not — `_EXTRA_SURFACE_TERMS` already routes it to
+    the goal lane and "working" would have been enough on its own.
+    """
+    blob = f" {str(query_text or '').lower()} "
+    if not any(term in blob for term in _COMMITMENT_STATED_TERMS):
+        return False
+    return any(term in blob for term in _COMMITMENT_FOLLOWTHROUGH_TERMS)
+
+
+def _goal_entity_ids(
+    conn: Optional[Any],
+    record_id: str,
+    *,
+    manifest: ScopeResolutionManifest,
+) -> Tuple[List[str], Optional[str]]:
+    """The entities the owner named IN the sentence that stated this goal.
+
+    This is the goal's identity for the purposes of the join, and it is read off the
+    EXISTING entity graph — `entity_mentions` keyed by the goal's own `record_id`, the
+    same join the entity-thread lane makes. There is no second resolver here and there
+    must never be one: a goal resolved by different rules than a query would attach
+    evidence the rest of the pipeline cannot see, which is how a join starts lying.
+
+    The ids are then put through `_entity_thread_entities`, so the is-self guard and the
+    selector allow-list apply unchanged. Returns ``(entity_ids, refusal_slug)`` — a goal
+    that resolves nothing says which kind of nothing rather than silently contributing.
+    """
+    if conn is None or not record_id:
+        return [], "commitment_goal_unresolved"
+    try:
+        rows = conn.execute(
+            "SELECT DISTINCT entity_id FROM entity_mentions WHERE record_id = ?",
+            (record_id,),
+        ).fetchall()
+    except Exception as exc:  # noqa: BLE001 — no mention table → no join, not a failure
+        logger.debug("commitment goal entity lookup unavailable: %s", exc)
+        return [], "commitment_goal_unresolved"
+    linked = [{"entity_id": str(r[0])} for r in rows if str(r[0] or "").strip()]
+    if not linked:
+        return [], "commitment_goal_unresolved"
+    kept, _skipped = _entity_thread_entities(conn, linked, manifest=manifest)
+    if not kept:
+        return [], "commitment_goal_unresolved"
+    return kept, None
+
+
+def _load_commitment_evidence_items(
+    *,
+    manifest: ScopeResolutionManifest,
+    adapters: AdapterBundle,
+    conn: Optional[Any],
+    goal_items: List[Dict[str, Any]],
+    query_text: str,
+    source_ids: List[str],
+    disclosure_tier: str,
+    first_person: bool,
+    belief_intent: bool,
+    exposure_visible: bool,
+    plan=None,
+    ledger: Optional[Any] = None,
+    sink: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
+    """Retrieve evidence for each stated goal, against that goal's own ids.
+
+    One pass per scanned table over rows `_list_canonical_rows` has already disclosed,
+    with the per-goal record-id sets deciding which goal (if any) each row is evidence
+    for. A row may be evidence for more than one goal; it enters the packet once.
+
+    EVIDENCE FOLLOWS THE COMMITMENT. A row dated before the goal was stated is not
+    evidence that the owner did it, so the window is `[stated_at, ∞)` per goal and a goal
+    with no timestamp gets no evidence lane at all rather than an unordered one. This is
+    the single rule that stops the join re-creating, with ids instead of wording, the
+    "sounds related, must be progress" error it exists to fix.
+    """
+    tables = [str(t) for t in (manifest.canonical_tables or [])]
+    goals = [g for g in (goal_items or []) if str(g.get("goal_id") or "").strip()]
+    goals = goals[:_COMMITMENT_GOAL_CAP]
+    if sink is not None:
+        sink["active"] = True
+        sink["tables"] = list(tables)
+        sink["goals"] = {}
+    if not goals or conn is None:
+        return []
+
+    owner_view = str(disclosure_tier or "") == "owner_raw"
+
+    # 1. Resolve every goal to its own ids first, so the per-goal refusals are recorded
+    #    even on a grant that names no store to search.
+    resolved: List[Dict[str, Any]] = []
+    for goal in goals:
+        goal_id = str(goal.get("goal_id"))
+        record_id = str(goal.get("record_id") or "").strip()
+        stated_at = str(goal.get("event_at") or "").strip()
+        state: Dict[str, Any] = {
+            "goal_id": goal_id,
+            "record_id": record_id,
+            "source_id": goal.get("source_id"),
+            "stated_at": stated_at,
+            "entity_ids": [],
+            "unresolved_reason": None,
+            "candidates": {},
+            "reached": 0,
+        }
+        if sink is not None:
+            sink["goals"][goal_id] = state
+        if not tables:
+            state["unresolved_reason"] = "commitment_scope_no_evidence_store"
+            continue
+        if not stated_at:
+            # Undated: nothing to order evidence against. Reported, never guessed at.
+            state["unresolved_reason"] = "commitment_goal_undated"
+            continue
+        entity_ids, refusal = _goal_entity_ids(conn, record_id, manifest=manifest)
+        if refusal:
+            state["unresolved_reason"] = refusal
+            continue
+        state["entity_ids"] = entity_ids
+        resolved.append(state)
+
+    if not resolved:
+        return []
+
+    # 2. The mention join, per goal, through the shipped helper — so the black hole runs
+    #    at SOURCE on every goal's set independently and a protected record is never read.
+    surfaces: List[str] = []
+    seen_surface: Set[str] = set()
+    wanted_by_table: Dict[str, Set[str]] = {}
+    for state in resolved:
+        by_table, untabled, goal_surfaces, entity_by_record = _entity_thread_mentions(
+            conn, state["entity_ids"], tables=tables
+        )
+        by_table, untabled = _blackhole_filter_thread_mentions(
+            by_table, untabled, conn=conn, owner_view=owner_view
+        )
+        # The goal's own record is not evidence of itself.
+        own = str(state["record_id"] or "")
+        state["_by_table"] = {t: {r for r in ids if r != own} for t, ids in by_table.items()}
+        state["_untabled"] = {r for r in untabled if r != own}
+        state["_entity_by_record"] = entity_by_record
+        for table in tables:
+            reach = set(state["_by_table"].get(table) or set()) | state["_untabled"]
+            if reach:
+                wanted_by_table.setdefault(table, set()).update(reach)
+        for surface in goal_surfaces:
+            if surface not in seen_surface and len(surfaces) < _COMMITMENT_SURFACE_CAP:
+                seen_surface.add(surface)
+                surfaces.append(surface)
+
+    if not wanted_by_table:
+        return []
+
+    # 3. One disclosed scan per table, attributed back to whichever goals wanted the row.
+    items: List[Dict[str, Any]] = []
+    emitted: Set[str] = set()
+    role_cache: Dict[str, Optional[bool]] = {}
+    display_cache: Dict[str, str] = {}
+    highlight_cache: Dict[str, str] = {}
+    for table in tables:
+        wanted = wanted_by_table.get(table) or set()
+        if not wanted:
+            continue
+        rows: List[Dict[str, Any]] = []
+        if surfaces:
+            rows += _list_canonical_rows(
+                adapters,
+                table,
+                source_ids=source_ids,
+                limit=_ENTITY_THREAD_SCAN_LIMIT,
+                disclosure_tier=disclosure_tier,
+                contains=surfaces,
+            )
+        rows += _list_canonical_rows(
+            adapters,
+            table,
+            source_ids=source_ids,
+            limit=_ENTITY_THREAD_SCAN_LIMIT,
+            disclosure_tier=disclosure_tier,
+        )
+        seen_row: Set[str] = set()
+        for row in rows:
+            rid = str(row.get("record_id") or row.get("message_id") or "").strip()
+            if not rid or rid not in wanted or rid in seen_row:
+                continue
+            seen_row.add(rid)
+            event_at = str(row.get("event_at") or row.get("starts_at") or row.get("entry_at") or "")
+            # Which goals is this row evidence FOR? Both halves must hold: the goal's own
+            # ids must reach the record, and the record must not predate the statement.
+            for_goals = [
+                state
+                for state in resolved
+                if rid in (set(state["_by_table"].get(table) or set()) | state["_untabled"])
+                and event_at
+                and event_at >= str(state["stated_at"])
+                and len(state["candidates"]) < _COMMITMENT_EVIDENCE_PER_GOAL_CAP
+            ]
+            if not for_goals:
+                continue
+            item = _canonical_row_to_item(
+                table,
+                row,
+                manifest=manifest,
+                query_text=query_text,
+                conn=conn,
+                first_person=first_person,
+                belief_intent=belief_intent,
+                exposure_visible=exposure_visible,
+                role_cache=role_cache,
+                display_cache=display_cache,
+                highlight_cache=highlight_cache,
+                retrieval_source=f"commitment_evidence:{table}",
+            )
+            if item is None:
+                continue
+            # The keys the exclusion filter matches on, set for the same reason the
+            # entity-thread lane sets them: "…but nothing about X" has to be able to
+            # reach a row that arrived because of X, however it arrived.
+            item["canonical_table"] = table
+            entity_id = None
+            for state in for_goals:
+                entity_id = entity_id or state["_entity_by_record"].get(rid)
+                state["candidates"][rid] = {
+                    "record_id": rid,
+                    "canonical_table": table,
+                    "event_at": event_at,
+                    "entity_id": state["_entity_by_record"].get(rid),
+                }
+                state["reached"] += 1
+            if entity_id:
+                item["entity_id"] = entity_id
+            if rid not in emitted and len(items) < _COMMITMENT_EVIDENCE_CAP:
+                emitted.add(rid)
+                items.append(item)
+
+    if ledger is not None:
+        ledger.record(
+            _N.STAGE_RETRIEVAL,
+            "contributed",
+            "commitment_evidence_lane",
+            dropped=max(0, sum(s["reached"] for s in resolved) - len(items)),
+            detail={
+                "goals": len(goals),
+                "goals_joined": len(resolved),
+                "contributed": len(items),
+                "tables": sorted(wanted_by_table),
+            },
+        )
+    return items
+
+
+def _attach_commitment_report(
+    packet: Dict[str, Any],
+    sink: Optional[Dict[str, Any]],
+    *,
+    conn: Optional[Any],
+    adapters: AdapterBundle,
+    manifest: ScopeResolutionManifest,
+    disclosure_tier: str,
+    installed_source_ids: Optional[List[str]] = None,
+    ledger: Optional[Any] = None,
+) -> None:
+    """Answer PER GOAL over the rows the packet actually kept, and attach it.
+
+    Called at the END of `retrieve()`, beside `_attach_topic_thread` and for the same
+    reason: every subtraction the packet is going to suffer has already happened to the
+    set this reads. A goal whose own row did not survive gets no entry at all; an evidence
+    record that did not survive is not evidence. That intersection IS the privacy
+    argument — the report cannot name a record the answer does not already carry.
+
+    ENTITY IDS ARE OWNER-ONLY, everywhere in this block. The entity lane has already
+    leaked existence once by handing a grantee the `entity_id`, `record_id`, table and
+    timestamp of a black-holed subject, and a per-goal report is a denser version of
+    exactly that shape. Records and timestamps here are safe because they are already in
+    `summaries`; the entity ids are not, because nothing else in the packet published
+    them. Grantees get `entity_count`, on the same "named for the owner, counted for
+    everyone else" rule the thread's participant roster runs on.
+    """
+    if not isinstance(sink, dict) or not sink.get("active"):
+        return
+    states = list((sink.get("goals") or {}).values())
+    if not states:
+        return
+    summaries = packet.get("summaries")
+    if not isinstance(summaries, list):
+        return
+
+    owner_view = str(disclosure_tier or "") == "owner_raw"
+    surviving: Set[str] = {
+        str(item.get("record_id")).strip()
+        for item in summaries
+        if str(item.get("record_id") or "").strip()
+    }
+    # Was an exclusion actually enforced on this packet? It is the one removal a goal may
+    # be told about by name: the requester wrote it, so reporting it discloses nothing
+    # they did not already say. Every other removal is reported as absence.
+    excluded = bool((packet.get("exclusion") or {}).get("enforced"))
+    stores_empty: Optional[bool] = None
+
+    goals_out: List[Dict[str, Any]] = []
+    with_evidence = 0
+    unresolved = 0
+    withheld = 0
+    for state in states:
+        if str(state.get("record_id") or "").strip() not in surviving:
+            # The goal itself did not survive to the answer. Reporting on it would be the
+            # report reaching around the plane that removed it.
+            continue
+        candidates: Dict[str, Any] = dict(state.get("candidates") or {})
+        evidence = [c for rid, c in candidates.items() if rid in surviving]
+        evidence.sort(key=lambda c: str(c.get("event_at") or ""))
+
+        entry: Dict[str, Any] = {
+            "goal_id": state.get("goal_id"),
+            "record_id": state.get("record_id"),
+            "stated_at": state.get("stated_at") or None,
+            "entity_count": len(state.get("entity_ids") or []),
+        }
+        if owner_view and state.get("entity_ids"):
+            entry["entity_ids"] = sorted(set(state["entity_ids"]))
+
+        if evidence:
+            with_evidence += 1
+            entry["status"] = "evidence_found"
+            entry["evidence"] = [
+                {
+                    "record_id": c["record_id"],
+                    "canonical_table": c["canonical_table"],
+                    "event_at": c["event_at"] or None,
+                    **({"entity_id": c["entity_id"]} if owner_view and c.get("entity_id") else {}),
+                }
+                for c in evidence
+            ]
+            entry["evidence_count"] = len(evidence)
+            goals_out.append(entry)
+            continue
+
+        # --- no evidence. Say which kind of nothing. -------------------------------
+        entry["status"] = "no_evidence"
+        entry["evidence"] = []
+        entry["evidence_count"] = 0
+        refusal = state.get("unresolved_reason")
+        if refusal:
+            unresolved += 1
+            entry["empty_cause"] = _N.CAUSE_NOT_QUERIED
+            entry["empty_reason"] = refusal
+        elif candidates and excluded and owner_view:
+            # THE VETOED LANE. Candidates were reached and a plane took them away. This is
+            # not the same statement as "I looked and there is nothing", and collapsing
+            # the two would tell the owner their week was empty when their own exclusion
+            # emptied it. Owner-only: for a grantee the same line is a receipt that the
+            # goal has evidence they are not being given.
+            withheld += 1
+            entry["empty_cause"] = _N.CAUSE_SCOPE_DENIED
+            entry["empty_reason"] = "commitment_evidence_withheld"
+        elif candidates:
+            # Reached, then lost to a cap or a filter this block cannot name. Honest
+            # about the difference between "there is nothing" and "nothing of it is in
+            # this answer" without claiming a denial it cannot evidence.
+            entry["empty_cause"] = _N.CAUSE_NO_MATCH
+            entry["empty_reason"] = "commitment_evidence_not_in_answer"
+        else:
+            if stores_empty is None:
+                stores_empty = _scope_stores_are_empty(conn, manifest)
+            if stores_empty is True:
+                entry["empty_cause"] = _N.CAUSE_STORE_EMPTY
+                entry["empty_reason"] = (
+                    _scope_supply_state(conn, manifest, installed_source_ids)
+                    or "scope_stores_hold_no_rows"
+                )
+            else:
+                entry["empty_cause"] = _N.CAUSE_NO_MATCH
+                entry["empty_reason"] = "commitment_no_evidence_matched"
+        goals_out.append(entry)
+
+    if not goals_out:
+        return
+
+    packet["commitment_report"] = {
+        "goals": goals_out,
+        "goal_count": len(goals_out),
+        "goals_with_evidence": with_evidence,
+        "goals_without_evidence": len(goals_out) - with_evidence,
+        "stores": sorted(str(t) for t in (sink.get("tables") or [])),
+    }
+
+    if ledger is None:
+        return
+    if not (sink.get("tables") or []):
+        ledger.record(
+            _N.STAGE_RETRIEVAL,
+            "not_applied",
+            "commitment_scope_no_evidence_store",
+            detail={"goals": len(goals_out)},
+        )
+    if unresolved:
+        # A COUNT OF GAPS IN THE GRAPH, not a statement about any subject. It says N of
+        # the owner's own goals could not be joined at all — which is the finding this
+        # mode is for, and is the same sentence on a node with no entity graph.
+        ledger.record(
+            _N.STAGE_RETRIEVAL,
+            "scoped",
+            "commitment_goal_unresolved",
+            dropped=unresolved,
+        )
+    without = len(goals_out) - with_evidence
+    if without:
+        ledger.record(
+            _N.STAGE_RETRIEVAL,
+            "emptied",
+            "commitment_no_evidence_matched",
+            dropped=without,
+            detail={"goals": len(goals_out), "with_evidence": with_evidence},
+        )
+    if withheld:
+        # Owner-only by construction (`owner_view` above). For a grantee this line is the
+        # receipt that discloses the evidence exists, which is the leak the entity lane
+        # has already had once.
+        ledger.record(
+            _N.STAGE_DISCLOSURE,
+            "dropped_items",
+            "commitment_evidence_withheld",
             dropped=withheld,
         )
 
@@ -4095,6 +4645,7 @@ def _build_summary_items(
     now: Optional[datetime] = None,
     ledger: Optional[Any] = None,
     thread_sink: Optional[Dict[str, Any]] = None,
+    commitment_sink: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     """Assemble summary items, then apply the black-hole policy to every exit.
 
@@ -4116,6 +4667,7 @@ def _build_summary_items(
         now=now,
         ledger=ledger,
         thread_sink=thread_sink,
+        commitment_sink=commitment_sink,
     )
     kept = _blackhole_policy_for_summary(
         items,
@@ -4161,6 +4713,7 @@ def _build_summary_items_unfiltered(
     now: Optional[datetime] = None,
     ledger: Optional[Any] = None,
     thread_sink: Optional[Dict[str, Any]] = None,
+    commitment_sink: Optional[Dict[str, Any]] = None,
 ) -> List[Dict[str, Any]]:
     from ..features.signal.vector_settings import fusion_rrf_enabled, vector_evidence_min
 
@@ -4221,6 +4774,10 @@ def _build_summary_items_unfiltered(
             for group in rare_groups
         ]
 
+    # Q1: "what did I say I'd do … and did I actually do it". Detected once, here, and
+    # threaded — it widens the goal gate below and switches the per-goal evidence join on.
+    commitment_intent = bool(query_text) and _commitment_intent(query_text)
+
     goal_items: List[Dict[str, Any]] = []
     if prefer_goals or work_scope:
         # Goals are owner-authored artifacts; the scope's authorization list
@@ -4236,6 +4793,7 @@ def _build_summary_items_unfiltered(
             source_ids=goal_source_ids or None,
             conn=bundle_conn,
             time_range=getattr(plan, "time_range", None) if plan else None,
+            goal_intent=commitment_intent,
         )
 
     canonical_items = _load_canonical_summary_items(
@@ -4575,6 +5133,30 @@ def _build_summary_items_unfiltered(
         except Exception as exc:
             logger.debug("entity linking skipped: %s", exc)
 
+    # Q1. The per-goal evidence join. Gated on BOTH the commitment question and goals
+    # actually being in play, so every other request in the corpus takes the byte-identical
+    # path it took before this lane existed — the ranking floor is measured, not assumed.
+    commitment_items: List[Dict[str, Any]] = []
+    if commitment_intent and goal_items:
+        try:
+            commitment_items = _load_commitment_evidence_items(
+                manifest=manifest,
+                adapters=adapters,
+                conn=bundle_conn,
+                goal_items=goal_items,
+                query_text=query_text,
+                source_ids=source_ids,
+                disclosure_tier=disclosure_tier,
+                first_person=first_person,
+                belief_intent=belief_intent,
+                exposure_visible=exposure_visible,
+                plan=plan,
+                ledger=ledger,
+                sink=commitment_sink,
+            )
+        except Exception as exc:  # noqa: BLE001 — a join failure must not lose the turn
+            logger.debug("commitment evidence lane skipped: %s", exc)
+
     # The statistics layer is a first-class surface, not an intent special
     # case: frequency questions ("what cities…", "which moods…") often carry
     # no aggregate keyword yet answer best from stat insights, and the loader
@@ -4676,6 +5258,11 @@ def _build_summary_items_unfiltered(
                 # ordinary canonical evidence that arrived by a different key, so
                 # it fuses at the canonical lane's own weight.
                 ("entity_thread", 1.0, entity_thread_items),
+                # Q1. Same argument, same weight: evidence for a stated goal is
+                # ordinary canonical evidence that arrived keyed to that goal's ids.
+                # It is a joined minority lane beside the scope routes, never above
+                # them — the mode earns its answer by ATTRIBUTION, not by outranking.
+                ("commitment_evidence", 1.0, commitment_items),
                 ("goals", goals_weight, goals_for_fuse),
                 ("emotions", emotions_weight, emotion_items),
                 ("canonical", canonical_weight, canonical_items),
@@ -4706,6 +5293,7 @@ def _build_summary_items_unfiltered(
         + fact_store_items
         + entity_items
         + entity_thread_items
+        + commitment_items
         + goal_items
         + emotion_items
         + canonical_items
@@ -5135,6 +5723,14 @@ class DefaultSignalRetrievalAdapter:
         # is common to all three modes even though only `summary` fills it.
         thread_sink: Dict[str, Any] = {}
 
+        # Q1: the commitment lane's tap, on the same contract and for the same reason.
+        # It holds one state per stated goal — the goal's own ids, the evidence rows the
+        # per-goal join REACHED, and any refusal that stopped the join before it ran.
+        # Reached is not answered: the drain below intersects it with the surviving
+        # summaries, so a row the exclusion filter or the black hole removed cannot be
+        # cited as progress.
+        commitment_sink: Dict[str, Any] = {}
+
         # One structured parse ahead of retrieval (entities/time/aggregate).
         # The reference instant is threaded, not read from the wall clock here:
         # request.now / TOPOS_QUERY_NOW (eval injection) → None → wall clock
@@ -5329,6 +5925,7 @@ class DefaultSignalRetrievalAdapter:
                     now=plan_now,
                     ledger=ledger,
                     thread_sink=thread_sink,
+                    commitment_sink=commitment_sink,
                 )
                 if summaries:
                     touched.append("signal")
@@ -5551,6 +6148,29 @@ class DefaultSignalRetrievalAdapter:
             retrieval_meta["topic_thread_items"] = len(packet["topic_thread"]["items"])
             retrieval_meta["topic_thread_cross_source"] = bool(
                 packet["topic_thread"]["cross_source"]
+            )
+
+        # Q1. Beside Q7 and after it, for the same reason and one more. The per-goal
+        # report cites record ids as PROOF OF PROGRESS, so every id in it must be an id
+        # that survived — the fusion cap, the exit black hole and the exclusions above
+        # all have to have finished subtracting before a single citation is written.
+        # Draining any earlier would let the mode assert, with an id attached, that the
+        # owner did something on evidence the owner's own request removed.
+        _attach_commitment_report(
+            packet,
+            commitment_sink,
+            conn=getattr(self._adapters.signal, "_conn", None),
+            adapters=self._adapters,
+            manifest=manifest,
+            disclosure_tier=request.disclosure_tier,
+            installed_source_ids=request.installed_source_ids,
+            ledger=ledger,
+        )
+        if packet.get("commitment_report"):
+            report = packet["commitment_report"]
+            retrieval_meta["commitment_goals"] = int(report.get("goal_count") or 0)
+            retrieval_meta["commitment_goals_with_evidence"] = int(
+                report.get("goals_with_evidence") or 0
             )
 
         # Why is this lane empty? Four causes had one message, and two of six

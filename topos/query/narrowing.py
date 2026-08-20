@@ -210,6 +210,18 @@ REASONS = frozenset(
         "skip_retrieval_requested",
         "summary_item_cap",
         "time_range_parsed",
+        # --- engine: commitment tracking (Q1) — evidence retrieved PER STATED GOAL,
+        # keyed to that goal's own record and entity ids. The first four are the
+        # per-goal empty-cause vocabulary: "no evidence found" is a first-class
+        # result here, and the whole point of the mode is that it says WHICH kind of
+        # nothing rather than letting synthesis assert progress it cannot see.
+        "commitment_evidence_lane",
+        "commitment_evidence_not_in_answer",
+        "commitment_evidence_withheld",
+        "commitment_goal_undated",
+        "commitment_goal_unresolved",
+        "commitment_no_evidence_matched",
+        "commitment_scope_no_evidence_store",
         # --- engine: the topic thread (Q7) — one ordered thread over the message
         # stores the grant names, plus its participants and its decision points.
         "topic_thread_lane",
