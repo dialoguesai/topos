@@ -521,6 +521,58 @@ The machine-readable twin of each release is
 
 ### Fixed
 
+- `[E:query]` **Q7's participant roster handed a grantee two identifiers the rest of the
+  answer had already withheld: a stable pseudonymous join key, and a phone number served
+  as a display name.** Both were reachable on grants the registry ships today, and both
+  were in the same eight lines of `_thread_participants`. Neither was a raw-text leak;
+  each was a grantee receiving an identifier every other plane in the pipeline treats as
+  the owner's.
+  - **`entity_id` was attached unconditionally.** `label` was correctly gated on
+    `nameable = owner_view or (policy_active and entity_id in accessible)`; `entity_id`
+    was set one line above it with no gate at all. On the default `messages:read` grant —
+    selector policy OFF, so the grantee may not be told anyone's name — the roster read
+    `{"kind": "person", "entity_id": "ent-sam"}`, an id appearing in **no** disclosed
+    summary. A production entity id is `ent_{uuid4().hex[:16]}` and carries no name
+    information, so this is a LINKABILITY leak rather than a content one: the grantee can
+    count distinct counterparties, watch who recurs across sessions, and — the moment the
+    same id appears in an `accessible_entity_ids` list on any other grant they hold —
+    resolve the pseudonym and retroactively de-anonymize every roster that carried it.
+    Withholding the name while handing over a stable join key is not withholding. The
+    field is now `owner_view`-only, which is the rule Q1 already applies to it in
+    `_attach_commitment_report` — the same rule, not a third one.
+  - **`label` could be a raw phone number.** `_sender_display` ends in
+    `cache[sender_id] = name or sender_id`, which is right for owner prose and wrong for
+    a roster: on a real entity-scoped grant (`resolve_scope_manifest("messages:read",
+    filter_manifest={"accessible_entity_ids": [...]})`) a GRANTED person with no
+    `display_name` was disclosed as `{"label": "+15550001"}`. The grant licenses a NAME;
+    it does not license the identifier that stands in when there is no name.
+    `_thread_speaker` now returns `label` as **a name or the empty string**, carrying the
+    identifier separately, and the roster falls back to it only at `owner_raw` — an owner
+    is not blinded to their own contact, and no tier below them is told the number.
+  - **The scrubber owned the right key and never walked the container.** `"label"` has
+    always been in `disclosure._GRANTEE_TEXT_KEYS`, but `_scrub_grantee_text_items` was
+    applied over four top-level LISTS (`summaries`, `scores`, `semantic_hits`, `facts`)
+    and `topic_thread` is a DICT — so the policy covered a container the enforcing code
+    never reached. `_GRANTEE_NESTED_TEXT_CONTAINERS` now declares the dict-shaped
+    artifacts and their item lists explicitly, so a new one has to be listed and the
+    listing is the review. The other two P4 blocks were enumerated with it:
+    `commitment_report.goals[]` is ids, slugs, counts and timestamps (listed anyway, so a
+    text field added later is covered by default) and `time_window` is a flat dict of
+    dates, integers and closed-set slugs with no item list to walk. **`topic_clusters`
+    was found unvisited by the same audit** — a cluster carries `label`, the key was in
+    the tuple, the container was simply never named — and joins the top-level list here.
+  - **Why 45 green tests said it worked, and what changed about the tests.**
+    `test_a_grantee_learns_the_count_and_not_the_name` asserted
+    `all("label" not in p for p in people)` — a deny-list of exactly one key, the one its
+    author was thinking about — and never looked at `entity_id`. The new
+    `TestTheRosterEntryCarriesOnlyWhatItsTierAllows` asserts an **allow-list over the
+    whole entry** at each tier (`{kind, label, entity_id}` for the owner,
+    `{kind, label}` for every tier below including a granted one), so a field added later
+    fails until somebody states which tier may see it. Nine tests added; five of them
+    fail against the unfixed source and four are controls — the owner still sees an
+    unnamed contact by their identifier, a named granted person is still named, and the
+    owner's packet passes through the new disclosure walk untouched.
+
 - `[E:query]` **Q1's per-goal report named its citation list `evidence`, which is a
   RESERVED artifact key — so every turn the commitment lane answered died, and 21 green
   tests said it worked.** `_attach_commitment_report` wrote `entry["evidence"]`;

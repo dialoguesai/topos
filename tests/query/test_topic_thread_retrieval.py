@@ -219,6 +219,34 @@ def _messages_manifest():
     return resolve_scope_manifest("messages:read")
 
 
+def _granted_manifest(*entity_ids: str):
+    """A REAL entity-scoped grant, resolved by the production resolver.
+
+    `dataclasses.replace(..., entity_selector_policy_active=True)` sets the fields a
+    grant would set; it does not prove a shipped grant can reach this state. Going
+    through `resolve_scope_manifest(..., filter_manifest={"accessible_entity_ids": …})`
+    does, and that is the path the two shortfalls below are reachable on.
+    """
+    return resolve_scope_manifest(
+        "messages:read",
+        filter_manifest={"accessible_entity_ids": list(entity_ids)},
+    )
+
+
+def _unname_the_counterparty(conn: sqlite3.Connection) -> None:
+    """Drop the contact's display name — the state most real contacts are in.
+
+    `_sender_display` then has nothing to return but the identifier it was asked
+    about, which is a phone number. Nothing else about the fixture changes.
+    """
+    conn.execute(
+        "UPDATE contacts SET display_name = NULL WHERE contact_id = ("
+        "  SELECT contact_id FROM contact_identifiers WHERE identifier = ?)",
+        (COUNTERPARTY_ID,),
+    )
+    conn.commit()
+
+
 def _dual_manifest():
     """A grant naming BOTH message stores.
 
@@ -703,6 +731,178 @@ class TestTheParticipantSet:
         assert "topic_thread_participants_withheld" not in _reasons(ledger), (
             "the receipt confirmed the protected participant exists"
         )
+
+
+# ============================================================ what a roster entry may carry
+#
+# THE SHAPE OF THE MISS THIS SECTION EXISTS FOR. The class above asserted
+# `all("label" not in p for p in people)` — a DENY-LIST of exactly one key, the key its
+# author was thinking about — and passed while the same eight lines handed a grantee
+# `entity_id` unconditionally. A deny-list can only rule out fields somebody already
+# suspected; every assertion below is an ALLOW-LIST over the WHOLE entry, so a field
+# added later fails here until somebody states which tier may see it.
+
+#: Owner tier. The owner may have the join key and the name; nothing else is assembled.
+_OWNER_PERSON_KEYS = {"kind", "label", "entity_id"}
+#: Every tier below `owner_raw`, INCLUDING a grant that names the entity. The grant
+#: licenses a NAME. It does not license the stable join key, and it does not license
+#: `sender_id`, which is the phone number itself.
+_GRANTEE_PERSON_KEYS = {"kind", "label"}
+
+
+class TestTheRosterEntryCarriesOnlyWhatItsTierAllows:
+    def test_an_owner_entry_carries_these_keys_and_no_others(self, conn) -> None:
+        for entry in _thread(_retrieve(conn))["participants"]:
+            allowed = _OWNER_PERSON_KEYS if entry["kind"] == "person" else {"kind", "label"}
+            assert set(entry) <= allowed, f"unexpected roster field: {sorted(entry)}"
+
+    def test_a_grantee_entry_carries_these_keys_and_no_others(self, conn) -> None:
+        """The default `messages:read` grant — selector policy OFF, so the grantee may
+        not be told anyone's name. Withholding the name while handing over a stable
+        pseudonymous join key is not withholding."""
+        thread = _thread(_retrieve(conn, disclosure_tier="default_disclosure"))
+        assert thread, "a grantee lost the thread entirely, so this proves nothing"
+        people = [p for p in thread["participants"] if p["kind"] == "person"]
+        assert people, "the grantee lost the participant count, and this is not that test"
+        for entry in thread["participants"]:
+            assert set(entry) <= _GRANTEE_PERSON_KEYS, (
+                f"a grantee roster entry carried {sorted(set(entry) - _GRANTEE_PERSON_KEYS)}"
+            )
+
+    def test_a_grantee_is_handed_no_identifier_the_answer_beside_it_withheld(
+        self, conn
+    ) -> None:
+        """Stated as the property, not as one field name. Every id anywhere in the
+        thread must already appear in the summaries the same grantee received; an id
+        that appears in NO disclosed summary is a channel the rest of the packet closed."""
+        bundle = _retrieve(conn, disclosure_tier="default_disclosure")
+        thread = _thread(bundle)
+        assert thread, "a grantee lost the thread entirely, so this proves nothing"
+        disclosed = {
+            str(s.get("entity_id")) for s in _summaries(bundle) if s.get("entity_id")
+        }
+        for entry in thread["participants"]:
+            eid = entry.get("entity_id")
+            assert eid is None or str(eid) in disclosed, (
+                f"the roster handed the grantee a novel entity id: {eid}"
+            )
+        assert COUNTERPARTY_ENTITY not in str(thread)
+        assert COUNTERPARTY_ID not in str(thread)
+
+    def test_a_grant_that_names_the_entity_gives_the_name_and_still_not_the_join_key(
+        self, conn
+    ) -> None:
+        """The selector policy is the grant doing the naming — and naming is all it
+        does. `entity_id` is owner-only on the rule Q1 already applies to it."""
+        thread = _thread(
+            _retrieve(
+                conn,
+                manifest=_granted_manifest(TOPIC_ENTITY, COUNTERPARTY_ENTITY),
+                disclosure_tier="default_disclosure",
+            )
+        )
+        people = [p for p in (thread.get("participants") or []) if p["kind"] == "person"]
+        assert people, "the entity grant produced no roster, so this proves nothing"
+        assert people[0].get("label") == COUNTERPARTY_NAME
+        for entry in thread["participants"]:
+            assert set(entry) <= _GRANTEE_PERSON_KEYS, (
+                f"a granted roster entry carried {sorted(set(entry) - _GRANTEE_PERSON_KEYS)}"
+            )
+
+    def test_a_granted_person_with_no_name_is_not_labelled_with_their_phone_number(
+        self, conn
+    ) -> None:
+        """The grant permits the grantee to know the ENTITY. What it delivered, when
+        the contact had no `display_name`, was the raw `sender_id` — because
+        `_sender_display` ends in `name or sender_id` and the roster printed the
+        fallback under `label`. An identifier is not a name at any tier."""
+        _unname_the_counterparty(conn)
+        thread = _thread(
+            _retrieve(
+                conn,
+                manifest=_granted_manifest(TOPIC_ENTITY, COUNTERPARTY_ENTITY),
+                disclosure_tier="default_disclosure",
+            )
+        )
+        people = [p for p in (thread.get("participants") or []) if p["kind"] == "person"]
+        assert people, "the entity grant produced no roster, so this proves nothing"
+        assert "label" not in people[0], f"a raw identifier was served as a name: {people[0]}"
+        assert COUNTERPARTY_ID not in str(thread)
+
+    def test_the_control_a_named_granted_person_is_still_named(self, conn) -> None:
+        """Rules out a vacuous pass above: the same grant, with the display name left
+        in place, must still deliver it. The roster works; it just may not dress an
+        identifier up as one."""
+        thread = _thread(
+            _retrieve(
+                conn,
+                manifest=_granted_manifest(TOPIC_ENTITY, COUNTERPARTY_ENTITY),
+                disclosure_tier="default_disclosure",
+            )
+        )
+        people = [p for p in (thread.get("participants") or []) if p["kind"] == "person"]
+        assert people and people[0].get("label") == COUNTERPARTY_NAME
+
+    def test_the_owner_still_sees_an_unnamed_contact_by_their_identifier(
+        self, conn
+    ) -> None:
+        """The other control. Suppressing the fallback below `owner_raw` must not blind
+        the OWNER to their own contact — "who did I talk to" answered with an anonymous
+        entry is a worse answer than a phone number, and the number is already theirs."""
+        _unname_the_counterparty(conn)
+        thread = _thread(_retrieve(conn))
+        people = [p for p in thread["participants"] if p["kind"] == "person"]
+        assert people and people[0].get("label") == COUNTERPARTY_ID
+        assert set(people[0]) <= _OWNER_PERSON_KEYS
+
+
+class TestTheGranteeScrubberReachesTheThread:
+    """`"label"` was already in `disclosure._GRANTEE_TEXT_KEYS`. The filter that enforces
+    that tuple walked four top-level LISTS — summaries, scores, semantic_hits, facts —
+    and `topic_thread` is a DICT, so a container the policy covered was never reached by
+    the code that enforces it. The policy was right; the walk stopped short."""
+
+    def test_the_filter_visits_topic_thread(self) -> None:
+        from topos.query.disclosure import DisclosureFilterPipeline
+        from topos.query.types import RetrievalBundle
+
+        bundle = RetrievalBundle(
+            context_packet={
+                "summaries": [],
+                "topic_thread": {
+                    "participants": [
+                        {"kind": "person", "label": "call +1 555 000 1234"},
+                        {"kind": "assistant", "label": "assistant"},
+                    ],
+                    "participant_count": 2,
+                    "items": [{"ordinal": 0, "record_id": "cm-1"}],
+                    "decision_points": [{"ordinal": 0, "marker": "decided"}],
+                },
+            }
+        )
+        out = DisclosureFilterPipeline().apply(
+            bundle, access_mode="summary", disclosure_tier="default_disclosure"
+        )
+        roster = out.context_packet["topic_thread"]["participants"]
+        assert "555" not in str(roster), f"the scrubber never reached the roster: {roster}"
+        assert "[REDACTED_PHONE]" in roster[0]["label"]
+        assert "grantee_scrub_topic_thread_participants" in out.filters_applied
+
+    def test_the_owner_packet_is_untouched(self) -> None:
+        """The control: the walk is a GRANTEE filter, and the owner's own roster must
+        come through exactly as retrieval built it."""
+        from topos.query.disclosure import DisclosureFilterPipeline
+        from topos.query.types import RetrievalBundle
+
+        roster = [{"kind": "person", "label": "call +1 555 000 1234"}]
+        out = DisclosureFilterPipeline().apply(
+            RetrievalBundle(
+                context_packet={"topic_thread": {"participants": roster}}
+            ),
+            access_mode="summary",
+            disclosure_tier="owner_raw",
+        )
+        assert out.context_packet["topic_thread"]["participants"] == roster
 
 
 # ====================================================================== the decision points
