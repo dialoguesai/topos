@@ -238,6 +238,40 @@ The machine-readable twin of each release is
 
 ### Fixed
 
+- `[E:query]` **The access-mode ceiling had no test, and 336 privacy tests did not
+  notice.** `disclosure.py`'s two mode blocks — summary mode dropping `rows`, inference
+  mode dropping `rows` / `summaries` / `content` / `messages` — decide *which artifacts*
+  a grantee receives at all. Everything the privacy battery held guarded the layer
+  underneath: what a grantee may see *of the artifacts they are already allowed*. Sever
+  both blocks and the whole battery still passed, while an adversarial sweep's probe
+  reported `rows present: True | row contents: [RAW OWNER SENTENCE]` to a grantee holding
+  a summary-mode grant. **No behaviour changed here; the code was already correct.** It
+  was simply unguarded, which is the worse of the two states — nothing would have told us
+  when it stopped being correct.
+  - **Three tests, in `tests/evals/privacy/technical/test_grantee_summaries_scores_filter.py`.**
+    (a) summary mode: `rows` is absent from the packet and `summary_mode_strip_raw` is in
+    `filters_applied`. (b) inference mode: none of the four evidence keys is present and
+    `inference_mode_strip_evidence` is in `filters_applied`. (c) a positive control: a
+    label-only stand-in that appends the receipt and strips nothing must **fail** (a) and
+    (b). Without (c) the first two are satisfiable by a no-op that lies in its own receipt
+    — `filters_applied` is a self-report, and a packet claiming to have been filtered is
+    exactly the failure class this programme keeps finding. (a) and (b) call the same two
+    assertion helpers the control does, so the control exercises what those tests actually
+    assert rather than a paraphrase of it.
+  - **Non-vacuous by construction.** The fixture carries a real `rows` list, real
+    `summaries`, and the `content` and `messages` keys, because "`rows` is absent" asserted
+    against a packet that never had rows is a test that cannot fail. The canary sentence
+    deliberately contains no email and no phone number, so the PII redaction the rest of
+    this file guards would leave it fully legible: the ceiling is the only thing standing
+    between it and the grantee.
+  - **Acceptance: watched fail, then restored.** With both blocks at
+    `disclosure.py:136-146` severed, the privacy battery reports `2 failed, 303 passed` —
+    the two new ceiling tests and nothing else — with `AssertionError: summary mode
+    delivered raw rows: [{'_table': 'conversation_messages', 'content': 'zx-canary-sg1 …'}]`
+    and the matching `inference mode delivered evidence under 'rows'`. Restored to an empty
+    `git diff`, all 305 pass. That battery is deselected from `just test` and `just gate` by
+    their `-m "public and …"` filter, so it is run by naming the path, the way CI does.
+
 - `[E:query]` **A node that had never ingested anything 500'd on its owner's first
   question.** `relationship_context:read` declares `canonical_tables:
   ["conversation_messages"]` (the entry above) and the entity-mention lane is bounded by
