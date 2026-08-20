@@ -210,6 +210,14 @@ REASONS = frozenset(
         "skip_retrieval_requested",
         "summary_item_cap",
         "time_range_parsed",
+        # --- engine: the topic thread (Q7) — one ordered thread over the message
+        # stores the grant names, plus its participants and its decision points.
+        "topic_thread_lane",
+        "topic_thread_no_decision",
+        "topic_thread_no_message_rows",
+        "topic_thread_not_message_scope",
+        "topic_thread_participants_withheld",
+        "topic_thread_single_store",
         # --- engine: supply states (`_scope_supply_state`)
         "connected_never_delivered",
         "delivered_then_emptied",

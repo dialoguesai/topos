@@ -171,6 +171,15 @@ class DefaultGameLayer:
             # one) — lets synthesis state the searched range explicitly.
             if context_packet.get("time_window"):
                 payload["time_window"] = context_packet["time_window"]
+            # Q7: the topic thread — the same summary rows, said as ONE ordered
+            # conversation with a participant set and its decision points. It
+            # carries record ids, timestamps and closed-set labels that point AT
+            # `summaries`; it never duplicates their text, and every id in it is
+            # already in the list beside it. Without this line the assembly is
+            # unreachable: retrieval would compute an ordering that synthesis
+            # never sees and the owner is handed a ranked list again.
+            if context_packet.get("topic_thread"):
+                payload["topic_thread"] = context_packet["topic_thread"]
         else:
             payload["answer_type"] = "raw"
             payload["rows"] = context_packet.get("rows") or []
