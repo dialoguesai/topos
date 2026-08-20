@@ -180,6 +180,16 @@ class DefaultGameLayer:
             # never sees and the owner is handed a ranked list again.
             if context_packet.get("topic_thread"):
                 payload["topic_thread"] = context_packet["topic_thread"]
+            # Q1: the per-goal commitment report. Same projection rule as the thread —
+            # it carries record ids, timestamps and closed-set empty-causes that point AT
+            # `summaries`, never their text, and every id in it is already in the list
+            # beside it. Without this line the mode is unreachable: retrieval would
+            # compute per-goal evidence that synthesis never sees, and the model would go
+            # back to matching the wording of a goal against the wording of a journal
+            # entry and asserting progress it cannot see. That confident-wrong answer is
+            # the failure the mode exists to remove, so the carry is the feature.
+            if context_packet.get("commitment_report"):
+                payload["commitment_report"] = context_packet["commitment_report"]
         else:
             payload["answer_type"] = "raw"
             payload["rows"] = context_packet.get("rows") or []

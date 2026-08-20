@@ -11,6 +11,77 @@ The machine-readable twin of each release is
 
 ### Added
 
+- `[E:query]` **Q1 — "did I actually do it?" is now answered PER GOAL, with the record ids
+  the claim rests on, or an explicit statement of which kind of nothing was found.**
+  "What did I say I'd do last week, and did I actually do it?" returned a list of goals and
+  a separate list of journal and message rows, with nothing connecting them. The model was
+  left to adjudicate, and what it adjudicates on is wording: a goal that says "finish the
+  rewrite" and an unrelated entry that says "rewrote the intro" look like progress. The
+  result is a **confident wrong answer**, which is the most damaging failure shape in the
+  catalog precisely because the owner cannot tell it from a right one. `retrieval.py` now
+  resolves each stated goal to **its own `record_id` and its own entity ids** and retrieves
+  evidence against those, and `packet["commitment_report"]` carries one entry per goal.
+  `DefaultGameLayer` forwards it on the `summary` payload — without that line the mode is a
+  mechanism computed and never consumed, and synthesis goes straight back to matching
+  wording against wording.
+  - **The join is per goal, not one blended query.** Each goal's mentions are joined
+    separately through the shipped `_entity_thread_mentions`, so a row can only ever be
+    evidence for the goal whose own ids reached it. A blended query is how one goal's
+    follow-through gets attributed to another — the same wrong answer as before, now
+    wearing a citation, which is worse rather than better.
+  - **Evidence must post-date the commitment.** The window is `[stated_at, ∞)` per goal, and
+    a goal with no statement time gets **no evidence lane at all** rather than an unordered
+    one. Without this the join re-creates, with ids instead of wording, the "sounds related,
+    must be progress" error it exists to remove: the fixture carries a row that shares the
+    goal's entity *and* its vocabulary and is dated four days earlier, and only chronology
+    separates them. There is deliberately **no lexical fallback** for a goal that resolves
+    no entity — matching the goal's words against the corpus is the original bug.
+  - **"No evidence found" is four different sentences and they never collapse into one.**
+    Per goal, on the shipped empty-cause taxonomy in closed-set slugs:
+    `not_queried`/`commitment_scope_no_evidence_store` (the grant names no store to search —
+    the `work_context:read` shape, which names only `profile_records`),
+    `not_queried`/`commitment_goal_unresolved` (no entity link, so no ids to join on),
+    `not_queried`/`commitment_goal_undated`, `store_empty` + its supply sub-cause,
+    `no_match`/`commitment_no_evidence_matched` (looked and missed) and
+    `scope_denied`/`commitment_evidence_withheld` (**the vetoed lane** — candidates were
+    reached and a plane removed them). Collapsing the last into the second-to-last would
+    tell the owner their week was empty when their own exclusion emptied it.
+  - **The report is a PROJECTION of `packet["summaries"]`, never a source**, on exactly the
+    contract Q7's thread runs on. It is drained at the very end of `retrieve()` — after the
+    fusion cap, after `_blackhole_policy_for_summary`, after `_enforce_request_exclusions` —
+    and intersected with the surviving rows, so **it cannot cite a record the answer does
+    not already carry**, and a goal whose own row did not survive gets no entry at all. It
+    adds no plane of its own because it inherits every one, which
+    `tests/query/test_commitment_evidence_retrieval.py` proves by severing them one at a
+    time: excluding the subject empties the citation (and an unrelated exclusion does not),
+    black-holing the subject empties it for a grantee at **wire A, before the row is read**
+    (and un-black-holing restores it), a manifest naming no table reaches none,
+    `CanonicalStore.get()` — which takes no `disclosure_tier` — is asserted never to be
+    called, and replacing `_load_commitment_evidence_items` with a function returning `[]`
+    removes the report entirely rather than falling back to anything.
+  - **Entity ids are owner-only throughout.** Record ids and timestamps are safe here
+    because they are already in `summaries`; entity ids are not, because nothing else in the
+    packet publishes them. Grantees get `entity_count` — named for the owner, counted for
+    everyone else. The `commitment_evidence_withheld` cause is likewise owner-only: for a
+    grantee that line is a receipt that the evidence exists, which is the existence leak the
+    entity lane has already had once.
+  - **The mode is armed by intent, not by topic**, and both halves are required: a marker of
+    the owner *placing* a commitment ("said I'd", "promised", "committed to") **and** a
+    retrospective or interrogative marker ("did I", "actually", "followed through"). The
+    follow-through half is deliberately past-tense only — the bare infinitives of completion
+    are the words a commitment is *made* of, and with them "remind me I said I'd finish the
+    rewrite" armed a progress audit on a request that was stating a goal. A goal browse
+    ("what am I working on") and every other request take the byte-identical path they took
+    before: the four seeded ranking-floor cases are unmoved at C11 0.725, C8 0.786, S4 0.917
+    and T7 0.700.
+  - **The gap this exposes, stated rather than papered over:** `work_context:read` is the
+    grant the goal list belongs to and it names only `profile_records`, so on that grant
+    there is effectively nothing to search and every goal reports
+    `commitment_scope_no_evidence_store`. The mode is genuinely reachable today on
+    `messages:read` and `ai_conversations:read`, which carry `user_goals` *and* a message
+    store. Making it reachable on the goal-shaped grant is a scope-registry decision about
+    what one grant may span, and that decision is the owner's, not this commit's.
+
 - `[E:query]` **Q7 — a topic ask now returns a THREAD: one ordered conversation over the
   message stores the grant names, with its participant set and its decision points.**
   "Who did I talk to about the classifier, and what did we decide?" is one question, and
