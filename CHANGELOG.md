@@ -521,6 +521,67 @@ The machine-readable twin of each release is
 
 ### Fixed
 
+- `[O]` **`just gate` — the thing a developer runs before every release — opened the
+  owner's live database and ran DDL on it.** The hermeticity work of 2026-08-19 and
+  2026-08-20 made the PYTEST lane hermetic. `just gate` has seven legs and two of them are
+  pytest; the guard lived in `tests/conftest.py`, so the other five ran with nothing
+  watching them. Leg 7, `scripts/release_smoke_test.py`, said so in its own output and
+  nobody was reading:
+
+  ```
+  INFO: Serving database /Users/<owner>/.topos/database.db (source=slot, profile=personaldb, schema=62)
+  INFO: DB tuning: journal_mode=wal sqlite_vec=True
+  DEBUG: Ensured table browser_visits exists
+  ```
+
+  - **The cause was one branch.** `TOPOS_DATABASE_PATH` was set only under `--seeded-db`,
+    so the ordinary run — the one the gate does — booted the built wheel's FastAPI app with
+    the variable unset, and `resolve_active_database` correctly answered with the
+    developer's own Topos. It is now pinned to a scratch database in the run's temp
+    directory on every path through `_install_and_verify`; `--seeded-db` copies into that
+    same file instead of choosing whether to have one. What the check asserts is "the built
+    artifact boots and answers `/healthcheck`", which a scratch database proves exactly as
+    well. A test reads that from the AST rather than by string search, because the defect
+    was that the assignment existed — it was just inside an `if`.
+  - **`scripts/live_db_tripwire.py` extends the guard past pytest.** It arms the same
+    `tests/live_db_watch` module — one implementation, no second copy to drift — in the leg
+    and, through a generated `sitecustomize.py` on `PYTHONPATH`, in every Python child it
+    spawns, including one in another virtualenv running another Python. It deliberately does
+    NOT put the repo root on that path: that would make the smoke venv's `import topos`
+    resolve to the working tree and delete the only thing a release smoke test is for. Every
+    non-pytest leg of `just gate` now runs under it, and a test fails if one stops doing so.
+  - **REFUSING IS NOT REPORTING, and here the difference was load-bearing.** The first armed
+    run refused the connect and the leg still exited 0:
+    `topos.core.state._open_owner_db_connection` catches the failure, logs
+    `WARNING: Failed to create database connection`, and the app serves `/healthcheck` from
+    a degraded path — so `app_boot_ok` and `release_smoke_ok` both printed over the top of
+    it. Every armed process therefore appends what it refused to a journal file and the
+    parent fails the leg from that, independent of exit codes and of whether the child chose
+    to notice. Worth carrying forward as a fact about the node, not about this commit: a
+    node whose database will not open still answers 200 at its front door.
+  - **The tripwire self-checks before it is trusted.** `site.execsitecustomize` swallows
+    exceptions, so an interpreter that failed to arm looks exactly like a clean one. Before
+    each leg, a child interpreter arms a throwaway path as owner data, asserts the connect
+    is refused, and asserts the refusal beat SQLite to the filesystem — a guard that lets a
+    0-byte file through has already lost. It never names `~/.topos`: a hermeticity check
+    that has to open the owner's database to prove itself is the bug it is checking for.
+  - **Two adjacent defects in the same script, found by arming it and fixed here.** The
+    `python -c` checks ran with the repo root as the working directory, which `python -c`
+    puts on `sys.path[0]` — so the venv's `import topos` resolved to `./topos` and both
+    checks described the working tree instead of the wheel just installed. They now run with
+    the venv as cwd and the import check asserts `topos.__file__` is under the venv's
+    `purelib`, so it is checked rather than intended. And `_find_wheel` sorted filenames
+    lexicographically, which ranks `topos_node-1.3.9` above `topos_node-1.3.21`; since
+    `dist/` is not cleaned between builds, any machine that has built twice was
+    smoke-testing an old wheel. It sorts by parsed version now.
+  - **What is established, and what is not.** Established, from the smoke test's own stdout:
+    the leg resolved the owner's database and ran `CREATE TABLE IF NOT EXISTS` on it. NOT
+    established: that any row changed — `query_artifacts` (1268) and `query_sessions` (1031)
+    were flat across the run that found it, and a node process holds the same file open, so
+    WAL mtime cannot attribute anything either way. Post-fix the leg reports
+    `source=settings` against a temp path, the tripwire records zero owner-data opens, and
+    `~/.topos/database.db` is unchanged in size and mtime.
+
 - `[O]` **Both of this repo's privacy safety nets turned out to be advisory: the 305-test
   privacy battery ran nowhere a developer runs, and the live-database guard warned instead
   of stopping. Neither was a missing check — both checks existed, worked, and had caught

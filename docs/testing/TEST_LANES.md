@@ -199,13 +199,15 @@ armed under does not travel with it.**
 ### What the connect guard cannot see
 
 It watches `sqlite3.connect` **in this process**. Two things are therefore out of
-its reach, and both are handled by deselection instead:
+its reach:
 
 - **Writes made by the node.** `tests/release/iteration4` drives the engine on
   `:9000` over HTTP; that process opens its own database, and no env var set in
-  the pytest process redirects it. `just test-live-node` is the only way in.
+  the pytest process redirects it. `just test-live-node` is the only way in, and
+  deselection is the only handling.
 - **Writes made by a subprocess.** Anything that shells out carries its own
-  interpreter and its own unwrapped `sqlite3`.
+  interpreter and its own unwrapped `sqlite3`. **Outside pytest this is now
+  covered — see below. Inside pytest it is not.**
 
 There is also one blind spot worth naming rather than hiding: a symlink inside a
 tmp directory pointing into `~/.topos` resolves to a watched path but does not
@@ -217,6 +219,57 @@ classifies correctly, and pins the selection rule. It cannot be the enforcement:
 a test that asserts "nothing has written to `~/.topos`" passes happily while a
 test scheduled *after* it does exactly that. Only a session hook sees the whole
 run.
+
+## The third guard: `just gate`'s non-pytest legs
+
+Everything above is about pytest. `just gate` has seven legs and two of them are
+pytest, so until 2026-08-20 five legs ran with nothing watching them — and one of
+them was not hermetic. `scripts/release_smoke_test.py` (leg 7) boots the built
+wheel's FastAPI app, and with `TOPOS_DATABASE_PATH` unset that app resolved to
+the developer's own Topos and ran DDL on it:
+
+```
+INFO: Serving database /Users/<owner>/.topos/database.db (source=slot, profile=personaldb, schema=62)
+INFO: DB tuning: journal_mode=wal sqlite_vec=True
+DEBUG: Ensured table browser_visits exists
+```
+
+`scripts/live_db_tripwire.py` closes it. Every non-pytest gate leg runs under it:
+
+```bash
+uv run python scripts/live_db_tripwire.py scripts/release_smoke_test.py
+uv run python scripts/live_db_tripwire.py --command uv build
+```
+
+It arms **the same `tests/live_db_watch` module** — one implementation, not a
+second copy to drift — in the leg and, through a generated `sitecustomize.py`
+placed on `PYTHONPATH`, in every Python child the leg spawns. That reaches a
+child in another virtualenv running another Python, which is exactly what the
+release smoke test is. It does not put the repo root on that path: doing so would
+make the smoke venv's `import topos` resolve to the working tree and delete the
+only thing a release smoke test is for.
+
+Three properties are worth knowing before you trust it:
+
+- **It fails a leg from a journal, not from an exit code.** The first armed run
+  refused the connect and the leg still exited 0, because
+  `topos.core.state._open_owner_db_connection` catches the failure, logs
+  `WARNING: Failed to create database connection`, and the app serves
+  `/healthcheck` from a degraded path. Every armed process appends what it
+  refused to `TOPOS_LIVE_DB_JOURNAL` from an `atexit` hook, and the parent reads
+  that. A refusal a caller swallows still fails the gate.
+- **It self-checks first.** `site.execsitecustomize` swallows exceptions, so an
+  interpreter that failed to arm is indistinguishable from a clean one. Before
+  each leg, a child arms a throwaway path as owner data, asserts the connect is
+  refused, and asserts the refusal beat SQLite to the filesystem. It never names
+  `~/.topos` — a hermeticity check that has to open the owner's database to prove
+  itself is the bug it is checking for.
+- **`tests/test_gate_leg_hermeticity.py` keeps it wired.** Unwrapping a gate leg
+  is a red test, not a silent regression.
+
+pytest legs are deliberately NOT wrapped: `tests/conftest.py` installs the same
+guard at session start, and wrapping them too would arm it twice in two
+separately loaded copies of the module.
 
 ## Why the marker is the only key
 
