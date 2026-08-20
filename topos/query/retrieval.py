@@ -932,6 +932,37 @@ def _load_user_goal_summaries(
         return []
 
 
+def _canonical_table_absent(adapters: AdapterBundle, table: str) -> bool:
+    """Has this node never created the canonical table a manifest declares?
+
+    A canonical table is created by the writer that first lands a row in it, so on a
+    first-run install a scope can declare a table that does not exist yet: a standard
+    init produces 77 tables and ``conversation_messages`` is not among them. Reading it
+    anyway raised ``no such table`` out of ``stores.py`` and 500'd the owner's first
+    question. A declared-but-uncreated store is an EMPTY store, not a fault, and the
+    empty-cause taxonomy already has the words for that.
+
+    Deliberately narrow in both directions. ``True`` only when ``sqlite_master`` was read
+    and the table was positively not in it — this is not a ``try/except`` wrapped around
+    the read, so a disk error, a locked database or a malformed row still reaches the
+    caller as the failure it is. ``False`` whenever existence cannot be established (a
+    non-SQLite adapter, an unreadable catalog), because an unknown must not silently
+    disable a lane — the mirror of the rule ``_scope_supply_state`` states for diagnoses.
+    """
+    conn = getattr(adapters.canonical, "_conn", None)
+    if conn is None or not _SAFE_TABLE_RE.match(str(table or "")):
+        return False
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=? LIMIT 1",
+            (table,),
+        ).fetchone()
+    except Exception as exc:  # noqa: BLE001 — a catalog we cannot read is not an absence
+        logger.debug("canonical table existence probe skipped for %s: %s", table, exc)
+        return False
+    return row is None
+
+
 def _list_canonical_rows(
     adapters: AdapterBundle,
     table: str,
@@ -941,6 +972,11 @@ def _list_canonical_rows(
     disclosure_tier: str = "owner_raw",
     contains: Optional[List[str]] = None,
 ) -> List[Dict[str, Any]]:
+    # A table this node has never created holds no rows — the one funnel every
+    # canonical lane goes through (scope routes, the entity-thread lane, the
+    # employer heuristic) so no future lane can reach around the probe.
+    if _canonical_table_absent(adapters, table):
+        return []
     # canonical.list() already applies the disclosure tier (SQL adapters via the
     # per-table _disclosure spec; in-memory fake via apply_disclosure_tier_to_rows), so the
     # rows returned here are ALREADY disclosed to `disclosure_tier`. Re-applying the swap
@@ -1304,6 +1340,7 @@ def _load_canonical_summary_items(
     plan=None,
     conn: Optional[Any] = None,
     exposure_visible: bool = True,
+    ledger: Optional[Any] = None,
 ) -> List[Dict[str, Any]]:
     # First-person asks (P3.3): message rows get owner-authorship treatment —
     # belief/identity asks hard-filter to owner-authored rows (another person's
@@ -1319,6 +1356,27 @@ def _load_canonical_summary_items(
 
     items: List[Dict[str, Any]] = []
     for table in manifest.canonical_tables or []:
+        if _canonical_table_absent(adapters, table):
+            # `connected_never_delivered` of the three supply states, and the choice is
+            # the point. `delivered_then_emptied` is excluded by the evidence itself:
+            # the writer that creates this table has never run, so nothing was ever
+            # delivered and then removed. `no_source_connected` is a claim about the
+            # INSTALL SET, not about this store, and it is the more actionable of the
+            # two remaining — it sends the owner to add a connector. Saying it to an
+            # owner who has connected one and is simply pre-first-sync is the same
+            # false-absence this taxonomy exists to end (`_scope_supply_state` refuses
+            # the symmetric guess for the symmetric reason). What the absent table does
+            # evidence, first-hand, is that this store has never received a delivery.
+            if ledger is not None:
+                ledger.empty(
+                    _N.CAUSE_STORE_EMPTY,
+                    stage=_N.STAGE_RETRIEVAL,
+                    reason=SUPPLY_NEVER_DELIVERED,
+                    # Which store, for the owner's own logs. `detail` is dropped by
+                    # `as_public`, so the diagnostic does not ride the wire.
+                    detail={"table": table},
+                )
+            continue
         rows = _route_canonical_rows(
             adapters,
             table,
@@ -3648,6 +3706,7 @@ def _build_summary_items_unfiltered(
         plan=plan,
         conn=bundle_conn,
         exposure_visible=exposure_visible,
+        ledger=ledger,
     )
     _canonical_before_window = len(canonical_items)
     canonical_items = _prefer_time_window(
@@ -4849,6 +4908,7 @@ class DefaultSignalRetrievalAdapter:
                 plan=plan,
                 conn=getattr(self._adapters.signal, "_conn", None),
                 exposure_visible=_exp_visible,
+                ledger=ledger,
             )
             for item in canon_items:
                 scores.append({k: v for k, v in item.items() if k not in _INFERENCE_CANONICAL_EXCLUDED_KEYS})
