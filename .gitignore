@@ -2,8 +2,13 @@
 .env.*
 !.env.example
 *.db
+*.db-shm
+*.db-wal
 *.sqlite
 *.sqlite3
+
+# Smithers (durable agent control plane) — runtime state, never shipped
+.smithers/
 __pycache__/
 *.py[cod]
 *$py.class
