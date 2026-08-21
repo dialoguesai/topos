@@ -3302,21 +3302,98 @@ def _load_complexity_summary_items(conn: Optional[Any]) -> List[Dict[str, Any]]:
     return items
 
 
-def _load_attention_summary_items(conn: Optional[Any], limit: int = 10) -> List[Dict[str, Any]]:
-    """Latest attention-triage objects (daily digests + interest profiles) as
-    summary items — the attention:read scope's primary content
-    (PLAN_ATTENTION_TRIAGE.md M2). The attention_summary payload already
-    enforces the silence invariant (no discard references), so shaping is safe."""
+#: One `attention_summary` and one `interest_profile` per day, so a window's day
+#: count doubles into the number of objects that answer it.
+_ATTENTION_OBJECTS_PER_DAY = 2
+
+#: Days a windowed fetch will reach back for. A window is a request for its days,
+#: but an unbounded one would put a year of digests into a single summary payload;
+#: past this the newest days inside the window answer.
+_ATTENTION_WINDOW_FETCH_DAYS_CAP = 31
+
+#: `substr(object_key, -10)` on a dated key. The loader already SORTS on this
+#: expression, so windowing on it cannot disagree with the order it serves in.
+_ATTENTION_DAY_GLOB = "[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]"
+
+
+def _attention_window_fetch_limit(window: Optional[DerivedWindow], default_limit: int) -> int:
+    """Row budget wide enough to hold every day a resolved window asks for.
+
+    The default of ten objects is five days — right for "what did I miss yesterday",
+    and silently wrong for a week's report, which is the shape that found this.
+    """
+    if window is None or not window.resolved:
+        return default_limit
+    try:
+        start = datetime.strptime(str(window.start)[:10], "%Y-%m-%d").date()
+        end = datetime.strptime(str(window.end)[:10], "%Y-%m-%d").date()
+    except (TypeError, ValueError):
+        return default_limit
+    days = (end - start).days + 1
+    if days < 1:
+        return default_limit
+    return max(default_limit, min(days, _ATTENTION_WINDOW_FETCH_DAYS_CAP) * _ATTENTION_OBJECTS_PER_DAY)
+
+
+def _count_attention_summary_items(conn: Optional[Any]) -> int:
+    """How many triage digests this node holds, ignoring any window.
+
+    Only ever asked when a windowed fetch came back empty, and only to tell
+    "the triage has nothing in your window" apart from "this node runs no triage".
+    """
+    if conn is None:
+        return 0
+    try:
+        row = conn.execute(
+            "SELECT count(*) FROM signal_objects "
+            "WHERE signal_dimension='interests' AND valid_to IS NULL "
+            "AND object_type IN ('attention_summary','interest_profile')"
+        ).fetchone()
+    except Exception:
+        return 0
+    return int(row[0]) if row else 0
+
+
+def _load_attention_summary_items(
+    conn: Optional[Any],
+    limit: int = 10,
+    *,
+    window: Optional[DerivedWindow] = None,
+) -> List[Dict[str, Any]]:
+    """Attention-triage objects (daily digests + interest profiles) as summary items —
+    the attention:read scope's primary content (PLAN_ATTENTION_TRIAGE.md M2). The
+    attention_summary payload already enforces the silence invariant (no discard
+    references), so shaping is safe.
+
+    A resolved ``window`` selects the days IN SQL. It used to be applied afterwards, by
+    `_attention_items_in_window`, to whatever the newest-ten happened to be: a report
+    for Aug 11-16 asked on Aug 21 fetched Aug 17-21, dropped all of it, and said the
+    window held no triage — while the node held a digest for every day of it. Filtering
+    a fixed page is not the same as asking for the days, and the difference is invisible
+    downstream: the empty and the ledger line both look exactly like a quiet week.
+
+    Undated keys are selected whatever the window, matching the rule
+    `_attention_items_in_window` documents — evidence must not vanish on a formatting
+    accident.
+    """
     if conn is None:
         return []
+    sql = (
+        "SELECT object_type, object_key, payload_json FROM signal_objects "
+        "WHERE signal_dimension='interests' AND valid_to IS NULL "
+        "AND object_type IN ('attention_summary','interest_profile')"
+    )
+    params: List[Any] = []
+    if window is not None and window.resolved:
+        sql += (
+            " AND (substr(object_key, -10) BETWEEN ? AND ?"
+            f" OR substr(object_key, -10) NOT GLOB '{_ATTENTION_DAY_GLOB}')"
+        )
+        params.extend([str(window.start)[:10], str(window.end)[:10]])
+    sql += " ORDER BY substr(object_key, -10) DESC, object_type ASC LIMIT ?"
+    params.append(_attention_window_fetch_limit(window, limit))
     try:
-        rows = conn.execute(
-            "SELECT object_type, object_key, payload_json FROM signal_objects "
-            "WHERE signal_dimension='interests' AND valid_to IS NULL "
-            "AND object_type IN ('attention_summary','interest_profile') "
-            "ORDER BY substr(object_key, -10) DESC, object_type ASC LIMIT ?",
-            (limit,),
-        ).fetchall()
+        rows = conn.execute(sql, tuple(params)).fetchall()
     except Exception:
         return []
     items: List[Dict[str, Any]] = []
@@ -6312,37 +6389,57 @@ class DefaultSignalRetrievalAdapter:
                         if item.get("summary_text") or item.get("topic") or item.get("dimension"):
                             summaries.append({k: v for k, v in item.items() if k != "content"})
             if manifest.scope_id == "attention:read":
-                attention_items = _load_attention_summary_items(
-                    getattr(self._adapters.signal, "_conn", None))
                 # Q3: the existing triage, run inside the derived window. The digests
                 # are the ones this scope always serves, computed by
                 # `features/triage/daily.py` off `triage_verdicts`; the window only
                 # decides which days of them answer. Nothing about the triage is
                 # recomputed here, which is the point — a second scoring path would
                 # be a second set of verdicts to disagree with the first.
+                #
+                # The window goes to the LOADER, not to a filter over the newest page:
+                # asking for five days and keeping the ones that happen to fall inside
+                # a six-day window answers a different question than asking for the six.
+                attention_conn = getattr(self._adapters.signal, "_conn", None)
+                attention_items = _load_attention_summary_items(
+                    attention_conn, window=derived_window)
+                # Still run, and still the authority on what counts as in-window: the
+                # loader keeps undated keys deliberately, and this is what decides them.
+                # `out_of_window` is expected to be 0 now that the days are selected
+                # in SQL; a non-zero value means the predicate and the filter disagreed,
+                # and `withheld` below counts it either way (it is held minus served).
                 attention_items, out_of_window = _attention_items_in_window(
                     attention_items, derived_window
                 )
                 if attention_items:
                     summaries = attention_items + list(summaries)
                     touched.append("signal")
-                    if ledger is not None and out_of_window:
+                if ledger is not None and derived_window is not None and derived_window.resolved:
+                    # What the window actually cost, counted against every digest the
+                    # node holds rather than against one page of them. Reporting the
+                    # post-filter drop instead would now report ~0 on every windowed
+                    # turn — the narrowing did not stop happening when it moved into
+                    # the query, it stopped being visible from where it used to be read.
+                    withheld = max(
+                        0,
+                        _count_attention_summary_items(attention_conn) - len(attention_items),
+                    )
+                    if attention_items and withheld:
                         ledger.record(
                             _N.STAGE_RETRIEVAL,
                             "windowed",
                             "entity_window_triage_lane",
-                            dropped=out_of_window,
+                            dropped=withheld,
                         )
-                elif out_of_window and ledger is not None:
-                    # The window was derived and the triage has nothing in it. That is
-                    # a different empty from "this node runs no triage", and only this
-                    # line can tell them apart.
-                    ledger.empty(
-                        _N.CAUSE_NO_MATCH,
-                        stage=_N.STAGE_RETRIEVAL,
-                        reason="entity_window_no_triage_in_window",
-                        dropped=out_of_window,
-                    )
+                    elif not attention_items and withheld:
+                        # The window was derived and the triage has nothing in it. That is
+                        # a different empty from "this node runs no triage", and only this
+                        # line can tell them apart.
+                        ledger.empty(
+                            _N.CAUSE_NO_MATCH,
+                            stage=_N.STAGE_RETRIEVAL,
+                            reason="entity_window_no_triage_in_window",
+                            dropped=withheld,
+                        )
             if manifest.scope_id == "availability:read":
                 time_items = _load_time_summary_items(
                     getattr(self._adapters.signal, "_conn", None), query_text)
@@ -6438,8 +6535,12 @@ class DefaultSignalRetrievalAdapter:
                 if band:
                     packet["availability_band"] = band
             elif manifest.scope_id == "attention:read":
+                # Same window as the summary path. An inference packet built from the
+                # newest five days while the plan's time range says otherwise is a
+                # score for a week the owner did not ask about.
                 for item in _load_attention_summary_items(
-                        getattr(self._adapters.signal, "_conn", None)):
+                        getattr(self._adapters.signal, "_conn", None),
+                        window=derived_window):
                     scores.append({k: v for k, v in item.items() if k not in _INFERENCE_EXCLUDED_KEYS})
             for dim in manifest.primary_dimensions:
                 page = self._adapters.signal.get_by_dimension(dim.lower(), limit=50, offset=0)
