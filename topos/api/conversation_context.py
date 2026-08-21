@@ -127,8 +127,9 @@ async def get_context_llm_config() -> dict:
 async def put_context_llm_config(payload: dict = Body(default=None)) -> dict:
     from ..config.conversation_context_llm import (
         ENGINE_CONFIG_KEY_CONVERSATION_CONTEXT_LLM_MODEL,
+        ENGINE_CONFIG_KEY_CONVERSATION_CONTEXT_LLM_PROVIDER,
         effective_config_for_api,
-        normalize_put_model,
+        normalize_put_config,
     )
     from ..config.settings import settings
     from ..core.state import set_engine_config_value
@@ -137,8 +138,9 @@ async def put_context_llm_config(payload: dict = Body(default=None)) -> dict:
     if conn is None:
         raise HTTPException(status_code=503, detail="Database not available")
     try:
-        model = normalize_put_model(payload)
+        provider, model = normalize_put_config(payload)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     set_engine_config_value(conn, ENGINE_CONFIG_KEY_CONVERSATION_CONTEXT_LLM_MODEL, model)
+    set_engine_config_value(conn, ENGINE_CONFIG_KEY_CONVERSATION_CONTEXT_LLM_PROVIDER, provider)
     return {"status": "ok", **effective_config_for_api(settings, conn)}

@@ -290,8 +290,9 @@ async def handle_put_facts_llm_config(message: Dict[str, Any]) -> Optional[Dict[
     req_id = message.get("id")
     from ...config.facts_llm import (
         ENGINE_CONFIG_KEY_FACTS_LLM_MODEL,
+        ENGINE_CONFIG_KEY_FACTS_LLM_PROVIDER,
         effective_config_for_api,
-        normalize_put_model,
+        normalize_put_config,
     )
 
     conn = hub.get_db_connection()
@@ -299,8 +300,9 @@ async def handle_put_facts_llm_config(message: Dict[str, Any]) -> Optional[Dict[
         return {"id": req_id, "status": "error", "error": "Database not available"}
     payload = message.get("payload") or {}
     try:
-        model = normalize_put_model(payload)
+        provider, model = normalize_put_config(payload)
         set_engine_config_value(conn, ENGINE_CONFIG_KEY_FACTS_LLM_MODEL, model)
+        set_engine_config_value(conn, ENGINE_CONFIG_KEY_FACTS_LLM_PROVIDER, provider)
         data = effective_config_for_api(settings, conn)
         return {"id": req_id, "status": "ok", "payload": {"status": "ok", **data}}
     except ValueError as exc:
@@ -313,6 +315,7 @@ async def handle_delete_facts_llm_config(message: Dict[str, Any]) -> Optional[Di
     req_id = message.get("id")
     from ...config.facts_llm import (
         ENGINE_CONFIG_KEY_FACTS_LLM_MODEL,
+        ENGINE_CONFIG_KEY_FACTS_LLM_PROVIDER,
         effective_config_for_api,
     )
 
@@ -321,6 +324,7 @@ async def handle_delete_facts_llm_config(message: Dict[str, Any]) -> Optional[Di
         return {"id": req_id, "status": "error", "error": "Database not available"}
     try:
         set_engine_config_value(conn, ENGINE_CONFIG_KEY_FACTS_LLM_MODEL, "")
+        set_engine_config_value(conn, ENGINE_CONFIG_KEY_FACTS_LLM_PROVIDER, "")
         data = effective_config_for_api(settings, conn)
         return {"id": req_id, "status": "ok", "payload": {"status": "ok", **data}}
     except Exception as exc:  # noqa: BLE001
@@ -387,8 +391,9 @@ async def handle_put_conversation_context_llm_config(message: Dict[str, Any]) ->
     req_id = message.get("id")
     from ...config.conversation_context_llm import (
         ENGINE_CONFIG_KEY_CONVERSATION_CONTEXT_LLM_MODEL,
+        ENGINE_CONFIG_KEY_CONVERSATION_CONTEXT_LLM_PROVIDER,
         effective_config_for_api,
-        normalize_put_model,
+        normalize_put_config,
     )
 
     conn = hub.get_db_connection()
@@ -396,8 +401,9 @@ async def handle_put_conversation_context_llm_config(message: Dict[str, Any]) ->
         return {"id": req_id, "status": "error", "error": "Database not available"}
     payload = message.get("payload") or {}
     try:
-        model = normalize_put_model(payload)
+        provider, model = normalize_put_config(payload)
         set_engine_config_value(conn, ENGINE_CONFIG_KEY_CONVERSATION_CONTEXT_LLM_MODEL, model)
+        set_engine_config_value(conn, ENGINE_CONFIG_KEY_CONVERSATION_CONTEXT_LLM_PROVIDER, provider)
         data = effective_config_for_api(settings, conn)
         return {"id": req_id, "status": "ok", "payload": {"status": "ok", **data}}
     except ValueError as exc:
