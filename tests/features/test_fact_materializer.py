@@ -13,7 +13,10 @@ import sqlite3
 import pytest
 
 from topos.features.entities.edges import graph_snapshot
-from topos.features.entities.fact_materializer import materialize_signal_objects_to_graph
+from topos.features.entities.fact_materializer import (
+    materialize_signal_objects_to_graph,
+    sweep_stale_materialized_edges,
+)
 from topos.features.entities.resolver import EntityResolver
 from topos.storage.db.migrations import apply_all_migrations
 
@@ -189,3 +192,80 @@ def test_discusses_edges_use_member_activity_not_object_insert_time(conn):
         if window_start <= t <= now + timedelta(days=1):
             kept.append(edge)
     assert kept, "recent member activity should keep discusses inside a 14d Active-in window"
+
+
+def test_rematerialize_updates_edges_in_place_never_deletes_first(conn):
+    """Upsert-then-sweep: a re-run must UPDATE surviving edges, not wipe and
+    re-mint them — the old up-front wipe left the committed graph without its
+    materialized edges for the minutes the slow enricher lanes take, so every
+    /entities/graph read in that window rendered a goal-less graph."""
+    r = EntityResolver(conn)
+    subj = r._create_entity("Jonny", "person")
+    conn.commit()
+    _put_object(
+        conn, object_id="f1", object_type="fact", object_key="fact:jonny:works_at",
+        payload={"subject_entity_id": subj, "predicate": "works_at", "object_value": "Dialogues", "confidence": 0.9},
+    )
+    touched_first: set = set()
+    materialize_signal_objects_to_graph(conn, touched_edges=touched_first)
+    ids_first = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT edge_id FROM entity_edges WHERE json_extract(metadata_json,'$.mz')=1"
+        )
+    }
+    assert ids_first and touched_first == ids_first
+
+    touched_second: set = set()
+    materialize_signal_objects_to_graph(conn, touched_edges=touched_second)
+    ids_second = {
+        str(row[0])
+        for row in conn.execute(
+            "SELECT edge_id FROM entity_edges WHERE json_extract(metadata_json,'$.mz')=1"
+        )
+    }
+    # Same rows, updated in place: stable ids prove nothing was dropped+re-minted.
+    assert ids_second == ids_first
+    assert touched_second == ids_first
+
+
+def test_sweep_removes_only_stale_mz_edges(conn):
+    r = EntityResolver(conn)
+    subj = r._create_entity("Jonny", "person")
+    org = r._create_entity("Dialogues", "org")
+    conn.commit()
+    # An organic evidence edge (no mz tag) must never be sweep-eligible.
+    conn.execute(
+        "INSERT INTO entity_edges (edge_id, src_entity_id, dst_entity_id, edge_type, "
+        "weight, evidence_count, valid_from) VALUES ('org1', ?, ?, 'co_occurrence', 1.0, 1, "
+        "'2026-01-01T00:00:00Z')",
+        (subj, org),
+    )
+    _put_object(
+        conn, object_id="f1", object_type="fact", object_key="fact:jonny:works_at",
+        payload={"subject_entity_id": subj, "predicate": "works_at", "object_value": "Dialogues", "confidence": 0.9},
+    )
+    touched: set = set()
+    materialize_signal_objects_to_graph(conn, touched_edges=touched)
+    assert len(touched) == 1
+
+    # Fact retracted at source: the refresh no longer touches its edge, but the
+    # edge stays live until the sweep — readers never see a missing window.
+    conn.execute("UPDATE signal_objects SET valid_to='2026-02-01T00:00:00Z' WHERE object_id='f1'")
+    conn.commit()
+    touched_after: set = set()
+    materialize_signal_objects_to_graph(conn, touched_edges=touched_after)
+    assert touched_after == set()
+    assert conn.execute(
+        "SELECT COUNT(*) FROM entity_edges WHERE json_extract(metadata_json,'$.mz')=1"
+    ).fetchone()[0] == 1
+
+    swept = sweep_stale_materialized_edges(conn, touched_after)
+    conn.commit()
+    assert swept == 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM entity_edges WHERE json_extract(metadata_json,'$.mz')=1"
+    ).fetchone()[0] == 0
+    assert conn.execute(
+        "SELECT COUNT(*) FROM entity_edges WHERE edge_id='org1'"
+    ).fetchone()[0] == 1

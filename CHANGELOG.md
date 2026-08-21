@@ -1330,7 +1330,105 @@ The machine-readable twin of each release is
     early returns end a turn; attributing each at its own return site would leave
     the eleventh unattributed the day someone adds it.
 
+- `[E:graph] [D]` **The community pass now stamps structural analytics: every
+  graph rebuild writes `centrality` = {degree, eigen, betweenness} and a
+  human-readable `community_label` into `entities.metadata_json`.** Node
+  prominence in the graph UI has only ever encoded extraction volume
+  (mention_count); the witcher-network measures — connections (degree),
+  influence (weighted eigenvector; PageRank stands in when power iteration
+  diverges on a disconnected spectrum), bridging (betweenness, unweighted
+  because edge weights are affinities not distances, Brandes-sampled at
+  k=256 sources past 256 nodes, seeded) — are computed over the same
+  in-memory graph `compute_communities` already builds for Louvain, outside
+  the write gate. Each community is auto-named after its highest-eigenvector
+  member's canonical name (ties break by weighted degree then id, so labels
+  hold still across rebuilds): the legend can say "Ada" instead of
+  "Community 3". Entities that leave the graph shed all three stamps in the
+  same sweep that removed community_id; an analytics failure logs and
+  degrades to community stamping alone, never blocking the rebuild.
+  `graph_snapshot` passes the new keys through node metadata unchanged.
+  Upgrade manifest: `rebuild-entity-graph-centrality` (fast, auto) rebuilds
+  once so existing nodes light up at upgrade rather than at their next
+  enrichment-triggered rebuild.
+
 ### Fixed
+
+- `[E:graph]` **Goals (and every materialized edge) no longer vanish from the
+  graph while a rebuild runs.** The materialized-edge lifecycle deleted every
+  mz-tagged edge up front (`fact_materializer`), then re-created facts, goals,
+  places and conversations lane by lane — and the goal lane alone takes minutes
+  (it embeds every goal text to cluster near-duplicates). Each enrichment
+  completion arms the debounced graph refresh, so a busy node rebuilds nearly
+  back-to-back and the committed graph spent a large share of wall-clock time
+  with **no `pursues`/`relates_to`/`located_at`/`mentions` edges at all**: any
+  `/entities/graph` read in that window rendered a goal-less graph and a bare
+  owner node (observed live: 462 edges mid-rebuild vs 3,041 after). The
+  lifecycle is now upsert-then-sweep — lanes update surviving edges in place
+  and record what they touched, and `rebuild_entity_graph` sweeps stale mz
+  edges once at the END, only after every lane succeeded (a failed lane
+  retains its old edges rather than losing them to a wipe it never followed).
+  Readers now see at worst a few-minutes-stale edge, never a missing one.
+  Same discipline `rebuild_evidence_edges` already applied to co-occurrence
+  ("the delete and insert share one hold"). Report gains `mz_swept`.
+
+- `[E:query]` **The scope-shadow env flag is authoritative in both directions.**
+  `enabled()` checked the truthy spellings of `TOPOS_SCOPE_SHADOW` and otherwise
+  fell through to the `~/.topos/scope_shadow.on` flag file, so
+  `TOPOS_SCOPE_SHADOW=0` did not turn shadow off — the file won. The flag file
+  exists because the node under the macOS app shell inherits no shell
+  environment, and that same inheritance is what made the asymmetry reachable in
+  the one place it mattered: a subprocess harness (release smoke, the upgrade
+  matrix, a demo script) inherits the *operator's* home directory, so an armed
+  flag file arms the harness too, and running the query path appends synthetic
+  traffic to a real person's `~/.topos/scope_shadow.jsonl` with no way to decline
+  from the environment. Tests are covered by an autouse guard fixture; a fixture
+  does not cross a process boundary. An explicit `0`/`false`/`no`/`off` now
+  returns `False` before the file is consulted, and the file stays the opt-in
+  gesture for when the env says nothing — unset, blank, or a value in neither
+  closed set. `TOPOS_SCOPE_SHADOW_LOG` redirects the log, for a harness that
+  wants observation somewhere disposable rather than none at all.
+  - Latent, not live: `scripts/release_smoke_test.py` was checked on 2026-08-18
+    and never reaches the query path (`/`, `/healthcheck`, `/version` only) —
+    the log's mtime and size were unchanged across a full run.
+  - `scripts/run_query_eval.py` was the one harness genuinely exposed — its
+    engine path runs `QueryPipeline` in-process against the operator's own
+    `~/.topos` database — and now declines observation for itself. Absent or
+    blank is read as "no opinion" there, the same way `enabled()` reads it, so
+    an explicit `TOPOS_SCOPE_SHADOW=1` still opts a run in. It governs the
+    in-process engine path only: under `--mcp` the observing happens in the
+    node's process, under the node's own flag.
+
+## [1.3.22] — 2026-08-18
+
+### Fixed
+
+- `[O]` **The update button could be pressed forever and never install
+  anything.** Reported live 2026-08-18: the menu offered "Update to v1.3.21",
+  said "Installing update…", the node restarted, and it came back on 1.3.20 —
+  offering 1.3.21 again. Nothing had failed. The engine on that machine was
+  installed from a working copy (`uv tool install ~/.topos/deploy-head`, which
+  is what the deploy lane does), so `uv tool upgrade` faithfully re-resolved
+  that same directory, rebuilt the same version, and exited 0. The node took
+  exit 0 as proof and logged "Update installed"; the restart then wiped the
+  in-memory update state, so even the menu's "Update failed — click to retry"
+  never appeared. Every layer reported success and the version never moved.
+  - `check_for_update` no longer offers a PyPI release to an engine that did
+    not come from PyPI. uv's own tool receipt says where it came from; an
+    install carrying a `directory`, `path`, `editable`, `url` or `git`
+    requirement cannot be moved by a published release, and offering one
+    anyway is a button whose only possible outcome is nothing.
+  - `apply_package_update` refuses such an install outright rather than running
+    uv to no effect, and — for every other install — now reads the version back
+    off disk afterwards and reports failure when it did not move. An exit code
+    of 0 was never proof that anything was installed.
+  - The version is read from the tool's own `dist-info` rather than
+    `importlib.metadata`, because this check runs inside the very process uv
+    just rewrote, whose metadata was resolved at import time. When it cannot be
+    read at all the update is still reported as success: an unknown must not be
+    dressed up as a failure.
+  - Machines running the deploy lane now see no update offer at all, which is
+    the truth, with the reason logged once at startup and the one command that
+    puts them back on PyPI (`uv tool install --force topos-node`).
 
 - `[E:query]` **"Aug 11–16" searched Aug 11 only, and said the rest of the week
   was unsynced.** `_iso_date_hints` had patterns for `<month> <day>` but none for

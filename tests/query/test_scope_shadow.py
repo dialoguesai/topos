@@ -253,6 +253,76 @@ def test_flag_file_enables_shadow_without_env(tmp_path, monkeypatch) -> None:
     assert ss.enabled() is True
 
 
+def test_env_off_beats_the_flag_file(tmp_path, monkeypatch) -> None:
+    """The direction that was missing, and the only one a subprocess can use.
+
+    A harness that shells out to the query path — release smoke, the upgrade matrix, a
+    demo script — inherits the operator's home directory, so an armed FLAG_FILE arms the
+    harness too. The env var is its only channel to decline, and it used to be
+    write-only: ``TOPOS_SCOPE_SHADOW=0`` fell through to the file, the file won, and
+    synthetic traffic landed in a real person's ~/.topos/scope_shadow.jsonl. The autouse
+    guard fixture in tests/conftest.py does not cross a process boundary, so this
+    behaviour is the whole protection out there.
+    """
+    from topos.query import scope_shadow as ss
+
+    monkeypatch.setattr(ss, "FLAG_FILE", tmp_path / "scope_shadow.on")
+    (tmp_path / "scope_shadow.on").touch()
+    monkeypatch.delenv(ss.ENV_FLAG, raising=False)
+    assert ss.enabled() is True, "the file alone still arms shadow"
+
+    for value in ("0", "false", "no", "off", "OFF", "  Off  "):
+        monkeypatch.setenv(ss.ENV_FLAG, value)
+        assert ss.enabled() is False, value
+
+    # Silence is not a vote: unset, blank, and anything outside both closed sets leave
+    # the file as the operator's opt-in gesture, which is what it was added for.
+    for value in ("", "   ", "maybe"):
+        monkeypatch.setenv(ss.ENV_FLAG, value)
+        assert ss.enabled() is True, value
+    monkeypatch.delenv(ss.ENV_FLAG, raising=False)
+    assert ss.enabled() is True
+
+
+def test_env_off_writes_nothing_though_the_flag_file_is_present(tmp_path, monkeypatch) -> None:
+    """`enabled()` is the gate, but the property that matters is bytes on disk."""
+    from topos.query import scope_shadow as ss
+
+    monkeypatch.setattr(ss, "FLAG_FILE", tmp_path / "scope_shadow.on")
+    (tmp_path / "scope_shadow.on").touch()
+    monkeypatch.setenv(ss.ENV_FLAG, "0")
+
+    log = ss.ShadowLog(tmp_path / "shadow.jsonl")
+    assert ss.observe(SENTINEL, "health:read", log=log) is None
+    assert ss.observe_turn(SENTINEL, log=log) is None
+    assert ss.warm() is False
+    assert not (tmp_path / "shadow.jsonl").exists()
+
+
+def test_log_path_follows_the_env_override(tmp_path, monkeypatch) -> None:
+    """The finer instrument: observe, but somewhere disposable."""
+    from pathlib import Path as _Path
+
+    from topos.query import scope_shadow as ss
+
+    elsewhere = tmp_path / "elsewhere" / "shadow.jsonl"
+    monkeypatch.setenv(ss.ENV_LOG_PATH, str(elsewhere))
+    assert ss.default_log_path() == elsewhere
+    # The default path is resolved per-construction, so `observe()`'s own ShadowLog()
+    # picks the override up too — that is the object doing the appending in production.
+    assert ss.ShadowLog().path == elsewhere
+
+    monkeypatch.setenv(ss.ENV_LOG_PATH, "~/somewhere/shadow.jsonl")
+    assert ss.default_log_path() == _Path.home() / "somewhere" / "shadow.jsonl"
+
+    # Blank is unset, not "log to the empty path".
+    for value in ("", "   "):
+        monkeypatch.setenv(ss.ENV_LOG_PATH, value)
+        assert ss.default_log_path() == _Path.home() / ".topos" / "scope_shadow.jsonl"
+    monkeypatch.delenv(ss.ENV_LOG_PATH, raising=False)
+    assert ss.default_log_path() == _Path.home() / ".topos" / "scope_shadow.jsonl"
+
+
 def test_cold_scorer_skips_and_never_loads_from_the_request_path(tmp_path, monkeypatch) -> None:
     """The daemon-thread warm is GONE. It put a 265 MB load in flight next to the
     engine's MPS work and tripped a torch GIL/MPS deadlock that wedged the node twelve
