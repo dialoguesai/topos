@@ -498,8 +498,8 @@
       ]
     },
     {
-      "version": "unreleased",
-      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "version": "1.3.23",
+      "summary": "Ships migration 62, query_artifacts_duration_ms_v1: a nullable duration_ms INTEGER on query_artifacts. It is also the first build that can OPEN a database already stamped user_version=62. 1.3.22 knows only 61, so ensure_migrations_applied raises DowngradeGuardError against such a file and every request that constructs a canonical store fails with it \u2014 a node whose database ran ahead of its package is answering nothing until this lands. No backfill is possible or attempted: a turn written before this was never timed, and the column is nullable so an unmeasured turn cannot read as a fast one. ONE upgrade step runs, rebuild-entity-graph-centrality (derived_rebuild, consent auto, no LLM and no network), which stamps centrality and community_label onto the entities the community pass already stamps community_id onto; skipping it only defers those keys to the next organic rebuild. Everything else in this release is query-time and stores nothing. The narrowing ledger and its closed empty-cause vocabulary make an empty lane say WHY it is empty \u2014 store_empty with sub-cause connected_never_delivered on a node that has never synced (a turn that previously raised sqlite3.OperationalError and returned a 500), entity_window_* for a derived window, commitment_* per stated goal \u2014 where the same turn used to return a silent blank. And the attention lane now selects the window's days IN SQL instead of filtering the newest ten interest objects, so a question naming a past week returns the digests the node already held for those days instead of reporting entity_window_no_triage_in_window; no digest is recomputed, triage_verdicts is untouched, and an unwindowed caller reads the byte-identical newest-ten page.",
       "steps": [
         {
           "id": "rebuild-entity-graph-centrality",
@@ -555,6 +555,12 @@
         "An entity that has left the graph sheds community_id, centrality and community_label together in the same sweep that previously removed community_id alone.",
         "No step for pushing the Q3 derived window into the attention loader: it changes WHICH rows a query-time SELECT returns, never what is stored. `_load_attention_summary_items` reads `signal_objects` (signal_dimension='interests', object_type in attention_summary/interest_profile) and now adds a day predicate on the same `substr(object_key, -10)` expression it already ORDERs by, with the LIMIT widened to cover the window's days (capped at 31). No digest is rewritten, recomputed or invalidated \u2014 `features/triage/daily.py` and `triage_verdicts` are untouched, and a node that upgrades serves the digests it already had, for the days it was actually asked about. Unwindowed callers keep the byte-identical newest-ten page, so every question that derives no window reads exactly what it read before."
       ]
+    },
+    {
+      "version": "unreleased",
+      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "steps": [],
+      "notes": []
     }
   ]
 }
