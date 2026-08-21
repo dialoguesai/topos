@@ -9,6 +9,79 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.24] — 2026-08-21
+
+### Added
+
+- `[E:facts]` `[E:llm]` **The two node functions that were hard-wired to local Ollama —
+  facts extraction and the conversation-context classifier — can now run on hosted
+  providers, so an owner on a weak machine can pay their way onto Topos Secure or
+  OpenAI.** Both configs accept `{provider, model}` with the same provider set signal
+  extraction already speaks (`ollama` / `platform` / `openai` / `redpill`), stored in a
+  per-function provider `engine_config` key beside the model key that already existed.
+  - **The vocabulary lives in one module so the two configs cannot drift.**
+    `topos/config/node_function_providers.py` owns the provider set, the hosted-model
+    defaults and the UI→engine provider mapping (`platform` runs on the OpenAI adapter —
+    the same mapping signal extraction uses). `resolve_facts_llm_request()` /
+    `resolve_context_llm_request()` return `(provider, model)`, and `normalize_put_config`
+    validates writes so a garbage body 400s instead of storing.
+  - **Legacy bodies keep behaving exactly as before, and hosted providers never inherit
+    the Ollama env fallback chain.** A bare string or `{"model": ...}` with no provider is
+    the legacy ollama-model write; an unset provider means ollama, where the model still
+    resolves through the historical env chain. A hosted provider only ever comes from the
+    device override, and resolves the override model or that provider's own default —
+    never Ollama's.
+  - **The fact pass routes through the real adapters and meters under the real
+    provider.** `_make_hosted_extractor` (`topos/features/facts/llm_extract.py`) drives
+    the Redpill/OpenAI chat-completions adapters on the same contract as the Ollama
+    extractor, emits usage observations under the engine provider actually billed, and
+    hosted transport *and* auth failures degrade the batch exactly like an unreachable
+    Ollama — retrying per row would fail identically. An explicit `model` argument stays a
+    caller-pinned local model; only the device config can steer the pass onto a hosted
+    provider.
+  - **The classifier's `ModelRequest` carries the resolved provider**
+    (`topos/features/signal/conversation_context.py`) instead of a hardcoded `"ollama"`.
+  - **GET payloads gain `provider` and `device_override_provider`, and their presence is
+    the capability signal**: the settings UI refuses hosted saves against a pre-provider
+    engine build that would silently store a provider it never reads.
+
+### Fixed
+
+- `[O]` **The test suite could reach the operator's live shadow log, and nothing said
+  so.** `~/.topos/scope_shadow.on` is an operator gesture — the node under the app shell
+  inherits no shell environment, so touching that file is the only reachable way to arm
+  shadow mode — and on a machine where someone had done it, `enabled()` returned True
+  *inside the test process too*, so every production hook (`QueryPipeline.execute`, the
+  `tools_retrieve` handler, the engine-direct `/tool_index` route) appended its
+  observations to `~/.topos/scope_shadow.jsonl`, the file the running node is writing.
+  Since the log gained rotation it is worse than appending: `ShadowLog.append` rolls the
+  file to a `.1` sibling once it passes the cap, so a test run could rename the log out
+  from under a node concurrently appending to it — and that file holds the only
+  real-traffic evaluation record the classifier promotion
+  (`PLAN_SCOPE_CLASSIFIER.md` §6.5) is measured from, which no re-run can regenerate. The
+  quieter reason is reproducibility: whether `enabled()` was True depended on whether
+  someone had touched a file in their home directory, so the suite meant something
+  different on an operator's laptop than in CI.
+  - **The guard takes no marker exemption, unlike the live-DB guard beside it.**
+    `_no_live_scope_shadow_guard` (`tests/conftest.py`) is autouse and lets nothing
+    through: `live`/`e2e`/`qq_eval` mean to read a real database, but no lane means to
+    write the operator's shadow log — and those are precisely the lanes that run real
+    queries, which would file synthetic eval traffic into the record as though it were the
+    traffic the log exists to capture. Opting in still works: a test that wants shadow ON
+    sets the env flag itself, and the pinned log path is what makes saying yes safe.
+  - **Pinned by the log's own supported lever, not a monkeypatch.** The guard sets
+    `TOPOS_SCOPE_SHADOW_LOG`, which reaches a `ShadowLog` built in a subprocess — a
+    `setattr` on the path resolver never could, and the lambda variant broke the test
+    asserting the env override works.
+  - **The guard has its own tripwire, because it is invisible when it works.**
+    `tests/query/test_scope_shadow_hermetic.py` asserts the resolved path BEFORE writing
+    anything, so a guard that has come loose is not discovered by appending to the very
+    file the test exists to protect — and nothing else in the suite fails if the guard is
+    deleted, which is why this file has to.
+  - **Measured:** public lane 3745 passed, 15 skipped, exit 0; the tests' sentinel string
+    appears 0 times in the operator's live `scope_shadow.jsonl` and no rotation sibling
+    was created.
+
 ## [1.3.23] — 2026-08-21
 
 ### Added
