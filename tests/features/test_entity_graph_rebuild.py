@@ -304,3 +304,156 @@ def test_rebuild_holds_gate_only_for_write_phases(conn, monkeypatch):
     assert observed.get("gate_held_during_write") is True, (
         "edge rewrite ran without the write gate — writes must stay serialized"
     )
+
+
+def _star_and_triangle(conn):
+    """Two communities with distinct structure: a star (Ada is the hub — max
+    degree/eigen/betweenness) and a symmetric triangle (Xen/Yara/Zed)."""
+    from topos.features.entities.edges import update_edge
+
+    r = EntityResolver(conn)
+    ada = r._create_entity("Ada", "person")
+    leaves = [r._create_entity(n, "person") for n in ("Bram", "Cass", "Dana")]
+    triangle = [r._create_entity(n, "org") for n in ("Xen", "Yara", "Zed")]
+    conn.commit()
+    for leaf in leaves:
+        update_edge(conn, src_entity_id=ada, dst_entity_id=leaf,
+                    edge_type="co_occurrence", event_at="2026-07-01T00:00:00Z")
+    for i in range(len(triangle)):
+        for j in range(i + 1, len(triangle)):
+            update_edge(conn, src_entity_id=triangle[i], dst_entity_id=triangle[j],
+                        edge_type="co_occurrence", event_at="2026-07-01T00:00:00Z")
+    conn.commit()
+    return ada, leaves, triangle
+
+
+def _entity_meta(conn, eid):
+    import json as _json
+
+    raw = conn.execute(
+        "SELECT metadata_json FROM entities WHERE entity_id=?", (eid,)
+    ).fetchone()[0]
+    return _json.loads(raw or "{}")
+
+
+def test_centrality_stamped_with_communities(conn):
+    """The community pass also stamps centrality {degree, eigen, betweenness}:
+    the star hub must out-rank its leaves on every structural measure."""
+    from topos.features.entities.maintenance import compute_communities
+
+    ada, leaves, _triangle = _star_and_triangle(conn)
+    out = compute_communities(conn)
+    assert out["nodes_labeled"] == 7
+
+    hub = _entity_meta(conn, ada)["centrality"]
+    leaf = _entity_meta(conn, leaves[0])["centrality"]
+    assert set(hub) == {"degree", "eigen", "betweenness"}
+    assert hub["degree"] == 3 and leaf["degree"] == 1
+    assert hub["eigen"] > leaf["eigen"]
+    # Every hub↔leaf shortest path crosses Ada; leaves broker nothing.
+    assert hub["betweenness"] > 0.0
+    assert leaf["betweenness"] == 0.0
+
+
+def test_community_label_is_top_member_name(conn):
+    """Each community is auto-named after its highest-eigenvector member, and
+    every member carries the label (the legend reads it off any node)."""
+    from topos.features.entities.maintenance import compute_communities
+
+    ada, leaves, triangle = _star_and_triangle(conn)
+    out = compute_communities(conn)
+    assert out["community_labels"] == out["communities"] >= 2
+
+    star_labels = {_entity_meta(conn, e).get("community_label") for e in [ada, *leaves]}
+    assert star_labels == {"Ada"}  # the hub names its neighborhood
+    tri_labels = {_entity_meta(conn, e).get("community_label") for e in triangle}
+    assert len(tri_labels) == 1
+    assert tri_labels < {"Xen", "Yara", "Zed"}  # symmetric — any member, but ONE
+
+
+def test_centrality_flows_through_graph_snapshot(conn):
+    """graph_snapshot merges stored entity metadata into node payloads — the
+    new stamps must ride along with community_id/mention_count."""
+    import json as _json
+
+    from topos.features.entities.maintenance import compute_communities
+
+    _star_and_triangle(conn)
+    compute_communities(conn)
+    snap = graph_snapshot(conn, min_weight=0.0)
+    metas = [_json.loads(n["metadata_json"] or "{}") for n in snap["nodes"]]
+    assert metas, "snapshot returned no nodes"
+    for meta in metas:
+        assert "community_id" in meta
+        assert "community_label" in meta
+        assert set(meta["centrality"]) == {"degree", "eigen", "betweenness"}
+
+
+def test_structural_stamps_cleared_when_entity_leaves_graph(conn):
+    """An entity whose edges all closed sheds community_id AND the new
+    centrality/community_label stamps on the next pass."""
+    from topos.features.entities.maintenance import compute_communities
+
+    ada, leaves, triangle = _star_and_triangle(conn)
+    compute_communities(conn)
+    assert "centrality" in _entity_meta(conn, triangle[0])
+
+    # Close out the whole triangle; only the star remains active.
+    for eid in triangle:
+        conn.execute(
+            "UPDATE entity_edges SET valid_to='2026-07-02T00:00:00Z' "
+            "WHERE src_entity_id=? OR dst_entity_id=?",
+            (eid, eid),
+        )
+    conn.commit()
+    compute_communities(conn)
+
+    gone = _entity_meta(conn, triangle[0])
+    assert "community_id" not in gone
+    assert "centrality" not in gone
+    assert "community_label" not in gone
+    kept = _entity_meta(conn, ada)
+    assert kept["community_label"] == "Ada"
+
+
+def test_community_pass_is_deterministic(conn):
+    """Seeded Louvain + seeded betweenness sampling: running the pass twice
+    stamps byte-identical metadata (labels must not churn between rebuilds)."""
+    from topos.features.entities.maintenance import compute_communities
+
+    ada, leaves, triangle = _star_and_triangle(conn)
+    everyone = [ada, *leaves, *triangle]
+    compute_communities(conn)
+    first = {e: _entity_meta(conn, e) for e in everyone}
+    compute_communities(conn)
+    second = {e: _entity_meta(conn, e) for e in everyone}
+    assert first == second
+
+
+def test_rebuild_sweeps_stale_materialized_edges_and_reports_count(conn):
+    """End-to-end mz lifecycle through rebuild_entity_graph: a goal materializes
+    into owner-pursues; retracting it at source removes the edge on the NEXT
+    rebuild via the end-of-run sweep (mz_swept in the report), never by an
+    up-front wipe that would leave mid-rebuild readers a goal-less graph."""
+    r = EntityResolver(conn)
+    owner = r._create_entity("Owner", "person")
+    conn.execute("UPDATE entities SET is_self=1 WHERE entity_id=?", (owner,))
+    conn.execute(
+        "INSERT INTO user_goals (goal_id, record_id, source_id, goal_text, payload_json) "
+        "VALUES ('g1', 'rec-g', 'chatgpt_file_ingestion', 'Ship the graph fix', '{}')"
+    )
+    conn.commit()
+
+    report = rebuild_entity_graph(conn)
+    assert report["goal_edges"] >= 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM entity_edges WHERE edge_type='pursues' AND valid_to IS NULL"
+    ).fetchone()[0] == 1
+
+    conn.execute("DELETE FROM user_goals WHERE goal_id='g1'")
+    conn.commit()
+    report_after = rebuild_entity_graph(conn)
+    assert report_after["mz_swept"] >= 1
+    assert conn.execute(
+        "SELECT COUNT(*) FROM entity_edges WHERE edge_type='pursues'"
+    ).fetchone()[0] == 0

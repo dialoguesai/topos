@@ -26,6 +26,19 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT / "tests" / "gap" / "qq" / "engine"))
 
+# Do not observe this eval's traffic as if it were a person's. The engine path below
+# runs QueryPipeline in THIS process against the operator's own ~/.topos database, and
+# scope shadow arms itself from ~/.topos/scope_shadow.on — a file this script inherits
+# without anyone deciding it should. Left alone, every eval case would append synthetic
+# text to the same ~/.topos/scope_shadow.jsonl that real turns land in, polluting the
+# one corpus of real traffic the classifier work exists to collect. Set before the
+# engine imports so nothing can read the flag first.
+# Absent-or-blank is "no opinion" here, exactly as `scope_shadow.enabled()` reads it, so
+# an explicit TOPOS_SCOPE_SHADOW=1 still opts this run in. Governs the in-process engine
+# path only: under --mcp the observing happens in the node's process, under its own flag.
+if not os.environ.get("TOPOS_SCOPE_SHADOW", "").strip():
+    os.environ["TOPOS_SCOPE_SHADOW"] = "0"
+
 from query_eval_cases import (  # noqa: E402
     LIVE_DB_PATH,
     PERMISSION_CASES,
