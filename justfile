@@ -176,7 +176,17 @@ gate:
 # Home chat Wave A retrieval-quality gates. LOCAL ONLY: these drive
 # demo/signal_dimension_harness, whose fixture data cannot ship in this repo
 # (`demo/` is gitignored), so CI cannot run them — see the note in
-# .github/workflows/ci.yml. Seeds a throwaway DB; never touches ~/.topos.
+# .github/workflows/ci.yml. Seeds a throwaway DB.
+#
+# "never touches ~/.topos" was NOT true until 2026-08-21: evaluate_harness.py
+# scored brief quality over HTTP against --engine-url, default
+# http://127.0.0.1:9000 — the operator's live node on their real data. Every
+# other number came from the seeded DB, so the gate went red as real life
+# drifted and printed the owner's brief text into /tmp/query-catalog.out. It now
+# reads the briefs the seed writes, out of the same DB. One live-DB read
+# remains: the evaluator's "Explorer tables" count goes through
+# topos.core.state, which opens and MIGRATES ~/.topos/database.db. It is
+# reported, never asserted on, and its printed label says so.
 #
 # THE BAR. Permission and Signal are hard 70/70: a permission miss is a
 # disclosure bug and a signal miss means a retrieval layer went dark, and
@@ -194,7 +204,13 @@ gate:
 #   34/70  2026-08-08  first honest measurement
 #   42/70  2026-08-09  restored profile_records to public_bio:read and
 #                      work_context:read (P-01..P-04, W-03, N-03, X-04)
-QUALITY_FLOOR := "42"
+#   45/70  2026-08-21  measured, not engineered: the run that fixed the
+#                      evaluator's brief check scored 45 and the recipe asked
+#                      for the lock-in. Which change earned the three points is
+#                      NOT identified — nothing in that fix touches the catalog
+#                      lane — so if this floor ever reads as a claim about the
+#                      brief fix, it is not one.
+QUALITY_FLOOR := "45"
 
 harness-gate:
     #!/usr/bin/env bash
