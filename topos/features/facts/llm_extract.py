@@ -143,6 +143,14 @@ def _resolved_extraction_model(settings: Any, conn: Any = None) -> str:
     return resolve_facts_llm_model(settings, conn)
 
 
+def _resolved_extraction_request(settings: Any, conn: Any = None) -> tuple[str, str]:
+    """(provider, model) B4 would use — provider from the device override,
+    ollama when unset (the only pre-provider behavior)."""
+    from ...config.facts_llm import resolve_facts_llm_request
+
+    return resolve_facts_llm_request(settings, conn)
+
+
 def facts_llm_enabled(settings: Any = None, conn: Any = None) -> bool:
     """Is the additive LLM fact pass ON?
 
@@ -175,7 +183,7 @@ def facts_llm_enabled(settings: Any = None, conn: Any = None) -> bool:
 
     if os.environ.get("PYTEST_CURRENT_TEST"):
         return False
-    return bool(_resolved_extraction_model(settings, conn))
+    return bool(_resolved_extraction_request(settings, conn)[1])
 
 
 # ---------------------------------------------------------------------------
@@ -495,6 +503,73 @@ def _make_ollama_extractor(
                     task_type="enrichment",
                     subtype="fact_llm_extract",
                     provider="ollama",
+                    model=model,
+                    usage={
+                        "prompt_tokens": int(usage.get("prompt_tokens") or 0),
+                        "completion_tokens": int(usage.get("completion_tokens") or 0),
+                        "total_tokens": int(usage.get("total_tokens") or 0),
+                    },
+                    origin="ingestion_pipeline",
+                    source_id=str(row.get("source_id") or ""),
+                )
+            except Exception:
+                pass
+        return parse_triples(response)
+
+    return _extract
+
+
+def _make_hosted_extractor(
+    provider: str,
+    model: str,
+    *,
+    should_stop: Optional[Callable[[], bool]] = None,
+) -> Callable[[str, Dict[str, Any]], List[Dict[str, Any]]]:
+    """Build a synchronous extractor bound to a hosted chat-completions backend.
+
+    Same contract as `_make_ollama_extractor`: raises on transport failure so
+    the batch loop can degrade gracefully. Hosted backends run at their own
+    default sampling — the temp-0 determinism knob is Ollama-specific — which
+    is acceptable for an additive fact pass whose parser drops malformed rows.
+    """
+    from ...config.node_function_providers import engine_provider_for
+
+    if provider == "redpill":
+        from ...engine.backends.redpill import RedpillAdapter, resolve_redpill_model
+
+        adapter = RedpillAdapter()
+        model = resolve_redpill_model(model)
+    else:  # platform / openai — both run on the OpenAI adapter
+        from ...engine.backends.openai import OpenAIAdapter
+
+        adapter = OpenAIAdapter()
+
+    usage_provider = engine_provider_for(provider)
+
+    def _extract(prompt: str, row: Dict[str, Any]) -> List[Dict[str, Any]]:
+        from ...runtime_shutdown import is_shutdown_requested
+
+        gate = should_stop if should_stop is not None else is_shutdown_requested
+        if gate():
+            raise InterruptedError("fact_llm extraction stopped")
+        completed = adapter._chat_completion(model=model, prompt=prompt)  # noqa: SLF001
+        response = str(completed.get("text") or "") if isinstance(completed, dict) else ""
+        usage = completed.get("usage") if isinstance(completed, dict) else None
+        if isinstance(usage, dict) and int(usage.get("total_tokens") or 0) > 0:
+            try:
+                from ...engine.usage_observation import emit_engine_llm_usage_observation
+
+                record_id = str(row.get("id") or row.get("record_id") or "")
+                task_id = (
+                    f"fact_llm:{record_id}"
+                    if record_id
+                    else f"fact_llm:{hash(prompt) & 0xFFFFFFFF:x}"
+                )
+                emit_engine_llm_usage_observation(
+                    task_id=task_id,
+                    task_type="enrichment",
+                    subtype="fact_llm_extract",
+                    provider=usage_provider,
                     model=model,
                     usage={
                         "prompt_tokens": int(usage.get("prompt_tokens") or 0),
@@ -890,13 +965,21 @@ def extract_owner_facts_llm(
 
     real_extractor_factory: Optional[Callable[[], Callable]] = None
     if extractor is None:
-        resolved_model = str(model or _resolved_extraction_model(settings, conn) or "").strip()
+        # An explicit `model` param is a caller-pinned local model; only the
+        # device config can steer the pass onto a hosted provider.
+        if model:
+            resolved_provider, resolved_model = "ollama", str(model).strip()
+        else:
+            resolved_provider, resolved_model = _resolved_extraction_request(settings, conn)
+            resolved_model = str(resolved_model or "").strip()
         if not resolved_model:
             logger.debug("LLM fact pass: no extraction model configured; inert")
             return _record(0, 0, 0)
 
         def real_extractor_factory() -> Callable[[str, Dict[str, Any]], List[Dict[str, Any]]]:
-            return _make_ollama_extractor(resolved_model, conn, should_stop=should_stop)
+            if resolved_provider == "ollama":
+                return _make_ollama_extractor(resolved_model, conn, should_stop=should_stop)
+            return _make_hosted_extractor(resolved_provider, resolved_model, should_stop=should_stop)
 
     from ..lifecycle.exclusions import excluded_record_ids
 
@@ -1084,6 +1167,9 @@ def _dimension_for(predicate: str) -> str:
 _UNREACHABLE_MARKERS = (
     "ollama request failed",
     "ollama_unreachable",
+    # Hosted extractors (_make_hosted_extractor): transport AND auth failures
+    # both degrade the batch — retrying per row would fail identically.
+    "openai-compatible request failed",
     "connection refused",
     "urlopen error",
     "max retries",

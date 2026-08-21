@@ -130,9 +130,12 @@ def _classify_with_model(
     model: str,
     excerpts: List[str],
     conn: Optional[sqlite3.Connection] = None,
+    *,
+    provider: str = "ollama",
 ) -> Any:
     """'work' | 'personal' | None (answered, unclear) | ``_ENGINE_UNAVAILABLE``."""
     from ...config.conversation_context_llm import resolve_context_llm_params
+    from ...config.node_function_providers import engine_provider_for
     from ...config.settings import settings  # noqa: F401 — engine client env
     from ...engine.client import get_engine_client_or_local
     from ...engine.tasks import ModelRequest, ProcessingTask, RequestedBy
@@ -152,7 +155,7 @@ def _classify_with_model(
             "context": "\n---\n".join(excerpts),
         },
         model_request=ModelRequest(
-            provider="ollama",
+            provider=engine_provider_for(provider),
             model=model,
             thinking=binding.thinking if binding else None,
             context=binding.context if binding else None,
@@ -199,15 +202,15 @@ def classify_untagged_conversations(
 
     model = ""
     if classify is None:
-        from ...config.conversation_context_llm import resolve_context_llm_model
+        from ...config.conversation_context_llm import resolve_context_llm_request
         from ...config.settings import settings
 
-        model = resolve_context_llm_model(settings, conn)
+        provider, model = resolve_context_llm_request(settings, conn)
         if not model:
             return {"examined": 0, "tagged": 0, "retired": 0, "unchanged": 0}
 
         def classify(excerpts: List[str]) -> Any:  # noqa: F811
-            return _classify_with_model(model, excerpts, conn)
+            return _classify_with_model(model, excerpts, conn, provider=provider)
 
     # Classification is a model call per conversation — collect the verdicts
     # first, then land them in one short gated write pass.

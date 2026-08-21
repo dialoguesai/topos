@@ -14,7 +14,13 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from typing import TYPE_CHECKING, Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional, Tuple
+
+from .node_function_providers import (
+    NODE_FUNCTION_LLM_PROVIDERS,
+    hosted_default_model,
+    normalize_provider,
+)
 
 if TYPE_CHECKING:
     from topos.config.model_packs import RoleBinding
@@ -22,6 +28,7 @@ if TYPE_CHECKING:
 logger = logging.getLogger("topos.config.conversation_context_llm")
 
 ENGINE_CONFIG_KEY_CONVERSATION_CONTEXT_LLM_MODEL = "conversation_context_llm_model"
+ENGINE_CONFIG_KEY_CONVERSATION_CONTEXT_LLM_PROVIDER = "conversation_context_llm_provider"
 
 _MAX_MODEL_NAME_LEN = 200
 
@@ -46,6 +53,13 @@ def device_context_llm_model(conn: Optional[sqlite3.Connection]) -> str:
     return str(raw or "").strip()
 
 
+def device_context_llm_provider(conn: Optional[sqlite3.Connection]) -> str:
+    """The device provider override, or "" when unset (⇒ ollama/legacy)."""
+    return normalize_provider(
+        _read_engine_config_value(conn, ENGINE_CONFIG_KEY_CONVERSATION_CONTEXT_LLM_PROVIDER)
+    )
+
+
 def resolve_context_llm_model(settings: Any, conn: Optional[sqlite3.Connection] = None) -> str:
     """Device override → engine default. Deliberately NO pack rung.
 
@@ -66,6 +80,23 @@ def resolve_context_llm_model(settings: Any, conn: Optional[sqlite3.Connection] 
     return ""
 
 
+def resolve_context_llm_request(
+    settings: Any, conn: Optional[sqlite3.Connection] = None
+) -> Tuple[str, str]:
+    """(provider, model) for the classifier — same contract as facts_llm.
+
+    Provider defaults to ollama, where the model resolves through the
+    historical settings chain. A hosted provider only ever comes from the
+    device override, and resolves the override model or that provider's own
+    default — never the Ollama chain.
+    """
+    provider = device_context_llm_provider(conn) or "ollama"
+    if provider == "ollama":
+        return "ollama", resolve_context_llm_model(settings, conn)
+    override = device_context_llm_model(conn)
+    return provider, override or hosted_default_model(settings, provider)
+
+
 def resolve_context_llm_params(
     conn: Optional[sqlite3.Connection], model: str
 ) -> Optional["RoleBinding"]:
@@ -80,6 +111,15 @@ def resolve_context_llm_params(
     return None
 
 
+def _validate_model_name(model: Any) -> str:
+    model = str(model or "").strip()
+    if len(model) > _MAX_MODEL_NAME_LEN:
+        raise ValueError(f"model name too long (max {_MAX_MODEL_NAME_LEN} chars)")
+    if model and any(ch in model for ch in " \t\n\r"):
+        raise ValueError("model name must not contain whitespace")
+    return model
+
+
 def normalize_put_model(payload: Any) -> str:
     """{"model": "<name>"} or bare string → stored value; empty clears."""
     if payload is None:
@@ -90,19 +130,36 @@ def normalize_put_model(payload: Any) -> str:
         model = payload.get("model") or ""
     else:
         raise ValueError("body must be a JSON object with a 'model' string")
-    model = str(model).strip()
-    if len(model) > _MAX_MODEL_NAME_LEN:
-        raise ValueError(f"model name too long (max {_MAX_MODEL_NAME_LEN} chars)")
-    if model and any(ch in model for ch in " \t\n\r"):
-        raise ValueError("model name must not contain whitespace")
-    return model
+    return _validate_model_name(model)
+
+
+def normalize_put_config(payload: Any) -> Tuple[str, str]:
+    """Validate a PUT body → (provider, model) to store — same contract as
+    facts_llm.normalize_put_config: no/ollama provider stores "" (legacy),
+    hosted providers require a model except platform, empty model clears."""
+    if payload is None:
+        return "", ""
+    if isinstance(payload, str):
+        return "", _validate_model_name(payload)
+    if not isinstance(payload, dict):
+        raise ValueError("body must be a JSON object with a 'model' string")
+    provider = str(payload.get("provider") or "").strip().lower()
+    model = _validate_model_name(payload.get("model") or "")
+    if not provider or provider == "ollama":
+        return "", model
+    if provider not in NODE_FUNCTION_LLM_PROVIDERS:
+        raise ValueError(f"provider must be one of: {', '.join(sorted(NODE_FUNCTION_LLM_PROVIDERS))}")
+    if provider != "platform" and not model:
+        raise ValueError("model is required for this provider")
+    return provider, model
 
 
 def effective_config_for_api(settings: Any, conn: Optional[sqlite3.Connection]) -> Dict[str, Any]:
     """Resolved classifier model + local model catalog for the settings picker."""
     override = device_context_llm_model(conn)
-    effective = resolve_context_llm_model(settings, conn)
-    if override:
+    provider_override = device_context_llm_provider(conn)
+    provider, effective = resolve_context_llm_request(settings, conn)
+    if override or provider_override:
         source = "device_override"
     elif str(getattr(settings, "ollama_extraction_model", "") or "").strip():
         source = "extraction_model_default"
@@ -126,7 +183,9 @@ def effective_config_for_api(settings: Any, conn: Optional[sqlite3.Connection]) 
 
     return {
         "model": effective,
+        "provider": provider,
         "override": override or None,
+        "override_provider": provider_override or None,
         "source": source,
         "available_models": available,
     }
