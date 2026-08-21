@@ -746,6 +746,96 @@ class TestTheExistingTriageRunsInsideTheDerivedWindow:
         )
         assert "2026-09-09" not in counts
 
+    # -- the window has to reach the days it names, not filter the newest page -----
+    #
+    # Measured 2026-08-21: a weekly report for Aug 11-16 asked on Aug 21 came back with
+    # no attention analytics. The node held a digest AND an interest profile for every
+    # one of those six days. The loader fetched the newest ten objects — Aug 17-21 —
+    # and the window then dropped all of them, which reads downstream as a quiet week.
+
+    @staticmethod
+    def _seed_days(conn, days: List[str]) -> None:
+        for day in days:
+            _seed_triage(conn, day, [])
+
+    def test_a_back_dated_window_reaches_past_the_newest_page(self, conn) -> None:
+        """The regression: eleven days of digests, a window over the older six."""
+        self._seed_days(conn, [f"2026-08-{d:02d}" for d in range(11, 22)])
+        items = R._load_attention_summary_items(
+            conn, window=W.DerivedWindow(start="2026-08-11", end="2026-08-16")
+        )
+        assert [i["record_id"] for i in items] == [
+            f"attention_summary:2026-08-{d:02d}" for d in range(16, 10, -1)
+        ]
+
+    def test_the_window_the_loader_applied_is_the_window_the_filter_agrees_with(
+        self, conn
+    ) -> None:
+        """Nothing survives the SQL only to be dropped by `_attention_items_in_window`."""
+        self._seed_days(conn, [f"2026-08-{d:02d}" for d in range(11, 22)])
+        window = W.DerivedWindow(start="2026-08-11", end="2026-08-16")
+        items = R._load_attention_summary_items(conn, window=window)
+        kept, dropped = R._attention_items_in_window(items, window)
+        assert kept == items and dropped == 0
+
+    def test_an_undated_key_is_selected_whatever_the_window(self, conn) -> None:
+        """The SQL keeps the same evidence the filter is documented to keep."""
+        conn.execute(
+            "INSERT INTO signal_objects (object_id, signal_dimension, object_type,"
+            " object_key, payload_json, valid_from, created_at, updated_at)"
+            " VALUES ('obj-latest','interests','interest_profile','interest_profile:latest',"
+            " '{\"top_vocab\": []}','2026-08-01T00:00:00Z','2026-08-01T00:00:00Z',"
+            " '2026-08-01T00:00:00Z')"
+        )
+        conn.commit()
+        items = R._load_attention_summary_items(
+            conn, window=W.DerivedWindow(start="2026-01-01", end="2026-01-31")
+        )
+        assert [i["record_id"] for i in items] == ["interest_profile:latest"]
+
+    def test_no_window_still_serves_the_newest_page(self, conn) -> None:
+        """The unwindowed default is unchanged: ten objects, newest first."""
+        self._seed_days(conn, [f"2026-08-{d:02d}" for d in range(11, 22)])
+        items = R._load_attention_summary_items(conn)
+        assert len(items) == 10
+        assert items[0]["record_id"] == "attention_summary:2026-08-21"
+
+    def test_a_window_longer_than_the_cap_serves_its_newest_days(self, conn) -> None:
+        """A year-long window is still a bounded payload, and says which end it kept."""
+        assert R._attention_window_fetch_limit(
+            W.DerivedWindow(start="2026-01-01", end="2026-12-31"), 10
+        ) == R._ATTENTION_WINDOW_FETCH_DAYS_CAP * R._ATTENTION_OBJECTS_PER_DAY
+
+    def test_an_empty_window_is_told_apart_from_a_node_with_no_triage(
+        self, attention
+    ) -> None:
+        """The pair the call site reads: nothing in the window, but digests are held.
+
+        Before the window reached SQL this count was whatever the LIMIT had gathered —
+        a number about the page size, not about the owner's week.
+        """
+        assert R._load_attention_summary_items(
+            attention, window=W.DerivedWindow(start="2026-01-01", end="2026-01-31")
+        ) == []
+        assert R._count_attention_summary_items(attention) == 2
+        assert R._count_attention_summary_items(None) == 0
+
+    def test_the_lane_reports_what_the_window_cost_end_to_end(self, attention) -> None:
+        """Through `retrieve()`: the narrowing is recorded even though SQL did it.
+
+        The drop count moved with the window. Read from the post-filter drop it would
+        now be ~0 on every windowed turn — the narrowing did not stop happening, it
+        stopped being visible from where the ledger used to read it.
+        """
+        led = NarrowingLedger()
+        _retrieve(attention, ledger=led, scope="attention:read")
+        assert {
+            "stage": "retrieval",
+            "action": "windowed",
+            "reason": "entity_window_triage_lane",
+            "dropped": 1,
+        } in led.as_public()["ledger"]
+
     def test_a_window_with_no_triage_in_it_says_so(self, attention) -> None:
         """Different from "this node runs no triage", and only the ledger can say which."""
         led = NarrowingLedger()
