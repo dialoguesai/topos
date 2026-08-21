@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.23] — 2026-08-21
+
 ### Added
 
 - `[E:query]` **Q3 — a question can now be anchored to a PERIOD THE SENTENCE DOES NOT NAME,
