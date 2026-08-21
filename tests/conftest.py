@@ -551,6 +551,75 @@ def _no_live_ollama_probe_guard(request, monkeypatch):
     yield
 
 
+@pytest.fixture(scope="session")
+def _scope_shadow_guard_dir(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Session-scoped, where the live-DB guard above is per-test, and on purpose.
+
+    That guard needs a fresh file per test because the background writers one
+    test spawns keep writing it and stall the next through SQLite busy timeouts.
+    A JSONL that nothing reads back has no such fallout — every test asserting
+    on shadow output passes its own `log=` — so one directory per session is
+    enough, and it saves an mktemp on every test in the lane.
+    """
+    return tmp_path_factory.mktemp("no-live-scope-shadow")
+
+
+@pytest.fixture(autouse=True)
+def _no_live_scope_shadow_guard(monkeypatch, _scope_shadow_guard_dir):
+    """The second live file in ~/.topos the suite can reach, after the database.
+
+    `scope_shadow.FLAG_FILE` is an operator gesture: touching
+    ~/.topos/scope_shadow.on arms shadow mode for the running node, which is the
+    only reachable switch there because the node under the app shell inherits no
+    shell environment. On a machine where the operator has done that, `enabled()`
+    returns True *inside the test process too* — and then every production hook
+    (QueryPipeline.execute, the tools_retrieve handler, the engine-direct
+    /tool_index route) appends its observation to ~/.topos/scope_shadow.jsonl,
+    the file the live node is writing.
+
+    Appending to it would be bad enough. Since the log gained rotation it is
+    worse: `ShadowLog.append` rolls the file to a `.1` sibling once it passes the
+    cap, so a test run can rename out from under a node that is concurrently
+    appending — silent loss of the evaluation record the classifier promotion in
+    PLAN_SCOPE_CLASSIFIER.md §6.5 is measured from.
+
+    The quieter reason is reproducibility: unguarded, whether `enabled()` is True
+    depends on whether someone touched a file in their home directory, so the
+    suite means something different on an operator's laptop than in CI.
+
+    NO marker exemption, unlike the live-DB guard. That one lets live/e2e/qq_eval
+    through because those lanes mean to read a real database; no lane means to
+    write the operator's shadow log, and those are precisely the lanes that run
+    real queries — they would file synthetic eval traffic into the record as
+    though it were the real traffic the log exists to capture. Tests that want
+    shadow ON still set ENV_FLAG (or patch FLAG_FILE) themselves and still get
+    it; the pinned log path is what makes saying yes safe. A test that means
+    to exercise the override just sets ENV_LOG_PATH again — last writer wins.
+    """
+    try:
+        from topos.query import scope_shadow
+    except Exception:  # a suite that cannot import it cannot leak through it
+        pass
+    else:
+        # A path that is never created: `enabled()` falls through to the env
+        # flag, so opting in still works and opting out is the default.
+        monkeypatch.setattr(
+            scope_shadow, "FLAG_FILE",
+            _scope_shadow_guard_dir / "scope_shadow.on", raising=False,
+        )
+        # The log moves by its own supported lever, not by replacing the
+        # resolver: `default_log_path` reads TOPOS_SCOPE_SHADOW_LOG per call, and
+        # a constant lambda here would break the override it exists to provide
+        # (tests/query/test_scope_shadow.py::test_log_path_follows_the_env_override).
+        # setenv also reaches a ShadowLog built in a subprocess, which setattr
+        # never could.
+        monkeypatch.setenv(
+            scope_shadow.ENV_LOG_PATH,
+            str(_scope_shadow_guard_dir / "scope_shadow.jsonl"),
+        )
+    yield
+
+
 _CORE_RELOAD_MODULES = (
     "topos.config.settings",
     "topos.core.state",
