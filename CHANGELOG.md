@@ -76,11 +76,29 @@ The machine-readable twin of each release is
     `as_of`, not a range) still wins over the density, as does a differenced two-window ask.
     When it fires it writes `plan.time_range` and flows through P3's existing window path;
     every other question takes the byte-identical path it took before.
-  - **The triage is the one that already exists.** `attention:read` items are filtered to
+  - **The triage is the one that already exists.** `attention:read` items are selected for
     the derived window by the day already encoded in their `object_key`, recorded as
     `retrieval/windowed/entity_window_triage_lane` with the drop count, or as
     `no_match`/`entity_window_no_triage_in_window` when the window is real and holds no
     digests. No triage logic is reimplemented; `triage_verdicts` already holds the analytics.
+  - **The window is a QUERY, not a filter over the newest page.** `_load_attention_summary_items`
+    fetched the ten newest interest objects — five days, one digest and one interest profile
+    each — and the window was applied to whatever those turned out to be. Right for "what did
+    I miss yesterday", which is the question it was written for, and wrong for every report
+    that names a past week: a report for Aug 11-16 asked on Aug 21 fetched Aug 17-21, dropped
+    all of it, and reported `entity_window_no_triage_in_window` — while the node held a digest
+    AND an interest profile for every one of the six days it was asked about. Filtering a
+    fixed page is not asking for the days, and downstream the two are indistinguishable:
+    both produce an empty attention section and a ledger line that reads as a quiet week.
+    A resolved window now goes into the SQL, with the row budget widened to hold its days
+    (capped at 31, past which the window's newest days answer) and undated keys selected
+    whatever the window, matching the rule `_attention_items_in_window` already documents.
+    That filter still runs and is still the authority on what counts as in-window. When the
+    window genuinely holds nothing, the `dropped` count on the ledger line is now every
+    digest the node holds rather than however many the `LIMIT` had happened to reach — a
+    number about the owner's week rather than about the page size. The inference path takes
+    the same window: a packet scored on the newest five days while `plan.time_range` says
+    otherwise is a score for a week nobody asked about.
 
 - `[E:query]` **Q1 — "did I actually do it?" is now answered PER GOAL, with the record ids
   the claim rests on, or an explicit statement of which kind of nothing was found.**
