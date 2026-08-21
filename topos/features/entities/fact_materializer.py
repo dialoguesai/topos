@@ -14,8 +14,12 @@ render them with no frontend change:
     validity window and confidence.
 
 Materialized edges are tagged (metadata_json.mz = 1) and given a weight above the
-co-occurrence noise floor so they show by default; a full refresh drops the prior
-tagged edges first, so re-running is idempotent. String-valued fact objects are
+co-occurrence noise floor so they show by default. Refresh is upsert-then-sweep:
+edges are upserted in place (never dropped up front) and the rebuild orchestrator
+sweeps stale mz edges at the END, once every materializer lane has finished —
+dropping them first left the committed graph goal-less for the minutes the
+enrichers take, and every UI fetch in that window rendered a graph with no
+goals and a bare owner node. String-valued fact objects are
 resolved to entity nodes (the resolve-to-nodes choice) so the graph stays maximally
 connected. Bounded by the current signal_objects; grows as extraction produces
 more facts.
@@ -234,16 +238,19 @@ def _upsert_materialized_edge(
     asserted_by: Optional[str] = None,
     actor_role: Optional[str] = None,
     last_event_at: Optional[str] = None,
-) -> None:
+) -> Optional[str]:
     """Idempotent directed edge with a materialized marker + carried validity.
 
     ``actor_role`` overrides the asserted_by-derived tier — used by enrichers
     whose provenance isn't an assertion (presence, participation, witnessing).
     ``last_event_at`` defaults to valid_from — pass explicitly when the edge's
     evidence spans a window (e.g. a goal recurring across months).
+
+    Returns the edge_id written (existing or new) so callers can record it as
+    touched for the end-of-rebuild stale sweep; None when the edge is skipped.
     """
     if not src or not dst or src == dst:
-        return
+        return None
     meta = json.dumps(
         {
             "mz": 1,
@@ -264,6 +271,7 @@ def _upsert_materialized_edge(
     ).fetchone()
     effective_last = last_event_at or valid_from
     if row is None:
+        edge_id = f"fmz_{uuid.uuid4().hex[:16]}"
         conn.execute(
             """
             INSERT INTO entity_edges
@@ -272,29 +280,70 @@ def _upsert_materialized_edge(
             VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
             """,
             (
-                f"fmz_{uuid.uuid4().hex[:16]}",
+                edge_id,
                 src, dst, edge_type, float(weight),
                 effective_last, valid_from or _now_iso(), valid_to, meta,
             ),
         )
-    else:
-        conn.execute(
-            """
-            UPDATE entity_edges
-            SET weight=?, valid_from=?, valid_to=?, last_event_at=?, metadata_json=?,
-                updated_at=datetime('now')
-            WHERE edge_id=?
-            """,
-            (float(weight), valid_from, valid_to, effective_last, meta, row[0]),
+        return edge_id
+    conn.execute(
+        """
+        UPDATE entity_edges
+        SET weight=?, valid_from=?, valid_to=?, last_event_at=?, metadata_json=?,
+            updated_at=datetime('now')
+        WHERE edge_id=?
+        """,
+        (float(weight), valid_from, valid_to, effective_last, meta, row[0]),
+    )
+    return str(row[0])
+
+
+def sweep_stale_materialized_edges(
+    conn: sqlite3.Connection, keep_edge_ids: "set[str]"
+) -> int:
+    """Delete mz-tagged edges no materializer touched this rebuild.
+
+    The old lifecycle deleted every mz edge UP FRONT and re-created them lane
+    by lane — but the goal/place/conversation enrichers take minutes (goal
+    clustering embeds every goal text), so every commit in between served a
+    graph with no goals on it. Sweeping at the end inverts that: readers see
+    at worst a few-minutes-stale edge, never a missing one.
+
+    Callers must pass the union of edge ids touched by ALL lanes and only
+    call this when every lane succeeded — sweeping after a failed lane would
+    delete edges that lane merely never got to re-assert. Evidence edges
+    (co_occurrence / communicates_with / part_of) and affinity edges carry no
+    mz tag and are never candidates. Returns the number of edges deleted.
+    """
+    stale = [
+        str(row[0])
+        for row in conn.execute(
+            "SELECT edge_id FROM entity_edges "
+            "WHERE json_extract(metadata_json, '$.mz') = 1"
         )
+        if str(row[0]) not in keep_edge_ids
+    ]
+    for start in range(0, len(stale), 400):
+        chunk = stale[start : start + 400]
+        conn.execute(
+            f"DELETE FROM entity_edges WHERE edge_id IN ({','.join('?' * len(chunk))})",
+            chunk,
+        )
+    return len(stale)
 
 
 def materialize_signal_objects_to_graph(
     conn: sqlite3.Connection,
     *,
     resolve_strings: bool = True,
+    touched_edges: Optional["set[str]"] = None,
 ) -> Dict[str, int]:
     """Refresh materialized fact/topic edges from active signal_objects.
+
+    Upserts in place — never deletes surviving edges — so the graph stays
+    fully populated while a refresh runs. Stale-edge removal happens once per
+    rebuild via :func:`sweep_stale_materialized_edges`; pass ``touched_edges``
+    (a shared accumulator across all materializer lanes) to feed that sweep.
 
     Returns counts of topic and fact edges written.
     """
@@ -313,11 +362,12 @@ def materialize_signal_objects_to_graph(
     def _mintable(surface: str) -> bool:
         return is_valid_entity_surface(surface) and normalize_name(surface) not in values
 
-    # Full refresh: drop previously-materialized edges (keep organic evidence edges).
-    conn.execute("DELETE FROM entity_edges WHERE json_extract(metadata_json, '$.mz') = 1")
-
     topic_edges = 0
     fact_edges = 0
+
+    def _record_touched(edge_id: Optional[str]) -> None:
+        if touched_edges is not None and edge_id:
+            touched_edges.add(edge_id)
 
     # 1) Topic clusters -> hub node + discusses edges to related entities.
     rows = conn.execute(
@@ -356,16 +406,21 @@ def materialize_signal_objects_to_graph(
                 continue
             if ent_id == topic_id:
                 continue
-            _upsert_materialized_edge(
+            _record_touched(_upsert_materialized_edge(
                 conn, src=topic_id, dst=ent_id, edge_type=EDGE_DISCUSSES,
                 weight=_MZ_WEIGHT_FLOOR, valid_from=edge_from, valid_to=None,
                 last_event_at=edge_last,
                 statement=f"topic: {tag}", source_object_id=object_id,
                 actor_role=cluster_role,
-            )
+            ))
             topic_edges += 1
             linked += 1
-        if linked == 0:
+        if linked == 0 and not conn.execute(
+            # Hub edges from an earlier run may still be live until the sweep;
+            # only a hub with no edges at all is truly an orphan.
+            "SELECT 1 FROM entity_edges WHERE src_entity_id=? OR dst_entity_id=? LIMIT 1",
+            (topic_id, topic_id),
+        ).fetchone():
             # No real entities to link — drop the orphan hub we just made.
             conn.execute(
                 "DELETE FROM entities WHERE entity_id=? AND mention_count=0", (topic_id,)
@@ -408,12 +463,12 @@ def materialize_signal_objects_to_graph(
 
         edge_type = EDGE_LOCATED_AT if is_place else pred
         weight = max(_MZ_WEIGHT_FLOOR, float(confidence or 0.7) * 3.0)
-        _upsert_materialized_edge(
+        _record_touched(_upsert_materialized_edge(
             conn, src=subj, dst=obj_id, edge_type=edge_type, weight=weight,
             valid_from=valid_from, valid_to=valid_to,
             statement=f"{pred.replace('_', ' ')} {obj_val}", source_object_id=object_id,
             asserted_by=payload.get("asserted_by"),
-        )
+        ))
         fact_edges += 1
 
     # 3) Purge value surfaces minted by EARLIER runs of this lane, which ran

@@ -21,7 +21,8 @@ insensitive.
 clause cleared AND a 265 MB RSS decision.
 
 **What is shipped, and it is not the classifier.** `scope_shadow.observe()` is called from
-`query/pipeline.py`, OFF unless `TOPOS_SCOPE_SHADOW` is set, never raises, and decides
+`query/pipeline.py`, OFF unless armed (`TOPOS_SCOPE_SHADOW=1` or the flag file, and
+`TOPOS_SCOPE_SHADOW=0` disarms both), never raises, and decides
 nothing — `classify()` has exactly one caller in the engine and it is that observer. Its
 purpose is the one thing every measurement above still lacks: labelled REAL traffic. Every
 number here comes from template-generated positives, and §9G names that distribution gap
@@ -33,11 +34,21 @@ slice, which §9G names as the first of the two remaining levers and which the p
 decision is explicitly meant to be informed by.
 
 **Before that flag is set anywhere:** the shadow log writes raw query text to
-`~/.topos/scope_shadow.jsonl`. It now rotates at 8 MiB keeping one generation
-(`TOPOS_SCOPE_SHADOW_MAX_BYTES`, 0 to disable) — unbounded query history on disk was the
-wrong default for a product whose security page promises the data stays the owner's. See
-also §6.1: that promise is unqualified and constrains OUR training, not just third
-parties'.
+`~/.topos/scope_shadow.jsonl` (`TOPOS_SCOPE_SHADOW_LOG` redirects it). It now rotates at
+8 MiB keeping one generation (`TOPOS_SCOPE_SHADOW_MAX_BYTES`, 0 to disable) — unbounded
+query history on disk was the wrong default for a product whose security page promises
+the data stays the owner's. See also §6.1: that promise is unqualified and constrains OUR
+training, not just third parties'.
+
+**Two switches, and the env one wins.** `TOPOS_SCOPE_SHADOW=1` or a
+`~/.topos/scope_shadow.on` file arms observation; the file exists because the node under
+the macOS app shell inherits no shell environment. `TOPOS_SCOPE_SHADOW=0` *disarms* it and
+beats the file. That direction was missing until 2026-08-18, and its absence was reachable
+in the one place it mattered: a subprocess harness inherits the operator's home directory,
+so an armed flag file armed the harness too, and running the query path appended synthetic
+traffic to a real person's log with no way to opt out from the environment. Harnesses that
+run the query path on a machine that may have shadow armed should set
+`TOPOS_SCOPE_SHADOW=0`, or redirect with `TOPOS_SCOPE_SHADOW_LOG`.
 **Related:** [`AUDIT_ROLE_COMPETENCE_CATALOG_V3.md`](AUDIT_ROLE_COMPETENCE_CATALOG_V3.md),
 [`PLAN_ROLE_COMPETENCE_EVAL.md`](PLAN_ROLE_COMPETENCE_EVAL.md)
 

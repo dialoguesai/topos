@@ -1,7 +1,8 @@
 """Goals / places / conversations materialized into the entity graph.
 
-Each enricher is additive, mz-tagged (refreshed with the fact materializer's
-full-refresh cycle) and skips cleanly when its feed table is absent.
+Each enricher is additive, mz-tagged (upserted in place; stale edges are
+removed by the rebuild's end-of-run sweep) and skips cleanly when its feed
+table is absent.
 """
 
 from __future__ import annotations
@@ -291,3 +292,43 @@ def test_enrichers_skip_missing_tables_and_are_idempotent(conn):
     assert first == second
     assert n1 == n2
     assert first["conversation_edges"] == 0
+
+
+def test_retracted_goal_edge_survives_refresh_until_swept(conn):
+    """A goal deleted at source keeps its edge through the refresh itself and
+    loses it only in the end-of-rebuild sweep — the old lifecycle (wipe all mz
+    edges up front) served a goal-less graph for the whole enricher window."""
+    from topos.features.entities.fact_materializer import sweep_stale_materialized_edges
+
+    _owner(conn)
+    conn.execute(
+        "INSERT INTO user_goals (goal_id, record_id, source_id, goal_text, payload_json) "
+        "VALUES ('g_keep', 'rec-1', 'chatgpt_file_ingestion', 'Keep shipping the pilot', '{}')"
+    )
+    conn.execute(
+        "INSERT INTO user_goals (goal_id, record_id, source_id, goal_text, payload_json) "
+        "VALUES ('g_drop', 'rec-2', 'chatgpt_file_ingestion', 'Attend the Q2 offsite', '{}')"
+    )
+    conn.commit()
+
+    touched_first: set = set()
+    materialize_graph_enrichments(conn, touched_edges=touched_first)
+    assert len(_edges(conn, "pursues")) == 2
+    assert len(touched_first) == 2
+
+    conn.execute("DELETE FROM user_goals WHERE goal_id='g_drop'")
+    conn.commit()
+
+    touched_second: set = set()
+    materialize_graph_enrichments(conn, touched_edges=touched_second)
+    # The retracted goal's edge is still live after the refresh (no missing
+    # window) — only the sweep, fed by what THIS run touched, removes it.
+    assert len(_edges(conn, "pursues")) == 2
+    assert len(touched_second) == 1
+
+    swept = sweep_stale_materialized_edges(conn, touched_second)
+    conn.commit()
+    assert swept == 1
+    remaining = _edges(conn, "pursues")
+    assert len(remaining) == 1
+    assert "Keep shipping the pilot" in json.loads(remaining[0]["metadata_json"])["statement"]
