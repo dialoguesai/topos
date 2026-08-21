@@ -19,11 +19,18 @@ from __future__ import annotations
 
 import logging
 import sqlite3
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
+
+from .node_function_providers import (
+    NODE_FUNCTION_LLM_PROVIDERS,
+    hosted_default_model,
+    normalize_provider,
+)
 
 logger = logging.getLogger("topos.config.facts_llm")
 
 ENGINE_CONFIG_KEY_FACTS_LLM_MODEL = "facts_llm_model"
+ENGINE_CONFIG_KEY_FACTS_LLM_PROVIDER = "facts_llm_provider"
 
 _MAX_MODEL_NAME_LEN = 200
 
@@ -50,6 +57,11 @@ def device_facts_llm_model(conn: Optional[sqlite3.Connection]) -> str:
     return str(raw or "").strip()
 
 
+def device_facts_llm_provider(conn: Optional[sqlite3.Connection]) -> str:
+    """The device provider override, or "" when unset (⇒ ollama/legacy)."""
+    return normalize_provider(_read_engine_config_value(conn, ENGINE_CONFIG_KEY_FACTS_LLM_PROVIDER))
+
+
 def resolve_facts_llm_model(settings: Any, conn: Optional[sqlite3.Connection] = None) -> str:
     """Effective model for the LLM fact pass ("" ⇒ pass stays inert).
 
@@ -72,6 +84,32 @@ def resolve_facts_llm_model(settings: Any, conn: Optional[sqlite3.Connection] = 
     return ""
 
 
+def resolve_facts_llm_request(
+    settings: Any, conn: Optional[sqlite3.Connection] = None
+) -> Tuple[str, str]:
+    """(provider, model) for the LLM fact pass.
+
+    Provider defaults to ollama (the only pre-provider behavior), where the
+    model resolves through the historical env chain. A hosted provider only
+    ever comes from the device override, and resolves the override model or
+    that provider's own default — never the Ollama env chain.
+    """
+    provider = device_facts_llm_provider(conn) or "ollama"
+    if provider == "ollama":
+        return "ollama", resolve_facts_llm_model(settings, conn)
+    override = device_facts_llm_model(conn)
+    return provider, override or hosted_default_model(settings, provider)
+
+
+def _validate_model_name(model: Any) -> str:
+    model = str(model or "").strip()
+    if len(model) > _MAX_MODEL_NAME_LEN:
+        raise ValueError(f"model name too long (max {_MAX_MODEL_NAME_LEN} chars)")
+    if model and any(ch in model for ch in " \t\n\r"):
+        raise ValueError("model name must not contain whitespace")
+    return model
+
+
 def normalize_put_model(payload: Any) -> str:
     """Validate a PUT body ({"model": "<name>"} or a bare string) → stored value.
 
@@ -86,12 +124,32 @@ def normalize_put_model(payload: Any) -> str:
         model = payload.get("model") or ""
     else:
         raise ValueError("body must be a JSON object with a 'model' string")
-    model = str(model).strip()
-    if len(model) > _MAX_MODEL_NAME_LEN:
-        raise ValueError(f"model name too long (max {_MAX_MODEL_NAME_LEN} chars)")
-    if model and any(ch in model for ch in " \t\n\r"):
-        raise ValueError("model name must not contain whitespace")
-    return model
+    return _validate_model_name(model)
+
+
+def normalize_put_config(payload: Any) -> Tuple[str, str]:
+    """Validate a PUT body → (provider, model) to store.
+
+    Back-compat: a bare string or {"model": ...} with no provider is the
+    legacy ollama-model write and stores provider "". {"model": ""} (or None)
+    clears both. Hosted providers require a model, except platform whose model
+    is Topos-chosen. Raises ValueError on garbage so the API can 400 it.
+    """
+    if payload is None:
+        return "", ""
+    if isinstance(payload, str):
+        return "", _validate_model_name(payload)
+    if not isinstance(payload, dict):
+        raise ValueError("body must be a JSON object with a 'model' string")
+    provider = str(payload.get("provider") or "").strip().lower()
+    model = _validate_model_name(payload.get("model") or "")
+    if not provider or provider == "ollama":
+        return "", model
+    if provider not in NODE_FUNCTION_LLM_PROVIDERS:
+        raise ValueError(f"provider must be one of: {', '.join(sorted(NODE_FUNCTION_LLM_PROVIDERS))}")
+    if provider != "platform" and not model:
+        raise ValueError("model is required for this provider")
+    return provider, model
 
 
 def effective_config_for_api(settings: Any, conn: Optional[sqlite3.Connection]) -> Dict[str, Any]:
@@ -102,8 +160,9 @@ def effective_config_for_api(settings: Any, conn: Optional[sqlite3.Connection]) 
     informational only; the adapter adapts automatically either way.
     """
     override = device_facts_llm_model(conn)
-    effective = resolve_facts_llm_model(settings, conn)
-    if override:
+    provider_override = device_facts_llm_provider(conn)
+    provider, effective = resolve_facts_llm_request(settings, conn)
+    if override or provider_override:
         source = "device_override"
     elif str(getattr(settings, "facts_llm_model", "") or "").strip():
         source = "env"
@@ -129,8 +188,10 @@ def effective_config_for_api(settings: Any, conn: Optional[sqlite3.Connection]) 
 
     return {
         "model": effective,
+        "provider": provider,
         "source": source,
         "device_override": override,
+        "device_override_provider": provider_override,
         "env_default": str(getattr(settings, "facts_llm_model", "") or "").strip(),
         "extraction_model": str(getattr(settings, "ollama_extraction_model", "") or "").strip(),
         "query_model": str(getattr(settings, "ollama_query_model", "") or "").strip(),
