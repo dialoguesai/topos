@@ -297,6 +297,21 @@ async def handle_routine_has_active_run(message: Dict[str, Any]) -> Optional[Dic
         "payload": {"active": active},
     }
 
+@handles("list_active_routine_runs")
+async def handle_list_active_routine_runs(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    from ...routines import store as routines_store
+
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    pl = message.get("payload") or {}
+    engine_id = str(pl.get("engine_id") or "").strip()
+    if not engine_id:
+        return {"id": req_id, "status": "error", "error": "engine_id required"}
+    rows = await run_db_read(routines_store.list_active_runs, engine_id=engine_id)
+    return {"id": req_id, "status": "ok", "payload": {"runs": rows}}
+
 @handles("advance_routine_next_run_at")
 async def handle_advance_routine_next_run_at(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
