@@ -312,6 +312,42 @@ async def handle_list_active_routine_runs(message: Dict[str, Any]) -> Optional[D
     rows = await run_db_read(routines_store.list_active_runs, engine_id=engine_id)
     return {"id": req_id, "status": "ok", "payload": {"runs": rows}}
 
+@handles("list_expired_routine_runs")
+async def handle_list_expired_routine_runs(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    from ...routines import store as routines_store
+
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    pl = message.get("payload") or {}
+    engine_id = str(pl.get("engine_id") or "").strip()
+    cutoff = str(pl.get("cutoff") or "").strip()
+    if not engine_id or not cutoff:
+        return {"id": req_id, "status": "error", "error": "engine_id and cutoff required"}
+    rows = await run_db_read(
+        routines_store.list_expired_runs,
+        engine_id=engine_id,
+        cutoff=cutoff,
+        limit=int(pl.get("limit") or 500),
+    )
+    return {"id": req_id, "status": "ok", "payload": {"runs": rows}}
+
+@handles("delete_routine_runs")
+async def handle_delete_routine_runs(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    from ...routines import store as routines_store
+
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    pl = message.get("payload") or {}
+    run_ids = pl.get("run_ids")
+    if not isinstance(run_ids, list) or not run_ids:
+        return {"id": req_id, "status": "error", "error": "run_ids required"}
+    deleted = await run_db_write(routines_store.delete_runs, run_ids)
+    return {"id": req_id, "status": "ok", "payload": {"deleted": int(deleted or 0)}}
+
 @handles("advance_routine_next_run_at")
 async def handle_advance_routine_next_run_at(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")

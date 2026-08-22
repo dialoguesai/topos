@@ -336,6 +336,42 @@ def list_active_runs(conn, *, engine_id: str, limit: int = 500) -> List[Dict[str
     return [_run_row_to_api(dict(row)) for row in cur.fetchall()]
 
 
+def list_expired_runs(conn, *, engine_id: str, cutoff: str, limit: int = 500) -> List[Dict[str, Any]]:
+    """Finished runs on this engine last touched before the cutoff, oldest first.
+
+    `updated_at` is the clock because it is the only real column — `created_at`
+    lives inside payload_json. For a finished run it is when the run ended, and
+    it is never earlier than creation, so nothing expires before its time.
+    """
+    ensure_routines_schema(conn)
+    placeholders = ",".join("?" for _ in ACTIVE_RUN_STATUSES)
+    cur = conn.execute(
+        f"""
+        SELECT id, routine_id, owner_user_id, engine_id, status, idempotency_key, payload_json, updated_at
+        FROM routine_runs
+        WHERE engine_id = ? AND status NOT IN ({placeholders}) AND updated_at < ?
+        ORDER BY updated_at ASC
+        LIMIT ?
+        """,
+        (str(engine_id).strip(), *sorted(ACTIVE_RUN_STATUSES), str(cutoff), int(limit)),
+    )
+    return [_run_row_to_api(dict(row)) for row in cur.fetchall()]
+
+
+def delete_runs(conn, run_ids: List[str]) -> int:
+    """Hard-delete runs by id. Returns how many rows went."""
+    ensure_routines_schema(conn)
+    ids = [str(run_id).strip() for run_id in run_ids if str(run_id).strip()]
+    if not ids:
+        return 0
+    placeholders = ",".join("?" for _ in ids)
+    with with_db_write():
+        cur = conn.execute(f"DELETE FROM routine_runs WHERE id IN ({placeholders})", ids)
+        deleted = int(cur.rowcount or 0)
+        commit_connection(conn)
+    return max(0, deleted)
+
+
 def count_runs_last_24h(conn, *, owner_user_id: str, engine_id: str) -> int:
     ensure_routines_schema(conn)
     cutoff = (_now_dt() - timedelta(hours=24)).isoformat()
