@@ -96,6 +96,7 @@ SUPPORTED_MESSAGE_TYPES = [
     "import_google_contacts_token",
     "import_google_contacts_token_global",
     "ingestion_reprocess",
+    "list_active_routine_runs",
     "list_database_tables",
     "list_due_routines",
     "list_enrichment_lab_job_groups",

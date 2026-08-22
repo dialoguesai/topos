@@ -59,6 +59,7 @@ _FAST_INBOUND_MESSAGE_TYPES = frozenset(
         "connection_info",
         "check_inbox_write",
         "list_waiting_routine_runs",
+        "list_active_routine_runs",
         "list_due_routines",
         "routine_has_active_run",
         "update_routine_run",

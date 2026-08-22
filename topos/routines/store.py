@@ -314,6 +314,28 @@ def has_active_run(conn, routine_id: str) -> bool:
     return cur.fetchone() is not None
 
 
+def list_active_runs(conn, *, engine_id: str, limit: int = 500) -> List[Dict[str, Any]]:
+    """Every run on this engine still sitting in an active status.
+
+    Engine-wide rather than per routine: the stale sweep has to reach runs whose
+    routine is manual-only or disabled, which no scheduler tick ever looks at.
+    Oldest first, so a capped sweep closes the worst corpses.
+    """
+    ensure_routines_schema(conn)
+    placeholders = ",".join("?" for _ in ACTIVE_RUN_STATUSES)
+    cur = conn.execute(
+        f"""
+        SELECT id, routine_id, owner_user_id, engine_id, status, idempotency_key, payload_json, updated_at
+        FROM routine_runs
+        WHERE engine_id = ? AND status IN ({placeholders})
+        ORDER BY updated_at ASC
+        LIMIT ?
+        """,
+        (str(engine_id).strip(), *sorted(ACTIVE_RUN_STATUSES), int(limit)),
+    )
+    return [_run_row_to_api(dict(row)) for row in cur.fetchall()]
+
+
 def count_runs_last_24h(conn, *, owner_user_id: str, engine_id: str) -> int:
     ensure_routines_schema(conn)
     cutoff = (_now_dt() - timedelta(hours=24)).isoformat()
