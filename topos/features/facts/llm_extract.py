@@ -445,25 +445,26 @@ def _make_ollama_extractor(
     The returned callable raises on transport failure so the batch loop's
     try/except can degrade gracefully (and stop hammering a dead server).
 
-    `conn` is read once, here, for the active pack's `classify` binding — and
-    only when that binding names `model`, so a device-pinned extraction model
-    does not inherit knobs the owner set on a different one.
+    `conn` used to be read here for the active pack's `classify` binding, so the
+    extractor inherited that role's knobs. That rung retired with the role on
+    2026-08-15 (see `config/facts_llm.resolve_facts_llm_model`): fact extraction
+    is an INGEST function, and a query-time pack must not steer it. The control
+    plane now strips `classify` from every pack write, so the lookup could only
+    ever have returned None in production — it survived that removal as dead
+    code, and dead code that reads a retired role reads like the role is alive.
+    `conn` stays in the signature: callers hold one and the seam is worth
+    keeping for parameters that grow their own home under Node functions.
     """
-    from ...config.model_packs import resolve_role_binding
     from ...engine.backends.ollama import OllamaAdapter
 
     adapter = OllamaAdapter()
 
-    binding = resolve_role_binding(conn, "classify")
-    if binding is None or binding.provider != "ollama" or binding.model != model:
-        binding = None
     # think=False is the measured default, not an absence of opinion: reasoning
     # models (qwen3.5 &c.) otherwise spend the whole num_predict budget on
-    # chain-of-thought and return an empty response. A pack that states
-    # `thinking` supersedes it; a pack that is silent must not cost it.
-    think = binding.thinking if (binding and binding.thinking is not None) else False
-    num_ctx = binding.context if binding else None
-    num_predict = binding.max_tokens if (binding and binding.max_tokens) else _NUM_PREDICT
+    # chain-of-thought and return an empty response.
+    think = False
+    num_ctx = None
+    num_predict = _NUM_PREDICT
 
     def _extract(prompt: str, row: Dict[str, Any]) -> List[Dict[str, Any]]:
         # Last gate before an expensive Ollama call. `should_stop` carries this
