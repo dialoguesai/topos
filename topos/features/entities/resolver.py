@@ -238,6 +238,32 @@ def is_valid_entity_surface(text: str) -> bool:
     return True
 
 
+def _placeholder_name_from_identifiers(identifiers: List[str]) -> str:
+    """A display name for a contact that has none, taken from its identifiers.
+
+    Preference order is legibility, not availability: an email or a handle says
+    something to a human reading a graph, a phone number says almost nothing.
+    Whatever is chosen is a placeholder — the contact_id is what identity is
+    anchored on, so a later pass that learns the real name updates the same row
+    rather than creating a second person.
+    """
+    if not identifiers:
+        return ""
+    emails = [i for i in identifiers if "@" in i and "." in i.rsplit("@", 1)[-1]]
+    if emails:
+        return sorted(emails)[0]
+    # A handle: has letters, is not a bare phone number.
+    handles = [
+        i
+        for i in identifiers
+        if any(c.isalpha() for c in i) and not i.lstrip("+").replace("-", "").isdigit()
+    ]
+    if handles:
+        return sorted(handles)[0]
+    phones = [i for i in identifiers if any(c.isdigit() for c in i)]
+    return sorted(phones)[0] if phones else ""
+
+
 class EntityResolver:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
@@ -257,9 +283,6 @@ class EntityResolver:
         # personal-scale, so one gated batch covers the whole seed.
         with batched_writes(self._conn):
             for contact_id, display_name, usernames_json, is_self in contacts:
-                name = str(display_name or "").strip()
-                if not name:
-                    continue
                 existing = self._conn.execute(
                     "SELECT entity_id FROM entities WHERE contact_id=?",
                     (contact_id,),
@@ -279,6 +302,34 @@ class EntityResolver:
                             identifiers.append(str(username).strip().lower())
                 except (json.JSONDecodeError, TypeError):
                     pass
+
+                # A contact with no display name still needs a person entity.
+                #
+                # This used to be `if not name: continue`, placed before the
+                # identifiers were even read — and every contact derived from a
+                # messenger sync has an empty display_name, because a phone
+                # number is all iMessage gives you. Measured on a live node
+                # 2026-08-25: 822 of 1,423 contacts nameless, and of 167
+                # distinct non-self message senders, all 167 resolved to a
+                # contact while only 10 resolved to a person ENTITY.
+                #
+                # That gap is load-bearing downstream: fact_materializer's SPO
+                # lane refuses any fact whose subject fails `_entity_exists`,
+                # so facts about the people you actually text had nowhere to
+                # attach. Falling back to the contact's best identifier gives
+                # the graph a subject to hang evidence on; a later pass that
+                # learns the real name updates the same row, because the
+                # contact_id anchor is what identity is keyed on here, not the
+                # name.
+                name = str(display_name or "").strip()
+                if not name:
+                    name = _placeholder_name_from_identifiers(identifiers)
+                if not name:
+                    # Nothing to key on at all — no name and no identifier.
+                    # 653 of 1,423 contacts have zero identifier rows; minting
+                    # entities for them would add people who can never be
+                    # resolved from a message.
+                    continue
                 if existing:
                     self._conn.execute(
                         "UPDATE entities SET identifiers_json=?, updated_at=datetime('now') WHERE entity_id=?",
