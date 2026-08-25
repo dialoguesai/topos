@@ -170,6 +170,10 @@ from .enrichment_spec_version_v1 import (
     MIGRATION_ID as ENRICHMENT_SPEC_VERSION_V1_ID,
     apply_enrichment_spec_version_v1_up,
 )
+from .enrichment_record_progress_v1 import (
+    MIGRATION_ID as ENRICHMENT_RECORD_PROGRESS_V1_ID,
+    apply_enrichment_record_progress_v1_up,
+)
 from .entity_context_vectors_v1 import (
     MIGRATION_ID as ENTITY_CONTEXT_VECTORS_V1_ID,
     apply_entity_context_vectors_v1_up,
@@ -336,6 +340,7 @@ MIGRATIONS: List[MigrationSpec] = [
     _spec(60, RETIRE_URL_CLASSIFICATION_V1_ID, apply_retire_url_classification_v1_up),
     _spec(61, JOURNAL_ORIGIN_DIMENSION_V1_ID, apply_journal_origin_dimension_v1_up),
     _spec(62, QUERY_ARTIFACTS_DURATION_MS_V1_ID, apply_query_artifacts_duration_ms_v1_up),
+    _spec(63, ENRICHMENT_RECORD_PROGRESS_V1_ID, apply_enrichment_record_progress_v1_up),
 ]
 
 
@@ -404,4 +409,5 @@ __all__ = [
     "ENTITY_REVIEW_CANDIDATE_BAR_V1_ID",
     "JOURNAL_ORIGIN_DIMENSION_V1_ID",
     "RETIRE_URL_CLASSIFICATION_V1_ID",
+    "ENRICHMENT_RECORD_PROGRESS_V1_ID",
 ]

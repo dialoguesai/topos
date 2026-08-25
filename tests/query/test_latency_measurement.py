@@ -30,7 +30,7 @@ import pytest
 
 from topos.query.narrowing import NarrowingEntry, NarrowingLedger
 from topos.storage.adapters.sqlite.stores import SQLiteQuerySessionStore
-from topos.storage.db.migrations import apply_all_migrations, max_migration_order
+from topos.storage.db.migrations import apply_all_migrations
 from topos.storage.db.migrations.query_artifacts_duration_ms_v1 import (
     MIGRATION_ID as DURATION_MIGRATION_ID,
 )
@@ -154,8 +154,14 @@ class TestTheMigrationThatAddedTheColumn:
         # phase 0 never re-runs it, so an in-place edit ships a column that exists only
         # on machines installed after the edit.
         spec = next(m for m in MIGRATIONS if m.id == DURATION_MIGRATION_ID)
-        assert spec.order == max_migration_order(), "the new column is the registry head"
-        assert spec.order > min(m.order for m in MIGRATIONS)
+        phase0 = min(MIGRATIONS, key=lambda m: m.order)
+        # The invariant is that the column arrives through its OWN migration
+        # ordered after phase 0 — not that it is the newest migration in the
+        # registry. Asserting `spec.order == max_migration_order()` said the
+        # latter, so it failed for whoever added the next migration (it did,
+        # at order 63) even though nothing about this column had changed.
+        assert spec.id != phase0.id, "the column must not arrive by editing phase 0"
+        assert spec.order > phase0.order, "…but through a migration that runs after it"
 
     def test_applying_the_registry_yields_the_column_and_stamps_the_ledger(
         self, tmp_path
