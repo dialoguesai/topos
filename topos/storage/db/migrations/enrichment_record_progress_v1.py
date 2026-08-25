@@ -1,5 +1,19 @@
 """Record-level "this ran" markers, so a backfill stops re-scanning empty results.
 
+NOT REGISTERED YET — deliberately. Registering this bumped the repo's migration
+head to 63, and the routine playground (which imports topos as an editable dep
+on this checkout) then applied it to the live ~/.topos/database.db while the
+INSTALLED engine still understood 62. Its downgrade guard correctly refused
+every write, and the node lost ingest/sync/enrichment for ~25 minutes on
+2026-08-25. The marker cannot take effect on a machine until a release ships it
+anyway, so it buys nothing before then and costs an outage.
+
+TO LAND: add `_spec(63, ENRICHMENT_RECORD_PROGRESS_V1_ID, ...)` back to
+registry.py as part of an engine release, and raise the playground's baseline
+(PG_NODE_SCHEMA_BASELINE=63) once that release is installed. If another
+migration takes order 63 first, this one simply takes the next free order —
+nothing here depends on the number.
+
 `only_missing` builds its done-set from ids PRESENT in a job's coverage table.
 That is a proxy for "was processed" and it is wrong in one direction: a record
 that ran and legitimately produced nothing writes no coverage row, so it looks
