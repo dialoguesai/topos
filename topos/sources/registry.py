@@ -269,7 +269,19 @@ IMESSAGE = _source(
     parser_id="imessage.messages.v1",
     canonical_group_id="conversations",
     raw_enrichment_jobs=[],
-    canonical_enrichment_jobs=["emo_27"],
+    # `entities` added 2026-08-25. It was absent, so NER never ran on messages
+    # at ingest and every `message_entities` row this source ever had came from
+    # a manual backfill: measured before the fix, a 2,354-message sync landed
+    # with 43% emotion coverage and 0% entities, and the corpus as a whole sat
+    # at 21%. That gap is upstream of the people work — entity mentions on
+    # messages are what tie a person to what was actually said about them, and
+    # what an owner-authored mention of a project is derived from.
+    #
+    # `topics` is deliberately still absent: it is the COST_HIGH lane (one
+    # local-model generation per message, capped at MAX_JOB_MESSAGES=1000),
+    # where `entities` is a RoBERTa token classifier. Adding topics here would
+    # put an LLM call on every message of every sync.
+    canonical_enrichment_jobs=["emo_27", "entities"],
     signal_derivation_jobs=['emo_27', 'goal_extraction'],
     analytics_profile_id=None,
     enrichment_trigger="automatic",

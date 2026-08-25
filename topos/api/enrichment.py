@@ -1115,7 +1115,23 @@ async def _get_enrichment_status_core(
     source_def = REGISTRY.get(source_id)
     if not source_def:
         raise ValueError(f"Source {source_id} not found")
-    
+
+    # Report what will ACTUALLY run, not the static definition.
+    #
+    # Every execution path resolves canonical jobs through
+    # `effective_canonical_enrichment_jobs` (canonical_pipeline, ingestion
+    # manager, the WS handler and `process_enrichment` all do), so a status
+    # surface that reads `source_def.canonical_enrichment_jobs` directly
+    # reports a DIFFERENT list than the engine runs the moment a per-source
+    # override exists. Measured 2026-08-25: with `entities` enabled for
+    # imessage via `PATCH /v1/sources/imessage/enrichments/entities`, the
+    # override-aware lanes said `['canonical','signal']` while this endpoint
+    # still said `['emo_27']` — which reads as "entity extraction is off"
+    # when it is on, and cost real time diagnosing exactly that.
+    from ..enrichment.source_overrides import effective_canonical_enrichment_jobs
+
+    effective_jobs = effective_canonical_enrichment_jobs(source_def)
+
     # Get database connection
     db_conn = get_db_connection()
     if not db_conn:
@@ -1125,7 +1141,7 @@ async def _get_enrichment_status_core(
             "total_messages": 0,
             "processed_messages": 0,
             "unprocessed_messages": 0,
-            "enrichment_jobs": source_def.canonical_enrichment_jobs,
+            "enrichment_jobs": effective_jobs,
             "enrichment_trigger": getattr(source_def, "enrichment_trigger", "automatic"),
             "message": "Database connection not available",
         }
@@ -1144,7 +1160,7 @@ async def _get_enrichment_status_core(
                 "total_messages": 0,
                 "processed_messages": 0,
                 "unprocessed_messages": 0,
-                "enrichment_jobs": source_def.canonical_enrichment_jobs,
+                "enrichment_jobs": effective_jobs,
                 "enrichment_trigger": getattr(source_def, "enrichment_trigger", "automatic"),
                 "message": "Canonical table does not exist yet",
             }
@@ -1182,7 +1198,7 @@ async def _get_enrichment_status_core(
             "total_messages": 0,
             "processed_messages": 0,
             "unprocessed_messages": 0,
-            "enrichment_jobs": source_def.canonical_enrichment_jobs,
+            "enrichment_jobs": effective_jobs,
             "enrichment_trigger": getattr(source_def, "enrichment_trigger", "automatic"),
             "message": f"Error reading canonical table: {e}",
         }
@@ -1198,7 +1214,7 @@ async def _get_enrichment_status_core(
         "total_messages": total,
         "processed_messages": processed_count,
         "unprocessed_messages": unprocessed_count,
-        "enrichment_jobs": source_def.canonical_enrichment_jobs,
+        "enrichment_jobs": effective_jobs,
         "enrichment_trigger": getattr(source_def, "enrichment_trigger", "automatic"),
     }
 
@@ -1266,7 +1282,13 @@ def _list_source_enrichments_core(source_id: str) -> Dict[str, Any]:
         raise ValueError(f"Source {source_id} not found")
 
     raw_jobs = list(getattr(source_def, "raw_enrichment_jobs", []) or [])
-    canonical_jobs = list(getattr(source_def, "canonical_enrichment_jobs", []) or [])
+    # Override-aware, for the same reason as `_get_enrichment_status_core`:
+    # this field named the static definition while `enrichments[].lanes`
+    # (built from `jobs_configured_for_source` below) named the effective one,
+    # so one response could disagree with itself about whether a job runs.
+    from ..enrichment.source_overrides import effective_canonical_enrichment_jobs
+
+    canonical_jobs = effective_canonical_enrichment_jobs(source_def)
     implemented_backfills = sorted(
         enrichment_name
         for sid, enrichment_name in _RAW_SOURCE_BACKFILL_HANDLERS
