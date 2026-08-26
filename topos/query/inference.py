@@ -89,11 +89,14 @@ def build_inference_context_packet(filtered_context: Dict[str, Any], *, max_char
         if key not in compact and key not in ("semantic_hits", "topic_clusters", "graph", "scores"):
             compact[key] = value
     raw = json.dumps(compact, default=str, separators=(",", ":"))
+    _cut_marker = " …[CONTEXT CUT AT CHAR LIMIT]"
     char_truncated = len(raw) > max_chars
     if char_truncated:
         # A bare slice hands the model invalid JSON that reads as a complete
-        # packet. Say the cut happened, visibly, at the cut.
-        raw = raw[:max_chars] + " …[CONTEXT CUT AT CHAR LIMIT]"
+        # packet. Say the cut happened, visibly, at the cut — INSIDE the budget:
+        # max_chars is a promise to the caller (gap p4 guards it), so the
+        # marker spends budget rather than exceeding it.
+        raw = raw[: max_chars - len(_cut_marker)] + _cut_marker
     # `context_truncated` = THIS function cut the serialized string (renamed from
     # `truncated` 2026-08-25: it collided with the retrieval packet's row-cap
     # `truncated` dict — two meanings, one key, same return path; no committed

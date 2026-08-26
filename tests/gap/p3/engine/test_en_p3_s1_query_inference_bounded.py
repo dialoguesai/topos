@@ -14,7 +14,7 @@ def test_query_inference_truncates_context_and_calls_engine_once() -> None:
     huge = {"data": "x" * 10_000}
     bounded = build_inference_context_packet(huge, max_chars=500)
     assert len(bounded["context"]) <= 500
-    assert bounded["truncated"] is True
+    assert bounded["context_truncated"] is True
 
     mock_engine = MagicMock()
     mock_engine.run.return_value = ProcessingResult(

@@ -584,6 +584,7 @@ async def handle_signal_list_facts(message: Dict[str, Any]) -> Optional[Dict[str
             guard=guard_from_message(conn, message),
             predicate=payload.get("predicate"),
             dimension=payload.get("dimension"),
+            pack=payload.get("pack"),
             include_closed=bool(payload.get("include_closed")),
             limit=min(int(payload.get("limit") or 100), 500),
             offset=max(0, int(payload.get("offset") or 0)),
