@@ -9,6 +9,37 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **Warmth is no longer a constant the extractor invents.** `warmth_band: "medium"`
+  and `cadence_band: "recent"` were string literals in the rule extractor, so all 216
+  stored `RelationshipEdge` rows read identically — a constant is indistinguishable
+  from a measurement once written, and two layers above consumed it as one: the
+  relationship aggregate defaulted an ABSENT band to "medium" as well, and
+  `fit/evaluator`'s `relationship_warmth` facet scored on the PRESENCE of any band,
+  so the stamped constant was the entire evidence base for telling the owner their
+  network is warm (0.75, `warm_network`). The extractor now says "unknown", the
+  aggregate defaults to "unknown", and the facet filters unknown before scoring, so
+  an unmeasured network reads `cold_network` with low confidence. Ranking that needs
+  real warmth comes from `query/closeness.py`, which has the corpus. Existing rows
+  were backfilled to "unknown" and the aggregate recomputed.
+- **The owner is no longer the most important person in their own social graph.**
+  Messenger analytics were last computed before the ego exclusion shipped, so the
+  owner still held top centrality (0.582) and their star collapsed the partition.
+  Recomputed: importance rows 350 -> 345, and the August partition went from one
+  community holding 58% of participants to 37 communities with the largest at 20%.
+
+### Fixed
+- **Known-item facts: delimiter-aware predicates and a deterministic owner.** A bare
+  `LIKE 'fact:<owner>:<pred>%'` also swept sibling predicates, so "Who's in my family?"
+  was handed all 23 `rel.relationship_event` rows and answered with people the owner had
+  merely met. `SELECT ... WHERE is_self=1` with `.fetchone()` and no ORDER BY ran against
+  three matching rows — the fact-bearing one won by rowid luck, and a vacuum would have
+  blanked every known-item answer.
+- **A cached answer is only valid for the code that produced it.** The retrieval
+  fingerprint covered every input except the engine version, so no upgrade could
+  invalidate the cache: the node was rebuilt with a fix and the chat kept replaying the
+  pre-fix payload as `memory_hit` for 21 minutes, with 24h of session TTL to run.
+
 ### Added
 - **[S1] Principal fabric P2 — elevation consent, in the UMA ledger.** An
   enrolled client can now be consented up from the `scores_only` floor:
@@ -45,6 +76,18 @@ The machine-readable twin of each release is
   `client:<id>` ("one consent ledger", Who's Asking §03b). Tests:
   `tests/core/test_mcp_client_registry.py`.
 
+- **[E] The close circle is ranked from who the owner actually talks to.** It was
+  answered from six `rel.relationship` facts a pack happened to extract from journal
+  sentences, omitting the highest-volume correspondents in the corpus.
+  `conversation_messages.sender_id` holds the raw handle while names live in `contacts`,
+  reachable only through `contact_identifiers`; nothing in the query path made that hop,
+  so all 4,866 inbound messages resolved to zero named people. The new lane normalises
+  both sides, bands warmth and cadence relative to this owner's corpus, honours entity
+  blackholes on whole-name match (a blackholed PLACE must not erase a person sharing a
+  token), excludes the owner from their own circle, and declares what the cap cut.
+  Gated on packet_resolution exactly as facts-direct is, so a grantee gets nothing and
+  the relationships grant policy — entity keys and warmth bands, not contact names —
+  still holds.
 - **[S1] Principal fabric P1 — the channel decides who is asking.** A second
   credential, `TOPOS_OWNER_KEY`, held only by first-party surfaces, resolves to
   the `owner_app` principal at the HTTP door; the legacy shared `TOPOS_KEY`

@@ -778,12 +778,24 @@ class QueryPipelineOrchestrator:
             # C7 facts-direct (W3.1): a known-item ask with live facts gets its
             # exact values, validity dates and evidence counts with ZERO LLM —
             # same contract as `band`: deterministic answer_types are final.
+            # Closeness asks rank by interaction, not by extracted role facts —
+            # see closeness.py. Runs BEFORE facts-direct because both match the
+            # same phrasings and only this one can see who the owner actually
+            # talks to; "family" carries no closeness term, so it still lands on
+            # the role facts below.
             try:
-                from .facts_direct import try_facts_direct
-                direct = try_facts_direct(
+                from .closeness import try_close_circle
+                direct = try_close_circle(
                     db_conn, query_text, packet_resolution=_pr["effective"])
             except Exception:  # noqa: BLE001 — this lane must never break a turn
                 direct = None
+            if direct is None:
+                try:
+                    from .facts_direct import try_facts_direct
+                    direct = try_facts_direct(
+                        db_conn, query_text, packet_resolution=_pr["effective"])
+                except Exception:  # noqa: BLE001 — this lane must never break a turn
+                    direct = None
             if direct is not None:
                 public.payload.update(direct)
         if (access_mode == "inference"
