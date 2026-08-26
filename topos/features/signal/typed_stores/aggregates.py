@@ -244,7 +244,9 @@ def recompute_relationship_aggregates(store: SignalObjectStore) -> int:
     edges = store.list_objects("relationships", object_type="RelationshipEdge", limit=200)
     if not edges:
         return 0
-    warmth = {str((e.get("payload") or {}).get("warmth_band") or "medium") for e in edges}
+    # Absent means unknown. Defaulting to "medium" invented the same measurement
+    # the extractor used to stamp, one layer further from anyone who could check.
+    warmth = {str((e.get("payload") or {}).get("warmth_band") or "unknown") for e in edges}
     store.upsert_object(
         "relationships",
         "warmth_score",

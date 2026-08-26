@@ -169,9 +169,15 @@ def extract_from_journal(record: Dict[str, Any]) -> List[ArtifactDraft]:
     for name in _parse_journal_group_names(people_raw):
         edge = {
             "target_entity_key": _anon_entity_key(name),
-            "warmth_band": "medium",
+            # "unknown", not "medium": this extractor sees ONE record and cannot
+            # know how warm a relationship is or how recently it was exercised.
+            # Stamping a constant made all 216 stored edges read "medium"/"recent",
+            # which is indistinguishable from a measurement and was consumed as one
+            # (fit/evaluator scored the owner's network "warm" on its presence
+            # alone). Ranking comes from query/closeness.py, which has the corpus.
+            "warmth_band": "unknown",
             "tier": "personal",
-            "cadence_band": "recent",
+            "cadence_band": "unknown",
             "context_tags": _infer_context_tags(str(record.get("content") or "")),
             "coactivity_band": activity_band[:40] if activity_band else None,
         }
@@ -303,9 +309,10 @@ def extract_from_message(record: Dict[str, Any]) -> List[ArtifactDraft]:
     tier = {"work": "professional", "personal": "personal"}.get(context, "professional")
     edge = {
         "target_entity_key": entity_key,
-        "warmth_band": "medium",
+        # See the journal edge above: one message is not a warmth measurement.
+        "warmth_band": "unknown",
         "tier": tier,
-        "cadence_band": "recent",
+        "cadence_band": "unknown",
         "context_tags": _infer_context_tags(str(record.get("content") or "")),
     }
     return [
