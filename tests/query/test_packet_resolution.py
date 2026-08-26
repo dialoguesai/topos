@@ -85,7 +85,7 @@ def test_gateway_stamped_owner_uuid_is_owner(conn, monkeypatch):
     literal "owner" alone floored every gateway-routed owner turn (live 2026-08-26)."""
     set_engine_config_value(conn, ENGINE_CONFIG_KEY_PACKET_RESOLUTION, "facts_all")
     monkeypatch.setattr(settings, "topos_engine_service_url", None)
-    uid = "9670043c-401a-4323-b092-c4724ca166eb"
+    uid = "00000000-1111-4222-8333-444444444444"
     info = effective_packet_resolution(
         conn, requester_id=uid, disclosure_tier="owner_raw", owner_id=uid
     )
@@ -98,7 +98,7 @@ def test_grantee_uuid_mismatch_floors(conn):
         conn,
         requester_id="11111111-2222-3333-4444-555555555555",
         disclosure_tier="default_disclosure",
-        owner_id="9670043c-401a-4323-b092-c4724ca166eb",
+        owner_id="00000000-1111-4222-8333-444444444444",
     )
     assert info["effective"] == "scores_only" and info["reason"] == "non_owner_floor"
 
@@ -108,7 +108,7 @@ def test_forged_owner_ids_cannot_widen_grantee(conn):
     floors, because the tier resolver never grants a grantee owner_raw and the tier
     leg is an independent guard. Id-equality alone must never be sufficient."""
     set_engine_config_value(conn, ENGINE_CONFIG_KEY_PACKET_RESOLUTION, "facts_all")
-    uid = "9670043c-401a-4323-b092-c4724ca166eb"
+    uid = "00000000-1111-4222-8333-444444444444"
     info = effective_packet_resolution(
         conn, requester_id=uid, disclosure_tier="default_disclosure", owner_id=uid
     )
@@ -119,7 +119,7 @@ def test_omitted_owner_id_keeps_legacy_behavior(conn):
     """Callers that never pass owner_id (config handlers, older paths) see byte-identical
     behavior: literal "owner" is owner, anything else floors."""
     set_engine_config_value(conn, ENGINE_CONFIG_KEY_PACKET_RESOLUTION, "facts_all")
-    uid = "9670043c-401a-4323-b092-c4724ca166eb"
+    uid = "00000000-1111-4222-8333-444444444444"
     info = effective_packet_resolution(conn, requester_id=uid, disclosure_tier="owner_raw")
     assert info["effective"] == "scores_only" and info["reason"] == "non_owner_floor"
 
