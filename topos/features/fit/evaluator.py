@@ -126,12 +126,16 @@ def _evaluate_facet(
     if facet_id == "relationship_warmth":
         warmth = store.list_objects("relationships", object_type="warmth_score", limit=1)
         payload = (warmth[0].get("payload") if warmth else {}) or {}
-        bands = payload.get("warmth_bands") or []
+        # An "unknown" band is the absence of a measurement, not a warm one. This
+        # read "any band present -> warm_network", so a constant stamped by the
+        # extractor was the whole evidence base for calling the owner's network warm.
+        bands = [b for b in (payload.get("warmth_bands") or [])
+                 if str(b).strip().lower() not in ("", "unknown")]
         score = 0.75 if bands else 0.2
         return {
             "facet_id": facet_id,
             "score": score,
-            "confidence": float(warmth[0]["confidence"]) if warmth else 0.3,
+            "confidence": float(warmth[0]["confidence"]) if (warmth and bands) else 0.3,
             "public_band": "warm_network" if score >= 0.6 else "cold_network",
         }
     if facet_id in ("domain_overlap", "seeking_alignment"):

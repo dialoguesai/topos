@@ -4,7 +4,8 @@ from __future__ import annotations
 
 import sqlite3
 
-from topos.features.fit.evaluator import compute_fit_readiness, evaluate_opportunity
+from topos.features.fit.evaluator import (compute_fit_readiness, evaluate_opportunity,
+                                          _evaluate_facet)
 from topos.features.signal.extraction.artifact_router import route_canonical_batch
 from topos.features.signal.typed_stores.aggregates import recompute_all_gate_aggregates
 from topos.features.signal.signal_object_store import SignalObjectStore
@@ -83,3 +84,41 @@ def test_fit_readiness_after_seed() -> None:
     readiness = compute_fit_readiness(conn)
     assert readiness["schedule_meeting"] >= 0.8
     assert readiness["evaluate_introduction"] >= 0.8
+
+
+def test_an_unknown_warmth_band_is_not_evidence_of_a_warm_network():
+    """The extractor cannot measure warmth from one record, so it stores "unknown".
+
+    This facet used to score on the PRESENCE of any band, which meant the constant
+    the extractor stamped on every edge was the entire evidence base for calling
+    the owner's network warm. All 216 live edges read "medium" and the facet
+    reported warm_network on that alone.
+    """
+    import json as _json
+
+    def facet_for(bands):
+        conn = sqlite3.connect(":memory:")
+        apply_signal_objects_up(conn)
+        apply_extraction_artifacts_up(conn)
+        # Inserted directly: SignalObjectStore.upsert_object's UPDATE path touches
+        # `updated_by`, which this migration does not create (the live schema does),
+        # and _seed_harness already leaves a warmth_score behind to collide with.
+        conn.execute(
+            "INSERT INTO signal_objects (object_id, signal_dimension, object_type,"
+            " object_key, payload_json, confidence, valid_from, created_at, updated_at)"
+            " VALUES (?,?,?,?,?,?,?,?,?)",
+            ("w1", "relationships", "warmth_score", "aggregate",
+             _json.dumps({"edge_count": 216, "warmth_bands": bands}), 0.85,
+             "2026-08-26T00:00:00Z", "2026-08-26T00:00:00Z", "2026-08-26T00:00:00Z"),
+        )
+        conn.commit()
+        return _evaluate_facet(SignalObjectStore(conn), "relationship_warmth", None, {})
+
+    unknown = facet_for(["unknown"])
+    assert unknown["public_band"] == "cold_network"
+    assert unknown["score"] == 0.2
+    assert unknown["confidence"] == 0.3        # unknown carries no confidence either
+
+    measured = facet_for(["high", "medium"])   # a real band still reads warm
+    assert measured["public_band"] == "warm_network"
+    assert measured["score"] == 0.75
