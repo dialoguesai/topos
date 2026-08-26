@@ -1192,3 +1192,49 @@ async def handle_signal_retire_intent(message: Dict[str, Any]) -> Optional[Dict[
         return {"id": req_id, "status": "ok", "payload": {"intents": active_intents(conn)}}
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("put_community_name")
+async def handle_put_community_name(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Owner rename for a graph community (PLAN_COMMUNITY_NAMING S3): retires
+    any derived name for the community's core and records the owner's, which
+    wins ties forever after. Stamps the label onto members immediately."""
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    community_id = payload.get("community_id")
+    new_name = str(payload.get("name") or "").strip()
+    try:
+        from ...features.entities.community_names import core_fingerprint, rename_community
+        from ...features.entities.community_naming import valid_label
+
+        if not isinstance(community_id, int) or not valid_label(new_name):
+            return {"id": req_id, "status": "error",
+                    "error": "community_id (int) and a short name (2-4 words, letters) required"}
+        conn = hub.get_db_connection()
+        rows = conn.execute(
+            "SELECT entity_id, json_extract(metadata_json,'$.centrality.eigen')"
+            " FROM entities WHERE json_extract(metadata_json,'$.community_id')=?",
+            (community_id,),
+        ).fetchall()
+        if not rows:
+            return {"id": req_id, "status": "error", "error": f"unknown community {community_id}"}
+        ranked = [r[0] for r in sorted(rows, key=lambda r: -(r[1] or 0.0))]
+        weights = {r[0]: float(r[1] or 0.0) for r in rows}
+        fp = core_fingerprint(ranked, weights)
+        from ...storage.db.write_gate import commit_connection, with_db_write
+        with with_db_write():
+            rename_community(conn, fp, new_name)
+            conn.execute(
+                "UPDATE entities SET metadata_json=json_patch(COALESCE(metadata_json,'{}'),"
+                " json_object('community_label', ?))"
+                " WHERE json_extract(metadata_json,'$.community_id')=?",
+                (new_name, community_id),
+            )
+            commit_connection(conn)
+        return {"id": req_id, "status": "ok",
+                "payload": {"status": "ok", "community_id": community_id, "name": new_name,
+                            "members": len(rows)}}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
