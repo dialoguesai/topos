@@ -624,6 +624,64 @@ def rebuild_evidence_edges(
     return {"co_occurrence": co, "communicates_with": comm}
 
 
+
+def _apply_stable_names(conn, community_cores, labels_by_rank, names, eigen):
+    """Stable naming pass (PLAN_COMMUNITY_NAMING S2): history match first, LLM
+    for new cores (budgeted), deterministic label as ever-present fallback."""
+    from .community_names import core_fingerprint, match_name, record_name, touch_name
+    from .community_naming import (MAX_NEW_NAMES_PER_REBUILD, derive_community_name,
+                                   distinctive_terms, resolve_naming_model, valid_label)
+
+    all_names_by_comm = {
+        r: [names.get(eid, "") for eid in core[:10] if names.get(eid, "").strip()]
+        for r, core in community_cores.items()
+    }
+    from .community_naming import naming_enabled
+    try:
+        conn.execute("SELECT 1 FROM community_names LIMIT 1")
+    except Exception:  # noqa: BLE001 — pre-migration-67 node: deterministic labels stand
+        return
+    llm = None if naming_enabled() else False
+    new_budget = MAX_NEW_NAMES_PER_REBUILD
+    for r, core in community_cores.items():
+        fp = core_fingerprint(core, eigen)
+        hit = match_name(conn, fp)
+        if hit is not None:
+            labels_by_rank[r] = hit["name"]
+            touch_name(conn, str(hit["name_id"]), fp)
+            continue
+        derived = None
+        if new_budget > 0:
+            if llm is None:
+                try:
+                    from ...engine.backends.ollama import OllamaAdapter
+                    _model = resolve_naming_model(conn)
+                    _adapter = OllamaAdapter()
+
+                    def _call(prompt, _a=_adapter, _m=_model):
+                        out = _a._generate(_m, prompt, num_predict=24, think=False,
+                                           temperature=0.0, num_ctx=4096, timeout=45)
+                        return str(out.get("text") or "") if isinstance(out, dict) else str(out or "")
+
+                    llm = _call
+                except Exception:  # noqa: BLE001
+                    llm = False
+            if llm:
+                others = [n for rr, ns in all_names_by_comm.items() if rr != r for n in ns]
+                derived = derive_community_name(
+                    all_names_by_comm.get(r, []),
+                    distinctive_terms(all_names_by_comm.get(r, []), others),
+                    llm,
+                )
+                new_budget -= 1
+        final = derived or labels_by_rank.get(r)
+        if final and valid_label(str(final)):
+            labels_by_rank[r] = final
+            record_name(conn, str(final), fp,
+                        source="llm" if derived else "deterministic",
+                        model=resolve_naming_model(conn) if derived else None)
+
+
 def compute_communities(conn: sqlite3.Connection) -> Dict[str, int]:
     """Louvain neighborhoods + structural analytics over the active entity
     graph (the witcher-network recipe: community_louvain.best_partition on the
@@ -680,6 +738,7 @@ def compute_communities(conn: sqlite3.Connection) -> Dict[str, int]:
     t0 = time.perf_counter()
     centrality: Dict[str, Tuple[int, float, float]] = {}
     labels_by_rank: Dict[int, Optional[str]] = {}
+    community_cores: Dict[int, List[str]] = {}
     try:
         degree = dict(G.degree())
         strength = dict(G.degree(weight="weight"))
@@ -757,6 +816,11 @@ def compute_communities(conn: sqlite3.Connection) -> Dict[str, int]:
                  if types.get(eid) == dominant and _labelable(eid)),
                 next((names[eid] for eid in ranked if _labelable(eid)), None),
             )
+            # S2 (PLAN_COMMUNITY_NAMING): the deterministic label above is the
+            # FALLBACK; identity-matched historical names win, and genuinely
+            # new cores get one LLM-derived name (validated, else fallback).
+            community_cores[rank[comm]] = [str(m) for m in ranked]
+        _apply_stable_names(conn, community_cores, labels_by_rank, names, eigen)
         logger.info(
             "graph structural analytics: %d nodes / %d edges, betweenness k=%s, %.2fs",
             n,
