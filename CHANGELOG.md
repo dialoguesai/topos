@@ -9,6 +9,33 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **[S1] Goals-first milestone integrity**: `asp.milestone` must attach (fuzzy,
+  generic-token-stopped) to a stored active goal or it quarantines — the measured
+  failure prompt rules couldn't fix twice, fixed structurally. Unattached-but-valid
+  milestones stay reviewable, never lost.
+- **[S1] Tier-2 `exclusive_with`**: pack-declared value-sets that cannot both hold for
+  one identity; RECENT contradictions queue for review (a same-week partner/ex_partner
+  flip-flop) while life changes still supersede. relationships pack 0.2.5 declares the
+  first set.
+- **[O] High-harm 3-vote judging at ingest** (relationship roles partner/child/sibling/
+  spouse; events loss/conflict/reconnected) — the measured single-vote variance fix.
+- **[O] Drip catch-up**: every ingest batch also processes 25 unprocessed history
+  pairs; dark deltas self-heal without a scheduler.
+- **[O] Owner backfill control**: `run_pack_backfill` + POST
+  /derivation/packs/{id}/backfill — bounded history runs from the lens catalog.
+- **[O] Trajectory synthesizer** (work.venture_history / professional_visibility from
+  accumulated events+projects; accumulation anchors to its newest evidence).
+- **[O] WA.E report card as code** (`report_card.py`): live acceptance / reroute /
+  owner-upheld scores per pack from the training ledger.
+- **[O] Semantic pack router (R0-M2), shipped FLAG-OFF on measured evidence**: lexical
+  recall already 86/86 on fact-yielding records; hybrid awaits substrate that outruns
+  pack vocabulary (TOPOS_DERIVATION_ROUTER=hybrid).
+- **[O] `TOPOS_FACTS_LANE_WEIGHT`**: the facts-lane fusion weight is a measured,
+  configurable choice — live sweep confirmed 1.5 (16/37 presence · 81 items) over
+  1.0 (71 items) and 0.6 (lane collapse), closing BP1.
+
+
 ## [1.3.28] — 2026-08-26
 
 ### Added

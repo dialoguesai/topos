@@ -437,3 +437,24 @@ def test_trajectory_synthesis(a3_writer):
     preds = {o["predicate"]: o for o in out}
     assert "work.professional_visibility" in preds       # 3 shipped projects
     assert preds["work.professional_visibility"]["outcome"] in ("written", "corroborated")
+
+
+# --- WA.E report card (protects: junk/attribution/retention visibility stays wired) ---
+def test_report_card_scores(a3_writer):
+    w, conn = a3_writer
+    conn.executescript("""
+      CREATE TABLE IF NOT EXISTS derivation_training_ledger (
+        ledger_id TEXT PRIMARY KEY, ts TEXT NOT NULL DEFAULT (datetime('now')),
+        stage TEXT, pack_id TEXT, pack_version TEXT, template_version TEXT,
+        extract_model TEXT, verifier_model TEXT, source_table TEXT, record_id TEXT,
+        actor_role TEXT, predicate TEXT, value_json TEXT, about TEXT, occurrence TEXT,
+        quote TEXT, confidence REAL, vstatus TEXT, vreason TEXT, written_object_id TEXT);
+    """)
+    for i, st in enumerate(["accepted", "accepted", "rejected", "rerouted", "grounding_reject"]):
+        conn.execute("INSERT INTO derivation_training_ledger (ledger_id, pack_id, predicate, vstatus)"
+                     " VALUES (?, 'work.career', 'work.project', ?)", (f"l{i}", st))
+    conn.commit()
+    from topos.features.derivation.report_card import compute_report_card
+    card = compute_report_card(conn)["packs"]["work.career"]
+    assert card["judged"] == 5 and card["acceptance"] == 0.6
+    assert card["reroute_rate"] == 0.2 and card["grounding_rejects"] == 1
