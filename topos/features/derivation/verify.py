@@ -21,7 +21,7 @@ import os
 import re
 from typing import Any, Dict, Optional
 
-VERIFIER_VERSION = "a4-1"
+VERIFIER_VERSION = "a4-2"
 DEFAULT_VERIFIER_MODEL = "smtek/Qwen3.8-27B:IQ2_M"
 
 _JSON_RE = re.compile(r"\{.*\}", re.DOTALL)
@@ -45,8 +45,16 @@ Answer three questions:
 2. about: whose fact is this? "owner" only if the record states it about the author-owner.
    "other:<name>" if it is someone else's (their partner, their appointment, their loss).
    "unclear" if the person cannot be determined from the record.
-3. fields_ok: is every field value present in or directly stated by the record
-   (no invented dates, orgs, titles, or levels)?
+3. fields_ok: is every NON-EMPTY field value present in or directly stated by the record
+   (no invented dates, orgs, titles, or levels)? A field that is null, empty, or omitted
+   is honest abstention, NEVER a fabrication — judge only fields that carry a value.
+
+Grounding rules:
+- The record's own date IS a stated date for anything the record narrates as happening
+  at writing time ("I got cleaned today" on a dated record = dated fact).
+- Text the owner merely Likes, quotes, or reacts to is the OTHER person's speech:
+  first-person statements inside a quoted/Liked message are about THAT speaker,
+  not the owner (their appointment, their firing, their plans).
 
 Respond ONLY with JSON:
 {{"supported": true/false, "about": "owner" | "other:<name>" | "unclear", "fields_ok": true/false, "reason": "<=15 words"}}"""

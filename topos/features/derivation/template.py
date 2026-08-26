@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .packs import Pack, load_scales
 
-TEMPLATE_VERSION = "shadow-7"
+TEMPLATE_VERSION = "shadow-8"
 _PACK_DIR = Path(__file__).resolve().parents[4] if False else None  # set by set_pack_dir()
 
 
@@ -140,7 +140,7 @@ Allowed predicates (extract ONLY these; anything else is invalid):
 Example (a record often holds a fact even when most of it is about something else):
   record: "Pushed the release out. Also — dentist moved my cleaning to Friday. Back to debugging."
   output: {{"assertions": [{{"predicate": "<an encounter/appointment-like predicate from the menu>",
-            "value": {{"kind": "appointment"}}, "occurrence_date": null, "confidence": 0.9,
+            "value": {{"kind": "appointment"}}, "about": "owner", "occurrence_date": null, "confidence": 0.9,
             "quote": "dentist moved my cleaning to Friday"}}]}}
 
 Hard rules:
@@ -151,6 +151,8 @@ Hard rules:
   their loss — e.g. "Wiki and her boyfriend Luc" -> about: "other:Wiki"), or "unclear" if you
   cannot tell. Facts about others are NOT discarded — they are routed to that person's dossier —
   so NEVER launder a third party's fact into "owner" to save it.
+  The about field does NOT make extraction stricter: extract exactly what you would have
+  extracted anyway, and label each assertion honestly.
 - Object fields are ALL OPTIONAL: emit only the fields the record states, omit the rest.
   A fact with one known field is still a fact — do NOT skip a fact because other fields are unknown.
 - A field marked [REQUIRED] must come FROM THE RECORD. If the record does not state it,
@@ -222,6 +224,11 @@ def parse_output(raw: str, pack: Pack) -> Tuple[List[Dict[str, Any]], int]:
             for pf in _PERSON_FIELDS & set(val):
                 if val.get(pf) is not None and not person_field_ok(val[pf]):
                     person_bad = True
+            # identity integrity: a predicate that KEYS on person cannot store an
+            # assertion with no person — it would collapse onto a person-less key
+            if (pred.key_fields and "person" in pred.key_fields
+                    and not str(val.get("person") or "").strip()):
+                person_bad = True
         if person_bad:
             rejects += 1
             continue
