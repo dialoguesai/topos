@@ -72,7 +72,7 @@ def test_about_other_preserved():
     assert valid[0]["about"] == "other:Wiki"
 
 def test_template_version_bumped():
-    assert TEMPLATE_VERSION == "shadow-9"
+    assert TEMPLATE_VERSION == "shadow-10"
 
 # --- A4: verdict parsing + merge semantics ---
 def test_verdict_reject_unsupported():
@@ -111,13 +111,13 @@ def a3_writer(tmp_path):
     conn = sqlite3.connect(tmp_path / "a3.db")
     conn.executescript("""
       CREATE TABLE entities (entity_id TEXT PRIMARY KEY, entity_type TEXT,
-        normalized_name TEXT, aliases_json TEXT, is_self INTEGER DEFAULT 0);
+        canonical_name TEXT, normalized_name TEXT, aliases_json TEXT, is_self INTEGER DEFAULT 0);
       CREATE TABLE fact_conflicts (conflict_id TEXT PRIMARY KEY, subject_entity_id TEXT NOT NULL,
         predicate TEXT NOT NULL, incumbent_object_id TEXT NOT NULL, challenger_value TEXT NOT NULL,
         challenger_confidence REAL, status TEXT NOT NULL DEFAULT 'pending',
         created_at TEXT NOT NULL DEFAULT (datetime('now')));
-      INSERT INTO entities VALUES ('ent_owner','person','owner','[]',1);
-      INSERT INTO entities VALUES ('ent_wiki','person','wiki','[]',0);
+      INSERT INTO entities VALUES ('ent_owner','person','Owner','owner','[]',1);
+      INSERT INTO entities VALUES ('ent_wiki','person','Wiki','wiki','[]',0);
       CREATE TABLE signal_objects (object_id TEXT PRIMARY KEY, signal_dimension TEXT,
         object_type TEXT, object_key TEXT, payload_json TEXT, confidence REAL,
         source_refs_json TEXT, valid_from TEXT, valid_to TEXT, extractor_version TEXT,
@@ -241,3 +241,34 @@ def test_graph_edge_family_filter():
     assert len(filt("rel.*")) == 2
     assert len(filt("work.*")) == 1
     assert len(filt("communicates_with")) == 1
+
+
+# --- A5-M1: entity-first candidates + escape hatches ---
+def test_candidates_match_spine_and_kin(a3_writer):
+    w, conn = a3_writer
+    from topos.features.derivation.candidates import person_candidates
+    got = person_candidates(conn, "Coffee with Wiki, then called mom about the weekend")
+    assert "Wiki" in got and "mom" in got
+
+def test_candidates_no_match_empty(a3_writer):
+    w, conn = a3_writer
+    from topos.features.derivation.candidates import person_candidates
+    assert person_candidates(conn, "shipped the release, wrote docs") == []
+
+def test_new_person_escape_hatch_parses():
+    pack = _rel_pack()
+    raw = json.dumps({"assertions": [{
+        "predicate": "rel.relationship", "value": {"person": "NEW:Hillary", "role": "friend"},
+        "about": "owner", "confidence": 0.9, "quote": "Met Hillary"}]})
+    valid, rejects = parse_output(raw, pack)
+    assert rejects == 0 and valid[0]["value"]["person"] == "Hillary"
+    assert valid[0].get("new_person") is True
+
+def test_prompt_without_candidates_unchanged():
+    from topos.features.derivation.template import build_prompt
+    pack = _rel_pack()
+    p1 = build_prompt(pack, "hello world text", "2026-08-01", "authored")
+    assert "archive already knows" not in p1
+    p2 = build_prompt(pack, "hello world text", "2026-08-01", "authored",
+                      known_people=["Wiki", "Mitch"])
+    assert "Wiki, Mitch" in p2 and "NEW:<name>" in p2
