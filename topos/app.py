@@ -465,6 +465,19 @@ async def startup_event() -> None:
             principal = verify_relay_stamp(message) or RELAY_PRINCIPAL
             return await handle_control_plane_request(message, principal=principal)
 
+        # P4: the owner socket — kernel-gated (0600) owner_app lane, no secret.
+        from .uds import start_uds_server
+
+        start_uds_server(app)
+
+        # P5: pin the CP's stamp verification key on first boot (TOFU over the
+        # same TLS channel the relay already trusts). Threaded: a slow or down
+        # CP must not delay startup; an existing pin is never overwritten.
+        from .relay_stamp import autopin_stamp_key
+
+        threading.Thread(target=autopin_stamp_key, name="topos-stamp-autopin",
+                         daemon=True).start()
+
         state.control_plane_client = ControlPlaneClient(
             control_plane_url=settings.topos_control_plane_url,
             api_key=str(settings.topos_key or ""),
