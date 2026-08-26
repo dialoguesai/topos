@@ -42,6 +42,10 @@ from .journal_origin_dimension_v1 import (
     MIGRATION_ID as JOURNAL_ORIGIN_DIMENSION_V1_ID,
     apply_journal_origin_dimension_v1_up,
 )
+from .derivation_factory_v1 import (
+    MIGRATION_ID as DERIVATION_FACTORY_V1_ID,
+    apply_derivation_factory_v1_up,
+)
 from .pack_registry_v1 import (
     MIGRATION_ID as PACK_REGISTRY_V1_ID,
     apply_pack_registry_v1_up,
@@ -354,6 +358,7 @@ MIGRATIONS: List[MigrationSpec] = [
     _spec(63, ENRICHMENT_RECORD_PROGRESS_V1_ID, apply_enrichment_record_progress_v1_up),
     _spec(64, DERIVATION_PROVENANCE_V1_ID, apply_derivation_provenance_v1_up),
     _spec(65, PACK_REGISTRY_V1_ID, apply_pack_registry_v1_up),
+    _spec(66, DERIVATION_FACTORY_V1_ID, apply_derivation_factory_v1_up),
 ]
 
 

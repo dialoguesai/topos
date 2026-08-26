@@ -1085,3 +1085,21 @@ async def post_fact_conflict_resolution(
     if not ok:
         raise HTTPException(status_code=404, detail=f"unknown conflict {conflict_id}")
     return {"conflict_id": conflict_id, "status": status}
+
+
+@router.post("/derivation/offers/resolve")
+async def post_pack_offer_resolution(
+    offer_id: str = Body(...),
+    action: str = Body(..., description="accept | dismiss"),
+    _api_key: str = Depends(require_api_key),
+):
+    """Self-gating offers: the node offered, the owner decides (W-B)."""
+    from ..features.derivation.surfaces import resolve_pack_offer
+
+    try:
+        out = resolve_pack_offer(_entities_conn(), offer_id, action)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not out:
+        raise HTTPException(status_code=404, detail=f"unknown offer {offer_id}")
+    return out

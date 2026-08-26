@@ -22,6 +22,20 @@ def list_packs(conn: sqlite3.Connection) -> Dict[str, Any]:
     conflict_counts = dict(conn.execute(
         "SELECT predicate, COUNT(*) FROM fact_conflicts WHERE status='pending'"
         " GROUP BY predicate").fetchall())
+    def _q(sql, args=()):
+        try:
+            return conn.execute(sql, args).fetchall()
+        except sqlite3.OperationalError:
+            return []              # pre-migration-66 node
+    offers = {}
+    for oid, pid_, kind, stats_json, created in _q(
+            "SELECT offer_id, pack_id, kind, stats_json, created_at FROM pack_offers"
+            " WHERE status='pending' ORDER BY created_at DESC"):
+        offers.setdefault(pid_, {"offer_id": oid, "kind": kind, "created_at": created,
+                                 "stats": json.loads(stats_json or "{}")})
+    yield_30d = {r[0]: {"prefilter_hits": r[1], "llm_calls": r[2], "written": r[3]}
+                 for r in _q("SELECT pack_id, SUM(prefilter_hits), SUM(llm_calls), SUM(written)"
+                             " FROM pack_yield WHERE day >= date('now','-30 day') GROUP BY pack_id")}
     packs: List[Dict[str, Any]] = []
     for pid, ver, enabled, disclosure, last_run in conn.execute(
             "SELECT pack_id, version, enabled, disclosure_default, last_run_at"
@@ -38,6 +52,8 @@ def list_packs(conn: sqlite3.Connection) -> Dict[str, Any]:
             "pending_conflicts": pending,
             "last_run_at": last_run,
             "predicates": len(getattr(p, "predicates", {}) or {}) if p else 0,
+            "offer": offers.get(pid),
+            "yield_30d": yield_30d.get(pid),
         })
     return {"packs": packs, "total_conflicts": sum(conflict_counts.values())}
 
@@ -81,3 +97,27 @@ def resolve_conflict(conn: sqlite3.Connection, conflict_id: str, status: str) ->
                            (status, conflict_id))
         commit_connection(conn)
     return bool(cur.rowcount)
+
+
+def resolve_pack_offer(conn: sqlite3.Connection, offer_id: str, action: str) -> Dict[str, Any]:
+    """Owner decision on a self-gating offer. accept on an enable_offer enables
+    the pack; accept on a disable_nudge disables it; dismiss just records the
+    choice (with backoff — a dismissed offer is not re-minted for 30 days)."""
+    if action not in ("accept", "dismiss"):
+        raise ValueError("action must be accept|dismiss")
+    row = conn.execute("SELECT pack_id, kind, status FROM pack_offers WHERE offer_id=?",
+                       (offer_id,)).fetchone()
+    if not row:
+        return {}
+    pack_id, kind, status = row
+    from ...storage.db.write_gate import commit_connection, with_db_write
+    with with_db_write():
+        conn.execute("UPDATE pack_offers SET status=?, updated_at=datetime('now')"
+                     " WHERE offer_id=?",
+                     ("accepted" if action == "accept" else "dismissed", offer_id))
+        if action == "accept":
+            enable = 1 if kind == "enable_offer" else 0
+            conn.execute("UPDATE pack_registry SET enabled=?, updated_at=datetime('now')"
+                         " WHERE pack_id=?", (enable, pack_id))
+        commit_connection(conn)
+    return {"offer_id": offer_id, "pack_id": pack_id, "kind": kind, "action": action}

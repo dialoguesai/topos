@@ -153,6 +153,7 @@ SUPPORTED_MESSAGE_TYPES = [
     "put_fact_conflict",
     "put_fact_verdict",
     "put_facts_llm_config",
+    "put_pack_offer",
     "put_packet_resolution_config",
     "put_sanitization_ollama_config",
     "put_signal_extraction_config",
