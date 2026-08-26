@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.32] — 2026-08-26
+
 ### Fixed
 - **Facts-direct owns `items`, so a correct answer stops shipping beside a wrong list.**
   The game layer fills `items` speculatively from graph/score text before the
