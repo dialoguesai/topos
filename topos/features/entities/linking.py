@@ -43,7 +43,7 @@ _LINK_STOPWORDS = frozenset(
 
 def _linkable_candidate(cand: str) -> bool:
     """A candidate name is linkable only if it carries at least one real word:
-    ≥3 chars and not a function word. 'Luc' links; 'IS', 'Go', 'The One' do not."""
+    ≥3 chars and not a function word. 'Leo' links; 'IS', 'Go', 'The One' do not."""
     words = [w for w in cand.split() if w]
     if not words:
         return False
