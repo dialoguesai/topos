@@ -312,3 +312,26 @@ def test_org_grounding():
         "about": "owner", "confidence": 0.9, "quote": "getting fired"}]})
     valid2, _ = parse_output(raw2, pack, record_text=rec)
     assert len(valid2) == 1      # org-less stays legal
+
+
+# --- role-evidence guard (measured: verifier consistently accepts possessive misattribution) ---
+def test_role_evidence_possessive_routes_away():
+    from topos.features.derivation.template import relationship_role_check
+    assert relationship_role_check("partner", "Luc", "Wiki and her boyfriend Luc") == "other"
+    assert relationship_role_check("sibling", "Albi", "Albi was up before her sister") == "other"
+    assert relationship_role_check("child", "Emersyn", "Hung out with Peter Grandma, mom, Emersyn") == "quarantine"
+    assert relationship_role_check("friend", "Wiki", "My friend Wiki submitted an app") == "owner"
+    assert relationship_role_check("sibling", "brother", "My brother got a guitar") == "owner"
+    assert relationship_role_check("parent", "Mom", "rosary with Mom and Grandma") == "owner"
+
+def test_parse_role_evidence_and_loss_guard():
+    pack = _rel_pack()
+    raw = json.dumps({"assertions": [
+        {"predicate": "rel.relationship", "value": {"person": "Luc", "role": "partner"},
+         "about": "owner", "confidence": 0.95, "quote": "her boyfriend Luc"},
+        {"predicate": "rel.relationship_event", "value": {"person": "Albi", "event": "loss", "description": "goodbye"},
+         "about": "owner", "confidence": 0.9, "quote": "goodbye"}]})
+    valid, rejects = parse_output(raw, pack, record_text="Wiki and her boyfriend Luc. I said goodbye to Albi.")
+    lucs = [a for a in valid if isinstance(a["value"], dict) and a["value"].get("person") == "Luc"]
+    assert lucs and lucs[0]["about"] == "unclear"      # never silently owner
+    assert rejects == 1                                 # loss-without-death-evidence rejected

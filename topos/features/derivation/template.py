@@ -76,6 +76,59 @@ def _needs_about(predicate_name: str) -> bool:
 _ABOUT_RE = re.compile(r"^(owner|unclear|other:.{1,60})$")
 
 
+ROLE_EVIDENCE = {
+    "partner": ("partner", "boyfriend", "girlfriend", "significant other", "fiance", "fiancee", "fiancé", "fiancée"),
+    "spouse": ("wife", "husband", "spouse", "married"),
+    "ex_partner": ("ex", "ex-boyfriend", "ex-girlfriend", "broke up"),
+    "child": ("son", "daughter", "child", "kids", "my girl", "my boy"),
+    "sibling": ("brother", "sister", "sibling"),
+    "parent": ("mom", "mother", "dad", "father", "parent"),
+    "extended_family": ("grandma", "grandmother", "grandpa", "grandfather", "aunt",
+                        "uncle", "cousin", "niece", "nephew", "family"),
+    "close_friend": ("close friend", "best friend", "friend"),
+    "friend": ("friend", "buddy", "pal"),
+    "roommate": ("roommate", "flatmate"),
+    "colleague": ("colleague", "coworker", "co-worker", "work with", "teammate"),
+    "manager": ("manager", "boss"),
+}
+
+_THIRD_PERSON_POSSESSIVES = ("her ", "his ", "their ")
+
+LOSS_EVIDENCE = ("died", "passed", "passing", "funeral", "loss of", "death", "rest this morning", "put him to rest", "put her to rest")
+
+
+def relationship_role_check(role: str, person: str, record_text: str):
+    """A1 role-evidence guard (measured 2026-08-26 full-run): the 27B verifier
+    CONSISTENTLY accepts possessive misattribution ("Wiki and her boyfriend Luc"
+    -> owner's partner) — textual support without subject discipline. Rules,
+    all deterministic:
+      1. A kin-term PERSON ("Mom", "brother") is self-evidencing -> owner.
+      2. Otherwise the role needs an evidence word in the record at all;
+         none -> "quarantine" (e.g. child claimed for a name at a family dinner).
+      3. An evidence word owned by a third-person possessive ("her sister",
+         "his boyfriend") -> "other" (route to the possessor's dossier).
+      4. Evidence word with "my" (or unpossessed) -> "owner".
+    Returns "owner" | "other" | "quarantine"."""
+    low = " " + (record_text or "").lower() + " "
+    n = " ".join((person or "").strip().lower().split())
+    if n in _KIN_WHITELIST:
+        return "owner"
+    words = ROLE_EVIDENCE.get(str(role or "").strip().lower())
+    if not words:
+        return "owner"          # roles without a lexicon pass through (verifier residue)
+    hits = [w for w in words if w in low]
+    if not hits:
+        return "quarantine"
+    for w in hits:
+        i = low.find(w)
+        prefix = low[max(0, i - 12):i]
+        if any(p in prefix for p in _THIRD_PERSON_POSSESSIVES):
+            return "other"
+        if "my " in prefix or "our " in prefix:
+            return "owner"
+    return "owner"
+
+
 def person_grounded(name: str, record_text: str) -> bool:
     """A5 grounding guard: a person value must be ANCHORED in the record — at
     least one name token (>2 chars) literally present, or a kin term. Kills the
@@ -279,6 +332,16 @@ def parse_output(raw: str, pack: Pack, record_text: str = None) -> Tuple[List[Di
         about = str(a.get("about") or "").strip()
         if not _ABOUT_RE.match(about):
             about = "unclear" if _needs_about(pred.name) else "owner"
+        if (record_text is not None and pred.name == "rel.relationship"
+                and isinstance(val, dict) and isinstance(val.get("role"), str)):
+            rc = relationship_role_check(val.get("role"), str(val.get("person") or ""), record_text)
+            if rc in ("quarantine", "other") and about == "owner":
+                about = "unclear"      # never silently owner; A3 quarantine is reviewable
+        if (record_text is not None and pred.name == "rel.relationship_event"
+                and isinstance(val, dict) and str(val.get("event")) == "loss"
+                and not any(w in (record_text or "").lower() for w in LOSS_EVIDENCE)):
+            rejects += 1               # a "loss" with no death evidence is a mislabel ("goodbye")
+            continue
         try:
             conf = min(1.0, max(0.0, float(a.get("confidence") or 0.5)))
         except (TypeError, ValueError):
