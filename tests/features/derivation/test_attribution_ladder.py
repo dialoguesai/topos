@@ -272,3 +272,28 @@ def test_prompt_without_candidates_unchanged():
     p2 = build_prompt(pack, "hello world text", "2026-08-01", "authored",
                       known_people=["Wiki", "Mitch"])
     assert "Wiki, Mitch" in p2 and "NEW:<name>" in p2
+
+
+# --- A5 grounding guard: names must be anchored in the record ---
+def test_person_grounded_kills_laundering():
+    from topos.features.derivation.template import person_grounded
+    rec = "My 4th time seeing him. The only person I care to venture out to see"
+    assert not person_grounded("The Wandering Partners", rec)      # measured laundering
+    assert not person_grounded("Victor Whiskey", "even Michael Jordan lost some games")
+    # wait — 'michael' IS in that record; grounded returns True. Token-level
+    # grounding admits first-name collisions; the verifier owns that residue.
+    assert person_grounded("grandpa", "My grandpa passed over the weekend")
+    assert person_grounded("mom", "anything")                     # kin whitelist
+    assert person_grounded("Wiki", "My friend Wiki submitted an app")
+
+def test_parse_output_grounding(a3_writer=None):
+    pack = _rel_pack()
+    rec = "My 4th time seeing him."
+    raw = json.dumps({"assertions": [{
+        "predicate": "rel.relationship", "value": {"person": "The Wandering Partners", "role": "friend"},
+        "about": "owner", "confidence": 0.9, "quote": "seeing him"}]})
+    valid, rejects = parse_output(raw, pack, record_text=rec)
+    assert rejects == 1 and valid == []
+    # without record_text (legacy callers) behavior unchanged
+    valid2, rejects2 = parse_output(raw, pack)
+    assert len(valid2) == 1
