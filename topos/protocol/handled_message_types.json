@@ -133,6 +133,7 @@
   "post_source_test_enrichment",
   "post_source_test_enrichment_trigger",
   "post_source_test_ingestion",
+  "put_community_name",
   "put_conversation_context",
   "put_conversation_context_llm_config",
   "put_data_explorer_table_prefs",

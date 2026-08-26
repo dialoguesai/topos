@@ -1121,3 +1121,38 @@ async def post_pack_backfill(
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return {"pack_id": pack_id, **stats}
+
+
+@router.put("/entities/communities/{community_id}/name")
+async def put_community_name_route(
+    community_id: int,
+    name: str = Body(..., embed=True),
+    _api_key: str = Depends(require_api_key),
+):
+    """Owner rename for a graph community (stable-naming S3)."""
+    from ..features.entities.community_names import core_fingerprint, rename_community
+    from ..features.entities.community_naming import valid_label
+
+    if not valid_label(name):
+        raise HTTPException(status_code=400, detail="a short name (2-4 words, letters) required")
+    conn = _entities_conn()
+    rows = conn.execute(
+        "SELECT entity_id, json_extract(metadata_json,'$.centrality.eigen')"
+        " FROM entities WHERE json_extract(metadata_json,'$.community_id')=?",
+        (community_id,),
+    ).fetchall()
+    if not rows:
+        raise HTTPException(status_code=404, detail=f"unknown community {community_id}")
+    ranked = [x[0] for x in sorted(rows, key=lambda x: -(x[1] or 0.0))]
+    weights = {x[0]: float(x[1] or 0.0) for x in rows}
+    from ..storage.db.write_gate import commit_connection, with_db_write
+    with with_db_write():
+        rename_community(conn, core_fingerprint(ranked, weights), name)
+        conn.execute(
+            "UPDATE entities SET metadata_json=json_patch(COALESCE(metadata_json,'{}'),"
+            " json_object('community_label', ?))"
+            " WHERE json_extract(metadata_json,'$.community_id')=?",
+            (name, community_id),
+        )
+        commit_connection(conn)
+    return {"community_id": community_id, "name": name, "members": len(rows)}
