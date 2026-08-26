@@ -15,6 +15,7 @@ _COLS = (
     ("source_refs_json", "TEXT"),
     ("quote", "TEXT"),
     ("about_hint", "TEXT"),
+    ("updated_at", "TEXT"),
 )
 
 

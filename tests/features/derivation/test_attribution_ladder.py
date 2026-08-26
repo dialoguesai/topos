@@ -481,6 +481,7 @@ def test_promote_quarantined_with_new_person(a3_writer):
       ALTER TABLE fact_conflicts ADD COLUMN source_refs_json TEXT;
       ALTER TABLE fact_conflicts ADD COLUMN quote TEXT;
       ALTER TABLE fact_conflicts ADD COLUMN about_hint TEXT;
+      ALTER TABLE fact_conflicts ADD COLUMN updated_at TEXT;
       CREATE TABLE IF NOT EXISTS derivation_training_ledger (
         ledger_id TEXT PRIMARY KEY, ts TEXT DEFAULT (datetime('now')), stage TEXT,
         pack_id TEXT, pack_version TEXT, template_version TEXT, extract_model TEXT,
