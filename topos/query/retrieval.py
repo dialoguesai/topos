@@ -138,6 +138,19 @@ _MONTH_TOKENS = frozenset(
 _DATE_RANGE_TERMS = frozenset({"through", "thru", "until", "till", "between", "during"})
 
 
+
+def _facts_lane_weight() -> float:
+    """BP1 (W1.2): the facts lane's fusion weight, config-overridable so the
+    sweep calibrates by data instead of a hardcoded literal. Default 1.5 is the
+    shipped behavior; the 2026-08-26 sweep readout lives in
+    derivation-packs/pilot/w1_report.md."""
+    import os
+    try:
+        return float(os.environ.get("TOPOS_FACTS_LANE_WEIGHT", "1.5"))
+    except ValueError:
+        return 1.5
+
+
 def _is_year_token(token: str) -> bool:
     return len(token) == 4 and token.isdigit() and 1900 <= int(token) <= 2099
 
@@ -5631,7 +5644,7 @@ def _build_summary_items_unfiltered(
         return _rrf_fuse_summary_lists(
             [
                 ("stat_insights", 2.0, stat_items),
-                ("facts_store", 1.5, fact_store_items),
+                ("facts_store", _facts_lane_weight(), fact_store_items),
                 ("entities", 1.5, entity_items),
                 # Beside the scope routes, never above them: a thread record is
                 # ordinary canonical evidence that arrived by a different key, so
