@@ -361,3 +361,198 @@ def rows_for_persist(acc: dict, dataset_id: str, session_gap_seconds: int) -> li
                     e.last_ts.isoformat() if e.last_ts else None,
                     int(session_gap_seconds), None, None, now, now))
     return out
+
+
+# --------------------------------------------------------------------------- persistence
+
+def persist_directed_edges(conn: Any, dataset_id: str, rows: list, periods: Any = None) -> int:
+    """Replace the directed rows for the periods this pass computed.
+
+    Pruning is scoped to the periods actually recomputed, never a blanket delete: a partial
+    pass (one connector, one month) must not silently erase everything else. The write and
+    its commit both sit inside the gate — taking SQLite's write lock outside it is the
+    lock-order inversion the write gate exists to prevent.
+    """
+    from ..storage.db.write_gate import batched_writes
+
+    touched = set(periods) if periods is not None else {r[1] for r in rows}
+    with batched_writes(conn):
+        for period in sorted(touched):
+            conn.execute(
+                f"DELETE FROM {MESSENGER_DIRECTED_EDGES_TABLE}"
+                " WHERE dataset_id = ? AND period_key = ?", (dataset_id, period))
+        conn.executemany(
+            f"""INSERT OR REPLACE INTO {MESSENGER_DIRECTED_EDGES_TABLE}
+                (dataset_id, period_key, connector, edge_kind, from_key, to_key, msgs,
+                 sessions_initiated, replies, median_reply_latency_s, first_ts, last_ts,
+                 session_gap_seconds, from_person_id, to_person_id, created_at, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
+    return len(rows)
+
+
+def persist_dyad_stats(conn: Any, dataset_id: str, rows: list) -> int:
+    """The lifetime rollup is a full replacement for this dataset — every row is derived
+    from the whole corpus, so a partial update would leave rows describing a corpus that no
+    longer exists."""
+    from ..storage.db.write_gate import batched_writes
+
+    with batched_writes(conn):
+        conn.execute(f"DELETE FROM {MESSENGER_DYAD_STATS_TABLE} WHERE dataset_id = ?",
+                     (dataset_id,))
+        conn.executemany(
+            f"""INSERT OR REPLACE INTO {MESSENGER_DYAD_STATS_TABLE}
+                (dataset_id, a_key, b_key, involves_self, peer_class, total_msgs, a_to_b,
+                 b_to_a, balance, first_ts, last_ts, active_periods, reciprocal_periods,
+                 longest_contact_streak_months, longest_contact_streak_weeks,
+                 longest_reciprocal_streak_months, longest_reciprocal_streak_weeks,
+                 max_gap_days, median_gap_days, recent_gap_days, drift_ratio, tie_state,
+                 a_person_id, b_person_id, created_at, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
+    return len(rows)
+
+
+# --------------------------------------------------------------------------- dyad rollup
+
+TIE_ACTIVE = "active"
+TIE_COOLING = "cooling"
+TIE_DORMANT = "dormant"
+TIE_ONE_SIDED = "one_sided"
+TIE_BROADCAST_ONLY = "broadcast_only"
+
+
+def _longest_run(buckets: set, universe: list) -> int:
+    """Longest run of CONSECUTIVE occupied buckets, measured against the corpus's own
+    calendar rather than against the dyad's — a dyad that starts in month three cannot have
+    a five-month streak, and indexing off its own first bucket would say it could."""
+    idx = {b: i for i, b in enumerate(universe)}
+    xs = sorted(idx[b] for b in buckets if b in idx)
+    best = cur = 0
+    prev = None
+    for x in xs:
+        cur = cur + 1 if prev is not None and x == prev + 1 else 1
+        best = max(best, cur)
+        prev = x
+    return best
+
+
+def build_dyad_stats(conn: Any, dataset_id: str, *, now: Any = None,
+                     recent_window_days: int = 30) -> list:
+    """Lifetime rollup, one row per unordered pair.
+
+    Streaks are stored at BOTH grains and in BOTH flavours, which is not indecision. On a
+    4.5-month corpus a monthly streak maxes at 5 — too coarse to see drift — while weekly
+    carries 21 buckets at the same peer coverage. And the contrast between *contact* (either
+    direction) and *reciprocal* (both directions in the bucket) is the whole of catalog #19,
+    "which friendships have become one-sided": one number cannot express it.
+
+    `drift_ratio` compares the dyad against ITS OWN baseline rate, never against a global
+    one. A monthly correspondent is not drifting because a daily one exists.
+    """
+    rows = load_messages(conn, dataset_id)
+    kinds = classify_conversations(rows)
+    peers: dict = {}
+    for conv, _m, s, _e, sf, _src, _rt in rows:
+        if not sf and s:
+            peers.setdefault(conv, set()).add(str(s))
+
+    per: dict = {}
+    all_months: set = set()
+    all_weeks: set = set()
+    for conv, _mid, sender, ea, is_self, _src, _rt in rows:
+        if kinds.get(conv) != EDGE_KIND_DM:
+            continue
+        dt = _parse_ts(ea)
+        if dt is None:
+            continue
+        cp = peers.get(conv) or set()
+        if not cp:
+            continue
+        peer = next(iter(cp))
+        a, b = dyad_key(SELF_KEY, peer)
+        d = per.setdefault((a, b), {
+            "times": [], "a_to_b": 0, "b_to_a": 0, "months": set(), "weeks": set(),
+            "m_out": set(), "m_in": set(), "w_out": set(), "w_in": set()})
+        speaker = SELF_KEY if is_self else peer
+        mo, wk = dt.strftime("%Y-%m"), dt.strftime("%G-W%V")
+        all_months.add(mo)
+        all_weeks.add(wk)
+        d["times"].append(dt)
+        d["months"].add(mo)
+        d["weeks"].add(wk)
+        if speaker == a:
+            d["a_to_b"] += 1
+            d["m_out"].add(mo)
+            d["w_out"].add(wk)
+        else:
+            d["b_to_a"] += 1
+            d["m_in"].add(mo)
+            d["w_in"].add(wk)
+
+    months = sorted(all_months)
+    weeks = sorted(all_weeks)
+    ref = now or (max((t for d in per.values() for t in d["times"]), default=None))
+    stamp = _utc_now()
+    out = []
+    for (a, b), d in per.items():
+        times = sorted(d["times"])
+        total = len(times)
+        gaps = [(times[i] - times[i - 1]).total_seconds() / 86400.0
+                for i in range(1, len(times))]
+        peer = b if a == SELF_KEY else a
+        recent_gap = ((ref - times[-1]).total_seconds() / 86400.0) if ref else None
+        # own-baseline drift: recent rate vs this dyad's own lifetime rate, never a global one
+        span_days = max((times[-1] - times[0]).total_seconds() / 86400.0, 1.0)
+        baseline = total / span_days
+        recent = sum(1 for t in times
+                     if ref and (ref - t).total_seconds() / 86400.0 <= recent_window_days)
+        # Divide by the OBSERVABLE window, not the nominal one. A dyad three weeks old has
+        # only three weeks in which recent messages could have happened; dividing those by 30
+        # understates its rate and reports every new relationship as already cooling.
+        observable = recent_window_days
+        if ref is not None:
+            age_days = (ref - times[0]).total_seconds() / 86400.0
+            observable = max(min(recent_window_days, age_days), 1.0)
+        drift = round((recent / observable) / baseline, 4) if baseline > 0 else None
+        recip_m = d["m_out"] & d["m_in"]
+        recip_w = d["w_out"] & d["w_in"]
+        # BALANCE IS OWNER-RELATIVE, and it has to be stated because the naive definition is
+        # silently wrong. `dyad_key` sorts canonically, so for a phone peer ('+1512…' < 's')
+        # the owner is b_key, while for an email peer ('zoe@…' > 's') the owner is a_key.
+        # Defining balance as (a_to_b - b_to_a) therefore FLIPS SIGN depending on how the
+        # counterparty's identifier happens to sort — and "who is one-sided" would invert
+        # between two peers for no reason but their phone number.
+        #
+        # Positive means the OWNER sends more. For a dyad with no owner in it the pair has no
+        # privileged side, so the a->b convention stands and a_key/b_key are stored alongside.
+        if not total:
+            balance = None
+        elif a == SELF_KEY:
+            balance = round((d["a_to_b"] - d["b_to_a"]) / total, 4)
+        elif b == SELF_KEY:
+            balance = round((d["b_to_a"] - d["a_to_b"]) / total, 4)
+        else:
+            balance = round((d["a_to_b"] - d["b_to_a"]) / total, 4)
+
+        if not recip_m:
+            tie = TIE_BROADCAST_ONLY
+        elif recent_gap is not None and recent_gap > 90:
+            tie = TIE_DORMANT
+        elif abs(balance or 0) >= 0.6:
+            tie = TIE_ONE_SIDED
+        elif drift is not None and drift < 0.5:
+            tie = TIE_COOLING
+        else:
+            tie = TIE_ACTIVE
+
+        out.append((
+            dataset_id, a, b, 1 if SELF_KEY in (a, b) else 0, classify_peer(peer),
+            total, d["a_to_b"], d["b_to_a"], balance,
+            times[0].isoformat(), times[-1].isoformat(),
+            len(d["months"]), len(recip_m),
+            _longest_run(d["months"], months), _longest_run(d["weeks"], weeks),
+            _longest_run(recip_m, months), _longest_run(recip_w, weeks),
+            round(max(gaps), 4) if gaps else None,
+            round(_median(gaps), 4) if gaps else None,
+            round(recent_gap, 4) if recent_gap is not None else None,
+            drift, tie, None, None, stamp, stamp))
+    return out
