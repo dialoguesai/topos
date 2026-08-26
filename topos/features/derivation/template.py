@@ -43,6 +43,7 @@ _PERSON_BLOCKLIST = {
     "him", "her", "he", "she", "they", "them", "we", "us", "me", "myself", "you",
     "another", "other", "others", "someone", "somebody", "anyone", "everybody",
     "everyone", "people", "family", "friends", "one", "this", "that", "it",
+    "yall", "y'all", "everybody else", "guys",
 }
 _KIN_WHITELIST = {
     "mom", "mother", "dad", "father", "grandma", "grandmother", "grandpa",
