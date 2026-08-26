@@ -26,8 +26,9 @@ from typing import Any, Dict, List, Optional
 from topos.features.facts.store import FactStore, normalize_predicate, CONFLICT_CONFIDENCE_MARGIN
 from .guard import find_identifiers
 from .packs import Pack, Predicate
-
-TEMPLATE_VERSION = "shadow-1"
+# extractor provenance must track the PROMPT actually used — a local copy of this
+# constant stamped every shadow-2..6 fact "shadow-1" (caught in W1.3 grading)
+from .template import TEMPLATE_VERSION
 
 
 def _now_iso() -> str:
