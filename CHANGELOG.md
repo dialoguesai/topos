@@ -9,6 +9,22 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **[S1] Training-data factory** (migration 66): every judged assertion — accepted or
+  rejected — lands in `derivation_training_ledger` with quotes, verdicts and reasons;
+  rejects are the hard negatives a future classifier distillation trains on. Daily
+  per-pack yield counters (`pack_yield`) power cost visibility and the nudges below.
+- **[S1] Per-node self-gating with offers** (`pack_offers`): a disabled lens whose
+  prefilter keeps matching gets a capped shadow trial (no writes); passing mints an
+  enable offer with example facts. An enabled lens burning ≥50 calls/30d with zero
+  yield gets a disable nudge — keyed on CALLS SPENT, so low-volume high-value sources
+  (a daily journal) are never nudged off. The node offers; the owner decides
+  (`put_pack_offer`, POST /derivation/offers/resolve; dismiss backs off 30 days).
+  Consent precedes computation: special-class packs are never auto-trialed.
+- **[O] Packs 0.2.4**: health.mental felt-state discipline; aspirations.goals
+  named-goal discipline (Wave-B contract iterations from measured gate junk).
+
+
 ## [1.3.27] — 2026-08-26
 
 ### Fixed
