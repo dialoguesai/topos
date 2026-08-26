@@ -9,6 +9,29 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **[E] The lens dispatcher, and closeness as a reviewable fact.** Packs have carried
+  `synthesis[]` since the catalog was written and `Pack.lenses` calls itself "what the
+  runtime will dispatch on", but nothing dispatched it: `synthesize_closeness` had ZERO
+  callers, so `rel.closeness_tier` stayed empty while facts_direct asked for it on every
+  closeness question. `run_pack_lenses()` now runs every implemented producer lens a pack
+  declares (3 of 55 are implemented, so "declared, not implemented" is a reported
+  outcome, and one lens raising cannot sink the pack). New `comms_stats` supplies the
+  input the lens always declared and never had — frequency, initiation balance, recency,
+  channels — so the tier is scored on volume x reciprocity x 1:1-share over the declared
+  90d window rather than being a message count with a relationship word on it. Guards
+  that each fired on live data: the owner is never their own inner circle, a name with no
+  letters is an identifier, an email is too, `scheme:value` shapes are not people, and a
+  blackholed person stays erased. 23 facts on this node: 2 inner_circle, 6 close, 9
+  regular, 6 peripheral.
+
+### Fixed
+- **Closeness answers from the durable fact view, in tier order.** facts-direct now runs
+  before the query-time closeness lane, which drops to a fallback for a node whose lens
+  has not run. Tier facts also sorted as events (`_is_durable` tested only role/status),
+  and all 23 share one `valid_from`, so the answer to "Who's in my close circle?" opened
+  with four `peripheral` people.
+
 ### Fixed
 - **Known-item facts: delimiter-aware predicates and a deterministic owner.** A bare
   `LIKE 'fact:<owner>:<pred>%'` also swept sibling predicates, so "Who's in my family?"
@@ -34,6 +57,32 @@ The machine-readable twin of each release is
   Gated on packet_resolution exactly as facts-direct is, so a grantee gets nothing and
   the relationships grant policy — entity keys and warmth bands, not contact names —
   still holds.
+
+### Added
+- **[O] A minimum-free-disk limit the owner sets, and a model manager that works to
+  keep it.** The disk check's reserve was a hard-coded 2 GB nobody could see or change.
+  It is now a setting (`engine_config[min_free_disk_bytes]`, default 10 GB) with
+  `GET/PUT /v1/disk-space-policy` and `GET /v1/disk-status` — the same three as
+  websocket types `get/put_disk_space_policy` and `get_disk_status`, which the control
+  plane relays for Settings → General and the sidebar's low-disk warning.
+- **[O] `topos.engine.model_manager`: eviction that cannot delete a model the node
+  needs.** When a pull will not fit above the floor, local models that nothing is bound
+  to are removed least-recently-written first and the pull is retried, rather than
+  refusing outright — an Ollama model is the only large thing on that volume that a
+  download can restore. Protected from eviction: the active pack's roles and every
+  node-function config (signal extraction, facts, conversation context, community
+  naming, sanitization), plus the tag being made room for. Deletions re-probe the volume
+  instead of subtracting reported sizes, because Ollama shares blobs between tags; a
+  remote Ollama, an unreadable volume, and "nothing evictable" each stop the sweep with
+  a named reason instead of a deletion made on a guess. An eviction also drops the pack
+  resolver's cached installed-tag set, which otherwise keeps naming deleted models for
+  up to 30 seconds.
+
+### Changed
+- **[O] The disk reserve defaults to 10 GB and is stored in decimal GB.** 2 GB was
+  "obviously more than a few writes" and no more; 10 GB is what the settings screen now
+  shows. Decimal because `format_bytes` divides by 1e9 like a file manager does, so a
+  floor typed as 10 does not read back as 10.7 GB.
 
 ## [1.3.32] — 2026-08-26
 
