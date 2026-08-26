@@ -506,3 +506,41 @@ def test_community_label_prefers_dominant_member_type(tmp_path):
     }
     assert labels["t0"] in {"Topos", "Control Plane", "Horos", "Investor Deck"}, labels
     assert labels["t0"] != "Sierra Hotel"
+
+
+def test_community_label_never_a_goal_sentence(tmp_path):
+    """Second measured failure: a goal's sentence-length canonical name labeled
+    a community (and dragged sensitive content into a UI chip)."""
+    import sqlite3, json as _json
+    from topos.features.entities.maintenance import compute_communities
+
+    conn = sqlite3.connect(tmp_path / "g2.db")
+    conn.executescript(
+        """
+        CREATE TABLE entities (entity_id TEXT PRIMARY KEY, entity_type TEXT,
+          canonical_name TEXT, normalized_name TEXT, aliases_json TEXT,
+          is_self INTEGER DEFAULT 0, mention_count INTEGER DEFAULT 0,
+          metadata_json TEXT, created_at TEXT, updated_at TEXT);
+        CREATE TABLE entity_edges (edge_id TEXT PRIMARY KEY, src_entity_id TEXT,
+          dst_entity_id TEXT, edge_type TEXT, weight REAL, evidence_count INTEGER,
+          last_event_at TEXT, valid_from TEXT, valid_to TEXT, metadata_json TEXT);
+        """
+    )
+    rows = [
+        ("g1", "goal", "Reflect on Topos values and discuss death with a mother facing terminal illness"),
+        ("g2", "goal", "Write the long plan about everything that matters this year"),
+        ("g3", "goal", "Ship the whole product roadmap before winter arrives somehow"),
+        ("t1", "topic", "Topos"),
+    ]
+    for eid, etype, name in rows:
+        conn.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name)"
+                     " VALUES (?, ?, ?, lower(?))", (eid, etype, name, name))
+    for i, (a, b) in enumerate([("g1", "g2"), ("g2", "g3"), ("g3", "t1"), ("g1", "t1")]):
+        conn.execute("INSERT INTO entity_edges (edge_id, src_entity_id, dst_entity_id, edge_type, weight)"
+                     " VALUES (?, ?, ?, 'co_occurrence', 3.0)", (f"e{i}", a, b))
+    conn.commit()
+    compute_communities(conn)
+    label = _json.loads(conn.execute(
+        "SELECT metadata_json FROM entities WHERE entity_id='t1'").fetchone()[0] or "{}"
+    ).get("community_label")
+    assert label == "Topos", label
