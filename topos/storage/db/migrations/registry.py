@@ -46,6 +46,10 @@ from .community_names_v1 import (
     MIGRATION_ID as COMMUNITY_NAMES_V1_ID,
     apply_community_names_v1_up,
 )
+from .conflict_provenance_v1 import (
+    MIGRATION_ID as CONFLICT_PROVENANCE_V1_ID,
+    apply_conflict_provenance_v1_up,
+)
 from .derivation_factory_v1 import (
     MIGRATION_ID as DERIVATION_FACTORY_V1_ID,
     apply_derivation_factory_v1_up,
@@ -364,6 +368,7 @@ MIGRATIONS: List[MigrationSpec] = [
     _spec(65, PACK_REGISTRY_V1_ID, apply_pack_registry_v1_up),
     _spec(66, DERIVATION_FACTORY_V1_ID, apply_derivation_factory_v1_up),
     _spec(67, COMMUNITY_NAMES_V1_ID, apply_community_names_v1_up),
+    _spec(68, CONFLICT_PROVENANCE_V1_ID, apply_conflict_provenance_v1_up),
 ]
 
 

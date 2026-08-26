@@ -271,7 +271,12 @@ def _as_binding(raw: Any) -> Optional[Dict[str, str]]:
 def _local_model_present(binding: Mapping[str, str], installed_local_models: Optional[Any]) -> bool:
     if installed_local_models is None:
         return True
-    if str(binding.get("provider") or "").strip().lower() not in LOCAL_PROVIDERS:
+    provider = str(binding.get("provider") or "").strip().lower()
+    # Horos is local but not an Ollama tag; `default` must not look like a
+    # missing download. Mirrors control_plane.model_pack_resolution.
+    if provider == SCOPE_HEAD_PROVIDER:
+        return True
+    if provider not in LOCAL_PROVIDERS:
         return True
     installed = {str(name or "").strip().lower() for name in installed_local_models}
     wanted = str(binding.get("model") or "").strip().lower()

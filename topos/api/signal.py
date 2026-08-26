@@ -1156,3 +1156,53 @@ async def put_community_name_route(
         )
         commit_connection(conn)
     return {"community_id": community_id, "name": name, "members": len(rows)}
+
+
+@router.get("/derivation/schema")
+async def get_derivation_schema(_api_key: str = Depends(require_api_key)):
+    """Per-predicate field schemas for the Fact Editor (W4.6)."""
+    from ..features.derivation.surfaces import predicate_schemas
+
+    return {"predicates": predicate_schemas(_entities_conn())}
+
+
+@router.post("/facts/conflicts/promote")
+async def post_conflict_promotion(
+    conflict_id: str = Body(...),
+    subject_entity_id: str = Body(""),
+    new_person_name: str = Body(""),
+    to_owner: bool = Body(False),
+    value: Any = Body(None),
+    _api_key: str = Depends(require_api_key),
+):
+    """Edit & add a quarantined extraction: the owner supplies the identity the
+    machine refused to guess; ledgered as gold (W4.6)."""
+    from ..features.derivation.surfaces import promote_conflict
+
+    try:
+        return promote_conflict(_entities_conn(), conflict_id,
+                                subject_entity_id=subject_entity_id,
+                                new_person_name=new_person_name,
+                                value=value, to_owner=to_owner)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.post("/facts/{object_id}/revise")
+async def post_fact_revision(
+    object_id: str,
+    value: Any = Body(None),
+    subject_entity_id: str = Body(""),
+    evidence_date: str = Body(""),
+    asserted_by: str = Body(""),
+    _api_key: str = Depends(require_api_key),
+):
+    """Owner revision of a live pack fact: field/subject/date, never its kind (W4.6)."""
+    from ..features.derivation.surfaces import revise_fact
+
+    try:
+        return revise_fact(_entities_conn(), object_id, value=value,
+                           subject_entity_id=subject_entity_id,
+                           evidence_date=evidence_date, asserted_by=asserted_by)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
