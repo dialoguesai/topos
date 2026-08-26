@@ -21,6 +21,14 @@ from topos.features.entities.resolver import EntityResolver
 from topos.storage.db.migrations import apply_all_migrations
 
 
+
+@pytest.fixture(autouse=True)
+def _naming_off(monkeypatch):
+    """Community NAMING is LLM-backed and tested separately; these tests cover
+    the deterministic labeler and must never call a live model."""
+    monkeypatch.setenv("TOPOS_COMMUNITY_NAMING", "off")
+
+
 @pytest.fixture()
 def conn(tmp_path):
     c = sqlite3.connect(str(tmp_path / "g.db"))
