@@ -6,11 +6,15 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Sequence, Set
 
+import logging
+
 import networkx as nx
 
 from .messenger_directed import create_directed_tables
 from .messenger_graph import extract_messenger_graph
 from ..storage.db.write_gate import batched_writes, commit_connection, with_db_write
+
+logger = logging.getLogger(__name__)
 
 MESSENGER_SOCIAL_EDGES_TABLE = "messenger_social_edges"
 MESSENGER_PARTICIPANT_IMPORTANCE_TABLE = "messenger_participant_importance"
@@ -425,6 +429,25 @@ def compute_and_persist_messenger_analytics(
             }
         )
 
+    # L1 — the directed lane, computed inside the pass that already runs.
+    #
+    # Deliberately NOT a new trigger and NOT a second rebuild lifecycle. Two of the three
+    # existing messenger triggers call this function synchronously, and prod CP is a single
+    # uvicorn worker where added synchronous work starves every tenant. Converging the
+    # messenger lane onto graph_materialization_state's debounce + flock + subprocess is real
+    # work with its own failure modes; doing it as a side effect of L1 would put an
+    # unreviewed refactor on the critical path of a single-worker service.
+    #
+    # A failure here must not lose the undirected results already computed above — the
+    # directed lane is additive, and a partial answer beats no answer.
+    directed_totals = {"directed_edges_written": 0, "dyads_written": 0}
+    try:
+        directed_totals = _compute_directed_lane(db, dataset_id, source_ids)
+    except Exception as exc:  # noqa: BLE001 — additive lane, never fails the pass
+        logger.warning("directed lane failed for %s: %s", dataset_id, exc)
+        directed_totals["error"] = str(exc)[:200]
+    totals.update(directed_totals)
+
     return {
         "dataset_id": dataset_id,
         "period_granularity": period_granularity,
@@ -432,3 +455,26 @@ def compute_and_persist_messenger_analytics(
         "periods": periods_out,
         "totals": totals,
     }
+
+
+def _compute_directed_lane(db: Any, dataset_id: str, source_ids: Optional[Sequence[str]]) -> Dict[str, int]:
+    """Extract, persist and roll up L1's directed edges for one dataset."""
+    from .messenger_directed import (DEFAULT_SESSION_GAP_SECONDS, build_dyad_stats,
+                                     extract_directed_dyadic_edges, persist_directed_edges,
+                                     persist_dyad_stats, rows_for_persist)
+
+    # Safe standalone: the orchestrator ensures tables before calling, but this function is
+    # also the unit under test and a future caller should not have to know the order.
+    with with_db_write():
+        create_directed_tables(db)
+        commit_connection(db)
+
+    # A single connector filter narrows the pass; several would need one pass each, and the
+    # rollup is lifetime-wide either way, so the filter only applies to the edge lane.
+    only = str(source_ids[0]) if source_ids and len(source_ids) == 1 else None
+    acc = extract_directed_dyadic_edges(db, dataset_id, connector=only)
+    rows = rows_for_persist(acc, dataset_id, DEFAULT_SESSION_GAP_SECONDS)
+    periods = sorted({r[1] for r in rows})
+    edges = persist_directed_edges(db, dataset_id, rows, periods=periods)
+    dyads = persist_dyad_stats(db, dataset_id, build_dyad_stats(db, dataset_id))
+    return {"directed_edges_written": edges, "dyads_written": dyads}
