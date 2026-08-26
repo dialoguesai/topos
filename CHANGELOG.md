@@ -10,6 +10,23 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Added
+- **[S1] Principal fabric P2 — elevation consent, in the UMA ledger.** An
+  enrolled client can now be consented up from the `scores_only` floor:
+  UMA-shaped lifecycle (`mcp_client_request_elevation` — the one type a
+  third-party principal may call, for ITSELF only, subject taken from the
+  channel stamp never the payload — then owner-only
+  `mcp_client_decide_elevation` / `mcp_client_revoke_elevation` /
+  `mcp_client_list_elevations`), per-scope, expiring, tombstoned, mirrored
+  into the engine's UMA audit tables with subject `client:<id>`.
+  Enforcement in `effective_packet_resolution`: an approved, unexpired grant
+  lifts the packet to min(owner setting, `facts`) — never `facts_all`, so
+  special-class content stays owner-first-party — with reason
+  `consent_grant:<id>` on the turn; the owner's global `scores_only` dial and
+  the model-locality gate both outrank consent, and a revoked client's grants
+  are inert regardless of row state. Storage is the node-local ledger next to
+  `mcp_clients` because the engine is the enforcement point; the CP/FE surface
+  reads it by relay proxy. Tests: `tests/core/test_mcp_client_elevations.py`.
+
 - **[S1] Principal fabric P2 (engine core) — enrolled clients, named and revocable.**
   A per-client registry (`mcp_clients`, lazy-created like `mcp_request_log`)
   mints `tpk_<client_id>.<secret>` tokens — hash at rest, plaintext shown once

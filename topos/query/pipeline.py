@@ -590,7 +590,7 @@ class QueryPipelineOrchestrator:
         try:
             _pr = effective_packet_resolution(
                 db_conn, requester_id=str(requester_id), disclosure_tier=disclosure_tier,
-                owner_id=str(owner_id or ""), principal=_principal,
+                owner_id=str(owner_id or ""), principal=_principal, scope_id=str(scope_id or ""),
             )
         except Exception:  # noqa: BLE001
             _pr = {"setting": "scores_only", "effective": "scores_only",

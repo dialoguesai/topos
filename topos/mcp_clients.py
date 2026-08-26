@@ -32,7 +32,13 @@ from typing import Any, Dict, List, Optional
 logger = logging.getLogger("topos.mcp_clients")
 
 MCP_CLIENTS_TABLE = "mcp_clients"
+MCP_CLIENT_ELEVATIONS_TABLE = "mcp_client_elevations"
 TOKEN_PREFIX = "tpk_"
+
+#: Elevation ceiling (owner decision, Who's Asking §06): a consented client may
+#: reach `facts`, never `facts_all` — special-class content (health, beliefs,
+#: admin) stays owner-first-party only. Requests for more are clamped, loudly.
+ELEVATION_CEILING = "facts"
 
 #: Client ids are slugs: stable, log-safe, and usable as UMA consent subjects
 #: (``client:<id>``) without escaping.
@@ -70,6 +76,21 @@ def ensure_mcp_clients_table(conn: sqlite3.Connection) -> None:
                 created_at TEXT NOT NULL,
                 last_used_at TEXT,
                 revoked_at TEXT
+            )
+            """
+        )
+        conn.execute(
+            f"""
+            CREATE TABLE IF NOT EXISTS {MCP_CLIENT_ELEVATIONS_TABLE} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                client_id TEXT NOT NULL,
+                scope_id TEXT NOT NULL,
+                resolution TEXT NOT NULL DEFAULT 'facts',
+                status TEXT NOT NULL DEFAULT 'pending',
+                note TEXT,
+                requested_at TEXT NOT NULL,
+                decided_at TEXT,
+                expires_at TEXT
             )
             """
         )
@@ -193,3 +214,172 @@ def revoke_client(conn: sqlite3.Connection, client_id: str) -> bool:
         )
         commit_connection(conn)
     return cur.rowcount > 0
+
+
+# --------------------------------------------------------------- elevations
+# Consent records for a client to receive fact CONTENT above the scores_only
+# floor. UMA-shaped lifecycle (pending -> approved/denied -> revoked; expiry),
+# subject ``client:<id>``; the engine's node-local ledger because the engine is
+# the enforcement point — the CP/FE surface reads it by relay proxy, and every
+# decision is mirrored into the UMA audit tables via record_uma_request.
+
+
+def request_elevation(
+    conn: sqlite3.Connection,
+    *,
+    client_id: str,
+    scope_id: str,
+    note: str = "",
+) -> Dict[str, Any]:
+    """File a pending elevation request. Idempotent per (client, scope): an
+    existing pending row is returned rather than duplicated, and an ACTIVE
+    approval short-circuits (nothing to ask for)."""
+    cid = normalize_client_id(client_id)
+    scope = str(scope_id or "").strip()
+    if not scope:
+        raise ValueError("scope_id is required")
+    ensure_mcp_clients_table(conn)
+    if get_client(conn, cid) is None:
+        raise ValueError(f"unknown client {cid!r} — enroll it first")
+    existing = active_elevation(conn, client_id=cid, scope_id=scope)
+    if existing is not None:
+        return existing
+    cur = conn.execute(
+        f"SELECT id FROM {MCP_CLIENT_ELEVATIONS_TABLE} "
+        f"WHERE client_id = ? AND scope_id = ? AND status = 'pending'",
+        (cid, scope),
+    )
+    row = cur.fetchone()
+    if row is not None:
+        return get_elevation(conn, int(row[0]))  # type: ignore[return-value]
+    from .core.state import commit_connection, with_db_write
+
+    with with_db_write():
+        cur = conn.execute(
+            f"INSERT INTO {MCP_CLIENT_ELEVATIONS_TABLE}"
+            f" (client_id, scope_id, resolution, status, note, requested_at)"
+            f" VALUES (?, ?, ?, 'pending', ?, ?)",
+            (cid, scope, ELEVATION_CEILING, str(note or "")[:500], _now()),
+        )
+        commit_connection(conn)
+    return get_elevation(conn, int(cur.lastrowid))  # type: ignore[return-value]
+
+
+def decide_elevation(
+    conn: sqlite3.Connection,
+    *,
+    request_id: int,
+    approve: bool,
+    expires_at: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Owner decision on a pending request. Approval is per-scope and expiring;
+    the resolution is clamped to ELEVATION_CEILING no matter what was asked."""
+    row = get_elevation(conn, int(request_id))
+    if row is None:
+        raise ValueError(f"no elevation request {request_id}")
+    if row["status"] != "pending":
+        raise ValueError(f"request {request_id} already {row['status']}")
+    status = "approved" if approve else "denied"
+    from .core.state import commit_connection, with_db_write
+
+    with with_db_write():
+        conn.execute(
+            f"UPDATE {MCP_CLIENT_ELEVATIONS_TABLE}"
+            f" SET status = ?, decided_at = ?, expires_at = ?, resolution = ?"
+            f" WHERE id = ?",
+            (status, _now(), str(expires_at or "") or None, ELEVATION_CEILING, int(request_id)),
+        )
+        commit_connection(conn)
+    return get_elevation(conn, int(request_id))  # type: ignore[return-value]
+
+
+def revoke_elevation(conn: sqlite3.Connection, *, client_id: str, scope_id: str = "") -> int:
+    """Revoke approved elevations for a client (one scope, or all when omitted).
+    Tombstones, not deletes — the consent history stays legible."""
+    cid = normalize_client_id(client_id)
+    ensure_mcp_clients_table(conn)
+    from .core.state import commit_connection, with_db_write
+
+    clause = "client_id = ? AND status = 'approved'"
+    args: list = [cid]
+    if str(scope_id or "").strip():
+        clause += " AND scope_id = ?"
+        args.append(str(scope_id).strip())
+    with with_db_write():
+        cur = conn.execute(
+            f"UPDATE {MCP_CLIENT_ELEVATIONS_TABLE} SET status = 'revoked', decided_at = ?"
+            f" WHERE {clause}",
+            (_now(), *args),
+        )
+        commit_connection(conn)
+    return cur.rowcount
+
+
+def get_elevation(conn: sqlite3.Connection, request_id: int) -> Optional[Dict[str, Any]]:
+    cur = conn.execute(
+        f"SELECT id, client_id, scope_id, resolution, status, note, requested_at,"
+        f" decided_at, expires_at FROM {MCP_CLIENT_ELEVATIONS_TABLE} WHERE id = ?",
+        (int(request_id),),
+    )
+    row = cur.fetchone()
+    if row is None:
+        return None
+    cols = [d[0] for d in cur.description]
+    return dict(zip(cols, row))
+
+
+def list_elevations(conn: sqlite3.Connection, *, client_id: str = "") -> List[Dict[str, Any]]:
+    ensure_mcp_clients_table(conn)
+    clause, args = "", []
+    if str(client_id or "").strip():
+        clause = " WHERE client_id = ?"
+        args = [normalize_client_id(client_id)]
+    cur = conn.execute(
+        f"SELECT id, client_id, scope_id, resolution, status, note, requested_at,"
+        f" decided_at, expires_at FROM {MCP_CLIENT_ELEVATIONS_TABLE}{clause}"
+        f" ORDER BY requested_at",
+        args,
+    )
+    cols = [d[0] for d in cur.description]
+    return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+
+def active_elevation(
+    conn: sqlite3.Connection,
+    *,
+    client_id: str,
+    scope_id: str,
+) -> Optional[Dict[str, Any]]:
+    """The approved, unexpired elevation covering this (client, scope), or None.
+
+    Fail closed on every branch — a revoked client has no active elevations no
+    matter what the rows say, and expiry is checked at read time so no reaper
+    is load-bearing. A grant for scope '*' covers every scope.
+    """
+    try:
+        cid = normalize_client_id(client_id)
+    except ValueError:
+        return None
+    scope = str(scope_id or "").strip()
+    try:
+        ensure_mcp_clients_table(conn)
+        client = get_client(conn, cid)
+        if client is None or client.get("revoked_at"):
+            return None
+        cur = conn.execute(
+            f"SELECT id, client_id, scope_id, resolution, status, note, requested_at,"
+            f" decided_at, expires_at FROM {MCP_CLIENT_ELEVATIONS_TABLE}"
+            f" WHERE client_id = ? AND status = 'approved' AND scope_id IN (?, '*')",
+            (cid, scope),
+        )
+        cols = [d[0] for d in cur.description]
+        now = _now()
+        for r in cur.fetchall():
+            row = dict(zip(cols, r))
+            exp = str(row.get("expires_at") or "")
+            if exp and exp <= now:
+                continue
+            return row
+    except Exception:  # noqa: BLE001 — DB trouble must never widen disclosure
+        logger.warning("active_elevation lookup failed for %r", client_id, exc_info=True)
+    return None
