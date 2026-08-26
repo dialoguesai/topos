@@ -162,7 +162,7 @@ def test_a_capped_list_says_what_it_cut(db):
                            packet_resolution="facts_all", limit=2)
     assert out["close_circle_truncated"] == {
         "shown": 2, "total": 4,
-        "note": "ranked by message volume; ask for more to see the rest"}
+        "note": "ranked by inbound message volume; the rest are not shown"}
     full = try_close_circle(db, "Who's in my close circle?",
                             packet_resolution="facts_all", limit=50)
     assert "close_circle_truncated" not in full

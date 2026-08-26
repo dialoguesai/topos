@@ -9,6 +9,32 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **Known-item facts: delimiter-aware predicates and a deterministic owner.** A bare
+  `LIKE 'fact:<owner>:<pred>%'` also swept sibling predicates, so "Who's in my family?"
+  was handed all 23 `rel.relationship_event` rows and answered with people the owner had
+  merely met. `SELECT ... WHERE is_self=1` with `.fetchone()` and no ORDER BY ran against
+  three matching rows — the fact-bearing one won by rowid luck, and a vacuum would have
+  blanked every known-item answer.
+- **A cached answer is only valid for the code that produced it.** The retrieval
+  fingerprint covered every input except the engine version, so no upgrade could
+  invalidate the cache: the node was rebuilt with a fix and the chat kept replaying the
+  pre-fix payload as `memory_hit` for 21 minutes, with 24h of session TTL to run.
+
+### Added
+- **[E] The close circle is ranked from who the owner actually talks to.** It was
+  answered from six `rel.relationship` facts a pack happened to extract from journal
+  sentences, omitting the highest-volume correspondents in the corpus.
+  `conversation_messages.sender_id` holds the raw handle while names live in `contacts`,
+  reachable only through `contact_identifiers`; nothing in the query path made that hop,
+  so all 4,866 inbound messages resolved to zero named people. The new lane normalises
+  both sides, bands warmth and cadence relative to this owner's corpus, honours entity
+  blackholes on whole-name match (a blackholed PLACE must not erase a person sharing a
+  token), excludes the owner from their own circle, and declares what the cap cut.
+  Gated on packet_resolution exactly as facts-direct is, so a grantee gets nothing and
+  the relationships grant policy — entity keys and warmth bands, not contact names —
+  still holds.
+
 ## [1.3.32] — 2026-08-26
 
 ### Fixed

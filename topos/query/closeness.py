@@ -283,6 +283,8 @@ def try_close_circle(
         payload["close_circle_truncated"] = {
             "shown": len(people),
             "total": total,
-            "note": "ranked by message volume; ask for more to see the rest",
+            # State the omission, do not offer a remedy: no caller can pass a
+            # limit today, so "ask for more" was a promise with nothing behind it.
+            "note": "ranked by inbound message volume; the rest are not shown",
         }
     return payload
