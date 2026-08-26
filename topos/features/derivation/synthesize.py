@@ -7,6 +7,7 @@ signal_objects refs), so `how did this become a fact` is answerable by walking r
 from __future__ import annotations
 
 import math
+import re
 import sqlite3
 from collections import Counter, defaultdict
 from datetime import datetime
@@ -287,7 +288,7 @@ def run_pack_lenses(conn: sqlite3.Connection, w: DerivationWriter, pack: Pack, o
     ran: List[Dict[str, Any]] = []
     skipped: List[Dict[str, Any]] = []
     seen_impls = set()
-    for lens in (pack.lenses or []):
+    for lens in _declared_lenses(pack):
         if not lens.is_producer:
             skipped.append({"kind": lens.kind, "reason": "reconciler"})
             continue
@@ -308,7 +309,9 @@ def run_pack_lenses(conn: sqlite3.Connection, w: DerivationWriter, pack: Pack, o
         if takes_window:
             # The lens's own evidence floor, honoured rather than hardcoded: this is
             # what "min_evidence: 90d" was declared for.
-            kwargs["window_days"] = lens.min_evidence.days
+            kwargs["window_days"] = (lens.min_evidence_days
+                                     if hasattr(lens, "min_evidence_days")
+                                     else lens.min_evidence.days)
         try:
             out = func(conn, w, pack, owner, **kwargs)
         except Exception as exc:  # noqa: BLE001 — one lens must not sink the pack
@@ -319,3 +322,44 @@ def run_pack_lenses(conn: sqlite3.Connection, w: DerivationWriter, pack: Pack, o
                     "window_days": kwargs.get("window_days"), "results": out or []})
     return {"pack": pack.pack, "ran": ran, "skipped": skipped,
             "facts_written": sum(r["facts"] for r in ran)}
+
+#: Producer kinds, mirrored rather than imported: `Pack.lenses` and the Lens/PRODUCER_KINDS
+#: machinery are not on main yet, and a dispatcher that only works against one session's
+#: uncommitted working tree is not a dispatcher. `synthesis[]` — the raw list — has been
+#: on every pack since the catalog was written, so read that and use the parsed objects
+#: only when they are actually there.
+_PRODUCER_KINDS = ("pattern", "disposition", "trajectory", "rhythm", "stylometry",
+                   "trend", "graph_labeling")
+_DURATION_DAYS = {"d": 1, "w": 7, "m": 30, "y": 365}
+
+
+class _RawLens:
+    """The subset of a lens this dispatcher needs, read from the raw declaration."""
+
+    def __init__(self, entry: Dict[str, Any]) -> None:
+        self.kind = str(entry.get("kind") or "")
+        pred = entry.get("predicate")
+        preds = entry.get("predicates")
+        self.predicates = ([str(p) for p in preds] if isinstance(preds, list)
+                           else ([str(pred)] if pred else []))
+        self.min_evidence_days = _parse_days(entry.get("min_evidence"))
+
+    @property
+    def is_producer(self) -> bool:
+        return self.kind in _PRODUCER_KINDS
+
+
+def _parse_days(value: Any) -> Optional[int]:
+    """`min_evidence` ships in three spellings; only durations carry days."""
+    if value is None or isinstance(value, bool) or isinstance(value, int):
+        return None
+    m = re.match(r"^(\d+)\s*([dwmy])$", str(value).strip(), re.I)
+    return int(m.group(1)) * _DURATION_DAYS[m.group(2).lower()] if m else None
+
+
+def _declared_lenses(pack: Pack) -> List[Any]:
+    parsed = getattr(pack, "lenses", None)
+    if parsed:
+        return list(parsed)
+    return [_RawLens(e) for e in (getattr(pack, "synthesis", None) or [])
+            if isinstance(e, dict)]

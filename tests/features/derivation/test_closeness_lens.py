@@ -115,8 +115,13 @@ def test_the_dispatcher_runs_what_is_implemented_and_reports_the_rest(db):
     from topos.features.derivation.registry import bundled_pack_dir
     from topos.features.derivation.synthesize import run_pack_lenses
 
+    from topos.features.derivation.synthesize import _declared_lenses
+
     pack = load_packs(bundled_pack_dir(), only=["relationships.social"])["relationships.social"]
-    kinds = {(l.kind, tuple(l.predicates)) for l in pack.lenses}
+    # Read through the accessor, not `pack.lenses`: the parsed Lens objects are a
+    # peer's uncommitted work, and a dispatcher that only runs against one session's
+    # working tree is not a dispatcher.
+    kinds = {(l.kind, tuple(l.predicates)) for l in _declared_lenses(pack)}
     assert ("graph_labeling", ("rel.closeness_tier",)) in kinds
 
     calls = []
