@@ -581,7 +581,8 @@ class QueryPipelineOrchestrator:
         # the conservative default is the safe one.
         try:
             _pr = effective_packet_resolution(
-                db_conn, requester_id=str(requester_id), disclosure_tier=disclosure_tier
+                db_conn, requester_id=str(requester_id), disclosure_tier=disclosure_tier,
+                owner_id=str(owner_id or ""),
             )
         except Exception:  # noqa: BLE001
             _pr = {"setting": "scores_only", "effective": "scores_only",
