@@ -9,9 +9,12 @@ from topos.features.derivation.verify import parse_verdict, apply_verdict
 from topos.features.derivation.packs import load_packs
 from pathlib import Path
 
-PACK_DIR = Path(__file__).resolve().parents[3].parent / "topos-control-plane" / "derivation-packs"
-if not PACK_DIR.exists():  # worktree layout: derivation-packs lives in the CP workspace
-    PACK_DIR = Path.home() / "developer" / "topos-control-plane" / "derivation-packs"
+# Bundled packs ship IN the wheel — the only pack dir that exists everywhere,
+# including CI (the authoring workspace is a developer-machine path; resolving
+# it here broke CI for every commit after the ladder landed, 2026-08-26).
+from topos.features.derivation.registry import bundled_pack_dir
+
+PACK_DIR = bundled_pack_dir()
 
 
 def _rel_pack():
