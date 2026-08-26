@@ -9,6 +9,18 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **Names on the facts page are no longer lowercased.** `object_value` is documented
+  in `features/facts/reads.py` as the display string the facts surface renders, but the
+  writer filled it with `_canon_value`, whose stated job is "keying + equality" and which
+  therefore folds case. Every name rendered as "mike november" and "k.l. oscar". It
+  stayed invisible for years of values like "brother" and "active" and only surfaced once
+  a lens began writing proper nouns. Display and identity are now separate functions:
+  `_display_value` is key-sorted and case-preserving, `_canon_value` is unchanged, so two
+  spellings of a name still collide for dedup — they are just no longer both stored as
+  the thing people read. Existing rows backfilled from `value_struct`, which had the
+  correct case all along.
+
 ### Changed
 - **The closeness lens reads the L1 rail instead of deriving interaction twice.**
   `comms_stats` and `analytics/messenger_directed` were built in parallel and each

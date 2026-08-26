@@ -94,6 +94,24 @@ def _value_leaves(value: Any) -> List[str]:
     return [str(value)] if value is not None else []
 
 
+def _display_value(value: Any) -> str:
+    """What a human reads. Key-sorted like the canonical form, but CASE-PRESERVING.
+
+    `object_value` is documented in features/facts/reads.py as the display string
+    the facts surface renders, and it was being filled with `_canon_value`, whose
+    whole job is keying and equality — so it lowercased. Every name on the facts
+    page came out as "mike november" and "k.l. oscar". It stayed invisible while
+    values were things like "brother" and "active", and only showed once a lens
+    started writing proper nouns.
+
+    Keying and equality still use `_canon_value`: two spellings of a name must
+    still collide, they just must not both be stored as the thing people read.
+    """
+    if isinstance(value, dict):
+        return json.dumps({k: value[k] for k in sorted(value)}, default=str)
+    return " ".join(str(value or "").strip().split())
+
+
 def _canon_value(value: Any) -> str:
     """Stable normalized representation for keying + equality (dicts key-sorted)."""
     if isinstance(value, dict):
@@ -543,7 +561,7 @@ class DerivationWriter:
         struct = dict(payload.get("value_struct") or {})
         struct.update(value)
         payload["value_struct"] = struct
-        payload["object_value"] = _canon_value(struct)[:160]
+        payload["object_value"] = _display_value(struct)[:160]
         self.conn.execute(
             "UPDATE signal_objects SET payload_json=?, updated_at=? WHERE object_id=?",
             (json.dumps(payload, default=str), _now_iso(), incumbent["object_id"]))
@@ -586,7 +604,7 @@ class DerivationWriter:
         payload = {
             "subject_entity_id": subject,
             "predicate": normalize_predicate(pred.name),
-            "object_value": _canon_value(value)[:160] if isinstance(value, dict) else str(value).strip(),
+            "object_value": _display_value(value)[:160] if isinstance(value, dict) else str(value).strip(),
             "object_entity_id": object_entity_id,
             "confidence": round(float(confidence), 3),
             "disclosure": "owner_only",
