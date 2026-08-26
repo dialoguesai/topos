@@ -27,7 +27,12 @@ async def _dispatch(msg_type: str, payload: Dict[str, Any], principal) -> Dict[s
     )
     if not out or out.get("status") != "ok":
         return {"status": "error", "error": str((out or {}).get("error") or "engine error")}
-    return {"status": "ok", **(out.get("payload") or {})}
+    payload = out.get("payload") or {}
+    # Elevation rows carry their own lifecycle `status` (pending/approved/...),
+    # which must not clobber the envelope's ok/error — nest such payloads.
+    if "status" in payload:
+        return {"status": "ok", "record": payload}
+    return {"status": "ok", **payload}
 
 
 @router.get("")
@@ -61,6 +66,24 @@ async def list_elevations(
     principal=Depends(resolve_request_principal),  # noqa: B008
 ) -> dict:
     return await _dispatch("mcp_client_list_elevations", {"client_id": client_id}, principal)
+
+
+@router.post("/elevations/request")
+async def request_elevation(
+    body: dict = Body(default_factory=dict),
+    principal=Depends(resolve_request_principal),  # noqa: B008
+) -> dict:
+    """File a pending elevation request — the ONE call an enrolled client's own
+    token may make on this surface (the handler takes the subject from the
+    channel stamp, so a client can only ask for itself; the owner may file for
+    a named client). Without this route no transport exposed the ask at all —
+    found live by e2e L2c."""
+    return await _dispatch(
+        "mcp_client_request_elevation",
+        {"client_id": body.get("client_id"), "scope_id": body.get("scope_id"),
+         "note": body.get("note")},
+        principal,
+    )
 
 
 @router.post("/elevations/decide")

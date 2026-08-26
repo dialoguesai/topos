@@ -61,3 +61,31 @@ async def test_third_party_token_is_inert_on_this_surface(conn):
     ):
         out = await call
         assert out["status"] == "error"
+
+
+@pytest.mark.asyncio
+async def test_client_can_file_its_own_elevation_request(conn):
+    """e2e L2c finding: the ask needs a transport. The client's token may file
+    for itself — and only itself — while the owner's accounting surface
+    (request-counts, e2e L2b finding) refuses the same token with 403."""
+    from topos.api.connected_apps import request_elevation
+
+    await enroll_connected_app({"client_id": "claude-desktop"}, OWNER)
+    out = await request_elevation(
+        {"client_id": "someone-else", "scope_id": "relationships.social"}, CLIENT
+    )
+    assert out["status"] == "ok"
+    assert out["record"]["client_id"] == "claude-desktop"  # stamp wins over payload
+    assert out["record"]["scope_id"] == "relationships.social"
+    assert out["record"]["status"] == "pending"  # lifecycle status survives, nested
+
+
+@pytest.mark.asyncio
+async def test_request_counts_refuses_third_party(conn):
+    from fastapi import HTTPException
+
+    from topos.api.usage import get_request_counts
+
+    with pytest.raises(HTTPException) as exc:
+        await get_request_counts(None, 90, CLIENT)
+    assert exc.value.status_code == 403
