@@ -1206,3 +1206,17 @@ async def post_fact_revision(
                            evidence_date=evidence_date, asserted_by=asserted_by)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/facts/{object_id}/evidence")
+async def get_fact_evidence_route(
+    object_id: str,
+    _api_key: str = Depends(require_api_key),
+):
+    """The records behind a fact — 'why does Topos believe this' (W4.7)."""
+    from ..features.derivation.surfaces import fact_evidence
+
+    try:
+        return fact_evidence(_entities_conn(), object_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc

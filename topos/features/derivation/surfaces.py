@@ -410,3 +410,67 @@ def revise_fact(conn: sqlite3.Connection, object_id: str, *,
         commit_connection(conn)
     return {"revised_from": object_id, "outcome": out.get("outcome"),
             "object_id": out.get("object_id")}
+
+
+def fact_evidence(conn: sqlite3.Connection, object_id: str) -> Dict[str, Any]:
+    """The records a fact came from (W4.7): every source ref resolved to its
+    actual text, plus the extracted quote and the extractor stamp. This is the
+    'why does Topos believe this' surface — a fact the owner cannot trace is a
+    fact they cannot trust."""
+    import json as _json
+
+    row = conn.execute(
+        "SELECT payload_json, source_refs_json, valid_from, ontology_id, ontology_version,"
+        " altitude, extractor_version, confidence"
+        " FROM signal_objects WHERE object_id=? AND object_type='fact'", (object_id,)).fetchone()
+    if not row:
+        raise ValueError(f"unknown fact {object_id}")
+    pj, refs_json, valid_from, pack, pack_v, altitude, extractor, confidence = row
+    payload = _json.loads(pj or "{}")
+    refs = _json.loads(refs_json or "[]") or (payload.get("source_refs") or [])
+
+    queries = {
+        "journal_entries": ("SELECT content, entry_at FROM journal_entries WHERE entry_id=?", "journal entry"),
+        "conversation_messages": ("SELECT content, event_at FROM conversation_messages WHERE message_id=?", "message"),
+        "activity_events": ("SELECT COALESCE(title,'')||' '||COALESCE(hostname,''), occurred_at"
+                            " FROM activity_events WHERE event_id=?", "activity"),
+        "calendar_events": ("SELECT COALESCE(title,''), starts_at FROM calendar_events WHERE event_id=?", "calendar event"),
+    }
+    sources = []
+    for ref in refs if isinstance(refs, list) else []:
+        if not isinstance(ref, dict):
+            continue
+        table = str(ref.get("table") or "")
+        rid = str(ref.get("record_id") or "")
+        spec = queries.get(table)
+        text, when = None, None
+        if spec and rid:
+            try:
+                r = conn.execute(spec[0], (rid,)).fetchone()
+            except sqlite3.OperationalError:
+                r = None
+            if r:
+                text, when = r[0], r[1]
+        sources.append({
+            "table": table, "record_id": rid,
+            "kind": spec[1] if spec else table or "record",
+            "text": (text or "")[:4000] or None,
+            "occurred_at": str(when)[:19] if when else None,
+            "missing": text is None,
+        })
+    # corroboration trail: later confirmations of the same fact
+    trail = []
+    for e in (payload.get("extractions") or [])[-8:]:
+        if isinstance(e, dict):
+            trail.append({"model": e.get("model"), "template": e.get("template"), "ts": e.get("ts")})
+    return {
+        "object_id": object_id,
+        "quote": payload.get("quote"),
+        "sources": sources,
+        "valid_from": valid_from,
+        "pack": pack, "pack_version": pack_v, "altitude": altitude,
+        "extractor_version": extractor, "confidence": confidence,
+        "asserted_by": payload.get("asserted_by"),
+        "verified_by_owner": bool(payload.get("verified_by_owner")),
+        "extraction_trail": trail,
+    }

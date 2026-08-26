@@ -186,6 +186,10 @@ class Settings(BaseSettings):
     # Packet resolution (PLAN_DERIVATION_LAYER.md): env default only; the per-database
     # engine_config value overrides. Validated against RESOLUTIONS at read time.
     topos_packet_resolution: str = Field("scores_only")
+    # Minimum free disk the owner wants left on the volume Ollama writes models
+    # to. Env default only; the per-node engine_config value overrides (the
+    # General settings bar writes it). See topos/engine/disk_space.py.
+    topos_min_free_disk_bytes: int = Field(10 * 1024**3)
     topos_database_mode: str = Field("local")
     topos_database_service_url: Optional[str] = Field(None)
     topos_postgres_dsn: Optional[str] = Field(None)
@@ -404,6 +408,16 @@ settings = Settings()
 # Frozen engine_config key the UI toggle writes; a per-node bool the owner sets.
 ENGINE_CONFIG_KEY_EXPOSURE_PROFILE_VISIBLE = "exposure_profile_visible"
 ENGINE_CONFIG_KEY_PACKET_RESOLUTION = "packet_resolution"
+# Owner-set floor for free disk space, in bytes. Written by Settings -> General;
+# read by topos/engine/disk_space.py and the model manager.
+ENGINE_CONFIG_KEY_MIN_FREE_DISK_BYTES = "min_free_disk_bytes"
+
+#: What the owner may set the floor to. Zero is allowed and means "do not hold
+#: anything back"; the ceiling only exists so a typo cannot make every download
+#: impossible forever.
+MIN_FREE_DISK_BYTES_DEFAULT = 10 * 1024**3
+MIN_FREE_DISK_BYTES_MIN = 0
+MIN_FREE_DISK_BYTES_MAX = 1024**4  # 1 TB
 
 _TRUE_STRINGS = frozenset({"1", "true", "t", "yes", "y", "on"})
 _FALSE_STRINGS = frozenset({"0", "false", "f", "no", "n", "off"})
@@ -477,6 +491,45 @@ def resolve_packet_resolution(settings_obj: "Settings", conn=None) -> str:
         return default
     value = str(raw).strip().lower()
     return value if value in valid else default
+
+
+def resolve_min_free_disk_bytes(settings_obj: "Settings", conn=None) -> int:
+    """Free bytes the owner wants kept available on the models volume.
+
+    The per-database engine_config value ("min_free_disk_bytes") when set and
+    parseable, else the env/settings default (10 GB). Clamped to
+    [MIN_FREE_DISK_BYTES_MIN, MIN_FREE_DISK_BYTES_MAX] so a bad value degrades to
+    a usable floor rather than refusing every download for good.
+
+    This is the number the disk check treats as the reserve and the number the
+    model manager tries to keep the volume above by evicting models it can
+    re-download.
+    """
+    default = _coerce_min_free_disk_bytes(
+        getattr(settings_obj, "topos_min_free_disk_bytes", None),
+        MIN_FREE_DISK_BYTES_DEFAULT,
+    )
+    raw = _read_engine_config_value(conn, ENGINE_CONFIG_KEY_MIN_FREE_DISK_BYTES)
+    if raw is None:
+        return default
+    return _coerce_min_free_disk_bytes(raw, default)
+
+
+def _coerce_min_free_disk_bytes(raw: object, default: int) -> int:
+    """Bytes from a setting, env string, or engine_config value; `default` when
+    it is not a number. Values outside the allowed range are clamped, not
+    rejected — an owner who typed 900 TB meant "a lot", not "never download"."""
+    if raw is None:
+        return default
+    try:
+        value = int(float(str(raw).strip()))
+    except (TypeError, ValueError):
+        return default
+    if value < MIN_FREE_DISK_BYTES_MIN:
+        return MIN_FREE_DISK_BYTES_MIN
+    if value > MIN_FREE_DISK_BYTES_MAX:
+        return MIN_FREE_DISK_BYTES_MAX
+    return value
 
 
 def exposure_profile_visible(conn=None) -> bool:

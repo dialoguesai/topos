@@ -590,3 +590,34 @@ def test_owner_facts_are_unaffected_by_the_switch(a3_writer):
     out = _rel_assert(w, "owner")
     assert out["outcome"] != "quarantined", out
     assert w.stats.get("net_subject_withheld") in (None, 0)
+
+
+# --- W4.7: fact evidence (why does Topos believe this) ---
+def test_fact_evidence_resolves_source_records(a3_writer):
+    w, conn = a3_writer
+    conn.executescript("""
+      CREATE TABLE IF NOT EXISTS journal_entries (entry_id TEXT PRIMARY KEY, content TEXT, entry_at TEXT);
+      INSERT INTO journal_entries VALUES ('tl-1', 'Took those qualia sleeping pills. Slept 8 hours.', '2026-08-01');
+    """)
+    out = w.assert_pack_fact(pack=_work_pack(), predicate="work.project",
+        subject_entity_id="ent_owner", value={"project": "topos", "status": "active"},
+        actor_role="authored", source_refs=[{"table": "journal_entries", "record_id": "tl-1"}],
+        confidence=0.9, quote="Took those qualia sleeping pills", about="owner",
+        event_date="2026-08-01")
+    from topos.features.derivation.surfaces import fact_evidence
+    ev = fact_evidence(conn, out["object_id"])
+    assert ev["quote"] == "Took those qualia sleeping pills"
+    assert len(ev["sources"]) == 1
+    src = ev["sources"][0]
+    assert src["kind"] == "journal entry" and "qualia" in src["text"] and not src["missing"]
+    assert ev["pack"] == "work.career" and ev["valid_from"].startswith("2026-08-01")
+
+def test_fact_evidence_marks_missing_records(a3_writer):
+    w, conn = a3_writer
+    out = w.assert_pack_fact(pack=_work_pack(), predicate="work.project",
+        subject_entity_id="ent_owner", value={"project": "ghost", "status": "active"},
+        actor_role="authored", source_refs=[{"table": "journal_entries", "record_id": "gone"}],
+        confidence=0.9, about="owner")
+    from topos.features.derivation.surfaces import fact_evidence
+    ev = fact_evidence(conn, out["object_id"])
+    assert ev["sources"][0]["missing"] is True     # honest about what it cannot show
