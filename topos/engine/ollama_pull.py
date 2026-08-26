@@ -34,6 +34,11 @@ REASON_NO_SPACE = "insufficient_disk_space"
 _LOCK = threading.Lock()
 _PROGRESS: Dict[str, Dict[str, Any]] = {}
 
+#: Tags whose in-flight download has already asked the model manager for room.
+#: Guarded by ``_LOCK``; cleared when a pull for that tag starts again, so a
+#: retry after the owner changed the floor gets a fresh attempt.
+_RECLAIM_ATTEMPTED: set = set()
+
 #: A node runs for weeks and the browser may name any tag, typos included. More
 #: than a handful of finished records means this store is being kept as a log,
 #: which is not what it is for.
@@ -74,6 +79,7 @@ def reset_progress() -> None:
     """Drop every record. Test seam — nothing in the product calls this."""
     with _LOCK:
         _PROGRESS.clear()
+        _RECLAIM_ATTEMPTED.clear()
 
 
 def pull_status(model: str) -> Dict[str, Any]:
@@ -84,7 +90,42 @@ def pull_status(model: str) -> Dict[str, Any]:
         return dict(existing) if existing is not None else _record(tag)
 
 
-def _apply_frame(tag: str, frame: Dict[str, Any], *, base_url: Any = None) -> None:
+def _reclaim_once(tag: str, needed: int, base_url: Any, adapter: Any) -> bool:
+    """Try eviction ONCE for this pull; True when anything was removed.
+
+    Once per pull, not once per frame: `_apply_frame` runs on every progress
+    frame, and a failed reclaim that re-ran each time would list and probe the
+    volume hundreds of times while the download it cannot save keeps streaming.
+    Tracked beside the progress records rather than on them — the record is the
+    payload the browser polls, and a private flag does not belong in a shape
+    two repos parse.
+
+    Deletion needs the DOWNLOAD'S adapter, not any adapter. Without it the only
+    way to prune would be to build a default one, which may point at a different
+    Ollama than this pull is streaming from — deleting one daemon's models to
+    make room on another's. No adapter means no eviction.
+    """
+    if adapter is None:
+        return False
+    with _LOCK:
+        if tag in _RECLAIM_ATTEMPTED:
+            return False
+        _RECLAIM_ATTEMPTED.add(tag)
+    from .model_manager import reclaim_for
+
+    result = reclaim_for(
+        needed, adapter=adapter, keep=[tag], base_url=base_url, reason="pull_stream"
+    )
+    if result.removed:
+        logger.info(
+            "made room mid-download for %s by removing %s", tag, ", ".join(result.removed)
+        )
+    return bool(result.removed)
+
+
+def _apply_frame(
+    tag: str, frame: Dict[str, Any], *, base_url: Any = None, adapter: Any = None
+) -> None:
     completed = int(frame.get("completed") or 0)
     total = int(frame.get("total") or 0)
     # The first frames carry the real size. Checking here catches what no
@@ -93,6 +134,11 @@ def _apply_frame(tag: str, frame: Dict[str, Any], *, base_url: Any = None) -> No
     # fill the volume the node's database is on.
     if total > 0:
         verdict = check_space_for(total, base_url=base_url)
+        # A tag whose real size only the stream knows is the case the model
+        # manager exists for. Evict what nothing is bound to and ask again
+        # before stopping a download that is otherwise healthy.
+        if verdict is not None and _reclaim_once(tag, total, base_url, adapter):
+            verdict = check_space_for(total, base_url=base_url)
         if verdict is not None:
             with _LOCK:
                 record = _PROGRESS.setdefault(tag, _record(tag))
@@ -119,7 +165,9 @@ def _run_pull(tag: str, adapter: Any) -> None:
         adapter.pull_model(
             tag,
             stream=True,
-            on_progress=lambda frame: _apply_frame(tag, frame, base_url=base_url),
+            on_progress=lambda frame: _apply_frame(
+                tag, frame, base_url=base_url, adapter=adapter
+            ),
         )
     except PullAborted:
         # `_apply_frame` already wrote the verdict and the reason; overwriting
@@ -150,6 +198,7 @@ def start_pull(
     *,
     adapter: Optional[Any] = None,
     known_size_bytes: Any = None,
+    reclaim: bool = True,
 ) -> Dict[str, Any]:
     """Begin downloading ``model`` in the background; returns the first record.
 
@@ -160,6 +209,10 @@ def start_pull(
     list does — be refused before the transfer starts rather than partway in.
     Omitting it is safe: `_apply_frame` still stops the pull once the stream
     reports the real total.
+
+    `reclaim=False` opts out of the model manager's eviction pass, for a caller
+    that wants the raw verdict rather than a node that quietly rearranges its
+    models first.
     """
     tag = str(model or "").strip()
     if not tag:
@@ -175,7 +228,27 @@ def start_pull(
     # Refuse before a single byte moves when the size is known up front. The
     # mid-stream check in `_apply_frame` is the backstop for tags whose size we
     # cannot know; this is the one that spares the owner the download entirely.
-    verdict = check_space_for(known_size_bytes, base_url=getattr(resolved, "_base_url", None))
+    base_url = getattr(resolved, "_base_url", None)
+    verdict = check_space_for(known_size_bytes, base_url=base_url)
+    if verdict is not None and reclaim:
+        # The floor is a floor, not a wall: before telling the owner their disk
+        # is full, remove the models nothing is bound to and ask again. This is
+        # the whole point of the model manager — a node that can answer by
+        # swapping one model for another should do that rather than stop.
+        from .model_manager import reclaim_for
+
+        freed = reclaim_for(
+            known_size_bytes,
+            adapter=resolved,
+            keep=[tag],
+            base_url=base_url,
+            reason="pull",
+        )
+        if freed.removed:
+            logger.info(
+                "made room for %s by removing %s", tag, ", ".join(freed.removed)
+            )
+            verdict = check_space_for(known_size_bytes, base_url=base_url)
     if verdict is not None:
         with _LOCK:
             record = _record(tag)
@@ -191,6 +264,7 @@ def start_pull(
         record = _record(tag)
         record["state"] = STATE_PULLING
         _PROGRESS[tag] = record
+        _RECLAIM_ATTEMPTED.discard(tag)
         snapshot = dict(record)
 
     worker = threading.Thread(

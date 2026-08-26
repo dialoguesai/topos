@@ -436,12 +436,22 @@ def extract_messenger_graph(
         co_edges: Counter[Tuple[str, str]] = Counter()
         reply_edges: Counter[Tuple[str, str]] = Counter()
         mention_edges: Counter[Tuple[str, str]] = Counter()
+        # Which CONNECTOR produced each edge, and how much of it. The edge tables
+        # partition on `source_scope` — a joined set like 'imessage,signal' — so an
+        # edge in a multi-source partition could not say where it came from, and
+        # asking for one connector's view meant writing a whole extra partition of
+        # the same corpus (2^n of them for n sources). Provenance belongs on the
+        # row: `conv_key` is (conversation_id, source_id), so the connector is
+        # already in hand here and costs one Counter to keep.
+        source_edges: Counter[Tuple[str, str, str]] = Counter()
 
         for conv_key, members in period_participants_by_conv.items():
             sorted_members = sorted(members)
+            conv_source = str(conv_key[1] or "") or "unknown"
             for src_id, tgt_id in combinations(sorted_members, 2):
                 if src_id and tgt_id:
                     co_edges[(src_id, tgt_id)] += 1
+                    source_edges[(src_id, tgt_id, conv_source)] += 1
 
             conv_alias_lookup = _build_unique_alias_lookup(
                 {cid: aliases_by_contact.get(cid, set()) for cid in members}
@@ -462,12 +472,14 @@ def extract_messenger_graph(
                     if target_id and target_id in members and target_id != sender_id:
                         edge = tuple(sorted((sender_id, target_id)))
                         reply_edges[edge] += 1
+                        source_edges[(edge[0], edge[1], conv_source)] += 1
 
                 for mention in _extract_mentions(msg.get("content")):
                     target_id = conv_alias_lookup.get(mention)
                     if target_id and target_id != sender_id:
                         edge = tuple(sorted((sender_id, target_id)))
                         mention_edges[edge] += 1
+                        source_edges[(edge[0], edge[1], conv_source)] += 1
 
         all_edges = set(co_edges.keys()) | set(reply_edges.keys()) | set(mention_edges.keys())
         edges_payload: List[Dict[str, Any]] = []
@@ -491,6 +503,11 @@ def extract_messenger_graph(
                     "weight": total_weight,
                     "edge_type": edge_type,
                     "edge_type_counts": edge_type_counts,
+                    "source_counts": {
+                        conn_id: int(n)
+                        for (a, b, conn_id), n in source_edges.items()
+                        if a == src_id and b == tgt_id and n
+                    },
                 }
             )
 

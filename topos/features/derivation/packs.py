@@ -72,6 +72,12 @@ class Pack:
     guidance: Dict[str, Any]
     revision: Dict[str, Any] = field(default_factory=dict)
     synthesis: List[Dict[str, Any]] = field(default_factory=list)
+    #: May this pack's predicates ever describe someone other than the owner?
+    #: Default DENY. A pack authored to describe the owner must not start
+    #: producing dossiers about third parties merely because it was enabled, and
+    #: before this existed every enabled pack could do exactly that — including
+    #: the special-class health.* packs.
+    net_subject: str = "deny"
     raw: Dict[str, Any] = field(default_factory=dict)
 
     def effective_sensitivity(self, predicate: str) -> str:
@@ -104,6 +110,9 @@ def load_pack(path: Path, known_namespaces: Optional[set] = None) -> Pack:
     _require(bool(d.get("pack")), pid, "missing `pack` id")
     _require(d.get("sensitivity_class") in SENSITIVITY, pid, f"bad sensitivity_class {d.get('sensitivity_class')!r}")
     _require(d.get("role_policy") in ROLE_POLICIES, pid, f"bad role_policy {d.get('role_policy')!r}")
+    _net_subject = str(d.get("net_subject") or "deny").strip().lower()
+    _require(_net_subject in ("allow", "deny"), pid,
+             f"net_subject must be 'allow' or 'deny', got {d.get('net_subject')!r}")
     _require(bool(d.get("eval", {}).get("gold")), pid, "eval.gold is MANDATORY (no instrument, no install)")
     _require(bool(d.get("eval", {}).get("negative_controls")), pid, "eval.negative_controls is MANDATORY")
     _require(bool(d.get("consumers")), pid, "at least one consumer is required")
@@ -138,7 +147,7 @@ def load_pack(path: Path, known_namespaces: Optional[set] = None) -> Pack:
         disclosure_default=str(d.get("disclosure_default") or "owner_only"),
         routing=d.get("routing") or {}, predicates=preds,
         guidance=d.get("guidance") or {}, revision=d.get("revision") or {},
-        synthesis=d.get("synthesis") or [], raw=d)
+        synthesis=d.get("synthesis") or [], net_subject=_net_subject, raw=d)
 
 
 def load_packs(directory: Path, only: Optional[List[str]] = None) -> Dict[str, Pack]:

@@ -555,3 +555,66 @@ async def handle_get_runtime_bootstrap(message: Dict[str, Any]) -> Optional[Dict
     except Exception as exc:  # noqa: BLE001
         logger.debug("[PIPELINE:QUERY] get_runtime_bootstrap error: %s", exc)
         return {"id": req_id, "status": "error", "error": str(exc)}
+
+@handles("get_disk_space_policy")
+async def handle_get_disk_space_policy(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """The owner's minimum-free-disk floor and the bounds the settings form needs."""
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    try:
+        from ...api.disk_space_config import policy_payload
+
+        return {
+            "id": req_id,
+            "status": "ok",
+            "payload": {"status": "ok", **policy_payload(hub.get_db_connection())},
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+@handles("put_disk_space_policy")
+async def handle_put_disk_space_policy(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Set the floor. Out-of-range values are refused, not clamped — the form has
+    to show the number the node actually agreed to."""
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    try:
+        from ...api.disk_space_config import normalize_put_min_free_bytes, policy_payload
+        from ...config.settings import ENGINE_CONFIG_KEY_MIN_FREE_DISK_BYTES
+        from .common import set_engine_config_value
+
+        value = normalize_put_min_free_bytes(message.get("payload"))
+        set_engine_config_value(conn, ENGINE_CONFIG_KEY_MIN_FREE_DISK_BYTES, str(value))
+        return {
+            "id": req_id,
+            "status": "ok",
+            "payload": {"status": "ok", **policy_payload(conn)},
+        }
+    except ValueError as exc:
+        return {"id": req_id, "status": "error", "error": str(exc), "error_code": 400}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+@handles("get_disk_status")
+async def handle_get_disk_status(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Free space against the floor, plus what the model manager could reclaim.
+
+    One payload for both surfaces that ask it — the settings panel and the
+    sidebar warning — so the two can never disagree about whether the node is
+    under its floor.
+    """
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    try:
+        from ...api.disk_space_config import get_disk_status_core
+
+        payload = await get_disk_status_core(hub.get_db_connection())
+        return {"id": req_id, "status": "ok", "payload": {"status": "ok", **payload}}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
