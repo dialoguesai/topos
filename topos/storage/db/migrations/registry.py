@@ -42,6 +42,14 @@ from .journal_origin_dimension_v1 import (
     MIGRATION_ID as JOURNAL_ORIGIN_DIMENSION_V1_ID,
     apply_journal_origin_dimension_v1_up,
 )
+from .derivation_provenance_v1 import (
+    MIGRATION_ID as DERIVATION_PROVENANCE_V1_ID,
+    apply_derivation_provenance_v1_up,
+)
+from .enrichment_record_progress_v1 import (
+    MIGRATION_ID as ENRICHMENT_RECORD_PROGRESS_V1_ID,
+    apply_enrichment_record_progress_v1_up,
+)
 from .query_artifacts_duration_ms_v1 import (
     MIGRATION_ID as QUERY_ARTIFACTS_DURATION_MS_V1_ID,
     apply_query_artifacts_duration_ms_v1_up,
@@ -336,6 +344,11 @@ MIGRATIONS: List[MigrationSpec] = [
     _spec(60, RETIRE_URL_CLASSIFICATION_V1_ID, apply_retire_url_classification_v1_up),
     _spec(61, JOURNAL_ORIGIN_DIMENSION_V1_ID, apply_journal_origin_dimension_v1_up),
     _spec(62, QUERY_ARTIFACTS_DURATION_MS_V1_ID, apply_query_artifacts_duration_ms_v1_up),
+    # 63 was written first and held back from the repo head on 2026-08-25 (see the module
+    # docstring): registering it early stamped the live database past its installed engine
+    # and cost ~25 minutes of ingest. A release ships it, which is what this is.
+    _spec(63, ENRICHMENT_RECORD_PROGRESS_V1_ID, apply_enrichment_record_progress_v1_up),
+    _spec(64, DERIVATION_PROVENANCE_V1_ID, apply_derivation_provenance_v1_up),
 ]
 
 
@@ -387,6 +400,8 @@ __all__ = [
     "CONVERSATION_CONTEXT_V1_ID",
     "ACTIVITY_EVENTS_CONTENT_V1_ID",
     "DERIVATION_LEDGER_V1_ID",
+    "ENRICHMENT_RECORD_PROGRESS_V1_ID",
+    "DERIVATION_PROVENANCE_V1_ID",
     "PIPELINE_JOBS_V1_ID",
     "CANONICAL_ADDRESS_BOOK_V1_ID",
     "DOCUMENTS_V1_ID",
