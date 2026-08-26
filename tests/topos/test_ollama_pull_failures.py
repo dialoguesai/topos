@@ -168,3 +168,126 @@ def test_run_pull_keeps_the_structured_reason_when_it_aborts():
     record = ollama_pull.pull_status("huge:latest")
     assert record["reason"] == ollama_pull.REASON_NO_SPACE
     assert "Not enough disk space" in record["error"]
+
+
+# --- The floor is a floor, not a wall (model manager) -------------------------
+#
+# Refusing a download because the disk is low is right only when there is
+# nothing the node could have done about it. When re-downloadable models are
+# sitting on the volume and nothing is bound to them, the node should swap.
+
+
+def test_a_refusal_becomes_a_download_once_eviction_makes_room():
+    verdict = SpaceVerdict(
+        needed_bytes=2_000_000_000,
+        free_bytes=100_000_000,
+        reserve_bytes=10 * 1024**3,
+        path="/home/x/.ollama/models",
+    )
+    started = []
+
+    class _Pulls(_Adapter):
+        def pull_model(self, tag, *, stream=True, on_progress=None):
+            started.append(tag)
+
+    verdicts = iter([verdict, None])  # full, then roomy after the eviction
+
+    class _Freed:
+        removed = ["stale:7b"]
+        freed_bytes = 5 * 1024**3
+
+    with patch(
+        "topos.engine.ollama_pull.check_space_for", side_effect=lambda *a, **k: next(verdicts)
+    ), patch("topos.engine.model_manager.reclaim_for", return_value=_Freed()):
+        record = ollama_pull.start_pull(
+            "llama3.2:latest", adapter=_Pulls([]), known_size_bytes=2_000_000_000
+        )
+
+    assert record["state"] == ollama_pull.STATE_PULLING
+    assert record["reason"] != ollama_pull.REASON_NO_SPACE
+
+
+def test_a_refusal_stands_when_there_was_nothing_to_evict():
+    """Eviction is an attempt, not a promise. Removing nothing must not turn a
+    real refusal into a download that fills the volume."""
+    verdict = SpaceVerdict(
+        needed_bytes=2_000_000_000,
+        free_bytes=100_000_000,
+        reserve_bytes=10 * 1024**3,
+        path="/home/x/.ollama/models",
+    )
+    started = []
+
+    class _NeverCalled(_Adapter):
+        def pull_model(self, *a, **k):  # pragma: no cover - must not run
+            started.append(1)
+
+    class _FreedNothing:
+        removed = []
+        freed_bytes = 0
+
+    with patch(
+        "topos.engine.ollama_pull.check_space_for", return_value=verdict
+    ), patch("topos.engine.model_manager.reclaim_for", return_value=_FreedNothing()):
+        record = ollama_pull.start_pull(
+            "llama3.2:latest", adapter=_NeverCalled([]), known_size_bytes=2_000_000_000
+        )
+
+    assert record["state"] == ollama_pull.STATE_ERROR
+    assert record["reason"] == ollama_pull.REASON_NO_SPACE
+    assert started == []
+
+
+def test_the_mid_stream_reclaim_runs_once_not_once_per_frame():
+    """`_apply_frame` sees every frame; a reclaim per frame would list models and
+    probe the volume hundreds of times for a download it cannot save."""
+    verdict = SpaceVerdict(
+        needed_bytes=40_000_000_000,
+        free_bytes=1_000_000_000,
+        reserve_bytes=10 * 1024**3,
+        path="/home/x/.ollama/models",
+    )
+    calls = []
+
+    class _FreedNothing:
+        removed = []
+        freed_bytes = 0
+
+    def _record_call(*args, **kwargs):
+        calls.append(kwargs.get("keep"))
+        return _FreedNothing()
+
+    adapter = _Adapter([])
+    with patch(
+        "topos.engine.ollama_pull.check_space_for", return_value=verdict
+    ), patch("topos.engine.model_manager.reclaim_for", side_effect=_record_call):
+        for _ in range(5):
+            with pytest.raises(PullAborted):
+                ollama_pull._apply_frame(
+                    "huge:latest",
+                    {"status": "downloading", "completed": 1, "total": 40_000_000_000},
+                    adapter=adapter,
+                )
+
+    assert len(calls) == 1, f"reclaim ran {len(calls)} times for one download"
+
+
+def test_no_adapter_means_no_eviction():
+    """Without the download's own adapter we cannot tell which Ollama the pull
+    is streaming from, and pruning the wrong daemon is not a recoverable error."""
+    verdict = SpaceVerdict(
+        needed_bytes=40_000_000_000,
+        free_bytes=1_000_000_000,
+        reserve_bytes=10 * 1024**3,
+        path="/home/x/.ollama/models",
+    )
+    with patch(
+        "topos.engine.ollama_pull.check_space_for", return_value=verdict
+    ), patch("topos.engine.model_manager.reclaim_for") as reclaim:
+        with pytest.raises(PullAborted):
+            ollama_pull._apply_frame(
+                "huge:latest",
+                {"status": "downloading", "completed": 1, "total": 40_000_000_000},
+            )
+
+    reclaim.assert_not_called()

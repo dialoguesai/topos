@@ -41,9 +41,14 @@ from urllib.parse import urlparse
 logger = logging.getLogger("topos.engine.disk_space")
 
 #: Headroom to leave AFTER the model lands, for the node's own database and the
-#: enrichment it runs continuously. Not tuned to a measurement — it is the
-#: smallest number that is obviously more than "a few writes".
-DEFAULT_RESERVE_BYTES = 2 * 1024**3
+#: enrichment it runs continuously, when the owner has not set a floor of their
+#: own. Not tuned to a measurement — it is the smallest number that is obviously
+#: more than "a few writes", raised to 10 GB when the floor became a setting so
+#: the shipped default matches what Settings -> General shows.
+DEFAULT_MIN_FREE_BYTES = 10 * 1024**3
+
+#: Historical spelling, kept because callers and tests import it by this name.
+DEFAULT_RESERVE_BYTES = DEFAULT_MIN_FREE_BYTES
 
 #: Hosts that mean "the machine this node runs on".
 _LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1", "::1", "0.0.0.0", ""})
@@ -125,6 +130,27 @@ def free_bytes(path: Optional[Path] = None) -> Optional[int]:
         return None
 
 
+def min_free_bytes(conn: Any = None) -> int:
+    """The owner's floor for this node, or the shipped default.
+
+    Resolved lazily and defensively: this module is imported by the CLI and by
+    background pull threads, neither of which is guaranteed a database. A node
+    that cannot answer keeps the default rather than dropping the floor to zero
+    — losing the setting must never be the thing that fills the volume.
+    """
+    try:
+        from ..config.settings import resolve_min_free_disk_bytes, settings
+
+        if conn is None:
+            from ..core.state import get_db_connection
+
+            conn = get_db_connection()
+        return int(resolve_min_free_disk_bytes(settings, conn))
+    except Exception as exc:  # noqa: BLE001 — no DB is not a reason to stop checking
+        logger.debug("min free disk floor unreadable, using default: %s", exc)
+        return DEFAULT_MIN_FREE_BYTES
+
+
 def space_check_applies(base_url: Any) -> bool:
     """Whether THIS machine's disk is the one the download would land on.
 
@@ -145,14 +171,19 @@ def check_space_for(
     needed_bytes: Any,
     *,
     base_url: Any = None,
-    reserve_bytes: int = DEFAULT_RESERVE_BYTES,
+    reserve_bytes: Optional[int] = None,
     path: Optional[Path] = None,
+    conn: Any = None,
 ) -> Optional[SpaceVerdict]:
     """A verdict when the pull would not fit, or None to go ahead.
 
     None covers every "we do not know": a remote Ollama, an unreadable volume,
     or a size we were never told. Only a positive finding — a real free-space
     number that is smaller than a real requirement — refuses.
+
+    `reserve_bytes` defaults to the owner's configured floor. Passing one
+    explicitly is for callers reasoning about a hypothetical floor (the settings
+    preview), not for routine checks — those must see what the owner set.
     """
     if not space_check_applies(base_url):
         return None
@@ -162,16 +193,50 @@ def check_space_for(
         return None
     if needed <= 0:
         return None
+    reserve = min_free_bytes(conn) if reserve_bytes is None else int(reserve_bytes)
     target = path or ollama_models_dir()
     available = free_bytes(target)
     if available is None:
         return None
-    if available >= needed + max(0, int(reserve_bytes)):
+    if available >= needed + max(0, reserve):
         return None
     resolved = _existing_ancestor(target)
     return SpaceVerdict(
         needed_bytes=needed,
         free_bytes=available,
-        reserve_bytes=max(0, int(reserve_bytes)),
+        reserve_bytes=max(0, reserve),
         path=str(resolved or target),
     )
+
+
+def disk_status(conn: Any = None, *, base_url: Any = None) -> dict:
+    """What the app shows: the volume, the floor, and whether we are under it.
+
+    `below_floor` is the fact the sidebar warns on, and it is deliberately
+    tri-state-safe: `free_bytes` is None when the volume could not be read, and
+    an unreadable volume is not a full one, so `below_floor` stays False.
+    `applies` is False for a remote Ollama — that machine's disk is not ours to
+    report on, and the UI says so rather than showing this node's numbers.
+    """
+    floor = min_free_bytes(conn)
+    target = ollama_models_dir()
+    resolved = _existing_ancestor(target)
+    applies = space_check_applies(base_url)
+    free = free_bytes(target) if applies else None
+    total: Optional[int] = None
+    if applies and resolved is not None:
+        try:
+            total = int(shutil.disk_usage(resolved).total)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("disk total probe failed for %s: %s", resolved, exc)
+    below = free is not None and free < floor
+    return {
+        "schema": 1,
+        "applies": applies,
+        "path": str(resolved or target),
+        "free_bytes": free,
+        "total_bytes": total,
+        "min_free_bytes": floor,
+        "below_floor": below,
+        "shortfall_bytes": max(0, floor - free) if below and free is not None else 0,
+    }
