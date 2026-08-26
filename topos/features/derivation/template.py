@@ -260,6 +260,13 @@ def parse_output(raw: str, pack: Pack, record_text: str = None) -> Tuple[List[Di
                     person_bad = True
                 elif pv is not None and record_text is not None and not person_grounded(pv, record_text):
                     person_bad = True
+            # org laundering is the same failure in a different slot (measured:
+            # a spine name bound as the fired-from org) — grounding-only, no
+            # blocklist: org paraphrases ("this last company") stay legal.
+            ov = val.get("org")
+            if (isinstance(ov, str) and ov.strip() and record_text is not None
+                    and not person_grounded(ov, record_text)):
+                person_bad = True
             # identity integrity: a predicate that KEYS on person cannot store an
             # assertion with no person — it would collapse onto a person-less key
             if (pred.key_fields and "person" in pred.key_fields
