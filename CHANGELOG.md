@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.26] — 2026-08-26
+
 ### Added
 - **[S1] Attribution ladder A1–A4** for ontology-pack fact derivation
   (PLAN_DERIVATION_WAVE2 §WA). A1: reaction-prefix hygiene at extraction input +
