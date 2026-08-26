@@ -9,6 +9,46 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **[S1] Attribution ladder A1–A4** for ontology-pack fact derivation
+  (PLAN_DERIVATION_WAVE2 §WA). A1: reaction-prefix hygiene at extraction input +
+  deterministic person-field rejects (pronouns, generics, garbled lists). A2: every
+  person-fact assertion carries `about: owner | other:<name> | unclear` — missing
+  never silently means owner. A3: `other:` facts route to that person's dossier
+  (`subject_entity_id`), unresolvable/unclear assertions quarantine into
+  `fact_conflicts` — nothing the ladder catches is silently lost. A4: a second-pass
+  verifier model judges every assertion before it lands (`TOPOS_DERIVATION_VERIFY`,
+  default `required`); measured on a 32-record battery: junk classes 19/23 → 0/23
+  while controls recover to near-extractor recall (template `shadow-9`, verifier `a4-2`).
+- **[S1] DerivationJob at ingest** (migration 65: `pack_registry` + `derivation_progress`):
+  ontology packs run as a canonical enrichment job for registry-enabled packs (Wave A
+  seeded: relationships.social, work.career, health.physical). Packs now ship inside the
+  wheel (`topos/features/derivation/bundled_packs/`). Extraction/verification model split
+  is measured, not aesthetic (extractor keeps recall, verifier supplies precision).
+- **[S1] Event-identity keying** (`event_identity: once|windowed:N|dated`, pack-declared):
+  a retold life event corroborates the original instead of minting a phantom duplicate —
+  measured before: one firing → 6 events, one death → 5.
+- **[S1] C7 facts-direct answers**: known-item asks ("what medications am I taking")
+  answer straight from live facts — exact values, validity dates, evidence counts, zero
+  LLM — gated by packet resolution (special-class requires `facts_all`); follows the
+  `band` deterministic-answer precedent.
+- **[S1] Derivation surfaces API**: `get/put_derivation_pack(s)` (lens catalog: registry
+  + per-pack live fact and quarantine counts, owner enable/disable) and
+  `get/put_fact_conflict(s)` (the quarantine/conflict review queue).
+
+### Changed
+- **[S1] `required_fields` retired from the pack contract** (4 measured fabrication
+  backfires: forced fields make models invent values — "Founder @ Smithers"). Parsed for
+  compatibility, never enforced; intent survives as abstention guidance.
+- **[S1] Pack prefilter learns the pack's own eval gold** — 13+ gold examples across 11
+  packs were silently dropped by their own prefilters; an invariant test now guards every
+  pack, present and future.
+
+### Fixed
+- **[S1] Derivation extractor provenance stamp told the truth all along — the constant
+  didn't.** `writer.py` carried a stale local `TEMPLATE_VERSION = "shadow-1"`, stamping
+  every fact from later templates as shadow-1; it now imports the real one.
+
 ### Fixed
 - **[S1] Honesty metadata now outranks evidence in the inference packet's truncation
   order.** The packet builder's char slice ate the TAIL of the serialized context, and the
