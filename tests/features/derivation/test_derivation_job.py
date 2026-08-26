@@ -92,9 +92,9 @@ def test_only_wave_a_enabled_by_default(node_db, monkeypatch):
     seed_pack_registry(node_db, bundled_pack_dir())
     rows = dict(node_db.execute("SELECT pack_id, enabled FROM pack_registry").fetchall())
     assert rows["relationships.social"] == 1 and rows["work.career"] == 1
-    assert rows["health.physical"] == 1
+    assert rows["health.physical"] == 1 and rows["health.mental"] == 1
     assert rows.get("beliefs.civic", 0) == 0 and rows.get("behavior.habits", 0) == 0
-    assert sum(rows.values()) == 3
+    assert sum(rows.values()) == 4
 
 
 # --- training-data factory + self-gating (W-B, owner design 2026-08-26) ---
