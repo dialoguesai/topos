@@ -28,6 +28,19 @@ The machine-readable twin of each release is
   enrichment. A release is the only thing that can safely ship it, so it ships here, ahead of
   `derivation_provenance_v1` (64). After installing, raise the routine playground's
   `PG_NODE_SCHEMA_BASELINE` to 64.
+- **[E:entities] iMessage entity extraction now runs at ingest**, and the API reports the job
+  list the engine actually runs — an override could previously make the reported and executed
+  lanes disagree, and `enrichments[].lanes` was already override-aware while the summary was not.
+- **[E] Enrichment records a per-record "this ran" marker** (backed by migration 63), so a
+  backfill stops re-scanning records that legitimately produced no output. On the live node a
+  2,400-record imessage/entities backfill left 1,903 of 2,355 messages still counting as
+  "missing", because roughly three in five ("ok", "haha", an emoji) contain no named entity and
+  NER correctly emits nothing.
+- **[E:entities] Contacts without a display name get a seeded person entity**, so they can be
+  linked and resolved rather than silently dropping out of the spine.
+- **[O] Script to fold a misnamed test-dataset corpus back into the owner's dataset.**
+  Neither enrichment change bumps `JOB_SPEC_VERSIONS`: both change which jobs run and how
+  their progress is tracked, not what a job derives, so previously-derived outputs stay valid.
 - **[O] Derivation-layer runtime** (`topos/features/derivation/`): pack loader + validator,
   identifier guard, sandboxed prompt template, lexical prefilter, the fact-assertion ladder
   (NOOP / CORROBORATE / CORRECT / SUPERSEDE / CONFLICT) and two no-LLM synthesizers. Library
