@@ -1,583 +1,585 @@
 {
-  "$comment": "Per-release derived-data upgrade manifests. Schema migrations handle table SHAPE; entries here declare which DERIVED layers a release invalidates and how to recompute them. Consumed by steps_between(installed, shipped) \u2014 see topos/upgrades/__init__.py. Steps MUST be idempotent and safe to re-run after interruption.",
-  "releases": [
+ "$comment": "Per-release derived-data upgrade manifests. Schema migrations handle table SHAPE; entries here declare which DERIVED layers a release invalidates and how to recompute them. Consumed by steps_between(installed, shipped) \u2014 see topos/upgrades/__init__.py. Steps MUST be idempotent and safe to re-run after interruption.",
+ "releases": [
+  {
+   "version": "1.1.0",
+   "summary": "Dense intelligence upgrade (stats engine, entity spine, fact store, incremental clustering, query planner). Shipped before manifests existed; entry anchors the version ladder.",
+   "steps": []
+  },
+  {
+   "version": "1.2.0",
+   "summary": "Temporal entity graph (facts/goals/places/conversations materialized, provenance roles on edges, Louvain neighborhoods, semantic graph search), NER wordpiece stitcher, derived-data GC hardening, provenance split completion.",
+   "steps": [
     {
-      "version": "1.1.0",
-      "summary": "Dense intelligence upgrade (stats engine, entity spine, fact store, incremental clustering, query planner). Shipped before manifests existed; entry anchors the version ladder.",
-      "steps": []
-    },
-    {
-      "version": "1.2.0",
-      "summary": "Temporal entity graph (facts/goals/places/conversations materialized, provenance roles on edges, Louvain neighborhoods, semantic graph search), NER wordpiece stitcher, derived-data GC hardening, provenance split completion.",
-      "steps": [
-        {
-          "id": "reextract-entities",
-          "kind": "enrichment_reprocess",
-          "title": "Re-extract entities with the wordpiece stitcher",
-          "why": "5f687e9 changed NER post-processing (word-level aggregation + wordpiece stitching): 1.1.0-era extractions contain ##-fragment junk and silently truncated surfaces ('Jon' for 'Jonny'). Message rows are untouched; message_entities/entity_mentions produced by the old extractor are stale.",
-          "params": {
-            "job_names": [
-              "entities"
-            ],
-            "force_reprocess": true,
-            "include_signal": false,
-            "per_source": true,
-            "source_filter": "sources with canonical message/journal/activity records"
-          },
-          "progress": "TUI progress bar on the node + GET /v1/upgrade/status",
-          "idempotent": "record_mention is INSERT OR IGNORE; re-running converges",
-          "estimated_duration": "~10\u201320 min per 1.5k records (CPU-bound NER); node stays usable, serves stale graph meanwhile; signal/LLM lane stays off (graph rebuild is the next step)",
-          "order": 1
-        },
-        {
-          "id": "rebuild-entity-graph",
-          "kind": "engine_endpoint",
-          "title": "Rebuild the entity graph (evidence + materialized layers)",
-          "why": "1.2.0 adds layers the 1.1.0 graph never had: fact/topic/goal/place/conversation materialization, provenance role stamping on edges (attribution overlay), Louvain community ids, and GC for dangling contact anchors / orphaned facts. One rebuild derives all of it from existing data.",
-          "params": {
-            "method": "POST",
-            "path": "/v1/signal/entities/graph/rebuild"
-          },
-          "progress": "synchronous (seconds at personal scale); response is the before/after report",
-          "idempotent": "full-refresh semantics (mz-tagged edges rebuilt, evidence edges recomputed from mentions)",
-          "estimated_duration": "<10s",
-          "depends_on": [
-            "reextract-entities"
-          ],
-          "order": 2,
-          "$comment": "Must run AFTER re-extraction completes: rebuilding from a partially restored mention set guts evidence edges (observed live 2026-07-10)."
-        },
-        {
-          "id": "actor-role-backfill",
-          "kind": "none",
-          "title": "actor_role column backfill",
-          "why": "Handled by the ledger-guarded schema migration actor_role_v1 at first boot; listed so release notes and the fleet dashboard show it without a manifest step.",
-          "order": 0
-        }
+     "id": "reextract-entities",
+     "kind": "enrichment_reprocess",
+     "title": "Re-extract entities with the wordpiece stitcher",
+     "why": "5f687e9 changed NER post-processing (word-level aggregation + wordpiece stitching): 1.1.0-era extractions contain ##-fragment junk and silently truncated surfaces ('Jon' for 'Jonny'). Message rows are untouched; message_entities/entity_mentions produced by the old extractor are stale.",
+     "params": {
+      "job_names": [
+       "entities"
       ],
-      "notes": [
-        "No re-embedding: the embedding model is unchanged in 1.2.0 (signal_embeddings remain valid).",
-        "No canonical re-ingest: raw and canonical rows are untouched by every 1.2.0 change.",
-        "Extraction default model moved to the quality tier (qwen3.5:9b-mlx) \u2014 affects FUTURE extractions only; small-RAM devices surface tier=stress in model recommendations and should downsize via settings.",
-        "Fleet skew: 1.1.0 nodes lack the signal_entity_graph_search handler \u2014 CPs must treat it as optional until the fleet is on 1.2.0."
-      ]
+      "force_reprocess": true,
+      "include_signal": false,
+      "per_source": true,
+      "source_filter": "sources with canonical message/journal/activity records"
+     },
+     "progress": "TUI progress bar on the node + GET /v1/upgrade/status",
+     "idempotent": "record_mention is INSERT OR IGNORE; re-running converges",
+     "estimated_duration": "~10\u201320 min per 1.5k records (CPU-bound NER); node stays usable, serves stale graph meanwhile; signal/LLM lane stays off (graph rebuild is the next step)",
+     "order": 1
     },
     {
-      "version": "1.3.0",
-      "summary": "Attention triage (daily 2x2 verdicts, badges/ranks, dashboard), negotiable time-signal availability (flex/rhythm/commitments), conversation context tags (work/personal), claim verification / fact verdicts, facts-LLM think gating.",
-      "steps": [
-        {
-          "id": "attention-triage-schema",
-          "kind": "none",
-          "title": "attention_triage_v1/v2 + conversation_context_v1 schema",
-          "why": "Handled by ledger-guarded / always-run schema migrations at first boot; listed so release notes and the fleet dashboard show the additive tables/columns (triage_verdicts, conversations.context_tag).",
-          "order": 0
-        },
-        {
-          "id": "backfill-attention-triage",
-          "kind": "enrichment_reprocess",
-          "title": "Backfill attention triage for existing sources",
-          "why": "1.3.0 adds the attention_triage enrichment job and triage_verdicts ledger. Pre-1.3.0 nodes have no verdicts or interest-profile/attention-summary objects; reprocessing fills the new derived layer from existing canonical rows without touching raw/canonical.",
-          "params": {
-            "job_names": [
-              "attention_triage"
-            ],
-            "force_reprocess": true,
-            "include_signal": false,
-            "per_source": true,
-            "source_filter": "sources with canonical message/journal/activity records"
-          },
-          "progress": "TUI progress bar on the node + GET /v1/upgrade/status",
-          "idempotent": "verdicts are (day, record_id) upserts; signal objects no-op when unchanged",
-          "estimated_duration": "seconds\u2013minutes depending on day span; CPU-bound instruments, no LLM (signal lane off)",
-          "order": 1
-        }
-      ],
-      "notes": [
-        "No re-embedding and no canonical re-ingest: raw/canonical rows and signal_embeddings remain valid.",
-        "Time-signal flex/rhythm/commitment objects fill on the next scope materialization (dimension_summary / structured signal path); no dedicated rematerialize endpoint is wired into the upgrade runner yet.",
-        "Conversation context_tag columns are additive empty; owner API + local-LLM auto-label fill going forward (owner stamps always win).",
-        "Fact-extraction think suppression and claim-verify handlers affect FUTURE LLM passes only \u2014 existing signal_facts are not invalidated.",
-        "New WS handlers (signal_attention_dashboard, signal_set_worn_badge, verify_claim, conversation_context*, facts_llm_config*, truth_*, put_fact_verdict): CPs must treat as optional until the fleet is on 1.3.0; bump engine-compat when the app depends on them."
-      ]
+     "id": "rebuild-entity-graph",
+     "kind": "engine_endpoint",
+     "title": "Rebuild the entity graph (evidence + materialized layers)",
+     "why": "1.2.0 adds layers the 1.1.0 graph never had: fact/topic/goal/place/conversation materialization, provenance role stamping on edges (attribution overlay), Louvain community ids, and GC for dangling contact anchors / orphaned facts. One rebuild derives all of it from existing data.",
+     "params": {
+      "method": "POST",
+      "path": "/v1/signal/entities/graph/rebuild"
+     },
+     "progress": "synchronous (seconds at personal scale); response is the before/after report",
+     "idempotent": "full-refresh semantics (mz-tagged edges rebuilt, evidence edges recomputed from mentions)",
+     "estimated_duration": "<10s",
+     "depends_on": [
+      "reextract-entities"
+     ],
+     "order": 2,
+     "$comment": "Must run AFTER re-extraction completes: rebuilding from a partially restored mention set guts evidence edges (observed live 2026-07-10)."
     },
     {
-      "version": "1.3.1",
-      "summary": "Patch release anchoring the upgrade ladder after 1.3.0 (no derived-layer invalidation).",
-      "steps": []
-    },
-    {
-      "version": "1.3.2",
-      "summary": "Entity black hole owner controls + turn-level taint, complexity data-page engine (summary/timeline/topics/influence), app-mode shell contract (attach-don't-double-start, file logs, tray over HTTP), unified timeline daily reads, scope-registry sync.",
-      "steps": [
-        {
-          "id": "blackhole-complexity-timeline-schema",
-          "kind": "none",
-          "title": "blackhole / complexity / timeline_daily additive schema",
-          "why": "Handled by ledger-guarded schema migrations at first boot; listed so release notes and the fleet dashboard show the additive tables/columns without a derived reprocess step.",
-          "order": 0
-        }
-      ],
-      "notes": [
-        "No re-embedding and no canonical re-ingest: raw/canonical rows and signal_embeddings remain valid.",
-        "Blackhole filtering is runtime policy over existing data \u2014 no backfill step.",
-        "Complexity snapshots fill via enrichment piggyback going forward; pre-1.3.2 nodes get coverage on the next enrichment pass.",
-        "New WS handlers (blackhole_*, complexity_*, signal_timeline_daily): CPs must treat as optional until the fleet is on 1.3.2; bump engine-compat when the app depends on them."
-      ]
-    },
-    {
-      "version": "1.3.3",
-      "summary": "Release migration hardening (PLAN_NODE_RELEASE_MIGRATIONS M0\u2013M2) + attention pin/retire intent handlers.",
-      "steps": [
-        {
-          "id": "migration-registry-hardening",
-          "kind": "none",
-          "title": "Single migration registry + backup + downgrade guard",
-          "why": "PLAN_NODE_RELEASE_MIGRATIONS M0\u2013M2: unify apply/ensure on one MIGRATIONS registry, PRAGMA user_version fast-path, fail-loud on shape failures, pre-migration backup under ~/.topos/backups, downgrade guard when user_version is ahead of this build. No derived-layer invalidation.",
-          "order": 0
-        }
-      ],
-      "notes": [
-        "Code + schema-runner only \u2014 raw/canonical/derived rows are untouched.",
-        "Nodes upgrading into this release get a pre-migration backup when ledger-pending migrations exist.",
-        "Also ships signal_pin_intent / signal_retire_intent (protocol + code only; no derived invalidation)."
-      ]
-    },
-    {
-      "version": "1.3.4",
-      "summary": "PLAN M3\u2013M4: coverage spec_version stamps, selective anti-join, new upgrade executors + consent, upgrade-matrix CI.",
-      "steps": [
-        {
-          "id": "enrichment-spec-version-columns",
-          "kind": "none",
-          "title": "Coverage spec_version + selective anti-join",
-          "why": "PLAN M3: additive spec_version on coverage tables; catalog JOB_SPEC_VERSIONS; writers stamp; anti-join treats NULL as 0. Current catalog versions all start at 1 \u2014 no derived wipe required.",
-          "cost": "fast",
-          "consent": "auto",
-          "order": 0
-        }
-      ],
-      "notes": [
-        "Also ships canonical_reprocess / derived_rebuild / reembed executors and pending_consent for slow steps.",
-        "M4: scripts/build_upgrade_fixture.py + run_upgrade_matrix.py + upgrade-matrix.yml."
-      ]
-    },
-    {
-      "version": "1.3.5",
-      "summary": "Pin torch<2.13; no schema or data change.",
-      "steps": [],
-      "notes": [
-        "Dependency-only. No migration, no reprocessing, no consent prompt: nothing on disk changes shape, so `steps` is deliberately empty.",
-        "torch 2.13.0 segfaulted the node under concurrent MPS use (embedder + privacy filter + NSFW classifier), which is what a first chat query triggers. Upgrading is safe from any prior version and needs no user action beyond the restart the upgrade already performs."
-      ]
-    },
-    {
-      "version": "1.3.6",
-      "summary": "Inbox txn hygiene + coalesce deferred enrichment; topic clustering off-loop; sanitization prewarm progress on upgrade/shell status; macOS computer_name in system_info. Code-only / protocol-additive.",
-      "steps": [],
-      "notes": []
-    },
-    {
-      "version": "1.3.7",
-      "summary": "Stability release: write-gate/event-loop deadlock class eliminated (control-plane client on its own thread), entity-graph rebuild in a subprocess (no more ~100s healthcheck darkness), repo-wide gated SQLite writes (73 files), startup DB work on a dedicated worker thread with the owner-connection swap serialized. Signal-registry upgrade jobs now route down the signal lane; one manifest step redoes the 1.3.0 attention-triage backfill that no-opped. Code-only otherwise.",
-      "steps": [
-        {
-          "id": "backfill-attention-triage-redo",
-          "kind": "enrichment_reprocess",
-          "title": "Re-run the attention triage backfill (1.3.0 step was a routing no-op)",
-          "why": "The 1.3.0 backfill-attention-triage step ledgered 'done' on every node without writing a single verdict: attention_triage lives in SIGNAL_DERIVATION_JOBS, but the runner routed it through run_canonical(), which filters job_names against CANONICAL_JOBS and silently dropped it. Nodes that upgraded through 1.3.0\u20131.3.6 therefore have a green ledger row and zero backfilled triage history. The runner now routes signal-registry jobs down the narrow signal lane; this step re-declares the backfill so already-upgraded nodes are healed too. Days triaged organically since 1.3.0 no-op via the (day, record_id) upserts.",
-          "params": {
-            "job_names": [
-              "attention_triage"
-            ],
-            "force_reprocess": true,
-            "include_signal": false,
-            "per_source": true,
-            "source_filter": "sources with canonical message/journal/activity records"
-          },
-          "progress": "TUI progress bar on the node + GET /v1/upgrade/status",
-          "idempotent": "verdicts are (day, record_id) upserts; signal objects no-op when unchanged",
-          "estimated_duration": "measured ~0.7s per day of history on a real node (no LLM, no network); minutes at worst for multi-year nodes",
-          "order": 1
-        }
-      ],
-      "notes": []
-    },
-    {
-      "version": "1.3.8",
-      "summary": "Stability: ingest/enrichment DB writes off the event loop; statistics job no longer holds an open write lock across the pipeline; graph refresher skips cross-thread dirty bumps; open-txn watchdog (opt-in); DMG in-app update finds bundled uv; control-plane pong deadline restored. Code-only.",
-      "steps": [],
-      "notes": [
-        "Code-only \u2014 no schema migration, no derived-layer invalidation, no consent prompt.",
-        "Worker-thread write offload + statistics txn hygiene close the database-is-locked / event-loop-stall class that hit repeat ingests after 1.3.7."
-      ]
-    },
-    {
-      "version": "1.3.9",
-      "summary": "Derivation-retry repair: the signal_derive_retry executor was never registered, so every recorded derivation debt was claimed and failed as an unknown job kind \u2014 the retry meant to repair a lost derivation destroyed the record of it instead. The executor is wired, workers claim only kinds they can execute, and an executor may requeue rather than read as failed. One consent:auto step sweeps debt already parked 'failed', which nothing else would re-queue. Also: public_bio:read / work_context:read gain test cover for the restored profile_records lane, and just harness-gate scores answer quality against a ratcheting floor instead of a 70/70 bar it cannot reach on a signal-less seed DB. No schema change.",
-      "steps": [
-        {
-          "id": "retry-recorded-derivation-debt",
-          "kind": "engine_endpoint",
-          "title": "Re-run derivation debt that was failed as an unknown job kind",
-          "why": "record_failed_derivation() has enqueued pipeline rows of kind 'signal_derive_retry' since 1.3.x, but no executor was ever registered for that kind, so the worker claimed each row and immediately failed it with 'Unknown job kind: signal_derive_retry'. The debt record IS the queue row, so the retry meant to repair a lost derivation destroyed the record of it instead \u2014 nodes carry silent derivation gaps with a 'failed' row and nothing pointing at them. The executor is registered as of this release, but that does not revive the existing rows: a failed row is only re-queued by the next organic failure of the same (batch, job), and recover_stale_jobs resets 'running' rows, never 'failed' ones. This step sweeps them once on upgrade so the repair happens without an operator remembering to POST /v1/signal/derivation-debt/retry.",
-          "params": {
-            "method": "POST",
-            "path": "/v1/signal/derivation-debt/retry",
-            "limit": 200
-          },
-          "consent": "auto",
-          "cost": "no LLM, no network; re-runs only the derivations already recorded as lost",
-          "progress": "synchronous; response is the attempted/recovered/still_failing report",
-          "idempotent": "re-running is a no-op once pending is empty; a debt that fails again is left 'failed' and still listed",
-          "estimated_duration": "seconds on a node with no debt (the common case); proportional to recorded debt otherwise",
-          "order": 1
-        }
-      ],
-      "notes": []
-    },
-    {
-      "version": "1.3.10",
-      "summary": "Release 1.3.10.",
-      "steps": [],
-      "notes": []
-    },
-    {
-      "version": "1.3.11",
-      "summary": "Ingest throughput: the conversation auto-classifier stops re-asking the same unlabelable conversations on every enrichment batch (~20 model calls / ~26s per batch, permanently, for zero progress). An unclear verdict now retires the row instead of being silently dropped. No steps: nothing on-node is invalidated \u2014 prompt, model and parse logic are unchanged, so existing auto: tags remain valid, and retired rows self-heal on the next enrichment pass.",
-      "steps": [],
-      "notes": []
-    },
-    {
-      "version": "1.3.12",
-      "summary": "Graph time correctness: edges stop being dated by when the machine touched them. Co-occurrence rebuilds no longer restart each edge's belief clock (valid_from); topic-cluster edges take the attribution role of their member records instead of defaulting to 'authored'; journal entry_at written from the import clock is re-dated from starts_at; and DATE/TIME/CARDINAL surfaces are no longer minted as graph nodes. Also: a failed upgrade step is reachable for retry again (ledger rows key on the DECLARING release, and the plan carries any step short of 'done'), and a progress bar can no longer fail the step it narrates.",
-      "steps": [
-        {
-          "id": "repair-journal-ingest-clock-dates",
-          "kind": "engine_endpoint",
-          "title": "Re-date journal entries that recorded the import clock as their event time",
-          "why": "Grow's journal producers wrote entry_at from the import clock while the true session time sat in starts_at. On the first live node checked: 309 rows across two sources, 127 of them sharing 2026-08-08T03:34:44 to the second, with real sessions spanning months. The entity graph dates its edges from canonical event time, so those batches pulled years-old relationships into the recent graph window. SQLiteCanonicalStore._journal_entry_at closes this for new writes, but a row already on disk only moves if something sweeps it. The predicate IS the corruption signature (entry_at equal to ingested_at to the second, with a real starts_at present), so a genuine entry_at is never touched and the step is safe to re-run. The timeline projection is unaffected either way: it already reads starts_at, so this brings entry_at into agreement with what timeline always showed.",
-          "params": {
-            "method": "POST",
-            "path": "/v1/canonical/journal/repair-ingest-dates"
-          },
-          "consent": "auto",
-          "cost": "no LLM, no network; one bounded UPDATE over journal_entries",
-          "progress": "GET /v1/upgrade/status",
-          "idempotent": "the signature stops matching once a row is repaired",
-          "estimated_duration": "milliseconds",
-          "order": 1
-        },
-        {
-          "id": "rebuild-entity-graph-after-date-repair",
-          "kind": "derived_rebuild",
-          "title": "Rebuild the entity graph so edges pick up the corrected dates, roles and value-surface guard",
-          "why": "Three of this release's fixes only reach EXISTING data through a rebuild: co-occurrence edges stop having their belief clock (valid_from) restarted on every rebuild; topic-cluster edges stop defaulting to actor_role 'authored' and take the role of their member records instead; and DATE/TIME/CARDINAL surfaces ('an hour', 'this week', 'four') are no longer minted as graph nodes, with previously-minted ones purged. It must run AFTER the journal date repair, because rebuilding first would only re-derive edges from the uncorrected event times.",
-          "params": {
-            "targets": [
-              "entity_graph"
-            ]
-          },
-          "depends_on": [
-            "repair-journal-ingest-clock-dates"
-          ],
-          "consent": "auto",
-          "cost": "no LLM, no network; the rebuild runs in a subprocess so the node's event loop stays live",
-          "progress": "TUI progress bar on the node + GET /v1/upgrade/status",
-          "idempotent": "deterministic recompute from surviving mentions",
-          "estimated_duration": "measured ~124s on a real node (2,741 edges)",
-          "order": 2
-        }
-      ],
-      "notes": [
-        "Graph time-window RCA (2026-08-10): five defects, all variations on recording when the machine touched the data rather than when the thing happened.",
-        "The scrub-window fix ships in topos-react-app, not here."
-      ]
-    },
-    {
-      "version": "1.3.13",
-      "summary": "Owner curation and search stop reporting how many times something was stored. The People tab's duplicate queue asked one question per sighting rather than per decision (8,134 pending rows for 99 real decisions on a live node), derivation asked about strings the owner never said, candidates never seen in the data were offered as merge targets (contacts included), and possessives, trailing punctuation and redaction placeholders were treated as identities. Search returned the same text once per time it was stored, where 37% of a live corpus is duplicate text. Orphan cleanup also stopped reaping the graph vertices derivation had just minted, which had been churning 173 entities and 206 edges per scrub. No steps: the three entity_review migrations run at boot and collapse the queue in place, preserving every prior answer and unbind guard; the spine and search changes are code-only and take effect on the next resolve and the next query.",
-      "steps": [],
-      "notes": [
-        "Migrations 57-59 delete duplicate and unanswerable entity_review rows and mark the rest stale; approved, dismissed and no_bind rows are never touched.",
-        "Entity labels already minted with a possessive, trailing dash or [NAME] are left in place \u2014 they surface through the review queue as ordinary merge decisions rather than being rewritten underneath the owner.",
-        "The occurrences count on search results ships in topos-react-app as well."
-      ]
-    },
-    {
-      "version": "1.3.14",
-      "summary": "Release 1.3.14.",
-      "steps": [],
-      "notes": []
-    },
-    {
-      "version": "1.3.15",
-      "summary": "Release 1.3.15.",
-      "steps": [],
-      "notes": []
-    },
-    {
-      "version": "1.3.16",
-      "summary": "Release 1.3.16.",
-      "steps": [
-        {
-          "id": "backfill-browser-activity-lanes",
-          "kind": "enrichment_reprocess",
-          "title": "Backfill embeddings for browser activity rows the stale-install gate dropped",
-          "why": "A 2026-05-29 source_runtime_installs snapshot for browser_visits/browser_events (enrichment_trigger='manual', no jobs) shadowed the bundled lane policy from the ~2026-07-10 deploy on: every live browser push since ran zero enrichment/signal jobs while the inbox job reported done (one live node: 0/1,034 August visits embedded). Runtime installs now adopt bundled lane policy, but rows ingested while the gate was closed still have no derived data.",
-          "params": {
-            "job_names": [
-              "embeddings"
-            ],
-            "include_signal": true
-          },
-          "progress": "per-source progress via GET /v1/upgrade/status",
-          "idempotent": "coverage-driven row selection (only rows missing derived output); embedding writes are (record_id, model, chunk_index)-keyed with content-hash skip, and activity rows dedupe to one vector per distinct text, so re-running converges",
-          "consent": "auto",
-          "cost": "local models only, no network; ~1k title-length rows on the affected node, minutes on the local embedding model; unaffected sources no-op on the coverage check",
-          "order": 1
-        },
-        {
-          "id": "backfill-github-activity-commit-content",
-          "kind": "canonical_reprocess",
-          "title": "Re-map retained GitHub push events so activity rows carry their commit messages",
-          "why": "activity_events.content was NULL on every github push row (one live node: 451/451, and only 11 DISTINCT titles across all 451 \u2014 all '{owner}/{repo}: pushed N commit'), because the mapper carried repo/actor and nothing else, and the store's INSERT did not list the content column at all. The commit messages \u2014 the only text that says what the work WAS \u2014 sat unused in the retained raw payloads. Everything semantic downstream could therefore match on repo NAME alone: goal/interest attachment to engineering work was pure name matching, and a contrastive term extraction over commit-attached items returned nothing but 'pushed'/'commit'. The declared field map and the store fix land in this release, but neither reaches a row already on disk: re-mapping from raw retention is what fills it. Raw retention holds the full PushEvent payloads (461 rows on the same node), so no re-fetch from GitHub is needed.",
-          "params": {
-            "from_stage": "raw",
-            "source_ids": [
-              "github_activity"
-            ],
-            "run_enrichment": false
-          },
-          "progress": "GET /v1/upgrade/status",
-          "idempotent": "re-mapping is upsert-keyed (activity event_id, journal entry_id) and content is written with COALESCE, so re-running rewrites the same values",
-          "consent": "auto",
-          "cost": "no network, no models: one parse + upsert per retained raw row (458 on the measured node), seconds. Nodes with no github_activity install no-op",
-          "order": 2,
-          "$comment": "CANONICAL ONLY (run_enrichment: false), deliberately. The default fan-out would run this source's baseline signal jobs, and a 458-row batch exceeds topic_clusters' _INCREMENTAL_MAX_BATCH (200), which forces a FULL cluster recompute: on the measured node that repartitions all 152 clusters, and 85 of them (interests 48, wellbeing 27, memory 10) sit in dimensions whose definitions/<dimension>.json is not yet in the tree, so dimension_core_question falls back to the generic prompt silently. Corrected content is what this release owes; derivation over it belongs to the release that lands the topic-dimension work, as one pass with the definitions present rather than two with a repartition in between."
-        },
-        {
-          "id": "rerun-blackhole-rebuilds",
-          "kind": "derived_rebuild",
-          "title": "Re-run every black-hole rebuild so it reaches topic cluster labels and member excerpts",
-          "why": "The black-hole rebuild withdraws prose artifacts naming a protected entity, but topic_clusters and topic_cluster_members were never on its list \u2014 the label used to be term soup that named nobody, and the contrastive labeler now names the subject (33 of 152 labels on one live node were an entity name). The rebuild also had to learn that the cluster ROW is the producer: closing the derived top_topics object alone is undone by the next cluster pass, which re-mints the fact from topic_clusters.label. Existing black holes are marked 'complete', so run_pending_rebuilds skips exactly the entities carrying the un-withdrawn data: the same live node had five member excerpts still quoting a protected entity under three completed rebuilds. Must run AFTER recompute-topic-clusters-split so it also sees the labels that pass just wrote.",
-          "params": {
-            "targets": [
-              "blackhole_rebuilds"
-            ]
-          },
-          "depends_on": [
-            "recompute-topic-clusters-split"
-          ],
-          "progress": "GET /v1/upgrade/status",
-          "idempotent": "withdrawal is a name scan re-applied to whatever is currently stored; a second run finds nothing left to withdraw. Cluster ids, membership and counts are untouched \u2014 only prose (label, centroid preview, member excerpts) is withdrawn.",
-          "consent": "auto",
-          "cost": "no LLM, no network; a scan of topic_clusters, topic_cluster_members, signal_objects and briefs per protected entity. Seconds. Nodes with no black holes no-op.",
-          "order": 5
-        },
-        {
-          "id": "retire-url-classification",
-          "kind": "none",
-          "title": "url_classification retired; its table and interest tags removed",
-          "why": "The job classified visited pages into DMOZ top-level categories. On the node this was measured on it produced 8,616 rows over six months, 73% of them the single label 'Reference' at an average confidence of 0.961 \u2014 HIGHER than any other bucket, so no threshold separates it from filler. The same host drew different labels on different visits (github.com: Reference 720, Computers 125, Kids 5), because the classifier reads the page title and an authenticated app title says almost nothing. DMOZ describes where a site files in a directory, not what a person is doing; 'Reference' is its catch-all. 458 of the interests dimension's 828 signal objects were these tags, 349 of them 'Reference'. Handled by the ledger-guarded migration retire_url_classification_v1 at first boot; listed so release notes and the fleet dashboard show it without a step. Scoped by payload source_kind, so the materializer's keyword-rule tags and the personal fact objects that also live in interests are untouched \u2014 verified on a copy of a live node: 828 -> 370 interests objects, facts 6 -> 6, other dimensions 6,580 unchanged.",
-          "order": 0
-        },
-        {
-          "id": "recompute-topic-clusters-split",
-          "kind": "derived_rebuild",
-          "title": "Recompute topic clusters with the oversized-cluster split and canonical-text labels",
-          "why": "23 clusters of 120+ members held 51% of all members on one live node, and labels were minted from redacted previews ([NAME]/[ACCOUNT]) rather than the canonical text. Both fixes only reach existing clusters through a recompute; rehearsed on a live-DB copy it took mega-clusters 23 -> 14 and their member share 51% -> 33% with 134/167 ids preserved. Subsumes a labels-only relabel: this pass relabels every cluster it writes, so a separate relabel step would spend one local-LLM call per cluster on labels this recompute immediately discards.",
-          "params": {
-            "targets": [
-              "topic_clusters"
-            ]
-          },
-          "progress": "GET /v1/upgrade/status",
-          "idempotent": "full recompute with stable-id matching; re-running converges on the same partition modulo k-means seed",
-          "consent": "prompt",
-          "cost": "one full clustering pass plus one short local-LLM call per cluster (~2s each warm); minutes at personal scale. No network.",
-          "order": 4
-        }
-      ],
-      "notes": [
-        "Deploying this build requires reinstalling the node (frozen uv tool snapshot) \u2014 a plain restart runs the old code and leaves the browser lanes dark.",
-        "Existing clusters keep their old labels and their old partition until recompute-topic-clusters-split runs: the labeler runs at cluster write time, and this release changes both the prompt and the partition.",
-        "Nodes whose github raw retention was purged keep NULL content on their old push rows; new pushes carry commit messages from this build on. Browser rows written before this release keep NULL content/hostname until they are re-ingested \u2014 no raw-retention re-map step is declared for them because the plugin re-pushes visits organically."
-      ]
-    },
-    {
-      "version": "1.3.17",
-      "summary": "Release 1.3.17.",
-      "steps": [
-        {
-          "id": "rerun-places-dimension-summary",
-          "kind": "enrichment_reprocess",
-          "title": "Re-run dimension_summary where undeclared PlaceContext writes failed the whole job",
-          "why": "The artifact router writes PlaceContext objects into the places dimension for every place EntityRef, but places.json never declared the type, so SignalObjectStore rejected the write and dimension_summary DEGRADED on any batch containing a place reference \u2014 the derivation-retry ledger recorded the debt but nothing consumes it automatically. Observed on grow_data_file 2026-08-15: every manual-enrichment batch (171 records) queued for retry with derived data MISSING. places.json now declares PlaceContext, so a re-run succeeds where the same records failed.",
-          "params": {
-            "job_names": [
-              "dimension_summary"
-            ],
-            "include_signal": true
-          },
-          "progress": "per-source progress via GET /v1/upgrade/status",
-          "idempotent": "coverage-driven row selection (only records whose dimension_summary output is missing); signal object upserts are (dimension, object_type, object_key)-keyed and supersede in place, so re-running converges",
-          "consent": "auto",
-          "cost": "local models only, no network; scoped to records whose derived output is missing \u2014 the failed grow_data_file batches on the affected node, minutes; unaffected sources no-op on the coverage check",
-          "order": 5
-        }
-      ],
-      "notes": [
-        "Write-gate/event-loop fix is code-only ([O]): no schema migration, no derived invalidation, no step. Ingest dedupe, the install_service sources surface, the routine write handlers and both gated sections of the privacy layer now run in asyncio.to_thread on the worker's own connection, and the ai_chat / source_settings DDL probes before taking the gate instead of re-running idempotent CREATEs. Existing rows and derived outputs are untouched \u2014 the same statements run, on a different thread."
-      ]
-    },
-    {
-      "version": "1.3.18",
-      "summary": "Release 1.3.18.",
-      "steps": [],
-      "notes": [
-        "Everything in 1.3.18 is code-only ([O]): no schema migration, no derived invalidation, no step. Two groups of change, neither of which invalidates an output. (1) Platform-aware local model setup: `ollama_extraction_model` and `privacy_judge_model` resolved to `qwen3.5:9b-mlx`, an MLX build that exists for Apple-Silicon Macs and nowhere else, and the seeded pack and install instructions were macOS-shaped too. On Apple Silicon every value resolves exactly as before; on the platforms where a value changes, the tag it replaces could never be served there, so there are no outputs derived from it to reprocess. (2) Download correctness: a failed pull used to be recorded as a completed one, and nothing checked free disk before a multi-gigabyte write onto the volume holding the node's SQLite. Both are guards on work that had not happened, so nothing already on disk is affected."
-      ]
-    },
-    {
-      "version": "1.3.19",
-      "summary": "Release 1.3.19.",
-      "steps": [],
-      "notes": [
-        "Code-only ([O] and one [E:facts] bug fix): no schema migration, no derived invalidation, no step. Three groups, none of which invalidates an output. (1) Runtime shutdown is scoped to a generation rather than a process-lifetime flag, and one cancelled fact-extraction batch now stops that batch instead of every later one. Tagged [E:facts] because it is in the facts lane, but it changes WHEN extraction runs, never what it produces \u2014 JOB_SPEC_VERSIONS is unchanged, so no reprocess is owed. (2) Startup's background work (four fire-and-forget tasks, the pipeline worker, the upgrade-runner thread) is now reaped at shutdown, and a migration blocked on SQLite no longer pins the process-wide write gate for the full busy_timeout. Both are lifecycle and locking fixes: the same statements run, on the same data. (3) A shared sqlite handle can no longer be used from the event loop and a worker at once, and /healthcheck now reflects a dead database instead of reporting healthy through it.",
-        "No node-side action. Nothing on disk is re-derived by this release, so an upgrade is install-and-restart with an empty step list."
-      ]
-    },
-    {
-      "version": "1.3.20",
-      "summary": "profile remove: an archived Topos can be deleted from a machine; the data explorer stops reading raw ingestion that belongs to no Topos.",
-      "steps": [],
-      "notes": [
-        "No re-derivation: the raw-ingestion binding fix changes which DIRECTORY the data explorer and storage breakdown read, not the shape or content of anything stored. Ingest already wrote to ~/.topos/ingestion, so no raw file moves and no record is reprocessed.",
-        "A node whose raw files live in ~/.topos/ingestion \u2014 every node, since that has been the ingest destination since before the profile layout \u2014 sees no change beyond the storage readout no longer double-counting.",
-        "On a machine that still carries a pre-profile ~/.topos_engine/ingestion, those JSONL files are no longer listed in the data explorer, no longer counted in the storage breakdown, and no longer deletable or downloadable through the UI. Nothing is moved or removed: the files stay where they are, and that directory belongs to no Topos \u2014 it is not carried by a profile switch and never was.",
-        "TOPOS_INGESTION_BASE_PATH now applies to reads as well as writes. A deployment that sets it (the LongMemEval adapter, and any test harness pointing ingestion at a scratch directory) will find the explorer and the storage breakdown following it instead of reporting on ~/.topos/ingestion.",
-        "`profile remove` is a new offline CLI command; it re-derives nothing and no upgrade step runs it. It deletes an archived profile only when a person asks it to, which is its purpose \u2014 nothing here touches ~/.topos/profiles/."
-      ]
-    },
-    {
-      "version": "1.3.21",
-      "summary": "Release 1.3.21.",
-      "steps": [],
-      "notes": [
-        "No re-derivation: the active-database binding fix changes which FILE is opened, not the shape or content of any table. A node already serving the database inside its active Topos sees no change at all.",
-        "A node serving a pre-profile database (~/.topos_engine, Application Support/ToposEngine or .../ToposControlPlane) on a machine that has never used profiles now ADOPTS it: the file is copied into ~/.topos on first start and served from there. The original stays in place as its own backup, so disk use grows by one database copy until the user removes it.",
-        "A node serving such a database on a machine that DOES use profiles now serves the (possibly empty) active slot instead, and logs a warning naming the stray. That data is not lost \u2014 it is where it always was \u2014 but it is no longer served: `topos-node profile adopt` pulls it into the active Topos.",
-        "Pre-migration backups are now named database-pre-v<version>--<profile>-<stamp>.db and pruned per Topos. Backups already on disk carry no profile in the name, form their own group, and are never pruned by a named one \u2014 so a machine upgrading into this keeps every backup it has until the un-named group itself exceeds retention.",
-        "Archiving a Topos now checkpoints its WAL first, so archived profiles are a single self-contained database file. No action needed; profiles archived by older engines keep their sidecars and still restore correctly.",
-        "profile.json gains engine_version, schema_version, upgrade_baseline, size_bytes and key_fingerprint at archive time. Profiles archived before this have none of them: `profile list` falls back to measuring the directory, and the switch preflight falls back to opening the database."
-      ]
-    },
-    {
-      "version": "1.3.22",
-      "summary": "A protected entity is withdrawn from cluster metadata names; query retrieval and time framing corrected; the update button stops reporting installs it did not make.",
-      "steps": [
-        {
-          "id": "rerun-blackhole-rebuilds-metadata-names",
-          "kind": "derived_rebuild",
-          "title": "Re-run black-hole rebuilds so they reach cluster metadata names",
-          "why": "topic_clusters.metadata_json carries related_entities and query_aliases as NAME strings. The read-side guard filters by entity_id and cannot see them, and the rebuild only knew about labels and previews \u2014 so a cluster minted before an entity was protected kept naming it, and fact_materializer turned that name into a graph edge. The producer refuses it now; this withdraws the ones already stored.",
-          "params": {
-            "targets": [
-              "blackhole_rebuilds"
-            ]
-          },
-          "cost": "fast",
-          "consent": "auto",
-          "order": 0
-        }
-      ],
-      "notes": [
-        "No recompute: clusters keep their partition and their labels. Only protected NAMES are removed from related_entities/query_aliases, and only on nodes that have marked an entity off-limits \u2014 a node with no black holes has nothing to withdraw and the step is a no-op.",
-        "The update-path fix is code-only: it changes whether a PyPI update is offered and whether an upgrade that changed nothing is reported as success. Nothing on disk is re-derived by it."
-      ]
-    },
-    {
-      "version": "1.3.23",
-      "summary": "Ships migration 62, query_artifacts_duration_ms_v1: a nullable duration_ms INTEGER on query_artifacts. It is also the first build that can OPEN a database already stamped user_version=62. 1.3.22 knows only 61, so ensure_migrations_applied raises DowngradeGuardError against such a file and every request that constructs a canonical store fails with it \u2014 a node whose database ran ahead of its package is answering nothing until this lands. No backfill is possible or attempted: a turn written before this was never timed, and the column is nullable so an unmeasured turn cannot read as a fast one. ONE upgrade step runs, rebuild-entity-graph-centrality (derived_rebuild, consent auto, no LLM and no network), which stamps centrality and community_label onto the entities the community pass already stamps community_id onto; skipping it only defers those keys to the next organic rebuild. Everything else in this release is query-time and stores nothing. The narrowing ledger and its closed empty-cause vocabulary make an empty lane say WHY it is empty \u2014 store_empty with sub-cause connected_never_delivered on a node that has never synced (a turn that previously raised sqlite3.OperationalError and returned a 500), entity_window_* for a derived window, commitment_* per stated goal \u2014 where the same turn used to return a silent blank. And the attention lane now selects the window's days IN SQL instead of filtering the newest ten interest objects, so a question naming a past week returns the digests the node already held for those days instead of reporting entity_window_no_triage_in_window; no digest is recomputed, triage_verdicts is untouched, and an unwindowed caller reads the byte-identical newest-ten page.",
-      "steps": [
-        {
-          "id": "rebuild-entity-graph-centrality",
-          "kind": "derived_rebuild",
-          "title": "Rebuild the entity graph so centrality + community labels stamp immediately",
-          "why": "compute_communities now stamps centrality {degree, eigen, betweenness} and community_label into entities.metadata_json, but only when it runs. Without this step the stamps appear at the next enrichment-triggered debounced rebuild; running it once at upgrade lights up structural node sizing and named communities in the graph UI right away instead of whenever new data next arrives.",
-          "params": {
-            "targets": [
-              "entity_graph"
-            ]
-          },
-          "cost": "no LLM, no network; the rebuild runs in a subprocess so the node's event loop stays live",
-          "consent": "auto",
-          "order": 0
-        }
-      ],
-      "notes": [
-        "No step for the Q3 entity-anchored window: it is a query-time derivation over rows the retriever reads anyway. topos/query/entity_window.py touches no database at all - it is anchor-phrase detection plus arithmetic on a day-count dict - and retrieval.py gathers those counts with one bounded SELECT over entity_mentions (LIMIT 2000, applied to ADMITTED rows because the two membership proofs are OR'd inside the WHERE clause rather than filtered afterwards). Nothing is written, no record is fetched by id, no schema, index or artifact changes shape, and no cached artifact replays differently: the derivation is a function of query_text and of live mention rows, and query_text is already inside the intent hash. Every question that is not the anchored question takes the byte-identical path it took before, because the lane is armed only when BOTH an anchoring frame (while/when/during ... heads-down on / deep in / buried in / working on) and a cost half (miss / slip / fell through / distracted) are present AND the planner found no window of its own. Nodes whose entity graph is empty or unbuilt simply refuse - entity_window_unresolved or entity_window_no_mentions - and the graph is populated by the existing extraction pipeline, which this release does not require to be re-run. One thing a consumer should know rather than discover: packet[\"time_window\"] (already forwarded onto the summary payload by DefaultGameLayer, unchanged by this release) gains source/method/window_days/mentions_in_window/rate_lift on a derived turn and an empty_reason on a refused one, so a caller that assumed time_window implies the owner NAMED a window must now read source to tell a parsed window from a derived one.",
-        "IMPORTANT, and still no step: the density the Q3 window is derived from is bounded to the record surface the GRANT authorizes, and that bound is where the disclosure lives, because a window is computed from records the answer may never contain. The mention scan admits a row only if its canonical_table is in manifest.canonical_tables, OR its record_id appears in triage_verdicts and the scope's signal_objects name attention_summary. The second clause is not a loophole and not a special case for one scope - it is the record surface that scope's own digests are ALREADY computed over, and without it attention:read (whose canonical_tables is deliberately []) could never window the very triage Q3 exists to window. A scope authorizing neither surface derives nothing rather than falling back to an unbounded scan, and a mention whose canonical_table is NULL never votes. Black-holed record ids (BlackholeGuard.blocked_record_ids(), for every non-owner caller) and Q5 request exclusions are removed BEFORE the arithmetic, so a protected or excluded subject cannot move the dates; an exclusion the engine cannot compile abandons the derivation entirely rather than deriving around it. No drop counts are reported from this scan, deliberately: 'your window would have been wider' is the existence disclosure the black hole exists to prevent.",
-        "No step for the Q3 window vocabulary: eight reason slugs join the closed set (entity_window_density_too_thin, entity_window_density_uniform, entity_window_derived, entity_window_no_mentions, entity_window_no_triage_in_window, entity_window_span_too_broad, entity_window_triage_lane, entity_window_unresolved) in both topos/query/narrowing.py and topos/protocol/narrowing_vocabulary.json. Ledger entries are response serialization, not storage, so nothing needs rebuilding and no artifact cached before this release replays differently. A consumer pinned to an older copy of the vocabulary coerces these to UNRECOGNIZED rather than failing, which is the protocol's existing contract. The derived DATE RANGE is content and is never one of these slugs - it appears only in the ledger's local-only detail and in packet[\"time_window\"], which the owner has to be able to read in order to dispute it; as_telemetry() carries neither.",
-        "No step for the narrowing-ledger empty_cause fix: _attach_narrowing now withholds a turn-level empty_cause when the result is not empty, which is response serialization only. Nothing stored changes shape and no cached artifact needs rebuilding \u2014 a replayed artifact re-derives the field on the way out.",
-        "No step for the per-part rare gate or multi-window planning: both are query-time only. needle_parts and time_windows are request fields and plan fields, nothing is persisted, and a request that sends neither (every caller before this) takes exactly the path it took before \u2014 one needle group, one window.",
-        "No step for connecting senders to the per-part rare gate: the front end and the control plane now populate retrieval_parts (and forward resource_id through prepare_engine_query_payload's allow-list), but both are request fields on the wire. Nothing is persisted and no schema, index or artifact changes shape. Two consequences worth stating rather than discovering: a multi-part turn now genuinely takes the new-key branch of the intent-hash note below \u2014 that cache miss was hypothetical while nothing sent parts and is real from this release \u2014 and a mixed deployment is safe in both directions, since an older node ignores an unknown request field and a newer node treats an absent one as the single-needle path it always took.",
-        "No rebuild for the widened intent hash: needle_parts and time_windows are appended to the hash payload only when present and only when they differ from what the existing formula already covers, so every artifact cached under the old key is still addressed by it. A turn that DOES send them gets a new key and simply misses the cache once \u2014 which is the correct outcome, since the alternative was serving one report section's findings as another's under a memory_hit stamp.",
-        "No step for enforced exclusion: it is parse-and-filter at query time. Nothing stored changes shape \u2014 the filter reads the packet the retriever just built and drops items from it before the packet leaves the retrieval boundary. No artifact cached before this release can be replayed for an excluded ask either, because the exclusion is parsed from query_text and query_text is already inside the intent hash, so an ask carrying an exclusion addresses a different cache key than the same ask without one. An owner who never phrases an exclusion takes the byte-identical path they took before.",
-        "No step for the entity-thread retrieval lane: it is a query-time join. The lane reads entity_mentions to build a record-id set and then SELECTS from the pages CanonicalStore.list() already disclosed for the request's tier \u2014 it never fetches a record by id and it writes nothing. Nothing stored changes shape, and a question that resolves no entity takes the byte-identical path it took before. Nodes whose entity graph is empty or unbuilt simply get no lane; the graph is populated by the existing extraction pipeline and this release does not require it to be re-run.",
-        "No rebuild for the entity_mention fusion-key split: _fusion_item_key is computed per request inside _rrf_fuse_summary_lists and is not persisted or part of any cache key. Artifacts cached before this release replay unchanged; the next live turn simply stops letting a mention pointer shadow the record it points at.",
-        "No step for the Q1 commitment-tracking join: it is a query-time join plus a projection of a packet the retriever just built. The lane reads user_goals and entity_mentions to build a record-id set PER STATED GOAL and then SELECTS from the pages CanonicalStore.list() already disclosed for the request's tier - it never fetches a record by id and it writes nothing. packet[\"commitment_report\"] is then assembled at the end of retrieve() by INTERSECTING those candidates with the summaries that survived the fusion cap, the black-hole exit policy and the request exclusions, so every record_id it cites is already present in the summaries beside it and it opens no second disclosure channel. Nothing stored changes shape, no index or artifact is affected, and every request that is not the commitment question - including an ordinary goal browse - takes the byte-identical path it took before, because the lane is armed only when BOTH a commitment-placing marker and a retrospective marker are present AND goals were loaded. Nodes whose entity graph is empty or unbuilt simply get no lane and report commitment_goal_unresolved per goal; the graph is populated by the existing extraction pipeline and this release does not require it to be re-run. One thing a consumer should know rather than discover: the response gains one new top-level key inside public_result on summary-mode turns (older clients ignore an unknown key, and narrowing.result_is_empty() deliberately does not read it, so an empty answer cannot be made to look non-empty by it).",
-        "No step for the Q1 per-goal empty-cause vocabulary: seven reason slugs are added to the closed set (commitment_evidence_lane, commitment_evidence_not_in_answer, commitment_evidence_withheld, commitment_goal_undated, commitment_goal_unresolved, commitment_no_evidence_matched, commitment_scope_no_evidence_store) in both topos/query/narrowing.py and topos/protocol/narrowing_vocabulary.json. Ledger entries are response serialization, not storage, so nothing needs rebuilding and no artifact cached before this release replays differently. A consumer pinned to an older copy of the vocabulary will coerce these to UNRECOGNIZED rather than fail, which is the protocol's existing contract; consumers that enumerate empty-causes should note that commitment_evidence_withheld is emitted to the OWNER ONLY - for a grantee the same line is a receipt that evidence exists behind a plane that removed it, which is the existence disclosure the black hole exists to prevent.",
-        "No step for the scope-registry gap the commitment join exposes: work_context:read is the grant user_goals belongs to and its canonical_tables name only profile_records, so on that grant there is no message or journal store to search and every goal honestly reports commitment_scope_no_evidence_store rather than being reported as unfulfilled. The mode is reachable today on messages:read and ai_conversations:read, which carry both user_goals and a message store. Widening the goal-shaped grant requires no migration; it requires a product decision about what one grant may span, which is deliberately not taken here. Nothing about an existing grant changes and no node needs to re-consent to anything on this release.",
-        "IMPORTANT, and still no step: the per-goal citation list inside public_result.commitment_report is named evidence_records, NOT evidence. The bare key is in FORBIDDEN_ARTIFACT_KEYS and query/pipeline.py validates public_result against that set recursively, so the first draft of this feature raised ValueError out of execute() on every turn the lane answered - the whole turn, not just the report. It is response serialization, so nothing stored changes and no artifact cached before this release replays differently: a turn that could not complete produced no artifact to replay. A consumer reading the report should key on evidence_records; the sibling evidence_count, the status value evidence_found and the commitment_*_evidence_* reason slugs are unchanged, because none of those is a key the artifact contract reserves.",
-        "No step for the Q7 topic thread: it is a projection of a packet the retriever just built. packet[\"topic_thread\"] is assembled at the end of retrieve() by INTERSECTING candidates tapped inside the existing entity_thread lane with the summaries that survived the fusion cap, the black-hole exit policy and the request exclusions - it issues no query of its own, fetches no record by id, and writes nothing. Nothing stored changes shape, no index or artifact is affected, and a question that resolves no entity or lands on a scope naming no message table takes the byte-identical path it took before. Two things a consumer should know rather than discover: the response gains one new top-level key inside public_result on summary-mode turns (older clients ignore an unknown key, and narrowing.result_is_empty() deliberately does not read it, so an empty answer cannot be made to look non-empty by it), and every record_id the thread names is already present in the summaries beside it, so it opens no second disclosure channel and needs no separate audit.",
-        "IMPORTANT, and still no step: the narrowing ledger no longer emits stage=retrieval/action=emptied/reason=topic_thread_no_message_rows when the lane produced no candidates at all. That combination fired on exactly one path - wire A having removed a black-holed subject's mentions at source - where the line carried dropped=0 and told a grantee, in a closed-set slug whose meaning the protocol guarantees, that the entity they named resolved and has a thread. It is response serialization, so nothing stored changes and no artifact needs rebuilding, but any consumer that treated the absence of that line as 'the lane did not run' should treat it as 'the lane has nothing sayable', which is the same statement a node with no entity graph makes.",
-        "No step for the scope-registry gap the topic thread exposes: no scope names both conversation_messages and ai_chat_messages, so on today's grants every thread is single-store and reports retrieval/scoped/topic_thread_single_store. The cross-store assembly is implemented and tested against a two-table manifest and requires no migration; what it requires is a product decision about what one grant may span, which is deliberately not taken here. Nothing about an existing grant changes, and no node needs to re-consent to anything on this release.",
-        "No step for the black-hole existence fix on the entity lane: it is query-time filtering only. The lane now removes BlackholeGuard.blocked_record_ids() from the mention set before it reads canonical rows, and the exit policy matches record_id/entity_id in addition to scanning names \u2014 both read the black-hole tables live, so a node that protects an entity after this release is covered without re-running anything, and a node with no black holes takes the byte-identical path it took before. Nothing stored changes shape.",
-        "No rebuild for the blackhole_protected stamp on entity-lane items: it is attached to the summary item inside the retrieval boundary for owner_raw callers only and is never persisted. Artifacts cached before this release replay unchanged and re-derive the stamp on the way out.",
-        "IMPORTANT, but still no step: the narrowing ledger no longer emits stage=disclosure/action=dropped_items/reason=blackhole_policy to non-owners. That line is response serialization, so nothing stored changes and no artifact needs rebuilding \u2014 but any consumer that parsed it is reading a receipt that was itself the existence disclosure the black hole exists to prevent, and it is gone for grantees. The owner still gets it.",
-        "No step for the four retrieval-plane bounds (mention pointers filtered by the manifest's canonical_tables, must_not_retrieve applied in summary mode, the profile_records employer lane reading at the request's disclosure tier, and the cohort rollup reporting its exclusion as not_applied): every one is query-time filtering inside the retrieval boundary. entity_mentions rows are read, not rewritten \u2014 a mention whose canonical_table is NULL is skipped at read time, not deleted \u2014 nothing stored changes shape, and no cached artifact needs rebuilding because a narrower packet re-derives on replay. Two consequences worth stating rather than discovering. First, a grant that authorizes no canonical table now receives no mention pointers at all, so a consumer that treated the pointer's topic string ('<name> in <table>') as a guaranteed field for such a scope will see it absent; it was never authorized. Second, entity_mention items now declare disclosure=owner_only against the entity_dossiers grant, which no scope in the registry currently holds \u2014 so grantees stop receiving mention pointers entirely, where before they crossed the tier filter untouched for want of an object_type.",
-        "No step for the exclusion plane's new aggregate_only path: it adds one closed-set ledger reason (exclusion_aggregate_unfilterable) and one public exclusion block on cohort-rollup packets. Both are response serialization. The aggregate is NOT filtered and does not claim to be \u2014 the count is derived from cohort membership before any row exists, so an item filter would report enforced=true having removed nothing. A caller that reads exclusion.enforced must therefore expect false on a rollup carrying an exclusion; reading the absence of the block as 'nothing was asked' was the previous, wrong, behaviour.",
-        "No step for closing the narrowing ledger's vocabulary: STAGES/ACTIONS/REASONS and the `unrecognized` sentinel constrain what NarrowingEntry may carry at construction time, which is response serialization only. Nothing stored changes shape, no cached artifact needs rebuilding, and a replayed artifact re-derives the ledger on the way out. Worth stating rather than discovering: a stage, action or reason a caller emits that this release does not declare now serializes as `unrecognized` instead of a slug of whatever was passed, so a mixed deployment where the control plane or the front end runs ahead of the node loses that entry's specificity \u2014 never the entry itself, and never the turn. topos/protocol/narrowing_vocabulary.json is what those two repos test against to keep that from happening silently.",
-        "No step for the latency measurement: query_artifacts gains a nullable duration_ms INTEGER via the query_artifacts_duration_ms_v1 migration (order 62), which the migration runner applies \u2014 there is nothing for an upgrade step to rebuild. A backfill is not merely skipped, it is impossible: a turn written before this release was never timed, and no stored field reconstructs a wall clock after the fact. The column is deliberately nullable for that reason, because 0 or -1 would read as a measurement and the percentile script counts NULL as unmeasured rather than as fast. Two consequences worth stating rather than discovering: scripts/query_latency_percentiles.py reports samples=0 for the engine series on any node until the first turn after upgrade, which is the correct output and not a failed migration; and the narrowing ledger's new optional elapsed_ms is response serialization only \u2014 absent means the stage did not time itself, so an older control plane or front end that drops the field at its merge seam loses the measurement, never the entry and never the turn. This is a NEW migration rather than an edit to wiki_mvp_phase0 because a node whose user_version is already past that migration would never re-run it, and editing it in place would strand exactly the machines this measures.",
-        "No step for declaring relationship_context:read's canonical_tables: the registry is read at request time to build the scope manifest, so the next turn after this release picks it up and there is nothing derived to rebuild. Nothing stored changes shape \u2014 entity_mentions rows are read, not rewritten, and no cached artifact needs invalidating because a replayed artifact re-derives its mention lane on the way out. Worth stating rather than discovering: this scope emitted entity_mention pointers before the previous release bounded that lane by canonical_tables, stopped emitting them because it declared none, and emits them again now that it declares conversation_messages \u2014 so a consumer reading this scope's pointers sees restored behaviour, not new behaviour, and it is now subject to the exclusion and disclosure planes that an undeclared grant routed around. The grant is conversation_messages ONLY; journal_entries was considered and deliberately excluded, so a caller must not assume a relationship-scope pointer can reference the journal. FLEET SKEW: control_plane/uma/scope_registry.json is canonical and this file's sibling topos/query/scope_registry.json is generated from it by just sync-scope-registry \u2014 a node running ahead of its control plane, or either running ahead of the wiki mirror, disagrees about what this scope authorizes, and the disagreement is silent because each side simply reads its own copy. just sync-scope-registry-check is what keeps that from happening and is green as of this release.",
-        "No step for the canonical-table existence probe: it is a query-time read of sqlite_master before a query-time read of the table, entirely inside the retrieval boundary. Nothing stored changes shape, no table is created or backfilled, and no cached artifact needs rebuilding because a replayed artifact re-derives its canonical lane on the way out. Explicitly NOT a migration: a canonical table is created by the writer that first lands a row in it, and creating conversation_messages empty at upgrade time would trade a 500 for a lie \u2014 the node would then report 'store_empty / scope_stores_hold_no_rows' where the truth is that this store has never received a delivery. Worth stating rather than discovering: a scope whose declared canonical table this node has never created now returns an empty result carrying empty_cause=store_empty with the ledger sub-cause connected_never_delivered, where before this release the turn raised sqlite3.OperationalError and the client saw a 500 \u2014 so a caller that treated a 500 from a first-run node as 'engine unreachable' will now correctly see an answered, empty turn, and a caller that reads empty_cause must expect this sub-cause on any pre-first-sync node. no_source_connected is unchanged and still reported for every scope whose tables the migrations do create.",
-        "No step for the access-mode ceiling tests: they are tests only. topos/query/disclosure.py is byte-for-byte unchanged by this entry \u2014 the summary-mode and inference-mode strips already behaved correctly \u2014 so no schema, index, enrichment output or derived layer moves, and no stored artifact becomes stale. Recorded rather than left implicit because of what the tests found: both ceiling blocks could be deleted outright and the entire 336-test privacy battery stayed green, which means every node shipped before this release ran its strongest disclosure boundary with no regression guard behind it. Nothing about that boundary changes for a running node; what changes is that severing it now turns two tests red, with a label-only positive control proving the assertions catch a leak rather than a missing self-report in filters_applied. Worth stating for anyone auditing a past release: the absence of these tests is not evidence the ceiling ever failed, only that it was never watched.",
-        "No step for the \u201cembed the subject, not the instruction\u201d guard: it is tests only. topos/query/retrieval.py is byte-for-byte unchanged by this entry \u2014 the rewrite that hands the distilled needle_text to the vector encoder instead of the owner's sentence already behaved correctly \u2014 so no schema, index, enrichment output or derived layer moves, no embedding is recomputed, and no stored artifact becomes stale. Recorded rather than left implicit because of what the tests found: the rewrite could be deleted outright and 1,058 tests passed with zero new reds, while the slug it emits, embedded_subject_not_instruction, is declared in the closed-set vocabulary of ALL THREE repos (topos/protocol/narrowing_vocabulary.json, topos/query/narrowing.py, next/lib/mcp/narrowingLedger.ts, control_plane/narrowing.py). Every node shipped before this release ran that rewrite with no regression guard behind it, and every consumer of the narrowing ledger has been reading a receipt whose action nothing verified. Nothing changes for a running node; what changes is that severing either half now turns exactly one test red, and the two halves fail independently, so a future change cannot silently keep the receipt while losing the rewrite. Worth stating for anyone auditing a past release: the absence of these tests is not evidence the rewrite ever failed, only that it was never watched \u2014 and a regression here would have been a silent recall loss, not a crash, because embedding an instruction returns plausible neighbours for the shape of a request rather than its subject.",
-        "No step for the entity_thread ranking floor: it is tests only. topos/query/retrieval.py is byte-for-byte unchanged and no retrieval weight, fusion order or lane scoring was touched. Recorded here because the measurement behind the floor is a fact about SHIPPED behaviour, not about this commit: ablating the lane at runtime (probe r15, _load_entity_thread_items returning []) moves exactly one of the 51 catalog cases - S4 falls 1.000 to 0.917 because the lane adds a third item the oracle does not want - and leaves C11, C8 and T7 unmoved, for a catalog aggregate of -0.0016. The lane is therefore not net positive on the catalog as it stands. Anyone auditing a past release should read every entity_thread: source shipped since 5ac3ba5 as neutral-to-slightly-dilutive on answer quality, not as an improvement, and should not read the sweep's C11/C8 regressions as caused by it: both sit at the lower number with the lane ON and OFF. Keep, gate or rework is the owner's decision.",
-        "No step for making the test lane hermetic: it is test infrastructure, docs and a reporting script, all of which run outside the node. pyproject's addopts marker filter, tests/live_db_watch.py, the lazy manifest resolution in tests/features/test_p3_entity_spine.py and the HARNESS_SESSION_PREFIXES filter in scripts/query_latency_percentiles.py change no schema, index, enrichment output or derived layer, and nothing a node has already stored becomes stale. Recorded rather than left implicit because the bug it fixes DID alter data on one machine \u2014 an unhermetic `pytest tests/` had written 1473 harness rows into the developer's own query_artifacts. Those rows are the owner's data now and are deliberately NOT deleted: the latency script excludes them by session-id prefix instead, so no number is improved by destroying evidence.",
-        "No step for the Q7 roster disclosure fix: it is read-side only and writes nothing. _thread_participants and _thread_speaker are pure functions over rows the retriever already admitted, and the disclosure change is one additional walk inside DisclosureFilterPipeline.apply over a packet built fresh every turn. No table, index, artifact or cached derivation changes shape and no stored row is rewritten - a node that upgrades gets the narrower roster on its very next question and needs nothing recomputed to get it. What a CONSUMER should know rather than discover: packet[\"topic_thread\"][\"participants\"][] is narrower below owner_raw than it was. entity_id is now owner-only on that block (the rule Q1's commitment_report already applied to the same field), so a grantee-tier caller that keyed a roster entry by entity_id must key it by position instead; and label is now a NAME or absent, never a sender_id fallback, so a caller that relied on label always being present below owner_raw must read participant_count for the count and treat a missing label as 'not disclosed'. The owner-tier shape is unchanged, including the identifier fallback for a contact with no display_name.",
-        "Also read-side, also no step: the grantee text scrubber now visits containers it already held the policy for. \"label\" was always in disclosure._GRANTEE_TEXT_KEYS, but _scrub_grantee_text_items ran over four top-level lists (summaries, scores, semantic_hits, facts) and never over the dict-shaped P4 artifacts or over topic_clusters. topic_thread (participants/items/decision_points), commitment_report (goals) and topic_clusters are walked now. The only observable difference is that grantee-tier labels in those blocks are PII-redacted the way summary text already was, so a grantee payload may contain [REDACTED_PHONE] or [REDACTED_EMAIL] where a raw identifier previously appeared. Owner-tier payloads are untouched: the walk runs only under disclosure_tier == \"default_disclosure\".",
-        "No step for wiring the privacy battery into the local gate and making the live-DB guard refuse: it is test infrastructure, a justfile recipe and docs, none of which the node ever loads. tests/live_db_watch.py and tests/conftest.py are imported by pytest and by nothing else; the justfile's test/gate/test-privacy-battery recipes and docs/testing/TEST_LANES.md are developer surface. The one production line here is a thread NAME (topos/features/entities/graph_refresh.py sets threading.Timer.name so the debounce thread is identifiable when a diagnostic catches it mid-write); it changes no schema, index, enrichment output or derived layer, and no stored artifact becomes stale. Recorded here because the FACT behind it is about shipped behaviour, not about this commit: the 305-test privacy battery (black-hole leak probes, UAR/CER zero-leak, minimality, negotiation ratchet, dense sparsification, redaction idempotence) has never run in `just test` or `just gate` - everything under tests/evals/privacy is auto-marked `private` and both recipes select -m public, so only ci.yml reached it, by path. And the connect-level guard added on 2026-08-19 raised only under TOPOS_TEST_DB_GUARD_STRICT, which no lane, recipe, workflow or doc set, so between then and now it recorded owner-database opens and then let them through. Anyone reading the 2026-08-19 entry as \"the test lane is now hermetic\" should read this one too: it was hermetic only for a developer who ran the default selection and read the last twenty lines of output. The same applies to the leaked debounce timer this armed guard immediately caught: mark_graph_dirty() arms a 90s timer that opened the real ~/.topos/database.db when it fired after its test's TOPOS_DATABASE_PATH pin was undone. That is a test-lane hermeticity defect, fixed in conftest; on a real node the timer firing against the owner's database is the feature working, so nothing a node has already written is affected.",
-        "No step for making `just gate` hermetic: it is a justfile recipe, a new developer-side script (scripts/live_db_tripwire.py), the release smoke test and tests -- none of which a node ever loads. The node's own code is byte-for-byte unchanged, so no schema, index, enrichment output, derived layer or stored artifact is affected and nothing becomes stale. Recorded rather than left implicit because the defect it fixes DID reach live owner data on a developer machine, and the 2026-08-19 and 2026-08-20 entries above should not be read as \"the gate is hermetic\": they made the PYTEST lane hermetic, and `just gate` leg 7 is one step further down. scripts/release_smoke_test.py set TOPOS_DATABASE_PATH only under --seeded-db, so the ordinary run -- the one every release performs -- booted the built wheel's FastAPI app with the variable unset, resolve_active_database answered $HOME/.topos/database.db (source=slot, profile=personaldb, schema=62), and the app set journal_mode=wal and ran CREATE TABLE IF NOT EXISTS ('Ensured table browser_visits exists') against the owner's live database while a node process held the same file open. What is established is the resolution and the DDL, from the smoke test's own stdout; what is NOT established is that any row changed -- query_artifacts and query_sessions counters were flat across the run that found it (E13, 2026-08-20). Two further facts about SHIPPED behaviour surfaced while arming the tripwire at that leg and are worth an auditor's attention: (1) refusing the connect did not fail the leg, because topos.core.state._open_owner_db_connection catches the failure, logs 'WARNING: Failed to create database connection' and the app still serves /healthcheck -- so a degraded database is not, by itself, visible at the app's front door; the tripwire therefore fails a leg from its own journal rather than from an exit code. (2) the smoke test's `python -c` checks ran with the repo root as cwd, which puts it on sys.path[0], so the venv's `import topos` resolved to ./topos and those two checks described the working tree rather than the wheel just installed; every release smoke result before 2026-08-20 should be read that way. Both are fixed here and both are now asserted rather than commented.",
-        "Additive derived data only: centrality and community_label are new metadata_json keys on entities the community pass already stamps community_id onto. Nothing changes shape, no table migrates, and a node that skips the step simply shows mention-count node sizing and numbered communities until its next organic rebuild stamps the new keys.",
-        "An entity that has left the graph sheds community_id, centrality and community_label together in the same sweep that previously removed community_id alone.",
-        "No step for pushing the Q3 derived window into the attention loader: it changes WHICH rows a query-time SELECT returns, never what is stored. `_load_attention_summary_items` reads `signal_objects` (signal_dimension='interests', object_type in attention_summary/interest_profile) and now adds a day predicate on the same `substr(object_key, -10)` expression it already ORDERs by, with the LIMIT widened to cover the window's days (capped at 31). No digest is rewritten, recomputed or invalidated \u2014 `features/triage/daily.py` and `triage_verdicts` are untouched, and a node that upgrades serves the digests it already had, for the days it was actually asked about. Unwindowed callers keep the byte-identical newest-ten page, so every question that derives no window reads exactly what it read before."
-      ]
-    },
-    {
-      "version": "1.3.24",
-      "summary": "Release 1.3.24.",
-      "steps": [],
-      "notes": []
-    },
-    {
-      "version": "1.3.25",
-      "summary": "Release 1.3.25.",
-      "steps": [],
-      "notes": [
-        "S1: two additive migrations ship here \u2014 enrichment_record_progress_v1 (63, written earlier and deliberately held out of the repo head on 2026-08-25 so it could not stamp a live database past its installed engine) and derivation_provenance_v1 (64, adds ontology_id / ontology_version / altitude + a pack lookup index to signal_objects). Both are additive DDL applied through wiki_schema_migrations; no rebuild, no reprocess.",
-        "P: new engine message types get_packet_resolution_config / put_packet_resolution_config, with matching CP routes at /v1/packet-resolution-config. The CP engine pin must be bumped to this release before its engine-contract CI can see them.",
-        "Packet resolution defaults to scores_only, which is byte-compatible with prior behaviour: no node changes what it sends to its answering model until its owner opts in.",
-        "After this release installs, raise the routine playground's PG_NODE_SCHEMA_BASELINE to 64."
-      ]
-    },
-    {
-      "version": "unreleased",
-      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
-      "steps": [],
-      "notes": []
+     "id": "actor-role-backfill",
+     "kind": "none",
+     "title": "actor_role column backfill",
+     "why": "Handled by the ledger-guarded schema migration actor_role_v1 at first boot; listed so release notes and the fleet dashboard show it without a manifest step.",
+     "order": 0
     }
-  ]
+   ],
+   "notes": [
+    "No re-embedding: the embedding model is unchanged in 1.2.0 (signal_embeddings remain valid).",
+    "No canonical re-ingest: raw and canonical rows are untouched by every 1.2.0 change.",
+    "Extraction default model moved to the quality tier (qwen3.5:9b-mlx) \u2014 affects FUTURE extractions only; small-RAM devices surface tier=stress in model recommendations and should downsize via settings.",
+    "Fleet skew: 1.1.0 nodes lack the signal_entity_graph_search handler \u2014 CPs must treat it as optional until the fleet is on 1.2.0."
+   ]
+  },
+  {
+   "version": "1.3.0",
+   "summary": "Attention triage (daily 2x2 verdicts, badges/ranks, dashboard), negotiable time-signal availability (flex/rhythm/commitments), conversation context tags (work/personal), claim verification / fact verdicts, facts-LLM think gating.",
+   "steps": [
+    {
+     "id": "attention-triage-schema",
+     "kind": "none",
+     "title": "attention_triage_v1/v2 + conversation_context_v1 schema",
+     "why": "Handled by ledger-guarded / always-run schema migrations at first boot; listed so release notes and the fleet dashboard show the additive tables/columns (triage_verdicts, conversations.context_tag).",
+     "order": 0
+    },
+    {
+     "id": "backfill-attention-triage",
+     "kind": "enrichment_reprocess",
+     "title": "Backfill attention triage for existing sources",
+     "why": "1.3.0 adds the attention_triage enrichment job and triage_verdicts ledger. Pre-1.3.0 nodes have no verdicts or interest-profile/attention-summary objects; reprocessing fills the new derived layer from existing canonical rows without touching raw/canonical.",
+     "params": {
+      "job_names": [
+       "attention_triage"
+      ],
+      "force_reprocess": true,
+      "include_signal": false,
+      "per_source": true,
+      "source_filter": "sources with canonical message/journal/activity records"
+     },
+     "progress": "TUI progress bar on the node + GET /v1/upgrade/status",
+     "idempotent": "verdicts are (day, record_id) upserts; signal objects no-op when unchanged",
+     "estimated_duration": "seconds\u2013minutes depending on day span; CPU-bound instruments, no LLM (signal lane off)",
+     "order": 1
+    }
+   ],
+   "notes": [
+    "No re-embedding and no canonical re-ingest: raw/canonical rows and signal_embeddings remain valid.",
+    "Time-signal flex/rhythm/commitment objects fill on the next scope materialization (dimension_summary / structured signal path); no dedicated rematerialize endpoint is wired into the upgrade runner yet.",
+    "Conversation context_tag columns are additive empty; owner API + local-LLM auto-label fill going forward (owner stamps always win).",
+    "Fact-extraction think suppression and claim-verify handlers affect FUTURE LLM passes only \u2014 existing signal_facts are not invalidated.",
+    "New WS handlers (signal_attention_dashboard, signal_set_worn_badge, verify_claim, conversation_context*, facts_llm_config*, truth_*, put_fact_verdict): CPs must treat as optional until the fleet is on 1.3.0; bump engine-compat when the app depends on them."
+   ]
+  },
+  {
+   "version": "1.3.1",
+   "summary": "Patch release anchoring the upgrade ladder after 1.3.0 (no derived-layer invalidation).",
+   "steps": []
+  },
+  {
+   "version": "1.3.2",
+   "summary": "Entity black hole owner controls + turn-level taint, complexity data-page engine (summary/timeline/topics/influence), app-mode shell contract (attach-don't-double-start, file logs, tray over HTTP), unified timeline daily reads, scope-registry sync.",
+   "steps": [
+    {
+     "id": "blackhole-complexity-timeline-schema",
+     "kind": "none",
+     "title": "blackhole / complexity / timeline_daily additive schema",
+     "why": "Handled by ledger-guarded schema migrations at first boot; listed so release notes and the fleet dashboard show the additive tables/columns without a derived reprocess step.",
+     "order": 0
+    }
+   ],
+   "notes": [
+    "No re-embedding and no canonical re-ingest: raw/canonical rows and signal_embeddings remain valid.",
+    "Blackhole filtering is runtime policy over existing data \u2014 no backfill step.",
+    "Complexity snapshots fill via enrichment piggyback going forward; pre-1.3.2 nodes get coverage on the next enrichment pass.",
+    "New WS handlers (blackhole_*, complexity_*, signal_timeline_daily): CPs must treat as optional until the fleet is on 1.3.2; bump engine-compat when the app depends on them."
+   ]
+  },
+  {
+   "version": "1.3.3",
+   "summary": "Release migration hardening (PLAN_NODE_RELEASE_MIGRATIONS M0\u2013M2) + attention pin/retire intent handlers.",
+   "steps": [
+    {
+     "id": "migration-registry-hardening",
+     "kind": "none",
+     "title": "Single migration registry + backup + downgrade guard",
+     "why": "PLAN_NODE_RELEASE_MIGRATIONS M0\u2013M2: unify apply/ensure on one MIGRATIONS registry, PRAGMA user_version fast-path, fail-loud on shape failures, pre-migration backup under ~/.topos/backups, downgrade guard when user_version is ahead of this build. No derived-layer invalidation.",
+     "order": 0
+    }
+   ],
+   "notes": [
+    "Code + schema-runner only \u2014 raw/canonical/derived rows are untouched.",
+    "Nodes upgrading into this release get a pre-migration backup when ledger-pending migrations exist.",
+    "Also ships signal_pin_intent / signal_retire_intent (protocol + code only; no derived invalidation)."
+   ]
+  },
+  {
+   "version": "1.3.4",
+   "summary": "PLAN M3\u2013M4: coverage spec_version stamps, selective anti-join, new upgrade executors + consent, upgrade-matrix CI.",
+   "steps": [
+    {
+     "id": "enrichment-spec-version-columns",
+     "kind": "none",
+     "title": "Coverage spec_version + selective anti-join",
+     "why": "PLAN M3: additive spec_version on coverage tables; catalog JOB_SPEC_VERSIONS; writers stamp; anti-join treats NULL as 0. Current catalog versions all start at 1 \u2014 no derived wipe required.",
+     "cost": "fast",
+     "consent": "auto",
+     "order": 0
+    }
+   ],
+   "notes": [
+    "Also ships canonical_reprocess / derived_rebuild / reembed executors and pending_consent for slow steps.",
+    "M4: scripts/build_upgrade_fixture.py + run_upgrade_matrix.py + upgrade-matrix.yml."
+   ]
+  },
+  {
+   "version": "1.3.5",
+   "summary": "Pin torch<2.13; no schema or data change.",
+   "steps": [],
+   "notes": [
+    "Dependency-only. No migration, no reprocessing, no consent prompt: nothing on disk changes shape, so `steps` is deliberately empty.",
+    "torch 2.13.0 segfaulted the node under concurrent MPS use (embedder + privacy filter + NSFW classifier), which is what a first chat query triggers. Upgrading is safe from any prior version and needs no user action beyond the restart the upgrade already performs."
+   ]
+  },
+  {
+   "version": "1.3.6",
+   "summary": "Inbox txn hygiene + coalesce deferred enrichment; topic clustering off-loop; sanitization prewarm progress on upgrade/shell status; macOS computer_name in system_info. Code-only / protocol-additive.",
+   "steps": [],
+   "notes": []
+  },
+  {
+   "version": "1.3.7",
+   "summary": "Stability release: write-gate/event-loop deadlock class eliminated (control-plane client on its own thread), entity-graph rebuild in a subprocess (no more ~100s healthcheck darkness), repo-wide gated SQLite writes (73 files), startup DB work on a dedicated worker thread with the owner-connection swap serialized. Signal-registry upgrade jobs now route down the signal lane; one manifest step redoes the 1.3.0 attention-triage backfill that no-opped. Code-only otherwise.",
+   "steps": [
+    {
+     "id": "backfill-attention-triage-redo",
+     "kind": "enrichment_reprocess",
+     "title": "Re-run the attention triage backfill (1.3.0 step was a routing no-op)",
+     "why": "The 1.3.0 backfill-attention-triage step ledgered 'done' on every node without writing a single verdict: attention_triage lives in SIGNAL_DERIVATION_JOBS, but the runner routed it through run_canonical(), which filters job_names against CANONICAL_JOBS and silently dropped it. Nodes that upgraded through 1.3.0\u20131.3.6 therefore have a green ledger row and zero backfilled triage history. The runner now routes signal-registry jobs down the narrow signal lane; this step re-declares the backfill so already-upgraded nodes are healed too. Days triaged organically since 1.3.0 no-op via the (day, record_id) upserts.",
+     "params": {
+      "job_names": [
+       "attention_triage"
+      ],
+      "force_reprocess": true,
+      "include_signal": false,
+      "per_source": true,
+      "source_filter": "sources with canonical message/journal/activity records"
+     },
+     "progress": "TUI progress bar on the node + GET /v1/upgrade/status",
+     "idempotent": "verdicts are (day, record_id) upserts; signal objects no-op when unchanged",
+     "estimated_duration": "measured ~0.7s per day of history on a real node (no LLM, no network); minutes at worst for multi-year nodes",
+     "order": 1
+    }
+   ],
+   "notes": []
+  },
+  {
+   "version": "1.3.8",
+   "summary": "Stability: ingest/enrichment DB writes off the event loop; statistics job no longer holds an open write lock across the pipeline; graph refresher skips cross-thread dirty bumps; open-txn watchdog (opt-in); DMG in-app update finds bundled uv; control-plane pong deadline restored. Code-only.",
+   "steps": [],
+   "notes": [
+    "Code-only \u2014 no schema migration, no derived-layer invalidation, no consent prompt.",
+    "Worker-thread write offload + statistics txn hygiene close the database-is-locked / event-loop-stall class that hit repeat ingests after 1.3.7."
+   ]
+  },
+  {
+   "version": "1.3.9",
+   "summary": "Derivation-retry repair: the signal_derive_retry executor was never registered, so every recorded derivation debt was claimed and failed as an unknown job kind \u2014 the retry meant to repair a lost derivation destroyed the record of it instead. The executor is wired, workers claim only kinds they can execute, and an executor may requeue rather than read as failed. One consent:auto step sweeps debt already parked 'failed', which nothing else would re-queue. Also: public_bio:read / work_context:read gain test cover for the restored profile_records lane, and just harness-gate scores answer quality against a ratcheting floor instead of a 70/70 bar it cannot reach on a signal-less seed DB. No schema change.",
+   "steps": [
+    {
+     "id": "retry-recorded-derivation-debt",
+     "kind": "engine_endpoint",
+     "title": "Re-run derivation debt that was failed as an unknown job kind",
+     "why": "record_failed_derivation() has enqueued pipeline rows of kind 'signal_derive_retry' since 1.3.x, but no executor was ever registered for that kind, so the worker claimed each row and immediately failed it with 'Unknown job kind: signal_derive_retry'. The debt record IS the queue row, so the retry meant to repair a lost derivation destroyed the record of it instead \u2014 nodes carry silent derivation gaps with a 'failed' row and nothing pointing at them. The executor is registered as of this release, but that does not revive the existing rows: a failed row is only re-queued by the next organic failure of the same (batch, job), and recover_stale_jobs resets 'running' rows, never 'failed' ones. This step sweeps them once on upgrade so the repair happens without an operator remembering to POST /v1/signal/derivation-debt/retry.",
+     "params": {
+      "method": "POST",
+      "path": "/v1/signal/derivation-debt/retry",
+      "limit": 200
+     },
+     "consent": "auto",
+     "cost": "no LLM, no network; re-runs only the derivations already recorded as lost",
+     "progress": "synchronous; response is the attempted/recovered/still_failing report",
+     "idempotent": "re-running is a no-op once pending is empty; a debt that fails again is left 'failed' and still listed",
+     "estimated_duration": "seconds on a node with no debt (the common case); proportional to recorded debt otherwise",
+     "order": 1
+    }
+   ],
+   "notes": []
+  },
+  {
+   "version": "1.3.10",
+   "summary": "Release 1.3.10.",
+   "steps": [],
+   "notes": []
+  },
+  {
+   "version": "1.3.11",
+   "summary": "Ingest throughput: the conversation auto-classifier stops re-asking the same unlabelable conversations on every enrichment batch (~20 model calls / ~26s per batch, permanently, for zero progress). An unclear verdict now retires the row instead of being silently dropped. No steps: nothing on-node is invalidated \u2014 prompt, model and parse logic are unchanged, so existing auto: tags remain valid, and retired rows self-heal on the next enrichment pass.",
+   "steps": [],
+   "notes": []
+  },
+  {
+   "version": "1.3.12",
+   "summary": "Graph time correctness: edges stop being dated by when the machine touched them. Co-occurrence rebuilds no longer restart each edge's belief clock (valid_from); topic-cluster edges take the attribution role of their member records instead of defaulting to 'authored'; journal entry_at written from the import clock is re-dated from starts_at; and DATE/TIME/CARDINAL surfaces are no longer minted as graph nodes. Also: a failed upgrade step is reachable for retry again (ledger rows key on the DECLARING release, and the plan carries any step short of 'done'), and a progress bar can no longer fail the step it narrates.",
+   "steps": [
+    {
+     "id": "repair-journal-ingest-clock-dates",
+     "kind": "engine_endpoint",
+     "title": "Re-date journal entries that recorded the import clock as their event time",
+     "why": "Grow's journal producers wrote entry_at from the import clock while the true session time sat in starts_at. On the first live node checked: 309 rows across two sources, 127 of them sharing 2026-08-08T03:34:44 to the second, with real sessions spanning months. The entity graph dates its edges from canonical event time, so those batches pulled years-old relationships into the recent graph window. SQLiteCanonicalStore._journal_entry_at closes this for new writes, but a row already on disk only moves if something sweeps it. The predicate IS the corruption signature (entry_at equal to ingested_at to the second, with a real starts_at present), so a genuine entry_at is never touched and the step is safe to re-run. The timeline projection is unaffected either way: it already reads starts_at, so this brings entry_at into agreement with what timeline always showed.",
+     "params": {
+      "method": "POST",
+      "path": "/v1/canonical/journal/repair-ingest-dates"
+     },
+     "consent": "auto",
+     "cost": "no LLM, no network; one bounded UPDATE over journal_entries",
+     "progress": "GET /v1/upgrade/status",
+     "idempotent": "the signature stops matching once a row is repaired",
+     "estimated_duration": "milliseconds",
+     "order": 1
+    },
+    {
+     "id": "rebuild-entity-graph-after-date-repair",
+     "kind": "derived_rebuild",
+     "title": "Rebuild the entity graph so edges pick up the corrected dates, roles and value-surface guard",
+     "why": "Three of this release's fixes only reach EXISTING data through a rebuild: co-occurrence edges stop having their belief clock (valid_from) restarted on every rebuild; topic-cluster edges stop defaulting to actor_role 'authored' and take the role of their member records instead; and DATE/TIME/CARDINAL surfaces ('an hour', 'this week', 'four') are no longer minted as graph nodes, with previously-minted ones purged. It must run AFTER the journal date repair, because rebuilding first would only re-derive edges from the uncorrected event times.",
+     "params": {
+      "targets": [
+       "entity_graph"
+      ]
+     },
+     "depends_on": [
+      "repair-journal-ingest-clock-dates"
+     ],
+     "consent": "auto",
+     "cost": "no LLM, no network; the rebuild runs in a subprocess so the node's event loop stays live",
+     "progress": "TUI progress bar on the node + GET /v1/upgrade/status",
+     "idempotent": "deterministic recompute from surviving mentions",
+     "estimated_duration": "measured ~124s on a real node (2,741 edges)",
+     "order": 2
+    }
+   ],
+   "notes": [
+    "Graph time-window RCA (2026-08-10): five defects, all variations on recording when the machine touched the data rather than when the thing happened.",
+    "The scrub-window fix ships in topos-react-app, not here."
+   ]
+  },
+  {
+   "version": "1.3.13",
+   "summary": "Owner curation and search stop reporting how many times something was stored. The People tab's duplicate queue asked one question per sighting rather than per decision (8,134 pending rows for 99 real decisions on a live node), derivation asked about strings the owner never said, candidates never seen in the data were offered as merge targets (contacts included), and possessives, trailing punctuation and redaction placeholders were treated as identities. Search returned the same text once per time it was stored, where 37% of a live corpus is duplicate text. Orphan cleanup also stopped reaping the graph vertices derivation had just minted, which had been churning 173 entities and 206 edges per scrub. No steps: the three entity_review migrations run at boot and collapse the queue in place, preserving every prior answer and unbind guard; the spine and search changes are code-only and take effect on the next resolve and the next query.",
+   "steps": [],
+   "notes": [
+    "Migrations 57-59 delete duplicate and unanswerable entity_review rows and mark the rest stale; approved, dismissed and no_bind rows are never touched.",
+    "Entity labels already minted with a possessive, trailing dash or [NAME] are left in place \u2014 they surface through the review queue as ordinary merge decisions rather than being rewritten underneath the owner.",
+    "The occurrences count on search results ships in topos-react-app as well."
+   ]
+  },
+  {
+   "version": "1.3.14",
+   "summary": "Release 1.3.14.",
+   "steps": [],
+   "notes": []
+  },
+  {
+   "version": "1.3.15",
+   "summary": "Release 1.3.15.",
+   "steps": [],
+   "notes": []
+  },
+  {
+   "version": "1.3.16",
+   "summary": "Release 1.3.16.",
+   "steps": [
+    {
+     "id": "backfill-browser-activity-lanes",
+     "kind": "enrichment_reprocess",
+     "title": "Backfill embeddings for browser activity rows the stale-install gate dropped",
+     "why": "A 2026-05-29 source_runtime_installs snapshot for browser_visits/browser_events (enrichment_trigger='manual', no jobs) shadowed the bundled lane policy from the ~2026-07-10 deploy on: every live browser push since ran zero enrichment/signal jobs while the inbox job reported done (one live node: 0/1,034 August visits embedded). Runtime installs now adopt bundled lane policy, but rows ingested while the gate was closed still have no derived data.",
+     "params": {
+      "job_names": [
+       "embeddings"
+      ],
+      "include_signal": true
+     },
+     "progress": "per-source progress via GET /v1/upgrade/status",
+     "idempotent": "coverage-driven row selection (only rows missing derived output); embedding writes are (record_id, model, chunk_index)-keyed with content-hash skip, and activity rows dedupe to one vector per distinct text, so re-running converges",
+     "consent": "auto",
+     "cost": "local models only, no network; ~1k title-length rows on the affected node, minutes on the local embedding model; unaffected sources no-op on the coverage check",
+     "order": 1
+    },
+    {
+     "id": "backfill-github-activity-commit-content",
+     "kind": "canonical_reprocess",
+     "title": "Re-map retained GitHub push events so activity rows carry their commit messages",
+     "why": "activity_events.content was NULL on every github push row (one live node: 451/451, and only 11 DISTINCT titles across all 451 \u2014 all '{owner}/{repo}: pushed N commit'), because the mapper carried repo/actor and nothing else, and the store's INSERT did not list the content column at all. The commit messages \u2014 the only text that says what the work WAS \u2014 sat unused in the retained raw payloads. Everything semantic downstream could therefore match on repo NAME alone: goal/interest attachment to engineering work was pure name matching, and a contrastive term extraction over commit-attached items returned nothing but 'pushed'/'commit'. The declared field map and the store fix land in this release, but neither reaches a row already on disk: re-mapping from raw retention is what fills it. Raw retention holds the full PushEvent payloads (461 rows on the same node), so no re-fetch from GitHub is needed.",
+     "params": {
+      "from_stage": "raw",
+      "source_ids": [
+       "github_activity"
+      ],
+      "run_enrichment": false
+     },
+     "progress": "GET /v1/upgrade/status",
+     "idempotent": "re-mapping is upsert-keyed (activity event_id, journal entry_id) and content is written with COALESCE, so re-running rewrites the same values",
+     "consent": "auto",
+     "cost": "no network, no models: one parse + upsert per retained raw row (458 on the measured node), seconds. Nodes with no github_activity install no-op",
+     "order": 2,
+     "$comment": "CANONICAL ONLY (run_enrichment: false), deliberately. The default fan-out would run this source's baseline signal jobs, and a 458-row batch exceeds topic_clusters' _INCREMENTAL_MAX_BATCH (200), which forces a FULL cluster recompute: on the measured node that repartitions all 152 clusters, and 85 of them (interests 48, wellbeing 27, memory 10) sit in dimensions whose definitions/<dimension>.json is not yet in the tree, so dimension_core_question falls back to the generic prompt silently. Corrected content is what this release owes; derivation over it belongs to the release that lands the topic-dimension work, as one pass with the definitions present rather than two with a repartition in between."
+    },
+    {
+     "id": "rerun-blackhole-rebuilds",
+     "kind": "derived_rebuild",
+     "title": "Re-run every black-hole rebuild so it reaches topic cluster labels and member excerpts",
+     "why": "The black-hole rebuild withdraws prose artifacts naming a protected entity, but topic_clusters and topic_cluster_members were never on its list \u2014 the label used to be term soup that named nobody, and the contrastive labeler now names the subject (33 of 152 labels on one live node were an entity name). The rebuild also had to learn that the cluster ROW is the producer: closing the derived top_topics object alone is undone by the next cluster pass, which re-mints the fact from topic_clusters.label. Existing black holes are marked 'complete', so run_pending_rebuilds skips exactly the entities carrying the un-withdrawn data: the same live node had five member excerpts still quoting a protected entity under three completed rebuilds. Must run AFTER recompute-topic-clusters-split so it also sees the labels that pass just wrote.",
+     "params": {
+      "targets": [
+       "blackhole_rebuilds"
+      ]
+     },
+     "depends_on": [
+      "recompute-topic-clusters-split"
+     ],
+     "progress": "GET /v1/upgrade/status",
+     "idempotent": "withdrawal is a name scan re-applied to whatever is currently stored; a second run finds nothing left to withdraw. Cluster ids, membership and counts are untouched \u2014 only prose (label, centroid preview, member excerpts) is withdrawn.",
+     "consent": "auto",
+     "cost": "no LLM, no network; a scan of topic_clusters, topic_cluster_members, signal_objects and briefs per protected entity. Seconds. Nodes with no black holes no-op.",
+     "order": 5
+    },
+    {
+     "id": "retire-url-classification",
+     "kind": "none",
+     "title": "url_classification retired; its table and interest tags removed",
+     "why": "The job classified visited pages into DMOZ top-level categories. On the node this was measured on it produced 8,616 rows over six months, 73% of them the single label 'Reference' at an average confidence of 0.961 \u2014 HIGHER than any other bucket, so no threshold separates it from filler. The same host drew different labels on different visits (github.com: Reference 720, Computers 125, Kids 5), because the classifier reads the page title and an authenticated app title says almost nothing. DMOZ describes where a site files in a directory, not what a person is doing; 'Reference' is its catch-all. 458 of the interests dimension's 828 signal objects were these tags, 349 of them 'Reference'. Handled by the ledger-guarded migration retire_url_classification_v1 at first boot; listed so release notes and the fleet dashboard show it without a step. Scoped by payload source_kind, so the materializer's keyword-rule tags and the personal fact objects that also live in interests are untouched \u2014 verified on a copy of a live node: 828 -> 370 interests objects, facts 6 -> 6, other dimensions 6,580 unchanged.",
+     "order": 0
+    },
+    {
+     "id": "recompute-topic-clusters-split",
+     "kind": "derived_rebuild",
+     "title": "Recompute topic clusters with the oversized-cluster split and canonical-text labels",
+     "why": "23 clusters of 120+ members held 51% of all members on one live node, and labels were minted from redacted previews ([NAME]/[ACCOUNT]) rather than the canonical text. Both fixes only reach existing clusters through a recompute; rehearsed on a live-DB copy it took mega-clusters 23 -> 14 and their member share 51% -> 33% with 134/167 ids preserved. Subsumes a labels-only relabel: this pass relabels every cluster it writes, so a separate relabel step would spend one local-LLM call per cluster on labels this recompute immediately discards.",
+     "params": {
+      "targets": [
+       "topic_clusters"
+      ]
+     },
+     "progress": "GET /v1/upgrade/status",
+     "idempotent": "full recompute with stable-id matching; re-running converges on the same partition modulo k-means seed",
+     "consent": "prompt",
+     "cost": "one full clustering pass plus one short local-LLM call per cluster (~2s each warm); minutes at personal scale. No network.",
+     "order": 4
+    }
+   ],
+   "notes": [
+    "Deploying this build requires reinstalling the node (frozen uv tool snapshot) \u2014 a plain restart runs the old code and leaves the browser lanes dark.",
+    "Existing clusters keep their old labels and their old partition until recompute-topic-clusters-split runs: the labeler runs at cluster write time, and this release changes both the prompt and the partition.",
+    "Nodes whose github raw retention was purged keep NULL content on their old push rows; new pushes carry commit messages from this build on. Browser rows written before this release keep NULL content/hostname until they are re-ingested \u2014 no raw-retention re-map step is declared for them because the plugin re-pushes visits organically."
+   ]
+  },
+  {
+   "version": "1.3.17",
+   "summary": "Release 1.3.17.",
+   "steps": [
+    {
+     "id": "rerun-places-dimension-summary",
+     "kind": "enrichment_reprocess",
+     "title": "Re-run dimension_summary where undeclared PlaceContext writes failed the whole job",
+     "why": "The artifact router writes PlaceContext objects into the places dimension for every place EntityRef, but places.json never declared the type, so SignalObjectStore rejected the write and dimension_summary DEGRADED on any batch containing a place reference \u2014 the derivation-retry ledger recorded the debt but nothing consumes it automatically. Observed on grow_data_file 2026-08-15: every manual-enrichment batch (171 records) queued for retry with derived data MISSING. places.json now declares PlaceContext, so a re-run succeeds where the same records failed.",
+     "params": {
+      "job_names": [
+       "dimension_summary"
+      ],
+      "include_signal": true
+     },
+     "progress": "per-source progress via GET /v1/upgrade/status",
+     "idempotent": "coverage-driven row selection (only records whose dimension_summary output is missing); signal object upserts are (dimension, object_type, object_key)-keyed and supersede in place, so re-running converges",
+     "consent": "auto",
+     "cost": "local models only, no network; scoped to records whose derived output is missing \u2014 the failed grow_data_file batches on the affected node, minutes; unaffected sources no-op on the coverage check",
+     "order": 5
+    }
+   ],
+   "notes": [
+    "Write-gate/event-loop fix is code-only ([O]): no schema migration, no derived invalidation, no step. Ingest dedupe, the install_service sources surface, the routine write handlers and both gated sections of the privacy layer now run in asyncio.to_thread on the worker's own connection, and the ai_chat / source_settings DDL probes before taking the gate instead of re-running idempotent CREATEs. Existing rows and derived outputs are untouched \u2014 the same statements run, on a different thread."
+   ]
+  },
+  {
+   "version": "1.3.18",
+   "summary": "Release 1.3.18.",
+   "steps": [],
+   "notes": [
+    "Everything in 1.3.18 is code-only ([O]): no schema migration, no derived invalidation, no step. Two groups of change, neither of which invalidates an output. (1) Platform-aware local model setup: `ollama_extraction_model` and `privacy_judge_model` resolved to `qwen3.5:9b-mlx`, an MLX build that exists for Apple-Silicon Macs and nowhere else, and the seeded pack and install instructions were macOS-shaped too. On Apple Silicon every value resolves exactly as before; on the platforms where a value changes, the tag it replaces could never be served there, so there are no outputs derived from it to reprocess. (2) Download correctness: a failed pull used to be recorded as a completed one, and nothing checked free disk before a multi-gigabyte write onto the volume holding the node's SQLite. Both are guards on work that had not happened, so nothing already on disk is affected."
+   ]
+  },
+  {
+   "version": "1.3.19",
+   "summary": "Release 1.3.19.",
+   "steps": [],
+   "notes": [
+    "Code-only ([O] and one [E:facts] bug fix): no schema migration, no derived invalidation, no step. Three groups, none of which invalidates an output. (1) Runtime shutdown is scoped to a generation rather than a process-lifetime flag, and one cancelled fact-extraction batch now stops that batch instead of every later one. Tagged [E:facts] because it is in the facts lane, but it changes WHEN extraction runs, never what it produces \u2014 JOB_SPEC_VERSIONS is unchanged, so no reprocess is owed. (2) Startup's background work (four fire-and-forget tasks, the pipeline worker, the upgrade-runner thread) is now reaped at shutdown, and a migration blocked on SQLite no longer pins the process-wide write gate for the full busy_timeout. Both are lifecycle and locking fixes: the same statements run, on the same data. (3) A shared sqlite handle can no longer be used from the event loop and a worker at once, and /healthcheck now reflects a dead database instead of reporting healthy through it.",
+    "No node-side action. Nothing on disk is re-derived by this release, so an upgrade is install-and-restart with an empty step list."
+   ]
+  },
+  {
+   "version": "1.3.20",
+   "summary": "profile remove: an archived Topos can be deleted from a machine; the data explorer stops reading raw ingestion that belongs to no Topos.",
+   "steps": [],
+   "notes": [
+    "No re-derivation: the raw-ingestion binding fix changes which DIRECTORY the data explorer and storage breakdown read, not the shape or content of anything stored. Ingest already wrote to ~/.topos/ingestion, so no raw file moves and no record is reprocessed.",
+    "A node whose raw files live in ~/.topos/ingestion \u2014 every node, since that has been the ingest destination since before the profile layout \u2014 sees no change beyond the storage readout no longer double-counting.",
+    "On a machine that still carries a pre-profile ~/.topos_engine/ingestion, those JSONL files are no longer listed in the data explorer, no longer counted in the storage breakdown, and no longer deletable or downloadable through the UI. Nothing is moved or removed: the files stay where they are, and that directory belongs to no Topos \u2014 it is not carried by a profile switch and never was.",
+    "TOPOS_INGESTION_BASE_PATH now applies to reads as well as writes. A deployment that sets it (the LongMemEval adapter, and any test harness pointing ingestion at a scratch directory) will find the explorer and the storage breakdown following it instead of reporting on ~/.topos/ingestion.",
+    "`profile remove` is a new offline CLI command; it re-derives nothing and no upgrade step runs it. It deletes an archived profile only when a person asks it to, which is its purpose \u2014 nothing here touches ~/.topos/profiles/."
+   ]
+  },
+  {
+   "version": "1.3.21",
+   "summary": "Release 1.3.21.",
+   "steps": [],
+   "notes": [
+    "No re-derivation: the active-database binding fix changes which FILE is opened, not the shape or content of any table. A node already serving the database inside its active Topos sees no change at all.",
+    "A node serving a pre-profile database (~/.topos_engine, Application Support/ToposEngine or .../ToposControlPlane) on a machine that has never used profiles now ADOPTS it: the file is copied into ~/.topos on first start and served from there. The original stays in place as its own backup, so disk use grows by one database copy until the user removes it.",
+    "A node serving such a database on a machine that DOES use profiles now serves the (possibly empty) active slot instead, and logs a warning naming the stray. That data is not lost \u2014 it is where it always was \u2014 but it is no longer served: `topos-node profile adopt` pulls it into the active Topos.",
+    "Pre-migration backups are now named database-pre-v<version>--<profile>-<stamp>.db and pruned per Topos. Backups already on disk carry no profile in the name, form their own group, and are never pruned by a named one \u2014 so a machine upgrading into this keeps every backup it has until the un-named group itself exceeds retention.",
+    "Archiving a Topos now checkpoints its WAL first, so archived profiles are a single self-contained database file. No action needed; profiles archived by older engines keep their sidecars and still restore correctly.",
+    "profile.json gains engine_version, schema_version, upgrade_baseline, size_bytes and key_fingerprint at archive time. Profiles archived before this have none of them: `profile list` falls back to measuring the directory, and the switch preflight falls back to opening the database."
+   ]
+  },
+  {
+   "version": "1.3.22",
+   "summary": "A protected entity is withdrawn from cluster metadata names; query retrieval and time framing corrected; the update button stops reporting installs it did not make.",
+   "steps": [
+    {
+     "id": "rerun-blackhole-rebuilds-metadata-names",
+     "kind": "derived_rebuild",
+     "title": "Re-run black-hole rebuilds so they reach cluster metadata names",
+     "why": "topic_clusters.metadata_json carries related_entities and query_aliases as NAME strings. The read-side guard filters by entity_id and cannot see them, and the rebuild only knew about labels and previews \u2014 so a cluster minted before an entity was protected kept naming it, and fact_materializer turned that name into a graph edge. The producer refuses it now; this withdraws the ones already stored.",
+     "params": {
+      "targets": [
+       "blackhole_rebuilds"
+      ]
+     },
+     "cost": "fast",
+     "consent": "auto",
+     "order": 0
+    }
+   ],
+   "notes": [
+    "No recompute: clusters keep their partition and their labels. Only protected NAMES are removed from related_entities/query_aliases, and only on nodes that have marked an entity off-limits \u2014 a node with no black holes has nothing to withdraw and the step is a no-op.",
+    "The update-path fix is code-only: it changes whether a PyPI update is offered and whether an upgrade that changed nothing is reported as success. Nothing on disk is re-derived by it."
+   ]
+  },
+  {
+   "version": "1.3.23",
+   "summary": "Ships migration 62, query_artifacts_duration_ms_v1: a nullable duration_ms INTEGER on query_artifacts. It is also the first build that can OPEN a database already stamped user_version=62. 1.3.22 knows only 61, so ensure_migrations_applied raises DowngradeGuardError against such a file and every request that constructs a canonical store fails with it \u2014 a node whose database ran ahead of its package is answering nothing until this lands. No backfill is possible or attempted: a turn written before this was never timed, and the column is nullable so an unmeasured turn cannot read as a fast one. ONE upgrade step runs, rebuild-entity-graph-centrality (derived_rebuild, consent auto, no LLM and no network), which stamps centrality and community_label onto the entities the community pass already stamps community_id onto; skipping it only defers those keys to the next organic rebuild. Everything else in this release is query-time and stores nothing. The narrowing ledger and its closed empty-cause vocabulary make an empty lane say WHY it is empty \u2014 store_empty with sub-cause connected_never_delivered on a node that has never synced (a turn that previously raised sqlite3.OperationalError and returned a 500), entity_window_* for a derived window, commitment_* per stated goal \u2014 where the same turn used to return a silent blank. And the attention lane now selects the window's days IN SQL instead of filtering the newest ten interest objects, so a question naming a past week returns the digests the node already held for those days instead of reporting entity_window_no_triage_in_window; no digest is recomputed, triage_verdicts is untouched, and an unwindowed caller reads the byte-identical newest-ten page.",
+   "steps": [
+    {
+     "id": "rebuild-entity-graph-centrality",
+     "kind": "derived_rebuild",
+     "title": "Rebuild the entity graph so centrality + community labels stamp immediately",
+     "why": "compute_communities now stamps centrality {degree, eigen, betweenness} and community_label into entities.metadata_json, but only when it runs. Without this step the stamps appear at the next enrichment-triggered debounced rebuild; running it once at upgrade lights up structural node sizing and named communities in the graph UI right away instead of whenever new data next arrives.",
+     "params": {
+      "targets": [
+       "entity_graph"
+      ]
+     },
+     "cost": "no LLM, no network; the rebuild runs in a subprocess so the node's event loop stays live",
+     "consent": "auto",
+     "order": 0
+    }
+   ],
+   "notes": [
+    "No step for the Q3 entity-anchored window: it is a query-time derivation over rows the retriever reads anyway. topos/query/entity_window.py touches no database at all - it is anchor-phrase detection plus arithmetic on a day-count dict - and retrieval.py gathers those counts with one bounded SELECT over entity_mentions (LIMIT 2000, applied to ADMITTED rows because the two membership proofs are OR'd inside the WHERE clause rather than filtered afterwards). Nothing is written, no record is fetched by id, no schema, index or artifact changes shape, and no cached artifact replays differently: the derivation is a function of query_text and of live mention rows, and query_text is already inside the intent hash. Every question that is not the anchored question takes the byte-identical path it took before, because the lane is armed only when BOTH an anchoring frame (while/when/during ... heads-down on / deep in / buried in / working on) and a cost half (miss / slip / fell through / distracted) are present AND the planner found no window of its own. Nodes whose entity graph is empty or unbuilt simply refuse - entity_window_unresolved or entity_window_no_mentions - and the graph is populated by the existing extraction pipeline, which this release does not require to be re-run. One thing a consumer should know rather than discover: packet[\"time_window\"] (already forwarded onto the summary payload by DefaultGameLayer, unchanged by this release) gains source/method/window_days/mentions_in_window/rate_lift on a derived turn and an empty_reason on a refused one, so a caller that assumed time_window implies the owner NAMED a window must now read source to tell a parsed window from a derived one.",
+    "IMPORTANT, and still no step: the density the Q3 window is derived from is bounded to the record surface the GRANT authorizes, and that bound is where the disclosure lives, because a window is computed from records the answer may never contain. The mention scan admits a row only if its canonical_table is in manifest.canonical_tables, OR its record_id appears in triage_verdicts and the scope's signal_objects name attention_summary. The second clause is not a loophole and not a special case for one scope - it is the record surface that scope's own digests are ALREADY computed over, and without it attention:read (whose canonical_tables is deliberately []) could never window the very triage Q3 exists to window. A scope authorizing neither surface derives nothing rather than falling back to an unbounded scan, and a mention whose canonical_table is NULL never votes. Black-holed record ids (BlackholeGuard.blocked_record_ids(), for every non-owner caller) and Q5 request exclusions are removed BEFORE the arithmetic, so a protected or excluded subject cannot move the dates; an exclusion the engine cannot compile abandons the derivation entirely rather than deriving around it. No drop counts are reported from this scan, deliberately: 'your window would have been wider' is the existence disclosure the black hole exists to prevent.",
+    "No step for the Q3 window vocabulary: eight reason slugs join the closed set (entity_window_density_too_thin, entity_window_density_uniform, entity_window_derived, entity_window_no_mentions, entity_window_no_triage_in_window, entity_window_span_too_broad, entity_window_triage_lane, entity_window_unresolved) in both topos/query/narrowing.py and topos/protocol/narrowing_vocabulary.json. Ledger entries are response serialization, not storage, so nothing needs rebuilding and no artifact cached before this release replays differently. A consumer pinned to an older copy of the vocabulary coerces these to UNRECOGNIZED rather than failing, which is the protocol's existing contract. The derived DATE RANGE is content and is never one of these slugs - it appears only in the ledger's local-only detail and in packet[\"time_window\"], which the owner has to be able to read in order to dispute it; as_telemetry() carries neither.",
+    "No step for the narrowing-ledger empty_cause fix: _attach_narrowing now withholds a turn-level empty_cause when the result is not empty, which is response serialization only. Nothing stored changes shape and no cached artifact needs rebuilding \u2014 a replayed artifact re-derives the field on the way out.",
+    "No step for the per-part rare gate or multi-window planning: both are query-time only. needle_parts and time_windows are request fields and plan fields, nothing is persisted, and a request that sends neither (every caller before this) takes exactly the path it took before \u2014 one needle group, one window.",
+    "No step for connecting senders to the per-part rare gate: the front end and the control plane now populate retrieval_parts (and forward resource_id through prepare_engine_query_payload's allow-list), but both are request fields on the wire. Nothing is persisted and no schema, index or artifact changes shape. Two consequences worth stating rather than discovering: a multi-part turn now genuinely takes the new-key branch of the intent-hash note below \u2014 that cache miss was hypothetical while nothing sent parts and is real from this release \u2014 and a mixed deployment is safe in both directions, since an older node ignores an unknown request field and a newer node treats an absent one as the single-needle path it always took.",
+    "No rebuild for the widened intent hash: needle_parts and time_windows are appended to the hash payload only when present and only when they differ from what the existing formula already covers, so every artifact cached under the old key is still addressed by it. A turn that DOES send them gets a new key and simply misses the cache once \u2014 which is the correct outcome, since the alternative was serving one report section's findings as another's under a memory_hit stamp.",
+    "No step for enforced exclusion: it is parse-and-filter at query time. Nothing stored changes shape \u2014 the filter reads the packet the retriever just built and drops items from it before the packet leaves the retrieval boundary. No artifact cached before this release can be replayed for an excluded ask either, because the exclusion is parsed from query_text and query_text is already inside the intent hash, so an ask carrying an exclusion addresses a different cache key than the same ask without one. An owner who never phrases an exclusion takes the byte-identical path they took before.",
+    "No step for the entity-thread retrieval lane: it is a query-time join. The lane reads entity_mentions to build a record-id set and then SELECTS from the pages CanonicalStore.list() already disclosed for the request's tier \u2014 it never fetches a record by id and it writes nothing. Nothing stored changes shape, and a question that resolves no entity takes the byte-identical path it took before. Nodes whose entity graph is empty or unbuilt simply get no lane; the graph is populated by the existing extraction pipeline and this release does not require it to be re-run.",
+    "No rebuild for the entity_mention fusion-key split: _fusion_item_key is computed per request inside _rrf_fuse_summary_lists and is not persisted or part of any cache key. Artifacts cached before this release replay unchanged; the next live turn simply stops letting a mention pointer shadow the record it points at.",
+    "No step for the Q1 commitment-tracking join: it is a query-time join plus a projection of a packet the retriever just built. The lane reads user_goals and entity_mentions to build a record-id set PER STATED GOAL and then SELECTS from the pages CanonicalStore.list() already disclosed for the request's tier - it never fetches a record by id and it writes nothing. packet[\"commitment_report\"] is then assembled at the end of retrieve() by INTERSECTING those candidates with the summaries that survived the fusion cap, the black-hole exit policy and the request exclusions, so every record_id it cites is already present in the summaries beside it and it opens no second disclosure channel. Nothing stored changes shape, no index or artifact is affected, and every request that is not the commitment question - including an ordinary goal browse - takes the byte-identical path it took before, because the lane is armed only when BOTH a commitment-placing marker and a retrospective marker are present AND goals were loaded. Nodes whose entity graph is empty or unbuilt simply get no lane and report commitment_goal_unresolved per goal; the graph is populated by the existing extraction pipeline and this release does not require it to be re-run. One thing a consumer should know rather than discover: the response gains one new top-level key inside public_result on summary-mode turns (older clients ignore an unknown key, and narrowing.result_is_empty() deliberately does not read it, so an empty answer cannot be made to look non-empty by it).",
+    "No step for the Q1 per-goal empty-cause vocabulary: seven reason slugs are added to the closed set (commitment_evidence_lane, commitment_evidence_not_in_answer, commitment_evidence_withheld, commitment_goal_undated, commitment_goal_unresolved, commitment_no_evidence_matched, commitment_scope_no_evidence_store) in both topos/query/narrowing.py and topos/protocol/narrowing_vocabulary.json. Ledger entries are response serialization, not storage, so nothing needs rebuilding and no artifact cached before this release replays differently. A consumer pinned to an older copy of the vocabulary will coerce these to UNRECOGNIZED rather than fail, which is the protocol's existing contract; consumers that enumerate empty-causes should note that commitment_evidence_withheld is emitted to the OWNER ONLY - for a grantee the same line is a receipt that evidence exists behind a plane that removed it, which is the existence disclosure the black hole exists to prevent.",
+    "No step for the scope-registry gap the commitment join exposes: work_context:read is the grant user_goals belongs to and its canonical_tables name only profile_records, so on that grant there is no message or journal store to search and every goal honestly reports commitment_scope_no_evidence_store rather than being reported as unfulfilled. The mode is reachable today on messages:read and ai_conversations:read, which carry both user_goals and a message store. Widening the goal-shaped grant requires no migration; it requires a product decision about what one grant may span, which is deliberately not taken here. Nothing about an existing grant changes and no node needs to re-consent to anything on this release.",
+    "IMPORTANT, and still no step: the per-goal citation list inside public_result.commitment_report is named evidence_records, NOT evidence. The bare key is in FORBIDDEN_ARTIFACT_KEYS and query/pipeline.py validates public_result against that set recursively, so the first draft of this feature raised ValueError out of execute() on every turn the lane answered - the whole turn, not just the report. It is response serialization, so nothing stored changes and no artifact cached before this release replays differently: a turn that could not complete produced no artifact to replay. A consumer reading the report should key on evidence_records; the sibling evidence_count, the status value evidence_found and the commitment_*_evidence_* reason slugs are unchanged, because none of those is a key the artifact contract reserves.",
+    "No step for the Q7 topic thread: it is a projection of a packet the retriever just built. packet[\"topic_thread\"] is assembled at the end of retrieve() by INTERSECTING candidates tapped inside the existing entity_thread lane with the summaries that survived the fusion cap, the black-hole exit policy and the request exclusions - it issues no query of its own, fetches no record by id, and writes nothing. Nothing stored changes shape, no index or artifact is affected, and a question that resolves no entity or lands on a scope naming no message table takes the byte-identical path it took before. Two things a consumer should know rather than discover: the response gains one new top-level key inside public_result on summary-mode turns (older clients ignore an unknown key, and narrowing.result_is_empty() deliberately does not read it, so an empty answer cannot be made to look non-empty by it), and every record_id the thread names is already present in the summaries beside it, so it opens no second disclosure channel and needs no separate audit.",
+    "IMPORTANT, and still no step: the narrowing ledger no longer emits stage=retrieval/action=emptied/reason=topic_thread_no_message_rows when the lane produced no candidates at all. That combination fired on exactly one path - wire A having removed a black-holed subject's mentions at source - where the line carried dropped=0 and told a grantee, in a closed-set slug whose meaning the protocol guarantees, that the entity they named resolved and has a thread. It is response serialization, so nothing stored changes and no artifact needs rebuilding, but any consumer that treated the absence of that line as 'the lane did not run' should treat it as 'the lane has nothing sayable', which is the same statement a node with no entity graph makes.",
+    "No step for the scope-registry gap the topic thread exposes: no scope names both conversation_messages and ai_chat_messages, so on today's grants every thread is single-store and reports retrieval/scoped/topic_thread_single_store. The cross-store assembly is implemented and tested against a two-table manifest and requires no migration; what it requires is a product decision about what one grant may span, which is deliberately not taken here. Nothing about an existing grant changes, and no node needs to re-consent to anything on this release.",
+    "No step for the black-hole existence fix on the entity lane: it is query-time filtering only. The lane now removes BlackholeGuard.blocked_record_ids() from the mention set before it reads canonical rows, and the exit policy matches record_id/entity_id in addition to scanning names \u2014 both read the black-hole tables live, so a node that protects an entity after this release is covered without re-running anything, and a node with no black holes takes the byte-identical path it took before. Nothing stored changes shape.",
+    "No rebuild for the blackhole_protected stamp on entity-lane items: it is attached to the summary item inside the retrieval boundary for owner_raw callers only and is never persisted. Artifacts cached before this release replay unchanged and re-derive the stamp on the way out.",
+    "IMPORTANT, but still no step: the narrowing ledger no longer emits stage=disclosure/action=dropped_items/reason=blackhole_policy to non-owners. That line is response serialization, so nothing stored changes and no artifact needs rebuilding \u2014 but any consumer that parsed it is reading a receipt that was itself the existence disclosure the black hole exists to prevent, and it is gone for grantees. The owner still gets it.",
+    "No step for the four retrieval-plane bounds (mention pointers filtered by the manifest's canonical_tables, must_not_retrieve applied in summary mode, the profile_records employer lane reading at the request's disclosure tier, and the cohort rollup reporting its exclusion as not_applied): every one is query-time filtering inside the retrieval boundary. entity_mentions rows are read, not rewritten \u2014 a mention whose canonical_table is NULL is skipped at read time, not deleted \u2014 nothing stored changes shape, and no cached artifact needs rebuilding because a narrower packet re-derives on replay. Two consequences worth stating rather than discovering. First, a grant that authorizes no canonical table now receives no mention pointers at all, so a consumer that treated the pointer's topic string ('<name> in <table>') as a guaranteed field for such a scope will see it absent; it was never authorized. Second, entity_mention items now declare disclosure=owner_only against the entity_dossiers grant, which no scope in the registry currently holds \u2014 so grantees stop receiving mention pointers entirely, where before they crossed the tier filter untouched for want of an object_type.",
+    "No step for the exclusion plane's new aggregate_only path: it adds one closed-set ledger reason (exclusion_aggregate_unfilterable) and one public exclusion block on cohort-rollup packets. Both are response serialization. The aggregate is NOT filtered and does not claim to be \u2014 the count is derived from cohort membership before any row exists, so an item filter would report enforced=true having removed nothing. A caller that reads exclusion.enforced must therefore expect false on a rollup carrying an exclusion; reading the absence of the block as 'nothing was asked' was the previous, wrong, behaviour.",
+    "No step for closing the narrowing ledger's vocabulary: STAGES/ACTIONS/REASONS and the `unrecognized` sentinel constrain what NarrowingEntry may carry at construction time, which is response serialization only. Nothing stored changes shape, no cached artifact needs rebuilding, and a replayed artifact re-derives the ledger on the way out. Worth stating rather than discovering: a stage, action or reason a caller emits that this release does not declare now serializes as `unrecognized` instead of a slug of whatever was passed, so a mixed deployment where the control plane or the front end runs ahead of the node loses that entry's specificity \u2014 never the entry itself, and never the turn. topos/protocol/narrowing_vocabulary.json is what those two repos test against to keep that from happening silently.",
+    "No step for the latency measurement: query_artifacts gains a nullable duration_ms INTEGER via the query_artifacts_duration_ms_v1 migration (order 62), which the migration runner applies \u2014 there is nothing for an upgrade step to rebuild. A backfill is not merely skipped, it is impossible: a turn written before this release was never timed, and no stored field reconstructs a wall clock after the fact. The column is deliberately nullable for that reason, because 0 or -1 would read as a measurement and the percentile script counts NULL as unmeasured rather than as fast. Two consequences worth stating rather than discovering: scripts/query_latency_percentiles.py reports samples=0 for the engine series on any node until the first turn after upgrade, which is the correct output and not a failed migration; and the narrowing ledger's new optional elapsed_ms is response serialization only \u2014 absent means the stage did not time itself, so an older control plane or front end that drops the field at its merge seam loses the measurement, never the entry and never the turn. This is a NEW migration rather than an edit to wiki_mvp_phase0 because a node whose user_version is already past that migration would never re-run it, and editing it in place would strand exactly the machines this measures.",
+    "No step for declaring relationship_context:read's canonical_tables: the registry is read at request time to build the scope manifest, so the next turn after this release picks it up and there is nothing derived to rebuild. Nothing stored changes shape \u2014 entity_mentions rows are read, not rewritten, and no cached artifact needs invalidating because a replayed artifact re-derives its mention lane on the way out. Worth stating rather than discovering: this scope emitted entity_mention pointers before the previous release bounded that lane by canonical_tables, stopped emitting them because it declared none, and emits them again now that it declares conversation_messages \u2014 so a consumer reading this scope's pointers sees restored behaviour, not new behaviour, and it is now subject to the exclusion and disclosure planes that an undeclared grant routed around. The grant is conversation_messages ONLY; journal_entries was considered and deliberately excluded, so a caller must not assume a relationship-scope pointer can reference the journal. FLEET SKEW: control_plane/uma/scope_registry.json is canonical and this file's sibling topos/query/scope_registry.json is generated from it by just sync-scope-registry \u2014 a node running ahead of its control plane, or either running ahead of the wiki mirror, disagrees about what this scope authorizes, and the disagreement is silent because each side simply reads its own copy. just sync-scope-registry-check is what keeps that from happening and is green as of this release.",
+    "No step for the canonical-table existence probe: it is a query-time read of sqlite_master before a query-time read of the table, entirely inside the retrieval boundary. Nothing stored changes shape, no table is created or backfilled, and no cached artifact needs rebuilding because a replayed artifact re-derives its canonical lane on the way out. Explicitly NOT a migration: a canonical table is created by the writer that first lands a row in it, and creating conversation_messages empty at upgrade time would trade a 500 for a lie \u2014 the node would then report 'store_empty / scope_stores_hold_no_rows' where the truth is that this store has never received a delivery. Worth stating rather than discovering: a scope whose declared canonical table this node has never created now returns an empty result carrying empty_cause=store_empty with the ledger sub-cause connected_never_delivered, where before this release the turn raised sqlite3.OperationalError and the client saw a 500 \u2014 so a caller that treated a 500 from a first-run node as 'engine unreachable' will now correctly see an answered, empty turn, and a caller that reads empty_cause must expect this sub-cause on any pre-first-sync node. no_source_connected is unchanged and still reported for every scope whose tables the migrations do create.",
+    "No step for the access-mode ceiling tests: they are tests only. topos/query/disclosure.py is byte-for-byte unchanged by this entry \u2014 the summary-mode and inference-mode strips already behaved correctly \u2014 so no schema, index, enrichment output or derived layer moves, and no stored artifact becomes stale. Recorded rather than left implicit because of what the tests found: both ceiling blocks could be deleted outright and the entire 336-test privacy battery stayed green, which means every node shipped before this release ran its strongest disclosure boundary with no regression guard behind it. Nothing about that boundary changes for a running node; what changes is that severing it now turns two tests red, with a label-only positive control proving the assertions catch a leak rather than a missing self-report in filters_applied. Worth stating for anyone auditing a past release: the absence of these tests is not evidence the ceiling ever failed, only that it was never watched.",
+    "No step for the \u201cembed the subject, not the instruction\u201d guard: it is tests only. topos/query/retrieval.py is byte-for-byte unchanged by this entry \u2014 the rewrite that hands the distilled needle_text to the vector encoder instead of the owner's sentence already behaved correctly \u2014 so no schema, index, enrichment output or derived layer moves, no embedding is recomputed, and no stored artifact becomes stale. Recorded rather than left implicit because of what the tests found: the rewrite could be deleted outright and 1,058 tests passed with zero new reds, while the slug it emits, embedded_subject_not_instruction, is declared in the closed-set vocabulary of ALL THREE repos (topos/protocol/narrowing_vocabulary.json, topos/query/narrowing.py, next/lib/mcp/narrowingLedger.ts, control_plane/narrowing.py). Every node shipped before this release ran that rewrite with no regression guard behind it, and every consumer of the narrowing ledger has been reading a receipt whose action nothing verified. Nothing changes for a running node; what changes is that severing either half now turns exactly one test red, and the two halves fail independently, so a future change cannot silently keep the receipt while losing the rewrite. Worth stating for anyone auditing a past release: the absence of these tests is not evidence the rewrite ever failed, only that it was never watched \u2014 and a regression here would have been a silent recall loss, not a crash, because embedding an instruction returns plausible neighbours for the shape of a request rather than its subject.",
+    "No step for the entity_thread ranking floor: it is tests only. topos/query/retrieval.py is byte-for-byte unchanged and no retrieval weight, fusion order or lane scoring was touched. Recorded here because the measurement behind the floor is a fact about SHIPPED behaviour, not about this commit: ablating the lane at runtime (probe r15, _load_entity_thread_items returning []) moves exactly one of the 51 catalog cases - S4 falls 1.000 to 0.917 because the lane adds a third item the oracle does not want - and leaves C11, C8 and T7 unmoved, for a catalog aggregate of -0.0016. The lane is therefore not net positive on the catalog as it stands. Anyone auditing a past release should read every entity_thread: source shipped since 5ac3ba5 as neutral-to-slightly-dilutive on answer quality, not as an improvement, and should not read the sweep's C11/C8 regressions as caused by it: both sit at the lower number with the lane ON and OFF. Keep, gate or rework is the owner's decision.",
+    "No step for making the test lane hermetic: it is test infrastructure, docs and a reporting script, all of which run outside the node. pyproject's addopts marker filter, tests/live_db_watch.py, the lazy manifest resolution in tests/features/test_p3_entity_spine.py and the HARNESS_SESSION_PREFIXES filter in scripts/query_latency_percentiles.py change no schema, index, enrichment output or derived layer, and nothing a node has already stored becomes stale. Recorded rather than left implicit because the bug it fixes DID alter data on one machine \u2014 an unhermetic `pytest tests/` had written 1473 harness rows into the developer's own query_artifacts. Those rows are the owner's data now and are deliberately NOT deleted: the latency script excludes them by session-id prefix instead, so no number is improved by destroying evidence.",
+    "No step for the Q7 roster disclosure fix: it is read-side only and writes nothing. _thread_participants and _thread_speaker are pure functions over rows the retriever already admitted, and the disclosure change is one additional walk inside DisclosureFilterPipeline.apply over a packet built fresh every turn. No table, index, artifact or cached derivation changes shape and no stored row is rewritten - a node that upgrades gets the narrower roster on its very next question and needs nothing recomputed to get it. What a CONSUMER should know rather than discover: packet[\"topic_thread\"][\"participants\"][] is narrower below owner_raw than it was. entity_id is now owner-only on that block (the rule Q1's commitment_report already applied to the same field), so a grantee-tier caller that keyed a roster entry by entity_id must key it by position instead; and label is now a NAME or absent, never a sender_id fallback, so a caller that relied on label always being present below owner_raw must read participant_count for the count and treat a missing label as 'not disclosed'. The owner-tier shape is unchanged, including the identifier fallback for a contact with no display_name.",
+    "Also read-side, also no step: the grantee text scrubber now visits containers it already held the policy for. \"label\" was always in disclosure._GRANTEE_TEXT_KEYS, but _scrub_grantee_text_items ran over four top-level lists (summaries, scores, semantic_hits, facts) and never over the dict-shaped P4 artifacts or over topic_clusters. topic_thread (participants/items/decision_points), commitment_report (goals) and topic_clusters are walked now. The only observable difference is that grantee-tier labels in those blocks are PII-redacted the way summary text already was, so a grantee payload may contain [REDACTED_PHONE] or [REDACTED_EMAIL] where a raw identifier previously appeared. Owner-tier payloads are untouched: the walk runs only under disclosure_tier == \"default_disclosure\".",
+    "No step for wiring the privacy battery into the local gate and making the live-DB guard refuse: it is test infrastructure, a justfile recipe and docs, none of which the node ever loads. tests/live_db_watch.py and tests/conftest.py are imported by pytest and by nothing else; the justfile's test/gate/test-privacy-battery recipes and docs/testing/TEST_LANES.md are developer surface. The one production line here is a thread NAME (topos/features/entities/graph_refresh.py sets threading.Timer.name so the debounce thread is identifiable when a diagnostic catches it mid-write); it changes no schema, index, enrichment output or derived layer, and no stored artifact becomes stale. Recorded here because the FACT behind it is about shipped behaviour, not about this commit: the 305-test privacy battery (black-hole leak probes, UAR/CER zero-leak, minimality, negotiation ratchet, dense sparsification, redaction idempotence) has never run in `just test` or `just gate` - everything under tests/evals/privacy is auto-marked `private` and both recipes select -m public, so only ci.yml reached it, by path. And the connect-level guard added on 2026-08-19 raised only under TOPOS_TEST_DB_GUARD_STRICT, which no lane, recipe, workflow or doc set, so between then and now it recorded owner-database opens and then let them through. Anyone reading the 2026-08-19 entry as \"the test lane is now hermetic\" should read this one too: it was hermetic only for a developer who ran the default selection and read the last twenty lines of output. The same applies to the leaked debounce timer this armed guard immediately caught: mark_graph_dirty() arms a 90s timer that opened the real ~/.topos/database.db when it fired after its test's TOPOS_DATABASE_PATH pin was undone. That is a test-lane hermeticity defect, fixed in conftest; on a real node the timer firing against the owner's database is the feature working, so nothing a node has already written is affected.",
+    "No step for making `just gate` hermetic: it is a justfile recipe, a new developer-side script (scripts/live_db_tripwire.py), the release smoke test and tests -- none of which a node ever loads. The node's own code is byte-for-byte unchanged, so no schema, index, enrichment output, derived layer or stored artifact is affected and nothing becomes stale. Recorded rather than left implicit because the defect it fixes DID reach live owner data on a developer machine, and the 2026-08-19 and 2026-08-20 entries above should not be read as \"the gate is hermetic\": they made the PYTEST lane hermetic, and `just gate` leg 7 is one step further down. scripts/release_smoke_test.py set TOPOS_DATABASE_PATH only under --seeded-db, so the ordinary run -- the one every release performs -- booted the built wheel's FastAPI app with the variable unset, resolve_active_database answered $HOME/.topos/database.db (source=slot, profile=personaldb, schema=62), and the app set journal_mode=wal and ran CREATE TABLE IF NOT EXISTS ('Ensured table browser_visits exists') against the owner's live database while a node process held the same file open. What is established is the resolution and the DDL, from the smoke test's own stdout; what is NOT established is that any row changed -- query_artifacts and query_sessions counters were flat across the run that found it (E13, 2026-08-20). Two further facts about SHIPPED behaviour surfaced while arming the tripwire at that leg and are worth an auditor's attention: (1) refusing the connect did not fail the leg, because topos.core.state._open_owner_db_connection catches the failure, logs 'WARNING: Failed to create database connection' and the app still serves /healthcheck -- so a degraded database is not, by itself, visible at the app's front door; the tripwire therefore fails a leg from its own journal rather than from an exit code. (2) the smoke test's `python -c` checks ran with the repo root as cwd, which puts it on sys.path[0], so the venv's `import topos` resolved to ./topos and those two checks described the working tree rather than the wheel just installed; every release smoke result before 2026-08-20 should be read that way. Both are fixed here and both are now asserted rather than commented.",
+    "Additive derived data only: centrality and community_label are new metadata_json keys on entities the community pass already stamps community_id onto. Nothing changes shape, no table migrates, and a node that skips the step simply shows mention-count node sizing and numbered communities until its next organic rebuild stamps the new keys.",
+    "An entity that has left the graph sheds community_id, centrality and community_label together in the same sweep that previously removed community_id alone.",
+    "No step for pushing the Q3 derived window into the attention loader: it changes WHICH rows a query-time SELECT returns, never what is stored. `_load_attention_summary_items` reads `signal_objects` (signal_dimension='interests', object_type in attention_summary/interest_profile) and now adds a day predicate on the same `substr(object_key, -10)` expression it already ORDERs by, with the LIMIT widened to cover the window's days (capped at 31). No digest is rewritten, recomputed or invalidated \u2014 `features/triage/daily.py` and `triage_verdicts` are untouched, and a node that upgrades serves the digests it already had, for the days it was actually asked about. Unwindowed callers keep the byte-identical newest-ten page, so every question that derives no window reads exactly what it read before."
+   ]
+  },
+  {
+   "version": "1.3.24",
+   "summary": "Release 1.3.24.",
+   "steps": [],
+   "notes": []
+  },
+  {
+   "version": "1.3.25",
+   "summary": "Release 1.3.25.",
+   "steps": [],
+   "notes": [
+    "S1: two additive migrations ship here \u2014 enrichment_record_progress_v1 (63, written earlier and deliberately held out of the repo head on 2026-08-25 so it could not stamp a live database past its installed engine) and derivation_provenance_v1 (64, adds ontology_id / ontology_version / altitude + a pack lookup index to signal_objects). Both are additive DDL applied through wiki_schema_migrations; no rebuild, no reprocess.",
+    "P: new engine message types get_packet_resolution_config / put_packet_resolution_config, with matching CP routes at /v1/packet-resolution-config. The CP engine pin must be bumped to this release before its engine-contract CI can see them.",
+    "Packet resolution defaults to scores_only, which is byte-compatible with prior behaviour: no node changes what it sends to its answering model until its owner opts in.",
+    "After this release installs, raise the routine playground's PG_NODE_SCHEMA_BASELINE to 64."
+   ]
+  },
+  {
+   "version": "unreleased",
+   "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+   "steps": [],
+   "notes": [
+    "1.3.26 ships the derivation layer ADDITIVELY: migration 65 (pack_registry + derivation_progress) runs via the schema tail; the DerivationJob derives at ingest for registry-enabled packs (Wave A) going FORWARD. No history step on purpose \u2014 junk gates are earned per-corpus (this release's gates were earned on the pilot corpus); history backfill is owner-initiated (lens catalog backfill control, W4.3 follow-up)."
+   ]
+  }
+ ]
 }
