@@ -58,6 +58,10 @@ class RetrievalRequest:
     installed_source_ids: Optional[List[str]] = None
     disclosure_tier: str = "owner_raw"
     requester_id: str = "owner"
+    #: Effective packet resolution for THIS turn (owner floor + model-locality gate
+    #: already applied by the pipeline). Governs whether inference-mode retrieval
+    #: loads fact CONTENT into the packet, or only relevance signal.
+    packet_resolution: str = "scores_only"
     owner_id: str = "owner"
     # Selector-aware disclosure (plan A2): the query names a third-party entity this grantee
     # may not select. Retrieval must produce an empty, mode-appropriate result — the entity's

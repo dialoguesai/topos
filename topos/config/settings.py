@@ -183,6 +183,9 @@ class Settings(BaseSettings):
     topos_engine_service_url: Optional[str] = Field(None)
 
     topos_database_path: Optional[str] = Field(None)
+    # Packet resolution (PLAN_DERIVATION_LAYER.md): env default only; the per-database
+    # engine_config value overrides. Validated against RESOLUTIONS at read time.
+    topos_packet_resolution: str = Field("scores_only")
     topos_database_mode: str = Field("local")
     topos_database_service_url: Optional[str] = Field(None)
     topos_postgres_dsn: Optional[str] = Field(None)
@@ -400,6 +403,7 @@ settings = Settings()
 # --- P1.5 exposure-profile visibility (PLAN_PROVENANCE_SPLIT) -------------------------
 # Frozen engine_config key the UI toggle writes; a per-node bool the owner sets.
 ENGINE_CONFIG_KEY_EXPOSURE_PROFILE_VISIBLE = "exposure_profile_visible"
+ENGINE_CONFIG_KEY_PACKET_RESOLUTION = "packet_resolution"
 
 _TRUE_STRINGS = frozenset({"1", "true", "t", "yes", "y", "on"})
 _FALSE_STRINGS = frozenset({"0", "false", "f", "no", "n", "off"})
@@ -456,6 +460,23 @@ def resolve_exposure_profile_visible(settings_obj: "Settings", conn=None) -> boo
     if raw is None:
         return default
     return _coerce_bool(raw, default)
+
+
+def resolve_packet_resolution(settings_obj: "Settings", conn=None) -> str:
+    """Effective packet-resolution SETTING (before interlocks): the per-database
+    engine_config value ("packet_resolution") when set and valid, else the
+    env/settings default ("scores_only"). Interlocks (owner floor, model locality)
+    live in query.packet_resolution.effective_packet_resolution — this returns
+    only what the owner asked for."""
+    valid = ("scores_only", "facts", "facts_all")
+    default = str(getattr(settings_obj, "topos_packet_resolution", "") or "scores_only").strip().lower()
+    if default not in valid:
+        default = "scores_only"
+    raw = _read_engine_config_value(conn, ENGINE_CONFIG_KEY_PACKET_RESOLUTION)
+    if raw is None:
+        return default
+    value = str(raw).strip().lower()
+    return value if value in valid else default
 
 
 def exposure_profile_visible(conn=None) -> bool:

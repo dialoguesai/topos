@@ -17,6 +17,7 @@ def compute_retrieval_fingerprint(
     disclosure_tier: str = "owner_raw",
     grant_id: str = "owner",
     field_transforms: Optional[Any] = None,
+    packet_resolution: str = "scores_only",
 ) -> str:
     """Cache-invalidation + isolation key for a retrieval.
 
@@ -30,6 +31,6 @@ def compute_retrieval_fingerprint(
     ids = ",".join(sorted({str(s).strip() for s in (source_ids or []) if str(s).strip()}))
     payload = (
         f"{scope_id}|{access_mode}|{data_health_version}|{ids}|{fm}"
-        f"|tier={disclosure_tier}|grant={grant_id}|ft={ft}"
+        f"|tier={disclosure_tier}|grant={grant_id}|ft={ft}|pr={packet_resolution}"
     )
     return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]

@@ -565,3 +565,65 @@ async def handle_put_exposure_profile_config(message: Dict[str, Any]) -> Optiona
         }
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("get_packet_resolution_config")
+async def handle_get_packet_resolution_config(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Packet resolution (PLAN_DERIVATION_LAYER.md): the owner's setting PLUS the
+    effective state after interlocks, and the model that receives the packet — the
+    settings UI shows all three so the coupling is legible at the moment of decision."""
+    req_id = message.get("id")
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    try:
+        from ...query.packet_resolution import RESOLUTIONS, effective_packet_resolution
+
+        info = effective_packet_resolution(conn, requester_id="owner", disclosure_tier="owner_raw")
+        return {"id": req_id, "status": "ok",
+                "payload": {"status": "ok", "options": list(RESOLUTIONS), **info}}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("put_packet_resolution_config")
+async def handle_put_packet_resolution_config(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Set packet resolution. On a DOWNGRADE, cached query artifacts are expired
+    immediately: the cache key isolates resolutions going forward, but artifacts
+    minted under the higher resolution still HOLD that content — "I turned it off"
+    must mean off now, not after a TTL."""
+    req_id = message.get("id")
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    payload = message.get("payload") or {}
+    value = str(payload.get("packet_resolution") or "").strip().lower()
+    try:
+        from ...config.settings import (
+            ENGINE_CONFIG_KEY_PACKET_RESOLUTION,
+            resolve_packet_resolution,
+        )
+        from ...query.packet_resolution import (
+            RESOLUTIONS,
+            effective_packet_resolution,
+            resolution_order,
+        )
+
+        if value not in RESOLUTIONS:
+            return {"id": req_id, "status": "error",
+                    "error": f"packet_resolution must be one of {list(RESOLUTIONS)}"}
+        previous = resolve_packet_resolution(settings, conn)
+        set_engine_config_value(conn, ENGINE_CONFIG_KEY_PACKET_RESOLUTION, value)
+        expired = 0
+        if resolution_order(value) < resolution_order(previous):
+            from ...storage.db.write_gate import commit_connection, with_db_write
+
+            with with_db_write():
+                cur = conn.execute("DELETE FROM query_artifacts")
+                expired = cur.rowcount if cur.rowcount is not None else 0
+                commit_connection(conn)
+        info = effective_packet_resolution(conn, requester_id="owner", disclosure_tier="owner_raw")
+        return {"id": req_id, "status": "ok",
+                "payload": {"status": "ok", "previous": previous, "expired_artifacts": expired, **info}}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}

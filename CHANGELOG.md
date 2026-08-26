@@ -9,6 +9,17 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **Packet resolution** (`packet_resolution`: `scores_only` | `facts` | `facts_all`, default
+  `scores_only`): per-database setting for how much fact content the inference packet may
+  carry. Two structural floors: non-owner turns are always `scores_only`, and content flows
+  only while the resolved `primary` model runs on-device (hosted binding ⇒ paused, declared
+  on the turn). Resolution joins the retrieval fingerprint and session cache key (disclosure
+  dimension); a downgrade expires cached query artifacts immediately. New engine messages
+  `get/put_packet_resolution_config`; inference-mode retrieval gains a facts lane and the
+  packet a structured `facts` block at `facts`+. (PLAN_DERIVATION_LAYER.md, owner decision
+  2026-08-25.)
+
 ## [1.3.24] — 2026-08-21
 
 ### Added

@@ -4257,8 +4257,14 @@ def _load_fact_store_items(
     manifest: ScopeResolutionManifest,
     temporal_shift: Optional[str] = None,
     as_of: Optional[str] = None,
+    include_packet_fields: bool = False,
 ) -> List[Dict[str, Any]]:
     """Atomic facts: subject-first for linked entities, then token search.
+
+    include_packet_fields — packet-resolution 'facts'/'facts_all' turns only: items
+    additionally carry value/dates/altitude/pack/sensitivity so the inference packet
+    can emit a structured facts block. OFF for the summary path: grantee-facing
+    surfaces keep exactly their pre-feature shape.
 
     temporal_shift='past' (the planner's before/prior/used-to signal) widens the
     read to superseded revisions — the bi-temporal store keeps closed facts and
@@ -4326,17 +4332,26 @@ def _load_fact_store_items(
         overlap = sum(1 for t in tokens if t in content_blob)
         if overlap == 0 and fact["object_id"] not in subject_linked and tokens:
             continue
-        items.append(
-            {
-                "topic": text[:120],
-                "summary_text": text,
-                "record_id": fact["object_id"],
-                "predicate": payload.get("predicate"),
-                "retrieval_source": "fact",
-                "relevance_score": round(min(1.0, 0.6 + 0.1 * overlap), 4),
-                "_overlap": overlap,
-            }
-        )
+        item = {
+            "topic": text[:120],
+            "summary_text": text,
+            "record_id": fact["object_id"],
+            "predicate": payload.get("predicate"),
+            "retrieval_source": "fact",
+            "relevance_score": round(min(1.0, 0.6 + 0.1 * overlap), 4),
+            "_overlap": overlap,
+        }
+        if include_packet_fields:
+            item.update({
+                "value": payload.get("object_value"),
+                "valid_from": fact.get("valid_from"),
+                "valid_to": fact.get("valid_to"),
+                "altitude": payload.get("altitude") or fact.get("altitude"),
+                "pack": payload.get("pack") or fact.get("ontology_id"),
+                "sensitivity": payload.get("sensitivity"),
+                "confidence": payload.get("confidence"),
+            })
+        items.append(item)
     items.sort(key=lambda i: i.pop("_overlap"), reverse=True)
     return items[:10]
 
@@ -6516,6 +6531,38 @@ class DefaultSignalRetrievalAdapter:
             )
             for item in canon_items:
                 scores.append({k: v for k, v in item.items() if k not in _INFERENCE_CANONICAL_EXCLUDED_KEYS})
+            # Packet resolution (owner opt-in, floors already applied by the pipeline):
+            # at 'facts'/'facts_all' the inference packet carries fact CONTENT. Facts are
+            # DERIVED items — the raw-text exclusions above are about canonical rows and
+            # do not apply; what gates here is the owner's setting and the sensitivity
+            # class. At 'scores_only' this block is skipped and the packet is
+            # byte-compatible with the pre-feature behavior.
+            if request.packet_resolution in ("facts", "facts_all"):
+                try:
+                    from ..features.entities.linking import link_query_entities
+
+                    _fact_conn = getattr(self._adapters.signal, "_conn", None)
+                    _linked = link_query_entities(_fact_conn, query_text or "") if _fact_conn else []
+                    fact_items = _load_fact_store_items(
+                        _fact_conn,
+                        query_text or "",
+                        _linked,
+                        disclosure_tier=request.disclosure_tier,
+                        manifest=manifest,
+                        temporal_shift=getattr(plan, "temporal_shift", None) if plan else None,
+                        as_of=getattr(plan, "as_of", None) if plan else None,
+                        include_packet_fields=True,
+                    )
+                    for item in fact_items:
+                        if request.packet_resolution != "facts_all" and str(
+                            item.get("sensitivity") or ""
+                        ) == "special":
+                            continue  # special-class needs the explicit facts_all step
+                        scores.append(dict(item))
+                    if fact_items:
+                        touched.append("facts_store")
+                except Exception:  # noqa: BLE001 — the facts lane must never break a turn
+                    pass
             if manifest.scope_id == "activity:read":
                 for item in _load_brief_summary_items(["Profile"]):
                     scores.append({k: v for k, v in item.items() if k not in _INFERENCE_EXCLUDED_KEYS})
