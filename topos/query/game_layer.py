@@ -204,6 +204,23 @@ class DefaultGameLayer:
         if isinstance(exclusion, dict) and exclusion:
             payload["exclusion"] = exclusion
 
+        # Row-cap truncation (retrieval plane). Carried on EVERY mode for the same
+        # reason as the exclusion block: the claim is about the whole turn, not about
+        # one lane's contents. It is closed-set — an integer cap and table names — and
+        # never carries a row.
+        #
+        # This layer REBUILDS the payload rather than passing the packet through, so a
+        # field set in retrieval and not named here is dropped silently. That is what
+        # happened on 2026-08-25: retrieval set `truncated`, the ledger recorded
+        # `capped/row_cap_reached`, and `public_result` arrived with four keys and no
+        # sign that the answer had been cut off. A scheduled report then stated that
+        # something had not happened, when the evidence that it had was one row past
+        # the cap. An absence read off a truncated result is the failure this field
+        # prevents, and it only prevents it if it survives this rebuild.
+        truncated = context_packet.get("truncated")
+        if isinstance(truncated, dict) and truncated:
+            payload["truncated"] = truncated
+
         return PublicResult(payload=payload, strategy=strategy.value)
 
 

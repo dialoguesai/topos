@@ -122,6 +122,7 @@
     "resolved_self",
     "retrieval_parts",
     "retrieval_text",
+    "row_cap_reached",
     "scope_denied",
     "scope_id_invalid",
     "scope_mismatch",

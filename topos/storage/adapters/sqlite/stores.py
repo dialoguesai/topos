@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import uuid
 from typing import Any, Dict, List, Optional
@@ -10,6 +11,8 @@ from typing import Any, Dict, List, Optional
 from ..protocols import ListPage
 from ...canonical.canonical_store import SQLiteCanonicalStore as TypedSQLiteCanonicalStore
 from ...db.write_gate import commit_connection, with_db_write
+
+logger = logging.getLogger(__name__)
 
 _NATIVE_TABLES = frozenset(
     {
@@ -1218,16 +1221,45 @@ class SQLiteQuerySessionStore:
         return cur.rowcount
 
     def purge_expired(self) -> int:
-        expired = self._conn.execute(
-            "SELECT session_id FROM query_sessions WHERE ttl_expires_at IS NOT NULL AND ttl_expires_at < datetime('now')"
-        ).fetchall()
-        count = 0
+        """Drop expired sessions and the artifacts belonging to them.
+
+        ONE cutoff, taken once, used by both statements. The previous version
+        selected expired sessions with ``datetime('now')``, deleted their
+        artifacts in a loop, then deleted sessions with a SECOND, later
+        ``datetime('now')``. Every session that expired *during* that loop was
+        removed by the second statement while its artifacts — never in the first
+        statement's list — stayed behind.
+
+        That leaks, quietly and permanently. Every artifact read is scoped
+        ``WHERE session_id=?``, so an artifact whose session is gone can never be
+        served; no privacy sweep covers this table; and there was no reaper. The
+        rows simply accumulate, holding real derived content (scope summaries,
+        inference answers) that the owner can neither see nor delete. Measured on
+        one node 2026-08-25: 223 such rows, 1.9MB, from three days in July, and
+        this runs on EVERY query turn so a burst of expiries hits the window
+        repeatedly.
+        """
+        cutoff = self._conn.execute("SELECT datetime('now')").fetchone()[0]
         with with_db_write():
-            for (session_id,) in expired:
-                self._conn.execute("DELETE FROM query_artifacts WHERE session_id=?", (session_id,))
-                count += 1
+            # Artifacts first, bounded by the SAME cutoff the session delete uses.
+            artifacts = self._conn.execute(
+                "DELETE FROM query_artifacts WHERE session_id IN "
+                "(SELECT session_id FROM query_sessions "
+                " WHERE ttl_expires_at IS NOT NULL AND ttl_expires_at < ?)",
+                (cutoff,),
+            ).rowcount
             cur = self._conn.execute(
-                "DELETE FROM query_sessions WHERE ttl_expires_at IS NOT NULL AND ttl_expires_at < datetime('now')"
+                "DELETE FROM query_sessions WHERE ttl_expires_at IS NOT NULL AND ttl_expires_at < ?",
+                (cutoff,),
             )
+            # Reap anything already orphaned — by the old race, an interrupted
+            # purge, or a session removed by any other path. Unreachable rows are
+            # not harmless when they hold the owner's derived content.
+            orphaned = self._conn.execute(
+                "DELETE FROM query_artifacts WHERE session_id NOT IN "
+                "(SELECT session_id FROM query_sessions)"
+            ).rowcount
             commit_connection(self._conn)
-        return count + cur.rowcount
+        if orphaned:
+            logger.info("query_artifacts: reaped %d orphaned artifact(s)", orphaned)
+        return artifacts + cur.rowcount + orphaned
