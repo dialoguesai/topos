@@ -10,7 +10,7 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Added
-- **Packet resolution** (`packet_resolution`: `scores_only` | `facts` | `facts_all`, default
+- **[S1] [P] Packet resolution** (`packet_resolution`: `scores_only` | `facts` | `facts_all`, default
   `scores_only`): per-database setting for how much fact content the inference packet may
   carry. Two structural floors: non-owner turns are always `scores_only`, and content flows
   only while the resolved `primary` model runs on-device (hosted binding ⇒ paused, declared
@@ -19,6 +19,19 @@ The machine-readable twin of each release is
   `get/put_packet_resolution_config`; inference-mode retrieval gains a facts lane and the
   packet a structured `facts` block at `facts`+. (PLAN_DERIVATION_LAYER.md, owner decision
   2026-08-25.)
+- **[S1] Migration 63 lands.** `enrichment_record_progress_v1` was written on 2026-08-25 and
+  held out of the repo head the same day: registering it early let an editable-dep checkout
+  stamp the live database to `user_version=63` while the installed engine understood 62, and
+  the downgrade guard correctly refused every write — ~25 minutes without ingest, sync or
+  enrichment. A release is the only thing that can safely ship it, so it ships here, ahead of
+  `derivation_provenance_v1` (64). After installing, raise the routine playground's
+  `PG_NODE_SCHEMA_BASELINE` to 64.
+- **[O] Derivation-layer runtime** (`topos/features/derivation/`): pack loader + validator,
+  identifier guard, sandboxed prompt template, lexical prefilter, the fact-assertion ladder
+  (NOOP / CORROBORATE / CORRECT / SUPERSEDE / CONFLICT) and two no-LLM synthesizers. Library
+  code only — no ingest-pipeline caller, no packs shipped, nothing runs on a node. It backs
+  the shadow-pilot harness (PLAN_DERIVATION_LAYER.md §F-S) and is released here so the
+  provenance columns it writes have their schema in the same version.
 
 ## [1.3.24] — 2026-08-21
 

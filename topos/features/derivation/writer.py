@@ -83,13 +83,28 @@ def _canon_value(value: Any) -> str:
     return _norm(value)
 
 
-def ensure_derivation_columns(conn: sqlite3.Connection) -> None:
+class DerivationSchemaMissing(RuntimeError):
+    """The provenance columns are absent — the database has not been migrated."""
+
+
+def assert_derivation_schema(conn: sqlite3.Connection) -> None:
+    """Verify the provenance columns exist; never create them.
+
+    They arrive via migration ``derivation_provenance_v1`` (registry order 64), which
+    stamps ``user_version``. This function previously ran the ALTER TABLE itself from
+    the writer's constructor — a feature quietly reshaping a live schema behind the
+    migration ledger's back, which is precisely how a database gets stamped ahead of
+    the engine that opens it. Fail loudly instead: an unmigrated database is an
+    install problem with a known fix, not something an extraction pass should paper
+    over mid-run.
+    """
     cols = {r[1] for r in conn.execute("PRAGMA table_info(signal_objects)")}
-    for col in ("ontology_id", "ontology_version", "altitude"):
-        if col not in cols:
-            conn.execute(f"ALTER TABLE signal_objects ADD COLUMN {col} TEXT")
-    conn.execute("CREATE INDEX IF NOT EXISTS idx_signal_objects_ontology ON signal_objects(ontology_id, valid_to)")
-    conn.commit()
+    missing = [c for c in ("ontology_id", "ontology_version", "altitude") if c not in cols]
+    if missing:
+        raise DerivationSchemaMissing(
+            f"signal_objects is missing {missing}; run migrations "
+            "(derivation_provenance_v1) before writing pack facts"
+        )
 
 
 class DerivationWriter:
@@ -97,7 +112,7 @@ class DerivationWriter:
         self.conn = conn
         self.model = model
         self.store = FactStore(conn)  # low-level helpers only; the ladder lives here
-        ensure_derivation_columns(conn)
+        assert_derivation_schema(conn)
         self.stats: Dict[str, int] = {k: 0 for k in (
             "written", "corroborated", "corrected", "superseded", "noop",
             "conflicts", "guard_rejects", "role_rejects", "updated_fields")}
