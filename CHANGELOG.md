@@ -9,6 +9,18 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **Packet resolution recognizes the gateway-verified owner.** The CP gateway
+  forwards `requester_id == owner_id` (the owner's uuid) on the owner query path,
+  but `effective_packet_resolution` compared against the literal `"owner"` only —
+  so every gateway-routed owner turn floored to `scores_only`, the `facts_all`
+  setting was dead on arrival, and the facts-direct lane could never fire for the
+  home-chat surface it was built for (live 2026-08-26: "What medications am I
+  taking?" → `unknown`/confidence 0 while the fact sat in `signal_objects`). The
+  owner test now mirrors `resolve_disclosure_tier` (id equality), with the
+  disclosure-tier leg kept as the independent guard so forged payload ids can
+  never widen a grantee (adversarial test included).
+
 ### Added
 - **[S1] The Fact Editor (W4.6)**: facts and review-queue rows are correctable in
   place. Quarantined extractions gain "Edit & add" — the subject picker opens

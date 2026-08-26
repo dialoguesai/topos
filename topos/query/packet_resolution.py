@@ -67,13 +67,28 @@ def effective_packet_resolution(
     *,
     requester_id: str = "owner",
     disclosure_tier: str = "owner_raw",
+    owner_id: str = "",
 ) -> Dict[str, Any]:
-    """The setting after both interlocks. `reason` says which floor applied, if any."""
+    """The setting after both interlocks. `reason` says which floor applied, if any.
+
+    The owner test mirrors `resolve_disclosure_tier`: the CP gateway authenticates the
+    caller and forwards requester_id == owner_id (the owner's uuid) on the owner path —
+    see the CP's test_owner_identity_forwarding.py. Comparing against the literal
+    "owner" alone rejected that verified identity, so every gateway-routed owner turn
+    was floored to scores_only and the facts_direct lane could never fire for the
+    surface it was built for (live 2026-08-26: "What medications am I taking?" answered
+    "unknown" while the fact sat in signal_objects). The disclosure-tier leg stays as
+    the independent guard: a grantee is never resolved to owner_raw, including when a
+    forged payload claims owner ids, so id-equality alone can never widen a grantee.
+    """
     from ..config.settings import resolve_packet_resolution, settings
 
     setting = resolve_packet_resolution(settings, conn)
     locality = primary_binding_locality(conn)
-    if str(requester_id or "") != "owner" or str(disclosure_tier or "") != "owner_raw":
+    req = str(requester_id or "")
+    own = str(owner_id or "")
+    is_owner = req == "owner" or (bool(own) and own != "owner" and req == own)
+    if not is_owner or str(disclosure_tier or "") != "owner_raw":
         effective, reason = "scores_only", "non_owner_floor"
     elif setting != "scores_only" and not locality["local"]:
         effective, reason = "scores_only", "hosted_binding"
