@@ -15,8 +15,11 @@ from typing import Dict
 
 from .packs import Pack, load_packs
 
-#: Wave A (PLAN_DERIVATION_WAVE2 §W5) — the only packs seeded enabled.
+#: Packs seeded enabled by default. Wave A earned its gate 2026-08-26 (full-corpus,
+#: junk ≈4-5%, zero critical misattribution); health.mental joined the same day
+#: (Wave B first admit: 0/7 junk under the 0.2.4 felt-state contract).
 WAVE_A = ("relationships.social", "work.career", "health.physical")
+ENABLED_BY_DEFAULT = WAVE_A + ("health.mental",)
 
 
 def seed_pack_registry(conn: sqlite3.Connection, pack_dir: Path) -> None:
@@ -28,7 +31,7 @@ def seed_pack_registry(conn: sqlite3.Connection, pack_dir: Path) -> None:
             """INSERT OR IGNORE INTO pack_registry
                (pack_id, version, enabled, disclosure_default)
                VALUES (?, ?, ?, ?)""",
-            (pid, pack.version, 1 if pid in WAVE_A else 0,
+            (pid, pack.version, 1 if pid in ENABLED_BY_DEFAULT else 0,
              getattr(pack, "disclosure_default", "owner_only") or "owner_only"),
         )
         # version follows the bundled catalog (upgrades are additive; the
