@@ -49,6 +49,17 @@ DEFAULT_SESSION_GAP_SECONDS = 6 * 3600
 PEER_CLASS_HUMAN = "human"
 PEER_CLASS_AUTOMATED = "automated"
 
+#: What produced a directed edge. In the PRIMARY KEY on purpose.
+#:
+#: A single message to a 10-person room would otherwise mint 9 directed edges, and group
+#: broadcast would swamp DM signal in every ranking that reads this table — the same failure
+#: the undirected lane already has, where co-participation in a big thread outweighs a real
+#: correspondence. Keeping the kinds in separate rows means volume conservation stays
+#: checkable per kind, and a reader can ask for correspondence without asking for noise.
+EDGE_KIND_DM = "dm"              # a two-person conversation: unambiguous direction
+EDGE_KIND_GROUP_REPLY = "group_reply"      # reply_to_message_id: a HARD directed edge
+EDGE_KIND_GROUP_BROADCAST = "group_broadcast"  # sender -> room: soft, and kept apart
+
 
 def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -88,6 +99,7 @@ def create_directed_tables(conn: Any) -> None:
             dataset_id TEXT NOT NULL,
             period_key TEXT NOT NULL,
             connector TEXT NOT NULL,
+            edge_kind TEXT NOT NULL DEFAULT 'dm',
             from_key TEXT NOT NULL,
             to_key TEXT NOT NULL,
             msgs INTEGER NOT NULL DEFAULT 0,
@@ -101,7 +113,7 @@ def create_directed_tables(conn: Any) -> None:
             to_person_id TEXT,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
-            PRIMARY KEY (dataset_id, period_key, connector, from_key, to_key)
+            PRIMARY KEY (dataset_id, period_key, connector, edge_kind, from_key, to_key)
         )
         """
     )
@@ -156,3 +168,196 @@ def create_directed_tables(conn: Any) -> None:
         ON {MESSENGER_DYAD_STATS_TABLE}(dataset_id, involves_self, peer_class)
         """
     )
+
+
+# --------------------------------------------------------------------------- extraction
+
+#: The owner's endpoint. A literal rather than an entity id, so L1 never blocks on L0 —
+#: `from_person_id` is the nullable column L0 backfills once the spine exists.
+SELF_KEY = "self"
+
+
+def _parse_ts(value: Any) -> Any:
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value).replace("Z", "+00:00").replace(" ", "T"))
+    except ValueError:
+        return None
+
+
+def _period_of(dt: Any) -> str:
+    return dt.strftime("%Y-%m")
+
+
+class _Acc:
+    """One ordered pair, in one period, from one connector, of one kind."""
+
+    __slots__ = ("msgs", "sessions_initiated", "replies", "latencies", "first_ts", "last_ts")
+
+    def __init__(self) -> None:
+        self.msgs = 0
+        self.sessions_initiated = 0
+        self.replies = 0
+        self.latencies: list = []
+        self.first_ts = None
+        self.last_ts = None
+
+    def observe(self, dt) -> None:
+        self.msgs += 1
+        if self.first_ts is None or dt < self.first_ts:
+            self.first_ts = dt
+        if self.last_ts is None or dt > self.last_ts:
+            self.last_ts = dt
+
+
+def _median(xs: list):
+    if not xs:
+        return None
+    ys = sorted(xs)
+    n = len(ys)
+    return float(ys[n // 2]) if n % 2 else float((ys[n // 2 - 1] + ys[n // 2]) / 2)
+
+
+def load_messages(conn: Any, dataset_id: str, connector: Any = None) -> list:
+    """Ordered by conversation then time — the order the session walk depends on.
+
+    Rows with no timestamp are dropped rather than defaulted: a message with no time cannot
+    be placed in a period, cannot open or continue a session, and defaulting it to now would
+    silently invent a conversation that happened at derivation time.
+    """
+    sql = ("SELECT conversation_id, message_id, sender_id, event_at, is_from_self,"
+           " source_id, reply_to_message_id FROM conversation_messages"
+           " WHERE dataset_id = ? AND event_at IS NOT NULL")
+    args = [dataset_id]
+    if connector:
+        sql += " AND source_id = ?"
+        args.append(connector)
+    sql += " ORDER BY conversation_id, event_at"
+    return conn.execute(sql, args).fetchall()
+
+
+def classify_conversations(rows: list) -> dict:
+    """DM iff exactly one distinct non-self sender ever spoke in it.
+
+    Measured on the first live corpus: 181 of 202 conversations are DM-shaped. Note this is
+    a property of the CORPUS, not of a room's roster — a group where only one other person
+    ever spoke reads as a DM here, which is the honest answer for a direction metric built
+    from messages rather than from membership.
+    """
+    senders: dict = {}
+    for conv, _mid, sender, _ea, is_self, _src, _rt in rows:
+        if not is_self and sender:
+            senders.setdefault(conv, set()).add(str(sender))
+    return {conv: (EDGE_KIND_DM if len(s) == 1 else EDGE_KIND_GROUP_BROADCAST)
+            for conv, s in senders.items()}
+
+
+def extract_directed_dyadic_edges(
+    conn: Any,
+    dataset_id: str,
+    *,
+    session_gap_seconds: int = DEFAULT_SESSION_GAP_SECONDS,
+    connector: Any = None,
+) -> dict:
+    """Single pass over the corpus producing directed per-period aggregates.
+
+    Sessions, initiations and replies all fall out of one walk, because they are three
+    readings of the same fact — where the silences are:
+
+      * a gap >= threshold ends a session, so the next message OPENS one and its sender is
+        credited with an initiation;
+      * a message from a different speaker than the previous one, inside a session, is a
+        REPLY, and the elapsed time is its latency;
+      * a message from the same speaker is neither — consecutive texts from one person are
+        one turn, and counting each as an initiation is how "who initiates" becomes a
+        measure of who is chattiest.
+
+    Returns {(period, connector, edge_kind, from_key, to_key): _Acc}.
+    """
+    rows = load_messages(conn, dataset_id, connector)
+    kinds = classify_conversations(rows)
+    peers: dict = {}
+    for conv, _mid, sender, _ea, is_self, _src, _rt in rows:
+        if not is_self and sender:
+            peers.setdefault(conv, set()).add(str(sender))
+
+    acc: dict = {}
+    by_id: dict = {}
+
+    def bucket(period, conn_id, kind, a, b):
+        key = (period, conn_id, kind, a, b)
+        if key not in acc:
+            acc[key] = _Acc()
+        return acc[key]
+
+    cur_conv = None
+    last_dt = None
+    last_speaker = None
+    for conv, mid, sender, ea, is_self, src, reply_to in rows:
+        dt = _parse_ts(ea)
+        if dt is None:
+            continue
+        by_id[str(mid)] = (str(sender or ""), bool(is_self), dt)
+        speaker = SELF_KEY if is_self else str(sender or "")
+        if not speaker:
+            continue
+        if conv != cur_conv:
+            cur_conv, last_dt, last_speaker = conv, None, None
+
+        opens_session = last_dt is None or (dt - last_dt).total_seconds() >= session_gap_seconds
+        is_reply = (not opens_session) and last_speaker is not None and last_speaker != speaker
+        latency = (dt - last_dt).total_seconds() if (is_reply and last_dt) else None
+
+        period = _period_of(dt)
+        kind = kinds.get(conv, EDGE_KIND_DM)
+        conv_peers = peers.get(conv) or set()
+
+        if kind == EDGE_KIND_DM:
+            peer = next(iter(conv_peers)) if conv_peers else ""
+            if peer:
+                a, b = (SELF_KEY, peer) if is_self else (peer, SELF_KEY)
+                e = bucket(period, src, EDGE_KIND_DM, a, b)
+                e.observe(dt)
+                if opens_session:
+                    e.sessions_initiated += 1
+                if is_reply:
+                    e.replies += 1
+                    if latency is not None:
+                        e.latencies.append(latency)
+        else:
+            # A hard directed edge exists only where the corpus states one.
+            if reply_to and str(reply_to) in by_id:
+                tgt_sender, tgt_self, _tdt = by_id[str(reply_to)]
+                target = SELF_KEY if tgt_self else tgt_sender
+                if target and target != speaker:
+                    e = bucket(period, src, EDGE_KIND_GROUP_REPLY, speaker, target)
+                    e.observe(dt)
+                    e.replies += 1
+                    if latency is not None:
+                        e.latencies.append(latency)
+            # Broadcast: speaker -> everyone else who has ever spoken in the room. Soft by
+            # construction, kept in its own rows so it can be excluded wholesale.
+            room = set(conv_peers) | {SELF_KEY}
+            for other in room:
+                if other == speaker:
+                    continue
+                e = bucket(period, src, EDGE_KIND_GROUP_BROADCAST, speaker, other)
+                e.observe(dt)
+                if opens_session:
+                    e.sessions_initiated += 1
+
+        last_dt, last_speaker = dt, speaker
+    return acc
+
+
+def rows_for_persist(acc: dict, dataset_id: str, session_gap_seconds: int) -> list:
+    now = _utc_now()
+    out = []
+    for (period, conn_id, kind, a, b), e in acc.items():
+        out.append((dataset_id, period, str(conn_id or ""), kind, a, b, e.msgs,
+                    e.sessions_initiated, e.replies, _median(e.latencies),
+                    e.first_ts.isoformat() if e.first_ts else None,
+                    e.last_ts.isoformat() if e.last_ts else None,
+                    int(session_gap_seconds), None, None, now, now))
+    return out

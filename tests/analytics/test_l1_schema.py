@@ -86,6 +86,20 @@ def test_the_directed_pk_actually_admits_direction(conn):
     assert "from_key" in pk and "to_key" in pk
 
 
+def test_edge_kind_is_in_the_key_so_broadcast_cannot_swamp_dm(conn):
+    """One message to a 10-person room would mint 9 directed edges. If those shared a key
+    with DM rows, group broadcast would outweigh every real correspondence in any ranking
+    reading this table — which is the exact failure the undirected lane already has."""
+    from topos.analytics.messenger_directed import (
+        EDGE_KIND_DM, EDGE_KIND_GROUP_BROADCAST, EDGE_KIND_GROUP_REPLY)
+
+    create_directed_tables(conn)
+    pk = [r[1] for r in conn.execute(f"PRAGMA table_info({MESSENGER_DIRECTED_EDGES_TABLE})") if r[5]]
+    assert "edge_kind" in pk
+    assert {EDGE_KIND_DM, EDGE_KIND_GROUP_REPLY, EDGE_KIND_GROUP_BROADCAST} == {
+        "dm", "group_reply", "group_broadcast"}
+
+
 def test_the_dyad_pk_is_unordered_and_the_edge_pk_is_ordered(conn):
     create_directed_tables(conn)
     dyad_pk = [r[1] for r in conn.execute(f"PRAGMA table_info({MESSENGER_DYAD_STATS_TABLE})") if r[5]]
