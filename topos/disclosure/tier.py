@@ -29,13 +29,32 @@ def resolve_disclosure_tier(
     is_grantee_request: bool = False,
     explicit_tier: Optional[DisclosureTier] = None,
     disclosure_ceiling: Optional[str] = None,
+    principal: "Optional[object]" = None,
 ) -> DisclosureTier:
     # Determine grantee status FIRST. A grantee request must never be elevated to
     # owner_raw by an explicit tier in the payload — that field is requester-influenced
     # upstream, so honoring it before the grantee check is a fail-open (B.2).
+    #
+    # P1 (principal fabric): when the channel verified a client class, the class
+    # decides and the payload-id heuristic below — INCLUDING its "mcp" whitelist,
+    # which any keyholder could claim (the fail-open this module's own warning
+    # describes) — is bypassed entirely. An OWNER_APP surface takes the owner
+    # path; a THIRD_PARTY client is clamped like a grantee, explicit tier
+    # ignored. The heuristic survives only for CP_RELAY (the CP already
+    # classified the caller and stamps owner ids for native clients only) and
+    # for legacy callers with no principal, where removing "mcp" would demote
+    # the owner's own single-key surfaces before they learn the owner key.
+    from ..principal import OWNER_APP, THIRD_PARTY
+
     req = str(requester_id or "").strip() or "owner"
     own = str(owner_id or "").strip() or "owner"
-    is_grantee = is_grantee_request or (req != own and req != "owner" and req != "mcp")
+    cls = getattr(principal, "cls", None)
+    if cls == OWNER_APP and not is_grantee_request:
+        is_grantee = False
+    elif cls == THIRD_PARTY:
+        is_grantee = True
+    else:
+        is_grantee = is_grantee_request or (req != own and req != "owner" and req != "mcp")
 
     if is_grantee:
         if explicit_tier == "owner_raw":

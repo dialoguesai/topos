@@ -444,10 +444,21 @@ async def startup_event() -> None:
             except Exception as lease_exc:  # noqa: BLE001
                 logger.error("Hosted pool lease issue failed: %s", lease_exc, exc_info=True)
                 raise
+        # Relay messages carry the CP_RELAY principal: the CP classified the
+        # caller at its own door (owner ids are stamped for Topos-native clients
+        # only), so the engine's floors keep honoring the forwarded-id equality
+        # test on this channel. The stamp is applied INSIDE the dispatched
+        # coroutine — the client thread's contextvars do not cross
+        # run_coroutine_threadsafe, a wrapper closure does.
+        async def _relay_dispatch(message):
+            from .principal import RELAY_PRINCIPAL
+
+            return await handle_control_plane_request(message, principal=RELAY_PRINCIPAL)
+
         state.control_plane_client = ControlPlaneClient(
             control_plane_url=settings.topos_control_plane_url,
             api_key=str(settings.topos_key or ""),
-            handler=handle_control_plane_request,
+            handler=_relay_dispatch,
             verify_ssl=settings.control_plane_verify_ssl,
         )
         state.control_plane_client.start()
