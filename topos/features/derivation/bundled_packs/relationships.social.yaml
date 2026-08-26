@@ -4,7 +4,7 @@
 # KG NOTE: this pack's relationship predicate adds ROLE-TYPED edges between person
 # entities — the single biggest graph upgrade in the catalog (today: communicates_with only).
 pack: relationships.social
-version: 0.2.3
+version: 0.2.5
 status: draft
 title: "Relationships"
 author: topos
@@ -68,7 +68,10 @@ guidance:
     - "Entity resolution first: an unresolvable 'Alex' gets a mention, not a relationship fact."
     - "Others' relationships to each other belong in their dossiers, not in rel.* (which is owner-centric)."
 
-revision:   # Tier-2 declarative rules (§1.6) — added for the shadow pilot (v0.2.1)
+revision:   # Tier-2 declarative rules
+  exclusive_with:      # Tier-2 completion (v0.2.5): contradictions queue, never auto-supersede
+    rel.relationship: [[partner, ex_partner], [spouse, ex_partner]]
+    _field: {rel.relationship: role}
   supersedes_on: {rel.relationship: [status, role]}     # role/status transitions keep history (friend->close_friend is a revision)
   noop_when: "re-statement within 7d at equal confidence"
 

@@ -216,6 +216,20 @@ class DerivationWriter:
         elif actor_role not in pack.allowed_roles():
             self.stats["role_rejects"] += 1
             return {"outcome": "role_reject", "reason": f"{actor_role} not allowed for {pack.role_policy}"}
+        _ex_incumbent = self._exclusive_conflict(pack, pred, subject_entity_id, value)
+        if _ex_incumbent:
+            self.store._queue_conflict(
+                subject_entity_id=subject_entity_id, predicate=pred.name,
+                incumbent_object_id=_ex_incumbent,
+                challenger_value=json.dumps(value, ensure_ascii=False, default=str)[:500],
+                challenger_confidence=float(confidence))
+            self.stats["conflicts"] = self.stats.get("conflicts", 0) + 1
+            return {"outcome": "conflict_queued", "object_id": _ex_incumbent}
+        if pred.name == "asp.milestone" and isinstance(value, dict):
+            if not self._milestone_attaches(subject_entity_id, str(value.get("goal_ref") or "")):
+                self._quarantine(subject_entity_id, predicate, value, confidence,
+                                 reason="milestone_without_goal")
+                return {"outcome": "quarantined", "reason": "milestone attaches to no stored goal"}
         # F1.6 guard — every leaf of the value
         for leaf in _value_leaves(value):
             kinds = find_identifiers(leaf)
@@ -317,6 +331,83 @@ class DerivationWriter:
         same_model = (incumbent["payload"].get("extractor") or {}).get("model") == self.model
         return same_model and (datetime.now(timezone.utc) - ts) < timedelta(days=days)
 
+
+    def _exclusive_conflict(self, pack, pred, subject_entity_id, value):
+        """Tier-2 `exclusive_with` (mem0's last piece, engine-side): pack revision
+        declares value-sets that cannot BOTH hold for one identity key. A new
+        assertion whose live counterpart sits in the same exclusive set is a
+        CONTRADICTION, not a supersession — it goes to the conflicts queue for
+        the owner (or Tier-3) to adjudicate; the incumbent stands until then."""
+        decl = (pack.revision or {}).get("exclusive_with") or {}
+        sets = decl.get(pred.name)
+        if not sets or not isinstance(value, dict):
+            return None
+        field = decl.get("_field", {}).get(pred.name) or "role"
+        newv = str(value.get(field) or "").strip().lower()
+        if not newv:
+            return None
+        key_field = (pred.key_fields or ["person"])[0]
+        ident = str(value.get(key_field) or "").strip().lower()
+        if not ident:
+            return None
+        for exset in sets:
+            exset_l = [str(x).lower() for x in exset]
+            if newv not in exset_l:
+                continue
+            rows = self.conn.execute(
+                "SELECT object_id, payload_json FROM signal_objects WHERE object_type='fact'"
+                " AND valid_to IS NULL AND object_key LIKE ?",
+                (f"fact:{subject_entity_id}:{pred.name}%",)).fetchall()
+            for oid, pj in rows:
+                try:
+                    v = json.loads(pj or "{}").get("value_struct") or {}
+                except (ValueError, TypeError):
+                    continue
+                if str(v.get(key_field) or "").strip().lower() != ident:
+                    continue
+                oldv = str(v.get(field) or "").strip().lower()
+                if oldv in exset_l and oldv != newv:
+                    # RECENT incumbents only: a same-week flip-flop is a
+                    # contradiction to review; a months-later change is life
+                    # (supersession's job). 7d mirrors the noop window.
+                    vf = json.loads(pj or "{}").get("valid_from") or ""
+                    recent = self.conn.execute(
+                        "SELECT 1 FROM signal_objects WHERE object_id=?"
+                        " AND valid_from >= datetime('now','-7 day')", (oid,)).fetchone()
+                    if recent:
+                        return oid
+        return None
+
+    def _milestone_attaches(self, subject_entity_id: str, goal_ref: str) -> bool:
+        """Goals-first integrity (W-B redesign, measured 2026-08-26): a milestone
+        may only attach to a goal that EXISTS in the store. Prompt rules failed
+        to hold this twice (day-tasks as milestones, sentence-length goal_refs);
+        the verifier can't hold it (day tasks ARE record-supported). Structure
+        holds it: token-overlap fuzzy match between goal_ref and any ACTIVE
+        asp.goal/asp.aspiration value for this subject; no match -> quarantine."""
+        _generic = {"work", "working", "people", "things", "thing", "better", "good",
+                    "time", "today", "make", "making", "want", "start", "started"}
+        ref_toks = {t for t in re.findall(r"[a-z']+", (goal_ref or "").lower())
+                    if len(t) > 3 and t not in _generic}
+        if not ref_toks:
+            return False
+        rows = self.conn.execute(
+            "SELECT payload_json FROM signal_objects WHERE object_type='fact'"
+            " AND valid_to IS NULL AND ontology_id='aspirations.goals'"
+            " AND (object_key LIKE ? OR object_key LIKE ?)",
+            (f"fact:{subject_entity_id}:asp.goal%", f"fact:{subject_entity_id}:asp.aspiration%"),
+        ).fetchall()
+        for (pj,) in rows:
+            try:
+                val = json.loads(pj or "{}").get("value_struct") or {}
+            except (ValueError, TypeError):
+                continue
+            goal_text = str((val or {}).get("goal") or (val or {}).get("aspiration") or "")
+            goal_toks = {t for t in re.findall(r"[a-z']+", goal_text.lower())
+                         if len(t) > 3 and t not in _generic}
+            if goal_toks and len(ref_toks & goal_toks) >= min(2, len(ref_toks), len(goal_toks)):
+                return True
+        return False
 
     def _episodic_retelling(self, base_ikey_prefix: str, pred, occurrence):
         """W2.1 event-identity: same episodic identity told again is the SAME event.

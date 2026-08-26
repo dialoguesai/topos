@@ -1103,3 +1103,21 @@ async def post_pack_offer_resolution(
     if not out:
         raise HTTPException(status_code=404, detail=f"unknown offer {offer_id}")
     return out
+
+
+@router.post("/derivation/packs/{pack_id}/backfill")
+async def post_pack_backfill(
+    pack_id: str,
+    limit: int = Body(200, embed=True, ge=1, le=1000),
+    _api_key: str = Depends(require_api_key),
+):
+    """Bounded owner-initiated history backfill (lens catalog control)."""
+    import asyncio as _asyncio
+
+    from ..features.derivation.surfaces import run_pack_backfill
+
+    try:
+        stats = await _asyncio.to_thread(run_pack_backfill, _entities_conn(), pack_id, limit)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return {"pack_id": pack_id, **stats}
