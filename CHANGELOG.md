@@ -9,6 +9,24 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **[S1] Principal fabric P3 — signed relay stamps: the CP's classification
+  reaches the node with proof.** The gateway attaches an Ed25519-signed
+  `principal_stamp` (`cls`, `client_id`, `acting_user`, `iat`, `exp`) to each
+  owner-path relay message, bound to that message's id and type so a captured
+  stamp cannot be replayed. The engine verifies against a pinned CP public key
+  (`TOPOS_CP_STAMP_PUBKEY` env or `~/.topos/cp_stamp_key.pub`) on the relay
+  dispatch path ONLY, and mints the named principal — a remote third-party
+  client finally carries a `client_id`, so enrollment and elevation now apply
+  over the relay, not just to engine-direct tpk tokens. Every failure branch
+  (no key, missing stamp, bad signature, tampering, expiry, unknown class) is
+  legacy CP_RELAY behavior — never wider — so nodes and CPs on either side of
+  this release interoperate. Grantee turns drop the principal entirely, on
+  both sides: a grantee must never inherit the owner's elevation for a
+  same-named client. Signing is off until `RELAY_STAMP_SIGNING_KEY` is set on
+  the CP; the node pins the key from GET /v1/relay/stamp-public-key. Tests:
+  `tests/core/test_relay_stamp.py` incl. a CP↔engine cross-repo verify.
+
 ### Fixed
 - **Warmth is no longer a constant the extractor invents.** `warmth_band: "medium"`
   and `cadence_band: "recent"` were string literals in the rule extractor, so all 216
