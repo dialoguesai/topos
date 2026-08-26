@@ -15,7 +15,7 @@ def node_db(tmp_path):
     conn.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name, aliases_json, is_self)"
                  " VALUES ('ent_owner','person','Owner','owner','[]',1)")
     conn.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name, aliases_json, is_self)"
-                 " VALUES ('ent_wiki','person','Wiki','wiki','[]',0)")
+                 " VALUES ('ent_nora','person','Nora','nora','[]',0)")
     conn.commit()
     return conn
 

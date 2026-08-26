@@ -49,7 +49,7 @@ def test_conflicts_roundtrip(conn):
     conn.execute("INSERT INTO fact_conflicts (conflict_id, subject_entity_id, predicate,"
                  " incumbent_object_id, challenger_value, challenger_confidence)"
                  " VALUES ('cfl_1','ent_o','rel.relationship','quarantine:about_unclear',"
-                 " ?, 0.9)", (json.dumps({"person": "Luc", "role": "partner"}),))
+                 " ?, 0.9)", (json.dumps({"person": "Theo", "role": "partner"}),))
     conn.commit()
     out = _run(handle_get_fact_conflicts({"id": "3"}))
     rows = out["payload"]["conflicts"]

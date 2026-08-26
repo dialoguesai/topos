@@ -73,8 +73,8 @@ guidance:
     - "Authored-only: an assigned OKR is work context, not a personal goal, unless the owner adopts it in their own words."
     - "Idle wishes ('would love to someday') are aspirations, never goals — the horizon field is load-bearing."
     - "v0.2.4 A goal is STATED INTENT in the owner's own words ('Goal:', 'I want to', 'I will').
-       Wry observations, jokes and family lore ('this is the closest I can keep that pattern
-       going') are never goals — if the owner would be surprised to see it on their goal list,
+       Wry observations, jokes and family lore ('guess the family streak continues through me
+      ') are never goals — if the owner would be surprised to see it on their goal list,
        extract nothing."
     - "v0.2.4 goal_ref is a NAME (a few words), not a sentence — a goal_ref longer than ~8 words
        means the goal was never really named; prefer the Goal: header's own phrasing."

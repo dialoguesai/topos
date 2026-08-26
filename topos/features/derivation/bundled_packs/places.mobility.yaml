@@ -81,8 +81,8 @@ decisions:
   - >
     2026-08-26 (W5 gate, measured): role_policy tightened to authored_addressed —
     with ambient/observed allowed, OTHER PEOPLE'S messages became owner place-ties
-    ("I am once again at Radio East" from a friend -> owner workplace_location;
-    a friend's NJ parking find -> owner tie to New Jersey). 4/5 sampled accepts
+    ("I am once again at the Harbor Cafe" from a friend -> owner workplace_location;
+    a friend's parking find -> owner tie to that city). 4/5 sampled accepts
     were junk, dominated by this leak. Location-bearing ambient signals return
     via the no-LLM synthesizer lane (timestamps/geo), never via LLM reading of
     others' words.
