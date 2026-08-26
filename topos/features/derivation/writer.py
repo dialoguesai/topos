@@ -328,6 +328,10 @@ class DerivationWriter:
             ts = datetime.fromisoformat(upd.replace("Z", "+00:00"))
         except ValueError:
             return False
+        if ts.tzinfo is None:
+            # evidence-time anchoring stores bare DATES (the fact's time is its
+            # evidence time) — treat naive stamps as UTC rather than crashing
+            ts = ts.replace(tzinfo=timezone.utc)
         same_model = (incumbent["payload"].get("extractor") or {}).get("model") == self.model
         return same_model and (datetime.now(timezone.utc) - ts) < timedelta(days=days)
 
