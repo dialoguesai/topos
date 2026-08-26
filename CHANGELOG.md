@@ -9,6 +9,18 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **[S1] The Fact Editor (W4.6)**: facts and review-queue rows are correctable in
+  place. Quarantined extractions gain "Edit & add" — the subject picker opens
+  prefilled from the unresolved hint, fields render from the pack contract, and the
+  save writes through the full writer path into the named person's dossier (or your
+  own facts). Live pack facts gain schema-driven revision (field/subject/evidence-
+  date; a fact's KIND never changes) that closes the old row and keeps history.
+  Every owner correction lands in the training ledger as gold. Migration 68 gives
+  the review queue provenance (pack, source refs, quote, subject hint) so promotion
+  never mints evidence-less facts.
+
+
 ## [1.3.29] — 2026-08-26
 
 ### Added
