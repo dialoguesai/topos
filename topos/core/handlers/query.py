@@ -132,6 +132,23 @@ async def handle_query(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
         from ...query.runtime import get_query_orchestrator
 
         filter_manifest = payload.get("filter_manifest") if isinstance(payload.get("filter_manifest"), dict) else None
+        # The caller names its own scope_id as free text, and a small local model
+        # invents plausible ones. Live 2026-08-26: "Who are my friends?" arrived as
+        # scope_id "social_graph", which does not exist, so the turn was DENIED before
+        # any retrieval and the owner was told "I don't have access to your contacts"
+        # while 1,386 of them sat in the store. One forgiving retry onto the scope the
+        # words actually name, recorded in the response so the substitution is never
+        # silent — `resolve_scope_manifest` itself stays strict, and this is skipped
+        # entirely when a grant is in play, so a grantee must still name what they
+        # were granted exactly.
+        scope_substituted_from = None
+        if filter_manifest is None:
+            from ...query.scope_registry_loader import suggest_scope_id
+
+            suggested = suggest_scope_id(scope_id, intent)
+            if suggested:
+                scope_substituted_from, scope_id = scope_id, suggested
+                logger.info("scope substituted: %r -> %r", scope_substituted_from, scope_id)
         try:
             manifest = resolve_scope_manifest(
                 scope_id,
@@ -207,6 +224,10 @@ async def handle_query(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             if payload.get("disclosure_tier")
             else None,
         )
+        if scope_substituted_from and isinstance(result, dict):
+            # Declared, never silent — the same rule as packet_resolution_reason
+            # and empty_cause: a turn says what was done to it.
+            result["scope_substituted_from"] = scope_substituted_from
         return {"id": req_id, "status": "ok", "payload": result}
     except KeyError as exc:
         return {"id": req_id, "status": "error", "error": f"Missing field: {exc}"}

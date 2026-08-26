@@ -38,7 +38,7 @@ from typing import Any, Dict, List, Optional
 #: related to. Kept separate from `facts_direct._ALIASES` so that "family" keeps
 #: its role-based answer (parent / sibling) instead of an interaction ranking.
 _CLOSENESS_RE = re.compile(
-    r"\b(close circle|inner circle|closest|close friends?|best friends?|"
+    r"\b(close circle|inner circle|closest|close friends?|best friends?|friends?|"
     r"my people|who do i (talk|speak|message|text) to most)\b"
 )
 _OWNER_RE = re.compile(r"\b(i|my|me|am i|do i|i'm)\b")
