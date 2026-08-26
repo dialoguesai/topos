@@ -38,6 +38,7 @@ JOB_SPEC_VERSIONS: dict[str, int] = {
     "facts": 1,
     "timeline": 1,
     "attention_triage": 1,
+    "derivation": 1,
     "complexity_snapshot": 1,
 }
 
