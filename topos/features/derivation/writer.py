@@ -182,6 +182,8 @@ class DerivationWriter:
         occurrence: Optional[str] = None,   # episodic anchor (event date)
         quote: str = "",
         about: str = "owner",               # A2/A3 routing: owner | other:<name> | unclear
+        event_date: Optional[str] = None,   # source-record date: a fact's time is its
+                                            # EVIDENCE time, never extraction time
     ) -> Dict[str, Any]:
         pred = pack.predicates.get(predicate)
         if pred is None:
@@ -236,6 +238,13 @@ class DerivationWriter:
                 self.stats["retelling_merged"] = self.stats.get("retelling_merged", 0) + 1
                 return {"outcome": "retelling_merged", "object_id": retold["object_id"]}
         now = _now_iso()
+        # THE FACT'S TIME IS ITS EVIDENCE TIME (owner rule, 2026-08-26): a stated
+        # fact anchors to its stated occurrence, else its source record's date;
+        # extraction time lives only in the extractor provenance stamp. A fact
+        # that emerges from accumulation anchors to the newest record that
+        # completed it (synthesis passes the newest evidence date as event_date).
+        anchor = (str(occurrence)[:10] if occurrence else None) or \
+                 (str(event_date)[:10] if event_date else None) or now
 
         if incumbent is not None:
             inc_payload = incumbent["payload"]
@@ -279,12 +288,12 @@ class DerivationWriter:
             # SUPERSESSION: new evidence, the world changed
             self._close(incumbent, reason="superseded", at=now)
             row = self._insert(pack, pred, subject_entity_id, value, actor_role, source_refs,
-                               confidence, object_entity_id, occurrence, quote, valid_from=now, key=key)
+                               confidence, object_entity_id, occurrence, quote, valid_from=anchor, key=key)
             self.stats["superseded"] += 1
             return {"outcome": "superseded", "object_id": row}
 
         row = self._insert(pack, pred, subject_entity_id, value, actor_role, source_refs,
-                           confidence, object_entity_id, occurrence, quote, valid_from=now, key=key)
+                           confidence, object_entity_id, occurrence, quote, valid_from=anchor, key=key)
         self.stats["written"] += 1
         # Tier-2 `closes`: a value transition that closes OTHER active rows of this predicate
         self._apply_closes_rules(pack, pred, subject_entity_id, value)

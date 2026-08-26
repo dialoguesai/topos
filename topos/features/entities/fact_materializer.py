@@ -332,6 +332,39 @@ def sweep_stale_materialized_edges(
     return len(stale)
 
 
+
+_HEAD_VALUE_KEYS = ("person", "member", "project", "org", "event", "title", "kind",
+                    "habit", "place", "goal", "claim", "value", "item")
+
+
+def _display_value(raw) -> str:
+    """Human surface for a fact's object value. Pack facts carry STRUCTURED
+    values; minting a node named with the raw JSON put literal
+    '{"project": …, "status": …}' labels on the graph (2026-08-26). The head
+    field IS the identity (it is what pack key_fields key on); the rest is
+    state that belongs on the fact, not in a node name."""
+    v = raw
+    if isinstance(v, str):
+        t = v.strip()
+        if t.startswith("{"):
+            try:
+                v = json.loads(t)
+            except (ValueError, TypeError):
+                return t
+        else:
+            return t
+    if isinstance(v, dict):
+        for k in _HEAD_VALUE_KEYS:
+            hv = v.get(k)
+            if isinstance(hv, str) and hv.strip():
+                return hv.strip()
+        for hv in v.values():
+            if isinstance(hv, str) and hv.strip():
+                return hv.strip()
+        return ""
+    return str(v or "").strip()
+
+
 def materialize_signal_objects_to_graph(
     conn: sqlite3.Connection,
     *,
@@ -441,7 +474,7 @@ def materialize_signal_objects_to_graph(
             continue
         subj = str(payload.get("subject_entity_id") or "").strip()
         pred = str(payload.get("predicate") or "").strip()
-        obj_val = str(payload.get("object_value") or "").strip()
+        obj_val = _display_value(payload.get("object_value"))
         obj_id = str(payload.get("object_entity_id") or "").strip()
         if not subj or not pred or not obj_val or not _entity_exists(conn, subj):
             continue
