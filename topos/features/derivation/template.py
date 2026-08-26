@@ -75,6 +75,23 @@ def _needs_about(predicate_name: str) -> bool:
 _ABOUT_RE = re.compile(r"^(owner|unclear|other:.{1,60})$")
 
 
+def person_grounded(name: str, record_text: str) -> bool:
+    """A5 grounding guard: a person value must be ANCHORED in the record — at
+    least one name token (>2 chars) literally present, or a kin term. Kills the
+    candidate-laundering class measured 2026-08-26 ("him" -> a spine name that
+    never appears in the record; a Michael Jordan quip bound to a real Michael).
+    Deterministic on purpose: the prompt rule against pronoun-guessing was
+    violated by the model, so the rule moved into structure."""
+    if not isinstance(name, str) or not name.strip():
+        return False
+    n = " ".join(name.strip().lower().split())
+    if n in _KIN_WHITELIST:
+        return True
+    low = (record_text or "").lower()
+    _name_stop = {"the", "and", "for", "von", "van", "der", "del", "los", "las"}
+    return any(tok in low for tok in n.split() if len(tok) > 2 and tok not in _name_stop)
+
+
 def _enum_of(spec: Any) -> Optional[List[Any]]:
     """Allowed values for a value_schema field, or None if free-form.
 
@@ -189,7 +206,7 @@ Respond with ONLY this JSON, nothing else:
 _JSON_RE = re.compile(r"\{.*\}", re.S)
 
 
-def parse_output(raw: str, pack: Pack) -> Tuple[List[Dict[str, Any]], int]:
+def parse_output(raw: str, pack: Pack, record_text: str = None) -> Tuple[List[Dict[str, Any]], int]:
     """Return (valid_assertions, schema_reject_count)."""
     m = _JSON_RE.search(raw or "")
     if not m:
@@ -240,6 +257,8 @@ def parse_output(raw: str, pack: Pack) -> Tuple[List[Dict[str, Any]], int]:
                     a["new_person"] = True
                     pv = val[pf]
                 if pv is not None and not person_field_ok(pv):
+                    person_bad = True
+                elif pv is not None and record_text is not None and not person_grounded(pv, record_text):
                     person_bad = True
             # identity integrity: a predicate that KEYS on person cannot store an
             # assertion with no person — it would collapse onto a person-less key
