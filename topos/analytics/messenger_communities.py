@@ -36,6 +36,13 @@ def ensure_messenger_analytics_tables(conn: Any) -> None:
         commit_connection(conn)
 
 
+def _add_column_if_missing(conn: Any, table: str, column: str, col_type: str) -> None:
+    """Idempotent additive column. Safe to call on every ensure."""
+    cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+
+
 def _create_messenger_analytics_tables(conn: Any) -> None:
     conn.execute(
         f"""
@@ -60,6 +67,13 @@ def _create_messenger_analytics_tables(conn: Any) -> None:
         ON {MESSENGER_SOCIAL_EDGES_TABLE}(dataset_id, period_key, source_scope)
         """
     )
+    # Per-edge connector provenance. Deliberately an additive ALTER here rather
+    # than a registry migration: these three tables are created by this function
+    # and appear nowhere in storage/db/migrations/registry.py, so they are already
+    # feature-owned. Routing this through the registry would bump user_version
+    # past what an installed engine understands and fence the node out of every
+    # write — which is exactly what happened on 2026-08-25.
+    _add_column_if_missing(conn, MESSENGER_SOCIAL_EDGES_TABLE, "source_counts_json", "TEXT")
 
     conn.execute(
         f"""
@@ -189,6 +203,7 @@ def _persist_period_results(
                 float(edge.get("weight") or 0.0),
                 str(edge.get("edge_type") or ""),
                 json.dumps(edge.get("edge_type_counts") or {}, ensure_ascii=False),
+                json.dumps(edge.get("source_counts") or {}, ensure_ascii=False),
                 now,
                 now,
             )
@@ -252,9 +267,10 @@ def _persist_period_results(
                 INSERT INTO {MESSENGER_SOCIAL_EDGES_TABLE}
                 (
                     dataset_id, period_key, source_scope, source_id, target_id,
-                    weight, edge_type, edge_type_counts_json, created_at, updated_at
+                    weight, edge_type, edge_type_counts_json, source_counts_json,
+                    created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 edge_rows,
             )
