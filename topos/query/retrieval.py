@@ -5270,7 +5270,10 @@ def _build_summary_items_unfiltered(
                 from ..features.entities.edges import EDGE_COMMUNICATES, top_edges
 
                 self_row = bundle_conn.execute(
-                    "SELECT entity_id FROM entities WHERE is_self=1 LIMIT 1"
+                    "SELECT entity_id FROM entities WHERE is_self=1"
+                    " ORDER BY (SELECT COUNT(*) FROM signal_objects o"
+                    "   WHERE o.object_type='fact' AND o.object_key LIKE"
+                    "   'fact:' || entities.entity_id || ':%') DESC, entity_id ASC LIMIT 1"
                 ).fetchone()
                 if self_row:
                     for edge in top_edges(

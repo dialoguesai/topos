@@ -155,6 +155,10 @@ class Lens:
     null_model: str = ""
     coverage: Dict[str, Any] = field(default_factory=dict)
     disclosure: str = ""
+    #: An explicit observation window, where a lens needs one distinct from its evidence
+    #: floor. One shipped declaration already uses it; parsing it rather than rejecting it
+    #: is the additive rule this block was widened under.
+    window: str = ""
     description: str = ""
     raw: Dict[str, Any] = field(default_factory=dict)
 
@@ -311,6 +315,7 @@ def _load_lenses(entries: Any, pid: str, preds: Dict[str, Predicate],
             min_evidence=min_ev, subject=subject, over=str(e.get("over") or ""),
             calibration=cal, null_model=str(e.get("null_model") or ""),
             coverage=e.get("coverage") or {}, disclosure=disclosure,
+            window=str(e.get("window") or ""),
             description=str(e.get("description") or ""), raw=e))
     return out
 

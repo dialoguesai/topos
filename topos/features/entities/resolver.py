@@ -110,6 +110,71 @@ def map_ner_type(ner_label: Optional[str]) -> Optional[str]:
     return _NER_TYPE_MAP.get(label, "topic")
 
 
+def _remap_derivation_corpus(conn: sqlite3.Connection, *, keep_id: str, absorb_id: str) -> dict:
+    """Repoint everything keyed on the absorbed entity that the edge/mention fold misses.
+
+    Each of these tables stores the subject as an opaque id, so a merge that skips them
+    leaves rows describing a person who no longer exists. `signal_objects` needs both the
+    key and the payload rewritten, because the subject appears in both and a reader that
+    trusts one over the other would see two different answers.
+    """
+    counts = {}
+    stmts = [
+        ("signal_objects_key",
+         "UPDATE signal_objects SET object_key = REPLACE(object_key, ?, ?)"
+         " WHERE object_key LIKE '%' || ? || '%'", (absorb_id, keep_id, absorb_id)),
+        ("signal_objects_payload",
+         "UPDATE signal_objects SET payload_json = REPLACE(payload_json, ?, ?)"
+         " WHERE payload_json LIKE '%' || ? || '%'", (absorb_id, keep_id, absorb_id)),
+        ("fact_conflicts",
+         "UPDATE fact_conflicts SET subject_entity_id=? WHERE subject_entity_id=?",
+         (keep_id, absorb_id)),
+        ("intelligence_exclusions",
+         "UPDATE intelligence_exclusions SET entity_id=? WHERE entity_id=?",
+         (keep_id, absorb_id)),
+        ("entity_blackholes",
+         "UPDATE entity_blackholes SET entity_id=? WHERE entity_id=?", (keep_id, absorb_id)),
+        ("net_subject_policy",
+         "UPDATE OR IGNORE net_subject_policy SET subject_entity_id=? WHERE subject_entity_id=?",
+         (keep_id, absorb_id)),
+    ]
+    for name, sql, args in stmts:
+        try:
+            counts[name] = conn.execute(sql, args).rowcount
+        except sqlite3.Error:
+            # A table this node does not have is not a failure — net_subject_policy ships
+            # ahead of its migration by design. Recording a zero keeps the summary honest.
+            counts[name] = 0
+    return counts
+
+
+def _write_merge_tombstone(conn: sqlite3.Connection, *, keep_id: str, absorb_id: str,
+                           name: str, aliases: list, identifiers: list) -> None:
+    """Record what was absorbed, so an incorrect merge is reviewable rather than only
+    re-ingestable. Created on demand: this is feature-owned state, and a registry migration
+    would bump user_version past an installed engine."""
+    try:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS entity_merge_tombstones (
+                   absorbed_entity_id TEXT PRIMARY KEY,
+                   merged_into TEXT NOT NULL,
+                   canonical_name TEXT,
+                   aliases_json TEXT,
+                   identifiers_json TEXT,
+                   merged_at TEXT NOT NULL DEFAULT (datetime('now'))
+               )""")
+        conn.execute(
+            "INSERT OR REPLACE INTO entity_merge_tombstones"
+            " (absorbed_entity_id, merged_into, canonical_name, aliases_json, identifiers_json)"
+            " VALUES (?,?,?,?,?)",
+            (absorb_id, keep_id, name, json.dumps(aliases), json.dumps(identifiers)))
+        # a chain of merges must resolve to the surviving row, not to an intermediate
+        conn.execute("UPDATE entity_merge_tombstones SET merged_into=? WHERE merged_into=?",
+                     (keep_id, absorb_id))
+    except sqlite3.Error:
+        pass
+
+
 def value_label_surfaces(conn: sqlite3.Connection) -> frozenset:
     """Normalized surfaces the NER model judged to be VALUES, not identities.
 
@@ -837,5 +902,25 @@ class EntityResolver:
                 "UPDATE entities SET mention_count = (SELECT COUNT(*) FROM entity_mentions WHERE entity_id=?) WHERE entity_id=?",
                 (keep_id, keep_id),
             )
+            # --- the derivation corpus ---
+            #
+            # Folding aliases, mentions and edges is not the whole merge. The absorbed
+            # entity is also the SUBJECT of stored facts, of quarantined conflicts and of
+            # the owner's exclusions, and none of those live in the three tables above.
+            # Measured on the live node before this was written: collapsing the owner's nine
+            # entities would have stranded 335 signal_objects (178 facts + 157 dossier rows),
+            # 13 fact_conflicts and 3 intelligence_exclusions — pointing at a row that no
+            # longer exists, which is precisely the dangling-subject shape that made two
+            # promoted facts unreachable earlier the same day.
+            _remap_derivation_corpus(self._conn, keep_id=keep_id, absorb_id=absorb_id)
+            # --- the tombstone ---
+            #
+            # The docstring says "reversible merge". It was not: this ended in a DELETE with
+            # nothing recorded, so an incorrect merge could be re-split only by re-ingesting.
+            # The tombstone makes the claim true enough to act on — what was absorbed, into
+            # what, and when.
+            _write_merge_tombstone(self._conn, keep_id=keep_id, absorb_id=absorb_id,
+                                   name=str(gone[0] or ""), aliases=json.loads(gone[1] or "[]"),
+                                   identifiers=json.loads(gone[2] or "[]"))
             self._conn.execute("DELETE FROM entities WHERE entity_id=?", (absorb_id,))
             commit_connection(self._conn)

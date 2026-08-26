@@ -367,14 +367,11 @@ def _display_value(raw) -> str:
 
 
 def _owner_entity_ids(conn: sqlite3.Connection) -> "set[str]":
-    """Every is_self entity. Plural because this machine has three, and reading one by rowid
-    luck would make the projection guard depend on which one won."""
-    try:
-        return {str(r[0]) for r in
-                conn.execute("SELECT entity_id FROM entities WHERE is_self=1").fetchall()
-                if r and r[0]}
-    except sqlite3.Error:
-        return set()
+    """Every is_self entity — the shared selector, so this guard cannot drift from the
+    ten other places that ask the same question."""
+    from .owner import owner_entity_ids
+
+    return owner_entity_ids(conn)
 
 
 def materialize_signal_objects_to_graph(

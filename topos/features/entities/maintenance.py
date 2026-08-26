@@ -115,7 +115,10 @@ def lookup_person_entity(
     """
     if is_from_self or str(sender_raw or "").strip().lower() in _SELF_SENDER_TOKENS:
         row = conn.execute(
-            "SELECT entity_id FROM entities WHERE is_self=1 LIMIT 1"
+            "SELECT entity_id FROM entities WHERE is_self=1"
+            " ORDER BY (SELECT COUNT(*) FROM signal_objects o WHERE o.object_type='fact'"
+            "   AND o.object_key LIKE 'fact:' || entities.entity_id || ':%') DESC,"
+            " entity_id ASC LIMIT 1"
         ).fetchone()
         if row:
             return str(row[0])
