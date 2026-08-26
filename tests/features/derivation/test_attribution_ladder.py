@@ -458,3 +458,16 @@ def test_report_card_scores(a3_writer):
     card = compute_report_card(conn)["packs"]["work.career"]
     assert card["judged"] == 5 and card["acceptance"] == 0.6
     assert card["reroute_rate"] == 0.2 and card["grounding_rejects"] == 1
+
+
+def test_noop_window_survives_bare_date_valid_from(a3_writer):
+    w, conn = a3_writer
+    pack = _work_pack()
+    a = dict(pack=pack, predicate="work.project", subject_entity_id="ent_owner",
+             value={"project": "topos", "status": "active"}, actor_role="authored",
+             source_refs=[{"table": "t", "record_id": "r1"}], confidence=0.9,
+             about="owner", event_date="2026-05-14")
+    assert w.assert_pack_fact(**a)["outcome"] == "written"
+    # same value again, same model — must NOT crash on the bare-date stamp
+    out = w.assert_pack_fact(**{**a, "source_refs": [{"table": "t", "record_id": "r2"}]})
+    assert out["outcome"] in ("noop", "corroborated")
