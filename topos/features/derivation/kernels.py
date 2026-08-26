@@ -102,7 +102,13 @@ def run_lens(conn: sqlite3.Connection, pack: Any, lens: Any, owner: str) -> Kern
     except Exception as exc:  # noqa: BLE001 — one bad kernel must not stop the pass
         return KernelResult(lens.kind, pack.pack, lens.predicate, abstained=True,
                             reason=f"kernel_error:{str(exc)[:80]}", kernel_version=version)
-    return KernelResult(lens.kind, pack.pack, lens.predicate, rows=rows or [],
+    if rows is None:
+        # None is a kernel that could not answer, not an empty answer. Coercing it to []
+        # made abstention unreachable from inside a kernel: the one honest signal it could
+        # send was being rewritten into "computed successfully, found nothing".
+        return KernelResult(lens.kind, pack.pack, lens.predicate, abstained=True,
+                            reason="kernel_returned_none", kernel_version=version)
+    return KernelResult(lens.kind, pack.pack, lens.predicate, rows=rows,
                         kernel_version=version)
 
 

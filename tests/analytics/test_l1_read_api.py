@@ -28,8 +28,14 @@ def conn(tmp_path, monkeypatch):
         conversation_id TEXT, message_id TEXT PRIMARY KEY, dataset_id TEXT,
         sender_id TEXT, event_at TEXT, is_from_self INTEGER, source_id TEXT,
         reply_to_message_id TEXT)""")
-    c.execute("CREATE TABLE contacts (contact_id TEXT PRIMARY KEY, display_name TEXT)")
-    c.execute("CREATE TABLE contact_identifiers (contact_id TEXT, identifier TEXT, dataset_id TEXT)")
+    # the REAL shapes of the label tables — the resolver filters on dataset_id and orders
+    # on source_id/updated_at, and a thinner fixture silently matches nothing
+    c.execute("""CREATE TABLE contacts (contact_id TEXT PRIMARY KEY, dataset_id TEXT,
+        source_id TEXT, display_name TEXT, is_self INTEGER DEFAULT 0,
+        created_at TEXT, updated_at TEXT)""")
+    c.execute("""CREATE TABLE contact_identifiers (dataset_id TEXT, source_id TEXT,
+        identifier TEXT, identifier_type TEXT, contact_id TEXT,
+        created_at TEXT, updated_at TEXT)""")
     n = 0
     for peer, count in (("+15125551234", 8), ("262966", 5)):
         for i in range(count):
@@ -39,11 +45,17 @@ def conn(tmp_path, monkeypatch):
                           (f"c_{peer}", f"m{n}", DS, None if is_self else peer,
                            (T0 + timedelta(days=i, minutes=is_self * 3)).isoformat(),
                            is_self, "imessage", None))
+    # A REAL contact behind one peer, so label resolution is exercised end to end — the
+    # first version mocked the resolver, which hid a keyword-only signature mismatch
+    # (HTTP 500 on every request) AND a nested-dict return shape. Mocks are for failure
+    # injection; this surface is tested against the real collaborator.
+    c.execute("INSERT INTO contacts VALUES ('ct_1', ?, 'address_book', 'Tango Uniform', 0, 't', 't')", (DS,))
+    c.execute("INSERT INTO contact_identifiers VALUES (?, 'address_book', '+15125551234',"
+              " 'phone', 'ct_1', 't', 't')", (DS,))
     c.commit()
     _compute_directed_lane(c, DS, None)
     import topos.api.messenger_analytics as api
     monkeypatch.setattr(api, "get_db_connection", lambda: c)
-    monkeypatch.setattr(api, "resolve_participant_labels", lambda *a, **k: {})
     yield c
     c.close()
 
@@ -111,7 +123,6 @@ def test_a_read_before_any_write_returns_empty_not_an_error(tmp_path, monkeypatc
     c = sqlite3.connect(str(tmp_path / "fresh.db"))
     import topos.api.messenger_analytics as api
     monkeypatch.setattr(api, "get_db_connection", lambda: c)
-    monkeypatch.setattr(api, "resolve_participant_labels", lambda *a, **k: {})
     from topos.api.messenger_analytics import get_directed_edges, get_relationships
 
     assert get_relationships(dataset_id="nope", tie_state=None, include_automated=False, limit=100)["relationships"] == []
@@ -147,3 +158,49 @@ def test_signals_on_an_unknown_dataset_are_empty_not_an_error(conn):
     res = get_relationship_signals(dataset_id="nope", signal="all")
     assert res["dyads_considered"] == 0
     assert res["warmth"] == []
+
+
+# --- the breaks the adversarial pass found, kept as regression tests ---
+
+def test_labels_are_flat_strings_from_the_real_resolver(conn):
+    """The 500-on-every-request break, and its shadow.
+
+    resolve_participant_labels is keyword-only and returns nested dicts; called
+    positionally it raises (HTTP 500), and passed through raw it embeds an object where a
+    string is promised. Both were invisible while the tests mocked the resolver.
+    """
+    from topos.api.messenger_analytics import get_relationships
+
+    res = get_relationships(dataset_id=DS, tie_state=None, include_automated=False, limit=100)
+    r = res["relationships"][0]
+    assert isinstance(r["label"], str)
+    assert r["label"] == "Tango Uniform", "the address-book name, not the phone number"
+
+
+def test_an_owner_owner_row_is_not_presented_as_a_relationship(conn):
+    """Corpus damage (a peer indistinguishable from the owner) must not appear as the owner
+    being their own contact."""
+    from topos.analytics.messenger_directed import MESSENGER_DYAD_STATS_TABLE
+    from topos.api.messenger_analytics import get_relationships
+
+    conn.execute(
+        f"""INSERT OR REPLACE INTO {MESSENGER_DYAD_STATS_TABLE}
+            (dataset_id, a_key, b_key, involves_self, peer_class, total_msgs, a_to_b, b_to_a,
+             created_at, updated_at)
+            VALUES (?, 'self', 'self', 1, 'human', 9, 5, 4, 't', 't')""", (DS,))
+    conn.commit()
+    res = get_relationships(dataset_id=DS, tie_state=None, include_automated=False, limit=100)
+    assert "self" not in {r["peer_key"] for r in res["relationships"]}
+
+
+def test_a_failing_resolver_degrades_to_keys_not_500(conn, monkeypatch):
+    """Labels are decoration; the data must still flow."""
+    import topos.api.messenger_analytics as api
+
+    def boom(*a, **k):
+        raise RuntimeError("resolver down")
+
+    monkeypatch.setattr(api, "resolve_participant_labels", boom)
+    res = api.get_relationships(dataset_id=DS, tie_state=None, include_automated=False, limit=100)
+    assert res["relationships"], "data flows"
+    assert all(r["label"] == r["peer_key"] for r in res["relationships"])

@@ -119,13 +119,45 @@ def _remap_derivation_corpus(conn: sqlite3.Connection, *, keep_id: str, absorb_i
     trusts one over the other would see two different answers.
     """
     counts = {}
+    # signal_objects is rewritten in Python, never with SQL REPLACE. REPLACE is substring
+    # blind: absorbing `ent_abc` would also corrupt `ent_abc2`'s keys and payloads —
+    # demonstrated by the adversarial pass, and precisely the class of silent corruption a
+    # merge must never introduce. Keys are rewritten per `:`-delimited segment; payloads per
+    # exact JSON string value.
+    counts["signal_objects_key"] = counts["signal_objects_payload"] = 0
+    try:
+        rows = self_conn = None
+        rows = conn.execute(
+            "SELECT object_id, object_key, payload_json FROM signal_objects"
+            " WHERE object_key LIKE '%' || ? || '%' OR payload_json LIKE '%' || ? || '%'",
+            (absorb_id, absorb_id)).fetchall()
+        for oid, key, pj in rows:
+            new_key = ":".join(keep_id if seg == absorb_id else seg
+                               for seg in str(key or "").split(":"))
+            new_pj = pj
+            if pj and absorb_id in pj:
+                try:
+                    def _swap(v):
+                        if isinstance(v, str):
+                            return keep_id if v == absorb_id else v
+                        if isinstance(v, list):
+                            return [_swap(x) for x in v]
+                        if isinstance(v, dict):
+                            return {k: _swap(x) for k, x in v.items()}
+                        return v
+                    new_pj = json.dumps(_swap(json.loads(pj)), ensure_ascii=False)
+                except (ValueError, TypeError):
+                    new_pj = pj  # unparseable payload: leave it rather than corrupt it
+            if new_key != key or new_pj != pj:
+                conn.execute("UPDATE signal_objects SET object_key=?, payload_json=?"
+                             " WHERE object_id=?", (new_key, new_pj, oid))
+                if new_key != key:
+                    counts["signal_objects_key"] += 1
+                if new_pj != pj:
+                    counts["signal_objects_payload"] += 1
+    except sqlite3.Error:
+        pass
     stmts = [
-        ("signal_objects_key",
-         "UPDATE signal_objects SET object_key = REPLACE(object_key, ?, ?)"
-         " WHERE object_key LIKE '%' || ? || '%'", (absorb_id, keep_id, absorb_id)),
-        ("signal_objects_payload",
-         "UPDATE signal_objects SET payload_json = REPLACE(payload_json, ?, ?)"
-         " WHERE payload_json LIKE '%' || ? || '%'", (absorb_id, keep_id, absorb_id)),
         ("fact_conflicts",
          "UPDATE fact_conflicts SET subject_entity_id=? WHERE subject_entity_id=?",
          (keep_id, absorb_id)),

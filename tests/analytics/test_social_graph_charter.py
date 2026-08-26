@@ -225,6 +225,15 @@ _ENFORCEMENT = [
     ("tests/features/test_merge_honesty.py", "test_an_exclusion_survives_the_merge"),
     ("tests/features/test_owner_selector.py", "test_no_production_site_reads_is_self_unordered"),
     ("tests/analytics/test_l1_orchestrator.py", "test_no_new_trigger_was_introduced"),
+    # adversarial retest, 2026-08-26 — each of these is a confirmed break kept as a gate
+    ("tests/analytics/test_l1_adversarial_regressions.py", "test_a_peer_named_self_does_not_merge_into_the_owner"),
+    ("tests/analytics/test_l1_adversarial_regressions.py", "test_one_naive_timestamp_does_not_zero_the_lane"),
+    ("tests/analytics/test_l1_adversarial_regressions.py", "test_timezone_offsets_order_by_instant_not_by_text"),
+    ("tests/analytics/test_l1_adversarial_regressions.py", "test_a_future_message_poisons_only_its_own_dyad"),
+    ("tests/analytics/test_l1_adversarial_regressions.py", "test_unknown_recency_is_never_warm"),
+    ("tests/analytics/test_l1_read_api.py", "test_labels_are_flat_strings_from_the_real_resolver"),
+    ("tests/features/test_l4_projection_guard.py", "test_with_no_owner_entity_the_guard_fails_closed"),
+    ("tests/features/test_l4_projection_guard.py", "test_a_blackholed_object_never_becomes_an_edge"),
 ]
 
 

@@ -480,9 +480,21 @@ def materialize_signal_objects_to_graph(
     # Owner-subject facts project exactly as before. Everything else is counted and skipped,
     # so "how many claims are we declining to project" is answerable rather than invisible.
     owner_ids = _owner_entity_ids(conn)
+    try:
+        blackholed = {str(r[0]) for r in conn.execute(
+            "SELECT entity_id FROM entity_blackholes WHERE entity_id IS NOT NULL"
+            " AND entity_id != ''").fetchall()}
+    except sqlite3.Error:
+        blackholed = set()
     if not owner_ids:
-        logger.warning("materializer: no is_self entity — the L4-8 projection guard cannot "
-                       "distinguish owner facts and is inactive for this pass")
+        # FAIL CLOSED — reversed 2026-08-26 after adversarial review. The first version
+        # stood the guard down here, reasoning a fresh node cannot hold outward facts. But
+        # the realistic way to LOSE the is_self flag is an entity merge gone wrong — and in
+        # that state the old behaviour projected every third-party fact on the node. Owner
+        # facts pausing until the flag is repaired is recoverable; a dossier restated into
+        # the graph is not.
+        logger.warning("materializer: no is_self entity — refusing to project ANY subject "
+                       "facts until the owner flag is restored (L4-8 fails closed)")
     frows = conn.execute(
         """
         SELECT object_id, payload_json, valid_from, valid_to, confidence
@@ -497,12 +509,15 @@ def materialize_signal_objects_to_graph(
         except (TypeError, ValueError):
             continue
         subj = str(payload.get("subject_entity_id") or "").strip()
-        # The filter applies only when the owner set is KNOWN. On a node with no is_self
-        # entity we cannot establish whose fact this is — but neither can the outward lane
-        # have produced one, since an outward write requires a resolved, authorised subject
-        # entity. Filtering there would stop a fresh node projecting its own facts to
-        # protect against claims that cannot exist yet, so it warns instead.
-        if owner_ids and subj and subj not in owner_ids:
+        if subj and subj not in owner_ids:
+            net_facts_skipped += 1
+            continue
+        # The blackhole binds at PROJECTION too, on the OBJECT side. An owner-subject fact
+        # may name an excluded person as its object; the fact store hides it at read, but an
+        # edge pointing at that person restates them into a surface the read filter never
+        # sees. "Forget this person" has to hold everywhere their identity lands.
+        obj_ent = str(payload.get("object_entity_id") or "").strip()
+        if obj_ent and obj_ent in blackholed:
             net_facts_skipped += 1
             continue
         pred = str(payload.get("predicate") or "").strip()

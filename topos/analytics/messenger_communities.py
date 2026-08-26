@@ -476,7 +476,13 @@ def _compute_directed_lane(db: Any, dataset_id: str, source_ids: Optional[Sequen
     from .messenger_directed import attach_affect
     rows = rows_for_persist(acc, dataset_id, DEFAULT_SESSION_GAP_SECONDS,
                             affect=attach_affect(db, dataset_id, acc))
+    # BOTH computations complete BEFORE either persist. The first version persisted edges,
+    # then computed and persisted dyads: a failure in the rollup left the two tables
+    # describing different corpora while totals reported neither — a split brain the
+    # adversarial pass demonstrated. Compute everything, then write; a failure now leaves
+    # the previous consistent state intact.
+    dyad_rows = build_dyad_stats(db, dataset_id)
     periods = sorted({r[1] for r in rows})
     edges = persist_directed_edges(db, dataset_id, rows, periods=periods)
-    dyads = persist_dyad_stats(db, dataset_id, build_dyad_stats(db, dataset_id))
+    dyads = persist_dyad_stats(db, dataset_id, dyad_rows)
     return {"directed_edges_written": edges, "dyads_written": dyads}

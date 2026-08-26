@@ -99,13 +99,46 @@ def test_every_is_self_entity_counts(conn):
     assert _edges(conn) >= 1, "a second is_self entity is still the owner"
 
 
-def test_with_no_owner_entity_the_guard_stands_down_rather_than_blocking_everything(conn):
-    """A fresh node cannot have produced an outward fact — that needs a resolved, authorised
-    subject entity. Filtering there would stop it projecting its OWN facts to protect
-    against claims that cannot exist yet."""
+def test_with_no_owner_entity_the_guard_fails_closed(conn):
+    """REVERSED 2026-08-26 after adversarial review.
+
+    The first version stood the guard down when no is_self entity existed, reasoning that a
+    fresh node cannot hold outward facts. But the realistic way to LOSE the flag is an
+    entity merge gone wrong — and in that state the old behaviour projected every
+    third-party fact on the node. Owner facts pausing until the flag is repaired is
+    recoverable; a dossier restated into the graph is not.
+    """
     conn.execute("UPDATE entities SET is_self=0")
     conn.commit()
     assert _owner_entity_ids(conn) == set()
     _fact(conn, "ent_owner", "works_at", "Dialogues")
     materialize_signal_objects_to_graph(conn)
-    assert _edges(conn) >= 1
+    assert _edges(conn) == 0, "no owner flag, no subject-fact projection"
+
+
+def test_a_blackholed_object_never_becomes_an_edge(conn):
+    """An owner-subject fact naming an excluded person as its OBJECT restated them into the
+    graph — a surface the read-side blackhole filter never sees."""
+    import json as _json
+    import uuid as _uuid
+
+    # the migrated table has 11 columns — insert by name, not position
+    cols = {r[1] for r in conn.execute("PRAGMA table_info(entity_blackholes)")}
+    assert {"blackhole_id", "entity_id"} <= cols, "real schema expected"
+    conn.execute("INSERT INTO entity_blackholes (blackhole_id, entity_id, normalized_name)"
+                 " VALUES ('bh1', 'ent_nora', 'nora')")
+    oid = str(_uuid.uuid4())
+    conn.execute(
+        "INSERT INTO signal_objects (object_id, signal_dimension, object_type, object_key,"
+        " payload_json, confidence, source_refs_json, valid_from, valid_to,"
+        " extractor_version, created_at, updated_at, created_by, updated_by)"
+        " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        (oid, "identity", "fact", "fact:ent_owner:collaborated_with",
+         _json.dumps({"subject_entity_id": "ent_owner", "predicate": "collaborated_with",
+                      "object_value": "Nora", "object_entity_id": "ent_nora",
+                      "confidence": 0.9}),
+         0.9, "[]", "2026-05-01", None, "t", "2026-05-01", "2026-05-01", "test", "test"))
+    conn.commit()
+    materialize_signal_objects_to_graph(conn)
+    dsts = {r[0] for r in conn.execute("SELECT dst_entity_id FROM entity_edges")}
+    assert "ent_nora" not in dsts, "forget-this-person holds at projection too"
