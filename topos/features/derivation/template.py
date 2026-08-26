@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .packs import Pack, load_scales
 
-TEMPLATE_VERSION = "shadow-8"
+TEMPLATE_VERSION = "shadow-9"
 _PACK_DIR = Path(__file__).resolve().parents[4] if False else None  # set by set_pack_dir()
 
 
@@ -136,6 +136,12 @@ Record (role={actor_role}, date={record_date}):
 
 Allowed predicates (extract ONLY these; anything else is invalid):
 {_predicate_menu(pack)}
+
+Example (facts about PEOPLE the owner names are wanted, with the role the owner's own words give):
+  record: "Coffee with my friend Sam, then errands"
+  output: {{"assertions": [{{"predicate": "<the relationship-like predicate from the menu>",
+            "value": {{"person": "Sam", "role": "friend"}}, "about": "owner", "occurrence_date": null,
+            "confidence": 0.95, "quote": "my friend Sam"}}]}}
 
 Example (a record often holds a fact even when most of it is about something else):
   record: "Pushed the release out. Also — dentist moved my cleaning to Friday. Back to debugging."
