@@ -77,3 +77,23 @@ async def handle_put_fact_conflict(message: Dict[str, Any]) -> Optional[Dict[str
         return {"id": req_id, "status": "error", "error": str(exc)}
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("put_pack_offer")
+async def handle_put_pack_offer(message):
+    req_id = message.get("id")
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    payload = message.get("payload") or {}
+    try:
+        from ...features.derivation.surfaces import resolve_pack_offer
+        out = resolve_pack_offer(conn, str(payload.get("offer_id") or ""),
+                                 str(payload.get("action") or ""))
+        if not out:
+            return {"id": req_id, "status": "error", "error": "unknown offer"}
+        return {"id": req_id, "status": "ok", "payload": {"status": "ok", **out}}
+    except ValueError as exc:
+        return {"id": req_id, "status": "error", "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
