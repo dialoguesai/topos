@@ -20,6 +20,21 @@ The machine-readable twin of each release is
   spellings of a name still collide for dedup — they are just no longer both stored as
   the thing people read. Existing rows backfilled from `value_struct`, which had the
   correct case all along.
+### Added
+- **[S1] Principal fabric P4.1 — Team ID peer attestation on the owner socket.**
+  With `TOPOS_UDS_TEAM_IDS` set (comma-separated Apple Team IDs), the owner
+  socket attests the connecting PROCESS — peer pid via `LOCAL_PEERPID`,
+  executable via `proc_pidpath`, Team ID via `codesign` — and closes any
+  unsigned or non-allowlisted peer at accept, before a request byte is parsed
+  (the same-uid-malware defense). Unset ⇒ permissive-log so the dev lane's
+  unsigned processes keep working; set ⇒ fail-closed on every error.
+- **[S1] Principal fabric — owner-key self-mint (install-flow invariant).** On
+  boot the node ensures `TOPOS_OWNER_KEY` exists in `~/.topos/.env`, minting one
+  locally (0600) if absent and setting it on the live settings so enforcement
+  activates this boot. Idempotent and additive — an existing key is never
+  rewritten, a value already in the process env (pairing) wins — so the fabric
+  auto-activates on every node, fresh or upgraded, with no manual step and no
+  secret over the wire.
 
 ### Changed
 - **The closeness lens reads the L1 rail instead of deriving interaction twice.**
