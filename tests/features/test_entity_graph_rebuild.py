@@ -457,3 +457,52 @@ def test_rebuild_sweeps_stale_materialized_edges_and_reports_count(conn):
     assert conn.execute(
         "SELECT COUNT(*) FROM entity_edges WHERE edge_type='pursues'"
     ).fetchone()[0] == 0
+
+
+def test_community_label_prefers_dominant_member_type(tmp_path):
+    """Owner critique 2026-08-26: a person's centrality must not name a
+    community whose members are mostly topics/projects."""
+    import sqlite3
+    from topos.features.entities.maintenance import compute_communities
+
+    conn = sqlite3.connect(tmp_path / "g.db")
+    conn.executescript(
+        """
+        CREATE TABLE entities (entity_id TEXT PRIMARY KEY, entity_type TEXT,
+          canonical_name TEXT, normalized_name TEXT, aliases_json TEXT,
+          is_self INTEGER DEFAULT 0, mention_count INTEGER DEFAULT 0,
+          metadata_json TEXT, created_at TEXT, updated_at TEXT);
+        CREATE TABLE entity_edges (edge_id TEXT PRIMARY KEY, src_entity_id TEXT,
+          dst_entity_id TEXT, edge_type TEXT, weight REAL, evidence_count INTEGER,
+          last_event_at TEXT, valid_from TEXT, valid_to TEXT, metadata_json TEXT);
+        """
+    )
+    # one community: a hub PERSON wired to four topics — person wins centrality,
+    # topics win the census; the label must be a topic
+    rows = [("p1", "person", "Sierra Hotel")] + [
+        (f"t{i}", "topic", name)
+        for i, name in enumerate(["Topos", "Control Plane", "Horos", "Investor Deck"])
+    ]
+    for eid, etype, name in rows:
+        conn.execute(
+            "INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name)"
+            " VALUES (?, ?, ?, lower(?))", (eid, etype, name, name))
+    for i in range(4):
+        conn.execute(
+            "INSERT INTO entity_edges (edge_id, src_entity_id, dst_entity_id,"
+            " edge_type, weight) VALUES (?, 'p1', ?, 'co_occurrence', 5.0)",
+            (f"e{i}", f"t{i}"))
+        # topics also interlink lightly so they form one community with the hub
+        conn.execute(
+            "INSERT INTO entity_edges (edge_id, src_entity_id, dst_entity_id,"
+            " edge_type, weight) VALUES (?, ?, ?, 'co_occurrence', 1.0)",
+            (f"tt{i}", f"t{i}", f"t{(i + 1) % 4}"))
+    conn.commit()
+    compute_communities(conn)
+    import json as _json
+    labels = {
+        r[0]: (_json.loads(r[1] or "{}").get("community_label"))
+        for r in conn.execute("SELECT entity_id, metadata_json FROM entities")
+    }
+    assert labels["t0"] in {"Topos", "Control Plane", "Horos", "Investor Deck"}, labels
+    assert labels["t0"] != "Sierra Hotel"
