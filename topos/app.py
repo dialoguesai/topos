@@ -465,6 +465,17 @@ async def startup_event() -> None:
             principal = verify_relay_stamp(message) or RELAY_PRINCIPAL
             return await handle_control_plane_request(message, principal=principal)
 
+        # Dual-mint (install-flow invariant): ensure an owner key exists so the
+        # fabric's floors/stamps/tier resolution auto-activate on every node —
+        # fresh or upgraded — with no manual step. Set it on the live settings
+        # singleton too, so enforcement sees it THIS boot (settings loaded its
+        # env before this mint could run).
+        from .owner_key import ensure_owner_key
+
+        _ok = ensure_owner_key()
+        if _ok and not getattr(settings, "topos_owner_key", None):
+            settings.topos_owner_key = _ok
+
         # P4: the owner socket — kernel-gated (0600) owner_app lane, no secret.
         from .uds import start_uds_server
 
