@@ -17,8 +17,11 @@ from topos.features.derivation.registry import bundled_pack_dir
 PACK_DIR = bundled_pack_dir()
 
 
-def _rel_pack():
+def _orig_rel_pack():
     return load_packs(PACK_DIR, only=["relationships.social"])["relationships.social"]
+
+
+_rel_pack = _orig_rel_pack
 
 
 # --- A1: reaction-prefix strip (measured: org "qi" from "+QI just got fired") ---
@@ -121,6 +124,11 @@ def a3_writer(tmp_path):
         created_at TEXT NOT NULL DEFAULT (datetime('now')));
       INSERT INTO entities VALUES ('ent_owner','person','Owner','owner','[]',1);
       INSERT INTO entities VALUES ('ent_nora','person','Nora','nora','[]',0);
+      CREATE TABLE net_subject_policy (subject_entity_id TEXT PRIMARY KEY,
+        policy TEXT NOT NULL, decided_by TEXT NOT NULL DEFAULT 'owner',
+        note TEXT NOT NULL DEFAULT '', decided_at TEXT NOT NULL DEFAULT (datetime('now')));
+      CREATE TABLE entity_blackholes (blackhole_id TEXT PRIMARY KEY,
+        entity_id TEXT NOT NULL DEFAULT '', normalized_name TEXT NOT NULL);
       CREATE TABLE signal_objects (object_id TEXT PRIMARY KEY, signal_dimension TEXT,
         object_type TEXT, object_key TEXT, payload_json TEXT, confidence REAL,
         source_refs_json TEXT, valid_from TEXT, valid_to TEXT, extractor_version TEXT,
@@ -533,23 +541,37 @@ def test_revise_fact_field_and_history(a3_writer):
 # --- net-subject kill switch: outward writes are OFF until the policy plane lands ---
 
 @pytest.fixture
-def net_subject_on(monkeypatch):
-    """Enable outward writes for the tests that exercise the routing itself.
+def net_subject_on(a3_writer, monkeypatch):
+    """Grant all three authorisations, so the tests below exercise the ROUTING.
 
-    The routing code must keep working — the switch defers it, it does not delete it —
-    so the A3 dossier tests opt in explicitly. Everything else runs at the shipped
-    default, which is OFF.
+    Note what this fixture has to do now: opting a subject in is no longer a flag,
+    it is a recorded decision plus a pack that declares it may describe other
+    people. That is the point — nothing about the shipped default lets an outward
+    write happen by accident.
     """
-    import topos.features.derivation.writer as _w
-    monkeypatch.setattr(_w, "NET_SUBJECT_WRITES_ENABLED", True)
+    from topos.features.derivation.net_subject_policy import ALLOW, set_subject_policy
+
+    _, conn = a3_writer
+    set_subject_policy(conn, "ent_nora", ALLOW)
+    conn.commit()
+
+    # _rel_pack() builds a FRESH Pack on every call, so patching one instance is a
+    # no-op — the assertion under test would get an unpatched pack and refuse.
+    def _allowing_pack():
+        pack = _orig_rel_pack()
+        pack.net_subject = "allow"
+        return pack
+
+    monkeypatch.setitem(globals(), "_rel_pack", _allowing_pack)
     yield
 
 
-def test_net_subject_writes_default_off():
-    """The shipped default must be off. If this fails, a node is writing dossier
-    facts about people who never consented."""
-    import topos.features.derivation.writer as _w
-    assert _w.NET_SUBJECT_WRITES_ENABLED is False
+def test_every_pack_defaults_to_refusing_outward_writes():
+    """The shipped default. If this fails, a pack can describe people who never
+    consented merely because it was enabled."""
+    from topos.features.derivation.packs import Pack
+    import inspect
+    assert inspect.signature(Pack).parameters["net_subject"].default == "deny"
 
 
 def test_a3_resolvable_other_is_withheld_by_default(a3_writer):
@@ -580,7 +602,7 @@ def test_withheld_is_distinguishable_from_unattributable(a3_writer):
     _rel_assert(w, "unclear")             # unattributable
     reasons = [r[0] for r in conn.execute(
         "SELECT incumbent_object_id FROM fact_conflicts ORDER BY incumbent_object_id")]
-    assert any(r.startswith("quarantine:net_subject_disabled:") for r in reasons), reasons
+    assert any(r.startswith("quarantine:net_subject_") for r in reasons), reasons
     assert any(r.startswith("quarantine:about_unclear") for r in reasons), reasons
 
 
