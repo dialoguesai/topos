@@ -11,7 +11,7 @@ from __future__ import annotations
 import json
 import sqlite3
 import uuid
-from typing import Dict, List, Optional, Sequence, Tuple
+from typing import Dict, List, Optional, Sequence, Set, Tuple
 
 CORE_K = 12
 MATCH_THRESHOLD = 0.5
@@ -21,10 +21,25 @@ def core_fingerprint(
     ranked_members: Sequence[str],
     weights: Dict[str, float],
     k: int = CORE_K,
+    exclude: Optional[Set[str]] = None,
 ) -> List[Tuple[str, float]]:
     """Top-k members with normalized weights. `ranked_members` is already
-    sorted by centrality (the compute_communities ordering)."""
-    core = [(str(m), max(float(weights.get(str(m), 0.0)), 1e-9)) for m in ranked_members[:k]]
+    sorted by centrality (the compute_communities ordering).
+
+    `exclude` drops the OWNER before the core is taken. The owner is adjacent to
+    almost everything, so they rank at or near the top of every community they
+    appear in — consuming a core slot and, worse, carrying a large share of the
+    normalized weight. A member common to two fingerprints raises their weighted
+    Jaccard, so an ego left in the core makes unrelated communities look alike and
+    biases matching toward false positives.
+
+    Measured live 2026-08-26: only 1 of 127 active fingerprints contained the ego —
+    but in that one it held 0.598 of the total weight across two core slots, i.e.
+    the community's recorded identity was mostly "the owner".
+    """
+    exclude = exclude or set()
+    picked = [str(m) for m in ranked_members if str(m) not in exclude][:k]
+    core = [(m, max(float(weights.get(m, 0.0)), 1e-9)) for m in picked]
     total = sum(w for _, w in core) or 1.0
     return [(eid, w / total) for eid, w in core]
 
