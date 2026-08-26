@@ -14,7 +14,10 @@ NOW = datetime(2026, 8, 26, tzinfo=timezone.utc)
 def db(tmp_path):
     conn = sqlite3.connect(tmp_path / "c.db")
     conn.executescript("""
-      CREATE TABLE contacts (contact_id TEXT PRIMARY KEY, display_name TEXT);
+      CREATE TABLE contacts (contact_id TEXT PRIMARY KEY, display_name TEXT,
+        is_self INTEGER DEFAULT 0);
+      CREATE TABLE entity_blackholes (blackhole_id TEXT, entity_id TEXT,
+        normalized_name TEXT, canonical_name TEXT, aliases_json TEXT);
       CREATE TABLE contact_identifiers (contact_id TEXT, identifier TEXT, identifier_type TEXT);
       CREATE TABLE conversation_messages (message_id TEXT PRIMARY KEY, sender_id TEXT,
         is_from_self INTEGER DEFAULT 0, event_at TEXT);
@@ -28,7 +31,7 @@ def db(tmp_path):
     ]
     n = 0
     for cid, name, ident, count, last in people:
-        conn.execute("INSERT INTO contacts VALUES (?,?)", (cid, name))
+        conn.execute("INSERT INTO contacts VALUES (?,?,0)", (cid, name))
         conn.execute("INSERT INTO contact_identifiers VALUES (?,?,?)",
                      (cid, ident, "email" if "@" in ident else "phone"))
         for i in range(count):
@@ -118,10 +121,54 @@ def test_payload_carries_names_and_answer(db):
 def test_empty_corpus_falls_through(tmp_path):
     conn = sqlite3.connect(tmp_path / "e.db")
     conn.executescript("""
-      CREATE TABLE contacts (contact_id TEXT PRIMARY KEY, display_name TEXT);
+      CREATE TABLE contacts (contact_id TEXT PRIMARY KEY, display_name TEXT,
+        is_self INTEGER DEFAULT 0);
       CREATE TABLE contact_identifiers (contact_id TEXT, identifier TEXT, identifier_type TEXT);
       CREATE TABLE conversation_messages (message_id TEXT PRIMARY KEY, sender_id TEXT,
         is_from_self INTEGER DEFAULT 0, event_at TEXT);
     """)
     assert try_close_circle(conn, "Who's in my close circle?",
                             packet_resolution="facts_all") is None
+
+
+def test_a_blackholed_person_is_never_returned(db):
+    db.execute("INSERT INTO entity_blackholes VALUES ('b1','e1','alpha xray','Alpha Xray','[]')")
+    db.commit()
+    names = [p["person"] for p in compute_close_circle(db, now=NOW)]
+    assert "Alpha Xray" not in names
+    assert "Mike November" in names          # the rest of the circle is unaffected
+
+
+def test_a_blackholed_place_does_not_erase_a_person_sharing_a_token(db):
+    # "Old Saybrook - Jeff's Place" must not take out a person named Jeff:
+    # whole-name matching, never token overlap.
+    db.execute("INSERT INTO entity_blackholes VALUES "
+               "('b2','e2','mitch place','Mitch Place','[]')")
+    db.commit()
+    assert "Mike November" in [p["person"] for p in compute_close_circle(db, now=NOW)]
+
+
+def test_the_owner_is_not_in_their_own_close_circle(db):
+    db.execute("INSERT INTO contacts VALUES ('me','Jonny Johnson',1)")
+    db.execute("INSERT INTO contact_identifiers VALUES ('me','+15125551111','phone')")
+    db.execute("INSERT INTO conversation_messages VALUES ('own1','+15125551111',0,?)",
+               ("2026-08-25T09:00:00+00:00",))
+    db.commit()
+    assert "Jonny Johnson" not in [p["person"] for p in compute_close_circle(db, now=NOW)]
+
+
+def test_a_capped_list_says_what_it_cut(db):
+    out = try_close_circle(db, "Who's in my close circle?",
+                           packet_resolution="facts_all", limit=2)
+    assert out["close_circle_truncated"] == {
+        "shown": 2, "total": 4,
+        "note": "ranked by message volume; ask for more to see the rest"}
+    full = try_close_circle(db, "Who's in my close circle?",
+                            packet_resolution="facts_all", limit=50)
+    assert "close_circle_truncated" not in full
+
+
+def test_payload_carries_no_redundant_structured_block(db):
+    out = try_close_circle(db, "Who's in my close circle?", packet_resolution="facts_all")
+    assert "close_circle" not in out          # restated answer+items, nothing read it
+    assert out["items"] and out["answer"]
