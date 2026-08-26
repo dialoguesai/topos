@@ -1,18 +1,22 @@
-"""The `rel.closeness_tier` lens — dispatch, stats, and the guards on who counts.
+"""The `rel.closeness_tier` lens — dispatch, and reading the L1 rail.
 
-`relationships.social` has declared this lens since the catalog was written, and
-`synthesize_closeness` was implemented — but nothing dispatched `Pack.lenses`, so
+`relationships.social` has declared this lens since the catalog was written and
+`synthesize_closeness` was implemented, but nothing dispatched `synthesis[]`, so
 the predicate stayed empty while facts_direct asked for it on every closeness
 question.
+
+The lens READS `messenger_dyad_stats` rather than deriving interaction itself:
+the 2026-08-25 owner decision made the rail the analytical view and closeness_tier
+the durable fact view, sharing evidence rather than each computing it.
 """
 
 import sqlite3
 
 import pytest
 
-from topos.features.derivation.comms_stats import (comms_stats,
-                                                   looks_like_a_person_name,
-                                                   normalise_handle)
+from topos.features.derivation.person_bridge import (handle_to_entity,
+                                                     looks_like_a_person_name,
+                                                     normalise_handle)
 
 
 @pytest.fixture
@@ -23,42 +27,56 @@ def db(tmp_path):
       CREATE TABLE contact_identifiers (contact_id TEXT, identifier TEXT, identifier_type TEXT);
       CREATE TABLE entities (entity_id TEXT PRIMARY KEY, canonical_name TEXT,
         entity_type TEXT, is_self INTEGER DEFAULT 0, contact_id TEXT);
-      CREATE TABLE conversation_messages (message_id TEXT PRIMARY KEY, sender_id TEXT,
-        is_from_self INTEGER DEFAULT 0, event_at TEXT, conversation_id TEXT, source_id TEXT);
-      CREATE TABLE conversation_participants (conversation_id TEXT, contact_id TEXT);
-      CREATE TABLE entity_edges (edge_id TEXT, src_entity_id TEXT, dst_entity_id TEXT,
-        edge_type TEXT, weight REAL, valid_to TEXT);
       CREATE TABLE entity_blackholes (blackhole_id TEXT, normalized_name TEXT);
+      CREATE TABLE messenger_dyad_stats (dataset_id TEXT, a_key TEXT, b_key TEXT,
+        involves_self INTEGER, peer_class TEXT, total_msgs INTEGER, a_to_b INTEGER,
+        b_to_a INTEGER, balance REAL, reciprocal_periods INTEGER,
+        longest_reciprocal_streak_months INTEGER, recent_gap_days REAL, tie_state TEXT);
     """)
     conn.execute("INSERT INTO entities VALUES ('e-owner','self','person',1,NULL)")
-    for eid, w in (("e1", 40.0), ("e2", 90.0)):
-        conn.execute("INSERT INTO entity_edges VALUES (?, 'e-owner', ?, 'communicates_with', ?, NULL)",
-                     (f"edge-{eid}", eid, w))
-    # one mutual 1:1 partner, one group-only partner
-    for cid, name, ident, eid in [("c1", "Mutual Friend", "+15125550001", "e1"),
-                                  ("c2", "Group Only", "+15125550002", "e2")]:
+    people = [
+        # entity, name, handles                       (a person may hold several)
+        ("e1", "Two Phones", ["+15125550001", "+15125550011"]),
+        ("e2", "One Sided", ["+15125550002"]),
+        ("e3", "Gone Quiet", ["+15125550003"]),
+        ("e4", "A Newsletter", ["+15125550004"]),
+    ]
+    for eid, name, handles in people:
+        cid = f"c-{eid}"
         conn.execute("INSERT INTO contacts VALUES (?,?)", (cid, name))
-        conn.execute("INSERT INTO contact_identifiers VALUES (?,?,'phone')", (cid, ident))
         conn.execute("INSERT INTO entities VALUES (?,?,'person',0,?)", (eid, name, cid))
-    conn.execute("INSERT INTO conversation_participants VALUES ('conv1','c1')")
-    for c in ("c2", "cX", "cY"):
-        conn.execute("INSERT INTO conversation_participants VALUES ('conv2',?)", (c,))
+        for h in handles:
+            conn.execute("INSERT INTO contact_identifiers VALUES (?,?,'phone')", (cid, h))
 
-    n = 0
-    def msg(sender, is_self, conv, at="2026-08-20T09:00:00+00:00"):
-        nonlocal n
-        n += 1
-        conn.execute("INSERT INTO conversation_messages VALUES (?,?,?,?,?, 'imessage')",
-                     (f"m{n}", sender, is_self, at, conv))
-    for _ in range(6):
-        msg("+15125550001", 0, "conv1")          # inbound, 1:1
-        msg("owner-handle", 1, "conv1")          # outbound, 1:1
-    for _ in range(10):
-        msg("+15125550002", 0, "conv2")          # inbound, group
-    # far outside any 90d window — must not count
-    msg("+15125550001", 0, "conv1", at="2020-01-01T09:00:00+00:00")
+    def dyad(handle, total, balance, streak, gap, tie, peer="human"):
+        conn.execute(
+            "INSERT INTO messenger_dyad_stats VALUES ('ds',?, 'self', 1, ?, ?, 0, 0, ?, 3, ?, ?, ?)",
+            (handle, peer, total, balance, streak, gap, tie))
+
+    dyad("+15125550001", 100, 0.02, 6, 2.0, "active")     # split across two handles
+    dyad("+15125550011", 40, 0.05, 4, 5.0, "active")
+    dyad("+15125550002", 80, 0.9, 1, 3.0, "one_sided")    # volume, no reciprocity
+    dyad("+15125550003", 90, 0.05, 6, 400.0, "dormant")   # was close, long silent
+    dyad("+15125550004", 500, -1.0, 0, 1.0, "broadcast_only")
     conn.commit()
     return conn
+
+
+def _run(db, **kw):
+    from topos.features.derivation.packs import load_packs
+    from topos.features.derivation.registry import bundled_pack_dir
+    from topos.features.derivation.synthesize import run_pack_lenses
+
+    calls = []
+
+    class StubWriter:
+        def assert_pack_fact(self, **k):
+            calls.append(k)
+            return {"outcome": "written"}
+
+    pack = load_packs(bundled_pack_dir(), only=["relationships.social"])["relationships.social"]
+    report = run_pack_lenses(db, StubWriter(), pack, owner="e-owner", **kw)
+    return report, calls
 
 
 def test_handles_normalise_across_both_sides_of_the_join():
@@ -74,38 +92,57 @@ def test_an_identifier_is_never_a_person_name():
     assert not looks_like_a_person_name("apple.com@forgotten.name")
 
 
-def test_both_directions_are_counted_and_balance_is_derived(db):
-    st = comms_stats(db, window_days=90, now=_aug26())
-    mutual = st["e1"]
-    assert mutual["inbound"] == 6 and mutual["outbound"] == 6
-    assert mutual["initiation_balance"] == 0.5          # an even exchange
-    assert mutual["one_to_one_share"] == 1.0
+def test_the_bridge_maps_every_handle_a_person_holds(db):
+    by_handle = handle_to_entity(db)
+    assert by_handle[normalise_handle("+15125550001")] == "e1"
+    assert by_handle[normalise_handle("+15125550011")] == "e1"
 
 
-def test_a_one_sided_correspondent_is_visible_as_one(db):
-    st = comms_stats(db, window_days=90, now=_aug26())
-    group = st["e2"]
-    assert group["inbound"] == 10 and group["outbound"] == 0
-    assert group["initiation_balance"] == 0.0          # talking AT the owner
-    assert group["one_to_one_share"] == 0.0            # never in a 1:1 thread
+def test_one_person_with_several_handles_is_one_fact_with_combined_traffic(db):
+    _, calls = _run(db)
+    people = [c["value"]["person"] for c in calls]
+    assert people.count("Two Phones") == 1              # was listed twice, split 105/31
+    note = next(c["source_refs"][0]["note"] for c in calls
+                if c["value"]["person"] == "Two Phones")
+    assert "140 msgs" in note                           # 100 + 40, not either alone
 
 
-def test_the_evidence_window_excludes_older_traffic(db):
-    wide = comms_stats(db, window_days=None, now=_aug26())
-    narrow = comms_stats(db, window_days=90, now=_aug26())
-    assert wide["e1"]["inbound"] == 7                   # the 2020 message counts
-    assert narrow["e1"]["inbound"] == 6                 # ...and is outside 90d
+def test_a_broadcast_channel_is_not_a_relationship(db):
+    _, calls = _run(db)
+    assert "A Newsletter" not in [c["value"]["person"] for c in calls]
 
 
-def test_the_window_anchors_to_the_data_not_the_wall_clock(db):
-    """A node that has not synced for a fortnight must not report everyone quiet."""
-    st = comms_stats(db, window_days=90)                # no `now` supplied
-    assert st["e1"]["inbound"] == 6
+def test_reciprocity_and_liveness_outrank_raw_volume(db):
+    _, calls = _run(db)
+    order = [c["value"]["person"] for c in calls]
+    # 140 mutual and current beats 80 one-sided and 90 long-dormant
+    assert order[0] == "Two Phones"
+    assert order.index("Two Phones") < order.index("One Sided")
+    assert order.index("Two Phones") < order.index("Gone Quiet")
 
 
-def _aug26():
-    from datetime import datetime, timezone
-    return datetime(2026, 8, 26, tzinfo=timezone.utc)
+def test_the_owner_is_never_a_member_of_their_own_circle(db):
+    _, calls = _run(db)
+    assert "self" not in [c["value"]["person"] for c in calls]
+
+
+def test_a_blackholed_person_stays_erased(db):
+    db.execute("INSERT INTO entity_blackholes VALUES ('b1','two phones')")
+    db.commit()
+    _, calls = _run(db)
+    assert "Two Phones" not in [c["value"]["person"] for c in calls]
+
+
+def test_the_lens_abstains_when_the_rail_has_not_run(tmp_path):
+    conn = sqlite3.connect(tmp_path / "empty.db")
+    conn.executescript("""
+      CREATE TABLE contacts (contact_id TEXT PRIMARY KEY, display_name TEXT);
+      CREATE TABLE contact_identifiers (contact_id TEXT, identifier TEXT, identifier_type TEXT);
+      CREATE TABLE entities (entity_id TEXT PRIMARY KEY, canonical_name TEXT,
+        entity_type TEXT, is_self INTEGER DEFAULT 0, contact_id TEXT);
+    """)
+    report, calls = _run(conn)
+    assert calls == [] and report["facts_written"] == 0
 
 
 def test_the_dispatcher_runs_what_is_implemented_and_reports_the_rest(db):
@@ -113,8 +150,6 @@ def test_the_dispatcher_runs_what_is_implemented_and_reports_the_rest(db):
     'declared, not implemented' has to be a normal outcome, not an error."""
     from topos.features.derivation.packs import load_packs
     from topos.features.derivation.registry import bundled_pack_dir
-    from topos.features.derivation.synthesize import run_pack_lenses
-
     from topos.features.derivation.synthesize import _declared_lenses
 
     pack = load_packs(bundled_pack_dir(), only=["relationships.social"])["relationships.social"]
@@ -124,25 +159,8 @@ def test_the_dispatcher_runs_what_is_implemented_and_reports_the_rest(db):
     kinds = {(l.kind, tuple(l.predicates)) for l in _declared_lenses(pack)}
     assert ("graph_labeling", ("rel.closeness_tier",)) in kinds
 
-    calls = []
-
-    class StubWriter:
-        def assert_pack_fact(self, **kw):
-            calls.append(kw)
-            return {"outcome": "written"}
-
-    report = run_pack_lenses(db, StubWriter(), pack, owner="e-owner")
-    ran = {r["predicate"] for r in report["ran"]}
-    assert "rel.closeness_tier" in ran, report["skipped"]
-    # the owner is never a member of their own circle
-    people = {c["value"]["person"] for c in calls}
-    assert people == {"Mutual Friend", "Group Only"}
-    # the mutual 1:1 partner outranks the group-only one despite lower volume
-    tiers = {c["value"]["person"]: c["value"]["tier"] for c in calls}
-    order = ["inner_circle", "close", "regular", "peripheral"]
-    assert order.index(tiers["Mutual Friend"]) <= order.index(tiers["Group Only"])
-    # the lens's own floor is honoured rather than hardcoded
-    assert next(r for r in report["ran"] if r["predicate"] == "rel.closeness_tier")["window_days"] == 90
+    report, _ = _run(db)
+    assert "rel.closeness_tier" in {r["predicate"] for r in report["ran"]}
     assert any(s.get("reason") == "declared, not implemented" for s in report["skipped"])
 
 

@@ -87,86 +87,126 @@ def synthesize_closeness(conn: sqlite3.Connection, w: DerivationWriter, pack: Pa
                          *, window_days: Optional[int] = 90, now=None) -> List[Dict[str, Any]]:
     """`rel.closeness_tier` — the pack's declared graph_labeling lens.
 
-    Inputs are the two the lens declares: the `communicates_with` edges give WHO,
-    and `comms_stats` gives frequency, initiation balance, recency and channels.
-    An earlier cut used the edges alone, which made the tier a decayed-volume rank
-    with a relationship word on it — and the live edge ranking put "self" first
-    (weight 2772) and a bare phone number second, so it would have written
-    `{person: "self", tier: "inner_circle"}` and named a handle as a person.
+    Reads `messenger_dyad_stats`, the L1 directed-analytics rail, rather than
+    recomputing interaction from messages. The 2026-08-25 owner decision was that
+    the rail is the ANALYTICAL view and closeness_tier the durable FACT view, and
+    that they "share evidence but are not merged" — sharing means exactly one of
+    them derives it. The rail also knows things a second pass would not: session
+    initiation, reply latency, reciprocal streaks, drift, and which peers are
+    automated (29 of 180 dyads on this node).
 
-    Guards, in order: the owner is never their own circle; a name with no letters
-    is an identifier, not a person; a blackholed person stays erased.
+    `window_days` is kept for the lens's declared floor but the rail's stats are
+    lifetime rollups; recency enters through `recent_gap_days` instead, which is a
+    better answer to "is this live?" than a hard cut that erases a decade-old
+    friendship because nobody texted this quarter.
     """
-    from .comms_stats import comms_stats, looks_like_a_person_name
+    from .person_bridge import handle_to_entity, looks_like_a_person_name
 
-    stats = comms_stats(conn, window_days=window_days, now=now)
+    by_handle = handle_to_entity(conn)
     blocked = _blackholed(conn)
-
-    rows = conn.execute("""
-        SELECT e.edge_id, e.weight,
-               CASE WHEN e.src_entity_id=? THEN e.dst_entity_id ELSE e.src_entity_id END AS other
-        FROM entity_edges e
-        WHERE e.edge_type='communicates_with' AND e.valid_to IS NULL
-          AND (e.src_entity_id=? OR e.dst_entity_id=?) ORDER BY e.weight DESC""",
-        (owner, owner, owner)).fetchall()
+    try:
+        rows = conn.execute(
+            "SELECT a_key, b_key, total_msgs, balance, reciprocal_periods,"
+            "       longest_reciprocal_streak_months, recent_gap_days, tie_state"
+            "  FROM messenger_dyad_stats"
+            " WHERE involves_self=1 AND peer_class='human'").fetchall()
+    except sqlite3.Error:
+        return []                      # the rail has not run yet
 
     scored = []
-    for edge_id, weight, other in rows:
-        if other == owner:
+    per_entity: Dict[str, Dict[str, Any]] = {}
+    for a_key, b_key, total, balance, recip_periods, streak, gap, tie_state in rows:
+        # One side of an owner dyad is the owner; the other is the partner.
+        partner_key = b_key if str(a_key).strip().lower() in _SELF_KEYS else a_key
+        if str(partner_key).strip().lower() in _SELF_KEYS:
+            continue
+        if str(tie_state or "") == "broadcast_only":
+            continue                   # a channel talking at the owner is not a tie
+        entity_id = by_handle.get(_norm_handle(partner_key))
+        if not entity_id or entity_id == owner:
             continue
         ent = conn.execute(
             "SELECT canonical_name, entity_type, COALESCE(is_self,0) FROM entities WHERE entity_id=?",
-            (other,)).fetchone()
+            (entity_id,)).fetchone()
         if not ent or ent[1] != "person" or int(ent[2] or 0) == 1:
             continue
         name = str(ent[0] or "")
         if not looks_like_a_person_name(name) or _norm_name(name) in blocked:
             continue
-        st = stats.get(other)
-        if not st:
-            continue                      # no interaction inside the evidence window
-        total = st["inbound"] + st["outbound"]
+        total = int(total or 0)
         if total < 2:
-            continue                      # a single message is not a relationship
-        # Balanced exchange counts for more than raw volume: 1.0 at an even split,
-        # 0.0 when one side does all the talking.
-        reciprocity = 1.0 - min(1.0, abs(0.5 - st["initiation_balance"]) * 2)
-        volume = math.log1p(total)
-        intimacy = st["one_to_one_share"]
-        # Intimacy is weighted lightly (0.7-1.0, not 0.5-1.0) on purpose: it comes
-        # from `conversation_participants`, which on this node carries 206 rows under
-        # retired ids against 70 canonical, so "this thread is a group" is a weaker
-        # claim than the counts are. At the old weight one person with 201 balanced
-        # group messages fell below another with 25 private ones.
-        score = volume * (0.5 + 0.5 * reciprocity) * (0.7 + 0.3 * intimacy)
-        scored.append((edge_id, other, name, st, total, score))
+            continue                   # a single message is not a relationship
+        # One PERSON can hold several handles, and the rail keys dyads by handle:
+        # Hotel India has two numbers and arrived as two dyads (105 msgs and 31),
+        # which both split her traffic and listed her twice in the same answer.
+        acc = per_entity.setdefault(entity_id, {
+            "name": name, "total": 0, "bal_weighted": 0.0,
+            "recip_periods": 0, "streak": 0, "gap": None, "tie": None})
+        acc["total"] += total
+        acc["bal_weighted"] += float(balance or 0.0) * total
+        acc["recip_periods"] = max(acc["recip_periods"], int(recip_periods or 0))
+        acc["streak"] = max(acc["streak"], int(streak or 0))
+        g_here = float(gap) if gap is not None else None
+        if g_here is not None and (acc["gap"] is None or g_here < acc["gap"]):
+            acc["gap"] = g_here        # most recent contact across her channels
+        if _TIE_RANK.get(str(tie_state or ""), 9) < _TIE_RANK.get(str(acc["tie"] or ""), 9):
+            acc["tie"] = tie_state     # the liveliest channel describes the tie
+        continue
 
-    scored.sort(key=lambda r: (-r[5], r[2]))
+    for entity_id, acc in per_entity.items():
+        name, total = acc["name"], acc["total"]
+        balance = acc["bal_weighted"] / total if total else 0.0
+        recip_periods, streak = acc["recip_periods"], acc["streak"]
+        gap, tie_state = acc["gap"], acc["tie"]
+
+        # `balance` is -1..1 and 0 is an even exchange, so |balance| IS the
+        # one-sidedness the old cut had to derive from raw counts.
+        reciprocity = 1.0 - min(1.0, abs(float(balance or 0.0)))
+        persistence = min(1.0, float(streak or 0) / 6.0)
+        g = float(gap) if gap is not None else 9999.0
+        recency = 1.0 if g <= 14 else (0.7 if g <= 60 else (0.4 if g <= 180 else 0.2))
+        tie_mult = {"active": 1.0, "cooling": 0.8, "one_sided": 0.5,
+                    "dormant": 0.4}.get(str(tie_state or ""), 0.7)
+        score = (math.log1p(total) * (0.4 + 0.6 * reciprocity)
+                 * (0.6 + 0.4 * persistence) * recency * tie_mult)
+        scored.append((entity_id, name, total, balance, recip_periods, streak,
+                       gap, tie_state, score))
+
+    scored.sort(key=lambda r: (-r[8], r[1]))
     n = len(scored)
     results: List[Dict[str, Any]] = []
-    for i, (edge_id, other, name, st, total, score) in enumerate(scored):
+    for i, (entity_id, name, total, balance, recip_periods, streak, gap, tie_state, score) in enumerate(scored):
         pct = (i + 1) / n if n else 1.0
         tier = ("inner_circle" if pct <= 0.10 else
                 "close" if pct <= 0.35 else
                 "regular" if pct <= 0.75 else "peripheral")
-        val = {"person": name, "tier": tier}
-        # Confidence tracks how much evidence there is, and never saturates the way
-        # `min(0.85, 0.5 + weight/200)` did — live weights reach 2772, so every row
-        # pinned to 0.85 and the number carried nothing.
         confidence = round(min(0.9, 0.35 + math.log1p(total) / 12.0), 3)
         r = w.assert_pack_fact(
             pack=pack, predicate="rel.closeness_tier", subject_entity_id=owner,
-            value=val, actor_role="synthesis",
-            source_refs=[{"table": "entity_edges", "record_id": edge_id,
-                          "note": (f"{st['inbound']} in / {st['outbound']} out over "
-                                   f"{window_days}d, balance {st['initiation_balance']}, "
-                                   f"1:1 share {st['one_to_one_share']}, "
-                                   f"last {st['last_contact']}")}],
-            confidence=confidence, object_entity_id=other)
+            value={"person": name, "tier": tier}, actor_role="synthesis",
+            source_refs=[{"table": "messenger_dyad_stats", "record_id": f"{entity_id}",
+                          "note": (f"{total} msgs, balance {balance}, "
+                                   f"{recip_periods} reciprocal periods, "
+                                   f"{streak}mo reciprocal streak, "
+                                   f"last contact {gap}d ago, tie {tie_state}")}],
+            confidence=confidence, object_entity_id=entity_id)
         results.append({"predicate": "rel.closeness_tier", "person": name, "tier": tier,
-                        "inbound": st["inbound"], "outbound": st["outbound"],
+                        "msgs": total, "balance": balance, "tie_state": tie_state,
                         "score": round(score, 2), "outcome": r["outcome"]})
     return results
+
+
+#: Both spellings the rail uses for the owner side of a dyad.
+_SELF_KEYS = {"self", "me", "owner"}
+
+#: Liveliest first — when one person reaches the owner on several channels, the
+#: most active of them describes the tie.
+_TIE_RANK = {"active": 0, "cooling": 1, "one_sided": 2, "dormant": 3}
+
+
+def _norm_handle(raw: Any) -> str:
+    from .person_bridge import normalise_handle
+    return normalise_handle(raw)
 
 
 def _norm_name(name: str) -> str:
