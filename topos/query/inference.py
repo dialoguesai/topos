@@ -22,11 +22,26 @@ def build_inference_context_packet(filtered_context: Dict[str, Any], *, max_char
     The retrieval packet lists `scores` LAST (after clusters/hits/graph), so a
     naive prefix truncation amputated exactly the evidence the model needed —
     it then honestly answered "unknown" to well-supported queries. Reorder to
-    evidence-first and trim the low-signal furniture before cutting."""
+    evidence-first and trim the low-signal furniture before cutting.
+
+    INSERTION ORDER IS THE TRUNCATION-PRIORITY SYSTEM: json.dumps preserves it,
+    and the char slice below eats the tail. Honesty metadata outranks evidence —
+    evidence says what was found; honesty keys (`truncated`, `empty_cause`,
+    `exclusion`) say what this packet CANNOT claim. Cutting them converts a
+    bounded result into a false assertion, and they are needed precisely on the
+    large packets that overflow the budget (a row cap fires on high-data queries;
+    high-data queries are the ones that truncate) — so they go FIRST, before the
+    evidence they qualify. Flagged by a peer session 2026-08-25 after the
+    original copy-through check missed the serialization slice."""
     ctx = dict(filtered_context or {})
     compact: Dict[str, Any] = {}
     for key in ("scope_id", "access_mode"):
         if key in ctx:
+            compact[key] = ctx[key]
+    # Honesty metadata first — see docstring. These keys exist to prevent the model
+    # reading an absence as a fact about the world; they must survive any cut.
+    for key in ("truncated", "empty_cause", "exclusion"):
+        if key in ctx and ctx[key] is not None:
             compact[key] = ctx[key]
     # Packet resolution (F2.6 / owner decision 2026-08-25): at 'facts'/'facts_all' the
     # fact items carry content, and it is emitted as a STRUCTURED block with its own
@@ -74,10 +89,16 @@ def build_inference_context_packet(filtered_context: Dict[str, Any], *, max_char
         if key not in compact and key not in ("semantic_hits", "topic_clusters", "graph", "scores"):
             compact[key] = value
     raw = json.dumps(compact, default=str, separators=(",", ":"))
-    truncated = len(raw) > max_chars
-    if truncated:
-        raw = raw[:max_chars]
-    return {"context": raw, "truncated": truncated}
+    char_truncated = len(raw) > max_chars
+    if char_truncated:
+        # A bare slice hands the model invalid JSON that reads as a complete
+        # packet. Say the cut happened, visibly, at the cut.
+        raw = raw[:max_chars] + " …[CONTEXT CUT AT CHAR LIMIT]"
+    # `context_truncated` = THIS function cut the serialized string (renamed from
+    # `truncated` 2026-08-25: it collided with the retrieval packet's row-cap
+    # `truncated` dict — two meanings, one key, same return path; no committed
+    # consumer read the old name).
+    return {"context": raw, "context_truncated": char_truncated}
 
 
 def run_query_inference(
