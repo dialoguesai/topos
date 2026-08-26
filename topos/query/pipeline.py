@@ -766,8 +766,19 @@ class QueryPipelineOrchestrator:
         )
         timings.game_layer_ms = now_ms() - _t0
         if access_mode == "inference" and public.payload.get("answer_type") != "band":
-            # Band answers are deterministic verdicts (minimal disclosure) —
-            # the LLM pass would only replace them with prose.
+            # C7 facts-direct (W3.1): a known-item ask with live facts gets its
+            # exact values, validity dates and evidence counts with ZERO LLM —
+            # same contract as `band`: deterministic answer_types are final.
+            try:
+                from .facts_direct import try_facts_direct
+                direct = try_facts_direct(
+                    db_conn, query_text, packet_resolution=_pr["effective"])
+            except Exception:  # noqa: BLE001 — this lane must never break a turn
+                direct = None
+            if direct is not None:
+                public.payload.update(direct)
+        if (access_mode == "inference"
+                and public.payload.get("answer_type") not in ("band", "facts")):
             _t0 = now_ms()
             inf = await asyncio.to_thread(
                 run_query_inference,
