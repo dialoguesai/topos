@@ -163,7 +163,8 @@ def run_derivation_batch(
                                   "source_id": rec["source_id"]}],
                     confidence=a["confidence"],
                     occurrence=a["occurrence"],   # NEVER defaulted to record date
-                    quote=a.get("quote", ""), about=a.get("about", "owner"))
+                    quote=a.get("quote", ""), about=a.get("about", "owner"),
+                    event_date=rec["date"] or None)
                 if out.get("outcome") in ("written", "corroborated", "retelling_merged",
                                           "field_update", "corrected", "superseded"):
                     written += 1

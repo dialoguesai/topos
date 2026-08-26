@@ -335,3 +335,30 @@ def test_parse_role_evidence_and_loss_guard():
     lucs = [a for a in valid if isinstance(a["value"], dict) and a["value"].get("person") == "Luc"]
     assert lucs and lucs[0]["about"] == "unclear"      # never silently owner
     assert rejects == 1                                 # loss-without-death-evidence rejected
+
+
+# --- evidence-time anchoring (owner rule 2026-08-26) ---
+def test_valid_from_anchors_to_evidence_time(a3_writer):
+    w, conn = a3_writer
+    out = w.assert_pack_fact(pack=_work_pack(), predicate="work.project",
+        subject_entity_id="ent_owner", value={"project": "old thing", "status": "active"},
+        actor_role="authored", source_refs=[{"table": "t", "record_id": "r1"}],
+        confidence=0.9, about="owner", event_date="2026-05-14")
+    vf = conn.execute("SELECT valid_from FROM signal_objects WHERE object_id=?",
+                      (out["object_id"],)).fetchone()[0]
+    assert str(vf).startswith("2026-05-14")
+
+def test_occurrence_outranks_event_date(a3_writer):
+    w, conn = a3_writer
+    out = _fire(w, "d1", occurrence="2026-04-21")
+    vf = conn.execute("SELECT valid_from FROM signal_objects WHERE object_id=?",
+                      (out["object_id"],)).fetchone()[0]
+    assert str(vf).startswith("2026-04-21")
+
+
+def test_materializer_display_value_head_not_json():
+    from topos.features.entities.fact_materializer import _display_value
+    assert _display_value('{"collaborators": null, "project": "qr code app", "status": "active"}') == "qr code app"
+    assert _display_value('{"person": "Dad", "role": "parent"}') == "Dad"
+    assert _display_value("plain string") == "plain string"
+    assert _display_value(None) == ""
