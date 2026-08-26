@@ -48,8 +48,6 @@ The machine-readable twin of each release is
 - **[S1] Derivation extractor provenance stamp told the truth all along — the constant
   didn't.** `writer.py` carried a stale local `TEMPLATE_VERSION = "shadow-1"`, stamping
   every fact from later templates as shadow-1; it now imports the real one.
-
-### Fixed
 - **[S1] Honesty metadata now outranks evidence in the inference packet's truncation
   order.** The packet builder's char slice ate the TAIL of the serialized context, and the
   catch-all loop placed honesty keys (`truncated` row-cap markers, `exclusion`,
