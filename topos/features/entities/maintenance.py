@@ -735,8 +735,16 @@ def compute_communities(conn: sqlite3.Connection) -> Dict[str, int]:
             # A community label is a NAME: name-length, from a name-natured type.
             def _labelable(eid: str) -> bool:
                 nm = names.get(eid, "").strip()
-                return (bool(nm) and len(nm) <= 40 and len(nm.split()) <= 4
-                        and types.get(eid, "") not in ("goal", "conversation"))
+                if not nm or len(nm) > 40 or len(nm.split()) > 4:
+                    return False
+                if types.get(eid, "") in ("goal", "conversation"):
+                    return False
+                # identifier-shaped entity names (a phone number, a bare id)
+                # labeled live communities on the first pass — a label needs
+                # letters and must not be an identifier surface
+                if not any(c.isalpha() for c in nm) or nm.startswith("+"):
+                    return False
+                return True
 
             type_counts: Dict[str, int] = {}
             for eid in ranked:
