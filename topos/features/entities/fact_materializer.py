@@ -360,7 +360,7 @@ def _display_value(raw) -> str:
                 return hv.strip()
         # NO fallback to arbitrary fields: a description/free-text value is
         # narrative, not identity — minting it produced sentence-named nodes
-        # ("rode with albi on the way to…"). A structured value with no
+        # ("rode with a friend on the way to…"). A structured value with no
         # identity key mints nothing; the fact itself still exists.
         return ""
     return str(v or "").strip()
