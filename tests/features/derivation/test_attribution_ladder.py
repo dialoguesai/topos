@@ -471,3 +471,59 @@ def test_noop_window_survives_bare_date_valid_from(a3_writer):
     # same value again, same model — must NOT crash on the bare-date stamp
     out = w.assert_pack_fact(**{**a, "source_refs": [{"table": "t", "record_id": "r2"}]})
     assert out["outcome"] in ("noop", "corroborated")
+
+
+# --- W4.6: promote + revise (the fact editor's engine half) ---
+def test_promote_quarantined_with_new_person(a3_writer):
+    w, conn = a3_writer
+    conn.executescript("""
+      ALTER TABLE fact_conflicts ADD COLUMN pack_id TEXT;
+      ALTER TABLE fact_conflicts ADD COLUMN source_refs_json TEXT;
+      ALTER TABLE fact_conflicts ADD COLUMN quote TEXT;
+      ALTER TABLE fact_conflicts ADD COLUMN about_hint TEXT;
+      CREATE TABLE IF NOT EXISTS derivation_training_ledger (
+        ledger_id TEXT PRIMARY KEY, ts TEXT DEFAULT (datetime('now')), stage TEXT,
+        pack_id TEXT, pack_version TEXT, template_version TEXT, extract_model TEXT,
+        verifier_model TEXT, source_table TEXT, record_id TEXT, actor_role TEXT,
+        predicate TEXT, value_json TEXT, about TEXT, occurrence TEXT, quote TEXT,
+        confidence REAL, vstatus TEXT, vreason TEXT, written_object_id TEXT);
+    """)
+    # quarantine one (as the writer would, with provenance)
+    out = w.assert_pack_fact(pack=_rel_pack(), predicate="rel.relationship",
+        subject_entity_id="ent_owner", value={"person": "Luc", "role": "partner"},
+        actor_role="authored", source_refs=[{"table": "t", "record_id": "r9"}],
+        confidence=0.9, quote="her boyfriend Luc", about="other:Wiki Unknownperson")
+    assert out["outcome"] == "quarantined"
+    cid = conn.execute("SELECT conflict_id FROM fact_conflicts").fetchone()[0]
+    from topos.features.derivation.surfaces import promote_conflict
+    res = promote_conflict(conn, cid, new_person_name="Wiki Vasquez")
+    assert res["outcome"] in ("written", "corroborated")
+    subj = res["subject_entity_id"]
+    name = conn.execute("SELECT canonical_name FROM entities WHERE entity_id=?", (subj,)).fetchone()[0]
+    assert name == "Wiki Vasquez"
+    assert conn.execute("SELECT status FROM fact_conflicts WHERE conflict_id=?", (cid,)).fetchone()[0] == "accepted"
+    gold = conn.execute("SELECT COUNT(*) FROM derivation_training_ledger WHERE stage='owner_promote'").fetchone()[0]
+    assert gold == 1
+
+def test_revise_fact_field_and_history(a3_writer):
+    w, conn = a3_writer
+    conn.executescript("""
+      CREATE TABLE IF NOT EXISTS derivation_training_ledger (
+        ledger_id TEXT PRIMARY KEY, ts TEXT DEFAULT (datetime('now')), stage TEXT,
+        pack_id TEXT, pack_version TEXT, template_version TEXT, extract_model TEXT,
+        verifier_model TEXT, source_table TEXT, record_id TEXT, actor_role TEXT,
+        predicate TEXT, value_json TEXT, about TEXT, occurrence TEXT, quote TEXT,
+        confidence REAL, vstatus TEXT, vreason TEXT, written_object_id TEXT);
+    """)
+    out = w.assert_pack_fact(pack=_rel_pack(), predicate="rel.relationship",
+        subject_entity_id="ent_owner", value={"person": "Wiki", "role": "friend", "status": "active"},
+        actor_role="authored", source_refs=[{"table": "t", "record_id": "r1"}],
+        confidence=0.95, quote="My friend Wiki", about="owner")
+    oid = out["object_id"]
+    from topos.features.derivation.surfaces import revise_fact
+    res = revise_fact(conn, oid, value={"person": "Wiki", "role": "close_friend", "status": "active"})
+    assert res["outcome"] in ("written", "superseded", "corrected")
+    old = conn.execute("SELECT valid_to, updated_by FROM signal_objects WHERE object_id=?", (oid,)).fetchone()
+    assert old[0] is not None and old[1] == "owner_revision"
+    live = conn.execute("SELECT payload_json FROM signal_objects WHERE object_id=?", (res["object_id"],)).fetchone()[0]
+    assert "close_friend" in live

@@ -154,18 +154,33 @@ class DerivationWriter:
         ).fetchone()
         return row[0] if row else None
 
-    def _quarantine(self, subject_entity_id: str, predicate: str, value, confidence: float, reason: str):
+    def _quarantine(self, subject_entity_id: str, predicate: str, value, confidence: float,
+                    reason: str, *, pack=None, source_refs=None, quote: str = "", about: str = ""):
         """A3 quarantine: nothing is silently lost — unroutable assertions land in
-        fact_conflicts (the W4.2 review queue) with a sentinel incumbent id."""
+        fact_conflicts (the review queue) WITH their provenance (migration 68), so
+        the owner can promote them into facts without minting evidence-less rows."""
         import uuid as _uuid
-        self.conn.execute(
-            """INSERT INTO fact_conflicts (conflict_id, subject_entity_id, predicate,
-                   incumbent_object_id, challenger_value, challenger_confidence)
-               VALUES (?, ?, ?, ?, ?, ?)""",
-            (f"cfl_{_uuid.uuid4().hex[:12]}", subject_entity_id, predicate,
-             f"quarantine:{reason}", json.dumps(value, ensure_ascii=False, default=str)[:500],
-             float(confidence)),
-        )
+        hint = about[6:] if isinstance(about, str) and about.startswith("other:") else ""
+        try:
+            self.conn.execute(
+                """INSERT INTO fact_conflicts (conflict_id, subject_entity_id, predicate,
+                       incumbent_object_id, challenger_value, challenger_confidence,
+                       pack_id, source_refs_json, quote, about_hint)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (f"cfl_{_uuid.uuid4().hex[:12]}", subject_entity_id, predicate,
+                 f"quarantine:{reason}", json.dumps(value, ensure_ascii=False, default=str)[:500],
+                 float(confidence), getattr(pack, "pack", None),
+                 json.dumps(source_refs or [], default=str)[:800], (quote or "")[:200], hint),
+            )
+        except Exception:  # noqa: BLE001 — pre-migration-68 schema
+            self.conn.execute(
+                """INSERT INTO fact_conflicts (conflict_id, subject_entity_id, predicate,
+                       incumbent_object_id, challenger_value, challenger_confidence)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (f"cfl_{_uuid.uuid4().hex[:12]}", subject_entity_id, predicate,
+                 f"quarantine:{reason}", json.dumps(value, ensure_ascii=False, default=str)[:500],
+                 float(confidence)),
+            )
         self.stats["quarantined"] = self.stats.get("quarantined", 0) + 1
 
     def assert_pack_fact(
@@ -200,11 +215,13 @@ class DerivationWriter:
                     self.stats["routed_dossier"] = self.stats.get("routed_dossier", 0) + 1
                 else:
                     self._quarantine(subject_entity_id, predicate, value, confidence,
-                                     reason=f"dossier_unresolved:{about[6:][:40]}")
+                                     reason=f"dossier_unresolved:{about[6:][:40]}",
+                                     pack=pack, source_refs=source_refs, quote=quote, about=about)
                     return {"outcome": "quarantined", "reason": "about=other unresolvable"}
             else:  # unclear — two passes could not agree on a subject
                 self._quarantine(subject_entity_id, predicate, value, confidence,
-                                 reason="about_unclear")
+                                 reason="about_unclear",
+                                 pack=pack, source_refs=source_refs, quote=quote, about=about)
                 return {"outcome": "quarantined", "reason": "about unclear"}
         synth_preds = {q for e in pack.synthesis for q in (e.get("predicate") if isinstance(e.get("predicate"), list) else [e.get("predicate")])}
         if actor_role == "synthesis":
@@ -228,7 +245,8 @@ class DerivationWriter:
         if pred.name == "asp.milestone" and isinstance(value, dict):
             if not self._milestone_attaches(subject_entity_id, str(value.get("goal_ref") or "")):
                 self._quarantine(subject_entity_id, predicate, value, confidence,
-                                 reason="milestone_without_goal")
+                                 reason="milestone_without_goal",
+                                 pack=pack, source_refs=source_refs, quote=quote, about=about)
                 return {"outcome": "quarantined", "reason": "milestone attaches to no stored goal"}
         # F1.6 guard — every leaf of the value
         for leaf in _value_leaves(value):

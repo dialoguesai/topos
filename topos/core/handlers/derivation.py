@@ -119,3 +119,58 @@ async def handle_run_pack_backfill(message):
         return {"id": req_id, "status": "error", "error": str(exc)}
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("get_derivation_schema")
+async def handle_get_derivation_schema(message):
+    req_id = message.get("id")
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    try:
+        from ...features.derivation.surfaces import predicate_schemas
+        return {"id": req_id, "status": "ok",
+                "payload": {"status": "ok", "predicates": predicate_schemas(conn)}}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("promote_fact_conflict")
+async def handle_promote_fact_conflict(message):
+    req_id = message.get("id")
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    p = message.get("payload") or {}
+    try:
+        from ...features.derivation.surfaces import promote_conflict
+        out = promote_conflict(conn, str(p.get("conflict_id") or ""),
+                               subject_entity_id=str(p.get("subject_entity_id") or ""),
+                               new_person_name=str(p.get("new_person_name") or ""),
+                               value=p.get("value"), to_owner=bool(p.get("to_owner")))
+        return {"id": req_id, "status": "ok", "payload": {"status": "ok", **out}}
+    except ValueError as exc:
+        return {"id": req_id, "status": "error", "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("revise_pack_fact")
+async def handle_revise_pack_fact(message):
+    req_id = message.get("id")
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    p = message.get("payload") or {}
+    try:
+        from ...features.derivation.surfaces import revise_fact
+        out = revise_fact(conn, str(p.get("object_id") or ""),
+                          value=p.get("value"),
+                          subject_entity_id=str(p.get("subject_entity_id") or ""),
+                          evidence_date=str(p.get("evidence_date") or ""),
+                          asserted_by=str(p.get("asserted_by") or ""))
+        return {"id": req_id, "status": "ok", "payload": {"status": "ok", **out}}
+    except ValueError as exc:
+        return {"id": req_id, "status": "error", "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}

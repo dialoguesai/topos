@@ -293,6 +293,7 @@ REASONS = frozenset(
         "now",
         "query_text_capped",
         "retrieval_parts",
+        "row_cap_reached",
         "retrieval_text",
         "single_call_bootstrap",
         "source_has_live_tools",

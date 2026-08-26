@@ -991,6 +991,20 @@ def _canonical_table_absent(adapters: AdapterBundle, table: str) -> bool:
     return row is None
 
 
+#: Rows returned per canonical table on a raw read. Fetched as CAP + 1 so that
+#: truncation is a FACT rather than an inference: getting CAP + 1 back proves more
+#: rows exist, where getting exactly CAP is ambiguous — a table with exactly that
+#: many rows is indistinguishable from one that was cut off.
+#:
+#: Measured 2026-08-25: a scheduled report stated that something had not happened,
+#: when the evidence that it had was one row past the cap. The query returned
+#: exactly CAP rows and the model read that as a fact about the world. Nothing in
+#: the response said the result had been cut off, so no consumer — model, ledger or
+#: human — could tell an absence from a truncation. That is what
+#: `public_result.truncated` now says.
+CANONICAL_ROW_CAP = 100
+
+
 def _list_canonical_rows(
     adapters: AdapterBundle,
     table: str,
@@ -6274,6 +6288,7 @@ class DefaultSignalRetrievalAdapter:
                 except Exception:
                     raw_rare_tokens = []
                     raw_rare_groups = None
+            truncated_tables: List[str] = []
             for table in manifest.canonical_tables:
                 table_rows = _route_canonical_rows(
                     self._adapters,
@@ -6281,11 +6296,17 @@ class DefaultSignalRetrievalAdapter:
                     manifest=manifest,
                     query_text=query_text,
                     source_ids=source_ids,
-                    limit=100,
+                    limit=CANONICAL_ROW_CAP + 1,
                     disclosure_tier=request.disclosure_tier,
                     rare_query_tokens=raw_rare_tokens,
                     rare_query_token_groups=raw_rare_groups,
                 )
+                # Truncation decided BEFORE any downstream filtering: the cap applies
+                # to what the store handed back, and a later filter narrowing 101 rows
+                # to 3 does not make the underlying read complete.
+                if len(table_rows) > CANONICAL_ROW_CAP:
+                    truncated_tables.append(table)
+                    table_rows = table_rows[:CANONICAL_ROW_CAP]
                 table_rows = [_redact_row_for_scope(manifest.scope_id, table, row) for row in table_rows]
                 touched.append("canonical")
                 if table == "profile_records" and "certification" in (query_text or "").lower():
@@ -6323,11 +6344,27 @@ class DefaultSignalRetrievalAdapter:
                 table_rows = _apply_filter_manifest_rows(table_rows, request.filter_manifest)
                 max_rows = int((request.filter_manifest or {}).get("max_rows") or 0)
                 if max_rows > 0:
+                    if len(table_rows) > max_rows and table not in truncated_tables:
+                        truncated_tables.append(table)
                     table_rows = table_rows[:max_rows]
                 counts[table] = len(table_rows)
                 for row in table_rows:
                     rows.append({"_table": table, **row})
             packet["rows"] = _strip_forbidden(rows, manifest.must_not_retrieve)
+            if truncated_tables:
+                # Rides inside public_result, the pattern the field contract already
+                # documents for empty_cause: a nested field survives every seam
+                # without widening required_return.
+                packet["truncated"] = {
+                    "row_cap": CANONICAL_ROW_CAP,
+                    "tables": sorted(truncated_tables),
+                    "note": (
+                        "More rows exist than were returned. An absence in this result "
+                        "is NOT evidence the thing does not exist."
+                    ),
+                }
+                if ledger is not None:
+                    ledger.record(_N.STAGE_RETRIEVAL, "capped", "row_cap_reached")
         elif mode == "summary":
             # Query-aware building only applies to actual queries. Ranked
             # clusters load even for browse requests (no query_text), and
