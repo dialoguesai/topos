@@ -163,3 +163,49 @@ def test_a3_owner_unchanged_default(a3_writer):
     w, conn = a3_writer
     out = _rel_assert(w, "owner")
     assert out["outcome"] not in ("quarantined",)
+
+
+# --- W2.1 event-identity keying (measured: 1 firing -> 6 events, 1 death -> 5) ---
+def _work_pack():
+    return load_packs(PACK_DIR, only=["work.career"])["work.career"]
+
+def _fire(w, date, org=None, occurrence=None):
+    v = {"event": "fired"}
+    if org: v["org"] = org
+    return w.assert_pack_fact(pack=_work_pack(), predicate="work.career_event",
+        subject_entity_id="ent_owner", value=v, actor_role="authored",
+        source_refs=[{"table": "t", "record_id": f"r-{date}-{occurrence}"}],
+        confidence=0.95, occurrence=occurrence, about="owner")
+
+def test_retelling_same_event_merges(a3_writer):
+    w, conn = a3_writer
+    out1 = _fire(w, "d1", occurrence="2026-04-21")
+    assert out1["outcome"] == "written"
+    out2 = _fire(w, "d2", occurrence="2026-04-22")      # told to someone else next day
+    assert out2["outcome"] == "retelling_merged"
+    out3 = _fire(w, "d3", occurrence=None)              # undated retelling months later
+    assert out3["outcome"] == "retelling_merged"
+    live = conn.execute("SELECT COUNT(*) FROM signal_objects WHERE object_type='fact'"
+                        " AND valid_to IS NULL AND object_key LIKE '%career_event%'").fetchone()[0]
+    assert live == 1                                     # ONE firing, one fact
+
+def test_distinct_events_do_not_merge(a3_writer):
+    w, conn = a3_writer
+    assert _fire(w, "d1", occurrence="2026-01-10")["outcome"] == "written"
+    out = _fire(w, "d2", occurrence="2026-06-10")        # 5 months later, dated: a real second event
+    assert out["outcome"] == "written"
+
+def test_loss_description_variants_merge(a3_writer):
+    w, conn = a3_writer
+    pack = _rel_pack()
+    def loss(desc, occ):
+        return w.assert_pack_fact(pack=pack, predicate="rel.relationship_event",
+            subject_entity_id="ent_owner", value={"person": "grandpa", "event": "loss", "description": desc},
+            actor_role="authored", source_refs=[{"table": "t", "record_id": f"r{occ}-{desc[:6]}"}],
+            confidence=0.95, occurrence=occ, about="owner")
+    assert loss("passed over the weekend", "2026-04-27")["outcome"] == "written"
+    r2 = loss("died today while gardening", "2026-05-06")   # retelling, different description+date
+    assert r2["outcome"] in ("retelling_merged", "field_update"), r2
+    live = conn.execute("SELECT COUNT(*) FROM signal_objects WHERE object_type='fact'"
+                        " AND valid_to IS NULL AND object_key LIKE '%relationship_event%grandpa%'").fetchone()[0]
+    assert live == 1

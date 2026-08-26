@@ -51,6 +51,9 @@ class Predicate:
                                                  # not an instance of this predicate at all
                                                  # (a "habit" with no nameable cadence is a task)
     key_fields: Optional[List[str]] = None  # identity fields of a structured value (the rest is STATE);
+    event_identity: str = "windowed:45"     # episodic dedup: once | windowed:<days> | dated
+                                            # (retellings of one life event must corroborate, not multiply —
+                                            #  measured 2026-08-26: one firing -> 6 events, one death -> 5)
                                             # e.g. rel.relationship keys on [person] so role/status changes
                                             # supersede instead of accumulating parallel truths
     note: str = ""
@@ -111,6 +114,9 @@ def load_pack(path: Path, known_namespaces: Optional[set] = None) -> Pack:
         _require(bool(_NAME_RE.match(name)), pid, f"predicate name not namespaced: {name!r}")
         _require(p.get("cardinality") in CARDINALITIES, pid, f"{name}: bad cardinality")
         _require(p.get("temporal") in TEMPORALS, pid, f"{name}: bad temporal")
+        ei = str(p.get("event_identity") or "windowed:45")
+        _require(ei in ("once", "dated") or (ei.startswith("windowed:") and ei[9:].isdigit()),
+                 pid, f"{name}: bad event_identity {ei}")
         _require(p.get("altitude") in ALTITUDES, pid, f"{name}: bad altitude")
         sens = p.get("sensitivity")
         _require(sens is None or sens in SENSITIVITY, pid, f"{name}: bad sensitivity override")
@@ -119,6 +125,7 @@ def load_pack(path: Path, known_namespaces: Optional[set] = None) -> Pack:
             temporal=p["temporal"], altitude=p["altitude"], sensitivity=sens,
             values=p.get("values"), value_schema=p.get("value_schema"),
             qualifiers=p.get("qualifiers"), key_fields=p.get("key_fields"),
+            event_identity=str(p.get("event_identity") or "windowed:45"),
             required_fields=p.get("required_fields"),
             note=str(p.get("note") or ""))
     _require(bool(preds), pid, "no predicates")
