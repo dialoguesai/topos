@@ -139,3 +139,15 @@ def _trajectory(conn, pack, lens, owner):
 
     return synthesize_trajectory(conn, DerivationWriter(conn, model="lens:trajectory"),
                                  pack, owner)
+
+
+def load_all_kernels() -> set:
+    """Import every kernel module so registration has happened.
+
+    Registration is an import side effect, which means a kernel nobody imported is a kernel
+    that silently does not exist. Calling this before dispatch turns that into a fact the
+    caller can check rather than an absence they discover at runtime.
+    """
+    from . import social_kernels  # noqa: F401 — imported for its @register_kernel calls
+
+    return registered_kinds()
