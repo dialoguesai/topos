@@ -9,6 +9,30 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.27] — 2026-08-26
+
+### Fixed
+- **[D] Graph nodes for structured facts take their HEAD value, not raw JSON.** The
+  materializer minted nodes literally named `{"project": …, "status": …}`; the head
+  field is the identity (what pack `key_fields` key on) — the rest is fact state.
+  Existing JSON-named nodes repoint and purge on the next materializer pass.
+- **[D] A fact's time is its evidence time (owner rule).** `valid_from` anchors to the
+  stated occurrence, else the source record's date (`event_date`, threaded from the
+  DerivationJob); accumulation facts anchor to the newest record that completed them.
+  Extraction time remains in the extractor provenance stamp only. Correction still
+  inherits the belief clock.
+
+### Fixed
+- **[D] Graph nodes for structured fact values are named by their HEAD value** —
+  the materializer minted nodes literally named `{"project": …, "status": …}`;
+  the head field (what pack `key_fields` key on) is the identity, the rest is
+  fact state. Next materializer pass re-points edges and the value-surface purge
+  removes the JSON-named orphans.
+- **[D] A fact's time is its evidence time.** `valid_from` anchors to the stated
+  occurrence, else the source record's date (`event_date`, threaded from the
+  DerivationJob), else now; accumulation facts anchor to the newest record that
+  completed them. Extraction time remains in the extractor provenance stamp only.
+
 ## [1.3.26] — 2026-08-26
 
 ### Added
