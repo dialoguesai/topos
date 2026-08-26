@@ -185,3 +185,31 @@ def test_I6_owner_app_is_owner_without_any_payload_identity(conn):
         principal=Principal(cls=OWNER_APP, channel="local_http"),
     )
     assert info["effective"] == "facts_all" and info["reason"] == "active"
+
+
+# ---- I7: the golden cross-repo stamp contract (twin of the CP's C1) --------
+# This byte string is asserted verbatim by the CONTROL PLANE's
+# tests/control_plane/test_fabric_invariants.py against its own
+# canonical_signing_payload. If the two ever disagree, relay stamps fail
+# verification and the system falls back to legacy SILENTLY — so both sides
+# freeze the same bytes, and a change on either side goes red.
+_GOLDEN_STAMP = {
+    "v": 1, "cls": "third_party", "client_id": "chatgpt",
+    "acting_user": "owner-uuid", "iat": 1700000000.0, "exp": 1700000120.0,
+}
+_GOLDEN_BYTES = (
+    b'{"acting_user":"owner-uuid","client_id":"chatgpt","cls":"third_party",'
+    b'"exp":1700000120.0,"iat":1700000000.0,"msg_id":"msg-abc",'
+    b'"msg_type":"query","v":1}'
+)
+
+
+def test_I7_canonical_payload_is_frozen():
+    from topos.relay_stamp import canonical_signing_payload
+
+    got = canonical_signing_payload(_GOLDEN_STAMP, msg_id="msg-abc", msg_type="query")
+    assert got == _GOLDEN_BYTES, (
+        "canonical_signing_payload changed shape — this SILENTLY breaks stamp "
+        "verification against the CP (fail-open to legacy). Change BOTH repos "
+        "and update the golden in both test files in lockstep."
+    )
