@@ -416,3 +416,24 @@ def test_exclusive_recent_contradiction_queues(a3_writer):
     live = conn.execute("SELECT COUNT(*) FROM signal_objects WHERE object_type='fact'"
                         " AND valid_to IS NULL AND object_key LIKE '%dana%'").fetchone()[0]
     assert live == 1
+
+
+# --- trajectory synthesizer: accumulation facts anchor to newest evidence ---
+def test_trajectory_synthesis(a3_writer):
+    w, conn = a3_writer
+    pack = _work_pack()
+    for i, (proj, status) in enumerate([("topos", "active"), ("qr app", "shipped"),
+                                        ("browser-plugin", "shipped"), ("classifier", "shipped")]):
+        w.assert_pack_fact(pack=pack, predicate="work.project", subject_entity_id="ent_owner",
+                           value={"project": proj, "status": status}, actor_role="authored",
+                           source_refs=[{"table": "t", "record_id": f"p{i}"}],
+                           confidence=0.9, about="owner", event_date=f"2026-0{i+2}-01")
+    w.assert_pack_fact(pack=pack, predicate="work.employment_shape", subject_entity_id="ent_owner",
+                       value="founder", actor_role="authored",
+                       source_refs=[{"table": "t", "record_id": "s1"}], confidence=0.95,
+                       about="owner", event_date="2026-06-01")
+    from topos.features.derivation.synthesize import synthesize_trajectory
+    out = synthesize_trajectory(conn, w, pack, "ent_owner")
+    preds = {o["predicate"]: o for o in out}
+    assert "work.professional_visibility" in preds       # 3 shipped projects
+    assert preds["work.professional_visibility"]["outcome"] in ("written", "corroborated")
