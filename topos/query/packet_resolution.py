@@ -128,6 +128,22 @@ def effective_packet_resolution(
         is_owner, floor_reason = False, "principal_floor"
     elif cls == OWNER_APP:
         is_owner, floor_reason = True, "non_owner_floor"
+    elif cls == "owner_automation":
+        # P5: routines act with the owner's authority but are not the owner's
+        # eyes — the doc's decision caps automation at `facts`, so special-class
+        # content (health, beliefs, admin) never rides an unattended lane. The
+        # cap is declared (reason automation_cap), and every other gate below
+        # keeps its authority.
+        if str(disclosure_tier or "") != "owner_raw":
+            effective, reason = "scores_only", "non_owner_floor"
+        elif setting != "scores_only" and not locality["local"]:
+            effective, reason = "scores_only", "hosted_binding"
+        elif resolution_order(setting) > resolution_order("facts"):
+            effective, reason = "facts", "automation_cap"
+        else:
+            effective, reason = setting, "active"
+        return {"setting": setting, "effective": effective, "reason": reason,
+                "principal_cls": cls or "", **locality}
     else:  # CP_RELAY or legacy: the forwarded-id equality test
         is_owner = req == "owner" or (bool(own) and own != "owner" and req == own)
         floor_reason = "non_owner_floor"

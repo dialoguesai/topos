@@ -27,6 +27,22 @@ The machine-readable twin of each release is
   (105 and 31) and listed her twice in one answer; she is now one fact at 136.
 
 ### Added
+- **[S1] Principal fabric P4 — the owner socket.** A second server on
+  `~/.topos/engine.sock` (mode 0600) serves the same API with NO bearer at
+  all: the kernel's filesystem ACL is the credential, so owner privilege on
+  this lane depends on no secret that a log, a backup, or a leaked config
+  could carry. The transport marker is set only by the socket server's ASGI
+  wrapper — nothing a TCP request contains can reach the owner branch. Off
+  switch: `TOPOS_UDS_ENABLED=0`; Team ID attestation of the peer process is
+  the explicit P4.1 follow-up.
+- **[S1] Principal fabric P5 — convergence.** (1) The node auto-pins the CP's
+  stamp verification key on first boot (trust-on-first-use over the relay's
+  own TLS channel; an existing pin is NEVER overwritten — rotation is a
+  deliberate owner action), making signed relay stamps zero-step for every
+  node, local and hosted alike. (2) The `owner_automation` class is real:
+  the CP stamps all three routine lanes, and packet resolution caps that
+  class at `facts` (reason `automation_cap`) — unattended runs never carry
+  special-class content regardless of the owner's global dial.
 - **[E] The lens dispatcher, and closeness as a reviewable fact.** Packs have carried
   `synthesis[]` since the catalog was written and `Pack.lenses` calls itself "what the
   runtime will dispatch on", but nothing dispatched it: `synthesize_closeness` had ZERO

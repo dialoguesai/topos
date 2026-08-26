@@ -121,3 +121,58 @@ def verify_relay_stamp(message: Dict[str, Any]) -> Optional[Principal]:
         client_id=str(stamp.get("client_id") or ""),
         acting_user=str(stamp.get("acting_user") or ""),
     )
+
+
+def cp_http_base_from_ws_url(ws_url: str) -> Optional[str]:
+    """wss://cp.example/ws/engine -> https://cp.example (http for ws://)."""
+    from urllib.parse import urlparse
+
+    try:
+        parsed = urlparse(str(ws_url or ""))
+        if parsed.scheme not in ("ws", "wss") or not parsed.netloc:
+            return None
+        scheme = "https" if parsed.scheme == "wss" else "http"
+        return f"{scheme}://{parsed.netloc}"
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def autopin_stamp_key() -> bool:
+    """P5 convergence: pin the CP's stamp key on first boot, trust-on-first-use.
+
+    Runs only when NO key is pinned anywhere (env or file) — an existing pin is
+    never overwritten, so a swapped CP cannot rotate itself into trust; rotation
+    is a deliberate owner action (delete the pinned file). TOFU rides the same
+    TLS channel the node already trusts for its entire relay, and makes signed
+    stamps zero-step for every node — local and hosted alike, which is the
+    point: the hosted node's only door is the relay, and this is its key.
+    Never raises; a CP without stamping (404) just leaves legacy behavior.
+    """
+    if _load_public_key_bytes() is not None:
+        return False
+    try:
+        from .config.settings import settings
+
+        base = cp_http_base_from_ws_url(getattr(settings, "topos_control_plane_url", "") or "")
+        if not base:
+            return False
+        import httpx
+
+        resp = httpx.get(f"{base}/v1/relay/stamp-public-key", timeout=10.0)
+        if resp.status_code != 200:
+            return False
+        data = resp.json()
+        key_b64 = str(data.get("public_key_b64") or "").strip()
+        if str(data.get("algorithm") or "") != "ed25519" or not key_b64:
+            return False
+        raw = base64.b64decode(key_b64, validate=True)
+        if len(raw) != 32:
+            return False
+        path = Path(os.path.expanduser(_PINNED_KEY_PATH))
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(key_b64 + "\n")
+        logger.info("pinned CP stamp key from %s (trust-on-first-use)", base)
+        return True
+    except Exception:  # noqa: BLE001 — pinning is opportunistic, never load-bearing
+        logger.debug("stamp key autopin skipped", exc_info=True)
+        return False
