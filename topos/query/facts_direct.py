@@ -125,8 +125,25 @@ def fetch_direct_facts(
     # mom/brother while keeping them in store. Stable sort keeps recency DESC
     # within each band, so event feeds ("what happened with X?") are unaffected
     # below the durable block.
-    out.sort(key=lambda f: 0 if _is_durable(f.get("value")) else 1)
+    out.sort(key=lambda f: (0 if _is_durable(f.get("value")) else 1, _tier_rank(f.get("value"))))
     return out or None
+
+
+#: A closeness tier is ORDERED, and the store has no idea in what order. All 23 rows
+#: are written in one pass so `valid_from DESC` is arbitrary among them, and the answer
+#: to "who's in my close circle?" led with four `peripheral` people.
+_TIER_ORDER = {"inner_circle": 0, "close": 1, "regular": 2, "peripheral": 3}
+
+
+def _tier_rank(value: Any) -> int:
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return 0
+    if isinstance(value, dict) and value.get("tier"):
+        return _TIER_ORDER.get(str(value["tier"]), 9)
+    return 0            # a fact with no tier keeps its place
 
 
 def _is_durable(value: Any) -> bool:
@@ -136,7 +153,10 @@ def _is_durable(value: Any) -> bool:
             value = json.loads(value)
         except (json.JSONDecodeError, TypeError):
             return False
-    return isinstance(value, dict) and bool(value.get("role") or value.get("status"))
+    # A closeness tier is a standing state too — without this it sorted as an event
+    # and every tier fact fell below every role fact regardless of how close.
+    return isinstance(value, dict) and bool(
+        value.get("role") or value.get("status") or value.get("tier"))
 
 
 def _fmt_value(v: Any) -> str:
