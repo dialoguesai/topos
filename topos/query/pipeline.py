@@ -770,21 +770,25 @@ class QueryPipelineOrchestrator:
             # C7 facts-direct (W3.1): a known-item ask with live facts gets its
             # exact values, validity dates and evidence counts with ZERO LLM —
             # same contract as `band`: deterministic answer_types are final.
-            # Closeness asks rank by interaction, not by extracted role facts —
-            # see closeness.py. Runs BEFORE facts-direct because both match the
-            # same phrasings and only this one can see who the owner actually
-            # talks to; "family" carries no closeness term, so it still lands on
-            # the role facts below.
+            # Facts FIRST. `rel.closeness_tier` is the durable, reviewable fact view
+            # (relationships.social's graph_labeling lens, 2026-08-25 owner decision:
+            # "the rail's per-window centrality lenses stay the ANALYTICAL view;
+            # closeness_tier is the durable FACT view"). It only became reachable once
+            # the lens dispatcher existed; before that the predicate was empty and the
+            # closeness lane below was the only answer.
             try:
-                from .closeness import try_close_circle
-                direct = try_close_circle(
+                from .facts_direct import try_facts_direct
+                direct = try_facts_direct(
                     db_conn, query_text, packet_resolution=_pr["effective"])
             except Exception:  # noqa: BLE001 — this lane must never break a turn
                 direct = None
             if direct is None:
+                # Fallback for a node whose lens has not run yet — a fresh install has
+                # no communicates_with edges, and answering from live interaction beats
+                # answering nothing while the derivation catches up.
                 try:
-                    from .facts_direct import try_facts_direct
-                    direct = try_facts_direct(
+                    from .closeness import try_close_circle
+                    direct = try_close_circle(
                         db_conn, query_text, packet_resolution=_pr["effective"])
                 except Exception:  # noqa: BLE001 — this lane must never break a turn
                     direct = None
