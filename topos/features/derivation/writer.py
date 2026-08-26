@@ -224,6 +224,17 @@ class DerivationWriter:
 
         key = self.object_key(subject_entity_id, pred, value, occurrence)
         incumbent = self.store._active_fact_by_key(key)
+        if incumbent is None and pred.temporal == "episodic":
+            # W2.1 event-identity: a retelling carries a different (or no) date and
+            # would mint a phantom second event — corroborate the original instead.
+            retold = self._episodic_retelling(key.rsplit(":", 1)[0] + ":", pred, occurrence)
+            if retold is not None:
+                self._corroborate({"object_id": retold["object_id"],
+                                   "payload": json.loads(retold["payload_json"] or "{}"),
+                                   "source_refs": (json.loads(retold["payload_json"] or "{}").get("source_refs") or [])},
+                                  confidence, source_refs)
+                self.stats["retelling_merged"] = self.stats.get("retelling_merged", 0) + 1
+                return {"outcome": "retelling_merged", "object_id": retold["object_id"]}
         now = _now_iso()
 
         if incumbent is not None:
@@ -296,6 +307,44 @@ class DerivationWriter:
             return False
         same_model = (incumbent["payload"].get("extractor") or {}).get("model") == self.model
         return same_model and (datetime.now(timezone.utc) - ts) < timedelta(days=days)
+
+
+    def _episodic_retelling(self, base_ikey_prefix: str, pred, occurrence):
+        """W2.1 event-identity: same episodic identity told again is the SAME event.
+        Returns the live incumbent row to corroborate, or None to create a new event.
+        Rules (pack-declared per predicate):
+          once          -> any live identity match corroborates (a person dies once)
+          windowed:<d>  -> match corroborates when either side is undated or dates
+                           fall within <d> days (retellings carry wrong/absent dates)
+          dated         -> only an exact same-date key collides (legacy behavior)
+        """
+        ei = getattr(pred, "event_identity", "windowed:45")
+        if ei == "dated":
+            return None
+        rows = self.conn.execute(
+            "SELECT object_id, object_key, payload_json, valid_from FROM signal_objects "
+            "WHERE object_type='fact' AND valid_to IS NULL AND object_key LIKE ?",
+            (base_ikey_prefix + "%",),
+        ).fetchall()
+        if not rows:
+            return None
+        if ei == "once":
+            r = rows[0]
+            return {"object_id": r[0], "object_key": r[1], "payload_json": r[2]}
+        days = int(ei.split(":", 1)[1])
+        from datetime import date as _date
+        def _d(s):
+            try:
+                return _date.fromisoformat(str(s)[:10])
+            except (ValueError, TypeError):
+                return None
+        new_d = _d(occurrence)
+        for r in rows:
+            occ_part = r[1].rsplit(":", 1)[-1]
+            old_d = _d(occ_part)
+            if new_d is None or old_d is None or abs((new_d - old_d).days) <= days:
+                return {"object_id": r[0], "object_key": r[1], "payload_json": r[2]}
+        return None
 
     def _corroborate(self, incumbent: Dict[str, Any], confidence: float, refs: List[Dict[str, Any]]) -> None:
         payload = dict(incumbent["payload"])
