@@ -9,6 +9,23 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Changed
+- **The closeness lens reads the L1 rail instead of deriving interaction twice.**
+  `comms_stats` and `analytics/messenger_directed` were built in parallel and each
+  derived per-partner direction from the same messages, which is how two views drift.
+  The 2026-08-25 decision made the rail the ANALYTICAL view and `rel.closeness_tier`
+  the durable FACT view, sharing evidence — so exactly one of them derives it. The
+  lens now reads `messenger_dyad_stats`, which knows things a second pass would not:
+  session initiation, reply latency, reciprocal streaks, drift, `tie_state`, and which
+  peers are automated (29 of 180 dyads here). Ranking is volume x reciprocity
+  (`balance`) x reciprocal streak x recency (`recent_gap_days`) x tie state, so 140
+  mutual and current outranks 80 one-sided and 90 long-dormant. `broadcast_only` ties
+  are dropped: a channel talking at the owner is not a relationship.
+  `comms_stats.py` becomes `person_bridge.py` and keeps only the handle -> contact ->
+  entity resolution both lanes need, which is also the fix for a person holding several
+  handles — one contact with two numbers arrived as two dyads, split her traffic
+  (105 and 31) and listed her twice in one answer; she is now one fact at 136.
+
 ### Added
 - **[E] The lens dispatcher, and closeness as a reviewable fact.** Packs have carried
   `synthesis[]` since the catalog was written and `Pack.lenses` calls itself "what the
