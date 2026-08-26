@@ -44,6 +44,7 @@ _PERSON_BLOCKLIST = {
     "another", "other", "others", "someone", "somebody", "anyone", "everybody",
     "everyone", "people", "family", "friends", "one", "this", "that", "it",
     "yall", "y'all", "everybody else", "guys",
+    "friend", "a friend", "friends of mine", "my friend",  # generic — a NAMED friend stays legal
 }
 _KIN_WHITELIST = {
     "mom", "mother", "dad", "father", "grandma", "grandmother", "grandpa",
