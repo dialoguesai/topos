@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .packs import Pack, load_scales
 
-TEMPLATE_VERSION = "shadow-9"
+TEMPLATE_VERSION = "shadow-10"
 _PACK_DIR = Path(__file__).resolve().parents[4] if False else None  # set by set_pack_dir()
 
 
@@ -122,10 +122,23 @@ def _predicate_menu(pack: Pack) -> str:
     return "\n".join(lines)
 
 
-def build_prompt(pack: Pack, record_text: str, record_date: str, actor_role: str) -> str:
+def build_prompt(pack: Pack, record_text: str, record_date: str, actor_role: str,
+                 known_people=None) -> str:
     record_text = clean_record_text(record_text)
     g = pack.guidance
     abst = "\n".join(f"- {a}" for a in (g.get("abstention") or []))
+    known_block = ""
+    if known_people:
+        names = ", ".join(known_people)
+        known_block = (
+            "People this archive already knows who may appear in this record: "
+            + names
+            + "\n"
+            + "For any person-valued field: BIND to one of these names exactly when the record\n"
+            + "means that person; write NEW:<name> only for a genuinely new person the record\n"
+            + "introduces; if you cannot tell who is meant, omit the assertion. Never guess a\n"
+            + "known name for a pronoun the record does not resolve.\n\n"
+        )
     return f"""You extract personal facts about the OWNER of a private journal/message archive.
 Lens: {pack.title}. {str(g.get('definitions') or '').strip()}
 
@@ -134,7 +147,7 @@ Record (role={actor_role}, date={record_date}):
 {record_text[:4000]}
 ---
 
-Allowed predicates (extract ONLY these; anything else is invalid):
+{known_block}Allowed predicates (extract ONLY these; anything else is invalid):
 {_predicate_menu(pack)}
 
 Example (facts about PEOPLE the owner names are wanted, with the role the owner's own words give):
@@ -220,7 +233,13 @@ def parse_output(raw: str, pack: Pack) -> Tuple[List[Dict[str, Any]], int]:
         person_bad = False
         if isinstance(val, dict):
             for pf in _PERSON_FIELDS & set(val):
-                if val.get(pf) is not None and not person_field_ok(val[pf]):
+                pv = val.get(pf)
+                if isinstance(pv, str) and pv.startswith("NEW:"):
+                    # A5 discovery escape hatch: strip the marker, flag the assertion
+                    val[pf] = pv[4:].strip()
+                    a["new_person"] = True
+                    pv = val[pf]
+                if pv is not None and not person_field_ok(pv):
                     person_bad = True
             # identity integrity: a predicate that KEYS on person cannot store an
             # assertion with no person — it would collapse onto a person-less key
@@ -237,7 +256,10 @@ def parse_output(raw: str, pack: Pack) -> Tuple[List[Dict[str, Any]], int]:
             conf = min(1.0, max(0.0, float(a.get("confidence") or 0.5)))
         except (TypeError, ValueError):
             conf = 0.5
-        valid.append({"predicate": pred.name, "value": val, "confidence": conf, "about": about,
+        entry = {"predicate": pred.name, "value": val, "confidence": conf, "about": about,
                       "occurrence": (str(a.get("occurrence_date"))[:10] if a.get("occurrence_date") else None),
-                      "quote": str(a.get("quote") or "")[:200]})
+                      "quote": str(a.get("quote") or "")[:200]}
+        if a.get("new_person"):
+            entry["new_person"] = True
+        valid.append(entry)
     return valid, rejects
