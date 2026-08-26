@@ -709,6 +709,7 @@ async def dismiss_blackhole_notification(
 async def list_facts(
     predicate: Optional[str] = Query(default=None, max_length=80),
     dimension: Optional[str] = Query(default=None, max_length=40),
+    pack: Optional[str] = Query(default=None, max_length=60),
     include_closed: bool = Query(default=False),
     limit: int = Query(default=100, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
@@ -724,6 +725,7 @@ async def list_facts(
         guard=owner_ui_guard(conn),
         predicate=predicate,
         dimension=dimension,
+        pack=pack,
         include_closed=include_closed,
         limit=limit,
         offset=offset,
@@ -1034,3 +1036,52 @@ async def complexity_influence(
         window_days=window_days,
         target=target,
     )
+
+
+@router.get("/derivation/packs")
+async def get_derivation_packs(_api_key: str = Depends(require_api_key)):
+    """Lens catalog (W4.3): registry rows + live fact + quarantine counts."""
+    from ..features.derivation.surfaces import list_packs
+
+    return list_packs(_entities_conn())
+
+
+@router.put("/derivation/packs/{pack_id}")
+async def put_derivation_pack(
+    pack_id: str,
+    enabled: bool = Body(..., embed=True),
+    _api_key: str = Depends(require_api_key),
+):
+    from ..features.derivation.surfaces import set_pack_enabled
+
+    if not set_pack_enabled(_entities_conn(), pack_id, enabled):
+        raise HTTPException(status_code=404, detail=f"unknown pack {pack_id}")
+    return {"pack_id": pack_id, "enabled": enabled}
+
+
+@router.get("/facts/conflicts")
+async def get_fact_conflicts(
+    limit: int = Query(default=100, ge=1, le=500),
+    _api_key: str = Depends(require_api_key),
+):
+    """The A3 quarantine + Tier-2 conflict review queue (W4.2)."""
+    from ..features.derivation.surfaces import list_conflicts
+
+    return {"conflicts": list_conflicts(_entities_conn(), limit=limit)}
+
+
+@router.post("/facts/conflicts/resolve")
+async def post_fact_conflict_resolution(
+    conflict_id: str = Body(...),
+    status: str = Body(..., description="dismissed | accepted"),
+    _api_key: str = Depends(require_api_key),
+):
+    from ..features.derivation.surfaces import resolve_conflict
+
+    try:
+        ok = resolve_conflict(_entities_conn(), conflict_id, status)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if not ok:
+        raise HTTPException(status_code=404, detail=f"unknown conflict {conflict_id}")
+    return {"conflict_id": conflict_id, "status": status}

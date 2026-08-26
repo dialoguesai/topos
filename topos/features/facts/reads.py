@@ -32,6 +32,7 @@ def list_facts(
     guard: "BlackholeGuard",
     predicate: Optional[str] = None,
     dimension: Optional[str] = None,
+    pack: Optional[str] = None,
     include_closed: bool = False,
     limit: int = 100,
     offset: int = 0,
@@ -45,12 +46,16 @@ def list_facts(
     if dimension and str(dimension).strip():
         where.append("signal_dimension = ?")
         params.append(str(dimension).strip().lower())
+    if pack and str(pack).strip():
+        where.append("ontology_id = ?")
+        params.append(str(pack).strip().lower())
     where_sql = " AND ".join(where)
 
     rows = conn.execute(
         f"""
         SELECT object_id, signal_dimension, object_key, payload_json, confidence,
-               source_refs_json, valid_from, valid_to, updated_at
+               source_refs_json, valid_from, valid_to, updated_at,
+               ontology_id, ontology_version, altitude
         FROM signal_objects
         WHERE {where_sql}
         ORDER BY (valid_to IS NULL) DESC, valid_from DESC
@@ -81,6 +86,9 @@ def list_facts(
                 "valid_from": row[6],
                 "valid_to": row[7],
                 "updated_at": row[8],
+                "pack": row[9],
+                "pack_version": row[10],
+                "altitude": row[11],
             }
         )
 
@@ -104,6 +112,10 @@ def list_facts(
         if fact["valid_to"] is None:
             key = str(fact["payload"].get("predicate") or "unknown")
             predicate_counts[key] = predicate_counts.get(key, 0) + 1
+    pack_counts: Dict[str, int] = {}
+    for fact in parsed:
+        if fact["valid_to"] is None and fact.get("pack"):
+            pack_counts[str(fact["pack"])] = pack_counts.get(str(fact["pack"]), 0) + 1
 
     items = []
     for fact in page:
@@ -132,6 +144,11 @@ def list_facts(
                 "valid_from": fact["valid_from"],
                 "valid_to": fact["valid_to"],
                 "is_active": fact["valid_to"] is None,
+                # W4.2: ontology-pack provenance (D6 columns) — None for the
+                # legacy corpus, which genuinely predates packs.
+                "pack": fact.get("pack"),
+                "pack_version": fact.get("pack_version"),
+                "altitude": fact.get("altitude"),
             }
         )
 
@@ -141,6 +158,7 @@ def list_facts(
         "limit": limit,
         "offset": offset,
         "predicate_counts": predicate_counts,
+        "pack_counts": pack_counts,
     }
 
 
