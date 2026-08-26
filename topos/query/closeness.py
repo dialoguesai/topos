@@ -112,6 +112,38 @@ def _cadence_band(last: Optional[datetime], now: datetime) -> str:
     return "dormant"
 
 
+def _blackholed_terms(conn: sqlite3.Connection) -> set:
+    """Names the owner asked to be forgotten.
+
+    The lane reads `contacts` and `conversation_messages` straight, so nothing
+    upstream strips a blackholed person for it — a person the owner erased would
+    otherwise be handed back as a close contact. Matched on the WHOLE normalised
+    name: token overlap produced false positives against place blackholes (the
+    place "Old Saybrook - Jeff's Place" matches the person "Zulu Alpha" on
+    "jeff", and erasing a place must not erase a person).
+    """
+    try:
+        from ..features.lifecycle.blackhole import blackholed_name_terms
+
+        return {str(t).strip().lower() for t in (blackholed_name_terms(conn) or set()) if str(t).strip()}
+    except Exception:  # noqa: BLE001 — a missing store must not fail open OR break the turn
+        try:
+            rows = conn.execute(
+                "SELECT normalized_name FROM entity_blackholes").fetchall()
+            return {str(r[0]).strip().lower() for r in rows if r and str(r[0]).strip()}
+        except sqlite3.Error:
+            return set()
+
+
+def _normalised_person(name: str) -> str:
+    try:
+        from ..features.lifecycle.blackhole import normalize_entity_name
+
+        return str(normalize_entity_name(name) or "").strip().lower()
+    except Exception:  # noqa: BLE001
+        return str(name or "").strip().lower()
+
+
 def compute_close_circle(
     conn: sqlite3.Connection,
     *,
@@ -133,11 +165,25 @@ def compute_close_circle(
         if key:
             ident_to_contact.setdefault(key, str(contact_id))
 
+    blocked = _blackholed_terms(conn)
     names: Dict[str, str] = {}
-    for contact_id, display_name in conn.execute(
-        "SELECT contact_id, display_name FROM contacts "
-        "WHERE display_name IS NOT NULL AND display_name != ''"
-    ).fetchall():
+    # `is_self` excludes the owner: their own handle appears as a sender on
+    # self-threads and messages synced from a second device, which put them in
+    # their own close circle (live 2026-08-26, rank 27).
+    try:
+        contact_rows = conn.execute(
+            "SELECT contact_id, display_name FROM contacts "
+            "WHERE display_name IS NOT NULL AND display_name != '' "
+            "AND COALESCE(is_self, 0) = 0"
+        ).fetchall()
+    except sqlite3.Error:                     # fixtures without the column
+        contact_rows = conn.execute(
+            "SELECT contact_id, display_name FROM contacts "
+            "WHERE display_name IS NOT NULL AND display_name != ''"
+        ).fetchall()
+    for contact_id, display_name in contact_rows:
+        if _normalised_person(str(display_name)) in blocked:
+            continue
         names[str(contact_id)] = str(display_name)
 
     agg: Dict[str, Dict[str, Any]] = {}
@@ -211,13 +257,32 @@ def try_close_circle(
         return None
     if packet_resolution not in ("facts", "facts_all"):
         return None
-    people = compute_close_circle(conn, limit=limit, now=now)
-    if not people:
+    # Computed once at full width: the warmth bands are already relative to the
+    # whole set inside compute_close_circle, so slicing after keeps them correct
+    # and gives the honest total without a second pass over the corpus.
+    everyone = compute_close_circle(conn, limit=10_000, now=now)
+    if not everyone:
         return None
-    return {
+    people = everyone[:limit]
+    payload = {
         "answer_type": "facts",
         "answer": compose_close_circle_answer(people),
         "items": [p["person"] for p in people],
-        "close_circle": people,
         "close_circle_direct": True,
     }
+    # `close_circle` (the structured block) is deliberately NOT returned: it
+    # restated `answer` and `items` for 1,866 of a 3,435-byte payload and nothing
+    # consumes it. compute_close_circle() still returns it for a caller that wants
+    # structure.
+    #
+    # Say what was cut. The cap hid 18 of 33 people on the live corpus, and an
+    # undisclosed cap is what makes a ranked list read as a complete one — the
+    # same failure this lane exists to correct.
+    total = len(everyone)
+    if total > len(people):
+        payload["close_circle_truncated"] = {
+            "shown": len(people),
+            "total": total,
+            "note": "ranked by message volume; ask for more to see the rest",
+        }
+    return payload
