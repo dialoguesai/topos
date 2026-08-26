@@ -107,3 +107,71 @@ def synthesize_closeness(conn: sqlite3.Connection, w: DerivationWriter, pack: Pa
         results.append({"predicate": "rel.closeness_tier", "person": name, "tier": tier,
                         "weight": round(weight, 1), "outcome": r["outcome"]})
     return results
+
+
+def synthesize_trajectory(conn: sqlite3.Connection, w: DerivationWriter, pack: Pack, owner: str) -> List[Dict[str, Any]]:
+    """Trajectory synthesis (work.career declares it, min_evidence 3): venture
+    history and professional visibility DERIVED from accumulated career events,
+    projects and research output — never from one record. Evidence sets ride in
+    source_refs; valid_from anchors to the NEWEST completing evidence (the
+    owner's accumulation rule, 2026-08-26)."""
+    import json as _json
+
+    rows = conn.execute(
+        "SELECT object_id, object_key, payload_json, valid_from FROM signal_objects"
+        " WHERE object_type='fact' AND valid_to IS NULL AND ontology_id='work.career'"
+        f" AND object_key LIKE 'fact:{owner}:%'").fetchall()
+    events, projects, research, shapes = [], [], [], []
+    refs = []
+    newest = None
+    for oid, key, pj, vf in rows:
+        try:
+            p = _json.loads(pj or "{}")
+        except (ValueError, TypeError):
+            continue
+        pred = str(p.get("predicate") or "")
+        val = p.get("value_struct") or {}
+        refs_row = p.get("source_refs") or []
+        if pred == "work.career_event":
+            events.append(val); refs += refs_row
+        elif pred == "work.project":
+            projects.append(val); refs += refs_row
+        elif pred == "work.research_output":
+            research.append(val); refs += refs_row
+        elif pred == "work.employment_shape":
+            shapes.append(str(p.get("object_value") or ""))
+        d = str(vf or "")[:10]
+        if d and (newest is None or d > newest):
+            newest = d
+    results: List[Dict[str, Any]] = []
+    evidence_n = len(events) + len(projects)
+    if evidence_n < 3:
+        return results
+
+    # venture_history: founder shape + started/closed_venture events + project volume
+    ev_names = {str(e.get("event")) for e in events}
+    if "founder" in shapes or "started_venture" in ev_names:
+        if "closed_venture" in ev_names:
+            vh = "exited" if "exited" in ev_names else "founded_once"
+        elif "founder" in shapes and len(projects) >= 5:
+            vh = "founded_once"
+        else:
+            vh = "side_hustle"
+        r = w.assert_pack_fact(pack=pack, predicate="work.venture_history",
+                               subject_entity_id=owner, value=vh, actor_role="synthesis",
+                               source_refs=refs[:12], confidence=0.6,
+                               event_date=newest)
+        results.append({"predicate": "work.venture_history", "value": vh,
+                        "outcome": r.get("outcome"), "evidence": evidence_n})
+
+    # professional_visibility: research output / public shipping breadth
+    shipped = sum(1 for p in projects if str(p.get("status")) == "shipped")
+    if research or shipped >= 3:
+        vis = "industry_recognized" if len(research) >= 3 else "locally_known"
+        r = w.assert_pack_fact(pack=pack, predicate="work.professional_visibility",
+                               subject_entity_id=owner, value=vis, actor_role="synthesis",
+                               source_refs=refs[:12], confidence=0.55,
+                               event_date=newest)
+        results.append({"predicate": "work.professional_visibility", "value": vis,
+                        "outcome": r.get("outcome"), "evidence": evidence_n})
+    return results
