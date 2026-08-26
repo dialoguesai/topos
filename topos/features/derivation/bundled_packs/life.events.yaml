@@ -1,0 +1,71 @@
+# DRAFT v0.2.0 for review — seeded from MatrAIx lane: Demographic: Life Events (24)
+# (life_stage, major_life_events, lifex_* trajectory attributes).
+pack: life.events
+version: 0.2.0
+status: draft
+title: "Life events & trajectory"
+author: topos
+license: Apache-2.0
+sensitivity_class: personal
+role_policy: authored_addressed
+disclosure_default: owner_only
+
+routing:
+  descriptors:
+    - "major life changes: moves, new jobs, marriage, births, losses, graduations, retirements"
+    - "milestones, anniversaries, big decisions, turning points, starting or ending chapters"
+  exemplars: ["we just moved", "started my new job", "passed away", "got married", "quit my job", "big news"]
+
+predicates:
+  - name: life.event
+    value_type: structured
+    cardinality: multi
+    temporal: episodic
+    altitude: stated
+    value_schema:
+      # v0.2: added military_service, caregiving_began, pet_loss, health_milestone, coming_out
+      kind: {enum: [relocation, migration, job_change, business_started, business_ended, marriage, engagement, breakup_divorce, birth_of_child, bereavement, graduation, retirement, accident_emergency, award_recognition, major_purchase, military_service, caregiving_began, pet_loss, health_milestone, coming_out, other]}
+      description: string
+      date: date_or_approx
+      entities: entity_refs      # people/places/orgs involved → graph edges
+  - {name: life.stage, value_type: enum, values: [student, early_career, parent_young_kids, mid_life, career_change, empty_nester, retirement, elder], cardinality: single, temporal: interval, altitude: inferred}
+  - {name: life.turning_point, value_type: structured, cardinality: multi, temporal: episodic, altitude: stated,
+     value_schema: {kind: {enum: [career_break, near_miss, awakening, reinvention, mentor_encounter, other]}, description: string}}
+  - {name: life.geographic_mobility, value_type: enum, values: [never_left_hometown, moved_within_region, moved_nationally, moved_internationally, serial_relocator], cardinality: single, temporal: interval, altitude: inferred}
+  - {name: life.career_path_shape, value_type: enum, values: [linear, pivoted_once, multiple_pivots, entrepreneurial, portfolio, just_starting], cardinality: single, temporal: interval, altitude: inferred}
+  - {name: life.anniversary, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {kind: string, date: recurring_date, entities: entity_refs}}
+
+guidance:
+  definitions: >
+    A life.event is a discrete, dated, owner-experienced change. Trajectory predicates
+    (stage, mobility, career_path_shape) are INFERRED summaries over accumulated events —
+    they must cite the events they summarize as evidence.
+  abstention:
+    - "Events happening to others are relationship_events (relationships.social) or dossier material, not life.events."
+    - "Plans and intentions are aspirations.goals, not events — 'we're thinking of moving' asserts nothing here."
+    - "Date the event from content ('last month', 'in 2023') resolved against the record timestamp; if undatable beyond a year, mark approx."
+
+synthesis:
+  - {kind: trajectory, predicate: life.stage, inputs: [life.event, identity.core], min_evidence: 3}
+  - {kind: trajectory, predicate: life.career_path_shape, inputs: [life.event, work.career], min_evidence: 3}
+
+eval:
+  gold:
+    - {text: "First day at the new job today — nervous but excited", role: authored,
+       expect: [{predicate: life.event, value: {kind: job_change}}]}
+    - {text: "It's been a year since Dad passed", role: authored,
+       expect: [{predicate: life.event, value: {kind: bereavement, date: approx_minus_1y}}]}
+  negative_controls:
+    - {text: "My coworker is retiring next month, planning her sendoff", role: authored, expect: [], note: "other-person event"}
+    - {text: "Article: why millennials are relocating to smaller cities", role: ambient, expect: []}
+  calibration: {min_conf_for_assert: 0.6, ece_max: 0.15}
+
+consumers:
+  brief_section: "Life"
+  dossier: true
+  fusion_lane: facts_store
+decisions:
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): childhood_environment and adversity_level stay EXCLUDED. Inferring someone's
+     childhood from adult text is the catalog's clearest over-reach; if the owner narrates it
+     explicitly, narrative.self.self_chapter and self.origin_story hold it in their own words."

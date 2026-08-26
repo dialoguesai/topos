@@ -1,0 +1,84 @@
+# DRAFT v0.2.0 for review — seeded from MatrAIx lane: Linguistic: Communication (37 cog_*)
+# + register (Demographic: Core) + tone_expected. Mostly measurable from authored text
+# with stylometric (no-LLM) synthesizers.
+pack: communication.style
+version: 0.2.0
+status: draft
+title: "Communication style"
+author: topos
+license: Apache-2.0
+sensitivity_class: personal
+role_policy: authored_only          # style is measured from what the owner writes, nothing else
+disclosure_default: owner_only
+
+routing:
+  descriptors:
+    - "how the owner writes and talks: tone, formality, directness, humor, emoji, verbosity"
+    - "conversational patterns: question-asking, response latency, conflict approach"
+  exemplars: []    # NOTE: this pack rarely routes on content — it runs as corpus-level synthesis, not per-record extraction
+
+predicates:
+  - {name: style.register, value_type: enum, values: [formal_standard, colloquial, regional_dialect, code_switching, technical_jargon], cardinality: multi, temporal: interval, altitude: inferred,
+     qualifiers: {context: [work, personal, public]}}
+  - {name: style.verbosity, value_type: enum, values: [terse, concise, balanced, wordy, rambling], cardinality: single, temporal: interval, altitude: inferred}
+  - {name: style.formality, value_type: enum, values: [very_formal, formal, neutral, casual, slangy], cardinality: single, temporal: interval, altitude: inferred,
+     qualifiers: {context: [work, personal, public]}}
+  - {name: style.directness, value_type: enum, values: [blunt, direct, balanced, indirect], cardinality: single, temporal: interval, altitude: inferred}
+  - {name: style.humor, value_type: enum, values: [dry, sarcastic, playful, wholesome, serious], cardinality: multi, temporal: interval, altitude: inferred}
+  - {name: style.emoji_use, value_type: enum, values: [heavy, moderate, rare, never], cardinality: single, temporal: interval, altitude: inferred,
+     note: "pure counting — no-LLM synthesizer"}
+  - {name: style.politeness_markers, value_type: enum, values: [very_polite, polite, neutral, brusque], cardinality: single, temporal: interval, altitude: inferred}
+  - {name: style.jargon_use, value_type: enum, values: [heavy, moderate, light, avoids], cardinality: single, temporal: interval, altitude: inferred}
+  - {name: style.question_asking, value_type: enum, values: [asks_constantly, asks_often, sometimes, rarely_asks], cardinality: single, temporal: interval, altitude: inferred}
+  - {name: style.response_latency_pattern, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {context: string, pattern: [immediate, same_day, batched, slow, erratic]},
+     note: "message metadata timing — no-LLM synthesizer"}
+  - {name: style.conflict_approach, value_type: enum, values: [confronting, collaborative, compromising, avoidant, accommodating], cardinality: single, temporal: interval, altitude: inferred,
+     note: "high evidence floor; only from owner's own messages in disagreement threads"}
+  - {name: style.signature_phrases, value_type: string, cardinality: multi, temporal: interval, altitude: inferred,
+     note: "recurring expressions; delightful for mirroring, harmless if wrong"}
+
+boundary:
+  note: >
+    v0.2 — this pack owns how the owner WRITES. How they WORK and THINK (procrastination,
+    perfectionism, attention span, decision speed, ambiguity tolerance, confidence calibration,
+    learning pace, patience, numeracy comfort, cognitive load) is behavior.preferences.pref.workstyle.
+    Both are inferred from the same authored corpus; keeping them separate stops a style
+    observation ("writes tersely") from being read as a cognitive claim ("thinks shallowly").
+
+vocab_refs:
+  - vocab/dispositions.yaml#style.cognitive_dimension   # 35 MatrAIx cog_* seeds, split across this pack and pref.workstyle
+
+guidance:
+  definitions: >
+    A stylometric portrait of the owner's OWN authored text, per context where volume
+    allows. This pack runs as corpus-level synthesis (R3), not per-record extraction —
+    per-record it would be noise.
+  abstention:
+    - "Authored text only; never style-profile from what others send the owner."
+    - "Context matters: work vs personal registers are separate facts, not a contradiction."
+    - "conflict_approach requires ≥3 genuine disagreement threads; skip forever if the corpus lacks them."
+
+synthesis:
+  - {kind: stylometry, predicate: [style.verbosity, style.formality, style.emoji_use, style.politeness_markers, style.jargon_use, style.signature_phrases], inputs: [authored_corpus_features], min_evidence: 200_messages}
+  - {kind: stylometry, predicate: style.response_latency_pattern, inputs: [message_timing_metadata], min_evidence: 50_threads}
+  - {kind: disposition, predicate: [style.humor, style.directness, style.conflict_approach], inputs: [authored_corpus_features], min_evidence: 6w}
+
+eval:
+  gold:
+    - {text: "(corpus window: 300 authored messages, median 9 words, 0.4% emoji rate, 78% lowercase starts)", role: authored_synthetic_window,
+       expect: [{predicate: style.verbosity, value: terse_or_concise}, {predicate: style.emoji_use, value: rare}]}
+  negative_controls:
+    - {text: "(window composed of messages RECEIVED by owner, heavy emoji)", role: observed, expect: [], note: "not owner-authored"}
+    - {text: "(30-message window)", role: authored_synthetic_window, expect: [], note: "below evidence floor — must abstain"}
+  calibration: {min_conf_for_assert: 0.7, ece_max: 0.15}
+
+consumers:
+  dossier: false
+  fusion_lane: facts_store
+  assistant_context: true    # drafting-in-owner's-voice + tone matching; the flagship consumer
+decisions:
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): work/personal context split derives from SOURCE POSTURE (as drafted), not from
+     per-recipient classification. Posture already exists per source, costs nothing, and is
+     wrong in fewer ways; recipient-level classification is a v2 refinement if posture
+     proves too coarse in the shadow readout."

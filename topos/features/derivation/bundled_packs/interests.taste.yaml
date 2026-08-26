@@ -1,0 +1,109 @@
+# DRAFT v0.2.0 for review — seeded from MatrAIx lanes: Interests: Topics (78), Hobbies (50),
+# Media (81), Sports (40), Culture (74), Food (35) — six enumeration lanes become ONE
+# parameterized predicate family with the expressed-vs-exposure split as a first-class axis.
+# THE showcase pack for the provenance-split design.
+pack: interests.taste
+version: 0.2.0
+status: draft
+title: "Interests & taste"
+author: topos
+license: Apache-2.0
+sensitivity_class: personal
+role_policy: any_with_label         # exposure evidence allowed AND ALWAYS LABELED (expressed vs exposure ledgers)
+disclosure_default: owner_only
+
+routing:
+  descriptors:
+    - "what the owner is into: topics, hobbies, music, film, books, games, sports, cuisines, places, scenes"
+    - "enthusiasm language, recommendations given, collections, fandom, repeated engagement"
+  exemplars: ["obsessed with", "my favorite", "can't stop listening", "we're big fans", "finally tried", "10/10 would"]
+
+predicates:
+  - name: interest.interest
+    value_type: structured
+    cardinality: multi
+    temporal: interval
+    altitude: inferred
+    value_schema:
+      topic: string                     # open vocab; MatrAIx topic/hobby/sport lists are the seed
+      kind: {enum: [topic, hobby, sport_played, sport_followed, scene, collection]}
+      level: {scale: affinity_5}
+      ledger: {enum: [expressed, exposure]}    # THE axis: owner enthusiasm vs mere consumption pattern
+  - {name: interest.media_taste, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {medium: {enum: [music, film_tv, books, games, podcasts, art]}, genre_or_artist: string, affinity: {scale: affinity_5}, ledger: [expressed, exposure]}}
+  - {name: interest.cuisine_taste, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {cuisine_or_dish: string, affinity: {scale: affinity_5}, ledger: [expressed, exposure]}}
+  - {name: interest.favorite, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {category: string, item: string},
+     note: "explicit favorites — always expressed-ledger, always quotable"}
+  - {name: interest.interest_event, value_type: structured, cardinality: multi, temporal: episodic, altitude: inferred,
+     value_schema: {topic: string, event: [discovered, adopted, deepened, cooled, dropped]},
+     note: "ties directly to the lens-lab adoption/discovery work — same substrate, now as facts"}
+  - {name: interest.cultural_affinity, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {culture_or_place: string, relation: [heritage, lived, drawn_to, studies]}}
+  # --- v0.2 additions: CONSUMPTION CADENCE — v0.1 captured what the owner likes (affinity)
+  #     but not how much time it actually gets. MatrAIx lstyle_{reading,gaming,streaming,music,
+  #     podcast,news}_freq + media_diet + fashion_sense + hobby_intensity. ---
+  - name: interest.consumption_cadence
+    value_type: structured
+    cardinality: multi
+    temporal: interval
+    altitude: inferred
+    value_schema:
+      medium: {enum: [reading, gaming, streaming, music, podcasts, news, social_media, long_form, video]}
+      cadence: {scale: freq_5}
+      ledger: {enum: [expressed, exposure]}
+    note: "v0.2 — affinity and cadence are DIFFERENT facts: someone can love books (affinity: passionate) and read monthly (cadence: monthly). That gap is itself an insight; never collapse the two."
+  - {name: interest.media_diet_shape, value_type: enum, values: [academic, news_heavy, social_media_heavy, long_form, video_first, minimal, mixed], cardinality: single, temporal: interval, altitude: inferred,
+     note: "v0.2 (MatrAIx media_diet) — composition of what is consumed, ambient-evidenced, exposure-ledger by default"}
+  - {name: interest.hobby_intensity, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {hobby: string, intensity: [obsessive, dedicated, casual, dabbler]},
+     note: "v0.2 (lstyle_hobby_intensity) — depth qualifier on interest.interest, kept separate so a dabbler is never rendered as a devotee"}
+  - {name: interest.style_sense, value_type: enum, values: [trend_setter, trend_follower, classic, practical, indifferent], cardinality: single, temporal: interval, altitude: inferred,
+     note: "v0.2 (lstyle_fashion_sense) — aesthetic self-presentation; stated or purchase-evidenced, never inferred from photos"}
+
+vocab_refs:
+  - vocab/interests.yaml#interest.topic          # 78 seeds
+  - vocab/interests.yaml#interest.hobby          # 50 seeds
+  - vocab/interests.yaml#interest.music_genre    # 35 seeds
+  - vocab/interests.yaml#interest.film_genre     # 24 seeds
+  - vocab/interests.yaml#interest.book_genre     # 22 seeds
+  - vocab/interests.yaml#interest.sport          # 40 seeds
+  - vocab/interests.yaml#interest.culture        # 40 seeds
+  - vocab/interests.yaml#interest.cuisine        # 35 seeds
+
+guidance:
+  definitions: >
+    What the owner engages with and how much they mean it. The ledger axis is the
+    integrity of this pack: EXPRESSED requires the owner's enthusiasm in their own
+    words or deliberate repeated participation; EXPOSURE is consumption pattern only
+    (browsing, feeds) and must never masquerade as identity.
+  abstention:
+    - "Exposure facts require ≥5 engagement events across ≥2 weeks (one binge is noise); expressed requires owner words or repeated chosen participation."
+    - "Never promote exposure→expressed without an ownership signal (created, spent, joined, recommended, stated)."
+    - "Algorithmic feeds inflate exposure — weight deliberate navigation over fed content where the source distinguishes."
+    - "Others' fandoms (partner's team, kid's show) stay in their dossiers unless the owner claims them."
+
+synthesis:
+  - {kind: pattern, predicate: [interest.interest, interest.media_taste], inputs: [browser_visit_stats, messages, topic_clusters], min_evidence: 5}
+  - {kind: trajectory, predicate: interest.interest_event, inputs: [interest.interest_history], min_evidence: 2w}
+
+eval:
+  gold:
+    - {text: "Third pottery class this month — I'm fully hooked", role: authored,
+       expect: [{predicate: interest.interest, value: {topic: pottery, kind: hobby, level: passionate, ledger: expressed}}]}
+    - {text: "(browser: 22 visits to F1 coverage across 3 weeks, no owner commentary)", role: ambient,
+       expect: [{predicate: interest.interest, value: {topic: formula_1, ledger: exposure}}]}
+  negative_controls:
+    - {text: "(browser: 9 visits to one viral story in one evening)", role: ambient, expect: [], note: "binge ≠ interest"}
+    - {text: "My daughter is obsessed with dinosaurs right now", role: authored, expect: [], note: "her interest, her dossier"}
+  calibration: {min_conf_for_assert: 0.55, ece_max: 0.15}
+
+consumers:
+  brief_section: "Interests"
+  dossier: true
+  fusion_lane: facts_store
+decisions:
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): exposure-ledger facts HONOR the existing exposure_profile_visible setting
+     (provenance-split P1.5) — one toggle governs exposure-derived material everywhere.
+     Expressed-ledger facts are always visible."

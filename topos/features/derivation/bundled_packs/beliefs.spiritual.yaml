@@ -1,0 +1,86 @@
+# DRAFT v0.2.0 for review — seeded from MatrAIx attributes: religiosity, demo_religion_affiliation,
+# lifex_faith_journey, att_organized_religion, topic_spirituality, trait_spirituality,
+# fam_religious_studies. Same structural caution tier as beliefs.civic.
+pack: beliefs.spiritual
+version: 0.2.0
+status: draft
+title: "Faith & practice"
+author: topos
+license: Apache-2.0
+sensitivity_class: special
+role_policy: authored_only
+disclosure_default: owner_only
+
+routing:
+  descriptors:
+    - "the owner's own religious or spiritual identity, practices, observances, and community"
+    - "first-person faith language: services, prayer, fasting, holidays observed, spiritual seeking"
+  exemplars: ["at church", "during Ramadan", "my faith", "we keep kosher", "meditation practice", "shabbat", "mass", "temple"]
+
+predicates:
+  - {name: faith.affiliation, value_type: string, cardinality: single, temporal: interval, altitude: stated,
+     note: "verbatim self-identification only ('I'm Catholic', 'we're secular Jews') — never inferred from names, holidays, or family"}
+  - {name: faith.religiosity_level, value_type: enum, values: [secular, spiritual_not_religious, observant, devout], cardinality: single, temporal: interval, altitude: stated}
+  - {name: faith.practice, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {practice: {enum: [prayer, meditation_spiritual, service_attendance, scripture_study, fasting, sabbath_observance, dietary_observance, pilgrimage, other]}, cadence: {scale: freq_5}},
+     note: "spiritually-framed by the OWNER; secular meditation stays in behavior.habits"}
+  - {name: faith.observance, value_type: structured, cardinality: multi, temporal: episodic, altitude: stated,
+     value_schema: {observance: string, date: date_or_approx},
+     note: "holidays/rites the owner OBSERVES first-person (fasted, hosted seder) — attendance at others' rites is relationships material"}
+  - {name: faith.community, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {community: entity_ref, role: [attends, member, volunteer, leader]}}
+  - {name: faith.journey_stage, value_type: enum, values: [lifelong, converted, returned, searching, lapsed, left, always_secular], cardinality: single, temporal: interval, altitude: inferred,
+     note: "only over explicit first-person faith-journey statements across time; the sole inferred predicate here"}
+  - {name: faith.spiritual_interest, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {tradition_or_topic: string, engagement: {scale: affinity_5}},
+     note: "intellectual/seeker interest, distinct from affiliation — 'reading a lot of Stoicism lately'"}
+  # --- v0.2 addition ---
+  - name: faith.institutional_stance
+    value_type: structured
+    cardinality: single
+    temporal: interval
+    altitude: stated
+    value_schema: {position: {scale: stance_5}, statement: string}
+    note: >
+      v0.2 (MatrAIx att_organized_religion) — the owner's stance toward organized religion as
+      an institution, which is INDEPENDENT of faith.affiliation and faith.religiosity_level.
+      Devout-but-critical and secular-but-sympathetic are both common and must both be
+      representable. Never derive affiliation from this, or this from affiliation.
+
+guidance:
+  definitions: >
+    The owner's spiritual life in their own words: identity, practices, observances,
+    community, and trajectory. Nothing in this pack may be derived from anyone else's
+    religiosity or from cultural context.
+  abstention:
+    - "Attending a wedding, funeral, bar mitzvah, or Christmas party asserts NOTHING — social participation is not observance."
+    - "Family religion is not the owner's ('my parents are devout' → nothing here)."
+    - "Never infer affiliation from names, cuisine, holidays mentioned, or region."
+    - "Secular mindfulness stays in behavior.habits unless the owner frames it spiritually."
+    - "Doubt and criticism from within a tradition are journey evidence, not exit evidence — never flip affiliation from a single frustrated message."
+
+synthesis:
+  - {kind: trajectory, predicate: faith.journey_stage, inputs: [faith.affiliation, faith.practice, faith.observance, authored_faith_statements], min_evidence: 4}
+
+eval:
+  gold:
+    - {text: "First Ramadan fasting with the kids old enough to understand — special year", role: authored,
+       expect: [{predicate: faith.observance, value: {observance: ramadan_fast}}, {predicate: faith.practice, value: {practice: fasting}}]}
+    - {text: "I've landed somewhere like 'spiritual but allergic to organized religion'", role: authored,
+       expect: [{predicate: faith.religiosity_level, value: spiritual_not_religious}]}
+  negative_controls:
+    - {text: "Going to Priya's Diwali party Saturday!", role: authored, expect: [], note: "social attendance at another's observance"}
+    - {text: "(browser: documentary about Zen monasteries)", role: ambient, expect: []}
+    - {text: "Mom lights candles every Friday when we visit", role: authored, expect: [], note: "family practice, not owner's"}
+  calibration: {min_conf_for_assert: 0.8, ece_max: 0.08}
+
+consumers:
+  brief_section: null
+  dossier: false
+  fusion_lane: facts_store
+decisions:
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): pack defaults OFF until the owner opts in, mirroring beliefs.civic; live
+     extraction waits for the next wave with it."
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): faith.spiritual_interest STAYS in this pack rather than interests.taste — the
+     special-class floor must cover seeker interest ('reading a lot of Sufi poetry lately')
+     because it is exactly the material an adversary would use to infer affiliation."

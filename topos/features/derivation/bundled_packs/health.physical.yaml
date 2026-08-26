@@ -1,0 +1,94 @@
+# DRAFT v0.2.0 for review — seeded from MatrAIx lane: Health: Physical (25)
+# (conditions, medication, mobility/vision/hearing/dexterity, pain, dietary restriction,
+# accessibility & assistive-tech cluster, insurance, caregiver flag → relationships.social).
+pack: health.physical
+version: 0.2.1
+status: draft
+title: "Health"
+author: topos
+license: Apache-2.0
+sensitivity_class: special         # hard floors: owner_only, no grantee/third-party paths, blackhole-compatible
+role_policy: authored_addressed    # addressed covers provider/clinic messages TO the owner
+disclosure_default: owner_only
+
+routing:
+  descriptors:
+    - "medical conditions, symptoms, medications, treatments, appointments, procedures, injuries"
+    - "allergies, pain, mobility, vision, hearing, accessibility needs, insurance, test results"
+  exemplars: ["diagnosed with", "started taking", "my knee", "flare-up", "the doctor said", "allergic to", "prescription", "doctor", "dentist", "appointment", "medication", "meds", "pain", "sore", "injury", "sick", "allergy", "allergic", "surgery", "therapy", "dose", "symptom", "knee", "back pain", "headache", "migraine", "flu", "fever", "clinic", "pharmacy", "refill", "prescription", "pill", "pills", "dosage", "vitamin", "supplement"]
+
+predicates:
+  - {name: health.condition, value_type: string, cardinality: multi, temporal: interval, altitude: stated,
+     qualifiers: {management: [managed, active, resolved, undiagnosed_concern]}, aligns_with: "https://schema.org/MedicalCondition",
+     note: "a NAMED ongoing medical condition the owner states they have (asthma, tendinitis). NOT a passing state, NOT a good/bad day, NOT sleep quality — those are health.symptom episodes or nothing."}
+  - {name: health.symptom, value_type: string, cardinality: multi, temporal: episodic, altitude: stated,
+     qualifiers: {severity: {scale: severity_4}}}
+  - {name: health.medication, value_type: string, cardinality: multi, temporal: interval, altitude: stated,
+     qualifiers: {cadence: [as_needed, daily, multiple_daily]}, aligns_with: "https://schema.org/Drug"}
+  - {name: health.allergy, value_type: string, cardinality: multi, temporal: interval, altitude: stated}
+  - {name: health.injury_or_procedure, value_type: structured, cardinality: multi, temporal: episodic, altitude: stated,
+     value_schema: {kind: {enum: [injury, surgery, procedure, hospitalization]}, description: string, date: date_or_approx}}
+  - {name: health.encounter, value_type: structured, cardinality: multi, temporal: episodic, altitude: stated,
+     value_schema: {kind: {enum: [appointment, test, screening, therapy_session, vaccination]}, provider: entity_ref, date: date_or_approx}}
+  - {name: health.sensory_or_mobility, value_type: structured, cardinality: multi, temporal: interval, altitude: stated, key_fields: [domain],
+     value_schema: {domain: {enum: [vision, hearing, mobility, dexterity, other]}, status: string}}
+  - {name: health.accessibility_need, value_type: structured, cardinality: multi, temporal: interval, altitude: stated, key_fields: [need],
+     value_schema: {need: {enum: [screen_reader, voice_control, magnifier, high_contrast, large_text, reduced_motion, captions, other]}, strength: [prefers, requires]}}
+  - {name: health.dietary_restriction_medical, value_type: string, cardinality: multi, temporal: interval, altitude: stated}
+  - {name: health.insurance_status, value_type: enum, values: [comprehensive, basic, minimal, uninsured], cardinality: single, temporal: interval, altitude: stated,
+     note: "v0.2: coverage SHAPE only. The policy itself (provider, status, renewal date) is owned by admin.legal.admin.policy — this pack cross-refs, it does not duplicate."}
+  # --- v0.2 additions ---
+  - {name: health.literacy, value_type: enum, values: [very_high, high, moderate, low], cardinality: single, temporal: interval, altitude: inferred,
+     note: "v0.2 (MatrAIx health_health_literacy) — how the owner engages with medical information; calibrates explanation depth. NEVER a competence judgment surfaced to the owner."}
+  - {name: health.care_stance, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {topic: {enum: [alternative_medicine, preventive_care, screening, medication_use, second_opinions, other]}, position: {scale: stance_5}},
+     note: "v0.2 — personal care philosophy. Public-health POLICY stances (vaccine mandates, healthcare systems) belong to beliefs.civic under the boundary rule."}
+  - {name: health.provider_relationship, value_type: structured, cardinality: multi, temporal: interval, altitude: stated, key_fields: [provider, kind],
+     value_schema: {provider: entity_ref, kind: {enum: [primary_care, specialist, dentist, optometrist, physio, mental_health, other]}},
+     note: "v0.2 — who the owner's care team is; enables 'when did I last see X' without storing clinical content"}
+  - {name: health.pain_pattern, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred, key_fields: [site_or_kind],
+     value_schema: {site_or_kind: string, pattern: string}}   # synthesis over repeated symptom episodes
+
+guidance:
+  definitions: >
+    Health facts record what the OWNER states about their own body and care, and what
+    providers state TO the owner (addressed). The unit is the owner's account — never a
+    clinical judgment.
+  abstention:
+    - "NEVER diagnose: repeated headaches are health.symptom episodes, never a health.condition."
+    - "Never infer conditions from medications, searches, or reading ('reading about metformin' asserts nothing)."
+    - "Family members' health belongs to their dossiers (and lifex caregiving to relationships.social), never to owner health.*."
+    - "One-off aches are episodic; only promote to health.pain_pattern via synthesis with min_evidence."
+
+revision:   # Tier-2 declarative rules (§1.6) — added for the shadow pilot (v0.2.1)
+  closes:
+    - {on_value: {management: resolved}, closes: same_object}   # a resolved condition closes its active row(s)
+  supersedes_on: {health.condition: [management]}               # management change = revision; other fields = update
+  noop_when: "re-statement within 7d at equal confidence"
+
+synthesis:
+  - {kind: pattern, predicate: health.pain_pattern, inputs: [health.symptom], min_evidence: 4}
+  - {kind: consistency_check, description: "medication stated stopped ⇒ close interval via supersession, keep history"}
+
+eval:
+  gold:
+    - {text: "Started metformin last week, 500mg with dinner", role: authored,
+       expect: [{predicate: health.medication, value: metformin, cadence: daily}]}
+    - {text: "Reminder: your physical therapy session is confirmed for Tuesday 3pm", role: addressed,
+       expect: [{predicate: health.encounter, value: {kind: therapy_session}}]}
+  negative_controls:
+    - {text: "Interesting thread on how statins work", role: ambient, expect: []}
+    - {text: "Mom's blood pressure meds got adjusted again", role: authored, expect: [], note: "family member, not owner"}
+    - {text: "I'd probably get seasick on that cruise lol", role: authored, expect: [], note: "hypothetical"}
+  calibration: {min_conf_for_assert: 0.7, ece_max: 0.1}
+
+consumers:
+  brief_section: "Health"
+  dossier: true
+  fusion_lane: facts_store
+decisions:
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): the mental-health split is CONFIRMED — health.mental keeps its stricter rules,
+     separate consumers (no dossier), and its own routing guards."
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): health.insurance_status is KEPT as coverage-shape only (comprehensive→uninsured);
+     admin.legal.admin.policy owns the policy itself (provider, status, renewal). Not
+     US-specific once read as 'coverage shape' — the enum reads naturally under any system."

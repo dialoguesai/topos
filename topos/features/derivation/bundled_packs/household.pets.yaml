@@ -1,0 +1,92 @@
+# DRAFT v0.2.0 (new in this catalog round) — MatrAIx has exactly ONE attribute here
+# (lstyle_pet_ownership: Dog|Cat|Multiple|Other|None). For a personal node a pet is a
+# household member with care routines, providers, and a health history.
+# GRAPH NOTE: introduces an `animal` entity type (new node kind in the spine).
+pack: household.pets
+version: 0.1.0
+status: draft
+title: "Pets"
+author: topos
+license: Apache-2.0
+sensitivity_class: personal
+role_policy: authored_addressed      # vet reminders addressed to the owner are prime evidence
+disclosure_default: owner_only
+
+routing:
+  descriptors:
+    - "pets and animals in the owner's household: names, species, care, feeding, walks, vet visits"
+    - "adoption, loss, boarding, grooming, training, medication for an animal"
+  exemplars: ["the dog", "our cat", "vet appointment", "walked", "adopted", "she's been limping", "boarding", "litter"]
+
+predicates:
+  - name: pet.animal
+    value_type: structured
+    cardinality: multi
+    temporal: interval
+    altitude: stated
+    value_schema:
+      name: string
+      species: string
+      breed: string
+      role: {enum: [companion, working, farm, foster]}
+      status: {enum: [living, lost, deceased, rehomed]}
+      since: date_or_approx
+    note: "creates/links an `animal` entity; service animals are NOT this role — see below"
+  - {name: pet.service_animal, value_type: structured, cardinality: multi, temporal: interval, altitude: stated, sensitivity: special,
+     value_schema: {name: string, species: string, kind: [guide, hearing, mobility, medical_alert, psychiatric]},
+     note: "SPECIAL CLASS: a service animal implies a disability. Stated-only, owner_only, never inferred from an animal's presence in workplaces or transit"}
+  - {name: pet.care_routine, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {pet: entity_ref, routine: {enum: [feeding, walking, medication, grooming, training, litter, exercise]}, cadence: {scale: freq_5}}}
+  - {name: pet.health_event, value_type: structured, cardinality: multi, temporal: episodic, altitude: stated,
+     value_schema: {pet: entity_ref, kind: {enum: [vet_visit, illness, injury, procedure, vaccination, medication_change]}, description: string, date: date_or_approx}}
+  - {name: pet.provider, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {pet: entity_ref, provider: entity_ref, kind: {enum: [vet, groomer, sitter, walker, trainer, boarding, insurer]}}}
+  - {name: pet.obligation, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {pet: entity_ref, obligation: string, next_due: date_or_approx},
+     note: "vaccination boosters, flea/tick cadence, annual checkups — same derivation-density idea as possessions/admin; feeds the attention lane"}
+
+guidance:
+  definitions: >
+    Animals the owner is responsible for, treated as household members with their own
+    care history — not as owner attributes.
+  abstention:
+    - "Other people's pets are their business ('my sister's puppy' → nothing here, at most a dossier note for the sister)."
+    - "Animals in media, memes, or wildlife sightings are never pets."
+    - "Never infer a pet's health condition from symptoms mentioned once — health events are episodic like the owner's."
+    - "pet.service_animal is stated-only and special-class; presence of a dog at work is not evidence."
+    - "Do not infer a pet's death from silence."
+
+synthesis:
+  - {kind: pattern, predicate: pet.care_routine, inputs: [messages, calendar_events, activity_timing_stats], min_evidence: 4}
+  - {kind: pattern, predicate: pet.obligation, inputs: [pet.health_event, pet.provider, addressed_notices], min_evidence: 1_dated_event}
+
+eval:
+  gold:
+    - {text: "Mabel's due for her rabies booster in March, vet just called", role: authored,
+       expect: [{predicate: pet.animal, value: {name: Mabel}}, {predicate: pet.obligation, value: {obligation: rabies_booster}}]}
+    - {text: "Fifteen years with the old man. Put him to rest this morning.", role: authored,
+       expect: [{predicate: pet.animal, value: {status: deceased}}, {predicate: life.event, value: {kind: bereavement}}, {note: "cross-pack: pet loss IS a life event"}]}
+  negative_controls:
+    - {text: "That golden retriever video is everything", role: ambient, expect: []}
+    - {text: "Watching the neighbours' cat while they're away", role: authored, expect: [{predicate: pet.animal}], expect_not: [{predicate: pet.animal, value: {role: companion}}], note: "temporary care ≠ ownership; foster/sitting only if sustained"}
+  calibration: {min_conf_for_assert: 0.7, ece_max: 0.15}
+
+consumers:
+  brief_section: "Home"
+  dossier: true
+  fusion_lane: facts_store
+  graph_projection: animal_entities
+  attention_lane: true
+co_asserts:
+  - trigger: "pet.animal status transitions to deceased (stated)"
+    asserts: "life.events.life.event {kind: pet_loss}"
+    rule: "both facts share identical source_refs; co-assertion fires on stated evidence only, never from synthesis"
+
+decisions:
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): the `animal` ENTITY TYPE is APPROVED — a real node kind in the spine (resolver
+     map + graph + FE type/color/icon), not a person-adjacent hack. Touches map_ner_type
+     and the entity type enum; scoped into plan F1.7."
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): cross-pack co-assertion is APPROVED as a declared format feature (`co_asserts:`,
+     used first by this pack). Constraints: stated-altitude triggers only, enumerated
+     statically in the pack, both facts share source_refs, and the target pack's own
+     validation still applies. Never emergent, never from inferred facts."

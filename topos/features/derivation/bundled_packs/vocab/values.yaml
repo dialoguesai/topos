@@ -1,0 +1,62 @@
+# GENERATED — do not hand-edit; regenerate with scratchpad/gen_vocab.py
+# Source: MatrAIx_Persona_1M codebook `persona_codes.schema.json` (arXiv 2608.04205).
+# Category structure and vocabulary only — no persona data was copied.
+# OPEN vocabularies: these are extraction SEEDS, not closed sets. Values outside
+# these lists are valid and expected (a personal node meets the long tail).
+
+vocab_file: values
+vocabularies:
+  - name: values.value
+    source_lane: "Values & Motivation"
+    count: 29
+    values:
+      - achievement
+      - adventure
+      - beauty_aesthetics
+      - career_success
+      - community
+      - creativity_self_expression
+      - equality
+      - family
+      - fun_enjoyment
+      - health
+      - helping_others
+      - independence
+      - integrity_honesty
+      - justice_fairness
+      - knowledge_truth
+      - loyalty
+      - order_structure
+      - patriotism
+      - personal_freedom
+      - personal_growth
+      - power_influence
+      - privacy
+      - recognition
+      - security_stability
+      - social_status
+      - spirituality_faith
+      - sustainability
+      - tradition
+      - wealth
+  - name: values.schwartz
+    source_lane: "Values & Motivation"
+    count: 10
+    values:
+      - achievement
+      - benevolence
+      - conformity
+      - hedonism
+      - power
+      - security
+      - self_direction
+      - stimulation
+      - tradition
+      - universalism
+  - name: values.sdt_need
+    source_lane: "Values & Motivation"
+    count: 3
+    values:
+      - autonomy
+      - competence
+      - relatedness

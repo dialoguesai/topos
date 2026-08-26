@@ -1,0 +1,151 @@
+# DRAFT v0.2.0 for review — seeded from MatrAIx lanes: Professional: Career (4),
+# Professional: Industry (51), Behavior: Work (2), lifex_career_path_shape/entrepreneurship,
+# + Developer: Professional Context (role archetypes generalized). Absorbs existing rules
+# predicates works_at/worked_at/role_is/advises + works_on.
+pack: work.career
+version: 0.2.3
+status: draft
+title: "Work & career"
+author: topos
+license: Apache-2.0
+sensitivity_class: personal
+role_policy: authored_addressed
+disclosure_default: owner_only
+
+pilot: true                          # F3 pilot, decided 2026-08-25 (owner) — replaces behavior.habits
+
+routing:
+  descriptors:
+    - "jobs, roles, employers, projects, promotions, teams, clients, professional identity"
+    - "work arrangements: schedule, location, freelance/contract, side projects, ventures"
+  exemplars: ["at work", "my team", "new role", "shipped", "client", "promoted", "quarterly review", "side project", "my startup"]
+
+predicates:
+  - {name: work.employer, value_type: structured, cardinality: multi, temporal: interval, altitude: stated, key_fields: [org],
+     value_schema: {org: entity_ref, kind: [employer, past_employer, client, advisory]},
+     note: "absorbs works_at/worked_at/advises; org resolves into the entity spine"}
+  - {name: work.role, value_type: structured, cardinality: multi, temporal: interval, altitude: stated, key_fields: [title, org],
+     value_schema: {title: string, org: entity_ref, seniority: [intern, entry, mid, senior, lead_principal, exec, founder]}}
+  - {name: work.industry, value_type: string, cardinality: multi, temporal: interval, altitude: inferred,
+     note: "from employer/role/domain evidence; MatrAIx 51-industry list is the seed vocabulary"}
+  - {name: work.employment_shape, value_type: enum, values: [full_time, part_time, freelance, contract, portfolio, founder, student, between_roles, retired], cardinality: single, temporal: interval, altitude: stated}
+  - {name: work.arrangement, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {schedule: [nine_to_five, flexible, shift, on_call, irregular], location_mode: [office, hybrid, remote]}}
+  - {name: work.project, value_type: structured, cardinality: multi, temporal: interval, altitude: stated, key_fields: [project],
+     value_schema: {project: entity_ref_or_string, status: [active, shipped, paused, abandoned], collaborators: entity_refs},
+     note: "absorbs works_on; project entities join the graph (pursues/works_on edges exist)"}
+  - name: work.career_event
+    value_type: structured
+    cardinality: multi
+    temporal: episodic
+    altitude: stated
+    key_fields: [event, org]
+    event_identity: "windowed:60"
+    value_schema:
+      event: {enum: [hired, promoted, role_change, raise, layoff, resigned, fired, review, award, started_venture, closed_venture]}
+      org: entity_ref
+      date: date_or_approx
+    note: >
+      v0.2.2 — a career_event is a COMPLETED transition that HAS ALREADY HAPPENED. Applying,
+      hoping, interviewing, submitting or planning is NOT the event: "I applied to X" is not
+      `hired`; "I applied to a startup fund" is not `started_venture`; "I filed for
+      unemployment" is not `resigned` (it says nothing about how the role ended); a test score
+      is not an `award`. If the record states an ATTEMPT rather than an OUTCOME, extract
+      nothing here.
+  - {name: work.venture_history, value_type: enum, values: [never, considered, side_hustle, founded_once, serial, exited], cardinality: single, temporal: interval, altitude: inferred}
+  - {name: work.professional_visibility, value_type: enum, values: [private, locally_known, industry_recognized, public_figure], cardinality: single, temporal: interval, altitude: inferred}
+  # --- v0.2 additions: work-culture stances + org context + research output (v0.1 residue) ---
+  - name: work.culture_stance
+    value_type: structured
+    cardinality: multi
+    temporal: interval
+    altitude: stated
+    key_fields: [topic]
+    value_schema:
+      topic: {enum: [remote_work, office_work, four_day_week, performance_reviews, meetings, on_call, overtime, hiring_practices, management_style, other]}
+      position: {scale: stance_5}
+    note: >
+      v0.2 — the workplace slice of the MatrAIx att_* battery had no home in v0.1.
+      BOUNDARY RULE (catalog-wide): a stance belongs to the pack whose DOMAIN the topic acts in.
+      Where a topic is both personal practice and public policy (e.g. labor unions, the gig
+      economy), the workplace stance lands here and the policy stance in beliefs.civic — two
+      different facts, both may fire, neither implies the other.
+  - {name: work.org_context, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {org: entity_ref, size: [solo, startup, smb, mid, large, enterprise], function: string},
+     note: "v0.2 (MatrAIx company_size / role_function) — shape of the workplace, inferred from stated context"}
+  - {name: work.research_output, value_type: structured, cardinality: multi, temporal: interval, altitude: stated, key_fields: [kind, venue],
+     value_schema: {kind: {enum: [paper, whitepaper, thesis, patent, talk, book, public_writing]}, venue: entity_ref_or_string, date: date_or_approx},
+     note: "v0.2 (MatrAIx research_output) — publication/authorship record; feeds work.professional_visibility"}
+  - {name: work.experience_span, value_type: enum, values: [0_2y, 3_5y, 6_10y, 11_20y, over_20y], cardinality: single, temporal: interval, altitude: inferred,
+     note: "v0.2 (MatrAIx years_experience) — derived from work.role interval history, never asked"}
+
+vocab_refs:
+  - vocab/expertise.yaml#work.industry     # 48 MatrAIx industry seeds
+  - vocab/stances.yaml#stance.topic        # work-domain rows only
+
+guidance:
+  definitions: >
+    The owner's working life: who they work for and with, what they build, and how the
+    shape of that work changes. Career events are episodic; employment/roles are
+    intervals with supersession (job changes close the old row, never delete it).
+  abstention:
+    - "Colleagues' career news is dossier material ('Ana got promoted' → Ana's dossier)."
+    - "Company news is not owner news (layoffs AT the company ≠ owner laid off)."
+    - "Interviewing/exploring is aspirations.goals until an offer is accepted."
+    - "Venting about work asserts employment context at most, never performance facts."
+    - "v0.2.2 INTENT IS NOT OUTCOME: applied / hoping / interviewing / submitted / planning never
+       produce a work.career_event — only a stated completed transition does."
+    - "v0.2.3 A role needs a stated TITLE in the record; 'working on X stuff' names an activity,
+       not a role — extract work.project instead. (required_fields retired: it forced 'Founder @
+       Smithers' style fabrications — the intent lives here as abstention now.)"
+    - "v0.2.2 A meeting or a day spent WITH an organisation is not employment by it: work.employer
+       needs a stated working relationship, not co-presence ('All day with X' asserts nothing)."
+
+revision:   # Tier-2 declarative rules (§1.6) — pilot promotion 2026-08-25
+  supersedes_on: {work.project: [status], work.role: [seniority], work.employer: [kind]}
+  noop_when: "re-statement within 7d at equal confidence"
+
+synthesis:
+  - {kind: trajectory, predicate: [work.venture_history, work.professional_visibility], inputs: [work.career_event, work.project], min_evidence: 3}
+  - {kind: consistency_check, description: "work.employer/role vs calendar domains + email domains → conflicts queue, never auto-assert"}
+
+eval:
+  gold:
+    - {text: "Signed the offer — starting as Staff Engineer at Meridian in March", role: authored,
+       expect: [{predicate: work.career_event, value: {event: hired}}, {predicate: work.role, value: {title: "Staff Engineer", seniority: lead_principal}}]}
+    - {text: "Put the side project on ice until after launch season", role: authored,
+       expect: [{predicate: work.project, value: {status: paused}}]}
+  negative_controls:
+    - {text: "Sounds like Dana's team is hiring three more", role: authored, expect: [], note: "other team's news"}
+    - {text: "I applied to Tavus' job application today", role: authored, expect: [], note: "v0.2.2 measured junk: applied is NOT hired"}
+    - {text: "I applied to the Google Startup Fund", role: authored, expect: [], note: "v0.2.2 measured junk: applying for funding is NOT started_venture"}
+    - {text: "I filed for unemployment.", role: authored, expect: [{predicate: work.employment_shape, value: between_roles}],
+       expect_not: [{predicate: work.career_event}], note: "v0.2.2: shape yes, event no"}
+    - {text: "I took the ccat again. I got a 32.", role: authored, expect: [], note: "v0.2.2 measured junk: a test score is not an award"}
+    - {text: "All day with Texas Ventures.", role: authored, expect_not: [{predicate: work.employer}], note: "v0.2.2 measured junk: co-presence is not employment"}
+    - {text: "(newsletter: 'The 2026 layoff wave continues')", role: ambient, expect: []}
+  calibration: {min_conf_for_assert: 0.65, ece_max: 0.15}
+
+consumers:
+  brief_section: "Work"
+  dossier: true
+  fusion_lane: facts_store
+decisions:
+  - >
+    2026-08-25 (pilot iteration): work.career_event measured 5/6 junk on first validation — the
+    model mapped intentions onto completed events (applied->hired, applied-for-fund->
+    started_venture, filed-unemployment->resigned, test-score->award). Fixed DECLARATIVELY:
+    completed-transition note + 2 abstention rules + 5 negative controls drawn from the actual
+    junk, and work.role gains required_fields:[title]. No prompt hand-tuning — the pack states
+    the contract, the engine template enforces the shape.
+  - >
+    2026-08-25 (owner): PROMOTED to the F3 pilot set, replacing behavior.habits. Rationale is a MEASURED
+    substrate match: the corpus is a work journal ("Accomplished: ...") on which behavior.habits
+    scored ~59% junk across three constraint iterations because the model maps logged tasks onto
+    habit predicates. Same records, right lens: projects, career events and collaborators are
+    what these entries actually contain. NOTE the required_fields lesson from that failure —
+    this pack deliberately declares NO required fields.
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): compensation is EXCLUDED from the catalog entirely — money.income_band was dropped
+     from finances.economics in the same pass; the only money-adjacent identity fact is
+     money.socioeconomic_self_description (stated, special). Work facts carry roles, events,
+     and shape — never figures."

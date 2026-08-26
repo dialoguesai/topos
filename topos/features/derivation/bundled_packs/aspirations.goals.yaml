@@ -1,0 +1,92 @@
+# DRAFT v0.2.0 for review — seeded from MatrAIx attributes: habit_goal_setting,
+# values_priority (aspiration side), lifex_turning_point (forward-looking side).
+# STRATEGIC ROLE: bridges the EXISTING goal system (user_goals table + goal extraction
+# job + goal graph nodes) into the pack registry — same move as the `core` pack in the plan.
+pack: aspirations.goals
+version: 0.2.0
+status: draft
+title: "Goals & aspirations"
+author: topos
+license: Apache-2.0
+sensitivity_class: personal
+role_policy: authored_only          # what someone wants is theirs to say; provenance-split already purged non-authored goals (214→26)
+disclosure_default: owner_only
+
+routing:
+  descriptors:
+    - "things the owner wants: goals, plans, deadlines, dreams, commitments, resolutions"
+    - "progress language: milestones, setbacks, deciding, finishing, someday-lists"
+  exemplars: ["my goal", "I want to", "by end of year", "deadline", "finally going to", "promised myself", "someday", "on track"]
+
+predicates:
+  - name: asp.goal
+    value_type: structured
+    cardinality: multi
+    temporal: interval
+    altitude: stated
+    value_schema:
+      goal: string
+      domain: {enum: [work, health, learning, financial, relational, creative, civic, personal, other]}
+      horizon: [this_week, this_quarter, this_year, multi_year, open_ended]
+      status: [active, progressing, stalled, achieved, abandoned]
+    note: "absorbs the existing user_goals extraction; status changes supersede, history kept"
+  - {name: asp.aspiration, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {aspiration: string, kind: [become, learn, visit, create, own, experience]},
+     note: "someday-grade wants without a horizon — kept distinct so goals stay actionable"}
+  - {name: asp.commitment, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {commitment: string, to_whom: entity_ref_or_self, due: date_or_approx},
+     note: "promises with a counterparty/date — feeds the EXISTING Commitment time-signal lane"}
+  - {name: asp.milestone, value_type: structured, cardinality: multi, temporal: episodic, altitude: stated,
+     value_schema: {goal_ref: string, milestone: string, kind: [progress, setback, completion]}}
+  - {name: asp.focus_period, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {focus: string, evidence_kind: [stated_priority, activity_concentration]},
+     note: "what the owner is ACTUALLY prioritizing right now — reconciles stated goals with observed activity; the lens-lab goal-attachment work is the direct precedent"}
+  - {name: asp.resolution_pattern, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {pattern: [finisher, strong_starter, pivoter, accumulator], context: string},
+     note: "gentle meta-pattern over goal histories; high evidence floor; NEVER surfaced judgmentally"}
+
+cross_refs:
+  - "narrative.self.self_aspirational_identity — WHO the owner is becoming (identity-shaped);
+     this pack owns WHAT they are doing about it (actionable, dated, statused). A single
+     statement can legitimately produce one of each."
+  - "places.mobility.place_relocation_intent — the geographic special case; see its open question
+     on which pack owns relocation aspirations."
+
+guidance:
+  definitions: >
+    What the owner is aiming at, at three altitudes: stated goals and commitments,
+    someday aspirations, and the inferred current focus. Goal facts anchor to graph
+    goal nodes (pursues edges already exist).
+  abstention:
+    - "Authored-only: an assigned OKR is work context, not a personal goal, unless the owner adopts it in their own words."
+    - "Idle wishes ('would love to someday') are aspirations, never goals — the horizon field is load-bearing."
+    - "Never mark a goal abandoned from silence; stalled requires the owner's words or a passed deadline plus zero activity (then still status=stalled, not abandoned)."
+    - "asp.focus_period must cite both the stated goal AND the activity evidence; if they disagree, record the divergence honestly (that divergence IS the insight)."
+
+synthesis:
+  - {kind: reconciliation, predicate: asp.focus_period, inputs: [asp.goal, activity_concentration_stats, calendar_events], min_evidence: 14d}
+  - {kind: trajectory, predicate: asp.resolution_pattern, inputs: [asp.goal_history, asp.milestone], min_evidence: 5_goals}
+
+eval:
+  gold:
+    - {text: "Goal for Q4: ship the beta and get 10 real users", role: authored,
+       expect: [{predicate: asp.goal, value: {domain: work, horizon: this_quarter, status: active}}]}
+    - {text: "Told Maya I'd have the draft to her by Friday", role: authored,
+       expect: [{predicate: asp.commitment, value: {to_whom: Maya, due: friday}}]}
+  negative_controls:
+    - {text: "Company goal this half is 20% activation lift", role: observed, expect: [], note: "org goal, not owner's"}
+    - {text: "Imagine retiring at 40 lol", role: authored, expect: [], note: "joke/hypothetical"}
+  calibration: {min_conf_for_assert: 0.65, ece_max: 0.15}
+
+consumers:
+  brief_section: "Goals"
+  dossier: true
+  fusion_lane: facts_store
+  graph_projection: goal_nodes      # existing pursues/relates_to enrichment continues to own the graph side
+decisions:
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): migration runs PARALLEL — asp.goal extraction runs alongside the existing
+     user_goals job until a parity gate (same corpus, ≥ existing recall, junk not worse)
+     passes two consecutive runs; only then does the legacy job retire."
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): relocation ownership — places.mobility.place.relocation_intent OWNS any
+     relocation intent with a named target place. asp.aspiration keeps only targetless
+     wanderlust (kind: experience/visit with no committed place). One fact, one owner."

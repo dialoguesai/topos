@@ -7,6 +7,7 @@ from .canonical.embeddings_job import EmbeddingsJob
 from .canonical.entities_job import EntitiesJob
 from .canonical.emo_27_job import Emo27Job
 from .canonical.fact_extraction_job import FactExtractionJob
+from .canonical.derivation_job import DerivationJob
 from .canonical.goal_extraction_job import GoalExtractionJob
 from .canonical.relationship_edges_job import RelationshipEdgesJob
 from .canonical.sentiment_job import SentimentJob
@@ -30,6 +31,7 @@ CANONICAL_JOBS = [
     StatisticsJob(),
     FactExtractionJob(),
     TimelineJob(),
+    DerivationJob(),   # W2.3: ontology-pack derivation (after entities/facts — needs the spine)
 ]
 
 SIGNAL_DERIVATION_JOBS = [
@@ -67,6 +69,7 @@ __all__ = [
     "AvailabilityScoresJob",
     "StatisticsJob",
     "FactExtractionJob",
+    "DerivationJob",
     "TimelineJob",
     "AttentionTriageJob",
     "TopicClusterJob",

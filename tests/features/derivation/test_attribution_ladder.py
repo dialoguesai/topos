@@ -209,3 +209,18 @@ def test_loss_description_variants_merge(a3_writer):
     live = conn.execute("SELECT COUNT(*) FROM signal_objects WHERE object_type='fact'"
                         " AND valid_to IS NULL AND object_key LIKE '%relationship_event%grandpa%'").fetchone()[0]
     assert live == 1
+
+
+# --- prefilter invariant (found by W2.3 job tests: work.career's own eval gold
+#     was silently dropped by its own prefilter — gold that can't route is
+#     coverage that quietly never happens at ingest) ---
+def test_every_pack_gold_passes_its_own_prefilter():
+    from topos.features.derivation.prefilter import PackPrefilter
+    misses = []
+    for pid, pack in load_packs(PACK_DIR).items():
+        pf = PackPrefilter(pack)
+        for g in ((pack.raw or {}).get("eval") or {}).get("gold") or []:
+            text = str(g.get("text") or "")
+            if text and not pf.passes(text):
+                misses.append(f"{pid}: {text[:60]}")
+    assert not misses, "gold dropped by own prefilter:\n" + "\n".join(misses)

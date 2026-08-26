@@ -1,0 +1,17 @@
+# Shared value scales for derivation packs (referenced as `scale: <name>`).
+# Seeded verbatim from MatrAIx_Persona_1M codebook value sets (persona_codes.schema.json)
+# so our facts stay mappable onto its 1,290-attribute space.
+scales:
+  freq_5: [daily, weekly, monthly, rarely, never]                    # MatrAIx habit_* battery
+  stance_5: [enthusiast, positive, neutral, skeptical, opposed]      # MatrAIx att_* battery
+  importance_5: [core, important, moderate, minor, irrelevant]       # MatrAIx val_* battery
+  level_5: [very_high, high, average, low, very_low]                 # MatrAIx big5_*/mft_*/dospert_* scales
+  strength_5: [signature, strong, moderate, slight, absent]          # MatrAIx trait_* (VIA) battery
+  proficiency_5: [expert, proficient, familiar, aware, none]         # MatrAIx fam_* battery
+  affinity_5: [passionate, interested, neutral, indifferent, averse] # MatrAIx topic_*/acad_* battery
+  quality_4: [excellent, good, fair, poor]                           # MatrAIx health self-ratings
+  severity_4: [none, mild, moderate, severe]                         # MatrAIx pain/limitation scales
+  position_5: [strong_a, lean_a, balanced, lean_b, strong_b]         # MatrAIx pref_*_vs_* spectrums
+  confidence_note: >
+    Scale values are fact VALUES/qualifiers, not confidences. Assertion confidence is the
+    separate calibrated float the FactStore already carries.

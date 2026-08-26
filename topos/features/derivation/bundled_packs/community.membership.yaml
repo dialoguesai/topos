@@ -1,0 +1,83 @@
+# DRAFT v0.2.0 (new in this catalog round) — the SECULAR twin of faith.community.
+# Seeded from MatrAIx: lstyle_volunteering, lstyle_giving, lstyle_primary_social,
+# lstyle_primary_messenger, linkedin_activity, stackoverflow_* participation,
+# open_source_activity_level, att_labor_unions (membership side), lifex_service_history.
+pack: community.membership
+version: 0.1.0
+status: draft
+title: "Communities & belonging"
+author: topos
+license: Apache-2.0
+sensitivity_class: personal
+role_policy: authored_addressed
+disclosure_default: owner_only
+
+routing:
+  descriptors:
+    - "groups the owner belongs to: teams, clubs, classes, associations, unions, alumni networks, neighborhood groups"
+    - "online communities, forums, servers, guilds; volunteering, organizing, moderating, showing up regularly"
+  exemplars: ["my team", "the club", "our group", "joined", "we meet every", "the server", "volunteering at", "board meeting"]
+
+vocab_refs: [vocab/habits.yaml#behavior.lifestyle_dimension]
+
+predicates:
+  - name: community.membership
+    value_type: structured
+    cardinality: multi
+    temporal: interval
+    altitude: stated
+    value_schema:
+      community: entity_ref
+      kind: {enum: [sports_team, club, class_cohort, alumni, professional_association, union, online_community, mutual_aid, neighborhood, hobby_group, arts_ensemble, parenting_group, other]}
+      role: {enum: [member, regular, organizer, leader, alum, lapsed]}
+    note: "faith communities → beliefs.spiritual.faith.community; support groups → health.mental.mind.care_practice (both are special-class domains and must not leak here)"
+  - {name: community.participation_event, value_type: structured, cardinality: multi, temporal: episodic, altitude: stated,
+     value_schema: {community: entity_ref, event: {enum: [joined, attended, organized, contributed, competed, lapsed, left]}, description: string}}
+  - {name: community.contribution, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {community: entity_ref_or_string, kind: {enum: [volunteering, moderation, teaching, organizing, funding, maintaining, mentoring]}, cadence: {scale: freq_5}}}
+  - {name: community.belonging_tier, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {community: entity_ref, tier: [core, active, peripheral, dormant]},
+     note: "no-LLM synthesizer over participation events + comms/calendar frequency"}
+  - {name: community.platform_presence, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {platform: entity_ref, participation: [creator, contributor, active, lurker, dormant]},
+     note: "PLATFORM-LEVEL ONLY — never store handles, usernames, or profile URLs as fact values (identifiers belong to the vault/span-store)"}
+  - {name: community.role_change, value_type: structured, cardinality: multi, temporal: episodic, altitude: stated,
+     value_schema: {community: entity_ref, from_role: string, to_role: string}}
+
+guidance:
+  definitions: >
+    Groups the owner belongs to and how they show up in them. Membership is stated;
+    belonging tier is measured. Employers are work.career, not communities — but a
+    team WITHIN an employer that the owner treats as a community may be both.
+  abstention:
+    - "One meetup, one visit, one thread is a participation event, never a membership."
+    - "Never infer membership from proximity (partner's club, a group chat the owner was added to)."
+    - "Faith and support-group memberships are OWNED BY their special-class packs — extract nothing here for them."
+    - "Never store handles/usernames; the platform entity is the fact, the account identifier is not."
+
+synthesis:
+  - {kind: graph_labeling, predicate: community.belonging_tier, inputs: [community.participation_event, comms_stats, calendar_events], min_evidence: 90d}
+  - {kind: pattern, predicate: community.platform_presence, inputs: [browser_visit_stats, github_events, source_activity], min_evidence: 30d}
+
+eval:
+  gold:
+    - {text: "Elected to the co-op board for next year — two meetings a month now", role: authored,
+       expect: [{predicate: community.membership, value: {kind: neighborhood, role: leader}}, {predicate: community.role_change}]}
+    - {text: "Been maintaining the docs for that project since spring", role: authored,
+       expect: [{predicate: community.contribution, value: {kind: maintaining}}]}
+  negative_controls:
+    - {text: "Got added to the neighborhood WhatsApp group, never read it", role: authored, expect: [], note: "passive membership without participation"}
+    - {text: "My wife's book club met here tonight", role: authored, expect: [], note: "her community"}
+    - {text: "Great AA meeting tonight", role: authored, expect: [], note: "support group → health.mental ONLY (special class)"}
+  calibration: {min_conf_for_assert: 0.65, ece_max: 0.15}
+
+consumers:
+  brief_section: "People"
+  dossier: true
+  fusion_lane: facts_store
+  graph_projection: member_of_edges
+decisions:
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): charitable giving is OWNED HERE as community.contribution(kind: funding).
+     beliefs.civic.civic.participation(action: donated) is reserved for politically-purposed
+     giving only (campaigns, advocacy, PACs) — and since beliefs.civic is authored-only and
+     off-by-default, ordinary charity never routes through a special-class pack."

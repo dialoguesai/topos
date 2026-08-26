@@ -1,0 +1,124 @@
+# DRAFT v0.2.0 (new in this catalog round) — absent from MatrAIx entirely except
+# health_insurance_status and demo_citizenship_status. Arguably the highest-utility pack
+# in the catalog for "maximal intelligence from minimal data": deadlines derived from
+# documents the owner already receives.
+pack: admin.legal
+version: 0.1.0
+status: draft
+title: "Documents & obligations"
+author: topos
+license: Apache-2.0
+sensitivity_class: special          # immigration status, legal matters, policy details = high harm if disclosed
+role_policy: authored_addressed     # renewal notices and confirmations ADDRESSED to the owner are the main evidence
+disclosure_default: owner_only
+
+pilot: false                        # WITHDRAWN from pilot 2026-08-25 (owner) — see decisions
+gated_on:
+  - id: F1.6
+    name: identifier guard (A1.0)
+    why: >
+      This pack is the only one that routinely reads document-shaped text dense with
+      identifiers (policy, case, document and account numbers). Its abstention rules forbid
+      storing them, but a rule the extractor merely reads is not a guarantee — the guard is a
+      REJECTING VALIDATOR on every extracted fact value, so an identifier cannot become a fact
+      even if the model emits one.
+      DELIBERATELY NARROW: deterministic recognizers only (Presidio-style rules tier, no model
+      weights) — NOT the full A1 span-store. This pack does not wait on the GLiNER bake-off,
+      the offset contract, or the vault. Full A1 remains the complete answer for document text
+      at rest; F1.6 is what makes this pilot safe to run before A1 exists.
+
+routing:
+  descriptors:
+    - "official documents and deadlines: passports, licenses, visas, permits, insurance policies, leases, warranties, registrations"
+    - "renewals, expirations, filings, appointments with institutions, claims, contracts, applications"
+  exemplars: ["expires on", "renewal notice", "your policy", "appointment at the", "filed", "the lease", "application status"]
+
+predicates:
+  - name: admin.document
+    value_type: structured
+    cardinality: multi
+    temporal: interval
+    altitude: stated
+    value_schema:
+      kind: {enum: [passport, national_id, drivers_license, visa, residence_permit, work_authorization, professional_license, vehicle_registration, insurance_policy, warranty, lease, deed_or_title, tax_record, membership_credential, other]}
+      issuer: entity_ref
+      status: {enum: [valid, expiring_soon, expired, in_renewal, applied_for, lost_or_stolen]}
+      expires_at: date_or_approx
+    note: "NEVER store the document's NUMBER, barcode, or any identifier — kind + issuer + status + date only"
+  - name: admin.recurring_obligation
+    value_type: structured
+    cardinality: multi
+    temporal: interval
+    altitude: inferred
+    value_schema: {obligation: string, kind: {enum: [renewal, filing, payment_due, inspection, recertification, report, other]}, cadence: string, next_due: date_or_approx}
+    note: "THE derivation-density predicate — the calendar the owner never wrote down. Feeds the attention lane."
+  - {name: admin.policy, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {kind: {enum: [health_insurance, auto, home_or_renters, life, disability, travel, pet, other]}, provider: entity_ref, status: [active, lapsed, switching, claim_open]},
+     note: "absorbs health_insurance_status; health.physical cross-refs but does not own it"}
+  - {name: admin.process, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {kind: {enum: [application, immigration_process, claim, dispute, filing, estate_matter, permit_process, other]}, counterparty: entity_ref, status: [open, pending, awaiting_response, resolved, withdrawn]},
+     note: "STATUS ONLY — never the substance of a legal matter, never advice, never case identifiers"}
+  - {name: admin.jurisdiction_context, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {jurisdiction: string, relevance: {enum: [tax, residency, licensing, voting, vehicle]}},
+     note: "which rule-systems apply to the owner — enables correct deadline reasoning without storing status details"}
+  - {name: admin.institutional_relationship, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {institution: entity_ref, kind: {enum: [bank, insurer, government_agency, utility, landlord, school, healthcare_provider, other]}}}
+
+guidance:
+  definitions: >
+    The administrative substrate of a life: which documents exist, what state they are
+    in, and what falls due when. The value is derived deadlines — the node knowing a
+    passport expires before a trip is booked.
+  abstention:
+    - "ABSOLUTE: no document numbers, account numbers, case numbers, policy numbers, or credentials as fact values — ever. Those live in the vault/span-store, referenced, never copied."
+    - "Never infer immigration or citizenship status from names, languages, travel, or employers — stated/addressed-document evidence only."
+    - "Never record the substance, merits, or parties of a legal dispute — kind + status + counterparty-institution only."
+    - "Never generate legal, tax, or immigration ADVICE from these facts; surfacing a date is the whole job."
+    - "Others' documents and matters are excluded entirely, including a spouse's (household filings note the owner's own obligation only)."
+
+synthesis:
+  - {kind: pattern, predicate: admin.recurring_obligation, inputs: [admin.document, admin.policy, calendar_events, addressed_notices], min_evidence: 1_document_with_date}
+  - {kind: pattern, predicate: admin.jurisdiction_context, inputs: [identity.core, places.mobility, admin.document], min_evidence: 2}
+
+eval:
+  gold:
+    - {text: "Your driver's licence expires on 03/2027 — renew online from January", role: addressed,
+       expect: [{predicate: admin.document, value: {kind: drivers_license, status: valid, expires_at: "2027-03"}}, {predicate: admin.recurring_obligation, value: {kind: renewal}}]}
+    - {text: "Switched the renters policy over to State Farm today", role: authored,
+       expect: [{predicate: admin.policy, value: {kind: home_or_renters, status: active}}]}
+  negative_controls:
+    - {text: "Passport no. X1234567, expires 2029", role: addressed, expect_not_value: "X1234567", note: "date/kind extractable; NUMBER must never enter a fact"}
+    - {text: "Helping my brother with his visa paperwork", role: authored, expect: [], note: "another's matter"}
+    - {text: "(browser: article on new tax rules)", role: ambient, expect: []}
+  calibration: {min_conf_for_assert: 0.8, ece_max: 0.08}
+
+consumers:
+  brief_section: "Admin"
+  dossier: false
+  fusion_lane: facts_store
+  attention_lane: true
+decisions:
+  - >
+    2026-08-25 (owner): WITHDRAWN from the F3 pilot set, replaced by relationships.social. Reason is
+    MEASURED, not judged: the S1d substrate pre-check found no email or calendar canonical
+    data on this node (calendar_events=0; gmail is a remote MCP connector, never ingested;
+    the 212 pattern hits were spam/OTP/URL false-matches). The pack stays fully drafted and
+    default-ON; its activation trigger is GMAIL INGESTION — which this finding turns into a
+    first-class connector argument. The F1.6 identifier-guard gate travels with it.
+  - >
+    2026-08-24 (owner): PROMOTED TO F3 PILOT, replacing beliefs.civic. Rationale — it is the
+    clearest demonstration of the north star (a couple of ordinary sources yield renewal
+    deadlines nobody wrote down), and its extraction is date-shaped rather than
+    judgment-shaped, so density and correctness are cheap to grade honestly.
+  - >
+    2026-08-24 (owner): gating CONFIRMED, but narrowed to F1.6's deterministic identifier
+    guard rather than the whole A1 span-store, so the pilot is not blocked on Workstream A.
+
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): default ON with owner_only disclosure (not opt-in). Its content is administrative
+     rather than intimate, its utility is the highest in the catalog, and every fact rides
+     special-class floors regardless. The lens catalog toggle still allows opt-out."
+
+open_questions:
+  - "Corpus pre-check — do the connected sources actually carry renewal notices? Folded into
+     the shadow pilot as an S1 checklist item (cheap Gmail query). If coverage is thin, the
+     pilot result is a data-coverage finding, not a pack verdict."

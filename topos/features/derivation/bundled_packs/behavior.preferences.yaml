@@ -1,0 +1,95 @@
+# DRAFT v0.2.0 for review — seeded from MatrAIx lanes: Behavior: Preferences (34)
+# (17 pref_*_vs_* spectrums + 13 peeve_* + modality/media/accessibility) and Learning: Style (1).
+pack: behavior.preferences
+version: 0.2.0
+status: draft
+title: "Preferences & style"
+author: topos
+license: Apache-2.0
+sensitivity_class: personal
+role_policy: authored_addressed
+disclosure_default: owner_only
+
+routing:
+  descriptors:
+    - "how the owner likes things: planning vs spontaneity, solo vs team, detail vs gist, text vs call"
+    - "pet peeves, preferred formats and explanation styles, learning preferences"
+  exemplars: ["I hate when", "I'd rather", "just give me the summary", "call me instead", "I prefer", "drives me crazy"]
+
+vocab:
+  spectrum_seed:   # MatrAIx pref_* dimensions, kept verbatim as the a_vs_b vocabulary
+    [team_vs_solo, plan_vs_spontaneous, city_vs_nature, routine_vs_variety, speed_vs_accuracy,
+     quality_vs_quantity, logic_vs_intuition, save_vs_spend, lead_vs_follow, indoor_vs_outdoor,
+     early_vs_late_adopter, text_vs_call, big_group_vs_one_on_one, novelty_vs_familiarity,
+     brief_vs_full_detail, competition_vs_collaboration, stability_vs_change]
+
+predicates:
+  - {name: pref.spectrum, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {dimension: string, position: {scale: position_5}},
+     note: "one active row per dimension (supersede on drift); stated declarations count as stated-altitude instances"}
+  - {name: pref.peeve, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {peeve: string, severity: [major, annoys, mild]}}
+  - {name: pref.delight, value_type: string, cardinality: multi, temporal: interval, altitude: stated,
+     note: "the positive mirror of peeve — small things the owner loves; MatrAIx has no analog, added for balance"}
+  - {name: pref.modality, value_type: enum, values: [text, code, visual_diagram, tabular, step_by_step, examples_first], cardinality: multi, temporal: interval, altitude: inferred}
+  - {name: pref.communication_channel, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {context: string, channel: [text, call, video, email, in_person]}}
+  - {name: pref.learning_style, value_type: enum, values: [visual, auditory, reading_writing, kinesthetic, mixed], cardinality: single, temporal: interval, altitude: stated,
+     note: "stated-only; learning-styles theory is contested — record self-description, never infer"}
+  - {name: pref.decision_input, value_type: enum, values: [just_the_gist, balanced, every_detail], cardinality: single, temporal: interval, altitude: inferred}
+  # --- v0.2 additions: the COGNITIVE WORK-STYLE cluster (the largest v0.1 gap, ~14 MatrAIx cog_* attrs
+  #     that the INDEX claimed for personality.traits but no predicate actually held) ---
+  - name: pref.workstyle
+    value_type: structured
+    cardinality: multi
+    temporal: interval
+    altitude: inferred
+    value_schema:
+      dimension: {enum: [procrastination, perfectionism, multitasking, attention_span, decision_speed, ambiguity_tolerance, confidence_calibration, learning_pace, patience, numeracy_comfort, cognitive_load_capacity, detail_vs_big_picture, abstraction_level, risk_framing, optimism]}
+      level: {scale: level_5}
+    note: >
+      BOUNDARY: communication.style owns how the owner WRITES (verbosity, formality, humor,
+      emoji, jargon, directness, question-asking). This predicate owns how they WORK and THINK.
+      Both are inferred from authored text; they are different facts and may be cited together.
+  - {name: pref.planning_horizon, value_type: enum, values: [day_to_day, weekly, monthly, yearly, multi_year], cardinality: single, temporal: interval, altitude: inferred,
+     note: "v0.2 (MatrAIx lstyle_planning_horizon) — distinct from pref.spectrum plan_vs_spontaneous: horizon is length, spectrum is style"}
+  - {name: pref.social_battery, value_type: enum, values: [strong_introvert, introvert, ambivert, extrovert, strong_extrovert], cardinality: single, temporal: interval, altitude: inferred,
+     note: "v0.2 (MatrAIx lstyle_social_battery); cross-refs trait.bfi2_domain extraversion — self-described energy, not a trait score"}
+  - {name: pref.tone_expected, value_type: enum, values: [concise, detailed, warm, formal, playful, blunt], cardinality: multi, temporal: interval, altitude: inferred,
+     note: "v0.2 (MatrAIx tone_expected) — how the owner wants to be SPOKEN TO; the most directly actionable assistant_context fact in the catalog"}
+
+guidance:
+  definitions: >
+    Durable tastes about HOW things should be, not WHAT the owner likes (that is
+    interests.taste). Inferred spectrum positions summarize repeated choices and
+    reactions; stated declarations are first-class evidence.
+  abstention:
+    - "One irritated message is not a peeve; require a declaration or ≥3 consistent reactions."
+    - "Context-bound choices (chose a call because driving) are not preferences."
+    - "Spectrum positions abstain at balanced rather than guessing a lean below evidence floor."
+
+synthesis:
+  - {kind: pattern, predicate: pref.spectrum, inputs: [messages, calendar_events, behavior.habits], min_evidence: 4}
+  - {kind: pattern, predicate: pref.communication_channel, inputs: [comms_channel_stats], min_evidence: 10}
+
+eval:
+  gold:
+    - {text: "Please just bullet-point it, long emails kill me", role: authored,
+       expect: [{predicate: pref.decision_input, value: just_the_gist}, {predicate: pref.peeve, value: {peeve: long_emails}}]}
+    - {text: "Honestly I do my best work alone, meetings drain me", role: authored,
+       expect: [{predicate: pref.spectrum, value: {dimension: team_vs_solo, position: lean_b_or_strong_b}}]}
+  negative_controls:
+    - {text: "Listicle: 10 pet peeves of remote workers", role: ambient, expect: []}
+    - {text: "Taking the call in the car, texting is unsafe", role: authored, expect: [], note: "context-bound, not preference"}
+  calibration: {min_conf_for_assert: 0.6, ece_max: 0.15}
+
+consumers:
+  brief_section: null
+  dossier: true
+  fusion_lane: facts_store
+  assistant_context: true   # NOTE: highest-leverage consumer — home-chat/system-prompt personalization reads this pack
+decisions:
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): the assistant_context consumer is APPROVED as a first-class consumer type. Rules:
+     only stated- and inferred-altitude facts at or above the pack's confidence floor enter
+     assistant context; special-class facts NEVER enter it (no pack exceptions); the injected
+     block is capped and cited so a wrong preference is visible and correctable in one turn."
