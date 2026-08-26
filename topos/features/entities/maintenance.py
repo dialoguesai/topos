@@ -794,7 +794,7 @@ def compute_communities(conn: sqlite3.Connection) -> Dict[str, int]:
             # A community label is a NAME: name-length, from a name-natured type.
             def _labelable(eid: str) -> bool:
                 nm = names.get(eid, "").strip()
-                if not nm or len(nm) > 40 or len(nm.split()) > 4:
+                if not nm or len(nm) > 40 or len(nm.split()) > 4 or "\n" in nm:
                     return False
                 if types.get(eid, "") in ("goal", "conversation"):
                     return False
