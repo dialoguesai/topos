@@ -161,6 +161,8 @@ def run_derivation_batch(
                                 temperature=0.0, num_ctx=8192, timeout=180)
         return str(out.get("text") or "") if isinstance(out, dict) else str(out or "")
 
+    from ....features.derivation.router import router_mode
+    _router_hybrid = router_mode() == "hybrid"
     verify_mode = _verify_mode()
     if verify_mode == "required" and packs:
         try:
@@ -221,8 +223,15 @@ def run_derivation_batch(
         rec = _row_to_record(row)
         if rec is None:
             continue
+        _rec_vec = None
+        if _router_hybrid:
+            from ....features.derivation.router import embed_record
+            _rec_vec = embed_record(rec["text"])
         for pid, pack in all_packs.items():
             hit = rec["role"] in pack.allowed_roles() and filters[pid].passes(rec["text"])
+            if not hit and _router_hybrid and rec["role"] in pack.allowed_roles():
+                from ....features.derivation.router import semantic_passes
+                hit = semantic_passes(pack, _rec_vec)
             if hit:
                 _bump_yield(conn, pid, prefilter_hits=1)
             if pid not in packs:
