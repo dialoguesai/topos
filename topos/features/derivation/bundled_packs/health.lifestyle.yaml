@@ -1,0 +1,81 @@
+# DRAFT v0.2.0 for review — seeded from MatrAIx lanes: Health: Fitness (2), Health: Lifestyle (2),
+# plus fitness/diet items from Health: Physical and habit_* overlaps. Absorbs existing rules
+# predicates training_for / practices (physical senses).
+pack: health.lifestyle
+version: 0.2.0
+status: draft
+title: "Fitness & lifestyle"
+author: topos
+license: Apache-2.0
+sensitivity_class: personal
+role_policy: authored_addressed
+disclosure_default: owner_only
+
+routing:
+  descriptors:
+    - "exercise, workouts, sports practice, training plans, races, gym, runs, rides, classes"
+    - "diet style, eating patterns, alcohol, caffeine, smoking, sleep schedule"
+  exemplars: ["morning run", "leg day", "training for", "went vegetarian", "cutting back on drinking", "spin class", "10k"]
+
+predicates:
+  - {name: lifestyle.exercise_practice, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {activity: string, cadence: {scale: freq_5}, context: string}}
+  - {name: lifestyle.training_for, value_type: string, cardinality: multi, temporal: interval, altitude: stated,
+     note: "absorbs existing rules predicate; event-anchored (race, competition, goal date)"}
+  - {name: lifestyle.fitness_level, value_type: enum, values: [athlete, fit, average, sedentary], cardinality: single, temporal: interval, altitude: inferred}
+  - {name: lifestyle.diet_type, value_type: enum, values: [omnivore, flexitarian, vegetarian, vegan, pescatarian, keto_low_carb, other], cardinality: single, temporal: interval, altitude: stated}
+  - {name: lifestyle.dietary_practice, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {practice: string, reason: {enum: [health, ethical, religious, preference, medical, unstated]}},
+     note: "religious-reason practices ALSO route to beliefs.spiritual.observance; medical to health.physical"}
+  - {name: lifestyle.substance_use, value_type: structured, cardinality: multi, temporal: interval, altitude: stated, sensitivity: special,
+     value_schema: {substance: {enum: [alcohol, tobacco, cannabis, caffeine, other]}, level: [never, rarely, socially, regularly, heavily], change: [starting, steady, cutting_back, quit]}}
+  - {name: lifestyle.sleep_schedule, value_type: enum, values: [early_bird, night_owl, irregular, flexible, shift_based], cardinality: single, temporal: interval, altitude: inferred,
+     note: "no-LLM synthesizer: activity timestamp distribution"}
+  # --- v0.2 addition ---
+  - name: lifestyle.consumption_level
+    value_type: structured
+    cardinality: multi
+    temporal: interval
+    altitude: stated
+    value_schema: {substance: {enum: [caffeine, alcohol, tobacco, cannabis, other]}, level: [none, low, moderate, high]}
+    note: >
+      v0.2 (MatrAIx lstyle_caffeine / lstyle_smoking) — a plain LEVEL, separate from
+      lifestyle.substance_use which carries change-trajectory and is special-class. Caffeine
+      level is an everyday fact; a stated quit attempt is not. Keeping them apart means a
+      coffee habit never inherits the sensitivity floor of a recovery narrative.
+
+vocab_refs:
+  - vocab/habits.yaml#behavior.lifestyle_dimension   # this pack owns the 5 health-domain lstyle_* rows
+
+guidance:
+  definitions: >
+    Practices and consumption patterns the owner states or repeatedly demonstrates.
+    Interval-valued: practices start, persist, and lapse — supersede, never overwrite.
+  abstention:
+    - "One workout is not a practice: lifestyle.exercise_practice needs a stated routine or ≥3 episodes in the window (synthesis promotes)."
+    - "Never moralize or grade substance facts; record level/change verbatim in the owner's terms."
+    - "Recipes read, fitness content browsed, and others' regimens assert nothing (ambient/observed)."
+
+synthesis:
+  - {kind: rhythm, predicate: lifestyle.sleep_schedule, inputs: [activity_timing_stats], min_evidence: 14d}
+  - {kind: pattern, predicate: lifestyle.exercise_practice, inputs: [calendar_events, messages, health_app_records], min_evidence: 3}
+  - {kind: trajectory, predicate: lifestyle.fitness_level, inputs: [lifestyle.exercise_practice, lifestyle.training_for], min_evidence: 5}
+
+eval:
+  gold:
+    - {text: "Signed up for the Austin half — 12-week plan starts Monday", role: authored,
+       expect: [{predicate: lifestyle.training_for, value: "Austin half marathon"}]}
+    - {text: "Officially six months sober today", role: authored,
+       expect: [{predicate: lifestyle.substance_use, value: {substance: alcohol, change: quit}}]}
+  negative_controls:
+    - {text: "Watched a documentary about ultramarathoners", role: ambient, expect: []}
+    - {text: "My trainer friend swears by fasted cardio", role: authored, expect: [], note: "other's practice"}
+  calibration: {min_conf_for_assert: 0.6, ece_max: 0.15}
+
+consumers:
+  brief_section: "Health"
+  dossier: true
+  fusion_lane: facts_store
+decisions:
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): wearable/health-app connectors are confirmed as the canonical FUTURE source for
+     this pack; v1 must work from messages + calendar alone. No build dependency created."

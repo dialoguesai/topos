@@ -1,0 +1,160 @@
+# GENERATED — do not hand-edit; regenerate with scratchpad/gen_vocab.py
+# Source: MatrAIx_Persona_1M codebook `persona_codes.schema.json` (arXiv 2608.04205).
+# Category structure and vocabulary only — no persona data was copied.
+# OPEN vocabularies: these are extraction SEEDS, not closed sets. Values outside
+# these lists are valid and expected (a personal node meets the long tail).
+
+vocab_file: dispositions
+vocabularies:
+  - name: trait.character_strength
+    source_lane: "Personality: Character"
+    count: 32
+    values:
+      - adaptability
+      - ambition
+      - appreciation_of_beauty
+      - bravery
+      - capacity_for_love
+      - competitiveness
+      - creativity
+      - curiosity
+      - discipline
+      - empathy
+      - fairness
+      - forgiveness
+      - generosity
+      - gratitude
+      - honesty
+      - hope_optimism
+      - humility
+      - kindness
+      - leadership
+      - love_of_learning
+      - loyalty
+      - open_mindedness
+      - perseverance
+      - perspective
+      - playfulness
+      - prudence
+      - resilience
+      - self_regulation
+      - social_intelligence
+      - spirituality
+      - teamwork
+      - zest
+  - name: trait.ipip_facet
+    source_lane: "Personality: Big Five"
+    count: 30
+    values:
+      - achievement_striving
+      - activity_level
+      - adventurousness
+      - altruism
+      - anger
+      - anxiety
+      - artistic_interest
+      - assertiveness
+      - cautiousness
+      - cheerfulness
+      - cooperation
+      - depression
+      - dutifulness
+      - emotionality
+      - excitement_seeking
+      - friendliness
+      - gregariousness
+      - imagination
+      - immoderation
+      - intellect
+      - liberalism
+      - modesty
+      - morality
+      - orderliness
+      - self_consciousness
+      - self_discipline
+      - self_efficacy
+      - sympathy
+      - trust
+      - vulnerability
+  - name: trait.bfi2
+    source_lane: "Personality: Big Five"
+    count: 20
+    values:
+      - domain_agreeableness
+      - domain_conscientiousness
+      - domain_extraversion
+      - domain_negative_emotionality
+      - domain_open_mindedness
+      - facet_aesthetic_sensitivity
+      - facet_anxiety
+      - facet_assertiveness
+      - facet_compassion
+      - facet_creative_imagination
+      - facet_depression
+      - facet_emotional_volatility
+      - facet_energy_level
+      - facet_intellectual_curiosity
+      - facet_organization
+      - facet_productiveness
+      - facet_respectfulness
+      - facet_responsibility
+      - facet_sociability
+      - facet_trust
+  - name: style.cognitive_dimension
+    source_lane: "Linguistic: Communication"
+    count: 35
+    values:
+      - abstraction
+      - ambiguity_tolerance
+      - assertiveness
+      - attention_span
+      - big_picture_vs_detail
+      - confidence_calibration
+      - conflict_approach
+      - curiosity
+      - decision_speed
+      - detail_orientation
+      - directness
+      - emoji_use
+      - emotional_expressiveness
+      - empathy_expression
+      - feedback_receptiveness
+      - formality
+      - humor
+      - learning_pace
+      - multitasking
+      - numeracy_comfort
+      - open_mindedness
+      - optimism
+      - patience
+      - perfectionism
+      - politeness
+      - precision_of_language
+      - procrastination
+      - question_asking
+      - reading_vs_watching
+      - risk_framing
+      - skepticism
+      - storytelling
+      - use_of_jargon
+      - verbosity
+      - visual_vs_verbal
+  - name: civic.moral_foundation
+    source_lane: "Worldview: Beliefs"
+    count: 6
+    values:
+      - authority_subversion
+      - care_harm
+      - fairness_cheating
+      - liberty_oppression
+      - loyalty_betrayal
+      - sanctity_degradation
+  - name: trait.risk_domain
+    source_lane: "Risk & Decision"
+    count: 5
+    values:
+      - ethical_risk_tolerance
+      - financial_risk_tolerance
+      - health_safety_risk_tolerance
+      - recreational_risk_tolerance
+      - social_risk_tolerance

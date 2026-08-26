@@ -1,0 +1,88 @@
+# DRAFT v0.2.0 for review — seeded from MatrAIx lanes: Expertise: Domains (144 fam_*),
+# Expertise: Skills (64 skill_*), Learning: Academic (34), Linguistic: Language (proficiency
+# subset). Absorbs existing rules predicates skilled_in/studied_at/certified_in.
+pack: expertise.knowledge
+version: 0.2.0
+status: draft
+title: "Expertise & learning"
+author: topos
+license: Apache-2.0
+sensitivity_class: personal
+role_policy: authored_addressed
+disclosure_default: owner_only
+
+routing:
+  descriptors:
+    - "what the owner knows and is learning: domains, skills, certifications, courses, study"
+    - "teaching, mentoring, explaining, being the go-to person for a subject"
+  exemplars: ["I studied", "certified in", "took a course", "learning", "I can explain", "years of experience with", "teaching myself"]
+
+predicates:
+  - {name: know.domain_expertise, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {domain: string, proficiency: {scale: proficiency_5}},
+     note: "MatrAIx 144-domain fam_* list is the seed vocabulary; proficiency from stated experience + demonstrated fluency"}
+  - {name: know.skill, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {skill: string, proficiency: {scale: proficiency_5}},
+     note: "absorbs skilled_in; MatrAIx 64-skill list seeds the vocabulary"}
+  - {name: know.certification, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {credential: string, issuer: entity_ref, date: date_or_approx},
+     note: "absorbs certified_in"}
+  - {name: know.education, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {institution: entity_ref, field: string, level: string, status: [current, completed, paused, dropped]},
+     note: "absorbs studied_at"}
+  - {name: know.learning_arc, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {subject: string, stage: [starting, active, deepening, stalled, completed], mode: [course, self_taught, mentored, on_the_job]},
+     note: "the live-learning layer: courses started, subjects pursued across weeks — ties to lens-lab Learning funnel work"}
+  - {name: know.language_proficiency, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {language: string, proficiency: {scale: proficiency_5}}}
+  - {name: know.teaches, value_type: string, cardinality: multi, temporal: interval, altitude: inferred,
+     note: "subjects the owner explains/mentors repeatedly — strong expertise evidence AND a graph edge (mentors_on)"}
+  # --- v0.2 additions ---
+  - {name: know.institution_context, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {institution: entity_ref, tier_or_kind: [research_university, university, community_college, bootcamp_or_online, vocational, self_directed]},
+     note: "v0.2 (MatrAIx institution_tier) — descriptive context on know.education, never a status ranking surfaced to the owner"}
+  - {name: know.self_assessed_gap, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {subject: string, gap: string},
+     note: "v0.2 — what the owner says they DON'T know. Genuinely useful (calibrates explanation depth, seeds learning arcs) and impossible to infer safely, so stated-only."}
+
+vocab_refs:
+  - vocab/expertise.yaml#know.domain              # 140 seeds
+  - vocab/expertise.yaml#know.skill               # 64 seeds
+  - vocab/expertise.yaml#know.academic_subject    # 29 seeds
+  - vocab/expertise.yaml#identity.language        # 50 seeds (proficiency side)
+
+guidance:
+  definitions: >
+    What the owner knows, at what depth, and what they are actively learning.
+    Stated credentials are facts; proficiency beyond 'familiar' is inferred from
+    sustained evidence (experience statements, fluent production, teaching acts).
+  abstention:
+    - "Reading about a topic is interests.taste; know.* requires stated study, credentials, production, or teaching."
+    - "Never downgrade proficiency from silence — expertise persists without recent mentions (no decay on this pack)."
+    - "Self-deprecation ('I know nothing about X') is calibration signal, not a proficiency fact — skip unless clearly literal."
+    - "Job titles imply domains, not proficiency levels — a title seeds know.domain_expertise at 'familiar' pending better evidence."
+
+synthesis:
+  - {kind: trajectory, predicate: know.learning_arc, inputs: [browser_learning_domains, calendar_events, authored_learning_statements], min_evidence: 3w}
+  - {kind: pattern, predicate: know.teaches, inputs: [messages, calendar_events], min_evidence: 3}
+  - {kind: disposition, predicate: know.domain_expertise, inputs: [know.skill, know.education, know.teaches, work.career], min_evidence: 3}
+
+eval:
+  gold:
+    - {text: "Passed the AWS Solutions Architect exam this morning!", role: authored,
+       expect: [{predicate: know.certification, value: {credential: "AWS Solutions Architect"}}]}
+    - {text: "Week 6 of the fastai course — finally get embeddings", role: authored,
+       expect: [{predicate: know.learning_arc, value: {subject: deep_learning, stage: active, mode: course}}]}
+  negative_controls:
+    - {text: "(browser: one Wikipedia visit on quantum computing)", role: ambient, expect: []}
+    - {text: "My cofounder is the ML expert, I stay out of it", role: authored, expect: [], note: "other's expertise; owner disclaimer"}
+  calibration: {min_conf_for_assert: 0.65, ece_max: 0.15}
+
+consumers:
+  brief_section: "Learning"
+  dossier: true
+  fusion_lane: facts_store
+decisions:
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): NO DECAY on expertise facts — confirmed. A 'dormant' qualifier (unused for years)
+     is deferred to v2 as a display concern, not a validity concern; expertise persisting
+     without mentions is the correct default for a personal node."

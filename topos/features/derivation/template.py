@@ -105,7 +105,7 @@ def _predicate_menu(pack: Pack) -> str:
             keys = []
             for k, v in p.value_schema.items():
                 allowed = _enum_of(v)
-                req = " [REQUIRED]" if k in (p.required_fields or []) else ""
+                req = ""  # required_fields retired from the contract (W2.2): forced fields make models fabricate — measured 4x
                 if allowed:
                     keys.append(f"{k}{req} MUST BE one of [{', '.join(str(x) for x in allowed[:12])}]")
                 else:
@@ -155,9 +155,6 @@ Hard rules:
   extracted anyway, and label each assertion honestly.
 - Object fields are ALL OPTIONAL: emit only the fields the record states, omit the rest.
   A fact with one known field is still a fact — do NOT skip a fact because other fields are unknown.
-- A field marked [REQUIRED] must come FROM THE RECORD. If the record does not state it,
-  do NOT guess a plausible value — omit the whole assertion. A required field is a test of
-  whether this really is an instance of the predicate, not a box to fill.
 - For enum fields pick the CLOSEST allowed value (grandparents/aunts/uncles/cousins -> extended_family).
   NEVER invent an enum value or write a sentence into an enum field — an assertion with an
   out-of-vocabulary enum value is discarded entirely.
@@ -205,11 +202,6 @@ def parse_output(raw: str, pack: Pack) -> Tuple[List[Dict[str, Any]], int]:
                 if not val:
                     rejects += 1
                     continue
-            missing = [k for k in (pred.required_fields or [])
-                       if not str(val.get(k) or "").strip()]
-            if missing:
-                rejects += 1
-                continue
             bad_enum = False
             for k, spec in pred.value_schema.items():
                 allowed = _enum_of(spec)

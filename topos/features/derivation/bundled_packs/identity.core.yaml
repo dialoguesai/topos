@@ -1,0 +1,81 @@
+# DRAFT v0.2.0 for review — seeded from MatrAIx lanes: Demographic: Core (25),
+# Demographic: Cultural (2), Demographic: Family (1), Linguistic: Language (subset).
+pack: identity.core
+version: 0.2.0
+status: draft
+title: "Identity & household"
+author: topos
+license: Apache-2.0
+sensitivity_class: personal        # per-predicate overrides below raise protected classes to special
+role_policy: authored_addressed
+disclosure_default: owner_only
+
+routing:
+  descriptors:
+    - "who the owner is: age, gender, pronouns, where they live, household, family structure"
+    - "marital status, partner, children, living situation, employment status, languages spoken"
+  exemplars: ["my wife and I", "we're expecting", "since I moved to", "my roommate", "as a renter", "I'm 34"]
+
+predicates:
+  - {name: identity.age_bracket, value_type: enum, values: [under_18, 18_24, 25_34, 35_44, 45_54, 55_64, 65_74, 75_plus], cardinality: single, temporal: interval, altitude: stated}
+  - {name: identity.gender_identity, value_type: string, cardinality: single, temporal: interval, altitude: stated, sensitivity: special}
+  - {name: identity.pronouns, value_type: string, cardinality: single, temporal: interval, altitude: stated}
+  - {name: identity.home_region, value_type: string, cardinality: single, temporal: interval, altitude: stated,
+     aligns_with: "https://schema.org/homeLocation"}   # city/region granularity; precise address stays in canonical location stores
+  - {name: identity.urbanicity, value_type: enum, values: [dense_urban, suburban, small_town, rural, nomadic], cardinality: single, temporal: interval, altitude: inferred}
+  - {name: identity.marital_status, value_type: enum, values: [single, in_relationship, engaged, married, domestic_partnership, separated, divorced, widowed], cardinality: single, temporal: interval, altitude: stated}
+  - {name: identity.household_size, value_type: enum, values: [alone, two, three_four, five_plus, communal], cardinality: single, temporal: interval, altitude: stated}
+  - {name: identity.children, value_type: enum, values: [none, expecting, minors_at_home, adult_children], cardinality: single, temporal: interval, altitude: stated}
+  - {name: identity.employment_status, value_type: enum, values: [full_time, part_time, self_employed, freelance, student, unemployed, retired, homemaker], cardinality: single, temporal: interval, altitude: stated}
+  - {name: identity.housing_status, value_type: enum, values: [own, mortgage, renting, with_family, shared, temporary], cardinality: single, temporal: interval, altitude: stated}
+  - {name: identity.education_level, value_type: enum, values: [primary, secondary, vocational, some_college, associates, bachelors, masters, doctorate, self_taught], cardinality: single, temporal: interval, altitude: stated}
+  - {name: identity.language, value_type: string, cardinality: multi, temporal: interval, altitude: stated,
+     qualifiers: {proficiency: {scale: proficiency_5}, role: [primary, home, heritage, working]}}
+  - {name: identity.citizenship_status, value_type: string, cardinality: single, temporal: interval, altitude: stated, sensitivity: special}
+  - {name: identity.ethnicity, value_type: string, cardinality: multi, temporal: interval, altitude: stated, sensitivity: special}
+  - {name: identity.sexual_orientation, value_type: string, cardinality: single, temporal: interval, altitude: stated, sensitivity: special}
+  - {name: identity.cultural_background, value_type: string, cardinality: multi, temporal: interval, altitude: stated}
+  # --- v0.2 additions (closing MatrAIx residue: military, birth order, migration generation, cultural exposure) ---
+  - {name: identity.service_status, value_type: enum, values: [civilian, active_duty, reserve_guard, veteran, military_family], cardinality: single, temporal: interval, altitude: stated, sensitivity: special,
+     note: "v0.2: had NO home in the v0.1 catalog. Stated-only; service history events live in life.events (kind: military_service)"}
+  - {name: identity.birth_order, value_type: enum, values: [only_child, eldest, middle, youngest, twin_or_multiple], cardinality: single, temporal: interval, altitude: stated}
+  - {name: identity.migration_generation, value_type: enum, values: [first_generation, second_generation, third_plus, native_multigenerational, returnee], cardinality: single, temporal: interval, altitude: stated, sensitivity: special,
+     note: "stated-only; NEVER inferred from name, language, cuisine, or region — same floor as citizenship_status"}
+  - {name: identity.cultural_exposure, value_type: enum, values: [monocultural, some_exposure, multicultural_upbringing, lived_across_cultures, third_culture_kid], cardinality: single, temporal: interval, altitude: inferred,
+     note: "inferred only from stated upbringing/relocation history (places.mobility + life.events), never from interests or languages"}
+
+guidance:
+  definitions: >
+    Identity facts describe the OWNER only, from their own statements. Household facts
+    (size, children, housing) may come from unambiguous first-person-plural statements
+    ("our apartment", "my kids"). Age may be bracketed from stated ages or birthdays,
+    never estimated from style or interests.
+  abstention:
+    - "Never infer gender, orientation, ethnicity, or citizenship from names, language, interests, or writing style — stated-only, verbatim from the owner."
+    - "Third-party facts belong to entity dossiers, never to identity.* ('my sister got married' is not owner marital status)."
+    - "Jokes, hypotheticals, and quoted speech assert nothing."
+
+synthesis:
+  - {kind: consistency_check, description: "flag identity facts contradicted by canonical stores (e.g. contacts' own card, calendar geography) into fact_conflicts — never auto-resolve"}
+
+eval:
+  gold:
+    - {text: "We finally closed on the house — no more renting for us", role: authored,
+       expect: [{predicate: identity.housing_status, value: mortgage_or_own}]}
+    - {text: "My pronouns are they/them, thanks for asking", role: authored,
+       expect: [{predicate: identity.pronouns, value: "they/them"}]}
+  negative_controls:
+    - {text: "My sister just got engaged!", role: authored, expect: [], note: "third-party life event"}
+    - {text: "Reading a demographics report on suburban renters", role: ambient, expect: []}
+    - {text: "He asked if I was Latino — people always guess", role: authored, expect: [], note: "reported guess, not self-identification"}
+  calibration: {min_conf_for_assert: 0.7, ece_max: 0.15}
+
+consumers:
+  dossier: true
+  fusion_lane: facts_store
+  brief_section: null   # identity feeds context, not a brief of its own
+decisions:
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): identity.age_bracket MAY derive from a stated birthday found in canonical stores
+     (contacts card, calendar birthday events) — a birthday the owner or their address book
+     states is stated evidence, not inference. The canonical join is stamped into source_refs
+     like any other evidence; style/interest-based age guessing stays forbidden."

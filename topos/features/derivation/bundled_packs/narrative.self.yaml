@@ -1,0 +1,121 @@
+# DRAFT v0.2.0 (new in this catalog round) — absent from MatrAIx by construction: a
+# persona GRID cannot hold a self-narrative. This pack records how the owner tells their
+# own story, which is the one thing an evidence-bound personal node can hold that a
+# survey vector cannot.
+pack: narrative.self
+version: 0.1.0
+status: draft
+title: "Self-narrative"
+author: topos
+license: Apache-2.0
+sensitivity_class: personal
+role_policy: authored_only          # a self-narrative is by definition the owner's own telling
+disclosure_default: owner_only
+
+routing:
+  descriptors:
+    - "how the owner describes and explains themselves: self-characterizations, origin stories, chapters of their life"
+    - "identity claims and changes, recurring themes in how they account for what happened"
+  exemplars: ["I'm the kind of person who", "I used to be", "the way I got into", "back when I was", "I've always", "that's so me", "I'm not someone who"]
+
+predicates:
+  - {name: self.identity_claim, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {claim: string, domain: {enum: [role, character, capability, belonging, limitation, taste]}, polarity: [is, is_not]},
+     note: "verbatim self-characterization, including negative claims ('I'm not a details person') — polarity is load-bearing"}
+  - {name: self.stated_change, value_type: structured, cardinality: multi, temporal: episodic, altitude: stated,
+     value_schema: {domain: string, from_state: string, to_state: string},
+     note: "'I used to X, now I Y' — the owner's OWN supersession signal; should trigger review of matching facts in other packs"}
+  - {name: self.chapter, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {label: string, period: date_range_or_approx, description: string},
+     note: "how the owner periodizes their own life ('my consulting years', 'before the move') — a personal calendar of eras"}
+  - {name: self.origin_story, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {subject: string, account: string},
+     note: "how they explain how something came to be (how they got into the field, how they met someone)"}
+  - {name: self.recurring_theme, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {theme: string, evidence_kind: [returns_to_topic, repeats_framing, recurring_tension]},
+     note: "what the owner keeps circling back to in their own accounts; high evidence floor"}
+  - {name: self.aspirational_identity, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {identity: string, stage: [imagining, working_toward, claiming]},
+     note: "who they are trying to become — cross-refs aspirations.goals (which owns the actionable side)"}
+  - name: self.attribution_pattern
+    value_type: structured
+    cardinality: multi
+    temporal: interval
+    altitude: inferred
+    sensitivity: special          # per-predicate override: personal-class pack, special-class floors on THIS predicate
+    value_schema:
+      domain: {enum: [success, setback]}
+      attributes_to: {enum: [own_effort, own_ability, others, circumstance, luck, systemic]}
+    note: >
+      KEPT IN v1 — owner decision 2026-08-24, deliberately overruling the v0.2 draft's
+      recommendation to cut it. It is the highest-inference predicate in the catalog and the
+      nearest to clinical territory (attributional style / locus of control), so it ships
+      under the strictest handling in the catalog:
+        1. DESCRIPTIVE ONLY — it records how the owner accounts for outcomes in their own
+           words. Never a diagnosis, never a competence claim, never framed as a stable trait.
+        2. NEVER an input to advice, nudges, coaching, or corrective framing. It may be shown
+           to the owner as an observation about their own accounts, always with the evidence.
+        3. Owner-facing only — `sensitivity: special` puts it behind the same engine-enforced
+           floors as health and beliefs facts: excluded from grantee lanes and third-party MCP
+           paths, blackhole-compatible.
+        4. Abstains rather than leans: ≥6 accounts of EACH outcome type, and mixed evidence
+           yields no fact at all.
+      Ship gate: its eval lane must include the mixed-attribution control below and pass it
+      before this predicate goes live, independently of the rest of the pack.
+
+guidance:
+  definitions: >
+    The owner's story about themselves, in their own words, kept separate from
+    behaviorally-inferred traits. When self-narrative and measured behavior disagree,
+    BOTH are recorded — the divergence is signal, not error, and is never auto-resolved.
+  abstention:
+    - "Fiction, drafts, roleplay, quoted speech, and things others say about the owner assert nothing."
+    - "Never 'correct' a self-claim with behavioral evidence, and never let personality.traits overwrite a self.identity_claim (different altitudes, different packs, both stand)."
+    - "self.recurring_theme requires ≥5 separate accounts across ≥6 weeks; a preoccupied month is not a theme."
+    - "self.attribution_pattern requires ≥6 accounts of each outcome type and must abstain rather than lean; it is never used to characterize the owner to themselves in a corrective tone."
+    - "A single 'I'm such an idiot' is venting, not an identity claim."
+
+synthesis:
+  - {kind: disposition, predicate: self.recurring_theme, inputs: [self.origin_story, self.identity_claim, authored_reflective_text], min_evidence: 5}
+  - {kind: disposition, predicate: self.attribution_pattern, inputs: [authored_accounts_of_outcomes], min_evidence: 6}
+  - {kind: reconciliation, description: "self.stated_change SHOULD open a supersession review against matching facts in other packs (identity, work, values) — the owner's own words are the strongest supersession trigger available"}
+
+eval:
+  gold:
+    - {text: "I used to be the person who said yes to everything. Took me until 35 to stop.", role: authored,
+       expect: [{predicate: self.stated_change, value: {from_state: says_yes_to_everything}}, {predicate: self.identity_claim, value: {polarity: is_not}}]}
+    - {text: "The whole reason I got into this was fixing my grandmother's radio", role: authored,
+       expect: [{predicate: self.origin_story, value: {subject: career_or_craft}}]}
+  negative_controls:
+    - {text: "(draft of a short story in first person)", role: authored, expect: [], note: "fiction"}
+    - {text: "Everyone says I'm the organized one", role: authored, expect: [], note: "others' attribution reported — not a self-claim (borderline: acceptable to skip)"}
+    - {text: "God I'm so bad at this today", role: authored, expect: [], note: "venting"}
+    - text: "(window: 8 setback accounts — 3 blame own preparation, 3 blame a vendor, 2 call it bad timing)"
+      role: authored_synthetic_window
+      expect: []
+      note: >
+        MIXED-ATTRIBUTION CONTROL — the ship gate for self.attribution_pattern. Evidence above
+        the count floor but with no dominant attribution must yield NO fact. A predicate that
+        leans here would be inventing a pattern out of ordinary variation, which is exactly the
+        failure this predicate is most likely to have.
+    - {text: "(window: 6 success accounts, all crediting the team)", role: authored_synthetic_window,
+       expect: [], note: "single-domain evidence only — requires ≥6 of EACH outcome type; must abstain"}
+  calibration: {min_conf_for_assert: 0.75, ece_max: 0.12}
+
+consumers:
+  brief_section: "Story"
+  dossier: true
+  fusion_lane: facts_store
+  assistant_context: true    # how the owner describes themselves should shape how the node speaks about them
+decisions:
+  - "2026-08-24 (owner): self.attribution_pattern KEPT in v1 — descriptive-only, sensitivity:special, never fed to advice, mixed-attribution control is its ship gate. Supersedes the draft's cut recommendation."
+
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): self.stated_change QUEUES supersession reviews in other packs (fact_conflicts +
+     owner review surface) — it never auto-closes another pack's facts. The owner's words are
+     the strongest supersession trigger available, but 'I used to be X' is often narrative
+     framing rather than a field update; a queue captures the signal without the misfire."
+
+open_questions:
+  - "Fiction/draft detection remains the main extraction hazard (journals and drafts share
+     sources). A routing guard is REQUIRED before this pack goes live — tracked as a plan
+     F2 build item (F2.9), not decided away."

@@ -1,0 +1,72 @@
+# DRAFT v0.2.0 for review — seeded from MatrAIx lane: Health: Physical (mental subset:
+# health_mental_health, health_stress_level, health_energy_level, health_sleep_quality,
+# health_neurodivergence, health_attention_condition, health_cognitive_load_capacity)
+# + Personality: MBTI (neurotype). Split from health.physical: stricter rules, different consumers.
+pack: health.mental
+version: 0.2.0
+status: draft
+title: "Mental wellbeing"
+author: topos
+license: Apache-2.0
+sensitivity_class: special
+role_policy: authored_addressed
+disclosure_default: owner_only
+
+routing:
+  descriptors:
+    - "stress, anxiety, mood, burnout, therapy, mental health, energy, sleep quality, overwhelm"
+    - "ADHD, autism, neurodivergence, focus, attention, medication for mood or attention"
+  exemplars: ["so burned out", "my therapist", "haven't been sleeping", "anxiety's been bad", "feeling great lately", "my ADHD"]
+
+predicates:
+  - {name: mind.self_reported_state, value_type: structured, cardinality: multi, temporal: episodic, altitude: stated,
+     value_schema: {dimension: {enum: [mood, stress, energy, sleep_quality, focus]}, report: string}}
+  - {name: mind.neurodivergence, value_type: string, cardinality: multi, temporal: interval, altitude: stated,
+     note: "stated-only, verbatim self-identification; NEVER inferred"}
+  - {name: mind.care_practice, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {practice: {enum: [therapy, counseling, coaching, medication, support_group, self_care_program, other]}, cadence: {scale: freq_5}}}
+  - {name: mind.mental_health_event, value_type: structured, cardinality: multi, temporal: episodic, altitude: stated,
+     value_schema: {kind: {enum: [crisis, breakthrough, diagnosis_shared, treatment_change, recovery_milestone]}, description: string}}
+  - {name: mind.stress_trend, value_type: enum, values: [rising, elevated, stable, easing, low], cardinality: single, temporal: interval, altitude: inferred,
+     note: "synthesis over emo27 aggregates + self-reports; abstains below evidence floor"}
+  - {name: mind.energy_rhythm, value_type: string, cardinality: single, temporal: interval, altitude: inferred,
+     note: "e.g. 'afternoon slump, evening peak' — from self-reports + activity timing, never from tone alone"}
+
+guidance:
+  definitions: >
+    This pack records the owner's OWN account of their inner state, their care practices,
+    and slow trends synthesized from sustained evidence. It is a mirror, not a monitor.
+  abstention:
+    - "NEVER diagnose or label (no 'seems depressed'); trends only summarize the owner's own reports and emotion-classified authored text."
+    - "mind.neurodivergence is verbatim self-identification only — never inferred from behavior, style, or interests."
+    - "A bad day is an episodic self-report; mind.stress_trend requires min_evidence across ≥3 distinct weeks."
+    - "Venting about others, fiction, and quoted speech assert nothing."
+    - "v0.2 — SUPPORT GROUPS ARE OWNED HERE, not by community.membership: a recovery, grief, or
+       condition-specific group is special-class by construction. community.membership must extract
+       nothing for them, and the routing guard is part of this pack's eval."
+
+synthesis:
+  - {kind: trend, predicate: mind.stress_trend, inputs: [mind.self_reported_state, emo27_aggregates], min_evidence: 6, window: 30d}
+  - {kind: rhythm, predicate: mind.energy_rhythm, inputs: [mind.self_reported_state, activity_timing_stats], min_evidence: 8}
+
+eval:
+  gold:
+    - {text: "Told my therapist I want to go to every-other-week sessions", role: authored,
+       expect: [{predicate: mind.care_practice, value: {practice: therapy}}]}
+    - {text: "Third week straight of terrible sleep, I'm running on fumes", role: authored,
+       expect: [{predicate: mind.self_reported_state, value: {dimension: sleep_quality}}]}
+  negative_controls:
+    - {text: "Podcast episode about burnout culture in tech", role: ambient, expect: []}
+    - {text: "My brother finally started therapy, proud of him", role: authored, expect: [], note: "third party"}
+    - {text: "ugh this parser is driving me insane", role: authored, expect: [], note: "idiom, not state report"}
+  calibration: {min_conf_for_assert: 0.75, ece_max: 0.1}
+
+consumers:
+  brief_section: "Wellbeing"
+  dossier: false                    # deliberately NOT in the general dossier; owner brief only
+  fusion_lane: facts_store
+decisions:
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): mind.stress_trend is DISPLAY-ONLY in v1 — surfaced in the owner's Wellbeing brief,
+     never an input to the attention/triage lane or any workload-shaping mechanism. A node
+     that reprioritizes your work because it thinks you are stressed has crossed from mirror
+     to monitor; revisit only with an explicit owner opt-in designed as its own feature."

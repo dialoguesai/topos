@@ -1,0 +1,49 @@
+# GENERATED — do not hand-edit; regenerate with scratchpad/gen_vocab.py
+# Source: MatrAIx_Persona_1M codebook `persona_codes.schema.json` (arXiv 2608.04205).
+# Category structure and vocabulary only — no persona data was copied.
+# OPEN vocabularies: these are extraction SEEDS, not closed sets. Values outside
+# these lists are valid and expected (a personal node meets the long tail).
+
+vocab_file: preferences
+vocabularies:
+  - name: pref.spectrum
+    source_lane: "Behavior: Preferences"
+    count: 18
+    values:
+      - big_group_vs_one_on_one
+      - city_vs_nature
+      - competition_vs_collab
+      - detail_brief_vs_full
+      - early_vs_late
+      - indoor_vs_outdoor
+      - lead_vs_follow
+      - logic_vs_intuition
+      - novelty_vs_familiarity
+      - plan_vs_spontaneous
+      - quality_vs_quantity
+      - routine_vs_variety
+      - save_vs_spend
+      - speed_vs_accuracy
+      - stability_vs_change
+      - team_vs_solo
+      - text_vs_call
+      - work_location
+  - name: pref.peeve
+    source_lane: "Behavior: Preferences"
+    count: 15
+    values:
+      - auto_play_video
+      - being_interrupted
+      - clickbait
+      - cold_calls
+      - condescension
+      - forced_small_talk
+      - lateness
+      - loud_chewing
+      - micromanagement
+      - paywalls
+      - pop_up_ads
+      - slow_walkers
+      - spam
+      - typos
+      - unexplained_jargon

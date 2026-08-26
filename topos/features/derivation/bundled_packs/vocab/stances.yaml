@@ -1,0 +1,70 @@
+# GENERATED — do not hand-edit; regenerate with scratchpad/gen_vocab.py
+# Source: MatrAIx_Persona_1M codebook `persona_codes.schema.json` (arXiv 2608.04205).
+# Category structure and vocabulary only — no persona data was copied.
+# OPEN vocabularies: these are extraction SEEDS, not closed sets. Values outside
+# these lists are valid and expected (a personal node meets the long tail).
+
+vocab_file: stances
+# Boundary rule: a stance belongs to the pack whose DOMAIN the topic acts in.
+# When a topic is both personal practice and public policy, the personal stance goes to
+# the domain pack and the policy stance to beliefs.civic (both may fire; they are different facts).
+vocabularies:
+  - name: stance.topic
+    source_lane: "Worldview: Beliefs (+2 demographic)"
+    count: 55
+    values:
+      - {topic: advertising, pack: finances.economics}
+      - {topic: ai, pack: craft.tooling}
+      - {topic: alternative_medicine, pack: health.physical}
+      - {topic: authority, pack: beliefs.civic}
+      - {topic: automation, pack: craft.tooling}
+      - {topic: brand_loyalty, pack: finances.economics}
+      - {topic: capital_punishment, pack: beliefs.civic}
+      - {topic: climate_action, pack: beliefs.civic}
+      - {topic: consumerism, pack: finances.economics}
+      - {topic: cryptocurrency, pack: finances.economics}
+      - {topic: data_privacy, pack: beliefs.civic}
+      - {topic: electric_vehicles, pack: finances.economics}
+      - {topic: fast_fashion, pack: finances.economics}
+      - {topic: four_day_work_week, pack: work.career}
+      - {topic: free_markets, pack: beliefs.civic}
+      - {topic: free_speech, pack: beliefs.civic}
+      - {topic: genetic_engineering, pack: beliefs.civic}
+      - {topic: gentrification, pack: beliefs.civic}
+      - {topic: globalization, pack: beliefs.civic}
+      - {topic: globalized_supply_chains, pack: beliefs.civic}
+      - {topic: government_regulation, pack: beliefs.civic}
+      - {topic: gun_ownership, pack: beliefs.civic}
+      - {topic: higher_education, pack: beliefs.civic}
+      - {topic: homeownership, pack: finances.economics}
+      - {topic: immigration, pack: beliefs.civic}
+      - {topic: influencers, pack: finances.economics}
+      - {topic: labor_unions, pack: beliefs.civic}
+      - {topic: minimalism, pack: finances.economics}
+      - {topic: new_technology, pack: craft.tooling}
+      - {topic: nuclear_energy, pack: beliefs.civic}
+      - {topic: online_reviews, pack: finances.economics}
+      - {topic: open_source, pack: craft.tooling}
+      - {topic: organized_religion, pack: beliefs.spiritual}
+      - {topic: performance_reviews, pack: work.career}
+      - {topic: privacy_vs_security, pack: beliefs.civic}
+      - {topic: public_transit, pack: beliefs.civic}
+      - {topic: rapid_change, pack: behavior.preferences}
+      - {topic: remote_work, pack: work.career}
+      - {topic: renewable_energy, pack: beliefs.civic}
+      - {topic: risk_taking, pack: personality.traits}
+      - {topic: self_driving_cars, pack: craft.tooling}
+      - {topic: social_media, pack: craft.tooling}
+      - {topic: space_exploration, pack: interests.taste}
+      - {topic: standardized_testing, pack: beliefs.civic}
+      - {topic: subscription_services, pack: finances.economics}
+      - {topic: surveillance, pack: beliefs.civic}
+      - {topic: taking_on_debt, pack: finances.economics}
+      - {topic: the_gig_economy, pack: beliefs.civic}
+      - {topic: tipping_culture, pack: finances.economics}
+      - {topic: traditional_gender_roles, pack: beliefs.civic}
+      - {topic: universal_basic_income, pack: beliefs.civic}
+      - {topic: urban_density, pack: beliefs.civic}
+      - {topic: vaccines, pack: beliefs.civic}
+      - {topic: veganism, pack: health.lifestyle}
+      - {topic: working_from_office, pack: work.career}

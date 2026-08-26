@@ -47,7 +47,7 @@ class Predicate:
     values: Optional[List[str]] = None
     value_schema: Optional[Dict[str, Any]] = None
     qualifiers: Optional[Dict[str, Any]] = None
-    required_fields: Optional[List[str]] = None  # a structured value MISSING one of these is
+    required_fields: Optional[List[str]] = None  # RETIRED (W2.2, 2026-08-26): parsed for compat, never enforced —
                                                  # not an instance of this predicate at all
                                                  # (a "habit" with no nameable cadence is a task)
     key_fields: Optional[List[str]] = None  # identity fields of a structured value (the rest is STATE);

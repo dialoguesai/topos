@@ -1,0 +1,118 @@
+# GENERATED — do not hand-edit; regenerate with scratchpad/gen_vocab.py
+# Source: MatrAIx_Persona_1M codebook `persona_codes.schema.json` (arXiv 2608.04205).
+# Category structure and vocabulary only — no persona data was copied.
+# OPEN vocabularies: these are extraction SEEDS, not closed sets. Values outside
+# these lists are valid and expected (a personal node meets the long tail).
+
+vocab_file: tools
+vocabularies:
+  - name: craft.tool
+    source_lane: "Skills: Tools"
+    count: 69
+    values:
+      - after_effects
+      - airtable
+      - asana
+      - autocad
+      - aws
+      - azure
+      - blender
+      - canva
+      - chatgpt
+      - claude
+      - docker
+      - excel
+      - figma
+      - git
+      - github
+      - github_copilot
+      - gitlab
+      - google_cloud
+      - google_sheets
+      - hubspot
+      - illustrator
+      - indesign
+      - jetbrains_ides
+      - jira
+      - jupyter
+      - keynote
+      - kubernetes
+      - linear
+      - linux_cli
+      - looker
+      - matlab
+      - microsoft_teams
+      - midjourney
+      - notion
+      - obsidian
+      - oracle_erp
+      - photoshop
+      - postman
+      - power_bi
+      - powerpoint
+      - premiere_pro
+      - python
+      - quickbooks
+      - r
+      - revit
+      - salesforce
+      - sap
+      - sas
+      - shopify
+      - sketch
+      - slack
+      - solidworks
+      - spss
+      - sql
+      - stata
+      - stripe
+      - tableau
+      - terraform
+      - trello
+      - unity
+      - unreal_engine
+      - vim
+      - vs_code
+      - webflow
+      - word
+      - wordpress
+      - xero
+      - zapier
+      - zoom
+  - name: craft.language_or_framework
+    source_lane: "Skills: Programming"
+    count: 33
+    values:
+      - assembly
+      - bash
+      - c
+      - clojure
+      - cobol
+      - dart
+      - elixir
+      - erlang
+      - f
+      - fortran
+      - go
+      - graphql
+      - haskell
+      - java
+      - javascript
+      - julia
+      - kotlin
+      - lua
+      - matlab
+      - objective_c
+      - ocaml
+      - perl
+      - php
+      - powershell
+      - python
+      - r
+      - ruby
+      - rust
+      - scala
+      - solidity
+      - sql
+      - swift
+      - typescript

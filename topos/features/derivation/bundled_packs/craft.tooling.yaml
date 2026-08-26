@@ -1,0 +1,93 @@
+# DRAFT v0.2.0 for review — seeded from MatrAIx lanes: Skills: Tools (69), Skills: Programming (44),
+# and the six Developer:* survey lanes (66 attrs), GENERALIZED from developer-only to "how the
+# owner practices their craft with tools" (applies to design, writing, music, trades equally —
+# but richest for developers, which fits this node's github/browser sources).
+pack: craft.tooling
+version: 0.2.0
+status: draft
+title: "Tools & craft practice"
+author: topos
+license: Apache-2.0
+sensitivity_class: personal
+role_policy: any_with_label         # tool USE is legitimately observable (github events, browser); stances stay authored
+disclosure_default: owner_only
+
+routing:
+  descriptors:
+    - "tools, stacks, editors, frameworks, workflows, automation, AI assistants in the owner's work"
+    - "how they adopt technology: evaluation criteria, trust in AI output, collaboration workflow"
+  exemplars: ["switched to", "my setup", "trying out", "our stack", "the agent wrote", "code review", "migrated from"]
+
+predicates:
+  - {name: craft.tool_use, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {tool: string, domain: string, intensity: [primary, regular, occasional, tried, abandoned]},
+     note: "observable from github/browser WITH ambient label; stated adoption upgrades altitude"}
+  - {name: craft.stack_component, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {component: string, layer: string, stance: [committed, default, evaluating, migrating_away]}}
+  - {name: craft.practice, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {practice: {enum: [code_review, testing_discipline, docs_writing, observability, security_review, backup_discipline, versioning_discipline, other]}, level: string},
+     note: "seeded from Developer: Code Maintenance; observable in github events"}
+  - name: craft.ai_assistance_stance
+    value_type: structured
+    cardinality: multi
+    temporal: interval
+    altitude: stated
+    value_schema:
+      aspect: {enum: [usage_frequency, task_delegation_comfort, output_trust, autonomy_preference, context_sharing_comfort, control_expectation]}
+      position: string
+    note: "seeded from Developer: AI Adoption/Agent Adoption; DIRECT CONSUMER: the node's own agent tunes its autonomy/explanation behavior to this"
+  - {name: craft.collaboration_style, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {aspect: {enum: [pr_size, commit_cadence, review_participation, issue_style, help_seeking]}, style: string},
+     note: "seeded from Developer: Open Source/Community Behavior; github-event synthesizer, no LLM"}
+  - {name: craft.workflow_event, value_type: structured, cardinality: multi, temporal: episodic, altitude: stated,
+     value_schema: {event: [adopted, migrated, abandoned, automated, broke_down], subject: string}}
+  - {name: craft.evaluation_criteria, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {criterion: {enum: [reliability, security_privacy, open_source, cost, ecosystem, ethics, longevity]}, weight: {scale: importance_5}},
+     note: "seeded from Developer: Technology Evaluation; from stated dealbreakers and repeated choice patterns"}
+  # --- v0.2 additions: general technology stances + savviness (v0.1 residue from the att_* battery) ---
+  - {name: craft.tech_stance, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {topic: {enum: [ai, automation, new_technology, open_source, self_driving_cars, social_media, cloud, other]}, position: {scale: stance_5}},
+     note: "v0.2 — technology attitudes as PERSONAL stances. Policy-shaped tech topics (surveillance, data-privacy law, AI governance) belong to beliefs.civic under the catalog boundary rule."}
+  - {name: craft.tech_savviness, value_type: enum, values: [digital_native, comfortable, cautious_adopter, reluctant, avoidant], cardinality: single, temporal: interval, altitude: inferred,
+     note: "v0.2 (MatrAIx tech_savviness) — calibrates how the node explains technical things; assistant_context consumer"}
+  - {name: craft.adoption_posture, value_type: enum, values: [bleeding_edge, early_adopter, mainstream, late_adopter, laggard], cardinality: single, temporal: interval, altitude: inferred,
+     note: "v0.2 (MatrAIx pref_early_vs_late) — measured from craft.workflow_event timing against release dates, not self-image"}
+
+vocab_refs:
+  - vocab/tools.yaml#craft.tool                       # 69 seeds
+  - vocab/tools.yaml#craft.language_or_framework      # 33 seeds
+  - vocab/stances.yaml#stance.topic                   # tech-domain rows only
+
+guidance:
+  definitions: >
+    How the owner works with tools: what they use (observable), what they believe about
+    it (authored), and how their craft practice looks in the record. Use is inferred
+    from events; stances and trust are only ever the owner's words.
+  abstention:
+    - "Visiting docs/repos is exploration, not adoption — craft.tool_use needs sustained use signals or a statement."
+    - "Work-mandated tools: mark intensity from use but never infer endorsement (stance requires words)."
+    - "Never grade skill quality from code events; that is expertise.knowledge territory with its own bars."
+
+synthesis:
+  - {kind: pattern, predicate: [craft.tool_use, craft.collaboration_style, craft.practice], inputs: [github_events, browser_dev_domains], min_evidence: 21d}
+  - {kind: disposition, predicate: craft.evaluation_criteria, inputs: [craft.workflow_event, authored_tool_statements], min_evidence: 3}
+
+eval:
+  gold:
+    - {text: "Migrated the whole pipeline off Airflow, not looking back", role: authored,
+       expect: [{predicate: craft.workflow_event, value: {event: migrated, subject: Airflow}}]}
+    - {text: "I let the agent draft but I review every diff before merge", role: authored,
+       expect: [{predicate: craft.ai_assistance_stance, value: {aspect: control_expectation}}]}
+  negative_controls:
+    - {text: "(browser: 40 min reading Rust docs once)", role: ambient, expect: [], note: "exploration, not adoption"}
+    - {text: "Team standard is trunk-based, no long branches", role: observed, expect: [], note: "team policy ≠ owner stance"}
+  calibration: {min_conf_for_assert: 0.6, ece_max: 0.15}
+
+consumers:
+  dossier: true
+  fusion_lane: facts_store
+  assistant_context: true    # ai_assistance_stance feeds the node's own agent behavior
+decisions:
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): non-developer craft vocabularies (design, writing, music, trades) are DEFERRED to
+     v2. The predicates are already craft-generic; only the seed vocab is dev-shaped, and
+     this node's sources are dev-heavy, so generalizing now would be unseeded speculation."

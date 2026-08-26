@@ -1,0 +1,112 @@
+# DRAFT v0.2.0 for review — seeded from MatrAIx lanes: Behavior: Habits (30),
+# Behavior: Time (3), Behavior: Work (2). The MatrAIx 30-habit battery becomes an open
+# vocabulary on one parameterized predicate rather than 30 booleans.
+pack: behavior.habits
+version: 0.2.3
+status: draft
+title: "Habits & routines"
+author: topos
+license: Apache-2.0
+sensitivity_class: personal
+role_policy: any_with_label        # behavioral rhythms may use ambient signals, always provenance-labeled
+disclosure_default: owner_only
+
+routing:
+  descriptors:
+    - "recurring practices and routines: journaling, meditation, to-do lists, planning, budgeting, morning/evening routines"
+    - "digital habits, work schedule patterns, recurring time blocks, streaks, skipped habits"
+  exemplars: ["every morning I", "trying to journal daily", "my routine", "streak", "always end up doomscrolling", "inbox zero", "routine", "habit", "streak", "every morning", "every night", "daily", "journaling", "meditation", "doomscrolling", "schedule", "bedtime", "woke up", "wake up"]
+
+vocab:
+  habit_seed:   # from the MatrAIx habit battery; open vocabulary, these are exemplars not a closed set
+    [journaling, meditation, to_do_lists, goal_setting, daily_reflection, budget_tracking, meal_prepping,
+     stretching_mobility, morning_walk, phone_free_downtime, gratitude_practice, reading_before_bed, naps,
+     skipping_breakfast, late_night_snacking, doomscrolling, multitab_browsing, inbox_zero, saving_receipts,
+     cold_showers, step_counting, hydration_tracking, backing_up_files, rereading_before_sending]
+
+predicates:
+  - {name: behavior.habit, value_type: structured, cardinality: multi, temporal: interval, altitude: stated, key_fields: [habit],
+     required_fields: [cadence],
+     value_schema: {habit: string, cadence: {scale: freq_5}, valence: [building, steady, lapsing, quit, aspirational]},
+     note: "a RECURRING practice with a nameable cadence. A task done once, a work item, or a day's
+       activity log is NOT a habit — if the record does not state or clearly imply a recurrence,
+       extract nothing. (v0.2.2: cadence required after a work-journal corpus produced 45 'habits'
+       that were mostly to-do items.)"}
+  - {name: behavior.routine_block, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred, key_fields: [label],
+     value_schema: {label: string, time_of_week: string, activity_kind: string},
+     note: "no-LLM rhythm synthesizer over event/message/browser timestamps"}
+  - {name: behavior.chronotype, value_type: enum, values: [early_bird, night_owl, irregular, flexible, shift_based], cardinality: single, temporal: interval, altitude: inferred}
+  - {name: behavior.work_schedule_pattern, value_type: enum, values: [nine_to_five, flexible, shift, on_call, freelance_irregular], cardinality: single, temporal: interval, altitude: inferred}
+  - {name: behavior.digital_habit, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred, key_fields: [habit],
+     value_schema: {habit: string, direction: [increasing, steady, decreasing]},
+     note: "browser/app patterns; expressed-vs-exposure label REQUIRED (ambient evidence)"}
+  - {name: behavior.habit_event, value_type: structured, cardinality: multi, temporal: episodic, altitude: stated,
+     value_schema: {habit: string, event: [started, restarted, milestone, lapsed, quit]}}
+  # --- v0.2 additions: the DOMESTIC OPERATIONS cluster, from the 40-attribute MatrAIx lstyle_*
+  #     battery that hides inside their "Interests: Culture" lane (34 of 40 are mis-laned there) ---
+  - name: behavior.domestic_pattern
+    value_type: structured
+    cardinality: multi
+    temporal: interval
+    altitude: inferred
+    value_schema:
+      dimension: {enum: [tidiness, punctuality, cooking_frequency, morning_routine_structure, evening_routine_structure, coffee_or_tea_ritual, meal_pattern, chore_cadence]}
+      pattern: string
+    note: "v0.2 (lstyle_tidiness / punctuality / cooking_freq / morning_routine / coffee_ritual). Self-reported or evidenced; NEVER graded — 'lived-in' is a description, not a failing."
+  - {name: behavior.screen_time_pattern, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {context: string, band: [under_2h, 2_4h, 4_8h, over_8h], direction: [increasing, steady, decreasing]},
+     note: "v0.2 (lstyle_screen_time) — ambient-labeled; device/browser evidence only, never inferred from message volume alone"}
+
+vocab_refs:
+  - vocab/habits.yaml#behavior.habit                    # 30 MatrAIx habit_* seeds
+  - vocab/habits.yaml#behavior.lifestyle_dimension      # 40 lstyle_* seeds (this pack owns 7)
+
+guidance:
+  definitions: >
+    A habit is a recurring practice the owner states, or a rhythm the synthesizer proves
+    from timestamps. Stated intent ('trying to journal daily') is valence=building or
+    aspirational — distinct from demonstrated cadence.
+  abstention:
+    - "Inferred routine_blocks/chronotype come from ≥3 weeks of timing evidence; one busy week proves nothing."
+    - "Never convert aspirational habits into demonstrated ones — the valence field carries the difference."
+    - "Digital habits from ambient browser data are behavioral observations, never interest or belief claims."
+
+revision:   # Tier-2 declarative rules (§1.6) — added for the shadow pilot (v0.2.1)
+  supersedes_on: {behavior.habit: [valence, cadence]}   # valence/cadence drift IS the history; context tweaks are field updates
+  noop_when: "re-statement within 7d at equal confidence"
+
+synthesis:
+  - {kind: rhythm, predicate: behavior.routine_block, inputs: [activity_timing_stats, calendar_events], min_evidence: 21d}
+  - {kind: rhythm, predicate: behavior.chronotype, inputs: [activity_timing_stats], min_evidence: 21d}
+  - {kind: pattern, predicate: behavior.digital_habit, inputs: [browser_visit_stats], min_evidence: 14d}
+
+eval:
+  gold:
+    - {text: "Day 45 of the morning pages streak", role: authored,
+       expect: [{predicate: behavior.habit, value: {habit: journaling, valence: steady}}]}
+    - {text: "Deleted Instagram again, the doomscrolling was out of hand", role: authored,
+       expect: [{predicate: behavior.habit_event, value: {habit: doomscrolling, event: quit}}]}
+  negative_controls:
+    - {text: "Article: the 7 habits of highly effective people", role: ambient, expect: []}
+    - {text: "You should try meditating before bed", role: observed, expect: [], note: "advice TO owner is not owner practice"}
+  calibration: {min_conf_for_assert: 0.6, ece_max: 0.15}
+
+consumers:
+  brief_section: "Rhythms"
+  dossier: true
+  fusion_lane: facts_store
+decisions:
+  - >
+    2026-08-25 (owner): WITHDRAWN from the F3 pilot set (replaced by work.career) on a measured negative,
+    not a judgement. Three iterations on this corpus: 67% junk (unenforced enums) -> 59%
+    (enums enforced) -> 59% (cadence required). Diagnosis: SUBSTRATE MISMATCH — a habits lens
+    over a task-log journal maps tasks to habits, and the failure is SEMANTIC so schema cannot
+    reach it. Worse, requiring `cadence` made the model INVENT a legal one ("deadlifting 225
+    for 5 reps" / "first time in a while" -> cadence: daily), converting honest junk into
+    confident junk. Activation trigger: timestamp/wearable/calendar substrate, where the
+    no-LLM rhythm synthesizer (already built and passing probes) does the work instead of the
+    LLM. `required_fields` retained but flagged: see the template's extract-nothing rule.
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): behavior.routine_block uses NAMED routines with a time_of_week string (as drafted),
+     not a day×hour grid. Named blocks are what the owner recognizes ('morning pages',
+     'Tuesday 6am spin'); the grid is a visualization concern, derivable later from the same
+     evidence, and a grid-shaped fact would be unreadable in the fact review surface."

@@ -1,0 +1,88 @@
+# DRAFT v0.2.0 (new in this catalog round) — MatrAIx has almost nothing here
+# (lstyle_device_ecosystem, lstyle_browser, lstyle_subscription_count only); the rest is
+# ours, because a personal node that knows what you OWN can act on maintenance and renewals.
+pack: possessions.assets
+version: 0.1.0
+status: draft
+title: "Things & belongings"
+author: topos
+license: Apache-2.0
+sensitivity_class: personal
+role_policy: authored_addressed        # purchase/warranty confirmations addressed to the owner are prime evidence
+disclosure_default: owner_only
+
+routing:
+  descriptors:
+    - "things the owner owns or uses: vehicles, devices, appliances, instruments, tools, furniture, collections"
+    - "buying, selling, repairing, replacing, warranties, upgrades, what broke, what needs servicing"
+  exemplars: ["my car", "new laptop", "finally replaced", "broke again", "under warranty", "picked up a", "sold my"]
+
+vocab_refs: [vocab/tools.yaml#craft.tool]
+
+predicates:
+  - name: own.possession
+    value_type: structured
+    cardinality: multi
+    temporal: interval
+    altitude: stated
+    value_schema:
+      item: string
+      category: {enum: [vehicle, device, appliance, furniture, instrument, tool, sports_equipment, clothing, collection_item, property, other]}
+      status: {enum: [owns, wants, ordered, sold, gifted_away, lost, broken, replaced]}
+  - {name: own.device, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {device: string, kind: {enum: [phone, laptop, desktop, tablet, wearable, peripheral, console, smart_home, camera, other]}, role: [primary, secondary, work, retired]},
+     note: "device ecosystem is partly observable from user-agent/source metadata — ambient-labeled"}
+  - {name: own.subscription, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {service: entity_ref, category: string, status: [active, trialing, paused, canceled], cadence: [monthly, annual, other]},
+     note: "cross-ref finances.economics (cost side); this pack owns the inventory, not the amounts"}
+  - {name: own.collection, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {collection: string, scale: [starting, growing, extensive], focus: string}}
+  - {name: own.acquisition_event, value_type: structured, cardinality: multi, temporal: episodic, altitude: stated,
+     value_schema: {item: string, event: {enum: [bought, received_gift, sold, gave_away, lost, broke, repaired, returned, upgraded]}, date: date_or_approx}}
+  - name: own.maintenance_obligation
+    value_type: structured
+    cardinality: multi
+    temporal: interval
+    altitude: inferred
+    value_schema: {item: string, obligation: string, cadence: string, last_done: date_or_approx, next_due: date_or_approx}
+    note: "THE derivation-density predicate of this pack — service intervals, filter changes, registrations, warranty expiry inferred from ownership + past events. Feeds the attention lane."
+  - {name: own.wishlist_item, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {item: string, stage: [idle_want, researching, deciding, committed]},
+     note: "distinct from status:wants so aspiration and ownership never blur"}
+
+guidance:
+  definitions: >
+    An inventory of the owner's material life, kept at the granularity that enables
+    action (what needs servicing, what is under warranty, what broke twice).
+  abstention:
+    - "Browsing, wishlists, and reviews read are NOT ownership — own.wishlist_item at most."
+    - "NEVER store serial numbers, VINs, license plates, IMEIs, or account numbers as fact values."
+    - "NEVER store prices/amounts — finances.economics and the canonical transaction stores own figures."
+    - "Gifts bought FOR others are not owner possessions."
+    - "Maintenance obligations must cite an ownership fact plus either a stated interval or ≥2 prior service events — never invent a schedule from product norms."
+
+synthesis:
+  - {kind: pattern, predicate: own.maintenance_obligation, inputs: [own.acquisition_event, own.possession, calendar_events, transaction_categories], min_evidence: 2}
+  - {kind: pattern, predicate: [own.device, own.collection], inputs: [source_metadata, own.acquisition_event, messages], min_evidence: 3}
+
+eval:
+  gold:
+    - {text: "Third time the dishwasher's leaked since we bought it in 2023", role: authored,
+       expect: [{predicate: own.possession, value: {category: appliance}}, {predicate: own.acquisition_event, value: {event: broke}}]}
+    - {text: "Your extended warranty for the Trek expires on 12 May", role: addressed,
+       expect: [{predicate: own.maintenance_obligation, value: {obligation: warranty_expiry}}]}
+  negative_controls:
+    - {text: "(browser: 14 visits to laptop reviews)", role: ambient, expect: [], note: "research, not ownership"}
+    - {text: "Got my dad a new drill for his birthday", role: authored, expect: [], note: "gift for another"}
+  calibration: {min_conf_for_assert: 0.65, ece_max: 0.15}
+
+consumers:
+  brief_section: "Home"
+  dossier: true
+  fusion_lane: facts_store
+  attention_lane: true      # maintenance/warranty due-dates are actionable
+decisions:
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): the admin.legal overlap rule is CONFIRMED as drafted — the DOCUMENT (registration,
+     warranty, policy) is admin.legal's fact; the THING (vehicle, appliance) is this pack's.
+     own.maintenance_obligation carries thing-duties (service intervals);
+     admin.recurring_obligation carries document-duties (renewals). Cross-refs, no copies."

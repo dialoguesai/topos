@@ -1,0 +1,84 @@
+# DRAFT v0.2.0 for review — seeded from MatrAIx attributes: lifex_travel_breadth,
+# lifex_geographic_mobility, lifex_hometown_tie, demo_driver_status, pref_city_vs_nature
+# (placement), urbanicity — grounded in Topos's EXISTING place entities and location stores.
+pack: places.mobility
+version: 0.2.0
+status: draft
+title: "Places & travel"
+author: topos
+license: Apache-2.0
+sensitivity_class: personal
+role_policy: any_with_label          # location/calendar canonical data is legitimate evidence, always labeled
+disclosure_default: owner_only
+
+routing:
+  descriptors:
+    - "places in the owner's life: home, old homes, hometown, frequent spots, trips, relocations"
+    - "travel plans and history, commuting, getting around, favorite places"
+  exemplars: ["flying to", "back home in", "our old place in", "trip to", "commute", "moving to", "favorite spot"]
+
+predicates:
+  - name: place.tie
+    value_type: structured
+    cardinality: multi
+    temporal: interval
+    altitude: stated
+    value_schema:
+      place: entity_ref
+      relation: {enum: [lives_in, lived_in, hometown, second_home, frequents, workplace_location, wants_to_visit]}
+    note: "absorbs existing lives_in; place entities exist in the spine (located_at edges)"
+  - {name: place.trip, value_type: structured, cardinality: multi, temporal: episodic, altitude: stated,
+     value_schema: {destination: entity_ref, purpose: [leisure, work, family, relocation_scouting, event, other], date: date_or_approx},
+     note: "calendar + travel-confirmation emails (addressed) are prime evidence"}
+  - {name: place.travel_breadth, value_type: enum, values: [never_left_country, a_few_countries, well_traveled, lived_abroad, global_nomad], cardinality: single, temporal: interval, altitude: inferred}
+  - {name: place.hometown_tie, value_type: enum, values: [still_there, visits_often, occasional_return, rarely_returns, no_connection], cardinality: single, temporal: interval, altitude: inferred}
+  - {name: place.transport_mode, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {mode: {enum: [drives_daily, drives_occasionally, transit, bike, walk, rideshare, non_driver]}, context: string}}
+  - {name: place.frequented_spot, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {place: entity_ref, kind: [cafe, gym, park, venue, shop, restaurant, other]},
+     note: "no-LLM synthesizer over location_events/calendar; labels existing place entities"}
+  - {name: place.relocation_intent, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {target: entity_ref_or_string, stage: [dreaming, researching, deciding, committed]},
+     note: "bridges to aspirations.goals; kept here for the place graph"}
+  # --- v0.2 additions (MatrAIx lstyle_travel_freq / lstyle_vacation_style) ---
+  - {name: place.travel_cadence, value_type: enum, values: [frequent_flyer, few_trips_yearly, occasional, rare, homebody], cardinality: single, temporal: interval, altitude: inferred,
+     note: "v0.2 — rate, distinct from place.travel_breadth (lifetime reach). Both can be true: a homebody who has lived abroad."}
+  - {name: place.travel_style, value_type: enum, values: [adventure, relaxation, culture, luxury, budget, family_visits, work_travel], cardinality: multi, temporal: interval, altitude: inferred,
+     note: "v0.2 (lstyle_vacation_style) — from stated trip purposes across ≥3 trips; never from one holiday"}
+
+guidance:
+  definitions: >
+    The owner's geography: where they are, were, go, and want to go — as durable ties
+    and dated episodes, all anchored to place entities in the graph.
+  abstention:
+    - "A place mentioned is not a place visited; place.trip needs a first-person visit or a booking addressed to the owner."
+    - "frequented_spot requires ≥4 distinct visits across ≥3 weeks; one great dinner is nothing."
+    - "Others' trips are dossier material ('Mia's in Lisbon' → Mia)."
+    - "Precise addresses/coordinates NEVER become fact values — place entities at venue/city granularity only (the span-store handles address redaction)."
+
+synthesis:
+  - {kind: pattern, predicate: place.frequented_spot, inputs: [location_events, calendar_events], min_evidence: 4}
+  - {kind: trajectory, predicate: [place.travel_breadth, place.hometown_tie], inputs: [place.trip, place.tie], min_evidence: 3}
+  - {kind: rhythm, predicate: place.transport_mode, inputs: [location_events, calendar_gaps], min_evidence: 21d}
+
+eval:
+  gold:
+    - {text: "Booked flights — two weeks in Portugal in May, first real trip since the move", role: authored,
+       expect: [{predicate: place.trip, value: {destination: Portugal, purpose: leisure}}]}
+    - {text: "(calendar+location: same climbing gym 11 times in 6 weeks)", role: ambient,
+       expect: [{predicate: place.frequented_spot, value: {kind: gym, ledger_note: ambient_labeled}}]}
+  negative_controls:
+    - {text: "Lisbon looks unreal in this video", role: ambient, expect: [], note: "aspiration at most, needs owner statement"}
+    - {text: "My parents are downsizing to Arizona", role: authored, expect: [], note: "their move"}
+  calibration: {min_conf_for_assert: 0.6, ece_max: 0.15}
+
+consumers:
+  brief_section: "Places"
+  dossier: true
+  fusion_lane: facts_store
+  graph_projection: place_tie_edges
+decisions:
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): THIS pack owns relocation intent — place.relocation_intent is the single fact for
+     any relocation aspiration with a named target place (it is place-anchored and feeds the
+     place graph). asp.aspiration keeps only targetless wanderlust (kind: experience/visit
+     with no committed place). Mirrored in aspirations.goals' decisions block."

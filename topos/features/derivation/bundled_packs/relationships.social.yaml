@@ -1,0 +1,106 @@
+# DRAFT v0.2.0 for review — seeded from MatrAIx lanes: Personality: Relationships (4:
+# attachment + interpersonal circumplex), demo_marital/parental/relationship_length,
+# health_caregiver_status, lstyle_household_size, social pref_* overlaps.
+# KG NOTE: this pack's relationship predicate adds ROLE-TYPED edges between person
+# entities — the single biggest graph upgrade in the catalog (today: communicates_with only).
+pack: relationships.social
+version: 0.2.3
+status: draft
+title: "Relationships"
+author: topos
+license: Apache-2.0
+sensitivity_class: personal
+role_policy: authored_addressed
+disclosure_default: owner_only
+
+pilot: true                          # F3 pilot, decided 2026-08-25 (owner) — replaces admin.legal
+
+routing:
+  descriptors:
+    - "who people are to the owner: partner, family, close friends, mentors, colleagues"
+    - "relationship changes: new friendships, conflicts, reconciliations, losses, caregiving"
+  exemplars: ["my wife", "my best friend", "my manager", "my mentor", "we made up", "haven't talked since", "taking care of my dad", "wife", "husband", "partner", "mom", "dad", "mother", "father", "sister", "brother", "son", "daughter", "grandma", "grandpa", "aunt", "uncle", "cousin", "roommate", "girlfriend", "boyfriend", "friend", "friends", "buddy", "coworker", "boss", "mentor"]
+
+predicates:
+  - name: rel.relationship
+    value_type: structured
+    cardinality: multi
+    temporal: interval
+    altitude: stated
+    key_fields: [person]        # v0.2.1: the person IS the relationship's identity; role/status are state
+    value_schema:
+      person: entity_ref
+      role: {enum: [partner, spouse, ex_partner, parent, child, sibling, extended_family, close_friend, friend, roommate, colleague, manager, report, mentor, mentee, neighbor, acquaintance, professional_provider]}
+      status: [active, strained, estranged, ended, lost]
+  - {name: rel.relationship_event, value_type: structured, cardinality: multi, temporal: episodic, altitude: stated,
+     key_fields: [person, event], event_identity: "windowed:60",
+     value_schema: {person: entity_ref, event: {enum: [met, became_close, conflict, reconciled, drifted, reconnected, ended, loss]}, description: string}}
+  - {name: rel.caregiving, value_type: structured, cardinality: multi, temporal: interval, altitude: stated, key_fields: [person],
+     value_schema: {person: entity_ref, kind: [child_care, elder_care, illness_support, other]}}
+  - {name: rel.closeness_tier, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred, key_fields: [person],
+     value_schema: {person: entity_ref, tier: [inner_circle, close, regular, peripheral]},
+     note: "no-LLM synthesizer over comms stats (frequency, initiation balance, recency, channels); labels the EXISTING communicates_with edges"}
+  - {name: rel.social_pattern, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {pattern: {enum: [group_vs_one_on_one, initiator_vs_responder, maintainer_vs_drifter]}, position: {scale: position_5}}}
+  - {name: rel.attachment_style_self_described, value_type: string, cardinality: single, temporal: interval, altitude: stated,
+     note: "STATED-ONLY ('I'm anxious-avoidant, classic') — attachment inference is out of scope in v1 by design"}
+  # --- v0.2 additions ---
+  - {name: rel.support_exchange, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred, key_fields: [person, kind],
+     value_schema: {person: entity_ref, direction: [gives, receives, mutual], kind: [practical, emotional, professional, financial]},
+     note: "v0.2 — who the owner leans on and who leans on them; from stated support acts, never from message volume"}
+  - {name: rel.household_member, value_type: structured, cardinality: multi, temporal: interval, altitude: stated, key_fields: [member],
+     value_schema: {member: entity_ref, kind: [partner, child, parent, sibling, roommate, other]},
+     note: "v0.2 — resolves identity.household_size into named people; pets are household.pets, not this predicate"}
+
+cross_refs:
+  - "community.membership — group belonging (this pack owns person-to-person ties only)"
+  - "household.pets — animals in the household"
+  - "health.mental — caregiving strain is a self-reported state there, not a relationship fact here"
+
+guidance:
+  definitions: >
+    Role semantics for the people in the owner's life, layered onto the entity graph.
+    Roles come from the owner's words; closeness comes from measured interaction;
+    the two are separate predicates and may disagree (a close_friend rarely messaged).
+  abstention:
+    - "Role terms used affectionately ('work wife', 'my brother from another mother') → extract only with the idiom stripped or not at all."
+    - "Never infer relationship STATUS (strained/ended) from message-frequency drops alone — life gets busy; status changes need the owner's words."
+    - "Entity resolution first: an unresolvable 'Alex' gets a mention, not a relationship fact."
+    - "Others' relationships to each other belong in their dossiers, not in rel.* (which is owner-centric)."
+
+revision:   # Tier-2 declarative rules (§1.6) — added for the shadow pilot (v0.2.1)
+  supersedes_on: {rel.relationship: [status, role]}     # role/status transitions keep history (friend->close_friend is a revision)
+  noop_when: "re-statement within 7d at equal confidence"
+
+synthesis:
+  - {kind: graph_labeling, predicate: rel.closeness_tier, inputs: [communicates_with_edges, comms_stats], min_evidence: 90d}
+  - {kind: pattern, predicate: rel.social_pattern, inputs: [comms_stats, calendar_events], min_evidence: 60d}
+
+eval:
+  gold:
+    - {text: "Dinner with Sam tonight — 10 years since we became roommates, somehow", role: authored,
+       expect: [{predicate: rel.relationship, value: {person: Sam, role: close_friend_or_roommate}}]}
+    - {text: "Moving Dad into the care facility next month; I'll handle his appointments", role: authored,
+       expect: [{predicate: rel.caregiving, value: {kind: elder_care}}]}
+  negative_controls:
+    - {text: "My sister's best friend is getting divorced", role: authored, expect: [], note: "third-party relationship"}
+    - {text: "(comms stats: messages to Jordan dropped 80% this quarter)", role: ambient, expect_not: [{predicate: rel.relationship, value: {status: strained}}], note: "frequency drop must NOT flip status"}
+  calibration: {min_conf_for_assert: 0.7, ece_max: 0.12}
+
+consumers:
+  brief_section: "People"
+  dossier: true
+  fusion_lane: facts_store
+  graph_projection: role_typed_edges     # rel.relationship → entity_edges with role as edge_type qualifier
+decisions:
+  - >
+    2026-08-25 (owner): PROMOTED to the F3 pilot set, replacing admin.legal (whose substrate the S1d
+    pre-check measured as absent). Rationale: richest substrate on this node (5,248
+    iMessages in the window), and the largest single KG upgrade in the catalog — role-typed
+    person edges over the 806 existing person entities. Shadow scope gains this pack's
+    no-LLM graph_labeling synthesizer (closeness_tier over comms stats) alongside the
+    habits rhythm synthesizer.
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): no intimacy predicates beyond role + status — the line is CONFIRMED as drafted."
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): rel.closeness_tier reconciles with the entity-importance rail at F2 build time:
+     the rail's per-window centrality lenses stay the ANALYTICAL view; closeness_tier is the
+     durable FACT view; they share evidence but are not merged."

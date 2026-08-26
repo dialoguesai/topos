@@ -49,4 +49,17 @@ def apply_pack_registry_v1_up(conn: sqlite3.Connection) -> None:
             )
             """
         )
+    if not _table_exists(conn, "derivation_progress"):
+        # resume ledger for the derivation enrichment job — one row per
+        # (pack@version, table, record_id) processed. Owned HERE, not by the job:
+        # feature-created DDL is how a live schema drifts past the ledger
+        # (2026-08-25 lesson, enrichment_record_progress_v1).
+        conn.execute(
+            """
+            CREATE TABLE derivation_progress (
+                key TEXT PRIMARY KEY,
+                ts TEXT NOT NULL DEFAULT (datetime('now'))
+            )
+            """
+        )
     conn.commit()

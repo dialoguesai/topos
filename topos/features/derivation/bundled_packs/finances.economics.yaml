@@ -1,0 +1,86 @@
+# DRAFT v0.2.0 for review — seeded from MatrAIx attributes: demo_household_income /
+# socioeconomic_band, pref_save_vs_spend, dospert_financial_risk_tolerance,
+# economic_motivation, lifex_financial_trajectory, att_{taking_on_debt, homeownership,
+# cryptocurrency, subscription_services}, habit_budget_tracking.
+pack: finances.economics
+version: 0.3.0
+status: draft
+title: "Money & economics"
+author: topos
+license: Apache-2.0
+sensitivity_class: personal          # NOT Art.9-special, but treat with elevated care; owner_only throughout
+role_policy: authored_addressed
+disclosure_default: owner_only
+
+predicates:
+  - {name: money.financial_practice, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {practice: {enum: [budgeting, saving_program, investing_regular, debt_paydown, subscription_audit, other]}, cadence: {scale: freq_5}}}
+  - {name: money.financial_event, value_type: structured, cardinality: multi, temporal: episodic, altitude: stated,
+     value_schema: {event: {enum: [major_purchase, sold_asset, new_debt, paid_off_debt, investment_made, windfall, setback, started_budget]}, description: string, date: date_or_approx}}
+  - {name: money.saving_orientation, value_type: enum, values: [hard_saver, saver_leaning, balanced, spender_leaning, free_spender], cardinality: single, temporal: interval, altitude: inferred}
+  - {name: money.financial_risk_tolerance, value_type: enum, values: [very_high, high, average, low, very_low], cardinality: single, temporal: interval, altitude: inferred,
+     note: "DOSPERT financial domain; from stated appetite + actual choices, never from one trade"}
+  - {name: money.economic_stance, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {topic: {enum: [debt, homeownership, renting, crypto, subscriptions, insurance, early_retirement, other]}, position: {scale: stance_5}}}
+  - {name: money.spending_pattern, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {category: string, pattern: string},
+     note: "no-LLM synthesizer over the EXISTING financial stats lane (d30/d90 windows already built)"}
+  - {name: money.trajectory, value_type: enum, values: [steady_upward, stable, volatile, downward, rebuilding], cardinality: single, temporal: interval, altitude: inferred,
+     note: "highest evidence floor in the pack; from owner statements over quarters, never from transaction data alone"}
+  # --- v0.2 additions: consumer stances + the money "stack" (MatrAIx lstyle_* financial cluster) ---
+  - {name: money.consumer_stance, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {topic: {enum: [brand_loyalty, advertising, influencers, online_reviews, fast_fashion, minimalism, consumerism, subscriptions, tipping_culture, electric_vehicles, other]}, position: {scale: stance_5}},
+     note: "v0.2 — the consumer-culture slice of the att_* battery, homeless in v0.1. Ethical-consumption stances may co-fire with values.motivation (sustainability) and beliefs.civic (policy) — three different facts."}
+  - {name: money.shopping_style, value_type: enum, values: [researcher, impulse_buyer, bargain_hunter, brand_loyal, minimalist], cardinality: single, temporal: interval, altitude: inferred,
+     note: "v0.2 (lstyle_shopping_style) — from purchase-decision language and transaction cadence, never from one purchase"}
+  - {name: money.money_stack, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {kind: {enum: [payment_preference, banking_style, investment_style]}, value: string},
+     note: "v0.2 (lstyle_payment_pref / banking_style / investment_style) — INSTITUTION-SHAPE ONLY: 'credit union', 'index investor'. Never account numbers, never balances, never holdings."}
+  - {name: money.socioeconomic_self_description, value_type: string, cardinality: single, temporal: interval, altitude: stated, sensitivity: special,
+     note: "v0.2 (MatrAIx socioeconomic_band) — STATED-ONLY, in the owner's own words. Never banded from spending, employer, or postcode."}
+
+vocab_refs:
+  - vocab/stances.yaml#stance.topic     # consumer/economic rows only
+
+routing:
+  descriptors:
+    - "money: budgets, purchases, savings, investments, debt, subscriptions, financial plans"
+    - "attitudes toward spending, saving, financial risk, big financial decisions"
+  exemplars: ["finally paid off", "saving up for", "budget", "splurged", "our mortgage", "invested in", "canceled the subscription"]
+
+guidance:
+  definitions: >
+    The owner's financial life in their own terms: practices, events, orientations.
+    Where the node already computes spending stats, this pack labels patterns —
+    it never re-derives amounts into facts.
+  abstention:
+    - "NEVER estimate income, net worth, or wealth from any signal — stated-only, sensitivity special."
+    - "Amounts stay in canonical financial stores; facts carry categories and patterns, not figures."
+    - "One splurge or one frugal month proves no orientation (min_evidence across ≥6 weeks)."
+    - "Financial stress language routes to health.mental as self-reported state, not here."
+
+synthesis:
+  - {kind: pattern, predicate: money.spending_pattern, inputs: [financial_stats_windows], min_evidence: 60d}
+  - {kind: disposition, predicate: [money.saving_orientation, money.financial_risk_tolerance], inputs: [money.financial_event, money.economic_stance, authored_money_statements], min_evidence: 4}
+
+eval:
+  gold:
+    - {text: "Student loans DONE. Five years early.", role: authored,
+       expect: [{predicate: money.financial_event, value: {event: paid_off_debt}}]}
+    - {text: "We're strict YNAB people now, every dollar has a job", role: authored,
+       expect: [{predicate: money.financial_practice, value: {practice: budgeting, cadence: daily_or_weekly}}]}
+  negative_controls:
+    - {text: "(browser: 'best index funds 2026' article)", role: ambient, expect: []}
+    - {text: "My brother's crypto portfolio is a rollercoaster", role: authored, expect: [], note: "third party"}
+    - {text: "(transactions: 4 restaurant charges this week)", role: ambient, expect_not: [{predicate: money.saving_orientation}], note: "stats lane material; no orientation from one week"}
+  calibration: {min_conf_for_assert: 0.7, ece_max: 0.12}
+
+consumers:
+  brief_section: "Money"
+  dossier: false
+  fusion_lane: facts_store
+decisions:
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): money.income_band is DROPPED from the catalog — it was the least action-relevant
+     special-class predicate and pure profile-building risk. The stated self-description case
+     is covered by money.socioeconomic_self_description (stated-only, special). The abstention
+     rule 'never estimate income/net worth from any signal' REMAINS in force."

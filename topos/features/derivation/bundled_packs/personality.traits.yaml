@@ -1,0 +1,88 @@
+# DRAFT v0.2.0 for review — seeded from MatrAIx lanes: Personality: Big Five (50: IPIP-NEO
+# facets + BFI-2 domains/facets), Personality: Character (34: VIA strengths + extras),
+# Risk & Decision (7: DOSPERT domains, decision style, need for closure).
+# MBTI deliberately EXCLUDED (weak validity; BFI-2 covers the space) — see INDEX.
+pack: personality.traits
+version: 0.2.0
+status: draft
+title: "Personality & disposition"
+author: topos
+license: Apache-2.0
+sensitivity_class: personal
+role_policy: authored_addressed
+disclosure_default: owner_only
+
+routing:
+  descriptors:
+    - "self-descriptions of personality, strengths, weaknesses, how the owner handles risk and decisions"
+    - "sustained dispositional patterns across months of authored text"
+  exemplars: ["I'm the kind of person who", "I've always been", "classic me", "I can't help but", "big risk for me"]
+
+predicates:
+  - {name: trait.bfi2_domain, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {domain: {enum: [extraversion, agreeableness, conscientiousness, negative_emotionality, open_mindedness]}, level: {scale: level_5}},
+     aligns_with: "https://en.wikipedia.org/wiki/Big_Five_personality_traits"}
+  - {name: trait.bfi2_facet, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {facet: {enum: [sociability, assertiveness, energy_level, compassion, respectfulness, trust, organization, productiveness, responsibility, anxiety, depression_tendency, emotional_volatility, intellectual_curiosity, aesthetic_sensitivity, creative_imagination]}, level: {scale: level_5}}}
+  - name: trait.character_strength
+    value_type: structured
+    cardinality: multi
+    temporal: interval
+    altitude: inferred
+    value_schema:
+      # v0.2: widened from the 24 canonical VIA strengths to include MatrAIx's 8 non-VIA additions
+      # (ambition, empathy, resilience, discipline, generosity, loyalty, competitiveness, adaptability),
+      # which the v0.1 draft silently trimmed. VIA-canonical members are marked in the vocab file.
+      strength: {enum: [curiosity, creativity, love_of_learning, open_mindedness, perspective, bravery, perseverance, honesty, zest, capacity_for_love, kindness, social_intelligence, teamwork, fairness, leadership, forgiveness, humility, prudence, self_regulation, appreciation_of_beauty, gratitude, hope_optimism, playfulness, spirituality, ambition, empathy, resilience, discipline, generosity, loyalty, competitiveness, adaptability]}
+      level: {scale: strength_5}
+    aligns_with: "https://en.wikipedia.org/wiki/Values_in_Action_Inventory_of_Strengths"
+  - {name: trait.ipip_facet, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {facet: string, level: {scale: level_5}},
+     note: "v0.2 — the full 30-facet IPIP-NEO space as an OPEN vocabulary (vocab/dispositions.yaml#trait.ipip_facet), rather than the 15 BFI-2 facets the v0.1 enum trimmed to. Gated by the same open question below: ship inference at all in v1?"}
+  - {name: trait.self_description, value_type: string, cardinality: multi, temporal: interval, altitude: stated,
+     note: "verbatim self-characterizations ('I'm an introvert') — kept distinct from inferred trait scores"}
+  - {name: trait.risk_tolerance, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {domain: {enum: [overall, financial, ethical, recreational, social, health_safety]}, level: {scale: level_5}},
+     aligns_with: "https://en.wikipedia.org/wiki/Domain-specific_risk-taking_scale"}
+  - {name: trait.decision_style, value_type: enum, values: [analytical, intuitive, consensus_driven, directive, deliberative], cardinality: single, temporal: interval, altitude: inferred}
+  - {name: trait.need_for_closure, value_type: enum, values: [very_high, high, average, low, very_low], cardinality: single, temporal: interval, altitude: inferred}
+
+guidance:
+  definitions: >
+    Dispositional summaries over MONTHS of authored evidence, plus verbatim
+    self-descriptions. Trait facts are the highest-inference content in the catalog —
+    they carry the strictest floors and the widest abstention.
+  abstention:
+    - "No trait from any single event, week, or mood period; min_evidence spans ≥6 distinct weeks."
+    - "Self-descriptions are recorded as trait.self_description (stated) and weigh into, but never shortcut, inferred scores."
+    - "Distress-adjacent facets (anxiety, depression_tendency, emotional_volatility) additionally route through health.mental rules: sustained self-report evidence only, never tone analysis of isolated messages."
+    - "When evidence conflicts, prefer no fact over a mid-scale guess; 'average' must be earned, not defaulted."
+
+synthesis:
+  - {kind: disposition, predicate: trait.bfi2_domain, inputs: [authored_corpus_features, trait.self_description], min_evidence: 6w}
+  - {kind: disposition, predicate: trait.character_strength, inputs: [authored_corpus_features, relationships_interaction_stats], min_evidence: 6w}
+  - {kind: pattern, predicate: trait.risk_tolerance, inputs: [decision_events, finances.economics, life.events], min_evidence: 5}
+
+eval:
+  gold:
+    - {text: "I'm a planner — spreadsheets for vacations, the whole thing", role: authored,
+       expect: [{predicate: trait.self_description, value: "planner"}]}
+    - {text: "(across 8 weeks: owner organizes group events 6 times, checks in on 4 friends unprompted)", role: authored_synthetic_window,
+       expect: [{predicate: trait.bfi2_facet, value: {facet: sociability_or_compassion, level: high}}]}
+  negative_controls:
+    - {text: "Personality quiz result: you're an ENFP!", role: ambient, expect: [], note: "quiz content, not evidence"}
+    - {text: "Snapped at the delivery guy today, feel bad", role: authored, expect: [], note: "single event, no disposition"}
+  calibration: {min_conf_for_assert: 0.75, ece_max: 0.1}
+
+consumers:
+  brief_section: null
+  dossier: true
+  fusion_lane: facts_store
+decisions:
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): v1 disposition inference is CHARACTER STRENGTHS ONLY. The trait.bfi2_domain,
+     trait.bfi2_facet, and trait.ipip_facet synthesizers DO NOT RUN in v1 — the predicates
+     stay in the schema (forward-compat, and stated self-descriptions may still reference
+     the vocabulary), but no psychometric Big-Five scoring ships until a synthesizer passes
+     a pre-registered validation (stability across windows + owner agreement ≥ agreed bar).
+     Rationale: highest plausible-sludge risk in the catalog; lens-lab lost two premises to
+     leak-controlled evaluation on exactly this class of inference."

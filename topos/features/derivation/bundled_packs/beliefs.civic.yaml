@@ -1,0 +1,99 @@
+# DRAFT v0.2.0 for review — seeded from MatrAIx lanes: Worldview: Beliefs (67: political_lean,
+# 55+ att_* stance battery, MFT moral foundations, trust_level) + demo_political_engagement +
+# lifex_service_history. THE maximum-caution pack: special class, authored-only, structural floors.
+pack: beliefs.civic
+version: 0.2.0
+status: draft
+title: "Civic outlook"
+author: topos
+license: Apache-2.0
+sensitivity_class: special
+role_policy: authored_only          # STRUCTURAL: engine refuses observed/ambient for this pack regardless of config
+disclosure_default: owner_only
+
+routing:
+  descriptors:
+    - "the owner's own political and policy positions, civic participation, causes they act on"
+    - "first-person stances on public issues: climate, regulation, speech, immigration, energy, labor"
+  exemplars: ["I'm voting", "I support", "I'm against", "donated to", "volunteered for", "wrote to my rep", "protest"]
+
+vocab:
+  stance_topic_seed:   # from the MatrAIx att_* battery (civic/public subset), open vocabulary
+    [climate_action, nuclear_energy, renewable_energy, government_regulation, free_markets, immigration,
+     labor_unions, universal_basic_income, free_speech, privacy_vs_security, surveillance, gun_ownership,
+     capital_punishment, higher_education, standardized_testing, public_transit, urban_density,
+     gentrification, globalization, gig_economy, ai_governance, vaccines]
+
+predicates:
+  - {name: civic.stance, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {topic: string, position: {scale: stance_5}, statement: string},
+     note: "topic-level positions from explicit first-person statements; statement keeps the owner's phrasing"}
+  - {name: civic.political_lean, value_type: enum, values: [left, center_left, center, center_right, right, libertarian, other_self_described], cardinality: single, temporal: interval, altitude: stated,
+     note: "STATED-ONLY in v1: recorded only from explicit self-labeling ('as a centrist…'). See open question on inference."}
+  - {name: civic.engagement_level, value_type: enum, values: [activist, engaged_voter, occasional_voter, disengaged, nonvoter], cardinality: single, temporal: interval, altitude: inferred,
+     note: "from the owner's own reported ACTIONS (voted, donated, attended), never from consumption"}
+  - {name: civic.participation, value_type: structured, cardinality: multi, temporal: episodic, altitude: stated,
+     value_schema: {action: {enum: [voted, donated, volunteered, contacted_official, attended_event, organized, petitioned, public_office]}, cause_or_race: string, date: date_or_approx}}
+  - {name: civic.cause, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {cause: string, involvement: [supports, active, leading]},
+     note: "requires ≥2 participation acts or repeated first-person advocacy"}
+  - {name: civic.moral_foundation_emphasis, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {foundation: {enum: [care_harm, fairness_cheating, loyalty_betrayal, authority_subversion, sanctity_degradation, liberty_oppression]}, emphasis: {scale: level_5}},
+     aligns_with: "https://en.wikipedia.org/wiki/Moral_foundations_theory",
+     note: "from the owner's own moral ARGUMENTS across ≥6 weeks; the highest evidence floor in the pack"}
+  - {name: civic.institutional_trust, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {institution: string, level: [trusting, verifying, skeptical, hostile]}}
+  # --- v0.2 addition ---
+  - {name: civic.social_values_stance, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
+     value_schema: {topic: {enum: [gender_roles, immigration, equality, free_speech, tradition, authority, other]}, position: {scale: stance_5}, statement: string},
+     note: "v0.2 — social/cultural positions were mixed into civic.stance in v0.1; separated because they carry higher misattribution risk and are more often reported second-hand. Same authored-only structural gate."}
+
+boundary:
+  note: >
+    v0.2 CATALOG BOUNDARY RULE — a stance belongs to the pack whose DOMAIN the topic acts in.
+    Where a topic is both personal practice and public policy, BOTH facts may exist and neither
+    implies the other: labor unions (work.culture_stance | civic.stance), veganism
+    (health.lifestyle dietary reason | civic.stance animal policy), minimalism
+    (money.consumer_stance | values.priority), AI (craft.tech_stance | civic.stance governance),
+    privacy (values.priority | craft.tech_stance | civic.stance surveillance policy).
+    vocab/stances.yaml carries the full 55-topic routing table.
+
+vocab_refs:
+  - vocab/stances.yaml#stance.topic                 # 55 topics with pack routing
+  - vocab/dispositions.yaml#civic.moral_foundation  # 6 MFT seeds
+
+guidance:
+  definitions: >
+    The owner's civic outlook FROM THEIR OWN WORDS AND ACTS. This pack exists so the
+    node can be genuinely useful about the owner's civic life while making
+    misattribution structurally impossible.
+  abstention:
+    - "Reading, watching, following, and being sent content assert NOTHING (role gate is structural, but re-state: news diet is interests.taste at most)."
+    - "Never compress stances into a lean: civic.political_lean only from explicit self-labeling."
+    - "Sarcasm/devil's-advocate: when in doubt about sincerity, extract nothing."
+    - "Group memberships (party registration, union) are stated facts; positions still need first-person statements."
+    - "Never extrapolate across topics ('opposes X so probably opposes Y' is forbidden — every stance earns its own evidence)."
+
+synthesis:
+  - {kind: disposition, predicate: civic.engagement_level, inputs: [civic.participation], min_evidence: 2}
+  - {kind: disposition, predicate: civic.moral_foundation_emphasis, inputs: [authored_moral_arguments], min_evidence: 6w}
+
+eval:
+  gold:
+    - {text: "Early-voted today, and yes I'm still mad about the transit measure failing", role: authored,
+       expect: [{predicate: civic.participation, value: {action: voted}}, {predicate: civic.stance, value: {topic: public_transit, position: positive}}]}
+  negative_controls:
+    - {text: "(browser: 12 articles on the election this week)", role: ambient, expect: [], note: "consumption ≠ position"}
+    - {text: "My uncle went on his usual rant about regulations", role: authored, expect: [], note: "other's position"}
+    - {text: "Playing devil's advocate: what's the steelman for the other side?", role: authored, expect: []}
+  calibration: {min_conf_for_assert: 0.8, ece_max: 0.08}
+
+consumers:
+  brief_section: null                # deliberately no automatic brief; owner queries only
+  dossier: false
+  fusion_lane: facts_store
+decisions:
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): civic.political_lean stays STATED-ONLY permanently in v1; no inference from stance
+     accumulation. Revisit only as its own proposal with its own eval lane."
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): pack defaults OFF until the owner opts in (lens catalog toggle, F4). Live
+     extraction additionally waits for the next wave — see plan F3 (pilot swap consequence)."

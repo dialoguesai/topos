@@ -1,0 +1,86 @@
+# GENERATED — do not hand-edit; regenerate with scratchpad/gen_vocab.py
+# Source: MatrAIx_Persona_1M codebook `persona_codes.schema.json` (arXiv 2608.04205).
+# Category structure and vocabulary only — no persona data was copied.
+# OPEN vocabularies: these are extraction SEEDS, not closed sets. Values outside
+# these lists are valid and expected (a personal node meets the long tail).
+
+vocab_file: habits
+vocabularies:
+  - name: behavior.habit
+    source_lane: "Behavior: Habits"
+    count: 30
+    values:
+      - backing_up_files
+      - budget_tracking
+      - cold_showers
+      - daily_reflection
+      - doomscrolling
+      - goal_setting
+      - gratitude_practice
+      - humming_whistling
+      - hydration_tracking
+      - inbox_zero_discipline
+      - journaling
+      - late_night_snacking
+      - meal_prepping
+      - meditation
+      - morning_walk
+      - multitab_browsing
+      - nail_biting_fidgeting
+      - naps
+      - phone_free_downtime
+      - power_snoozing_alarm
+      - pre_trip_overpacking
+      - procrasti_cleaning
+      - re_reading_texts_before_sending
+      - reading_before_bed
+      - saving_receipts
+      - skipping_breakfast
+      - step_counting
+      - stretching_mobility
+      - talking_to_oneself
+      - to_do_lists
+  - name: behavior.lifestyle_dimension
+    source_lane: "multiple (lstyle_*)"
+    count: 40
+    values:
+      - alcohol_use
+      - banking_style
+      - browser
+      - caffeine
+      - coffee_ritual
+      - commute_mode
+      - cooking_freq
+      - device_ecosystem
+      - diet_type
+      - exercise_freq
+      - fashion_sense
+      - frugality
+      - gaming_freq
+      - giving
+      - hobby_intensity
+      - household_size
+      - investment_style
+      - morning_routine
+      - music_listening
+      - news_freq
+      - payment_pref
+      - pet_ownership
+      - planning_horizon
+      - podcast_listening
+      - primary_messenger
+      - primary_social
+      - punctuality
+      - reading_freq
+      - screen_time
+      - shopping_style
+      - sleep_schedule
+      - smoking
+      - social_battery
+      - streaming_hours
+      - subscription_count
+      - tidiness
+      - travel_freq
+      - vacation_style
+      - volunteering
+      - work_schedule

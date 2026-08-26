@@ -1,0 +1,97 @@
+# DRAFT v0.2.0 for review — seeded from MatrAIx lane: Values & Motivation (46):
+# 30-item val_* battery, Schwartz basic values (10), SDT needs (3), need_for_cognition,
+# values_priority, economic_motivation. Trait-adjacent moral foundations live in beliefs.civic.
+pack: values.motivation
+version: 0.2.0
+status: draft
+title: "Values & motivation"
+author: topos
+license: Apache-2.0
+sensitivity_class: personal
+role_policy: authored_only          # what someone values is identity-grade; only their own words/choices testify
+disclosure_default: owner_only
+
+routing:
+  descriptors:
+    - "what matters to the owner: family, freedom, security, achievement, creativity, community, growth"
+    - "stated priorities, tradeoffs chosen, what they protect when things conflict"
+  exemplars: ["what matters most to me", "I'd never trade", "at the end of the day", "non-negotiable", "worth it for the"]
+
+vocab:
+  value_seed:   # MatrAIx val_* battery, verbatim
+    [family, career_success, wealth, health, personal_freedom, security_stability, adventure, tradition,
+     power_influence, achievement, creativity_self_expression, community, spirituality_faith, knowledge_truth,
+     social_status, independence, justice_fairness, loyalty, sustainability, recognition, helping_others,
+     personal_growth, fun_enjoyment, integrity_honesty, beauty_aesthetics, order_structure, patriotism,
+     equality, privacy]
+
+predicates:
+  - {name: values.priority, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {value: string, importance: {scale: importance_5}},
+     note: "one active row per value; supersede on drift — values evolve"}
+  - {name: values.declaration, value_type: structured, cardinality: multi, temporal: episodic, altitude: stated,
+     value_schema: {value: string, statement: string},
+     note: "verbatim value statements; the evidence stream values.priority synthesizes over"}
+  - {name: values.tradeoff_observed, value_type: structured, cardinality: multi, temporal: episodic, altitude: inferred,
+     value_schema: {chose: string, over: string, context: string},
+     note: "revealed preference from real decisions ('turned down the raise to stay remote')"}
+  - {name: values.schwartz, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {value: {enum: [self_direction, stimulation, hedonism, achievement, power, security, conformity, tradition, benevolence, universalism]}, level: {scale: level_5}},
+     aligns_with: "https://en.wikipedia.org/wiki/Theory_of_basic_human_values"}
+  - {name: values.sdt_need_salience, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     value_schema: {need: {enum: [autonomy, competence, relatedness]}, salience: {scale: level_5}},
+     aligns_with: "https://en.wikipedia.org/wiki/Self-determination_theory"}
+  - {name: values.motivation_driver, value_type: enum, values: [cost_sensitive, value_driven, premium_seeking, indifferent], cardinality: single, temporal: interval, altitude: inferred}
+  # --- v0.2 addition ---
+  - name: values.value_conflict
+    value_type: structured
+    cardinality: multi
+    temporal: interval
+    altitude: inferred
+    value_schema: {value_a: string, value_b: string, context: string, resolution: [chose_a, chose_b, unresolved, oscillating]}
+    note: >
+      v0.2 — MatrAIx cannot represent this at all: its value battery scores each value
+      independently, so tension is invisible. Standing value conflicts (security vs adventure,
+      family vs ambition) are where a person's real decision structure lives. Recorded
+      descriptively, never resolved for the owner, never surfaced as a judgment.
+
+vocab_refs:
+  - vocab/values.yaml#values.value        # 29 seeds
+  - vocab/values.yaml#values.schwartz     # 10 seeds
+  - vocab/values.yaml#values.sdt_need     # 3 seeds
+
+guidance:
+  definitions: >
+    What the owner treats as mattering — from declarations (stated) and revealed
+    tradeoffs (inferred). Schwartz/SDT summaries sit on top of those two evidence
+    streams and cite them.
+  abstention:
+    - "Values are authored-only: a shared article, a group's stance, or an employer's mission assert nothing about the owner."
+    - "One declaration ≠ core value: values.priority requires declarations AND/OR tradeoffs across ≥3 distinct contexts."
+    - "Never rank the full value inventory — assert only values with evidence; silence for the rest."
+    - "Aspirational statements about who they want to be route to aspirations.goals, not values held."
+
+synthesis:
+  - {kind: disposition, predicate: values.priority, inputs: [values.declaration, values.tradeoff_observed], min_evidence: 3}
+  - {kind: disposition, predicate: [values.schwartz, values.sdt_need_salience], inputs: [values.priority, values.tradeoff_observed], min_evidence: 5}
+
+eval:
+  gold:
+    - {text: "Turned down the promotion — I'm not giving up remote and time with the kids", role: authored,
+       expect: [{predicate: values.tradeoff_observed, value: {chose: family_or_freedom, over: career_success}}]}
+    - {text: "Privacy isn't a feature to me, it's the whole point", role: authored,
+       expect: [{predicate: values.declaration, value: {value: privacy}}]}
+  negative_controls:
+    - {text: "Company all-hands: our values are integrity and customer obsession", role: observed, expect: []}
+    - {text: "Retweeted: 'hustle culture is a scam'", role: authored, expect: [], note: "share ≠ held value without owner comment; at most interests signal"}
+  calibration: {min_conf_for_assert: 0.7, ece_max: 0.12}
+
+consumers:
+  brief_section: "What matters"
+  dossier: true
+  fusion_lane: facts_store
+decisions:
+  - "2026-08-25 (delegated — Jonny: 'on the open decisions, do what you recommend'): values.tradeoff_observed is KEPT in v1. It is the pack's highest-value predicate —
+     revealed preference is the only evidence stream that separates held values from
+     narrated ones — and it is authored-only and episodic, so its failure mode is a missed
+     extraction, not a wrong identity claim."

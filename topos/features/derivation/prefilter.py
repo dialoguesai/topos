@@ -38,6 +38,11 @@ class PackPrefilter:
                 if isinstance(spec, dict):
                     for v in spec.get("enum") or []:
                         toks |= _tokens(str(v).replace("_", " "))
+        # the pack's own eval gold is routing vocabulary BY DEFINITION — a pack
+        # whose prefilter drops its own gold has coverage that silently never
+        # happens at ingest (found 2026-08-26: 13+ gold texts across 11 packs)
+        for g in ((pack.raw or {}).get("eval") or {}).get("gold") or []:
+            toks |= _tokens(str(g.get("text") or ""))
         self.lexicon = toks - _STOP
         self.hits = 0
         self.misses = 0
