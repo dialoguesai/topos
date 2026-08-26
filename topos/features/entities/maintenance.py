@@ -820,7 +820,12 @@ def compute_communities(conn: sqlite3.Connection) -> Dict[str, int]:
             # FALLBACK; identity-matched historical names win, and genuinely
             # new cores get one LLM-derived name (validated, else fallback).
             community_cores[rank[comm]] = [str(m) for m in ranked]
-        _apply_stable_names(conn, community_cores, labels_by_rank, names, eigen)
+        try:
+            _apply_stable_names(conn, community_cores, labels_by_rank, names, eigen)
+        except Exception:  # noqa: BLE001 — naming is an ENHANCEMENT; a lock or
+            # model failure mid-pass must never cost the deterministic labels
+            # (first live run: a transient 'database is locked' wiped them)
+            logger.exception("stable naming pass failed; deterministic labels stand")
         logger.info(
             "graph structural analytics: %d nodes / %d edges, betweenness k=%s, %.2fs",
             n,
