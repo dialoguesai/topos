@@ -139,7 +139,7 @@ def _rel_assert(w, about):
         actor_role="authored", source_refs=[{"table": "t", "record_id": "r1"}],
         confidence=0.9, about=about)
 
-def test_a3_other_resolved_routes_to_dossier(a3_writer):
+def test_a3_other_resolved_routes_to_dossier(a3_writer, net_subject_on):
     w, conn = a3_writer
     out = _rel_assert(w, "other:Nora")
     assert out["outcome"] not in ("quarantined", "role_reject"), out
@@ -149,7 +149,7 @@ def test_a3_other_resolved_routes_to_dossier(a3_writer):
                        " AND object_key LIKE 'fact:ent_owner:%'").fetchone()
     assert row[0] == 0
 
-def test_a3_other_unresolved_quarantines(a3_writer):
+def test_a3_other_unresolved_quarantines(a3_writer, net_subject_on):
     w, conn = a3_writer
     out = _rel_assert(w, "other:Zorbo Nobody")
     assert out["outcome"] == "quarantined"
@@ -528,3 +528,65 @@ def test_revise_fact_field_and_history(a3_writer):
     assert old[0] is not None and old[1] == "owner_revision"
     live = conn.execute("SELECT payload_json FROM signal_objects WHERE object_id=?", (res["object_id"],)).fetchone()[0]
     assert "close_friend" in live
+
+
+# --- net-subject kill switch: outward writes are OFF until the policy plane lands ---
+
+@pytest.fixture
+def net_subject_on(monkeypatch):
+    """Enable outward writes for the tests that exercise the routing itself.
+
+    The routing code must keep working — the switch defers it, it does not delete it —
+    so the A3 dossier tests opt in explicitly. Everything else runs at the shipped
+    default, which is OFF.
+    """
+    import topos.features.derivation.writer as _w
+    monkeypatch.setattr(_w, "NET_SUBJECT_WRITES_ENABLED", True)
+    yield
+
+
+def test_net_subject_writes_default_off():
+    """The shipped default must be off. If this fails, a node is writing dossier
+    facts about people who never consented."""
+    import topos.features.derivation.writer as _w
+    assert _w.NET_SUBJECT_WRITES_ENABLED is False
+
+
+def test_a3_resolvable_other_is_withheld_by_default(a3_writer):
+    """Nora RESOLVES — this is the dangerous path, and it must still quarantine."""
+    w, conn = a3_writer
+    out = _rel_assert(w, "other:Nora")
+    assert out["outcome"] == "quarantined", out
+    assert w.stats.get("routed_dossier") in (None, 0)
+    assert w.stats.get("net_subject_withheld") == 1
+    # nothing durable was written for ANYONE
+    assert conn.execute(
+        "SELECT COUNT(*) FROM signal_objects WHERE object_type='fact'").fetchone()[0] == 0
+    # and specifically not onto Nora's dossier
+    assert conn.execute(
+        "SELECT COUNT(*) FROM signal_objects WHERE object_key LIKE 'fact:ent_nora:%'"
+    ).fetchone()[0] == 0
+
+
+def test_withheld_is_distinguishable_from_unattributable(a3_writer):
+    """A policy hold and a failed attribution must not collapse into one reason.
+
+    The review queue's whole value is telling a human WHY a row is waiting: 'we know
+    who this is about and chose not to write it' is a different decision from 'we could
+    not tell who this is about'.
+    """
+    w, conn = a3_writer
+    _rel_assert(w, "other:Nora")          # resolvable -> policy hold
+    _rel_assert(w, "unclear")             # unattributable
+    reasons = [r[0] for r in conn.execute(
+        "SELECT incumbent_object_id FROM fact_conflicts ORDER BY incumbent_object_id")]
+    assert any(r.startswith("quarantine:net_subject_disabled:") for r in reasons), reasons
+    assert any(r.startswith("quarantine:about_unclear") for r in reasons), reasons
+
+
+def test_owner_facts_are_unaffected_by_the_switch(a3_writer):
+    """The switch must not touch the owner's own lane — that is the whole product."""
+    w, conn = a3_writer
+    out = _rel_assert(w, "owner")
+    assert out["outcome"] != "quarantined", out
+    assert w.stats.get("net_subject_withheld") in (None, 0)
