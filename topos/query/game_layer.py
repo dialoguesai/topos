@@ -55,6 +55,34 @@ def _extract_inference_evidence(context_packet: Dict[str, Any], *, limit: int = 
     return evidence
 
 
+#: Redaction writes these placeholders into stored text, and the NER pass then
+#: extracts them as if they were names.
+_REDACTION_PLACEHOLDERS = {"NAME", "ADDRESS", "DATE", "EMAIL", "PHONE", "URL", "LOCATION"}
+
+
+def _looks_like_entity_label(value: str) -> bool:
+    """Reject debris that is not a name.
+
+    `graph.nodes` and `scores` carry raw NER output, which includes WordPiece
+    continuation tokens ("Topos" tokenizes to "Top" + "##os", and both are stored
+    as separate entities), redaction placeholders, and serialized fact blobs. Live
+    2026-08-26 the answer to "Who's in my close circle?" was
+    ["U", "AI", "UMA", "Sara", "Marcus", "NAME", "Top", "##os", "VoxTerm A"].
+    """
+    v = value.strip()
+    if len(v) < 2 or len(v) > 60:
+        return False
+    if v.startswith("##"):          # WordPiece continuation, never a standalone name
+        return False
+    if "{" in v or "}" in v:        # serialized fact payload, not a label
+        return False
+    if v.upper() in _REDACTION_PLACEHOLDERS:
+        return False
+    if v.isupper() and len(v) <= 3:  # bare acronym (U, AI, UMA), not a person here
+        return False
+    return True
+
+
 def _extract_entity_labels(context_packet: Dict[str, Any]) -> List[str]:
     labels: List[str] = []
     seen: set[str] = set()
@@ -64,7 +92,7 @@ def _extract_entity_labels(context_packet: Dict[str, Any]) -> List[str]:
             continue
         for key in ("label", "name", "node_id", "entity_text"):
             value = node.get(key)
-            if value and str(value) not in seen:
+            if value and str(value) not in seen and _looks_like_entity_label(str(value)):
                 seen.add(str(value))
                 labels.append(str(value))
     for score in context_packet.get("scores") or []:
@@ -72,7 +100,7 @@ def _extract_entity_labels(context_packet: Dict[str, Any]) -> List[str]:
             continue
         for key in ("entity_text", "label", "topic", "summary_text"):
             value = score.get(key)
-            if value and str(value) not in seen:
+            if value and str(value) not in seen and _looks_like_entity_label(str(value)):
                 seen.add(str(value))
                 labels.append(str(value))
     return labels[:10]

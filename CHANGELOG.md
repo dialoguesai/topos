@@ -9,6 +9,25 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **Facts-direct owns `items`, so a correct answer stops shipping beside a wrong list.**
+  The game layer fills `items` speculatively from graph/score text before the
+  deterministic lane runs, and `payload.update(direct)` only overwrites the keys that
+  lane returns — so `items` survived. Live 2026-08-26 "Who's in my family?" carried Mom,
+  Dad, brother and grandma in `answer` while `items` held NER debris ("U", "AI", "##os",
+  "NAME"), and the local synthesis model answered from the debris. The lane now returns
+  its own subject labels.
+- **"close circle" reaches the facts lane.** The closeness alias matched `closest`,
+  `inner circle` and `best friend` but not `close circle`, so "Who's in my close circle?"
+  matched no known-item pattern and fell through with no facts. Added `close circle`
+  and `close friend`.
+- **Entity labels reject tokenizer and redaction debris.** `_extract_entity_labels` took
+  any string from `graph.nodes`/`scores`, including WordPiece continuations, redaction
+  placeholders and serialized fact blobs. 154 `graph_nodes` rows written 2026-06-21 to
+  2026-07-07 (before word-level NER aggregation landed) still carry `##` surfaces; the
+  extractor itself is clean — `entities` and `message_entities` have zero — but those
+  stale rows still reach the query path. Filter drops all 53 distinct junk labels.
+
 ## [1.3.31] — 2026-08-26
 
 ### Fixed

@@ -38,7 +38,8 @@ _ALIASES: List[tuple] = [
     (r"\b(career|fired|hired|promoted|laid off)\b", ["work.career_event"], False),
     (r"\bfamily member|my (family|relatives|parents|siblings|kids|children)\b",
      ["rel.relationship"], False),
-    (r"\b(closest|inner circle|best friend)s?\b", ["rel.closeness_tier", "rel.relationship"], False),
+    (r"\b(closest|inner circle|close circle|close friend|best friend)s?\b",
+     ["rel.closeness_tier", "rel.relationship"], False),
     (r"\bchronotype|night owl|early bird\b", ["behavior.chronotype"], False),
 ]
 
@@ -125,6 +126,37 @@ def _fmt_value(v: Any) -> str:
     return str(v)
 
 
+def _fact_labels(facts: List[Dict[str, Any]]) -> List[str]:
+    """Subject labels for `items`.
+
+    The game layer fills `items` speculatively from graph/score text before this
+    lane runs, and pipeline's `payload.update(direct)` only overwrites the keys
+    this lane returns. Leaving `items` behind shipped a correct `answer` next to a
+    contradicting list: live 2026-08-26 "Who's in my family?" carried Mom, Dad,
+    brother and grandma in `answer` while `items` held NER debris ("U", "AI",
+    "##os", "NAME"), and the local synthesis model answered from the debris.
+    """
+    out: List[str] = []
+    seen: set[str] = set()
+    for f in facts:
+        value = f.get("value")
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (json.JSONDecodeError, TypeError):
+                value = None
+        label = None
+        if isinstance(value, dict):
+            label = value.get("person") or value.get("name") or value.get("value")
+        if not label:
+            label = _fmt_value(f.get("value"))
+        label = str(label).strip()
+        if label and label not in seen:
+            seen.add(label)
+            out.append(label)
+    return out[:20]
+
+
 def compose_facts_answer(facts: List[Dict[str, Any]]) -> str:
     lines = []
     for f in facts[:20]:
@@ -158,5 +190,6 @@ def try_facts_direct(
         "answer_type": "facts",
         "answer": compose_facts_answer(facts),
         "facts": facts[:20],
+        "items": _fact_labels(facts),
         "facts_direct": True,
     }
