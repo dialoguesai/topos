@@ -10,6 +10,24 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Added
+- **[S1] Principal fabric P2 (engine core) — enrolled clients, named and revocable.**
+  A per-client registry (`mcp_clients`, lazy-created like `mcp_request_log`)
+  mints `tpk_<client_id>.<secret>` tokens — hash at rest, plaintext shown once
+  at enrollment. A tpk bearer resolves to `Principal(third_party,
+  client_id=…)` on principal-aware routes only; `require_api_key` rejects it,
+  so an enrolled client's surface is the MCP tool set, never the full REST
+  surface the shared key could reach. Revocation is a tombstone and takes
+  effect on the next request. New owner-only message types
+  `mcp_client_enroll` / `mcp_client_list` / `mcp_client_revoke` (Settings →
+  Connected apps backend), with an in-handler guard so one enrolled client can
+  never mint another. `mcp_request_log` gains `verified_cls` /
+  `verified_client_id` — the channel-verified principal recorded next to the
+  payload-claimed `source`/`requester_id`, ending accounting-by-self-report;
+  claimed-vs-verified divergence is itself a spoof signal. Elevation consent
+  is NOT here by design: it lands in UMA's existing ledger with subject
+  `client:<id>` ("one consent ledger", Who's Asking §03b). Tests:
+  `tests/core/test_mcp_client_registry.py`.
+
 - **[S1] Principal fabric P1 — the channel decides who is asking.** A second
   credential, `TOPOS_OWNER_KEY`, held only by first-party surfaces, resolves to
   the `owner_app` principal at the HTTP door; the legacy shared `TOPOS_KEY`

@@ -106,6 +106,9 @@
   "llm_cancel",
   "llm_generation",
   "llm_integrations_storage",
+  "mcp_client_enroll",
+  "mcp_client_list",
+  "mcp_client_revoke",
   "messenger_analytics_communities",
   "messenger_analytics_graph",
   "messenger_analytics_importance",
@@ -239,6 +242,9 @@
   "delete_database_rows",
   "delete_database_table",
   "get_database_explorer_summary",
-  "graph_cypher_query"
+  "graph_cypher_query",
+  "mcp_client_enroll",
+  "mcp_client_list",
+  "mcp_client_revoke"
  ]
 }
