@@ -20,6 +20,16 @@ async def get_request_counts(
     Return UMA and MCP request counts from the engine's DB.
     Same data as get_request_counts message type (for direct frontend or CP proxy).
     """
+    # The owner's accounting is not part of an enrolled client's surface: a tpk
+    # token authenticates on principal-aware routes, so owner-facing wrappers
+    # must refuse the THIRD_PARTY class explicitly (found live by e2e L2b —
+    # request-counts answered an enrolled client's token with 200).
+    from fastapi import HTTPException
+
+    from ..principal import THIRD_PARTY
+
+    if getattr(principal, "cls", None) == THIRD_PARTY:
+        raise HTTPException(status_code=403, detail="Owner surface")
     import uuid
     msg = {
         "id": str(uuid.uuid4()),
