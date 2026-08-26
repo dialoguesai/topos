@@ -6,6 +6,7 @@ signal_objects refs), so `how did this become a fact` is answerable by walking r
 """
 from __future__ import annotations
 
+import math
 import sqlite3
 from collections import Counter, defaultdict
 from datetime import datetime
@@ -81,7 +82,25 @@ def synthesize_rhythm(conn: sqlite3.Connection, w: DerivationWriter, pack: Pack,
     return results
 
 
-def synthesize_closeness(conn: sqlite3.Connection, w: DerivationWriter, pack: Pack, owner: str) -> List[Dict[str, Any]]:
+def synthesize_closeness(conn: sqlite3.Connection, w: DerivationWriter, pack: Pack, owner: str,
+                         *, window_days: Optional[int] = 90, now=None) -> List[Dict[str, Any]]:
+    """`rel.closeness_tier` — the pack's declared graph_labeling lens.
+
+    Inputs are the two the lens declares: the `communicates_with` edges give WHO,
+    and `comms_stats` gives frequency, initiation balance, recency and channels.
+    An earlier cut used the edges alone, which made the tier a decayed-volume rank
+    with a relationship word on it — and the live edge ranking put "self" first
+    (weight 2772) and a bare phone number second, so it would have written
+    `{person: "self", tier: "inner_circle"}` and named a handle as a person.
+
+    Guards, in order: the owner is never their own circle; a name with no letters
+    is an identifier, not a person; a blackholed person stays erased.
+    """
+    from .comms_stats import comms_stats, looks_like_a_person_name
+
+    stats = comms_stats(conn, window_days=window_days, now=now)
+    blocked = _blackholed(conn)
+
     rows = conn.execute("""
         SELECT e.edge_id, e.weight,
                CASE WHEN e.src_entity_id=? THEN e.dst_entity_id ELSE e.src_entity_id END AS other
@@ -89,24 +108,84 @@ def synthesize_closeness(conn: sqlite3.Connection, w: DerivationWriter, pack: Pa
         WHERE e.edge_type='communicates_with' AND e.valid_to IS NULL
           AND (e.src_entity_id=? OR e.dst_entity_id=?) ORDER BY e.weight DESC""",
         (owner, owner, owner)).fetchall()
-    results = []
-    ranked = []
+
+    scored = []
     for edge_id, weight, other in rows:
-        ent = conn.execute("SELECT canonical_name, entity_type FROM entities WHERE entity_id=?", (other,)).fetchone()
-        if ent and ent[1] == "person" and float(weight or 0) >= 1.0:
-            ranked.append((edge_id, float(weight), other, ent[0]))
-    for i, (edge_id, weight, other, name) in enumerate(ranked[:20]):
-        tier = "inner_circle" if i < 3 else ("close" if i < 8 else "regular")
+        if other == owner:
+            continue
+        ent = conn.execute(
+            "SELECT canonical_name, entity_type, COALESCE(is_self,0) FROM entities WHERE entity_id=?",
+            (other,)).fetchone()
+        if not ent or ent[1] != "person" or int(ent[2] or 0) == 1:
+            continue
+        name = str(ent[0] or "")
+        if not looks_like_a_person_name(name) or _norm_name(name) in blocked:
+            continue
+        st = stats.get(other)
+        if not st:
+            continue                      # no interaction inside the evidence window
+        total = st["inbound"] + st["outbound"]
+        if total < 2:
+            continue                      # a single message is not a relationship
+        # Balanced exchange counts for more than raw volume: 1.0 at an even split,
+        # 0.0 when one side does all the talking.
+        reciprocity = 1.0 - min(1.0, abs(0.5 - st["initiation_balance"]) * 2)
+        volume = math.log1p(total)
+        intimacy = st["one_to_one_share"]
+        # Intimacy is weighted lightly (0.7-1.0, not 0.5-1.0) on purpose: it comes
+        # from `conversation_participants`, which on this node carries 206 rows under
+        # retired ids against 70 canonical, so "this thread is a group" is a weaker
+        # claim than the counts are. At the old weight one person with 201 balanced
+        # group messages fell below another with 25 private ones.
+        score = volume * (0.5 + 0.5 * reciprocity) * (0.7 + 0.3 * intimacy)
+        scored.append((edge_id, other, name, st, total, score))
+
+    scored.sort(key=lambda r: (-r[5], r[2]))
+    n = len(scored)
+    results: List[Dict[str, Any]] = []
+    for i, (edge_id, other, name, st, total, score) in enumerate(scored):
+        pct = (i + 1) / n if n else 1.0
+        tier = ("inner_circle" if pct <= 0.10 else
+                "close" if pct <= 0.35 else
+                "regular" if pct <= 0.75 else "peripheral")
         val = {"person": name, "tier": tier}
-        # evidence set: the comms edge (itself an accumulation) — walkable provenance
-        r = w.assert_pack_fact(pack=pack, predicate="rel.closeness_tier", subject_entity_id=owner,
-                               value=val, actor_role="synthesis",
-                               source_refs=[{"table": "entity_edges", "record_id": edge_id,
-                                             "note": f"decayed comms weight {weight:.1f}"}],
-                               confidence=min(0.85, 0.5 + weight / 200), object_entity_id=other)
+        # Confidence tracks how much evidence there is, and never saturates the way
+        # `min(0.85, 0.5 + weight/200)` did — live weights reach 2772, so every row
+        # pinned to 0.85 and the number carried nothing.
+        confidence = round(min(0.9, 0.35 + math.log1p(total) / 12.0), 3)
+        r = w.assert_pack_fact(
+            pack=pack, predicate="rel.closeness_tier", subject_entity_id=owner,
+            value=val, actor_role="synthesis",
+            source_refs=[{"table": "entity_edges", "record_id": edge_id,
+                          "note": (f"{st['inbound']} in / {st['outbound']} out over "
+                                   f"{window_days}d, balance {st['initiation_balance']}, "
+                                   f"1:1 share {st['one_to_one_share']}, "
+                                   f"last {st['last_contact']}")}],
+            confidence=confidence, object_entity_id=other)
         results.append({"predicate": "rel.closeness_tier", "person": name, "tier": tier,
-                        "weight": round(weight, 1), "outcome": r["outcome"]})
+                        "inbound": st["inbound"], "outbound": st["outbound"],
+                        "score": round(score, 2), "outcome": r["outcome"]})
     return results
+
+
+def _norm_name(name: str) -> str:
+    try:
+        from ..lifecycle.blackhole import normalize_entity_name
+        return str(normalize_entity_name(name) or "").strip().lower()
+    except Exception:  # noqa: BLE001
+        return str(name or "").strip().lower()
+
+
+def _blackholed(conn: sqlite3.Connection) -> set:
+    try:
+        from ..lifecycle.blackhole import blackholed_name_terms
+        return {str(t).strip().lower() for t in (blackholed_name_terms(conn) or set())}
+    except Exception:  # noqa: BLE001
+        try:
+            return {str(r[0]).strip().lower()
+                    for r in conn.execute("SELECT normalized_name FROM entity_blackholes")}
+        except sqlite3.Error:
+            return set()
 
 
 def synthesize_trajectory(conn: sqlite3.Connection, w: DerivationWriter, pack: Pack, owner: str) -> List[Dict[str, Any]]:
@@ -175,3 +254,68 @@ def synthesize_trajectory(conn: sqlite3.Connection, w: DerivationWriter, pack: P
         results.append({"predicate": "work.professional_visibility", "value": vis,
                         "outcome": r.get("outcome"), "evidence": evidence_n})
     return results
+
+
+#: predicate -> (implementation, accepts a window argument)
+#:
+#: Keyed on PREDICATE rather than on `kind`, because kind does not identify an
+#: implementation: 19 declarations share kind "pattern" and no two of them compute
+#: the same thing. Packs declare 55 lenses and three are implemented, so the
+#: dispatcher must skip the rest as a normal outcome rather than an error.
+_LENS_IMPLS = {
+    "behavior.chronotype": (synthesize_rhythm, False),
+    "behavior.routine_block": (synthesize_rhythm, False),
+    "rel.closeness_tier": (synthesize_closeness, True),
+    "work.venture_history": (synthesize_trajectory, False),
+    "work.professional_visibility": (synthesize_trajectory, False),
+}
+
+
+def run_pack_lenses(conn: sqlite3.Connection, w: DerivationWriter, pack: Pack, owner: str,
+                    *, now=None) -> Dict[str, Any]:
+    """Run every implemented producer lens a pack declares.
+
+    Packs have carried `synthesis[]` since the catalog was written and `Pack.lenses`
+    documents itself as "what the runtime will dispatch on" — but nothing dispatched.
+    `synthesize_closeness` had zero callers, so `rel.closeness_tier` sat empty while
+    facts_direct asked for it on every closeness question and the query layer answered
+    from a volume rank instead.
+
+    Reconcilers are not run here: they open a review and assert nothing, which is a
+    different contract and a different surface.
+    """
+    ran: List[Dict[str, Any]] = []
+    skipped: List[Dict[str, Any]] = []
+    seen_impls = set()
+    for lens in (pack.lenses or []):
+        if not lens.is_producer:
+            skipped.append({"kind": lens.kind, "reason": "reconciler"})
+            continue
+        impl = None
+        for predicate in lens.predicates:
+            if predicate in _LENS_IMPLS:
+                impl = (predicate, *_LENS_IMPLS[predicate])
+                break
+        if impl is None:
+            skipped.append({"kind": lens.kind, "predicates": lens.predicates,
+                            "reason": "declared, not implemented"})
+            continue
+        predicate, func, takes_window = impl
+        if func in seen_impls:
+            continue                       # one computation can fill several predicates
+        seen_impls.add(func)
+        kwargs = {"now": now} if takes_window else {}
+        if takes_window:
+            # The lens's own evidence floor, honoured rather than hardcoded: this is
+            # what "min_evidence: 90d" was declared for.
+            kwargs["window_days"] = lens.min_evidence.days
+        try:
+            out = func(conn, w, pack, owner, **kwargs)
+        except Exception as exc:  # noqa: BLE001 — one lens must not sink the pack
+            skipped.append({"kind": lens.kind, "predicates": lens.predicates,
+                            "reason": f"error: {type(exc).__name__}: {exc}"})
+            continue
+        ran.append({"kind": lens.kind, "predicate": predicate, "facts": len(out or []),
+                    "window_days": kwargs.get("window_days"), "results": out or []})
+    return {"pack": pack.pack, "ran": ran, "skipped": skipped,
+            "facts_written": sum(r["facts"] for r in ran)}
