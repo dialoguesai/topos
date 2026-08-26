@@ -556,3 +556,17 @@ def build_dyad_stats(conn: Any, dataset_id: str, *, now: Any = None,
             round(recent_gap, 4) if recent_gap is not None else None,
             drift, tie, None, None, stamp, stamp))
     return out
+
+
+def ensure_directed_tables_present(conn: Any) -> None:
+    """Idempotent DDL for read paths.
+
+    A read surface must not 500 because a write pass has never run. The tables are created
+    empty and the endpoint returns an empty list, which is the honest answer to "what are my
+    relationships" on a node that has not computed any yet.
+    """
+    from ..storage.db.write_gate import commit_connection, with_db_write
+
+    with with_db_write():
+        create_directed_tables(conn)
+        commit_connection(conn)

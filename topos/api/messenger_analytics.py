@@ -383,3 +383,113 @@ async def get_messenger_sources(dataset_id: str = Query(...)) -> Dict[str, Any]:
         ).fetchall()
     )
     return {"status": "ok", "dataset_id": dataset_id, "sources": [r["source_id"] for r in rows]}
+
+
+# --------------------------------------------------------------------------- L1 read
+
+@router.get("/messenger-analytics/relationships", dependencies=[Depends(require_api_key)])
+def get_relationships(
+    dataset_id: str = Query(...),
+    tie_state: Optional[str] = Query(None, description="active | cooling | dormant | one_sided | broadcast_only"),
+    include_automated: bool = Query(False, description="shortcodes, 2FA and delivery notices"),
+    limit: int = Query(100, ge=1, le=500),
+) -> Dict[str, Any]:
+    """L1 — the lifetime view of every messaging relationship.
+
+    Automated peers are stored but excluded by default. They are 29 of 179 DM counterparties
+    on the first live corpus checked, and ranking a carrier shortcode alongside a friend
+    makes every relationship number meaningless — but dropping them at write would also lose
+    the honest answer to "what is actually filling my inbox", so the filter lives here.
+    """
+    conn = get_db_connection()
+    if conn is None:
+        return {"dataset_id": dataset_id, "relationships": [], "error": "no database"}
+    from ..analytics.messenger_directed import (MESSENGER_DYAD_STATS_TABLE, PEER_CLASS_HUMAN,
+                                                SELF_KEY, ensure_directed_tables_present)
+
+    ensure_directed_tables_present(conn)
+    sql = (f"SELECT a_key, b_key, peer_class, total_msgs, a_to_b, b_to_a, balance, first_ts,"
+           f" last_ts, active_periods, reciprocal_periods, longest_contact_streak_weeks,"
+           f" longest_reciprocal_streak_weeks, longest_contact_streak_months, max_gap_days,"
+           f" median_gap_days, recent_gap_days, drift_ratio, tie_state"
+           f" FROM {MESSENGER_DYAD_STATS_TABLE} WHERE dataset_id = ? AND involves_self = 1")
+    args: List[Any] = [dataset_id]
+    if not include_automated:
+        sql += " AND peer_class = ?"
+        args.append(PEER_CLASS_HUMAN)
+    if tie_state:
+        sql += " AND tie_state = ?"
+        args.append(tie_state)
+    sql += " ORDER BY total_msgs DESC LIMIT ?"
+    args.append(int(limit))
+
+    keys = ["a_key", "b_key", "peer_class", "total_msgs", "a_to_b", "b_to_a", "balance",
+            "first_ts", "last_ts", "active_periods", "reciprocal_periods",
+            "contact_streak_weeks", "reciprocal_streak_weeks", "contact_streak_months",
+            "max_gap_days", "median_gap_days", "days_since_last", "drift_ratio", "tie_state"]
+    out: List[Dict[str, Any]] = []
+    for row in conn.execute(sql, args).fetchall():
+        d = dict(zip(keys, tuple(row)))
+        peer = d["b_key"] if d["a_key"] == SELF_KEY else d["a_key"]
+        # sent/received are stated from the OWNER's side, so a caller never has to know
+        # which side of the canonical pair the owner landed on
+        owner_sent = d["a_to_b"] if d["a_key"] == SELF_KEY else d["b_to_a"]
+        out.append({
+            "peer_key": peer,
+            "peer_class": d["peer_class"],
+            "total_msgs": d["total_msgs"],
+            "sent": owner_sent,
+            "received": d["total_msgs"] - owner_sent,
+            "balance": d["balance"],
+            "first_ts": d["first_ts"], "last_ts": d["last_ts"],
+            "days_since_last": d["days_since_last"],
+            "active_periods": d["active_periods"],
+            "reciprocal_periods": d["reciprocal_periods"],
+            "contact_streak_weeks": d["contact_streak_weeks"],
+            "reciprocal_streak_weeks": d["reciprocal_streak_weeks"],
+            "contact_streak_months": d["contact_streak_months"],
+            "median_gap_days": d["median_gap_days"],
+            "max_gap_days": d["max_gap_days"],
+            "drift_ratio": d["drift_ratio"],
+            "tie_state": d["tie_state"],
+        })
+    labels = resolve_participant_labels(conn, dataset_id, [r["peer_key"] for r in out])
+    for r in out:
+        r["label"] = labels.get(r["peer_key"]) or r["peer_key"]
+    return {"dataset_id": dataset_id, "count": len(out), "relationships": out}
+
+
+@router.get("/messenger-analytics/directed-edges", dependencies=[Depends(require_api_key)])
+def get_directed_edges(
+    dataset_id: str = Query(...),
+    peer_key: Optional[str] = Query(None),
+    edge_kind: str = Query("dm", description="dm | group_reply | group_broadcast"),
+    limit: int = Query(200, ge=1, le=1000),
+) -> Dict[str, Any]:
+    """L1 — the per-period, per-direction detail behind a relationship.
+
+    `edge_kind` defaults to `dm` on purpose. Group broadcast fans one message out to every
+    other speaker in the room, so leaving it in by default would let a busy thread outrank
+    every real correspondence — the failure the undirected lane already has.
+    """
+    conn = get_db_connection()
+    if conn is None:
+        return {"dataset_id": dataset_id, "edges": [], "error": "no database"}
+    from ..analytics.messenger_directed import (MESSENGER_DIRECTED_EDGES_TABLE,
+                                                ensure_directed_tables_present)
+
+    ensure_directed_tables_present(conn)
+    sql = (f"SELECT period_key, connector, edge_kind, from_key, to_key, msgs,"
+           f" sessions_initiated, replies, median_reply_latency_s, first_ts, last_ts"
+           f" FROM {MESSENGER_DIRECTED_EDGES_TABLE} WHERE dataset_id = ? AND edge_kind = ?")
+    args: List[Any] = [dataset_id, edge_kind]
+    if peer_key:
+        sql += " AND (from_key = ? OR to_key = ?)"
+        args.extend([peer_key, peer_key])
+    sql += " ORDER BY period_key DESC, msgs DESC LIMIT ?"
+    args.append(int(limit))
+    keys = ["period_key", "connector", "edge_kind", "from_key", "to_key", "msgs",
+            "sessions_initiated", "replies", "median_reply_latency_s", "first_ts", "last_ts"]
+    edges = [dict(zip(keys, tuple(r))) for r in conn.execute(sql, args).fetchall()]
+    return {"dataset_id": dataset_id, "edge_kind": edge_kind, "count": len(edges),
+            "edges": edges}
