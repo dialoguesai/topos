@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.30] — 2026-08-26
+
 ### Fixed
 - **Packet resolution recognizes the gateway-verified owner.** The CP gateway
   forwards `requester_id == owner_id` (the owner's uuid) on the owner query path,
