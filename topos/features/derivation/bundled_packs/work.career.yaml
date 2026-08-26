@@ -117,12 +117,12 @@ eval:
        expect: [{predicate: work.project, value: {status: paused}}]}
   negative_controls:
     - {text: "Sounds like Dana's team is hiring three more", role: authored, expect: [], note: "other team's news"}
-    - {text: "I applied to Tavus' job application today", role: authored, expect: [], note: "v0.2.2 measured junk: applied is NOT hired"}
-    - {text: "I applied to the Google Startup Fund", role: authored, expect: [], note: "v0.2.2 measured junk: applying for funding is NOT started_venture"}
+    - {text: "I applied to Meridian's open role today", role: authored, expect: [], note: "v0.2.2 measured junk: applied is NOT hired"}
+    - {text: "I applied to the Horizon Startup Fund", role: authored, expect: [], note: "v0.2.2 measured junk: applying for funding is NOT started_venture"}
     - {text: "I filed for unemployment.", role: authored, expect: [{predicate: work.employment_shape, value: between_roles}],
        expect_not: [{predicate: work.career_event}], note: "v0.2.2: shape yes, event no"}
-    - {text: "I took the ccat again. I got a 32.", role: authored, expect: [], note: "v0.2.2 measured junk: a test score is not an award"}
-    - {text: "All day with Texas Ventures.", role: authored, expect_not: [{predicate: work.employer}], note: "v0.2.2 measured junk: co-presence is not employment"}
+    - {text: "I took the practice aptitude test again. Scored a 32.", role: authored, expect: [], note: "v0.2.2 measured junk: a test score is not an award"}
+    - {text: "All day with Harbor Ventures.", role: authored, expect_not: [{predicate: work.employer}], note: "v0.2.2 measured junk: co-presence is not employment"}
     - {text: "(newsletter: 'The 2026 layoff wave continues')", role: ambient, expect: []}
   calibration: {min_conf_for_assert: 0.65, ece_max: 0.15}
 

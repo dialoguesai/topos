@@ -43,7 +43,7 @@ def test_person_garble_rejected():
     assert not person_field_ok("a" * 41)
 
 def test_person_kin_and_names_pass():
-    for ok in ("mom", "grandma", "brother", "Wiki", "marissa ayala", "Kaspian"):
+    for ok in ("mom", "grandma", "brother", "Nora", "renata alvarez", "Caspar"):
         assert person_field_ok(ok), ok
 
 def test_parse_output_rejects_pronoun_person():
@@ -51,28 +51,28 @@ def test_parse_output_rejects_pronoun_person():
     raw = json.dumps({"assertions": [
         {"predicate": "rel.relationship", "value": {"person": "him", "role": "close_friend"},
          "confidence": 0.95, "quote": "x"},
-        {"predicate": "rel.relationship", "value": {"person": "Wiki", "role": "friend"},
-         "about": "owner", "confidence": 0.95, "quote": "My friend Wiki"},
+        {"predicate": "rel.relationship", "value": {"person": "Nora", "role": "friend"},
+         "about": "owner", "confidence": 0.95, "quote": "My friend Nora"},
     ]})
     valid, rejects = parse_output(raw, pack)
-    assert rejects == 1 and len(valid) == 1 and valid[0]["value"]["person"] == "Wiki"
+    assert rejects == 1 and len(valid) == 1 and valid[0]["value"]["person"] == "Nora"
 
 # --- A2: about routing field ---
 def test_about_defaults_unclear_for_person_facts():
     pack = _rel_pack()
     raw = json.dumps({"assertions": [
-        {"predicate": "rel.relationship", "value": {"person": "Luc", "role": "partner"},
-         "confidence": 0.95, "quote": "her boyfriend Luc"}]})
+        {"predicate": "rel.relationship", "value": {"person": "Theo", "role": "partner"},
+         "confidence": 0.95, "quote": "her boyfriend Theo"}]})
     valid, _ = parse_output(raw, pack)
     assert valid[0]["about"] == "unclear"      # missing about NEVER silently means owner
 
 def test_about_other_preserved():
     pack = _rel_pack()
     raw = json.dumps({"assertions": [
-        {"predicate": "rel.relationship", "value": {"person": "Luc", "role": "partner"},
-         "about": "other:Wiki", "confidence": 0.95, "quote": "her boyfriend Luc"}]})
+        {"predicate": "rel.relationship", "value": {"person": "Theo", "role": "partner"},
+         "about": "other:Nora", "confidence": 0.95, "quote": "her boyfriend Theo"}]})
     valid, _ = parse_output(raw, pack)
-    assert valid[0]["about"] == "other:Wiki"
+    assert valid[0]["about"] == "other:Nora"
 
 def test_template_version_bumped():
     assert TEMPLATE_VERSION == "shadow-10"
@@ -84,13 +84,13 @@ def test_verdict_reject_unsupported():
     assert apply_verdict(a, v)["verifier_status"] == "rejected"
 
 def test_verdict_demotes_owner_to_other():
-    a = {"predicate": "rel.relationship", "value": {"person": "Luc", "role": "partner"}, "about": "owner"}
-    v = parse_verdict('{"supported": true, "about": "other:Wiki", "fields_ok": true, "reason": "Wikis boyfriend"}')
+    a = {"predicate": "rel.relationship", "value": {"person": "Theo", "role": "partner"}, "about": "owner"}
+    v = parse_verdict('{"supported": true, "about": "other:Nora", "fields_ok": true, "reason": "Wikis boyfriend"}')
     out = apply_verdict(a, v)
-    assert out["verifier_status"] == "rerouted" and out["about"] == "other:Wiki"
+    assert out["verifier_status"] == "rerouted" and out["about"] == "other:Nora"
 
 def test_verdict_never_promotes_to_owner():
-    a = {"predicate": "rel.relationship", "value": {"person": "Luc", "role": "partner"}, "about": "unclear"}
+    a = {"predicate": "rel.relationship", "value": {"person": "Theo", "role": "partner"}, "about": "unclear"}
     v = parse_verdict('{"supported": true, "about": "owner", "fields_ok": true, "reason": "looks fine"}')
     out = apply_verdict(a, v)   # two passes must AGREE before a fact lands on the owner
     assert out["about"] == "unclear" and out["verifier_status"] == "rerouted"
@@ -120,7 +120,7 @@ def a3_writer(tmp_path):
         challenger_confidence REAL, status TEXT NOT NULL DEFAULT 'pending',
         created_at TEXT NOT NULL DEFAULT (datetime('now')));
       INSERT INTO entities VALUES ('ent_owner','person','Owner','owner','[]',1);
-      INSERT INTO entities VALUES ('ent_wiki','person','Wiki','wiki','[]',0);
+      INSERT INTO entities VALUES ('ent_nora','person','Nora','nora','[]',0);
       CREATE TABLE signal_objects (object_id TEXT PRIMARY KEY, signal_dimension TEXT,
         object_type TEXT, object_key TEXT, payload_json TEXT, confidence REAL,
         source_refs_json TEXT, valid_from TEXT, valid_to TEXT, extractor_version TEXT,
@@ -135,13 +135,13 @@ def a3_writer(tmp_path):
 def _rel_assert(w, about):
     pack = _rel_pack()
     return w.assert_pack_fact(pack=pack, predicate="rel.relationship",
-        subject_entity_id="ent_owner", value={"person": "Luc", "role": "partner"},
+        subject_entity_id="ent_owner", value={"person": "Theo", "role": "partner"},
         actor_role="authored", source_refs=[{"table": "t", "record_id": "r1"}],
         confidence=0.9, about=about)
 
 def test_a3_other_resolved_routes_to_dossier(a3_writer):
     w, conn = a3_writer
-    out = _rel_assert(w, "other:Wiki")
+    out = _rel_assert(w, "other:Nora")
     assert out["outcome"] not in ("quarantined", "role_reject"), out
     assert w.stats.get("routed_dossier") == 1
     # the fact must NOT sit on the owner
@@ -250,8 +250,8 @@ def test_graph_edge_family_filter():
 def test_candidates_match_spine_and_kin(a3_writer):
     w, conn = a3_writer
     from topos.features.derivation.candidates import person_candidates
-    got = person_candidates(conn, "Coffee with Wiki, then called mom about the weekend")
-    assert "Wiki" in got and "mom" in got
+    got = person_candidates(conn, "Coffee with Nora, then called mom about the weekend")
+    assert "Nora" in got and "mom" in got
 
 def test_candidates_no_match_empty(a3_writer):
     w, conn = a3_writer
@@ -261,10 +261,10 @@ def test_candidates_no_match_empty(a3_writer):
 def test_new_person_escape_hatch_parses():
     pack = _rel_pack()
     raw = json.dumps({"assertions": [{
-        "predicate": "rel.relationship", "value": {"person": "NEW:Hillary", "role": "friend"},
-        "about": "owner", "confidence": 0.9, "quote": "Met Hillary"}]})
+        "predicate": "rel.relationship", "value": {"person": "NEW:Harriet", "role": "friend"},
+        "about": "owner", "confidence": 0.9, "quote": "Met Harriet"}]})
     valid, rejects = parse_output(raw, pack)
-    assert rejects == 0 and valid[0]["value"]["person"] == "Hillary"
+    assert rejects == 0 and valid[0]["value"]["person"] == "Harriet"
     assert valid[0].get("new_person") is True
 
 def test_prompt_without_candidates_unchanged():
@@ -273,8 +273,8 @@ def test_prompt_without_candidates_unchanged():
     p1 = build_prompt(pack, "hello world text", "2026-08-01", "authored")
     assert "archive already knows" not in p1
     p2 = build_prompt(pack, "hello world text", "2026-08-01", "authored",
-                      known_people=["Wiki", "Mitch"])
-    assert "Wiki, Mitch" in p2 and "NEW:<name>" in p2
+                      known_people=["Nora", "Marco"])
+    assert "Nora, Marco" in p2 and "NEW:<name>" in p2
 
 
 # --- A5 grounding guard: names must be anchored in the record ---
@@ -288,7 +288,7 @@ def test_person_grounded_kills_laundering():
     assert person_grounded("Victor Whiskey", "even Michael Jordan lost some games")
     assert person_grounded("grandpa", "My grandpa passed over the weekend")
     assert person_grounded("mom", "anything")                     # kin whitelist
-    assert person_grounded("Wiki", "My friend Wiki submitted an app")
+    assert person_grounded("Nora", "My friend Nora submitted an app")
 
 def test_parse_output_grounding(a3_writer=None):
     pack = _rel_pack()
@@ -320,23 +320,23 @@ def test_org_grounding():
 # --- role-evidence guard (measured: verifier consistently accepts possessive misattribution) ---
 def test_role_evidence_possessive_routes_away():
     from topos.features.derivation.template import relationship_role_check
-    assert relationship_role_check("partner", "Luc", "Wiki and her boyfriend Luc") == "other"
-    assert relationship_role_check("sibling", "Albi", "Albi was up before her sister") == "other"
-    assert relationship_role_check("child", "Emersyn", "Hung out with Peter Grandma, mom, Emersyn") == "quarantine"
-    assert relationship_role_check("friend", "Wiki", "My friend Wiki submitted an app") == "owner"
+    assert relationship_role_check("partner", "Theo", "Nora and her boyfriend Theo") == "other"
+    assert relationship_role_check("sibling", "Ava", "Ava was up before her sister") == "other"
+    assert relationship_role_check("child", "Junie", "Hung out with grandma, mom, Junie") == "quarantine"
+    assert relationship_role_check("friend", "Nora", "My friend Nora submitted an app") == "owner"
     assert relationship_role_check("sibling", "brother", "My brother got a guitar") == "owner"
     assert relationship_role_check("parent", "Mom", "rosary with Mom and Grandma") == "owner"
 
 def test_parse_role_evidence_and_loss_guard():
     pack = _rel_pack()
     raw = json.dumps({"assertions": [
-        {"predicate": "rel.relationship", "value": {"person": "Luc", "role": "partner"},
-         "about": "owner", "confidence": 0.95, "quote": "her boyfriend Luc"},
-        {"predicate": "rel.relationship_event", "value": {"person": "Albi", "event": "loss", "description": "goodbye"},
+        {"predicate": "rel.relationship", "value": {"person": "Theo", "role": "partner"},
+         "about": "owner", "confidence": 0.95, "quote": "her boyfriend Theo"},
+        {"predicate": "rel.relationship_event", "value": {"person": "Ava", "event": "loss", "description": "goodbye"},
          "about": "owner", "confidence": 0.9, "quote": "goodbye"}]})
-    valid, rejects = parse_output(raw, pack, record_text="Wiki and her boyfriend Luc. I said goodbye to Albi.")
-    lucs = [a for a in valid if isinstance(a["value"], dict) and a["value"].get("person") == "Luc"]
-    assert lucs and lucs[0]["about"] == "unclear"      # never silently owner
+    valid, rejects = parse_output(raw, pack, record_text="Nora and her boyfriend Theo. I said goodbye to Ava.")
+    theos = [a for a in valid if isinstance(a["value"], dict) and a["value"].get("person") == "Theo"]
+    assert theos and theos[0]["about"] == "unclear"      # never silently owner
     assert rejects == 1                                 # loss-without-death-evidence rejected
 
 
@@ -491,17 +491,17 @@ def test_promote_quarantined_with_new_person(a3_writer):
     """)
     # quarantine one (as the writer would, with provenance)
     out = w.assert_pack_fact(pack=_rel_pack(), predicate="rel.relationship",
-        subject_entity_id="ent_owner", value={"person": "Luc", "role": "partner"},
+        subject_entity_id="ent_owner", value={"person": "Theo", "role": "partner"},
         actor_role="authored", source_refs=[{"table": "t", "record_id": "r9"}],
-        confidence=0.9, quote="her boyfriend Luc", about="other:Wiki Unknownperson")
+        confidence=0.9, quote="her boyfriend Theo", about="other:Zorbo Unknownperson")
     assert out["outcome"] == "quarantined"
     cid = conn.execute("SELECT conflict_id FROM fact_conflicts").fetchone()[0]
     from topos.features.derivation.surfaces import promote_conflict
-    res = promote_conflict(conn, cid, new_person_name="Wiki Vasquez")
+    res = promote_conflict(conn, cid, new_person_name="Nora Vasquez")
     assert res["outcome"] in ("written", "corroborated")
     subj = res["subject_entity_id"]
     name = conn.execute("SELECT canonical_name FROM entities WHERE entity_id=?", (subj,)).fetchone()[0]
-    assert name == "Wiki Vasquez"
+    assert name == "Nora Vasquez"
     assert conn.execute("SELECT status FROM fact_conflicts WHERE conflict_id=?", (cid,)).fetchone()[0] == "accepted"
     gold = conn.execute("SELECT COUNT(*) FROM derivation_training_ledger WHERE stage='owner_promote'").fetchone()[0]
     assert gold == 1
@@ -517,12 +517,12 @@ def test_revise_fact_field_and_history(a3_writer):
         confidence REAL, vstatus TEXT, vreason TEXT, written_object_id TEXT);
     """)
     out = w.assert_pack_fact(pack=_rel_pack(), predicate="rel.relationship",
-        subject_entity_id="ent_owner", value={"person": "Wiki", "role": "friend", "status": "active"},
+        subject_entity_id="ent_owner", value={"person": "Nora", "role": "friend", "status": "active"},
         actor_role="authored", source_refs=[{"table": "t", "record_id": "r1"}],
-        confidence=0.95, quote="My friend Wiki", about="owner")
+        confidence=0.95, quote="My friend Nora", about="owner")
     oid = out["object_id"]
     from topos.features.derivation.surfaces import revise_fact
-    res = revise_fact(conn, oid, value={"person": "Wiki", "role": "close_friend", "status": "active"})
+    res = revise_fact(conn, oid, value={"person": "Nora", "role": "close_friend", "status": "active"})
     assert res["outcome"] in ("written", "superseded", "corrected")
     old = conn.execute("SELECT valid_to, updated_by FROM signal_objects WHERE object_id=?", (oid,)).fetchone()
     assert old[0] is not None and old[1] == "owner_revision"
