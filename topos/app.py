@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .__version__ import __version__
 from .api import (
     analytics as analytics_routes,
+    connected_apps as connected_apps_routes,
     app_registry as app_registry_routes,
     backup as backup_routes,
     compute_remote as compute_remote_routes,
@@ -135,6 +136,7 @@ app.include_router(app_registry_routes.router)
 app.include_router(ingestion_compat_routes.router)
 app.include_router(enrichment_routes.router, prefix="/v1")
 app.include_router(signal_routes.router, prefix="/v1")
+app.include_router(connected_apps_routes.router, prefix="/v1")
 app.include_router(ingestion_routes.router, prefix="/v1")
 app.include_router(ingestion_sources_routes.router)
 app.include_router(query_routes.router, prefix="/v1")
