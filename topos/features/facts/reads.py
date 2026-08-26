@@ -130,6 +130,9 @@ def list_facts(
                 "subject_name": subject_name,
                 "predicate": payload.get("predicate"),
                 "object_value": payload.get("object_value"),
+                # the FULL structured value — object_value is a 160-char display
+                # string and renders as cut JSON when a report runs long (W4.6)
+                "value_struct": payload.get("value_struct"),
                 "period_start": payload.get("period_start"),
                 "period_end": payload.get("period_end"),
                 "confidence": payload.get("confidence", fact["confidence"]),
