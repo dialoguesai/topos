@@ -3,7 +3,7 @@
 # health_neurodivergence, health_attention_condition, health_cognitive_load_capacity)
 # + Personality: MBTI (neurotype). Split from health.physical: stricter rules, different consumers.
 pack: health.mental
-version: 0.2.0
+version: 0.2.4
 status: draft
 title: "Mental wellbeing"
 author: topos
@@ -19,8 +19,22 @@ routing:
   exemplars: ["so burned out", "my therapist", "haven't been sleeping", "anxiety's been bad", "feeling great lately", "my ADHD"]
 
 predicates:
-  - {name: mind.self_reported_state, value_type: structured, cardinality: multi, temporal: episodic, altitude: stated,
-     value_schema: {dimension: {enum: [mood, stress, energy, sleep_quality, focus]}, report: string}}
+  - name: mind.self_reported_state
+    value_type: structured
+    cardinality: multi
+    temporal: episodic
+    altitude: stated
+    value_schema:
+      dimension: {enum: [mood, stress, energy, sleep_quality, focus]}
+      report: string
+    note: >
+      v0.2.4 — a state report is a FELT-STATE statement about how the owner is/was
+      ("I am exhausted", "slept 8 hours, wild dreams", "so nervous with the talk").
+      An intention, aspiration, reflection or observation is NOT a state, whatever
+      dimension it brushes: "I need to be talking to more intelligent people" is a
+      want, not an energy report; "the talk motivated me to write" is a reflection,
+      not a focus report. If the words don't describe how the owner FEELS or FELT,
+      extract nothing.
   - {name: mind.neurodivergence, value_type: string, cardinality: multi, temporal: interval, altitude: stated,
      note: "stated-only, verbatim self-identification; NEVER inferred"}
   - {name: mind.care_practice, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
@@ -56,6 +70,10 @@ eval:
     - {text: "Third week straight of terrible sleep, I'm running on fumes", role: authored,
        expect: [{predicate: mind.self_reported_state, value: {dimension: sleep_quality}}]}
   negative_controls:
+    - {text: "I need to be talking to more intelligent people. To go out of my way to speak with people.", role: authored,
+       expect_not: [{predicate: mind.self_reported_state}], note: "v0.2.4 measured junk: a want is not an energy state"}
+    - {text: "The talk at the end motivated me to write my own thought on coordination tools.", role: authored,
+       expect_not: [{predicate: mind.self_reported_state}], note: "v0.2.4 measured junk: a reflection is not a focus state"}
     - {text: "Podcast episode about burnout culture in tech", role: ambient, expect: []}
     - {text: "My brother finally started therapy, proud of him", role: authored, expect: [], note: "third party"}
     - {text: "ugh this parser is driving me insane", role: authored, expect: [], note: "idiom, not state report"}

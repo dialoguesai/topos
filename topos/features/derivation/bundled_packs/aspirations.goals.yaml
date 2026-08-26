@@ -3,7 +3,7 @@
 # STRATEGIC ROLE: bridges the EXISTING goal system (user_goals table + goal extraction
 # job + goal graph nodes) into the pack registry — same move as the `core` pack in the plan.
 pack: aspirations.goals
-version: 0.2.0
+version: 0.2.4
 status: draft
 title: "Goals & aspirations"
 author: topos
@@ -36,8 +36,20 @@ predicates:
   - {name: asp.commitment, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
      value_schema: {commitment: string, to_whom: entity_ref_or_self, due: date_or_approx},
      note: "promises with a counterparty/date — feeds the EXISTING Commitment time-signal lane"}
-  - {name: asp.milestone, value_type: structured, cardinality: multi, temporal: episodic, altitude: stated,
-     value_schema: {goal_ref: string, milestone: string, kind: [progress, setback, completion]}}
+  - name: asp.milestone
+    value_type: structured
+    cardinality: multi
+    temporal: episodic
+    altitude: stated
+    value_schema:
+      goal_ref: string
+      milestone: string
+      kind: {enum: [progress, setback, completion]}
+    note: >
+      v0.2.4 — a milestone belongs to a NAMED, ENDURING goal (one the owner pursues
+      across days), and goal_ref is that goal's short name, never a copied sentence.
+      Finishing a morning's task is a day's work, not a milestone: if the goal it
+      advances wouldn't be recognizable next week, extract nothing.
   - {name: asp.focus_period, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
      value_schema: {focus: string, evidence_kind: [stated_priority, activity_concentration]},
      note: "what the owner is ACTUALLY prioritizing right now — reconciles stated goals with observed activity; the lens-lab goal-attachment work is the direct precedent"}
@@ -60,6 +72,12 @@ guidance:
   abstention:
     - "Authored-only: an assigned OKR is work context, not a personal goal, unless the owner adopts it in their own words."
     - "Idle wishes ('would love to someday') are aspirations, never goals — the horizon field is load-bearing."
+    - "v0.2.4 A goal is STATED INTENT in the owner's own words ('Goal:', 'I want to', 'I will').
+       Wry observations, jokes and family lore ('this is the closest I can keep that pattern
+       going') are never goals — if the owner would be surprised to see it on their goal list,
+       extract nothing."
+    - "v0.2.4 goal_ref is a NAME (a few words), not a sentence — a goal_ref longer than ~8 words
+       means the goal was never really named; prefer the Goal: header's own phrasing."
     - "Never mark a goal abandoned from silence; stalled requires the owner's words or a passed deadline plus zero activity (then still status=stalled, not abandoned)."
     - "asp.focus_period must cite both the stated goal AND the activity evidence; if they disagree, record the divergence honestly (that divergence IS the insight)."
 
