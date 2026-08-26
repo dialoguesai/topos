@@ -728,16 +728,26 @@ def compute_communities(conn: sqlite3.Connection) -> Dict[str, int]:
             # member OF that type carries the label; fall back to the overall
             # top member when the dominant type has no nameable member. Ties
             # keep the old ordering so labels stay stable across rebuilds.
+            # Label eligibility (measured 2026-08-26, second iteration): goals
+            # and conversations carry SENTENCES as canonical names — the first
+            # dominant-type pass labeled a community "Reflect on Topos values
+            # (…) and discuss death with a mother facing terminal illness."
+            # A community label is a NAME: name-length, from a name-natured type.
+            def _labelable(eid: str) -> bool:
+                nm = names.get(eid, "").strip()
+                return (bool(nm) and len(nm) <= 40 and len(nm.split()) <= 4
+                        and types.get(eid, "") not in ("goal", "conversation"))
+
             type_counts: Dict[str, int] = {}
             for eid in ranked:
                 t = types.get(eid, "")
-                if t:
+                if t and _labelable(eid):
                     type_counts[t] = type_counts.get(t, 0) + 1
             dominant = max(type_counts, key=lambda t: (type_counts[t], t)) if type_counts else ""
             labels_by_rank[rank[comm]] = next(
                 (names[eid] for eid in ranked
-                 if types.get(eid) == dominant and names.get(eid, "").strip()),
-                next((names[eid] for eid in ranked if names.get(eid, "").strip()), None),
+                 if types.get(eid) == dominant and _labelable(eid)),
+                next((names[eid] for eid in ranked if _labelable(eid)), None),
             )
         logger.info(
             "graph structural analytics: %d nodes / %d edges, betweenness k=%s, %.2fs",
