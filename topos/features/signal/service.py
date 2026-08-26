@@ -319,7 +319,14 @@ class SignalService:
             nodes = [n for n in nodes if n.get("source_id") == source_id]
             edges = [e for e in edges if e.get("source_id") == source_id]
         if edge_type:
-            edges = [e for e in edges if e.get("edge_type") == edge_type]
+            # W4.1: pack predicates are open-ended edge vocabulary — a trailing
+            # ".*" filters the FAMILY ("rel.*" matches every rel. predicate),
+            # exact strings keep exact semantics.
+            if edge_type.endswith(".*"):
+                fam = edge_type[:-1]  # "rel.*" -> "rel."
+                edges = [e for e in edges if str(e.get("edge_type") or "").startswith(fam)]
+            else:
+                edges = [e for e in edges if e.get("edge_type") == edge_type]
         if min_weight is not None:
             edges = [e for e in edges if float(e.get("weight") or 0) >= min_weight]
         from .graph_sanitize import ensure_graph_endpoints
