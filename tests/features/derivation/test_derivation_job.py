@@ -95,3 +95,73 @@ def test_only_wave_a_enabled_by_default(node_db, monkeypatch):
     assert rows["health.physical"] == 1
     assert rows.get("beliefs.civic", 0) == 0 and rows.get("behavior.habits", 0) == 0
     assert sum(rows.values()) == 3
+
+
+# --- training-data factory + self-gating (W-B, owner design 2026-08-26) ---
+
+def test_ledger_keeps_rejects_as_hard_negatives(node_db, monkeypatch):
+    from topos.engine.backends import ollama
+    extract = json.dumps({"assertions": [{
+        "predicate": "work.career_event", "value": {"event": "raise"},
+        "about": "owner", "occurrence_date": None, "confidence": 0.85, "quote": "the raise"}]})
+    verify = json.dumps({"supported": False, "about": "owner", "fields_ok": True,
+                         "reason": "fundraise not salary"})
+    monkeypatch.setattr(ollama.OllamaAdapter, "_generate", _stub_llm(extract, verify))
+    monkeypatch.setattr("topos.features.facts.llm_extract._resolved_extraction_model",
+                        lambda s, c: "stub-9b")
+    run_derivation_batch(node_db, [ROW], stats={})
+    rows = node_db.execute("SELECT vstatus, vreason, written_object_id, quote"
+                           " FROM derivation_training_ledger").fetchall()
+    assert rows and rows[0][0] == "rejected" and "salary" in rows[0][1]
+    assert rows[0][2] is None and rows[0][3] == "the raise"
+
+
+def test_yield_counters_and_drywell_nudge(node_db, monkeypatch):
+    from topos.engine.backends import ollama
+    monkeypatch.setattr(ollama.OllamaAdapter, "_generate",
+                        _stub_llm(json.dumps({"assertions": []})))
+    monkeypatch.setattr("topos.features.facts.llm_extract._resolved_extraction_model",
+                        lambda s, c: "stub-9b")
+    # simulate 30d of calls with zero yield for an ENABLED pack
+    node_db.execute("INSERT OR IGNORE INTO pack_yield (pack_id, day, llm_calls, written)"
+                    " VALUES ('work.career', date('now'), 60, 0)")
+    node_db.commit()
+    run_derivation_batch(node_db, [ROW], stats={})
+    kinds = [r[0] for r in node_db.execute(
+        "SELECT kind FROM pack_offers WHERE pack_id='work.career'")]
+    assert "disable_nudge" in kinds
+
+
+def test_trial_mints_enable_offer_and_specials_excluded(node_db, monkeypatch):
+    from topos.engine.backends import ollama
+    extract = json.dumps({"assertions": [{
+        "predicate": "interest.favorite", "value": {"category": "music", "item": "T.T. Xray"},
+        "about": "owner", "occurrence_date": None, "confidence": 0.9,
+        "quote": "I love T.T. Xray"}]})
+    verify = json.dumps({"supported": True, "about": "owner", "fields_ok": True, "reason": "stated"})
+    monkeypatch.setattr(ollama.OllamaAdapter, "_generate", _stub_llm(extract, verify))
+    monkeypatch.setattr("topos.features.facts.llm_extract._resolved_extraction_model",
+                        lambda s, c: "stub-9b")
+    # hits accumulated on a DISABLED, non-special pack + recent records to sample
+    node_db.execute("INSERT OR IGNORE INTO pack_yield (pack_id, day, prefilter_hits)"
+                    " VALUES ('interests.taste', date('now'), 40)")
+    # and on a special-class pack (must never trial)
+    node_db.execute("INSERT OR IGNORE INTO pack_yield (pack_id, day, prefilter_hits)"
+                    " VALUES ('beliefs.civic', date('now'), 40)")
+    node_db.execute("CREATE TABLE IF NOT EXISTS conversation_messages ("
+                    "message_id TEXT PRIMARY KEY, content TEXT, event_at TEXT,"
+                    " actor_role TEXT, source_id TEXT)")
+    for i in range(12):
+        node_db.execute(
+            "INSERT INTO conversation_messages (message_id, content, event_at, actor_role, source_id)"
+            " VALUES (?, ?, datetime('now'), 'authored', 'imessage')",
+            (f"tm{i}", "Third pottery class this month — I'm fully hooked on T.T. Xray music"))
+    node_db.commit()
+    stats = {}
+    run_derivation_batch(node_db, [ROW], stats=stats)
+    offers = {r[0]: r[1] for r in node_db.execute("SELECT pack_id, kind FROM pack_offers")}
+    assert offers.get("interests.taste") == "enable_offer"
+    assert "beliefs.civic" not in offers          # consent precedes computation
+    trial_rows = node_db.execute("SELECT COUNT(*) FROM derivation_training_ledger"
+                                 " WHERE stage='trial'").fetchone()[0]
+    assert trial_rows > 0
