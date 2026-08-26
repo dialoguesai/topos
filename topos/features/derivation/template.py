@@ -100,7 +100,7 @@ LOSS_EVIDENCE = ("died", "passed", "passing", "funeral", "loss of", "death", "re
 
 def relationship_role_check(role: str, person: str, record_text: str):
     """A1 role-evidence guard (measured 2026-08-26 full-run): the 27B verifier
-    CONSISTENTLY accepts possessive misattribution ("Wiki and her boyfriend Luc"
+    CONSISTENTLY accepts possessive misattribution ("Nora and her boyfriend Theo"
     -> owner's partner) — textual support without subject discipline. Rules,
     all deterministic:
       1. A kin-term PERSON ("Mom", "brother") is self-evidencing -> owner.
@@ -239,7 +239,7 @@ Hard rules:
 - Extract only what this record actually states about the OWNER. No guesses, no world knowledge.
 - Every assertion MUST carry "about": "owner" if the fact is about the record's author-owner,
   "other:<name>" if the record states it about someone else (their appointment, their partner,
-  their loss — e.g. "Wiki and her boyfriend Luc" -> about: "other:Wiki"), or "unclear" if you
+  their loss — e.g. "Nora and her boyfriend Theo" -> about: "other:Nora"), or "unclear" if you
   cannot tell. Facts about others are NOT discarded — they are routed to that person's dossier —
   so NEVER launder a third party's fact into "owner" to save it.
   The about field does NOT make extraction stricter: extract exactly what you would have
