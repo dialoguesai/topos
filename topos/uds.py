@@ -84,11 +84,24 @@ def start_uds_server(app) -> Optional[threading.Thread]:
             logger.warning("could not remove stale socket at %s", path)
             return None
 
+        from uvicorn.protocols.http.h11_impl import H11Protocol
+
+        class _AttestingH11(H11Protocol):
+            """P4.1: attest the peer PROCESS at accept, before any bytes parse."""
+
+            def connection_made(self, transport):  # noqa: D102
+                sock = transport.get_extra_info("socket")
+                if sock is not None and not peer_admitted(sock):
+                    transport.close()
+                    return
+                super().connection_made(transport)
+
         config = uvicorn.Config(
             UDSChannelApp(app),
             uds=str(path),
             lifespan="off",
             log_level="warning",
+            http=_AttestingH11,
         )
         server = uvicorn.Server(config)
 
@@ -121,3 +134,92 @@ def start_uds_server(app) -> Optional[threading.Thread]:
     except Exception:  # noqa: BLE001 — the second door must never break startup
         logger.warning("owner socket startup failed", exc_info=True)
         return None
+
+
+# ---------------------------------------------------------- P4.1 attestation
+# Team ID attestation of the PEER PROCESS — the same-uid-malware defense. The
+# 0600 kernel gate already restricts the socket to the owner's uid; this layer
+# additionally asks WHICH of the owner's programs is connecting. Enforcement is
+# opt-in via TOPOS_UDS_TEAM_IDS (comma-separated Apple Team IDs, e.g. the shell
+# app's 25AMARRV2F): unset, every same-uid peer is admitted and merely logged —
+# the dev lane's unsigned python/node processes must keep working by default.
+# When set, an unsigned, unreadable, or non-allowlisted peer's connection is
+# closed at accept, before a single request byte is parsed.
+
+_SOL_LOCAL = 0
+_LOCAL_PEERPID = 2
+_TEAM_RE = None
+
+
+def _peer_pid(sock) -> Optional[int]:
+    try:
+        pid = sock.getsockopt(_SOL_LOCAL, _LOCAL_PEERPID)
+        return int(pid) if pid > 0 else None
+    except OSError:
+        return None
+
+
+def _pid_executable(pid: int) -> Optional[str]:
+    import ctypes
+    import ctypes.util
+
+    try:
+        libproc = ctypes.CDLL(ctypes.util.find_library("proc") or "libproc.dylib")
+        buf = ctypes.create_string_buffer(4096)
+        n = libproc.proc_pidpath(ctypes.c_int(pid), buf, ctypes.c_uint32(len(buf)))
+        if n <= 0:
+            return None
+        return buf.value.decode("utf-8", "replace")
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _team_id_of(executable: str) -> Optional[str]:
+    """TeamIdentifier from codesign; None for unsigned/adhoc/platform binaries."""
+    global _TEAM_RE
+    import re
+    import subprocess
+
+    if _TEAM_RE is None:
+        _TEAM_RE = re.compile(r"^TeamIdentifier=(\S+)$", re.M)
+    try:
+        out = subprocess.run(
+            ["codesign", "-dv", "--", executable],
+            capture_output=True, text=True, timeout=5,
+        )
+        m = _TEAM_RE.search(out.stderr or "")
+        if not m or m.group(1) == "not":  # "TeamIdentifier=not set"
+            return None
+        return m.group(1)
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _allowed_team_ids() -> frozenset:
+    raw = str(os.environ.get("TOPOS_UDS_TEAM_IDS") or "").strip()
+    return frozenset(t.strip() for t in raw.split(",") if t.strip())
+
+
+def peer_admitted(sock) -> bool:
+    """Attestation decision for one accepted connection.
+
+    Permissive-log without an allowlist; FAIL-CLOSED with one: any error on any
+    step (no pid, unreadable executable, unsigned, wrong team) closes the door.
+    """
+    allowed = _allowed_team_ids()
+    pid = _peer_pid(sock)
+    if not allowed:
+        logger.debug("owner socket peer pid=%s (attestation off)", pid)
+        return True
+    if pid is None:
+        logger.warning("owner socket: peer pid unavailable; refusing (attestation on)")
+        return False
+    exe = _pid_executable(pid)
+    team = _team_id_of(exe) if exe else None
+    if team in allowed:
+        return True
+    logger.warning(
+        "owner socket: refused peer pid=%s exe=%s team=%s (allowlist %s)",
+        pid, exe, team, ",".join(sorted(allowed)),
+    )
+    return False
