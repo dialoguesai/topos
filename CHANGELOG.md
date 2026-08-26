@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.28] — 2026-08-26
+
 ### Added
 - **[S1] Training-data factory** (migration 66): every judged assertion — accepted or
   rejected — lands in `derivation_training_ledger` with quotes, verdicts and reasons;
