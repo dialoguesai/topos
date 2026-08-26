@@ -110,7 +110,14 @@ class FactStore:
         confidence: float = 0.7,
         source_refs: Optional[List[Dict[str, Any]]] = None,
         valid_from: Optional[str] = None,
-        disclosure: str = "scoped",
+        # Fail closed. Every in-tree caller passes this explicitly (verdicts.py,
+        # llm_extract.py, extract.py x2, truth_facts.py), so the default is only
+        # ever reached by a caller that forgot — and the safe thing to do with a
+        # claim about a person when nobody said how far it may travel is to keep
+        # it. This is the second fact write path: DerivationWriter pins owner_only
+        # by construction, and this one did not, so "facts are owner_only" was
+        # true of one lane and merely conventional in the other.
+        disclosure: str = "owner_only",
         period_start: Optional[str] = None,
         period_end: Optional[str] = None,
         asserted_by: str = "owner",

@@ -136,7 +136,13 @@ def list_facts(
                 "period_start": payload.get("period_start"),
                 "period_end": payload.get("period_end"),
                 "confidence": payload.get("confidence", fact["confidence"]),
-                "disclosure": payload.get("disclosure", "scoped"),
+                # Fail closed, and match the sibling reader 74 lines below, which
+                # already defaults to owner_only. A payload with no disclosure is
+                # a row nobody classified; reading it as shareable is the wrong
+                # direction to guess in, and the two readers disagreeing meant the
+                # same unclassified row was shareable on one path and private on
+                # the other.
+                "disclosure": payload.get("disclosure", "owner_only"),
                 # Attribution: who asserted this claim (owner | contact:<id> |
                 # assistant | page-author | …). Powers the person→ambient badge.
                 "asserted_by": payload.get("asserted_by", "owner"),
