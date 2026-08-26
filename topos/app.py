@@ -448,16 +448,22 @@ async def startup_event() -> None:
             except Exception as lease_exc:  # noqa: BLE001
                 logger.error("Hosted pool lease issue failed: %s", lease_exc, exc_info=True)
                 raise
-        # Relay messages carry the CP_RELAY principal: the CP classified the
-        # caller at its own door (owner ids are stamped for Topos-native clients
-        # only), so the engine's floors keep honoring the forwarded-id equality
-        # test on this channel. The stamp is applied INSIDE the dispatched
-        # coroutine — the client thread's contextvars do not cross
-        # run_coroutine_threadsafe, a wrapper closure does.
+        # Relay principal (P3): a message carrying a VERIFIED Ed25519 stamp
+        # resolves to the CP's classification — a named third_party client
+        # (enrollable, elevatable) or the owner's native surface. Anything
+        # else keeps the CP_RELAY deferral: forwarded-id equality plus the
+        # CP-side containment, byte-identical to pre-P3 behavior, so a node
+        # and CP on different sides of this release keep working. Verification
+        # happens only on THIS channel — a stamp arriving over local HTTP is
+        # never parsed. The stamp is resolved INSIDE the dispatched coroutine —
+        # the client thread's contextvars do not cross run_coroutine_threadsafe,
+        # a wrapper closure does.
         async def _relay_dispatch(message):
             from .principal import RELAY_PRINCIPAL
+            from .relay_stamp import verify_relay_stamp
 
-            return await handle_control_plane_request(message, principal=RELAY_PRINCIPAL)
+            principal = verify_relay_stamp(message) or RELAY_PRINCIPAL
+            return await handle_control_plane_request(message, principal=principal)
 
         state.control_plane_client = ControlPlaneClient(
             control_plane_url=settings.topos_control_plane_url,

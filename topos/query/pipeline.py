@@ -559,8 +559,13 @@ class QueryPipelineOrchestrator:
         # Channel-verified client class, stamped by the entry point that
         # authenticated this request (dispatcher contextvar). Read ONCE per
         # turn and threaded to both disclosure floors and the fingerprint —
-        # never from the payload.
+        # never from the payload. GRANTEE turns run pure legacy logic
+        # (principal dropped): a grantee arriving through a stamped relay must
+        # never inherit the OWNER's elevation for a client that happens to
+        # share a name — grantees have no elevation path, structurally.
         _principal = current_principal()
+        if is_grantee_request:
+            _principal = None
 
         disclosure_tier = resolve_disclosure_tier(
             requester_id=requester_id,
