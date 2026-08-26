@@ -67,19 +67,43 @@ def fetch_direct_facts(
         return None
     if special and packet_resolution != "facts_all":
         return None
-    owner = conn.execute("SELECT entity_id FROM entities WHERE is_self=1").fetchone()
+    # `is_self` is not unique: live 2026-08-26 three entities carried it —
+    # ent_e73ff33ae330422b ("Owner", 178 facts) plus two "self" rows created that
+    # morning holding none. An unordered fetchone() picked the fact-bearing row by
+    # rowid luck; a vacuum or a rewrite of that row would have silently blanked
+    # every known-item answer. Prefer the self-entity that actually owns facts,
+    # entity_id as the tiebreak, so the choice is stable across rewrites. (No
+    # created_at in the ORDER BY: the query fixtures build a minimal `entities`
+    # table without it.)
+    owner = conn.execute(
+        """SELECT e.entity_id
+             FROM entities e
+            WHERE e.is_self=1
+         ORDER BY (SELECT COUNT(*) FROM signal_objects o
+                    WHERE o.object_type='fact'
+                      AND o.object_key LIKE 'fact:' || e.entity_id || ':%') DESC,
+                  e.entity_id ASC
+            LIMIT 1"""
+    ).fetchone()
     if not owner:
         return None
     out: List[Dict[str, Any]] = []
     for pred in predicates:
+        # Delimiter-aware: a bare `{pred}%` prefix also swept sibling predicates.
+        # "Who's in my family?" asks for rel.relationship and was handed the 23
+        # rel.relationship_event rows too, so the answer listed people the owner
+        # merely met (live 2026-08-26: Echo Victor returned as family). Match
+        # the exact key or the key plus its ':value' segment, nothing else.
+        # `_` is a LIKE wildcard and predicates contain it, so escape it.
+        like_pred = pred.replace("\\", "\\\\").replace("_", "\\_").replace("%", "\\%")
         rows = conn.execute(
             """SELECT object_key, payload_json, confidence, valid_from, valid_to,
                       ontology_id, altitude
                FROM signal_objects
                WHERE object_type='fact' AND valid_to IS NULL
-                 AND object_key LIKE ?
+                 AND (object_key = ? OR object_key LIKE ? ESCAPE '\\')
                ORDER BY valid_from DESC LIMIT 40""",
-            (f"fact:{owner[0]}:{pred}%",),
+            (f"fact:{owner[0]}:{pred}", f"fact:{owner[0]}:{like_pred}:%"),
         ).fetchall()
         for key, payload_json, conf, vf, vt, pack, altitude in rows:
             try:
