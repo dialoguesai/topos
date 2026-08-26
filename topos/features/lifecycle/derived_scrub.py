@@ -524,9 +524,22 @@ def sweep_orphans(conn: sqlite3.Connection) -> Dict[str, int]:
             """
         )
         out["embedding_entities"] = int(cursor.rowcount or 0)
+        # A conflict row is an orphan when the fact it CHALLENGES is gone. A3
+        # quarantine rows have no incumbent by design — an unroutable or withheld
+        # assertion is not challenging anything — so they carry the synthetic
+        # sentinel `quarantine:<reason>` (writer.py::_quarantine). That sentinel is
+        # never a signal_objects.object_id, so the orphan predicate matched every
+        # one of them: measured on the live node 2026-08-26, all 13 pending rows
+        # would be deleted by this sweep, and it fires on the owner's ordinary
+        # per-record exclusion flow. That queue is the human review path for
+        # third-party assertions — including health.condition about people who
+        # never consented — so deleting it silently discards exactly the decisions
+        # a person is supposed to make.
         cursor = conn.execute(
             """
-            DELETE FROM fact_conflicts WHERE incumbent_object_id NOT IN (
+            DELETE FROM fact_conflicts
+             WHERE incumbent_object_id NOT LIKE 'quarantine:%'
+               AND incumbent_object_id NOT IN (
                 SELECT object_id FROM signal_objects WHERE object_type='fact'
             )
             """
