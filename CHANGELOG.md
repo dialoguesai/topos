@@ -9,14 +9,24 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.31] — 2026-08-26
+
 ### Fixed
+- **Privacy: synthetic examples replace measured verbatims.** Test fixtures, pack
+  negative controls, and the derivation template's misattribution example (docstring
+  AND live prompt text) quoted real people and records measured on the live node.
+  All replaced with a synthetic cast; wheels 1.3.26–1.3.30 shipped the template
+  strings and are being removed from the index.
 - **Facts-direct: durable facts outrank event facts.** Recency-only ordering let a
   month of met-events push the owner's parents past the 20-row compose cap — live
-  2026-08-26, "Who's in my family?" listed 16 introductions and cut mom/brother
-  while both sat in the store. Role/status-bearing facts now sort ahead of events
+  2026-08-26, "Who's in my family?" listed 16 introductions and cut the parent and
+  sibling facts while both sat in the store. Role/status-bearing facts now sort ahead of events
   (stable, so event feeds keep recency order among themselves).
 
 ## [1.3.30] — 2026-08-26
+
+> Bookkeeping: the release commit's message says "Release 1.3.29" — a concurrent-cut
+> wart. The tag (v1.3.30), package metadata, and artifacts all say 1.3.30; trust those.
 
 ### Fixed
 - **Packet resolution recognizes the gateway-verified owner.** The CP gateway
