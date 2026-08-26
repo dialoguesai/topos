@@ -365,3 +365,54 @@ def test_materializer_display_value_head_not_json():
     assert _display_value('{"person": "Dad", "role": "parent"}') == "Dad"
     assert _display_value("plain string") == "plain string"
     assert _display_value(None) == ""
+
+
+# --- goals-first milestone integrity (aspirations redesign, measured 2x prompt failure) ---
+def _asp_pack():
+    return load_packs(PACK_DIR, only=["aspirations.goals"])["aspirations.goals"]
+
+def test_milestone_without_goal_quarantines(a3_writer):
+    w, conn = a3_writer
+    out = w.assert_pack_fact(pack=_asp_pack(), predicate="asp.milestone",
+        subject_entity_id="ent_owner",
+        value={"goal_ref": "generative work from this morning", "milestone": "finished", "kind": "completion"},
+        actor_role="authored", source_refs=[{"table": "t", "record_id": "r1"}],
+        confidence=0.9, about="owner")
+    assert out["outcome"] == "quarantined"
+
+def test_milestone_attaches_to_stored_goal(a3_writer):
+    w, conn = a3_writer
+    g = w.assert_pack_fact(pack=_asp_pack(), predicate="asp.goal",
+        subject_entity_id="ent_owner",
+        value={"goal": "finish the investor deck beginning to end", "domain": "work",
+               "horizon": "this_week", "status": "active"},
+        actor_role="authored", source_refs=[{"table": "t", "record_id": "r0"}],
+        confidence=0.95, about="owner")
+    assert g["outcome"] == "written"
+    m = w.assert_pack_fact(pack=_asp_pack(), predicate="asp.milestone",
+        subject_entity_id="ent_owner",
+        value={"goal_ref": "investor deck", "milestone": "story is rock solid, cleaning up",
+               "kind": "progress"},
+        actor_role="authored", source_refs=[{"table": "t", "record_id": "r1"}],
+        confidence=0.9, about="owner")
+    assert m["outcome"] == "written"
+
+# --- Tier-2 exclusive_with: recent contradictions queue; life changes supersede ---
+def test_exclusive_recent_contradiction_queues(a3_writer):
+    w, conn = a3_writer
+    p1 = w.assert_pack_fact(pack=_rel_pack(), predicate="rel.relationship",
+        subject_entity_id="ent_owner", value={"person": "Dana", "role": "partner", "status": "active"},
+        actor_role="authored", source_refs=[{"table": "t", "record_id": "r1"}],
+        confidence=0.95, about="owner")
+    assert p1["outcome"] == "written"
+    out = w.assert_pack_fact(pack=_rel_pack(), predicate="rel.relationship",
+        subject_entity_id="ent_owner", value={"person": "Dana", "role": "ex_partner", "status": "active"},
+        actor_role="authored", source_refs=[{"table": "t", "record_id": "r2"}],
+        confidence=0.9, about="owner")
+    assert out["outcome"] == "conflict_queued"
+    n = conn.execute("SELECT COUNT(*) FROM fact_conflicts WHERE predicate='rel.relationship'").fetchone()[0]
+    assert n == 1
+    # incumbent still stands
+    live = conn.execute("SELECT COUNT(*) FROM signal_objects WHERE object_type='fact'"
+                        " AND valid_to IS NULL AND object_key LIKE '%dana%'").fetchone()[0]
+    assert live == 1

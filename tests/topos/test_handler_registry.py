@@ -168,6 +168,7 @@ SUPPORTED_MESSAGE_TYPES = [
     "replay_projection",
     "replay_projection_preview",
     "routine_has_active_run",
+    "run_pack_backfill",
     "set_device_name",
     "signal_affinity_config",
     "signal_affinity_label",

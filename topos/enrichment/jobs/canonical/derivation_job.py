@@ -176,19 +176,42 @@ def run_derivation_batch(
     writer = DerivationWriter(conn, model=model)
     done = {r[0] for r in conn.execute("SELECT key FROM derivation_progress")}
 
+    HARM_ROLES = {"partner", "spouse", "child", "sibling", "ex_partner"}
+    HARM_EVENTS = {"loss", "conflict", "reconnected", "ended", "estranged"}
+
+    def _is_high_harm(a):
+        v = a.get("value") if isinstance(a.get("value"), dict) else {}
+        if a.get("predicate") == "rel.relationship" and str(v.get("role")) in HARM_ROLES:
+            return True
+        if a.get("predicate") == "rel.relationship_event" and str(v.get("event")) in HARM_EVENTS:
+            return True
+        return False
+
     def judge(pack, rec, a, stage):
-        """Verify one assertion; ledger it; return the annotated assertion."""
+        """Verify one assertion; high-harm predicate classes get 3-vote majority
+        (measured 2026-08-26: single quantized-verifier votes are variance-exposed
+        exactly where errors hurt most). Everything else keeps one vote."""
         if verify_mode == "off":
             a = dict(a); a["verifier_status"] = "skipped"
-        else:
+            return a
+        votes_needed = 3 if _is_high_harm(a) else 1
+        accepts = 0
+        last_verdict = None
+        for _ in range(votes_needed):
             try:
                 verdict = parse_verdict(llm(vmodel, build_verify_prompt(
                     rec["text"], rec["role"], rec["date"],
                     a["predicate"], a["value"], a.get("about", "owner")), n=250))
             except Exception:  # noqa: BLE001
                 verdict = None
-            a = apply_verdict(a, verdict)
-        return a
+            last_verdict = verdict or last_verdict
+            if verdict and verdict["supported"] and verdict["fields_ok"]:
+                accepts += 1
+        if votes_needed > 1 and accepts < 2:
+            a = dict(a); a["verifier_status"] = "rejected"
+            a["verifier_reason"] = f"majority {accepts}/{votes_needed} against"
+            return a
+        return apply_verdict(a, last_verdict)
 
     written = 0
     for row in rows:
@@ -247,6 +270,9 @@ def run_derivation_batch(
             conn.execute("INSERT OR REPLACE INTO derivation_progress (key) VALUES (?)", (key,))
         conn.commit()
 
+    _drip_catchup(conn, packs=packs, filters=filters, llm=llm, judge=judge,
+                  writer=writer, owner=owner, done=done, st=st, cancel=cancel)
+
     _self_gate(conn, all_packs=all_packs, enabled=set(packs), filters=filters,
                llm=llm, judge=judge, model=model, vmodel=vmodel, st=st,
                cancel=cancel)
@@ -257,6 +283,94 @@ def run_derivation_batch(
     st["written"] = written
     st.update({f"w_{k}": v for k, v in writer.stats.items() if v})
     return written
+
+
+#: history records drip-processed per batch — the dark delta self-heals without
+#: a scheduler; a fresh enablement's history closes over days, or immediately
+#: via the owner's backfill control.
+CATCHUP_PER_BATCH = 25
+
+
+def _iter_history(conn, limit=2000):
+    import sqlite3 as _sqlite3
+    def _rows(sql):
+        try:
+            return conn.execute(sql).fetchall()
+        except _sqlite3.OperationalError:
+            return []
+    out = []
+    for tbl, rid, text, at, role in _rows(
+            f"SELECT 'journal_entries', entry_id, content, entry_at, 'authored'"
+            f" FROM journal_entries WHERE content IS NOT NULL AND LENGTH(content)>15"
+            f" ORDER BY entry_at DESC LIMIT {int(limit)}"):
+        out.append({"table": tbl, "record_id": rid, "text": (text or "")[:6000],
+                    "date": str(at or "")[:10], "role": role or "authored", "source_id": ""})
+    for tbl, rid, text, at, role in _rows(
+            f"SELECT 'conversation_messages', message_id, content, event_at, actor_role"
+            f" FROM conversation_messages WHERE content IS NOT NULL AND LENGTH(content)>15"
+            f" ORDER BY event_at DESC LIMIT {int(limit)}"):
+        out.append({"table": tbl, "record_id": rid, "text": (text or "")[:6000],
+                    "date": str(at or "")[:10], "role": role or "observed", "source_id": ""})
+    return out
+
+
+def _drip_catchup(conn, *, packs, filters, llm, judge, writer, owner, done, st, cancel):
+    """Process up to CATCHUP_PER_BATCH unprocessed HISTORY (record, pack) pairs
+    per batch. Newest-first: recent history answers queries soonest."""
+    if not packs:
+        return
+    from ....features.derivation.template import build_prompt, parse_output
+    from ....features.facts.llm_extract import _resolved_extraction_model
+    from ....config.settings import settings as _settings
+    model = _resolved_extraction_model(_settings, conn)
+    budget = CATCHUP_PER_BATCH
+    for rec in _iter_history(conn):
+        if budget <= 0 or (cancel is not None and cancel.is_set()):
+            return
+        for pid, pack in packs.items():
+            key = f"{pid}@{pack.version}:{rec['table']}:{rec['record_id']}"
+            if key in done:
+                continue
+            if rec["role"] not in pack.allowed_roles() or not filters[pid].passes(rec["text"]):
+                conn.execute("INSERT OR REPLACE INTO derivation_progress (key) VALUES (?)", (key,))
+                done.add(key)
+                continue
+            budget -= 1
+            try:
+                raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"]))
+                _bump_yield(conn, pid, llm_calls=1, prefilter_hits=1)
+            except Exception:  # noqa: BLE001
+                st["llm_errors"] = st.get("llm_errors", 0) + 1
+                continue
+            valid, _rej = parse_output(raw, pack, record_text=rec["text"])
+            _bump_yield(conn, pid, assertions=len(valid))
+            for a in valid:
+                a = judge(pack, rec, a, "catchup")
+                if a.get("verifier_status") == "rejected":
+                    _ledger_write(conn, stage="catchup", pack=pack, rec=rec, a=a,
+                                  model=model, vmodel="(job)", )
+                    continue
+                _bump_yield(conn, pid, accepted=1)
+                out = writer.assert_pack_fact(
+                    pack=pack, predicate=a["predicate"], subject_entity_id=owner,
+                    value=a["value"], actor_role=rec["role"],
+                    source_refs=[{"table": rec["table"], "record_id": rec["record_id"]}],
+                    confidence=a["confidence"], occurrence=a["occurrence"],
+                    quote=a.get("quote", ""), about=a.get("about", "owner"),
+                    event_date=rec["date"] or None)
+                stored = out.get("outcome") in ("written", "corroborated", "retelling_merged",
+                                                "field_update", "corrected", "superseded")
+                if stored:
+                    _bump_yield(conn, pid, written=1)
+                    st["catchup_written"] = st.get("catchup_written", 0) + 1
+                _ledger_write(conn, stage="catchup", pack=pack, rec=rec, a=a,
+                              model=model, vmodel="(job)",
+                              written_id=out.get("object_id") if stored else None)
+            conn.execute("INSERT OR REPLACE INTO derivation_progress (key) VALUES (?)", (key,))
+            done.add(key)
+            if budget <= 0:
+                break
+        conn.commit()
 
 
 def _self_gate(conn, *, all_packs, enabled, filters, llm, judge, model, vmodel, st, cancel):
