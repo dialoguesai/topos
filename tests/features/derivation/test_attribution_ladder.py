@@ -279,9 +279,10 @@ def test_person_grounded_kills_laundering():
     from topos.features.derivation.template import person_grounded
     rec = "My 4th time seeing him. The only person I care to venture out to see"
     assert not person_grounded("The Wandering Partners", rec)      # measured laundering
-    assert not person_grounded("Victor Whiskey", "even Michael Jordan lost some games")
-    # wait — 'michael' IS in that record; grounded returns True. Token-level
-    # grounding admits first-name collisions; the verifier owns that residue.
+    # Token-level grounding deliberately ADMITS first-name collisions
+    # ("Victor Whiskey" grounds on a Michael Jordan quip) — that residue is the
+    # verifier's to catch; the guard only kills names with NO anchor at all.
+    assert person_grounded("Victor Whiskey", "even Michael Jordan lost some games")
     assert person_grounded("grandpa", "My grandpa passed over the weekend")
     assert person_grounded("mom", "anything")                     # kin whitelist
     assert person_grounded("Wiki", "My friend Wiki submitted an app")
