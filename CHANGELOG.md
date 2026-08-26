@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.25] — 2026-08-25
+
 ### Added
 - **[S1] [P] Packet resolution** (`packet_resolution`: `scores_only` | `facts` | `facts_all`, default
   `scores_only`): per-database setting for how much fact content the inference packet may
