@@ -77,3 +77,75 @@ def test_owner_wins_ties(conn):
 def test_pre_migration_node_fails_open(tmp_path):
     bare = sqlite3.connect(tmp_path / "bare.db")
     assert match_name(bare, _fp(CORE)) is None
+
+
+# --- S2: naming engine ---
+def test_distinctive_terms_contrastive():
+    from topos.features.entities.community_naming import distinctive_terms
+    here = ["Topos", "topos-react-app", "Control Plane", "deploy scripts"]
+    there = ["Grandma", "Mom", "dominoes", "Control Panel", "control freak"]
+    terms = distinctive_terms(here, there)
+    assert "topos" in terms
+    assert "control" not in terms[:2]      # shared vocabulary must not lead
+
+
+def test_derive_validates_and_falls_back():
+    from topos.features.entities.community_naming import derive_community_name
+    assert derive_community_name(["A"], [], lambda p: "The Workshop") == "The Workshop"
+    assert derive_community_name(["A"], [], lambda p: "A very long sentence that describes everything happening") is None
+    assert derive_community_name(["A"], [], lambda p: "+15551234567") is None
+    assert derive_community_name(["A"], [], lambda p: (_ for _ in ()).throw(RuntimeError())) is None
+
+
+def test_rebuild_reuses_history_without_llm(tmp_path, monkeypatch):
+    """Second rebuild of the same graph must not invoke the model at all."""
+    import sqlite3, json as _json
+    from topos.features.entities.maintenance import compute_communities
+
+    monkeypatch.setenv("TOPOS_COMMUNITY_NAMING", "on")
+    calls = {"n": 0}
+
+    class FakeAdapter:
+        def _generate(self, m, prompt, **kw):
+            calls["n"] += 1
+            return {"text": "Topos Build"}
+
+    from topos.engine.backends import ollama
+    monkeypatch.setattr(ollama, "OllamaAdapter", FakeAdapter)
+    monkeypatch.setattr(
+        "topos.features.entities.community_naming.resolve_naming_model", lambda c: "stub")
+
+    conn = sqlite3.connect(tmp_path / "g3.db")
+    conn.executescript(
+        """
+        CREATE TABLE entities (entity_id TEXT PRIMARY KEY, entity_type TEXT,
+          canonical_name TEXT, normalized_name TEXT, aliases_json TEXT,
+          is_self INTEGER DEFAULT 0, mention_count INTEGER DEFAULT 0,
+          metadata_json TEXT, created_at TEXT, updated_at TEXT);
+        CREATE TABLE entity_edges (edge_id TEXT PRIMARY KEY, src_entity_id TEXT,
+          dst_entity_id TEXT, edge_type TEXT, weight REAL, evidence_count INTEGER,
+          last_event_at TEXT, valid_from TEXT, valid_to TEXT, metadata_json TEXT);
+        """
+    )
+    from topos.storage.db.migrations.community_names_v1 import apply_community_names_v1_up
+    apply_community_names_v1_up(conn)
+    for i, name in enumerate(["Topos", "Control Plane", "Horos", "Deck"]):
+        conn.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name)"
+                     " VALUES (?, 'topic', ?, lower(?))", (f"t{i}", name, name))
+    for i in range(4):
+        conn.execute("INSERT INTO entity_edges (edge_id, src_entity_id, dst_entity_id, edge_type, weight)"
+                     " VALUES (?, ?, ?, 'co_occurrence', 3.0)", (f"e{i}", f"t{i}", f"t{(i+1) % 4}"))
+    conn.commit()
+
+    compute_communities(conn)
+    first_calls = calls["n"]
+    assert first_calls >= 1
+    label = _json.loads(conn.execute("SELECT metadata_json FROM entities WHERE entity_id='t0'")
+                        .fetchone()[0] or "{}").get("community_label")
+    assert label == "Topos Build"
+
+    compute_communities(conn)          # same graph → history hit, zero new calls
+    assert calls["n"] == first_calls
+    label2 = _json.loads(conn.execute("SELECT metadata_json FROM entities WHERE entity_id='t0'")
+                         .fetchone()[0] or "{}").get("community_label")
+    assert label2 == "Topos Build"
