@@ -138,6 +138,36 @@ class DerivationWriter:
         return base
 
     # ---------------------------------------------------------------- ladder
+
+    def _resolve_person(self, name: str):
+        if not name or not isinstance(name, str):
+            return None
+        n = " ".join(name.strip().lower().split())
+        row = self.conn.execute(
+            "SELECT entity_id FROM entities WHERE entity_type='person' AND normalized_name=?", (n,)
+        ).fetchone()
+        if row:
+            return row[0]
+        row = self.conn.execute(
+            "SELECT entity_id FROM entities WHERE entity_type='person' AND aliases_json LIKE ? LIMIT 1",
+            (f'%"{n}"%',),
+        ).fetchone()
+        return row[0] if row else None
+
+    def _quarantine(self, subject_entity_id: str, predicate: str, value, confidence: float, reason: str):
+        """A3 quarantine: nothing is silently lost — unroutable assertions land in
+        fact_conflicts (the W4.2 review queue) with a sentinel incumbent id."""
+        import uuid as _uuid
+        self.conn.execute(
+            """INSERT INTO fact_conflicts (conflict_id, subject_entity_id, predicate,
+                   incumbent_object_id, challenger_value, challenger_confidence)
+               VALUES (?, ?, ?, ?, ?, ?)""",
+            (f"cfl_{_uuid.uuid4().hex[:12]}", subject_entity_id, predicate,
+             f"quarantine:{reason}", json.dumps(value, ensure_ascii=False, default=str)[:500],
+             float(confidence)),
+        )
+        self.stats["quarantined"] = self.stats.get("quarantined", 0) + 1
+
     def assert_pack_fact(
         self,
         *,
@@ -151,10 +181,29 @@ class DerivationWriter:
         object_entity_id: Optional[str] = None,
         occurrence: Optional[str] = None,   # episodic anchor (event date)
         quote: str = "",
+        about: str = "owner",               # A2/A3 routing: owner | other:<name> | unclear
     ) -> Dict[str, Any]:
         pred = pack.predicates.get(predicate)
         if pred is None:
             return {"outcome": "schema_reject", "reason": f"unknown predicate {predicate}"}
+        # --- A3 (attribution ladder): route by subject BEFORE any owner-assert ---
+        about = (about or "owner").strip()
+        if about != "owner":
+            if about.startswith("other:"):
+                other = self._resolve_person(about[6:])
+                if other:
+                    # third-party OBSERVATION: lands on THAT person's dossier, never the
+                    # owner's fact sheet; disclosure is pinned owner_only by construction.
+                    subject_entity_id = other
+                    self.stats["routed_dossier"] = self.stats.get("routed_dossier", 0) + 1
+                else:
+                    self._quarantine(subject_entity_id, predicate, value, confidence,
+                                     reason=f"dossier_unresolved:{about[6:][:40]}")
+                    return {"outcome": "quarantined", "reason": "about=other unresolvable"}
+            else:  # unclear — two passes could not agree on a subject
+                self._quarantine(subject_entity_id, predicate, value, confidence,
+                                 reason="about_unclear")
+                return {"outcome": "quarantined", "reason": "about unclear"}
         synth_preds = {q for e in pack.synthesis for q in (e.get("predicate") if isinstance(e.get("predicate"), list) else [e.get("predicate")])}
         if actor_role == "synthesis":
             # synthesis facts derive from AGGREGATES, not a single record's role; allowed only

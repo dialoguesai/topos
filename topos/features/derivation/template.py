@@ -13,7 +13,7 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from .packs import Pack, load_scales
 
-TEMPLATE_VERSION = "shadow-6"
+TEMPLATE_VERSION = "shadow-7"
 _PACK_DIR = Path(__file__).resolve().parents[4] if False else None  # set by set_pack_dir()
 
 
@@ -21,6 +21,58 @@ def set_pack_dir(path) -> None:
     """Bind the catalog directory so {scale:} references resolve."""
     global _PACK_DIR
     _PACK_DIR = path
+
+
+
+# --- A1 (attribution ladder): deterministic input/output hygiene -----------------
+# iMessage reaction/attachment prefixes ("+Q", "+g", "+!") glue onto the first
+# word and have been measured leaking into extracted fields (org "qi" from
+# "+QI just got fired"). Strip at EXTRACTION INPUT only — stored records are
+# never mutated. "+1 nice" style openers keep their prefix (third char is a space).
+_REACTION_PREFIX = re.compile(r"^\+\S(?=\S)")
+
+def clean_record_text(text: str) -> str:
+    return _REACTION_PREFIX.sub("", text or "", count=1)
+
+# Person-valued fields: pronouns/generics can never identify a person, and
+# comma/ellipsis strings are garbled lists. Kin terms are legitimate person
+# references (the owner's own word for them). Everything else passes — semantic
+# attribution is A4's job, not a blocklist's.
+_PERSON_FIELDS = {"person", "member"}
+_PERSON_BLOCKLIST = {
+    "him", "her", "he", "she", "they", "them", "we", "us", "me", "myself", "you",
+    "another", "other", "others", "someone", "somebody", "anyone", "everybody",
+    "everyone", "people", "family", "friends", "one", "this", "that", "it",
+}
+_KIN_WHITELIST = {
+    "mom", "mother", "dad", "father", "grandma", "grandmother", "grandpa",
+    "grandfather", "brother", "sister", "aunt", "uncle", "cousin", "nephew",
+    "niece", "son", "daughter", "wife", "husband", "partner", "stepdad",
+    "stepmom", "stepmother", "stepfather", "mother-in-law", "father-in-law",
+}
+
+def person_field_ok(name) -> bool:
+    if not isinstance(name, str) or not name.strip():
+        return False
+    n = " ".join(name.strip().lower().split())
+    if n in _KIN_WHITELIST:
+        return True
+    if n in _PERSON_BLOCKLIST:
+        return False
+    if len(name) > 40 or len(n.split()) > 4:
+        return False
+    if any(ch in name for ch in (",", "\u2026", "/", "|")) or "..." in name:
+        return False
+    return True
+
+# A2: packs whose facts are ABOUT a person — every assertion must carry an
+# `about` routing field; missing => "unclear" (never silently owner).
+_PERSON_FACT_PREFIXES = ("rel.", "health.")
+
+def _needs_about(predicate_name: str) -> bool:
+    return predicate_name.startswith(_PERSON_FACT_PREFIXES)
+
+_ABOUT_RE = re.compile(r"^(owner|unclear|other:.{1,60})$")
 
 
 def _enum_of(spec: Any) -> Optional[List[Any]]:
@@ -71,6 +123,7 @@ def _predicate_menu(pack: Pack) -> str:
 
 
 def build_prompt(pack: Pack, record_text: str, record_date: str, actor_role: str) -> str:
+    record_text = clean_record_text(record_text)
     g = pack.guidance
     abst = "\n".join(f"- {a}" for a in (g.get("abstention") or []))
     return f"""You extract personal facts about the OWNER of a private journal/message archive.
@@ -93,6 +146,11 @@ Example (a record often holds a fact even when most of it is about something els
 Hard rules:
 {abst}
 - Extract only what this record actually states about the OWNER. No guesses, no world knowledge.
+- Every assertion MUST carry "about": "owner" if the fact is about the record's author-owner,
+  "other:<name>" if the record states it about someone else (their appointment, their partner,
+  their loss — e.g. "Wiki and her boyfriend Luc" -> about: "other:Wiki"), or "unclear" if you
+  cannot tell. Facts about others are NOT discarded — they are routed to that person's dossier —
+  so NEVER launder a third party's fact into "owner" to save it.
 - Object fields are ALL OPTIONAL: emit only the fields the record states, omit the rest.
   A fact with one known field is still a fact — do NOT skip a fact because other fields are unknown.
 - A field marked [REQUIRED] must come FROM THE RECORD. If the record does not state it,
@@ -107,7 +165,7 @@ Hard rules:
 - confidence: 0.0-1.0, how clearly the record states it.
 
 Respond with ONLY this JSON, nothing else:
-{{"assertions": [{{"predicate": "...", "value": "... or object", "occurrence_date": null, "confidence": 0.0, "quote": "..."}}]}}"""
+{{"assertions": [{{"predicate": "...", "value": "... or object", "about": "owner", "occurrence_date": null, "confidence": 0.0, "quote": "..."}}]}}"""
 
 
 _JSON_RE = re.compile(r"\{.*\}", re.S)
@@ -159,11 +217,22 @@ def parse_output(raw: str, pack: Pack) -> Tuple[List[Dict[str, Any]], int]:
             if bad_enum:
                 rejects += 1
                 continue
+        person_bad = False
+        if isinstance(val, dict):
+            for pf in _PERSON_FIELDS & set(val):
+                if val.get(pf) is not None and not person_field_ok(val[pf]):
+                    person_bad = True
+        if person_bad:
+            rejects += 1
+            continue
+        about = str(a.get("about") or "").strip()
+        if not _ABOUT_RE.match(about):
+            about = "unclear" if _needs_about(pred.name) else "owner"
         try:
             conf = min(1.0, max(0.0, float(a.get("confidence") or 0.5)))
         except (TypeError, ValueError):
             conf = 0.5
-        valid.append({"predicate": pred.name, "value": val, "confidence": conf,
+        valid.append({"predicate": pred.name, "value": val, "confidence": conf, "about": about,
                       "occurrence": (str(a.get("occurrence_date"))[:10] if a.get("occurrence_date") else None),
                       "quote": str(a.get("quote") or "")[:200]})
     return valid, rejects
