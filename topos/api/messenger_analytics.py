@@ -385,6 +385,33 @@ async def get_messenger_sources(dataset_id: str = Query(...)) -> Dict[str, Any]:
     return {"status": "ok", "dataset_id": dataset_id, "sources": [r["source_id"] for r in rows]}
 
 
+def _peer_labels(conn: Any, dataset_id: str, keys: List[str]) -> Dict[str, str]:
+    """Flat peer_key -> display string.
+
+    `resolve_participant_labels` is keyword-only and returns NESTED dicts
+    ({label, display_name, identifier}). The first version of these endpoints called it
+    positionally (TypeError -> HTTP 500 on every request that reached labelling) and would
+    then have embedded the nested object where a string was promised. Both defects were
+    invisible to the endpoint tests because they MOCKED the resolver — the mock is the
+    documented counter-example for why these tests now use the real one.
+    """
+    if not keys:
+        return {}
+    try:
+        raw = resolve_participant_labels(conn, dataset_id=dataset_id, participant_ids=keys)
+    except Exception:  # noqa: BLE001 — labels are decoration; data must still flow
+        return {}
+    out: Dict[str, str] = {}
+    for k, entry in (raw or {}).items():
+        if isinstance(entry, dict):
+            label = str(entry.get("label") or entry.get("display_name") or "").strip()
+        else:
+            label = str(entry or "").strip()
+        if label:
+            out[str(k)] = label
+    return out
+
+
 # --------------------------------------------------------------------------- L1 read
 
 @router.get("/messenger-analytics/relationships", dependencies=[Depends(require_api_key)])
@@ -412,7 +439,10 @@ def get_relationships(
            f" last_ts, active_periods, reciprocal_periods, longest_contact_streak_weeks,"
            f" longest_reciprocal_streak_weeks, longest_contact_streak_months, max_gap_days,"
            f" median_gap_days, recent_gap_days, drift_ratio, tie_state"
-           f" FROM {MESSENGER_DYAD_STATS_TABLE} WHERE dataset_id = ? AND involves_self = 1")
+           f" FROM {MESSENGER_DYAD_STATS_TABLE} WHERE dataset_id = ? AND involves_self = 1"
+           # an owner-owner row (both keys 'self') is corpus damage, not a relationship —
+           # presenting it as one labels the owner as their own contact
+           f" AND NOT (a_key = '{SELF_KEY}' AND b_key = '{SELF_KEY}')")
     args: List[Any] = [dataset_id]
     if not include_automated:
         sql += " AND peer_class = ?"
@@ -453,7 +483,7 @@ def get_relationships(
             "drift_ratio": d["drift_ratio"],
             "tie_state": d["tie_state"],
         })
-    labels = resolve_participant_labels(conn, dataset_id, [r["peer_key"] for r in out])
+    labels = _peer_labels(conn, dataset_id, [r["peer_key"] for r in out])
     for r in out:
         r["label"] = labels.get(r["peer_key"]) or r["peer_key"]
     return {"dataset_id": dataset_id, "count": len(out), "relationships": out}
@@ -536,7 +566,7 @@ def get_relationship_signals(
 
     labels_for = {r["peer_key"] for k in ("warmth", "drift_alarms", "reciprocity")
                   for r in out.get(k, [])}
-    labels = resolve_participant_labels(conn, dataset_id, sorted(labels_for)) if labels_for else {}
+    labels = _peer_labels(conn, dataset_id, sorted(labels_for))
     for k in ("warmth", "drift_alarms", "reciprocity"):
         for r in out.get(k, []):
             r["label"] = labels.get(r["peer_key"]) or r["peer_key"]

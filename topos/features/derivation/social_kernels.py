@@ -73,6 +73,10 @@ def _peer(row: Dict[str, Any]) -> str:
 DEFAULT_MIN_MESSAGES = 8
 DEFAULT_MIN_RECIPROCAL_PERIODS = 1
 
+#: Below this many above-floor dyads, quantile self-calibration is a tautology — a single
+#: dyad is its own p75 and bands 'warm' against itself.
+MIN_DYADS_FOR_CALIBRATION = 3
+
 
 def apply_evidence_floor(rows: List[Dict[str, Any]], *, min_messages: int = DEFAULT_MIN_MESSAGES,
                          min_reciprocal: int = DEFAULT_MIN_RECIPROCAL_PERIODS) -> tuple:
@@ -103,6 +107,18 @@ def compute_warmth(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     rows, excluded = apply_evidence_floor(rows)
     if not rows:
         return []
+    if len(rows) < MIN_DYADS_FOR_CALIBRATION:
+        # Quantiles of a distribution of one are that one value: the single dyad becomes
+        # its own p75 and bands 'warm' by tautology. Below the floor, describe rather than
+        # rank — every dyad reads 'steady' and the basis says why.
+        basis = {"n_dyads": len(rows), "excluded_below_floor": excluded,
+                 "calibration": "insufficient_dyads"}
+        return [{"peer_key": _peer(r), "dataset_id": r["dataset_id"],
+                 "warmth_band": "steady",
+                 "reciprocal_periods": int(r["reciprocal_periods"] or 0),
+                 "total_msgs": int(r["total_msgs"] or 0),
+                 "recent_gap_days": r["recent_gap_days"],
+                 "threshold_basis": basis} for r in rows]
     volumes = [float(r["total_msgs"] or 0) for r in rows]
     gaps = [float(r["recent_gap_days"] or 0) for r in rows]
     vol_hi, vol_mid = _quantile(volumes, 0.75), _quantile(volumes, 0.4)
@@ -114,10 +130,16 @@ def compute_warmth(rows: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     out = []
     for r in rows:
         recip = int(r["reciprocal_periods"] or 0)
-        gap = float(r["recent_gap_days"] or 0)
+        gap_known = r["recent_gap_days"] is not None
+        gap = float(r["recent_gap_days"]) if gap_known else 0.0
         vol = float(r["total_msgs"] or 0)
         if recip <= 0:
             band = "never_direct"
+        elif not gap_known:
+            # Unknown recency used to coerce to 0.0 — "we don't know when you last spoke"
+            # scored as "you spoke moments ago", the most favourable possible reading of
+            # missing data. Unknown caps at steady: never warm on ignorance.
+            band = "steady"
         elif gap > max(gap_hi, 60.0):
             band = "dormant"
         elif gap > gap_lo and vol < vol_mid:

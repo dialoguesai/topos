@@ -49,6 +49,10 @@ DEFAULT_SESSION_GAP_SECONDS = 6 * 3600
 PEER_CLASS_HUMAN = "human"
 PEER_CLASS_AUTOMATED = "automated"
 
+#: Rooms larger than this mint no broadcast edges — fan-out is quadratic in the roster, and
+#: a hundreds-strong room is an announcement channel, not a set of relationships.
+MAX_BROADCAST_ROSTER = 32
+
 #: What produced a directed edge. In the PRIMARY KEY on purpose.
 #:
 #: A single message to a 10-person room would otherwise mint 9 directed edges, and group
@@ -196,12 +200,33 @@ SELF_KEY = "self"
 
 
 def _parse_ts(value: Any) -> Any:
+    """Parse an event timestamp into an AWARE datetime, always.
+
+    Three shapes broke the first version, all found by adversarial testing:
+      * a tz-less string parses NAIVE, and one naive value crashes every aware
+        comparison after it — a single odd connector row zeroed the whole lane;
+      * epoch seconds appear as digit strings on the live corpus and silently
+        contributed nothing;
+      * TEXT ORDER BY sorts '+02:00' offsets lexicographically, not temporally.
+    Naive values are stamped UTC — the storage convention — because dropping them
+    would un-count real messages while guessing a local zone would invent times.
+    """
     if not value:
         return None
+    text = str(value).strip()
+    if text.replace(".", "", 1).isdigit():
+        try:
+            secs = float(text)
+            if secs > 1e12:  # milliseconds
+                secs /= 1000.0
+            return datetime.fromtimestamp(secs, tz=timezone.utc)
+        except (ValueError, OSError, OverflowError):
+            return None
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00").replace(" ", "T"))
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00").replace(" ", "T"))
     except ValueError:
         return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
 def _period_of(dt: Any) -> str:
@@ -252,7 +277,12 @@ def load_messages(conn: Any, dataset_id: str, connector: Any = None) -> list:
         sql += " AND source_id = ?"
         args.append(connector)
     sql += " ORDER BY conversation_id, event_at"
-    return conn.execute(sql, args).fetchall()
+    rows = conn.execute(sql, args).fetchall()
+    # TEXT ORDER BY sorts timezone OFFSETS lexicographically: '09:00+02:00' orders after
+    # '08:30+00:00' even though it happened first. Adversarial run measured the result —
+    # negative reply latencies and initiations credited to the responder. Re-sort by the
+    # parsed instant; the SQL ORDER BY remains only to make ties deterministic.
+    return sorted(rows, key=lambda r: (str(r[0] or ""), _parse_ts(r[3]) or datetime.min.replace(tzinfo=timezone.utc)))
 
 
 def classify_conversations(rows: list) -> dict:
@@ -265,7 +295,10 @@ def classify_conversations(rows: list) -> dict:
     """
     senders: dict = {}
     for conv, _mid, sender, _ea, is_self, _src, _rt in rows:
-        if not is_self and sender:
+        # A non-self sender whose id equals the owner sentinel is unattributable: counting
+        # it would merge a stranger into the owner's own node (the token 'self' exists as a
+        # sender_id on the live corpus, so this is a real row shape, not a hypothetical).
+        if not is_self and sender and str(sender) != SELF_KEY:
             senders.setdefault(conv, set()).add(str(sender))
     return {conv: (EDGE_KIND_DM if len(s) == 1 else EDGE_KIND_GROUP_BROADCAST)
             for conv, s in senders.items()}
@@ -297,7 +330,7 @@ def extract_directed_dyadic_edges(
     kinds = classify_conversations(rows)
     peers: dict = {}
     for conv, _mid, sender, _ea, is_self, _src, _rt in rows:
-        if not is_self and sender:
+        if not is_self and sender and str(sender) != SELF_KEY:
             peers.setdefault(conv, set()).add(str(sender))
 
     acc: dict = {}
@@ -320,6 +353,8 @@ def extract_directed_dyadic_edges(
         speaker = SELF_KEY if is_self else str(sender or "")
         if not speaker:
             continue
+        if not is_self and speaker == SELF_KEY:
+            continue  # unattributable: see classify_conversations
         if conv != cur_conv:
             cur_conv, last_dt, last_speaker = conv, None, None
 
@@ -356,6 +391,13 @@ def extract_directed_dyadic_edges(
                         e.latencies.append(latency)
             # Broadcast: speaker -> everyone else who has ever spoken in the room. Soft by
             # construction, kept in its own rows so it can be excluded wholesale.
+            #
+            # Bounded: fan-out is quadratic in the roster (a 500-speaker room mints 250k
+            # rows per period), and a room that size is an announcement channel, not a set
+            # of relationships — minting nothing is the honest reading of it.
+            if len(conv_peers) > MAX_BROADCAST_ROSTER:
+                last_dt, last_speaker = dt, speaker
+                continue
             room = set(conv_peers) | {SELF_KEY}
             for other in room:
                 if other == speaker:
@@ -476,7 +518,7 @@ def build_dyad_stats(conn: Any, dataset_id: str, *, now: Any = None,
     kinds = classify_conversations(rows)
     peers: dict = {}
     for conv, _m, s, _e, sf, _src, _rt in rows:
-        if not sf and s:
+        if not sf and s and str(s) != SELF_KEY:
             peers.setdefault(conv, set()).add(str(s))
 
     per: dict = {}
@@ -514,7 +556,10 @@ def build_dyad_stats(conn: Any, dataset_id: str, *, now: Any = None,
 
     months = sorted(all_months)
     weeks = sorted(all_weeks)
-    ref = now or (max((t for d in per.values() for t in d["times"]), default=None))
+    # The reference instant is NOW, not the corpus maximum. Deriving it from the data let
+    # one future-dated message mark every other dyad dormant — the poisoned row set the
+    # clock for everyone. A caller may still pass `now` (tests do); production gets wall time.
+    ref = now or datetime.now(timezone.utc)
     stamp = _utc_now()
     out = []
     for (a, b), d in per.items():
@@ -523,7 +568,10 @@ def build_dyad_stats(conn: Any, dataset_id: str, *, now: Any = None,
         gaps = [(times[i] - times[i - 1]).total_seconds() / 86400.0
                 for i in range(1, len(times))]
         peer = b if a == SELF_KEY else a
-        recent_gap = ((ref - times[-1]).total_seconds() / 86400.0) if ref else None
+        # Clamped at zero: a future-dated LAST message yields a negative gap, which every
+        # downstream comparison reads as "extremely recent". The poison stays confined to
+        # the dyad that carries the bad row.
+        recent_gap = max(0.0, (ref - times[-1]).total_seconds() / 86400.0) if ref else None
         # own-baseline drift: recent rate vs this dyad's own lifetime rate, never a global one
         span_days = max((times[-1] - times[0]).total_seconds() / 86400.0, 1.0)
         baseline = total / span_days
@@ -536,7 +584,7 @@ def build_dyad_stats(conn: Any, dataset_id: str, *, now: Any = None,
         if ref is not None:
             age_days = (ref - times[0]).total_seconds() / 86400.0
             observable = max(min(recent_window_days, age_days), 1.0)
-        drift = round((recent / observable) / baseline, 4) if baseline > 0 else None
+        drift = round(min(max((recent / observable) / baseline, 0.0), 10.0), 4) if baseline > 0 else None
         recip_m = d["m_out"] & d["m_in"]
         recip_w = d["w_out"] & d["w_in"]
         # BALANCE IS OWNER-RELATIVE, and it has to be stated because the naive definition is
@@ -632,7 +680,7 @@ def attach_affect(conn: Any, dataset_id: str, acc: dict) -> dict:
     kinds = classify_conversations(rows)
     peers: dict = {}
     for conv, _m, s, _e, sf, _src, _rt in rows:
-        if not sf and s:
+        if not sf and s and str(s) != SELF_KEY:
             peers.setdefault(conv, set()).add(str(s))
 
     tally: dict = {}

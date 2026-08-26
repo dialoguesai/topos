@@ -71,6 +71,8 @@ def test_topic_cluster_becomes_hub_with_discusses_edges(conn):
 def test_fact_triple_becomes_labeled_edge(conn):
     r = EntityResolver(conn)
     subj = r._create_entity("Jonny", "person")
+    # L4-8: subject facts project only for the OWNER; the guard fails closed otherwise
+    conn.execute("UPDATE entities SET is_self=1 WHERE entity_id=?", (subj,))
     conn.commit()
     _put_object(
         conn,
@@ -98,6 +100,8 @@ def test_fact_triple_becomes_labeled_edge(conn):
 def test_materialize_is_idempotent(conn):
     r = EntityResolver(conn)
     subj = r._create_entity("Jonny", "person")
+    # L4-8: subject facts project only for the OWNER; the guard fails closed otherwise
+    conn.execute("UPDATE entities SET is_self=1 WHERE entity_id=?", (subj,))
     conn.commit()
     _put_object(
         conn, object_id="f1", object_type="fact", object_key="fact:jonny:lived_in",
@@ -201,6 +205,8 @@ def test_rematerialize_updates_edges_in_place_never_deletes_first(conn):
     /entities/graph read in that window rendered a goal-less graph."""
     r = EntityResolver(conn)
     subj = r._create_entity("Jonny", "person")
+    # L4-8: subject facts project only for the OWNER; the guard fails closed otherwise
+    conn.execute("UPDATE entities SET is_self=1 WHERE entity_id=?", (subj,))
     conn.commit()
     _put_object(
         conn, object_id="f1", object_type="fact", object_key="fact:jonny:works_at",
@@ -233,6 +239,7 @@ def test_sweep_removes_only_stale_mz_edges(conn):
     r = EntityResolver(conn)
     subj = r._create_entity("Jonny", "person")
     org = r._create_entity("Dialogues", "org")
+    conn.execute("UPDATE entities SET is_self=1 WHERE entity_id=?", (subj,))
     conn.commit()
     # An organic evidence edge (no mz tag) must never be sweep-eligible.
     conn.execute(
