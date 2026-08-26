@@ -10,6 +10,25 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Fixed
+- **Warmth is no longer a constant the extractor invents.** `warmth_band: "medium"`
+  and `cadence_band: "recent"` were string literals in the rule extractor, so all 216
+  stored `RelationshipEdge` rows read identically — a constant is indistinguishable
+  from a measurement once written, and two layers above consumed it as one: the
+  relationship aggregate defaulted an ABSENT band to "medium" as well, and
+  `fit/evaluator`'s `relationship_warmth` facet scored on the PRESENCE of any band,
+  so the stamped constant was the entire evidence base for telling the owner their
+  network is warm (0.75, `warm_network`). The extractor now says "unknown", the
+  aggregate defaults to "unknown", and the facet filters unknown before scoring, so
+  an unmeasured network reads `cold_network` with low confidence. Ranking that needs
+  real warmth comes from `query/closeness.py`, which has the corpus. Existing rows
+  were backfilled to "unknown" and the aggregate recomputed.
+- **The owner is no longer the most important person in their own social graph.**
+  Messenger analytics were last computed before the ego exclusion shipped, so the
+  owner still held top centrality (0.582) and their star collapsed the partition.
+  Recomputed: importance rows 350 -> 345, and the August partition went from one
+  community holding 58% of participants to 37 communities with the largest at 20%.
+
+### Fixed
 - **Known-item facts: delimiter-aware predicates and a deterministic owner.** A bare
   `LIKE 'fact:<owner>:<pred>%'` also swept sibling predicates, so "Who's in my family?"
   was handed all 23 `rel.relationship_event` rows and answered with people the owner had
