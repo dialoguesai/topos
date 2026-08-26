@@ -121,3 +121,106 @@ def resolve_pack_offer(conn: sqlite3.Connection, offer_id: str, action: str) -> 
                          " WHERE pack_id=?", (enable, pack_id))
         commit_connection(conn)
     return {"offer_id": offer_id, "pack_id": pack_id, "kind": kind, "action": action}
+
+
+def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500) -> Dict[str, Any]:
+    """Owner-initiated history backfill for ONE enabled pack (the lens catalog's
+    backfill control). Bounded by `limit` prefilter-HIT records per invocation —
+    a huge history closes over a few presses (or the drip catch-up finishes it).
+    Reuses the ingest pipeline wholesale: guards, multi-vote judging, ladder,
+    ledger, yield counters."""
+    from ...enrichment.jobs.canonical.derivation_job import (
+        _bump_yield, _iter_history, _ledger_write, _verify_mode)
+    from .packs import load_packs
+    from .prefilter import PackPrefilter
+    from . import template as _T
+    from .registry import bundled_pack_dir
+    from .template import build_prompt, parse_output
+    from .verify import (apply_verdict, build_verify_prompt, parse_verdict,
+                         verifier_model)
+    from .writer import DerivationWriter
+    from ...features.facts.llm_extract import _resolved_extraction_model  # type: ignore
+    from ...config.settings import settings as _settings
+    from ...engine.backends.ollama import OllamaAdapter
+
+    pack_dir = bundled_pack_dir()
+    _T.set_pack_dir(pack_dir)
+    row = conn.execute("SELECT enabled FROM pack_registry WHERE pack_id=?", (pack_id,)).fetchone()
+    if not row or not row[0]:
+        raise ValueError(f"pack {pack_id} is not enabled")
+    pack = load_packs(pack_dir, only=[pack_id]).get(pack_id)
+    if pack is None:
+        raise ValueError(f"unknown pack {pack_id}")
+    owner_row = conn.execute("SELECT entity_id FROM entities WHERE is_self=1").fetchone()
+    if not owner_row:
+        raise ValueError("no owner entity")
+    owner = owner_row[0]
+    model = _resolved_extraction_model(_settings, conn)
+    vmodel = verifier_model()
+    adapter = OllamaAdapter()
+
+    def llm(m, prompt, n=900):
+        out = adapter._generate(m, prompt, num_predict=n, think=False, temperature=0.0,
+                                num_ctx=8192, timeout=180)
+        return str(out.get("text") or "") if isinstance(out, dict) else str(out or "")
+
+    verify_mode = _verify_mode()
+    pf = PackPrefilter(pack)
+    writer = DerivationWriter(conn, model=model)
+    done = {r[0] for r in conn.execute("SELECT key FROM derivation_progress")}
+    stats = {"processed": 0, "assertions": 0, "accepted": 0, "written": 0, "quarantined0": writer.stats.get("quarantined", 0)}
+    for rec in _iter_history(conn, limit=20000):
+        if stats["processed"] >= limit:
+            break
+        key = f"{pack_id}@{pack.version}:{rec['table']}:{rec['record_id']}"
+        if key in done:
+            continue
+        if rec["role"] not in pack.allowed_roles() or not pf.passes(rec["text"]):
+            conn.execute("INSERT OR REPLACE INTO derivation_progress (key) VALUES (?)", (key,))
+            continue
+        stats["processed"] += 1
+        try:
+            raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"]))
+            _bump_yield(conn, pack_id, llm_calls=1, prefilter_hits=1)
+        except Exception:  # noqa: BLE001
+            continue
+        valid, _rej = parse_output(raw, pack, record_text=rec["text"])
+        stats["assertions"] += len(valid)
+        _bump_yield(conn, pack_id, assertions=len(valid))
+        for a in valid:
+            if verify_mode != "off":
+                try:
+                    verdict = parse_verdict(llm(vmodel, build_verify_prompt(
+                        rec["text"], rec["role"], rec["date"],
+                        a["predicate"], a["value"], a.get("about", "owner")), n=250))
+                except Exception:  # noqa: BLE001
+                    verdict = None
+                a = apply_verdict(a, verdict)
+            else:
+                a = dict(a); a["verifier_status"] = "skipped"
+            if a.get("verifier_status") == "rejected":
+                _ledger_write(conn, stage="backfill", pack=pack, rec=rec, a=a,
+                              model=model, vmodel=vmodel)
+                continue
+            stats["accepted"] += 1
+            _bump_yield(conn, pack_id, accepted=1)
+            out = writer.assert_pack_fact(
+                pack=pack, predicate=a["predicate"], subject_entity_id=owner,
+                value=a["value"], actor_role=rec["role"],
+                source_refs=[{"table": rec["table"], "record_id": rec["record_id"]}],
+                confidence=a["confidence"], occurrence=a["occurrence"],
+                quote=a.get("quote", ""), about=a.get("about", "owner"),
+                event_date=rec["date"] or None)
+            stored = out.get("outcome") in ("written", "corroborated", "retelling_merged",
+                                            "field_update", "corrected", "superseded")
+            if stored:
+                stats["written"] += 1
+                _bump_yield(conn, pack_id, written=1)
+            _ledger_write(conn, stage="backfill", pack=pack, rec=rec, a=a,
+                          model=model, vmodel=vmodel,
+                          written_id=out.get("object_id") if stored else None)
+        conn.execute("INSERT OR REPLACE INTO derivation_progress (key) VALUES (?)", (key,))
+        conn.commit()
+    conn.commit()
+    stats["quarantined"] = writer.stats.get("quarantined", 0) - stats.pop("quarantined0")
+    return stats
