@@ -165,6 +165,7 @@ from . import (  # noqa: F401  (imported for handler registration side effects)
     uma,
     messenger_analytics,
     mcp_clients,
+    mcp_client_elevations,
     contacts_import,
     complexity,
     timeline_daily,

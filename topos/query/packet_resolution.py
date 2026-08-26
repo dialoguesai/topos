@@ -69,6 +69,7 @@ def effective_packet_resolution(
     disclosure_tier: str = "owner_raw",
     owner_id: str = "",
     principal: "Optional[object]" = None,
+    scope_id: str = "",
 ) -> Dict[str, Any]:
     """The setting after both interlocks. `reason` says which floor applied, if any.
 
@@ -101,6 +102,29 @@ def effective_packet_resolution(
     own = str(owner_id or "")
     cls = getattr(principal, "cls", None)
     if cls == THIRD_PARTY:
+        # Elevation (P2, "one consent ledger" §03b): an enrolled client may hold
+        # an approved, unexpired, per-scope consent record. It lifts the packet
+        # floor to min(owner setting, facts) — never facts_all, so special-class
+        # content stays owner-first-party — and every other gate keeps its
+        # authority: the owner's global scores_only dial caps it, the locality
+        # gate floors a hosted binding, and the disclosure TIER stays
+        # default_disclosure (elevation is about the fact packet, not raw rows).
+        # Note this branch deliberately does not require owner_raw tier.
+        client_id = str(getattr(principal, "client_id", "") or "")
+        if conn is not None and client_id and scope_id and setting != "scores_only":
+            from ..mcp_clients import ELEVATION_CEILING, active_elevation
+
+            grant = active_elevation(conn, client_id=client_id, scope_id=scope_id)
+            if grant is not None:
+                candidates = (setting, ELEVATION_CEILING, str(grant.get("resolution") or ""))
+                effective = min(candidates, key=resolution_order)
+                if resolution_order(effective) > 0:
+                    if not locality["local"]:
+                        effective, reason = "scores_only", "hosted_binding"
+                    else:
+                        reason = f"consent_grant:{grant.get('id')}"
+                    return {"setting": setting, "effective": effective, "reason": reason,
+                            "principal_cls": cls or "", **locality}
         is_owner, floor_reason = False, "principal_floor"
     elif cls == OWNER_APP:
         is_owner, floor_reason = True, "non_owner_floor"
