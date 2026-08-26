@@ -563,8 +563,8 @@
       "notes": []
     },
     {
-      "version": "unreleased",
-      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "version": "1.3.25",
+      "summary": "Release 1.3.25.",
       "steps": [],
       "notes": [
         "S1: two additive migrations ship here \u2014 enrichment_record_progress_v1 (63, written earlier and deliberately held out of the repo head on 2026-08-25 so it could not stamp a live database past its installed engine) and derivation_provenance_v1 (64, adds ontology_id / ontology_version / altitude + a pack lookup index to signal_objects). Both are additive DDL applied through wiki_schema_migrations; no rebuild, no reprocess.",
@@ -572,6 +572,12 @@
         "Packet resolution defaults to scores_only, which is byte-compatible with prior behaviour: no node changes what it sends to its answering model until its owner opts in.",
         "After this release installs, raise the routine playground's PG_NODE_SCHEMA_BASELINE to 64."
       ]
+    },
+    {
+      "version": "unreleased",
+      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "steps": [],
+      "notes": []
     }
   ]
 }
