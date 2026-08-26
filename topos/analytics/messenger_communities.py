@@ -473,7 +473,9 @@ def _compute_directed_lane(db: Any, dataset_id: str, source_ids: Optional[Sequen
     # rollup is lifetime-wide either way, so the filter only applies to the edge lane.
     only = str(source_ids[0]) if source_ids and len(source_ids) == 1 else None
     acc = extract_directed_dyadic_edges(db, dataset_id, connector=only)
-    rows = rows_for_persist(acc, dataset_id, DEFAULT_SESSION_GAP_SECONDS)
+    from .messenger_directed import attach_affect
+    rows = rows_for_persist(acc, dataset_id, DEFAULT_SESSION_GAP_SECONDS,
+                            affect=attach_affect(db, dataset_id, acc))
     periods = sorted({r[1] for r in rows})
     edges = persist_directed_edges(db, dataset_id, rows, periods=periods)
     dyads = persist_dyad_stats(db, dataset_id, build_dyad_stats(db, dataset_id))

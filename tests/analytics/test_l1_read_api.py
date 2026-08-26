@@ -117,3 +117,33 @@ def test_a_read_before_any_write_returns_empty_not_an_error(tmp_path, monkeypatc
     assert get_relationships(dataset_id="nope", tie_state=None, include_automated=False, limit=100)["relationships"] == []
     assert get_directed_edges(dataset_id="nope", peer_key=None, edge_kind="dm", limit=200)["edges"] == []
     c.close()
+
+
+# --- L5 signals over the same substrate ---
+
+def test_relationship_signals_reports_what_it_declined_to_judge(conn):
+    """A dyad under the floor has not been judged and found wanting — it has not been
+    judged. Reporting the count is the difference between "you have N relationships" and
+    "most of your contacts are events"."""
+    from topos.api.messenger_analytics import get_relationship_signals
+
+    res = get_relationship_signals(dataset_id=DS, signal="all")
+    assert res["dyads_considered"] >= 1
+    assert "excluded_below_floor" in res
+    assert res["dyads_above_floor"] + res["excluded_below_floor"] == res["dyads_considered"]
+
+
+def test_each_signal_can_be_requested_alone(conn):
+    from topos.api.messenger_analytics import get_relationship_signals
+
+    only = get_relationship_signals(dataset_id=DS, signal="warmth")
+    assert "warmth" in only
+    assert "drift_alarms" not in only and "reciprocity" not in only
+
+
+def test_signals_on_an_unknown_dataset_are_empty_not_an_error(conn):
+    from topos.api.messenger_analytics import get_relationship_signals
+
+    res = get_relationship_signals(dataset_id="nope", signal="all")
+    assert res["dyads_considered"] == 0
+    assert res["warmth"] == []

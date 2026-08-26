@@ -493,3 +493,51 @@ def get_directed_edges(
     edges = [dict(zip(keys, tuple(r))) for r in conn.execute(sql, args).fetchall()]
     return {"dataset_id": dataset_id, "edge_kind": edge_kind, "count": len(edges),
             "edges": edges}
+
+
+@router.get("/messenger-analytics/relationship-signals", dependencies=[Depends(require_api_key)])
+def get_relationship_signals(
+    dataset_id: str = Query(...),
+    signal: str = Query("all", description="all | warmth | drift | reciprocity"),
+) -> Dict[str, Any]:
+    """L5 — the derived read of the relationship graph.
+
+    Everything here is calibrated against the owner's OWN distribution, and each response
+    carries the thresholds it was computed under: a warmth band is a claim about a person,
+    and a claim about a person should be able to say what would have changed it.
+
+    `excluded_below_floor` is reported rather than hidden. A dyad under the evidence floor
+    has not been judged and found wanting — it has not been judged, and saying so is the
+    difference between "you have 35 relationships" and "116 of your contacts are events".
+    """
+    conn = get_db_connection()
+    if conn is None:
+        return {"dataset_id": dataset_id, "error": "no database"}
+    from ..analytics.messenger_directed import ensure_directed_tables_present
+    from ..features.derivation.social_kernels import (_dyad_rows, apply_evidence_floor,
+                                                      compute_drift, compute_reciprocity,
+                                                      compute_warmth)
+
+    ensure_directed_tables_present(conn)
+    rows = _dyad_rows(conn, dataset_id)
+    kept, excluded = apply_evidence_floor(rows)
+    out: Dict[str, Any] = {
+        "dataset_id": dataset_id,
+        "dyads_considered": len(rows),
+        "dyads_above_floor": len(kept),
+        "excluded_below_floor": excluded,
+    }
+    if signal in ("all", "warmth"):
+        out["warmth"] = compute_warmth(rows)
+    if signal in ("all", "drift"):
+        out["drift_alarms"] = compute_drift(rows)
+    if signal in ("all", "reciprocity"):
+        out["reciprocity"] = compute_reciprocity(rows)
+
+    labels_for = {r["peer_key"] for k in ("warmth", "drift_alarms", "reciprocity")
+                  for r in out.get(k, [])}
+    labels = resolve_participant_labels(conn, dataset_id, sorted(labels_for)) if labels_for else {}
+    for k in ("warmth", "drift_alarms", "reciprocity"):
+        for r in out.get(k, []):
+            r["label"] = labels.get(r["peer_key"]) or r["peer_key"]
+    return out

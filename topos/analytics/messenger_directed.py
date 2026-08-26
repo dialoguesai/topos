@@ -84,6 +84,14 @@ def dyad_key(a: str, b: str) -> tuple:
     return (x, y) if x <= y else (y, x)
 
 
+def _add_directed_column_if_missing(conn: Any, column: str, col_type: str) -> None:
+    cols = {row[1] for row in
+            conn.execute(f"PRAGMA table_info({MESSENGER_DIRECTED_EDGES_TABLE})").fetchall()}
+    if column not in cols:
+        conn.execute(
+            f"ALTER TABLE {MESSENGER_DIRECTED_EDGES_TABLE} ADD COLUMN {column} {col_type}")
+
+
 def create_directed_tables(conn: Any) -> None:
     """DDL for both L1 tables.
 
@@ -111,12 +119,22 @@ def create_directed_tables(conn: Any) -> None:
             session_gap_seconds INTEGER NOT NULL,
             from_person_id TEXT,
             to_person_id TEXT,
+            affect_counts_json TEXT,
+            affect_coverage REAL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             PRIMARY KEY (dataset_id, period_key, connector, edge_kind, from_key, to_key)
         )
         """
     )
+    # Additive upgrade for a table that already exists. CREATE TABLE IF NOT EXISTS is a
+    # no-op on an existing table, so a column added later would be missing forever on every
+    # node that ran an earlier build — the silent-partial-schema failure P0-4 hit on
+    # messenger_social_edges. Same reasoning as there: additive ALTER, never a registry
+    # migration, so user_version is untouched.
+    _add_directed_column_if_missing(conn, "affect_counts_json", "TEXT")
+    _add_directed_column_if_missing(conn, "affect_coverage", "REAL")
+
     conn.execute(
         f"""
         CREATE INDEX IF NOT EXISTS idx_{MESSENGER_DIRECTED_EDGES_TABLE}_period
@@ -351,15 +369,20 @@ def extract_directed_dyadic_edges(
     return acc
 
 
-def rows_for_persist(acc: dict, dataset_id: str, session_gap_seconds: int) -> list:
+def rows_for_persist(acc: dict, dataset_id: str, session_gap_seconds: int,
+                     affect: Any = None) -> list:
     now = _utc_now()
+    affect = affect or {}
     out = []
-    for (period, conn_id, kind, a, b), e in acc.items():
+    for key, e in acc.items():
+        period, conn_id, kind, a, b = key
+        af = affect.get(key) or {}
         out.append((dataset_id, period, str(conn_id or ""), kind, a, b, e.msgs,
                     e.sessions_initiated, e.replies, _median(e.latencies),
                     e.first_ts.isoformat() if e.first_ts else None,
                     e.last_ts.isoformat() if e.last_ts else None,
-                    int(session_gap_seconds), None, None, now, now))
+                    int(session_gap_seconds), None, None,
+                    af.get("affect_counts_json"), af.get("affect_coverage"), now, now))
     return out
 
 
@@ -385,8 +408,9 @@ def persist_directed_edges(conn: Any, dataset_id: str, rows: list, periods: Any 
             f"""INSERT OR REPLACE INTO {MESSENGER_DIRECTED_EDGES_TABLE}
                 (dataset_id, period_key, connector, edge_kind, from_key, to_key, msgs,
                  sessions_initiated, replies, median_reply_latency_s, first_ts, last_ts,
-                 session_gap_seconds, from_person_id, to_person_id, created_at, updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
+                 session_gap_seconds, from_person_id, to_person_id,
+                 affect_counts_json, affect_coverage, created_at, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
     return len(rows)
 
 
@@ -570,3 +594,65 @@ def ensure_directed_tables_present(conn: Any) -> None:
     with with_db_write():
         create_directed_tables(conn)
         commit_connection(conn)
+
+
+# --------------------------------------------------------------------------- L3: affect
+
+#: L3 asks for topic mix, affect and co-produced artifacts ON the edge. Measured on the live
+#: corpus, only ONE of the three has any messaging coverage at all:
+#:
+#:   message_topics     2,594 rows — 0 of them match a conversation message (all ChatGPT)
+#:   message_sentiment  1,792 rows — likewise, entirely ChatGPT ingestion
+#:   message_emotions   4,889 rows — 4,234 of them iMessage
+#:
+#: So "what do we talk about" is not buildable: the enrichment does not exist for messages.
+#: "How does it feel" is, and this is that. Recording the gap in code rather than only in a
+#: plan is deliberate — the next person to reach for topic-on-edge should find out here.
+def attach_affect(conn: Any, dataset_id: str, acc: dict) -> dict:
+    """Fold per-message emotion labels onto the directed edges that carry those messages.
+
+    `affect_coverage` rides beside the counts because a distribution over three labelled
+    messages and a distribution over three hundred look identical once normalised, and a
+    reader that cannot tell them apart will rank relationships by how much of them happened
+    to get enriched. Coverage is the number that makes the mix honest.
+    """
+    import json as _json
+    from collections import Counter
+
+    try:
+        labels = {str(r[0]): str(r[1]) for r in conn.execute(
+            "SELECT message_id, emotion_label FROM message_emotions"
+            " WHERE emotion_label IS NOT NULL").fetchall()}
+    except Exception:  # noqa: BLE001 — a node without the enrichment simply has no affect
+        return {}
+    if not labels:
+        return {}
+
+    rows = load_messages(conn, dataset_id)
+    kinds = classify_conversations(rows)
+    peers: dict = {}
+    for conv, _m, s, _e, sf, _src, _rt in rows:
+        if not sf and s:
+            peers.setdefault(conv, set()).add(str(s))
+
+    tally: dict = {}
+    for conv, mid, sender, ea, is_self, src, _rt in rows:
+        if kinds.get(conv) != EDGE_KIND_DM:
+            continue
+        dt = _parse_ts(ea)
+        cp = peers.get(conv) or set()
+        if dt is None or not cp:
+            continue
+        peer = next(iter(cp))
+        a, b = (SELF_KEY, peer) if is_self else (peer, SELF_KEY)
+        key = (_period_of(dt), str(src or ""), EDGE_KIND_DM, a, b)
+        if key not in acc:
+            continue
+        t = tally.setdefault(key, {"counts": Counter(), "n": 0})
+        t["n"] += 1
+        lab = labels.get(str(mid))
+        if lab:
+            t["counts"][lab] += 1
+    return {k: {"affect_counts_json": _json.dumps(dict(v["counts"])),
+                "affect_coverage": round(sum(v["counts"].values()) / v["n"], 4) if v["n"] else 0.0}
+            for k, v in tally.items()}
