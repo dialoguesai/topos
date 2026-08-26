@@ -62,6 +62,24 @@ def resolve_request_principal(
 
     if owner and secrets.compare_digest(presented.encode(), owner.encode()):
         return Principal(cls=OWNER_APP, channel="local_http")
+    # P2: per-client enrolled tokens (tpk_<client_id>.<secret>). Resolved before
+    # the shared legacy key so an enrolled client is NAMED in its principal —
+    # and note these authenticate only on principal-aware routes: require_api_key
+    # does not accept them, so a tpk holder's surface is the MCP tool set, not
+    # every REST endpoint the god key could reach.
+    if presented.startswith("tpk_"):
+        from .core.state import get_db_connection
+        from .mcp_clients import verify_client_token
+
+        conn = get_db_connection()
+        row = verify_client_token(conn, presented) if conn else None
+        if row is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid authorization token"
+            )
+        return Principal(
+            cls=THIRD_PARTY, channel="local_http", client_id=str(row.get("client_id") or "")
+        )
     if secrets.compare_digest(presented.encode(), legacy.encode()):
         if not owner:
             return None  # legacy mode: single-key world, no principal enforcement
