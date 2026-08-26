@@ -6,7 +6,7 @@ import uuid
 
 from fastapi import APIRouter, Body, Depends
 
-from ..auth import require_api_key
+from ..auth import resolve_request_principal
 from ..core.handlers import handle_control_plane_request
 
 router = APIRouter(prefix="/api/local", tags=["local-mcp"])
@@ -21,10 +21,10 @@ def _local_mcp_payload(extra: dict | None = None) -> dict:
 
 
 @router.post("/list_database_tables")
-async def local_list_database_tables(_: None = Depends(require_api_key)) -> dict:  # noqa: B008
+async def local_list_database_tables(principal=Depends(resolve_request_principal)) -> dict:  # noqa: B008
     """List tables (same as CP-forwarded tool). Requires Bearer TOPOS_KEY."""
     msg = {"id": str(uuid.uuid4()), "type": "list_database_tables", "payload": _local_mcp_payload()}
-    out = await handle_control_plane_request(msg)
+    out = await handle_control_plane_request(msg, principal=principal)
     if out.get("status") == "error":
         return {"status": "error", "error": out.get("error", "unknown")}
     return out.get("payload", {})
@@ -33,7 +33,7 @@ async def local_list_database_tables(_: None = Depends(require_api_key)) -> dict
 @router.post("/verify_claim")
 async def local_verify_claim(
     body: dict = Body(default_factory=dict),
-    _: None = Depends(require_api_key),  # noqa: B008
+    principal=Depends(resolve_request_principal),  # noqa: B008
 ) -> dict:
     """Same-device truth check (PLAN_TRUTHFULNESS_PLUGIN.md). Owner-key only;
     mirrors the CP door: `app_id` is mandatory and `mode` is pinned to fun —
@@ -48,7 +48,7 @@ async def local_verify_claim(
         "type": "verify_claim",
         "payload": {"statement": statement, "mode": "fun", "caller_app_id": app_id},
     }
-    out = await handle_control_plane_request(msg)
+    out = await handle_control_plane_request(msg, principal=principal)
     if out.get("status") == "error":
         return {"status": "error", "error": out.get("error", "unknown")}
     return out.get("payload", {})
@@ -57,7 +57,7 @@ async def local_verify_claim(
 @router.post("/truth_prompts")
 async def local_truth_prompts(
     body: dict = Body(default_factory=dict),
-    _: None = Depends(require_api_key),  # noqa: B008
+    principal=Depends(resolve_request_principal),  # noqa: B008
 ) -> dict:
     """Same-device "ask me" prompt seeds (fun aperture; topics only, no
     stances). Body: {"app_id": "truth-mirror", "limit": 5}."""
@@ -70,7 +70,7 @@ async def local_truth_prompts(
         "payload": {"mode": "fun", "caller_app_id": app_id,
                     "limit": int(body.get("limit") or 5)},
     }
-    out = await handle_control_plane_request(msg)
+    out = await handle_control_plane_request(msg, principal=principal)
     if out.get("status") == "error":
         return {"status": "error", "error": out.get("error", "unknown")}
     return out.get("payload", {})
@@ -79,7 +79,7 @@ async def local_truth_prompts(
 @router.post("/truth_seed_fact")
 async def local_truth_seed_fact(
     body: dict = Body(default_factory=dict),
-    _: None = Depends(require_api_key),  # noqa: B008
+    principal=Depends(resolve_request_principal),  # noqa: B008
 ) -> dict:
     """Owner adds a fun fact to their own sheet (refused outside the fun
     aperture). Body: {"predicate": "favorite_food", "value": "tacos",
@@ -97,7 +97,7 @@ async def local_truth_seed_fact(
             "value": str(body.get("value") or ""),
         },
     }
-    out = await handle_control_plane_request(msg)
+    out = await handle_control_plane_request(msg, principal=principal)
     if out.get("status") == "error":
         return {"status": "error", "error": out.get("error", "unknown")}
     return out.get("payload", {})
@@ -106,14 +106,14 @@ async def local_truth_seed_fact(
 @router.post("/get_table_schema")
 async def local_get_table_schema(
     body: dict = Body(default_factory=dict),
-    _: None = Depends(require_api_key),  # noqa: B008
+    principal=Depends(resolve_request_principal),  # noqa: B008
 ) -> dict:
     """Get table schema (same as CP-forwarded tool). Body: {"table_name": "..."}. Requires Bearer TOPOS_KEY."""
     table_name = (body.get("table_name") or "").strip()
     if not table_name:
         return {"status": "error", "error": "table_name required"}
     msg = {"id": str(uuid.uuid4()), "type": "get_table_schema", "payload": _local_mcp_payload({"table_name": table_name})}
-    out = await handle_control_plane_request(msg)
+    out = await handle_control_plane_request(msg, principal=principal)
     if out.get("status") == "error":
         return {"status": "error", "error": out.get("error", "unknown")}
     return out.get("payload", {})

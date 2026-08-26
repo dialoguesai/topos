@@ -35,6 +35,13 @@ class Settings(BaseSettings):
     )
 
     topos_key: Optional[str] = Field(None)
+    # First-party credential (principal fabric P1): held only by Topos-native
+    # surfaces (app, FE). Resolves to the owner_app principal on the HTTP door,
+    # while topos_key demotes to third_party. Unset ⇒ legacy mode: the door
+    # resolves no principal and every consumer behaves exactly as before, so an
+    # engine upgrade can never demote the owner's own app before the app has
+    # learned this key (install-flow invariant).
+    topos_owner_key: Optional[str] = Field(None)
     openai_api_key: Optional[str] = Field(None)
 
     environment: str = Field("development")

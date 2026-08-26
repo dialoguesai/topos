@@ -34,6 +34,24 @@ The machine-readable twin of each release is
   Gated on packet_resolution exactly as facts-direct is, so a grantee gets nothing and
   the relationships grant policy — entity keys and warmth bands, not contact names —
   still holds.
+- **[S1] Principal fabric P1 — the channel decides who is asking.** A second
+  credential, `TOPOS_OWNER_KEY`, held only by first-party surfaces, resolves to
+  the `owner_app` principal at the HTTP door; the legacy shared `TOPOS_KEY`
+  demotes to `third_party`. The verified class is stamped by the entry point
+  (HTTP dependency or the relay wrapper), scoped through the dispatcher, and
+  consumed by both disclosure floors: `effective_packet_resolution` floors a
+  `third_party` caller to `scores_only` even when the payload claims
+  `requester_id == owner_id` (reason `principal_floor`), and
+  `resolve_disclosure_tier` clamps it to `default_disclosure`, bypassing the
+  payload-id heuristic — including its spoofable `"mcp"` whitelist — whenever a
+  real principal exists. The class joins the retrieval fingerprint (`pcls=`)
+  and surfaces as `principal_cls` on stamped turns. With `TOPOS_OWNER_KEY`
+  unset, every path is byte-identical to before (install-flow invariant: an
+  upgraded engine never demotes the owner's app before the app learns the
+  key). Relay turns carry `cp_relay` and keep the forwarded-id equality test —
+  the CP stamps owner ids for Topos-native clients only since the 2026-08-26
+  containment. Design: the "Who's Asking" doc; tests:
+  `tests/query/test_principal_floors.py`.
 
 ## [1.3.32] — 2026-08-26
 

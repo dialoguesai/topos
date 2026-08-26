@@ -171,7 +171,23 @@ from . import (  # noqa: F401  (imported for handler registration side effects)
 )
 
 
-async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+async def handle_control_plane_request(
+    message: Dict[str, Any],
+    principal: "Optional[object]" = None,
+) -> Optional[Dict[str, Any]]:
+    """Dispatch one control-plane message.
+
+    `principal` is the CHANNEL-verified client class (topos/principal.py),
+    supplied by the entry point that authenticated the caller — the HTTP routes
+    pass what resolve_request_principal returned; the relay wrapper in app.py
+    passes RELAY_PRINCIPAL. It is scoped onto a contextvar for the duration of
+    the handler so the query pipeline's disclosure floors can read it without
+    threading a parameter through every handler signature. It is never read
+    from the message: a payload field claiming a principal is audit data at
+    best and a spoof at worst.
+    """
+    from ...principal import reset_principal, set_principal
+
     msg_type = str(message.get("type") or "").strip().lower()
     handler = HANDLERS.get(msg_type)
     if handler is None:
@@ -192,4 +208,12 @@ async def handle_control_plane_request(message: Dict[str, Any]) -> Optional[Dict
         "delete_home_chat_session",
     }:
         logger.info("control plane request received type=%s id=%s", msg_type, message.get("id"))
-    return await handler(message)
+    # None inherits the ambient principal (nested dispatch inside a handler must
+    # not erase the channel's stamp); entry points always pass theirs explicitly.
+    from ...principal import current_principal
+
+    token = set_principal(principal if principal is not None else current_principal())
+    try:
+        return await handler(message)
+    finally:
+        reset_principal(token)
