@@ -15,6 +15,7 @@ from .audit import build_query_audit_event
 from .ddr import StageTimings, build_disclosure_decision_record, now_ms
 from .disclosure import DisclosureFilterPipeline
 from .fingerprint import compute_retrieval_fingerprint
+from .packet_resolution import effective_packet_resolution
 from .game_layer import DefaultGameLayer
 from .inference import run_query_inference
 from .intent import compute_intent_hash
@@ -573,6 +574,20 @@ class QueryPipelineOrchestrator:
         resolved_source_ids = resolve_retrieval_source_ids(manifest, installed_source_ids or None)
         data_health_version = get_data_health_version(scope_id, resolved_source_ids, db_conn)
 
+        # Packet resolution: computed ONCE per turn with both floors applied
+        # (requester + model locality); threaded into retrieval (whether fact
+        # content is loaded), the fingerprint and cache key (disclosure
+        # dimension), and the inference packet builder. Failure ⇒ scores_only:
+        # the conservative default is the safe one.
+        try:
+            _pr = effective_packet_resolution(
+                db_conn, requester_id=str(requester_id), disclosure_tier=disclosure_tier
+            )
+        except Exception:  # noqa: BLE001
+            _pr = {"setting": "scores_only", "effective": "scores_only",
+                   "reason": "resolver_error", "local": True, "provider": "", "model": ""}
+
+
         classification = self._classifier.classify(
             turn,
             session,
@@ -630,7 +645,8 @@ class QueryPipelineOrchestrator:
 
         if classification.outcome == TurnOutcome.MEMORY_HIT and session:
             cache_key = classification.cache_key or build_cache_key(
-                scope_id=scope_id, access_mode=access_mode, intent_hash=intent_hash
+                scope_id=scope_id, access_mode=access_mode, intent_hash=intent_hash,
+                packet_resolution=_pr["effective"],
             )
             for art in session.artifacts:
                 if art.cache_key != cache_key:
@@ -688,6 +704,7 @@ class QueryPipelineOrchestrator:
                     installed_source_ids=installed_source_ids or None,
                     disclosure_tier=disclosure_tier,
                     requester_id=requester_id,
+                    packet_resolution=_pr["effective"],
                     suppress_selectors=suppress_selectors,
                     cohort_aggregate=cohort_aggregate,
                     # Wall clock by default; eval harnesses inject a fixed now so
@@ -757,11 +774,18 @@ class QueryPipelineOrchestrator:
                 query_text=query_text,
                 context_packet=final_packet,
                 scope_id=scope_id,
+                packet_resolution=_pr["effective"],
             )
             public.payload.update(inf)
             timings.inference_ms = now_ms() - _t0
 
         public_dict = public.to_dict()
+        # Declared, never silent: every turn says what resolution actually applied and
+        # why (active / non_owner_floor / hosted_binding). Same post-hoc pattern as
+        # `empty_cause` below.
+        public_dict["packet_resolution"] = _pr["effective"]
+        if _pr["reason"] != "active" and _pr["setting"] != _pr["effective"]:
+            public_dict["packet_resolution_reason"] = _pr["reason"]
         # The model that writes the owner's answer reads `public_result`, not the
         # envelope — so the cause of an empty lane has to be IN it, or the answer is
         # "no data" again. Stored on the artifact too, so a memory hit replays the
@@ -802,8 +826,10 @@ class QueryPipelineOrchestrator:
             disclosure_tier=disclosure_tier,
             grant_id=str(requester_id),
             field_transforms=field_transforms,
+            packet_resolution=_pr["effective"],
         )
-        cache_key = build_cache_key(scope_id=scope_id, access_mode=access_mode, intent_hash=intent_hash)
+        cache_key = build_cache_key(scope_id=scope_id, access_mode=access_mode,
+                                    intent_hash=intent_hash, packet_resolution=_pr["effective"])
         ttl = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
         prior_envelope = session.envelope_json if session else {}
         store.put(
