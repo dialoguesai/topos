@@ -174,3 +174,20 @@ async def handle_revise_pack_fact(message):
         return {"id": req_id, "status": "error", "error": str(exc)}
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+@handles("get_fact_evidence")
+async def handle_get_fact_evidence(message):
+    req_id = message.get("id")
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+    p = message.get("payload") or {}
+    try:
+        from ...features.derivation.surfaces import fact_evidence
+        return {"id": req_id, "status": "ok",
+                "payload": {"status": "ok", **fact_evidence(conn, str(p.get("object_id") or ""))}}
+    except ValueError as exc:
+        return {"id": req_id, "status": "error", "error": str(exc)}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}

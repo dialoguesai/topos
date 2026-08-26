@@ -643,8 +643,17 @@ def _apply_stable_names(conn, community_cores, labels_by_rank, names, eigen):
         return
     llm = None if naming_enabled() else False
     new_budget = MAX_NEW_NAMES_PER_REBUILD
+    # The owner is adjacent to almost everything, so they top the ranking of every
+    # community they touch. Left in the core they consume a slot and carry a large
+    # share of its weight, which makes unrelated communities look similar to the
+    # matcher. Identity is who the OTHER people are.
+    try:
+        ego = {str(r0[0]) for r0 in conn.execute(
+            "SELECT entity_id FROM entities WHERE is_self=1").fetchall() if r0 and r0[0]}
+    except Exception:  # noqa: BLE001 — naming must never fail on a schema quirk
+        ego = set()
     for r, core in community_cores.items():
-        fp = core_fingerprint(core, eigen)
+        fp = core_fingerprint(core, eigen, exclude=ego)
         hit = match_name(conn, fp)
         if hit is not None:
             labels_by_rank[r] = hit["name"]

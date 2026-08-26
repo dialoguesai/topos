@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Optional, Sequence
+from typing import Any, Dict, List, Optional, Sequence, Set
 
 import networkx as nx
 
@@ -36,6 +36,13 @@ def ensure_messenger_analytics_tables(conn: Any) -> None:
         commit_connection(conn)
 
 
+def _add_column_if_missing(conn: Any, table: str, column: str, col_type: str) -> None:
+    """Idempotent additive column. Safe to call on every ensure."""
+    cols = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+
+
 def _create_messenger_analytics_tables(conn: Any) -> None:
     conn.execute(
         f"""
@@ -60,6 +67,13 @@ def _create_messenger_analytics_tables(conn: Any) -> None:
         ON {MESSENGER_SOCIAL_EDGES_TABLE}(dataset_id, period_key, source_scope)
         """
     )
+    # Per-edge connector provenance. Deliberately an additive ALTER here rather
+    # than a registry migration: these three tables are created by this function
+    # and appear nowhere in storage/db/migrations/registry.py, so they are already
+    # feature-owned. Routing this through the registry would bump user_version
+    # past what an installed engine understands and fence the node out of every
+    # write — which is exactly what happened on 2026-08-25.
+    _add_column_if_missing(conn, MESSENGER_SOCIAL_EDGES_TABLE, "source_counts_json", "TEXT")
 
     conn.execute(
         f"""
@@ -105,12 +119,36 @@ def _create_messenger_analytics_tables(conn: Any) -> None:
     )
 
 
-def build_networkx_graph(period_payload: Dict[str, Any]) -> nx.Graph:
-    """Build an undirected weighted graph from Sprint 01 period payload."""
+def build_networkx_graph(
+    period_payload: Dict[str, Any],
+    exclude: Optional[Set[str]] = None,
+) -> nx.Graph:
+    """Build an undirected weighted graph from Sprint 01 period payload.
+
+    `exclude` drops nodes and every edge touching them — used to remove the OWNER
+    before centrality and community detection. The owner sits inside every
+    conversation they are part of, so co-participation makes them adjacent to
+    nearly everyone: they are the most central node in every period measured
+    (degree 0.375-0.582), and the partition collapses around them.
+
+    Measured on the live corpus 2026-08-26, removing that single node:
+
+        period    communities        largest community
+        2026-04   34 ->  53          35% -> 15%
+        2026-05   40 ->  63          34% ->  6%
+        2026-06   34 ->  54          37% -> 17%
+        2026-07   31 ->  48          34% -> 18%
+        2026-08   12 ->  37          58% -> 20%
+
+    August's "community" of 58% of all participants was the owner's star, not a
+    group of people who know each other. Every brokerage, bridge and circle number
+    computed with the ego present describes the owner's own reach.
+    """
+    exclude = exclude or set()
     graph = nx.Graph()
     for node in period_payload.get("nodes", []):
         node_id = str(node.get("id") or "").strip()
-        if not node_id:
+        if not node_id or node_id in exclude:
             continue
         graph.add_node(node_id, **node)
 
@@ -119,14 +157,26 @@ def build_networkx_graph(period_payload: Dict[str, Any]) -> nx.Graph:
         target_id = str(edge.get("target") or "").strip()
         if not source_id or not target_id or source_id == target_id:
             continue
+        if source_id in exclude or target_id in exclude:
+            continue
         weight = float(edge.get("weight") or 0.0)
         graph.add_edge(source_id, target_id, weight=max(weight, 0.0))
     return graph
 
 
-def compute_importance_and_communities(period_payload: Dict[str, Any]) -> Dict[str, Any]:
-    """Compute centrality metrics and Louvain communities for one period."""
-    graph = build_networkx_graph(period_payload)
+def compute_importance_and_communities(
+    period_payload: Dict[str, Any],
+    exclude: Optional[Set[str]] = None,
+) -> Dict[str, Any]:
+    """Compute centrality metrics and Louvain communities for one period.
+
+    `exclude` (the owner) is removed from the GRAPH but never from the stored
+    EDGES: the edges are a factual record of who talked to whom and the owner's
+    are the most important ones there, while centrality and communities are an
+    interpretation of structure BETWEEN other people. Those are different
+    questions and only the second one needs the ego gone.
+    """
+    graph = build_networkx_graph(period_payload, exclude=exclude)
     node_ids = list(graph.nodes())
     if not node_ids:
         return {"importance": {}, "communities": {}, "graph": graph}
@@ -162,6 +212,25 @@ def compute_importance_and_communities(period_payload: Dict[str, Any]) -> Dict[s
     }
 
 
+def _owner_participant_ids(conn: Any) -> Set[str]:
+    """Every contact id that IS the owner.
+
+    Plural on purpose: the owner can hold more than one contact row. Live on this
+    machine there are two — the canonical id and a `test-dataset:`-prefixed
+    duplicate left by the phone-only matching in the dataset unification — and
+    excluding only one of them would leave the ego in the graph under its other
+    identity, which looks exactly like the fix working while it has not.
+    """
+    try:
+        return {
+            str(r[0])
+            for r in conn.execute("SELECT contact_id FROM contacts WHERE is_self=1").fetchall()
+            if r and r[0]
+        }
+    except Exception:  # noqa: BLE001 — a missing or older contacts table must not break analytics
+        return set()
+
+
 def _persist_period_results(
     conn: Any,
     *,
@@ -189,6 +258,7 @@ def _persist_period_results(
                 float(edge.get("weight") or 0.0),
                 str(edge.get("edge_type") or ""),
                 json.dumps(edge.get("edge_type_counts") or {}, ensure_ascii=False),
+                json.dumps(edge.get("source_counts") or {}, ensure_ascii=False),
                 now,
                 now,
             )
@@ -252,9 +322,10 @@ def _persist_period_results(
                 INSERT INTO {MESSENGER_SOCIAL_EDGES_TABLE}
                 (
                     dataset_id, period_key, source_scope, source_id, target_id,
-                    weight, edge_type, edge_type_counts_json, created_at, updated_at
+                    weight, edge_type, edge_type_counts_json, source_counts_json,
+                    created_at, updated_at
                 )
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 edge_rows,
             )
@@ -321,6 +392,7 @@ def compute_and_persist_messenger_analytics(
     )
 
     scope = _source_scope(source_ids)
+    ego = _owner_participant_ids(db)
     periods_out: List[Dict[str, Any]] = []
     totals = {"edges_written": 0, "importance_written": 0, "communities_written": 0}
 
@@ -328,7 +400,7 @@ def compute_and_persist_messenger_analytics(
         period_key = str(period_payload.get("period_key") or "")
         if not period_key:
             continue
-        computed = compute_importance_and_communities(period_payload)
+        computed = compute_importance_and_communities(period_payload, exclude=ego)
         writes = _persist_period_results(
             db,
             dataset_id=dataset_id,
