@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query
 
-from ..auth import require_api_key
+from ..auth import resolve_request_principal
 from ..core.handlers import handle_control_plane_request
 
 router = APIRouter(prefix="/api", tags=["usage"])
@@ -14,19 +14,29 @@ router = APIRouter(prefix="/api", tags=["usage"])
 async def get_request_counts(
     owner_user_id: str | None = Query(None, description="Resource owner (default: engine's linked user)"),
     since_days: int = Query(90, ge=1, le=365),
-    _: None = Depends(require_api_key),  # noqa: B008
+    principal=Depends(resolve_request_principal),  # noqa: B008
 ) -> dict:
     """
     Return UMA and MCP request counts from the engine's DB.
     Same data as get_request_counts message type (for direct frontend or CP proxy).
     """
+    # The owner's accounting is not part of an enrolled client's surface: a tpk
+    # token authenticates on principal-aware routes, so owner-facing wrappers
+    # must refuse the THIRD_PARTY class explicitly (found live by e2e L2b —
+    # request-counts answered an enrolled client's token with 200).
+    from fastapi import HTTPException
+
+    from ..principal import THIRD_PARTY
+
+    if getattr(principal, "cls", None) == THIRD_PARTY:
+        raise HTTPException(status_code=403, detail="Owner surface")
     import uuid
     msg = {
         "id": str(uuid.uuid4()),
         "type": "get_request_counts",
         "payload": {"owner_user_id": owner_user_id or "", "since_days": since_days},
     }
-    out = await handle_control_plane_request(msg)
+    out = await handle_control_plane_request(msg, principal=principal)
     if out.get("status") == "error":
         return {
             "uma": {
