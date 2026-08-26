@@ -38,7 +38,10 @@ _ALIASES: List[tuple] = [
     (r"\b(career|fired|hired|promoted|laid off)\b", ["work.career_event"], False),
     (r"\bfamily member|my (family|relatives|parents|siblings|kids|children)\b",
      ["rel.relationship"], False),
-    (r"\b(closest|inner circle|close circle|close friend|best friend)s?\b",
+    # `friends?` alone matters: it is the most natural phrasing of the question and
+    # it matched nothing here, so "Who are my friends?" fell past the fact view to
+    # the interim query-time lane while 23 closeness_tier facts sat in the store.
+    (r"\b(closest|inner circle|close circle|close friend|best friend|friend)s?\b",
      ["rel.closeness_tier", "rel.relationship"], False),
     (r"\bchronotype|night owl|early bird\b", ["behavior.chronotype"], False),
 ]
