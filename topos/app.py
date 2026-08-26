@@ -13,6 +13,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .__version__ import __version__
 from .api import (
     analytics as analytics_routes,
+    connected_apps as connected_apps_routes,
     app_registry as app_registry_routes,
     backup as backup_routes,
     compute_remote as compute_remote_routes,
@@ -135,6 +136,7 @@ app.include_router(app_registry_routes.router)
 app.include_router(ingestion_compat_routes.router)
 app.include_router(enrichment_routes.router, prefix="/v1")
 app.include_router(signal_routes.router, prefix="/v1")
+app.include_router(connected_apps_routes.router, prefix="/v1")
 app.include_router(ingestion_routes.router, prefix="/v1")
 app.include_router(ingestion_sources_routes.router)
 app.include_router(query_routes.router, prefix="/v1")
@@ -446,10 +448,27 @@ async def startup_event() -> None:
             except Exception as lease_exc:  # noqa: BLE001
                 logger.error("Hosted pool lease issue failed: %s", lease_exc, exc_info=True)
                 raise
+        # Relay principal (P3): a message carrying a VERIFIED Ed25519 stamp
+        # resolves to the CP's classification — a named third_party client
+        # (enrollable, elevatable) or the owner's native surface. Anything
+        # else keeps the CP_RELAY deferral: forwarded-id equality plus the
+        # CP-side containment, byte-identical to pre-P3 behavior, so a node
+        # and CP on different sides of this release keep working. Verification
+        # happens only on THIS channel — a stamp arriving over local HTTP is
+        # never parsed. The stamp is resolved INSIDE the dispatched coroutine —
+        # the client thread's contextvars do not cross run_coroutine_threadsafe,
+        # a wrapper closure does.
+        async def _relay_dispatch(message):
+            from .principal import RELAY_PRINCIPAL
+            from .relay_stamp import verify_relay_stamp
+
+            principal = verify_relay_stamp(message) or RELAY_PRINCIPAL
+            return await handle_control_plane_request(message, principal=principal)
+
         state.control_plane_client = ControlPlaneClient(
             control_plane_url=settings.topos_control_plane_url,
             api_key=str(settings.topos_key or ""),
-            handler=handle_control_plane_request,
+            handler=_relay_dispatch,
             verify_ssl=settings.control_plane_verify_ssl,
         )
         state.control_plane_client.start()

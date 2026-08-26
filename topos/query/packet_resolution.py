@@ -68,30 +68,74 @@ def effective_packet_resolution(
     requester_id: str = "owner",
     disclosure_tier: str = "owner_raw",
     owner_id: str = "",
+    principal: "Optional[object]" = None,
+    scope_id: str = "",
 ) -> Dict[str, Any]:
     """The setting after both interlocks. `reason` says which floor applied, if any.
 
-    The owner test mirrors `resolve_disclosure_tier`: the CP gateway authenticates the
-    caller and forwards requester_id == owner_id (the owner's uuid) on the owner path —
-    see the CP's test_owner_identity_forwarding.py. Comparing against the literal
-    "owner" alone rejected that verified identity, so every gateway-routed owner turn
-    was floored to scores_only and the facts_direct lane could never fire for the
-    surface it was built for (live 2026-08-26: "What medications am I taking?" answered
-    "unknown" while the fact sat in signal_objects). The disclosure-tier leg stays as
-    the independent guard: a grantee is never resolved to owner_raw, including when a
-    forged payload claims owner ids, so id-equality alone can never widen a grantee.
+    Two owner tests, by channel (P1 of the principal fabric):
+
+    - `principal` is the CHANNEL-verified client class (topos/principal.py) —
+      which credential authenticated, on which transport. OWNER_APP is the
+      owner's own surface regardless of payload ids; THIRD_PARTY is floored
+      regardless of payload ids (a legacy-key client claiming
+      requester_id == owner_id is a spoof, reason `principal_floor`). Never
+      derived from the payload.
+    - CP_RELAY (and legacy None) fall back to forwarded-id equality, mirroring
+      `resolve_disclosure_tier`: the CP authenticates the caller and — since the
+      2026-08-26 containment — stamps requester_id == owner_id for Topos-native
+      clients ONLY (see the CP's test_owner_identity_forwarding.py, both sides).
+      Comparing against the literal "owner" alone had floored every
+      gateway-routed owner turn (live 2026-08-26: "What medications am I
+      taking?" answered "unknown" while the fact sat in signal_objects); the
+      unconditional stamp before the containment would have opened facts_all to
+      every OAuth connector. The disclosure-tier leg stays as the independent
+      guard: a grantee is never resolved to owner_raw, so id-equality alone can
+      never widen a grantee.
     """
     from ..config.settings import resolve_packet_resolution, settings
+    from ..principal import OWNER_APP, THIRD_PARTY
 
     setting = resolve_packet_resolution(settings, conn)
     locality = primary_binding_locality(conn)
     req = str(requester_id or "")
     own = str(owner_id or "")
-    is_owner = req == "owner" or (bool(own) and own != "owner" and req == own)
+    cls = getattr(principal, "cls", None)
+    if cls == THIRD_PARTY:
+        # Elevation (P2, "one consent ledger" §03b): an enrolled client may hold
+        # an approved, unexpired, per-scope consent record. It lifts the packet
+        # floor to min(owner setting, facts) — never facts_all, so special-class
+        # content stays owner-first-party — and every other gate keeps its
+        # authority: the owner's global scores_only dial caps it, the locality
+        # gate floors a hosted binding, and the disclosure TIER stays
+        # default_disclosure (elevation is about the fact packet, not raw rows).
+        # Note this branch deliberately does not require owner_raw tier.
+        client_id = str(getattr(principal, "client_id", "") or "")
+        if conn is not None and client_id and scope_id and setting != "scores_only":
+            from ..mcp_clients import ELEVATION_CEILING, active_elevation
+
+            grant = active_elevation(conn, client_id=client_id, scope_id=scope_id)
+            if grant is not None:
+                candidates = (setting, ELEVATION_CEILING, str(grant.get("resolution") or ""))
+                effective = min(candidates, key=resolution_order)
+                if resolution_order(effective) > 0:
+                    if not locality["local"]:
+                        effective, reason = "scores_only", "hosted_binding"
+                    else:
+                        reason = f"consent_grant:{grant.get('id')}"
+                    return {"setting": setting, "effective": effective, "reason": reason,
+                            "principal_cls": cls or "", **locality}
+        is_owner, floor_reason = False, "principal_floor"
+    elif cls == OWNER_APP:
+        is_owner, floor_reason = True, "non_owner_floor"
+    else:  # CP_RELAY or legacy: the forwarded-id equality test
+        is_owner = req == "owner" or (bool(own) and own != "owner" and req == own)
+        floor_reason = "non_owner_floor"
     if not is_owner or str(disclosure_tier or "") != "owner_raw":
-        effective, reason = "scores_only", "non_owner_floor"
+        effective, reason = "scores_only", floor_reason
     elif setting != "scores_only" and not locality["local"]:
         effective, reason = "scores_only", "hosted_binding"
     else:
         effective, reason = setting, "active"
-    return {"setting": setting, "effective": effective, "reason": reason, **locality}
+    return {"setting": setting, "effective": effective, "reason": reason,
+            "principal_cls": cls or "", **locality}
