@@ -24,7 +24,7 @@ def conn(tmp_path, monkeypatch):
 
 
 def _run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return asyncio.run(coro)
 
 
 def test_get_packs_seeds_and_lists(conn):
