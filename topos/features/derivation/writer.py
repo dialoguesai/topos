@@ -23,9 +23,23 @@ import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Any, Dict, List, Optional
 
+import os
+
 from topos.features.facts.store import FactStore, normalize_predicate, CONFLICT_CONFIDENCE_MARGIN
 from .guard import find_identifiers
 from .packs import Pack, Predicate
+
+#: Whether a resolved `about=other:<name>` assertion may be WRITTEN to that person's
+#: dossier. Default OFF, and it must stay off until a net-subject policy plane exists
+#: (per-subject opt-in defaulting to off, a write-time BlackholeStore consult, and
+#: pack-level `net_subject: allow|deny`). With it off, every outward assertion is
+#: quarantined with reason `net_subject_disabled:<name>` and waits for a human.
+#:
+#: The env override exists so the policy work can be developed and tested against the
+#: real path without editing the module. It is NOT a supported production setting: any
+#: node that sets it is writing durable facts about people who never consented and
+#: cannot, with no gate in front of the write.
+NET_SUBJECT_WRITES_ENABLED = os.environ.get("TOPOS_NET_SUBJECT_WRITES") == "1"
 # extractor provenance must track the PROMPT actually used — a local copy of this
 # constant stamped every shadow-2..6 fact "shadow-1" (caught in W1.3 grading)
 from .template import TEMPLATE_VERSION
@@ -206,6 +220,43 @@ class DerivationWriter:
         # --- A3 (attribution ladder): route by subject BEFORE any owner-assert ---
         about = (about or "owner").strip()
         if about != "owner":
+            # --- net-subject kill switch (temporary; remove when the policy plane lands) ---
+            #
+            # Below this line, `about=other:<name>` that RESOLVES is written as a durable
+            # fact onto that person's dossier. There is currently no consent plane to
+            # authorise that: `net_subject` / `subject_axis` appear ZERO times in this
+            # engine, the control plane, the front end, or any of the 25 pack YAMLs; the
+            # Pack/Predicate dataclasses carry no subject field, so a pack can neither
+            # declare nor refuse an outward subject; `pack.disclosure_default` is stored
+            # on every registry row and never read; and BlackholeGuard is consulted only
+            # at READ time, so a blackholed person can still ACCRUE facts.
+            #
+            # Nothing has been written so far only because `_resolve_person` is an exact
+            # match on `entities.normalized_name` and fails on every third-party first
+            # name — 624 of 1,505 person entities are keyed on a phone number and only 36
+            # carry aliases. That is an accident of an unbuilt person spine, not a policy.
+            # The planned L0 (person spine) exists precisely to make that resolution
+            # succeed, which would silently switch automatic third-party dossier writing
+            # ON. The owner's standing decision is "off until asked".
+            #
+            # So: quarantine EVERY outward assertion, resolvable or not. Quarantine is
+            # already the reviewed path — the rows carry full provenance and the fact
+            # editor promotes them — so nothing is lost, only deferred to a human.
+            #
+            # REMOVE THIS BLOCK when the net-subject policy plane exists (plan L4-4:
+            # per-subject opt-in defaulting to off, a write-time BlackholeStore consult,
+            # and pack-level `net_subject: allow|deny`). Replace it with that lookup —
+            # do not simply delete it.
+            if about.startswith("other:") and not NET_SUBJECT_WRITES_ENABLED:
+                # Its own reason, deliberately: these are POLICY holds, not failures to
+                # identify a subject. Collapsing them into `about_unclear` would make a
+                # withheld-by-policy row indistinguishable from one the verifier could
+                # not attribute, and the review queue's whole value is that distinction.
+                self._quarantine(subject_entity_id, predicate, value, confidence,
+                                 reason=f"net_subject_disabled:{about[6:][:40]}",
+                                 pack=pack, source_refs=source_refs, quote=quote, about=about)
+                self.stats["net_subject_withheld"] = self.stats.get("net_subject_withheld", 0) + 1
+                return {"outcome": "quarantined", "reason": "net-subject writes disabled"}
             if about.startswith("other:"):
                 other = self._resolve_person(about[6:])
                 if other:
