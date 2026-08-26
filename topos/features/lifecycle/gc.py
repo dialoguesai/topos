@@ -35,10 +35,12 @@ AUDIT_RETENTION_DAYS = 90
 # Superseded tables kept only because live code still references them.
 # GC marks them in wiki_table_catalog instead of dropping; removal needs the
 # referencing code retired first.
+# UN-DEPRECATED 2026-08-26 — `persons`, `person_aliases` and `relationship_edges` are the
+# person spine L0 is being built on. run_gc calls mark_deprecated_tables on EVERY pass, so
+# leaving them here would re-stamp the spine as superseded overnight, every night, for as
+# long as it took to build it. They are empty today, which is why nothing has noticed.
 DEPRECATED_TABLES = {
-    "persons": "superseded by entities (entity_type='person')",
-    "person_aliases": "superseded by entities.aliases_json",
-    "relationship_edges": "superseded by entity_edges",
+    "relationship_edges_legacy": "superseded by entity_edges",
     # D1.8 / B1: dual-graph furniture store — retrieval no longer packages it;
     # product path is entity_edges (+ /data/graph as-of scrubber → Wave B9).
     "graph_nodes": "superseded by entity graph (entities + entity_edges)",

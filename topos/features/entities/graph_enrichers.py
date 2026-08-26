@@ -58,7 +58,9 @@ def _table_exists(conn: sqlite3.Connection, table: str) -> bool:
 
 
 def _owner_entity(conn: sqlite3.Connection) -> Optional[str]:
-    row = conn.execute("SELECT entity_id FROM entities WHERE is_self=1 LIMIT 1").fetchone()
+    from .owner import owner_entity_id
+    _o = owner_entity_id(conn)
+    row = (_o,) if _o else None
     return str(row[0]) if row else None
 
 

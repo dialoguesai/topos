@@ -208,7 +208,10 @@ class EntitiesJob(BaseEnrichmentJob):
         def self_entity_id() -> Optional[str]:
             try:
                 row = conn.execute(
-                    "SELECT entity_id FROM entities WHERE is_self=1 LIMIT 1"
+                    "SELECT entity_id FROM entities WHERE is_self=1"
+                    " ORDER BY (SELECT COUNT(*) FROM signal_objects o"
+                    "   WHERE o.object_type='fact' AND o.object_key LIKE"
+                    "   'fact:' || entities.entity_id || ':%') DESC, entity_id ASC LIMIT 1"
                 ).fetchone()
             except Exception:
                 return None

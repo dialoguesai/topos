@@ -197,18 +197,48 @@ class TestJunkPurge:
 
 
 class TestDeprecationMarking:
-    def test_existing_deprecated_tables_marked_not_dropped(self, conn):
-        marked = mark_deprecated_tables(conn)
-        assert marked == 1  # only `persons` exists in this fixture
+    def test_the_person_spine_is_no_longer_marked_deprecated(self, conn):
+        """Reversed 2026-08-26.
+
+        `persons` and `person_aliases` are the spine L0 is being built on, and `run_gc`
+        calls `mark_deprecated_tables` on EVERY pass — so leaving them in the set would
+        re-stamp the spine as superseded overnight, every night, for as long as it took to
+        build it. They are empty today, which is the only reason nothing noticed.
+        """
+        from topos.features.lifecycle.gc import DEPRECATED_TABLES
+
+        assert "persons" not in DEPRECATED_TABLES
+        assert "person_aliases" not in DEPRECATED_TABLES
+
+        mark_deprecated_tables(conn)
         row = conn.execute(
-            "SELECT status, deprecation_note FROM wiki_table_catalog WHERE table_name='persons'"
+            "SELECT status FROM wiki_table_catalog WHERE table_name='persons'"
         ).fetchone()
-        assert row[0] == "deprecated"
-        assert "entities" in row[1]
-        # Never dropped: live code still references these tables.
-        assert conn.execute(
-            "SELECT 1 FROM sqlite_master WHERE name='persons'"
-        ).fetchone()
+        assert row is None or row[0] != "deprecated"
+        # and it is still there — marking never dropped, and neither does not-marking
+        assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='persons'").fetchone()
+
+    def test_a_genuinely_superseded_table_is_still_marked_not_dropped(self, conn):
+        """The mechanism has to keep working for the tables it is actually for."""
+        import topos.features.lifecycle.gc as gc
+
+        conn.execute("CREATE TABLE IF NOT EXISTS legacy_thing (x TEXT)")
+        conn.commit()
+        original = dict(gc.DEPRECATED_TABLES)
+        gc.DEPRECATED_TABLES.clear()
+        gc.DEPRECATED_TABLES["legacy_thing"] = "superseded by something better"
+        try:
+            assert mark_deprecated_tables(conn) == 1
+            row = conn.execute(
+                "SELECT status, deprecation_note FROM wiki_table_catalog"
+                " WHERE table_name='legacy_thing'").fetchone()
+            assert row[0] == "deprecated"
+            assert "superseded" in row[1]
+            assert conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE name='legacy_thing'").fetchone()
+        finally:
+            gc.DEPRECATED_TABLES.clear()
+            gc.DEPRECATED_TABLES.update(original)
 
 
 def test_run_gc_reports_all_sections(conn):
