@@ -128,5 +128,29 @@ def test_facts_block_survives_truncation_first():
     # facts are placed before scores: a tight budget must cut scores, not facts
     big = {"scores": [dict(_FACT_ITEM)] + [{"relevance_score": 0.5, "note": "x" * 50}] * 60}
     out = build_inference_context_packet(big, max_chars=900, packet_resolution="facts")
-    assert out["truncated"] is True
+    assert out["context_truncated"] is True
     assert '"facts"' in out["context"][:400]
+
+
+def test_honesty_keys_survive_char_truncation():
+    """The row-cap `truncated` dict must outlive the char slice — it is needed
+    precisely on the large packets that overflow (peer-session finding: the old
+    catch-all placed it LAST, deleting it exactly when it mattered)."""
+    big = {
+        "truncated": {"conversation_messages": {"cap": 100, "returned": 101}},
+        "empty_cause": None,  # None must NOT be hoisted
+        "exclusion": {"enforced": True, "dropped": 3},
+        "scores": [{"relevance_score": 0.5, "note": "x" * 60}] * 80,
+    }
+    out = build_inference_context_packet(big, max_chars=900, packet_resolution="scores_only")
+    head = out["context"][:400]
+    assert '"truncated"' in head and '"exclusion"' in head
+    assert '"empty_cause"' not in out["context"]
+    assert out["context_truncated"] is True
+    assert out["context"].endswith("…[CONTEXT CUT AT CHAR LIMIT]")
+
+
+def test_cut_marker_absent_when_context_fits():
+    out = build_inference_context_packet({"scores": [{"relevance_score": 0.9}]})
+    assert out["context_truncated"] is False
+    assert "CONTEXT CUT" not in out["context"]
