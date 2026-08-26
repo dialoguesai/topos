@@ -298,3 +298,17 @@ def test_parse_output_grounding(a3_writer=None):
     # without record_text (legacy callers) behavior unchanged
     valid2, rejects2 = parse_output(raw, pack)
     assert len(valid2) == 1
+
+def test_org_grounding():
+    pack = _work_pack()
+    rec = "I told the story of getting fired. Johnny said to sell the software."
+    raw = json.dumps({"assertions": [{
+        "predicate": "work.career_event", "value": {"event": "fired", "org": "The Wandering Partners"},
+        "about": "owner", "confidence": 0.9, "quote": "getting fired"}]})
+    valid, rejects = parse_output(raw, pack, record_text=rec)
+    assert rejects == 1
+    raw2 = json.dumps({"assertions": [{
+        "predicate": "work.career_event", "value": {"event": "fired"},
+        "about": "owner", "confidence": 0.9, "quote": "getting fired"}]})
+    valid2, _ = parse_output(raw2, pack, record_text=rec)
+    assert len(valid2) == 1      # org-less stays legal
