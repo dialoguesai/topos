@@ -10,6 +10,19 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Added
+- **[S1] Stable community naming** (PLAN_COMMUNITY_NAMING; migration 67): a
+  community's identity is its weighted core (top-k central members), not its
+  per-rebuild Louvain index. Names live in a history and survive rebuilds while
+  the core persists (weighted-Jaccard match; fingerprints follow gradual drift);
+  genuinely new cores get one LLM-derived name — local model by default,
+  owner-swappable at Settings → Node functions (`/v1/community-naming-config`) —
+  prompted contrastively and validated by the deterministic label guards, with
+  the dominant-type label as ever-present fallback. Owners can rename any
+  community (`put_community_name`, panel ✎); renames retire derived names and
+  win ties forever. Steady-state model cost ≈ a few calls per rebuild.
+
+
+### Added
 - **[S1] Goals-first milestone integrity**: `asp.milestone` must attach (fuzzy,
   generic-token-stopped) to a stored active goal or it quarantines — the measured
   failure prompt rules couldn't fix twice, fixed structurally. Unattached-but-valid
