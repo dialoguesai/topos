@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional, Sequence, Set
 
 import networkx as nx
 
+from .messenger_directed import create_directed_tables
 from .messenger_graph import extract_messenger_graph
 from ..storage.db.write_gate import batched_writes, commit_connection, with_db_write
 
@@ -74,6 +75,9 @@ def _create_messenger_analytics_tables(conn: Any) -> None:
     # past what an installed engine understands and fence the node out of every
     # write — which is exactly what happened on 2026-08-25.
     _add_column_if_missing(conn, MESSENGER_SOCIAL_EDGES_TABLE, "source_counts_json", "TEXT")
+
+    # L1 — the directed half. Same site, same gate, same reasoning about migrations.
+    create_directed_tables(conn)
 
     conn.execute(
         f"""
