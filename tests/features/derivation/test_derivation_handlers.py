@@ -31,7 +31,11 @@ def test_get_packs_seeds_and_lists(conn):
     out = _run(handle_get_derivation_packs({"id": "1"}))
     assert out["status"] == "ok"
     packs = {p["pack_id"]: p for p in out["payload"]["packs"]}
-    assert len(packs) == 25
+    assert len(packs) >= 25, "the shipped catalog should not shrink"
+    assert "net.capability" in packs, "the outward pack is listed like any other"
+    assert packs["net.capability"]["enabled"] is False, (
+        "an outward pack must not be enabled by default — describing third parties is a "
+        "decision the owner makes, never one a seed makes for them")
     assert packs["work.career"]["enabled"] is True          # Wave A
     assert packs["beliefs.civic"]["enabled"] is False       # opt-in, gated
     assert packs["work.career"]["predicates"] > 5

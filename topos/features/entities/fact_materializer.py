@@ -366,6 +366,17 @@ def _display_value(raw) -> str:
     return str(v or "").strip()
 
 
+def _owner_entity_ids(conn: sqlite3.Connection) -> "set[str]":
+    """Every is_self entity. Plural because this machine has three, and reading one by rowid
+    luck would make the projection guard depend on which one won."""
+    try:
+        return {str(r[0]) for r in
+                conn.execute("SELECT entity_id FROM entities WHERE is_self=1").fetchall()
+                if r and r[0]}
+    except sqlite3.Error:
+        return set()
+
+
 def materialize_signal_objects_to_graph(
     conn: sqlite3.Connection,
     *,
@@ -461,6 +472,20 @@ def materialize_signal_objects_to_graph(
             )
 
     # 2) SPO facts -> subject->object labeled edges.
+    #
+    # L4-8 — THE PROJECTION GUARD. This query used to have no subject filter, which was
+    # harmless while every pack fact was about the owner and became unsafe the moment one
+    # was not. An outward fact is a claim about a third party who never consented; the
+    # engine holds it at owner_only disclosure, but the ENTITY GRAPH is a different surface
+    # with different readers, and projecting the claim onto an edge would restate it
+    # somewhere the disclosure rule does not reach.
+    #
+    # Owner-subject facts project exactly as before. Everything else is counted and skipped,
+    # so "how many claims are we declining to project" is answerable rather than invisible.
+    owner_ids = _owner_entity_ids(conn)
+    if not owner_ids:
+        logger.warning("materializer: no is_self entity — the L4-8 projection guard cannot "
+                       "distinguish owner facts and is inactive for this pass")
     frows = conn.execute(
         """
         SELECT object_id, payload_json, valid_from, valid_to, confidence
@@ -468,12 +493,21 @@ def materialize_signal_objects_to_graph(
         WHERE object_type = 'fact' AND valid_to IS NULL
         """
     ).fetchall()
+    net_facts_skipped = 0
     for object_id, payload_json, valid_from, valid_to, confidence in frows:
         try:
             payload = json.loads(payload_json or "{}")
         except (TypeError, ValueError):
             continue
         subj = str(payload.get("subject_entity_id") or "").strip()
+        # The filter applies only when the owner set is KNOWN. On a node with no is_self
+        # entity we cannot establish whose fact this is — but neither can the outward lane
+        # have produced one, since an outward write requires a resolved, authorised subject
+        # entity. Filtering there would stop a fresh node projecting its own facts to
+        # protect against claims that cannot exist yet, so it warns instead.
+        if owner_ids and subj and subj not in owner_ids:
+            net_facts_skipped += 1
+            continue
         pred = str(payload.get("predicate") or "").strip()
         obj_val = _display_value(payload.get("object_value"))
         obj_id = str(payload.get("object_entity_id") or "").strip()
@@ -528,6 +562,9 @@ def materialize_signal_objects_to_graph(
         purged += 1
     if purged:
         logger.info("materializer purged %d value-surface entities (dates/quantities)", purged)
+    if net_facts_skipped:
+        logger.info("materializer skipped %d non-owner-subject facts (L4-8 projection guard)",
+                    net_facts_skipped)
 
     conn.commit()
     return {"topic_edges": topic_edges, "fact_edges": fact_edges, "purged_value_nodes": purged}

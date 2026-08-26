@@ -643,3 +643,101 @@ def test_fact_evidence_marks_missing_records(a3_writer):
     from topos.features.derivation.surfaces import fact_evidence
     ev = fact_evidence(conn, out["object_id"])
     assert ev["sources"][0]["missing"] is True     # honest about what it cannot show
+
+
+def test_promoting_a_pre_provenance_conflict_says_the_evidence_is_missing(a3_writer):
+    """A promotion must never mint a fact whose empty `source_refs` reads as
+    "no sources were needed".
+
+    13 rows on the first live node checked carry `source_refs_json` as SQL NULL with
+    `pack_id` populated — written by a build from before `1a82a5c` added those columns to
+    the quarantine INSERT, which is why promote_conflict's pack_id guard lets them through.
+    `_quarantine` exists so the owner can promote "without minting evidence-less rows", so
+    the gap has to be stated, and stated somewhere walkable.
+    """
+    import json as _json
+    import uuid as _uuid
+
+    w, conn = a3_writer
+    # the fixture's fact_conflicts predates provenance — bring it up the same way a real
+    # node does, so the test exercises the migrated shape rather than a hand-built one
+    conn.execute("""CREATE TABLE IF NOT EXISTS fact_conflicts (
+        conflict_id TEXT PRIMARY KEY, subject_entity_id TEXT, predicate TEXT,
+        incumbent_object_id TEXT, challenger_value TEXT, challenger_confidence REAL,
+        status TEXT DEFAULT 'pending', created_at TEXT DEFAULT (datetime('now')))""")
+    from topos.storage.db.migrations.conflict_provenance_v1 import (
+        apply_conflict_provenance_v1_up)
+    apply_conflict_provenance_v1_up(conn)
+    conn.executescript("""
+      CREATE TABLE IF NOT EXISTS derivation_training_ledger (
+        ledger_id TEXT PRIMARY KEY, ts TEXT DEFAULT (datetime('now')), stage TEXT,
+        pack_id TEXT, pack_version TEXT, template_version TEXT, extract_model TEXT,
+        verifier_model TEXT, source_table TEXT, record_id TEXT, actor_role TEXT,
+        predicate TEXT, value_json TEXT, about TEXT, occurrence TEXT, quote TEXT,
+        confidence REAL, vstatus TEXT, vreason TEXT, written_object_id TEXT);
+    """)
+    cid = f"cfl_{_uuid.uuid4().hex[:12]}"
+    # the live shape: pack_id present, evidence columns SQL NULL
+    conn.execute(
+        """INSERT INTO fact_conflicts (conflict_id, subject_entity_id, predicate,
+               incumbent_object_id, challenger_value, challenger_confidence, pack_id,
+               source_refs_json, quote, about_hint)
+           VALUES (?, 'ent_owner', 'rel.relationship_event', 'quarantine:about_unclear',
+                   ?, 0.9, 'relationships.social', NULL, NULL, 'grandpa')""",
+        (cid, _json.dumps({"person": "grandpa", "event": "loss", "description": "x"})))
+    conn.commit()
+
+    from topos.features.derivation.surfaces import promote_conflict
+    res = promote_conflict(conn, cid, to_owner=True)
+    assert res["outcome"] in ("written", "corroborated")
+
+    refs = _json.loads(conn.execute(
+        "SELECT source_refs_json FROM signal_objects WHERE object_id=?",
+        (res["object_id"],)).fetchone()[0] or "[]")
+    assert refs, "an empty source_refs would read as 'no sources needed'"
+    assert refs[0]["table"] == "fact_conflicts"
+    assert refs[0]["record_id"] == cid, "the conflict row IS the provenance now"
+    assert "evidence unavailable" in refs[0]["note"]
+
+
+def test_a_conflict_that_carries_evidence_promotes_with_it_untouched(a3_writer):
+    """The marker is a fallback, never a replacement — a row with real refs keeps them."""
+    import json as _json
+    import uuid as _uuid
+
+    w, conn = a3_writer
+    # the fixture's fact_conflicts predates provenance — bring it up the same way a real
+    # node does, so the test exercises the migrated shape rather than a hand-built one
+    conn.execute("""CREATE TABLE IF NOT EXISTS fact_conflicts (
+        conflict_id TEXT PRIMARY KEY, subject_entity_id TEXT, predicate TEXT,
+        incumbent_object_id TEXT, challenger_value TEXT, challenger_confidence REAL,
+        status TEXT DEFAULT 'pending', created_at TEXT DEFAULT (datetime('now')))""")
+    from topos.storage.db.migrations.conflict_provenance_v1 import (
+        apply_conflict_provenance_v1_up)
+    apply_conflict_provenance_v1_up(conn)
+    conn.executescript("""
+      CREATE TABLE IF NOT EXISTS derivation_training_ledger (
+        ledger_id TEXT PRIMARY KEY, ts TEXT DEFAULT (datetime('now')), stage TEXT,
+        pack_id TEXT, pack_version TEXT, template_version TEXT, extract_model TEXT,
+        verifier_model TEXT, source_table TEXT, record_id TEXT, actor_role TEXT,
+        predicate TEXT, value_json TEXT, about TEXT, occurrence TEXT, quote TEXT,
+        confidence REAL, vstatus TEXT, vreason TEXT, written_object_id TEXT);
+    """)
+    cid = f"cfl_{_uuid.uuid4().hex[:12]}"
+    real = [{"table": "conversation_messages", "record_id": "msg_42"}]
+    conn.execute(
+        """INSERT INTO fact_conflicts (conflict_id, subject_entity_id, predicate,
+               incumbent_object_id, challenger_value, challenger_confidence, pack_id,
+               source_refs_json, quote, about_hint)
+           VALUES (?, 'ent_owner', 'rel.relationship_event', 'quarantine:about_unclear',
+                   ?, 0.9, 'relationships.social', ?, 'he passed', 'grandpa')""",
+        (cid, _json.dumps({"person": "grandpa", "event": "loss", "description": "x"}),
+         _json.dumps(real)))
+    conn.commit()
+
+    from topos.features.derivation.surfaces import promote_conflict
+    res = promote_conflict(conn, cid, to_owner=True)
+    stored = _json.loads(conn.execute(
+        "SELECT source_refs_json FROM signal_objects WHERE object_id=?",
+        (res["object_id"],)).fetchone()[0] or "[]")
+    assert stored == real
