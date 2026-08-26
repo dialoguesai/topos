@@ -19,12 +19,27 @@ Nothing in the query path performed that hop, so all 4,866 inbound messages
 resolved to zero named people. Normalising both sides and joining recovers the
 whole picture (top of the live corpus: 319, 206, 164, 109 messages).
 
-WHAT COUNTS AS CLOSE
---------------------
-Volume and recency, banded rather than scored, because a raw count invites the
-model to read precision that monthly sync gaps do not support. Bands are relative
-to THIS owner's corpus: "high" means high for them, so a light texter is not
-flattened into a single band.
+WHAT THIS MEASURES, AND WHAT IT DOES NOT
+----------------------------------------
+Inbound message VOLUME and RECENCY. Nothing else. The fields are named for that
+and not for what it might imply: an earlier cut called them `warmth_band` and
+`cadence_band`, which asserted a reading of the relationship that counting cannot
+support — the same defect as the hardcoded "medium" this lane was written to
+replace, one step subtler.
+
+Specifically NOT consulted, though all of it is in the store: the owner's 2,802
+OUTBOUND messages (so there is no reciprocity — someone who texts a lot and gets
+nothing back still ranks), 4,887 emotion labels, 2,594 topics, 1,792 sentiment
+rows, and whether a thread is 1:1 (153) or a group (14), so a busy group inflates
+everyone in it equally.
+
+Banded rather than scored, because a raw count invites the model to read precision
+that monthly sync gaps do not support. Bands are relative to THIS owner's corpus:
+"high" means high for them, so a light texter is not flattened into one band.
+
+A real closeness judgement belongs in a derivation pack writing reviewable
+`rel.closeness_tier` facts, which is the predicate facts_direct already asks for
+and nothing yet populates. This lane is the interim answer, not that judgement.
 """
 
 from __future__ import annotations
@@ -86,7 +101,7 @@ def _parse_ts(raw: Any) -> Optional[datetime]:
     return dt if dt.tzinfo else dt.replace(tzinfo=timezone.utc)
 
 
-def _warmth_band(rank: int, total: int) -> str:
+def _correspondence_band(rank: int, total: int) -> str:
     """Relative to this corpus — see module docstring."""
     if total <= 0:
         return "low"
@@ -101,7 +116,7 @@ def _warmth_band(rank: int, total: int) -> str:
     return "low"
 
 
-def _cadence_band(last: Optional[datetime], now: datetime) -> str:
+def _recency_band(last: Optional[datetime], now: datetime) -> str:
     if last is None:
         return "dormant"
     age = now - last
@@ -222,8 +237,8 @@ def compute_close_circle(
                 "person": row["person"],
                 "messages": row["messages"],
                 "last_contact": row["last_at"].date().isoformat() if row["last_at"] else None,
-                "warmth_band": _warmth_band(idx, total),
-                "cadence_band": _cadence_band(row["last_at"], anchor),
+                "correspondence_band": _correspondence_band(idx, total),
+                "recency_band": _recency_band(row["last_at"], anchor),
             }
         )
     return out
@@ -232,10 +247,12 @@ def compute_close_circle(
 def compose_close_circle_answer(people: List[Dict[str, Any]]) -> str:
     lines = []
     for p in people:
-        bits = [f"{p['warmth_band']} warmth", f"{p['cadence_band']} contact"]
+        bits = [f"{p['correspondence_band']} correspondence",
+                f"{p['messages']} messages inbound"]
         if p.get("last_contact"):
-            bits.append(f"last {p['last_contact']}")
-        bits.append(f"{p['messages']} messages")
+            bits.append(f"last {p['last_contact']} ({p['recency_band']})")
+        else:
+            bits.append(f"last contact {p['recency_band']}")
         lines.append(f"- {p['person']}: " + " · ".join(bits))
     return "\n".join(lines)
 

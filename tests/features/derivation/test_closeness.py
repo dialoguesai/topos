@@ -86,15 +86,15 @@ def test_excludes_speaker_labels_unknown_handles_and_own_messages(db):
                 if p["person"] == "Mike November")["messages"] == 206
 
 
-def test_cadence_is_relative_to_the_supplied_anchor(db):
-    got = {p["person"]: p["cadence_band"] for p in compute_close_circle(db, now=NOW)}
+def test_recency_is_relative_to_the_supplied_anchor(db):
+    got = {p["person"]: p["recency_band"] for p in compute_close_circle(db, now=NOW)}
     assert got["Mike November"] == "recent"        # 2 days
     assert got["Alpine Xray"] == "recent"          # 7 days
     assert got["Old Colleague"] == "dormant"        # ~7 months
 
 
-def test_warmth_is_relative_to_this_corpus(db):
-    bands = [p["warmth_band"] for p in compute_close_circle(db, now=NOW)]
+def test_correspondence_band_is_relative_to_this_corpus(db):
+    bands = [p["correspondence_band"] for p in compute_close_circle(db, now=NOW)]
     assert bands[0] == "high"       # top quartile of THIS owner's traffic
     assert bands[-1] == "low"
 
@@ -115,7 +115,7 @@ def test_payload_carries_names_and_answer(db):
     out = try_close_circle(db, "who are my closest friends", packet_resolution="facts_all")
     assert out["answer_type"] == "facts" and out["close_circle_direct"] is True
     assert out["items"][0] == "Mike November"
-    assert "Mike November" in out["answer"] and "206 messages" in out["answer"]
+    assert "Mike November" in out["answer"] and "206 messages inbound" in out["answer"]
 
 
 def test_empty_corpus_falls_through(tmp_path):
