@@ -703,23 +703,41 @@ def compute_communities(conn: sqlite3.Connection) -> Dict[str, int]:
         # Auto-label each community after its most central member; ties break
         # by strength then id so labels hold still across rebuilds.
         names: Dict[str, str] = {}
+        types: Dict[str, str] = {}
         ids = list(partition.keys())
         for start in range(0, len(ids), 400):
             chunk = ids[start : start + 400]
             for row in conn.execute(
-                "SELECT entity_id, canonical_name FROM entities "
+                "SELECT entity_id, canonical_name, entity_type FROM entities "
                 f"WHERE entity_id IN ({','.join('?' * len(chunk))})",
                 chunk,
             ):
                 names[str(row[0])] = str(row[1] or "")
+                types[str(row[0])] = str(row[2] or "")
         for comm, members in enumerate(community_sets):
             ranked = sorted(
                 (str(m) for m in members),
                 key=lambda eid: (eigen.get(eid, 0.0), strength.get(eid, 0.0), eid),
                 reverse=True,
             )
+            # A community is named by its dominant KIND of member, not by
+            # whoever is most central (owner critique 2026-08-26: people
+            # accumulate communication edges and colonize the label of any
+            # mixed community — a project cluster was answering to a person's
+            # name). Majority member type first; the most central nameable
+            # member OF that type carries the label; fall back to the overall
+            # top member when the dominant type has no nameable member. Ties
+            # keep the old ordering so labels stay stable across rebuilds.
+            type_counts: Dict[str, int] = {}
+            for eid in ranked:
+                t = types.get(eid, "")
+                if t:
+                    type_counts[t] = type_counts.get(t, 0) + 1
+            dominant = max(type_counts, key=lambda t: (type_counts[t], t)) if type_counts else ""
             labels_by_rank[rank[comm]] = next(
-                (names[eid] for eid in ranked if names.get(eid, "").strip()), None
+                (names[eid] for eid in ranked
+                 if types.get(eid) == dominant and names.get(eid, "").strip()),
+                next((names[eid] for eid in ranked if names.get(eid, "").strip()), None),
             )
         logger.info(
             "graph structural analytics: %d nodes / %d edges, betweenness k=%s, %.2fs",
