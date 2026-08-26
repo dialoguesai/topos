@@ -9,6 +9,13 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **Facts-direct: durable facts outrank event facts.** Recency-only ordering let a
+  month of met-events push the owner's parents past the 20-row compose cap — live
+  2026-08-26, "Who's in my family?" listed 16 introductions and cut mom/brother
+  while both sat in the store. Role/status-bearing facts now sort ahead of events
+  (stable, so event feeds keep recency order among themselves).
+
 ## [1.3.30] — 2026-08-26
 
 ### Fixed

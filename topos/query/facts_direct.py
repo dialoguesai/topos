@@ -93,7 +93,25 @@ def fetch_direct_facts(
                 "altitude": altitude or "stated", "pack": pack,
                 "evidence_count": len(refs) if isinstance(refs, list) else 0,
             })
+    # Durable facts (a standing role/status: "mom, parent, active") outrank event
+    # facts ("met X at the saloon") in a known-item answer. Recency-only ordering
+    # let a month of introductions push the owner's parents past the compose cap:
+    # live 2026-08-26, "Who's in my family?" listed 16 met-events and cut
+    # mom/brother while keeping them in store. Stable sort keeps recency DESC
+    # within each band, so event feeds ("what happened with X?") are unaffected
+    # below the durable block.
+    out.sort(key=lambda f: 0 if _is_durable(f.get("value")) else 1)
     return out or None
+
+
+def _is_durable(value: Any) -> bool:
+    """A fact whose value carries a standing role/status rather than an event."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (json.JSONDecodeError, TypeError):
+            return False
+    return isinstance(value, dict) and bool(value.get("role") or value.get("status"))
 
 
 def _fmt_value(v: Any) -> str:
