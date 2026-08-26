@@ -9,6 +9,19 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **[S1] Honesty metadata now outranks evidence in the inference packet's truncation
+  order.** The packet builder's char slice ate the TAIL of the serialized context, and the
+  catch-all loop placed honesty keys (`truncated` row-cap markers, `exclusion`,
+  `empty_cause`) last — deleting "this result was capped" exactly on the large packets
+  where caps fire. Those keys are now hoisted ahead of the evidence they qualify; a cut
+  context ends with a visible `…[CONTEXT CUT AT CHAR LIMIT]` marker instead of silently
+  invalid JSON; and the builder's return flag is renamed `context_truncated` to stop
+  colliding with the retrieval packet's row-cap `truncated` (two meanings, one key; no
+  committed consumer read the old name). Found by a peer session's review of the
+  truncation-honesty work-in-progress.
+
+
 ## [1.3.25] — 2026-08-25
 
 ### Added
