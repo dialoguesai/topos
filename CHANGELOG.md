@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.29] — 2026-08-26
+
 ### Added
 - **[S1] Stable community naming** (PLAN_COMMUNITY_NAMING; migration 67): a
   community's identity is its weighted core (top-k central members), not its
