@@ -20,6 +20,12 @@ def require_api_key(credentials: HTTPAuthorizationCredentials = Depends(bearer_s
     # Resolve settings at call-time so tests that reload env/modules
     # see the latest TOPOS_KEY value.
     from .config.settings import settings as runtime_settings
+    from .uds import current_transport
+
+    if current_transport() == "uds":
+        # P4: the owner socket (0600) — the kernel already established the
+        # caller is the owner's own process; no bearer exists to check.
+        return
 
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing authorization")
@@ -52,6 +58,12 @@ def resolve_request_principal(
     keeps its auth semantics.
     """
     from .config.settings import settings as runtime_settings
+    from .uds import current_transport
+
+    if current_transport() == "uds":
+        # P4: owner by TRANSPORT — the 0600 socket is the credential, and no
+        # bearer (or lack of one) can demote or promote a connection there.
+        return Principal(cls=OWNER_APP, channel="uds")
 
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing authorization")
