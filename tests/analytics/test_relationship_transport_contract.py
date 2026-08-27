@@ -108,6 +108,22 @@ def test_luck_surface_identical_over_both_transports(conn):
     assert ws == http
 
 
+def test_person_graph_identical_over_both_transports(conn):
+    from topos.api.messenger_analytics import get_person_graph
+
+    http = get_person_graph(dataset_id=DS, include_automated=False)
+    ws = _ws("messenger_person_graph", {"dataset_id": DS})
+    assert ws == http
+
+
+def test_naming_queue_identical_over_both_transports(conn):
+    from topos.api.messenger_analytics import get_naming_queue
+
+    http = get_naming_queue(dataset_id=DS, limit=25)
+    ws = _ws("messenger_naming_queue", {"dataset_id": DS})
+    assert ws == http
+
+
 def test_the_protocol_names_are_pinned():
     """The CP proxy routes and the client will address these exact strings; renaming one
     silently strands the other side."""
@@ -115,7 +131,8 @@ def test_the_protocol_names_are_pinned():
 
     for name in ("messenger_relationships", "messenger_relationship_signals",
                  "messenger_directed_edges", "messenger_bench",
-                 "messenger_luck_surface"):
+                 "messenger_luck_surface", "messenger_person_graph",
+                 "messenger_naming_queue"):
         assert name in HANDLERS, f"protocol name {name!r} unregistered"
 
 

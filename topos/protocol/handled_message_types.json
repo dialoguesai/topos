@@ -123,6 +123,8 @@
   "messenger_contact_graph",
   "messenger_directed_edges",
   "messenger_luck_surface",
+  "messenger_naming_queue",
+  "messenger_person_graph",
   "messenger_relationship_signals",
   "messenger_relationships",
   "migrate_browser_plugin_app_id",

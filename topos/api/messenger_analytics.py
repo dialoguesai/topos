@@ -458,3 +458,29 @@ def get_luck_surface(
     from ..analytics.relationship_reads import read_luck_surface
 
     return read_luck_surface(conn, dataset_id=dataset_id, explore=explore)
+
+
+@router.get("/messenger-analytics/person-graph", dependencies=[Depends(require_api_key)])
+def get_person_graph(
+    dataset_id: str = Query("", description="empty => the engine picks the busiest dataset"),
+    include_automated: bool = Query(False, description="shortcodes are not people"),
+) -> Dict[str, Any]:
+    conn = get_db_connection()
+    if conn is None:
+        return {"dataset_id": dataset_id, "nodes": [], "error": "no database"}
+    from ..analytics.relationship_reads import read_person_graph
+
+    return read_person_graph(conn, dataset_id=dataset_id, include_automated=include_automated)
+
+
+@router.get("/messenger-analytics/naming-queue", dependencies=[Depends(require_api_key)])
+def get_naming_queue(
+    dataset_id: str = Query(""),
+    limit: int = Query(25, ge=1, le=200),
+) -> Dict[str, Any]:
+    conn = get_db_connection()
+    if conn is None:
+        return {"dataset_id": dataset_id, "queue": [], "error": "no database"}
+    from ..analytics.relationship_reads import read_naming_queue
+
+    return read_naming_queue(conn, dataset_id=dataset_id, limit=limit)

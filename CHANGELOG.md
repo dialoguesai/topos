@@ -10,6 +10,31 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Added
+- **Person-centric social graph: one node per person, from evidence.** `[E:analytics]`
+  New reads `messenger_person_graph` and `messenger_naming_queue` (HTTP + websocket, one
+  shared body). 441 nodes in ~6ms on the live corpus, against 180 before.
+
+  Three decisions the owner made, enforced by tests:
+  - **Evidence only.** Messaged or mentioned. The address book is a NAMING source, never a
+    node source — importing it would add ~1,106 people with no evidence of any relationship.
+  - **One node per person.** Somebody who is both a messenger peer and an extracted entity is
+    ONE node holding both identities, and traffic sums across their handles.
+  - **The owner is a node, and leads the list.** Extraction had emitted the owner THREE times
+    (`Owner` with 1,239 edges, `self` with 95, `self` with 0), splitting 1,334 edges across
+    three ids; they now resolve to one logical identity at READ time, with no destructive
+    merge of `entities`.
+
+  `evidence` gates the maths: a node without `messaged` has no cadence, so warmth, drift and
+  reciprocity are reported as unavailable rather than as zero — a zero would render as "you
+  are not close", which the data cannot support.
+
+  The naming queue ranks unnamed HUMAN peers by message volume, because automatic recovery is
+  exhausted: only 32 of 136 peer phone numbers appear in the address book and 30 of those are
+  already named, so digit-matching every named contact recovers ZERO further names. Ordering
+  is the value — the top 10 unknowns carry 71% of the traffic behind unnamed people.
+  Automated shortcodes (29 of 180 peers) are excluded outright; they are not people.
+
+### Added
 - **Luck surface: what you have built, against who has heard about it.** `[E:analytics]`
   New read `messenger_luck_surface` (HTTP `/messenger-analytics/luck-surface` and the
   websocket handler, sharing one body per the SGU-1 no-drift rule). Per body of work it

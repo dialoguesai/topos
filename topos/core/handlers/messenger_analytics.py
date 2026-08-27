@@ -489,7 +489,8 @@ async def handle_messenger_analytics_periods(message: Dict[str, Any]) -> Optiona
 # one fixture and asserts byte-equal payloads.
 
 @handles("messenger_relationships", "messenger_relationship_signals",
-         "messenger_directed_edges", "messenger_bench", "messenger_luck_surface")
+         "messenger_directed_edges", "messenger_bench", "messenger_luck_surface",
+         "messenger_person_graph", "messenger_naming_queue")
 async def handle_relationship_reads(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     if not req_id:
@@ -511,7 +512,9 @@ async def handle_relationship_reads(message: Dict[str, Any]) -> Optional[Dict[st
             # luck surface resolves its own dataset when the client cannot name one:
             # /v1/ingestion/datasets is empty on sync-fed nodes, so requiring an id here
             # rendered a full database as an empty screen.
-            if not dataset_id and msg_type != "messenger_luck_surface":
+            if not dataset_id and msg_type not in (
+                    "messenger_luck_surface", "messenger_person_graph",
+                    "messenger_naming_queue"):
                 return {"id": req_id, "status": "error", "error": "dataset_id required"}
             if msg_type == "messenger_relationships":
                 result = reads.read_relationships(
@@ -525,6 +528,14 @@ async def handle_relationship_reads(message: Dict[str, Any]) -> Optional[Dict[st
                 result = reads.read_luck_surface(
                     conn, dataset_id=dataset_id,
                     explore=min(max(float(payload.get("explore", 0.5)), 0.0), 1.0))
+            elif msg_type == "messenger_person_graph":
+                result = reads.read_person_graph(
+                    conn, dataset_id=dataset_id,
+                    include_automated=bool(payload.get("include_automated", False)))
+            elif msg_type == "messenger_naming_queue":
+                result = reads.read_naming_queue(
+                    conn, dataset_id=dataset_id,
+                    limit=min(max(int(payload.get("limit") or 25), 1), 200))
             elif msg_type == "messenger_relationship_signals":
                 result = reads.read_relationship_signals(
                     conn, dataset_id=dataset_id,

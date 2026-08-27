@@ -266,3 +266,52 @@ def read_luck_surface(conn: Any, *, dataset_id: str,
         out["moves"] = []
     out["explore"] = explore
     return out
+
+
+def read_person_graph(conn: Any, *, dataset_id: str,
+                      include_automated: bool = False) -> Dict[str, Any]:
+    """The person-centric graph: one node per person, evidence-gated, owner first.
+
+    Computed at read like the bench and the luck surface — 441 nodes in ~6ms on the live
+    corpus, which is a page load. Storing it would mean a graph that quietly describes last
+    month's relationships.
+    """
+    from .person_graph import build_person_nodes, resolve_owner_identity
+
+    for table in ("entities",):
+        if _table_missing(conn, table):
+            return {"dataset_id": dataset_id, "nodes": [], "coverage": {
+                "reason": "entity extraction has not run on this node yet"}}
+    nodes = build_person_nodes(conn, dataset_id, include_automated=include_automated)
+    owner = resolve_owner_identity(conn)
+    people = [n for n in nodes if not n.get("is_owner")]
+    return {
+        "dataset_id": dataset_id,
+        "nodes": nodes,
+        "counts": {
+            "total": len(nodes),
+            "messaged": sum(1 for n in people if n["evidence"]["messaged"]),
+            "mentioned": sum(1 for n in people if n["evidence"]["mentioned"]),
+            "both": sum(1 for n in people
+                        if n["evidence"]["messaged"] and n["evidence"]["mentioned"]),
+            "needs_name": sum(1 for n in people if n.get("needs_name")),
+        },
+        "owner": {"entity_id": owner["canonical_id"], "label": owner["label"],
+                  "identity_count": len(owner["ids"])},
+        "coverage": {
+            "node_basis": ("evidence only — messaged or mentioned. The address book is a "
+                           "naming source, never a node source."),
+            "excluded": "automated shortcodes (2FA, delivery notices) are not people",
+            "evidence_meaning": ("a node without `messaged` has no cadence, so warmth, drift "
+                                 "and reciprocity are unavailable rather than zero"),
+        },
+    }
+
+
+def read_naming_queue(conn: Any, *, dataset_id: str, limit: int = 25) -> Dict[str, Any]:
+    """Unnamed human peers, busiest first."""
+    from .person_graph import naming_queue
+
+    if _table_missing(conn, "messenger_dyad_stats"):
+        return {"dataset_id": dataset_id, "queue": [], "unnamed_count": 0}
+    return naming_queue(conn, dataset_id, limit=limit)
