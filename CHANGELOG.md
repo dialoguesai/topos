@@ -9,6 +9,20 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Security
+- **The node binds loopback by default.** `--host` defaulted to `0.0.0.0`, so a
+  personal node published its whole authenticated API to every device on the
+  network — verified live: the node answered on the machine's wifi address.
+  Between a coffee-shop peer and the owner's data stood only a long-lived
+  bearer token that lives in a dotfile, rides along in backups, and used to be
+  pasted into MCP configs. Default is now `127.0.0.1`; an explicit `--host`,
+  `TOPOS_HOST`, or hosted-pool mode still bind wider.
+- **The owner CLASS is loopback-only.** Even with a valid `TOPOS_OWNER_KEY`, a
+  non-loopback peer resolves to `third_party` (channel `remote_http`) rather
+  than `owner_app`. A credential that escaped into a log, a screen share, or a
+  synced dotfile cannot confer owner privilege from the network. Both layers
+  are pinned by invariant I8.
+
 ### Fixed
 - **Names on the facts page are no longer lowercased.** `object_value` is documented
   in `features/facts/reads.py` as the display string the facts surface renders, but the
