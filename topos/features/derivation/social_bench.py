@@ -55,22 +55,38 @@ def _terms(text: str) -> List[str]:
     return [w for w in _WORD.findall(str(text or "").lower()) if w not in _STOP]
 
 
-def build_role_corpus(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+#: Below this many dated goals the work record is too thin to name a role from, and the
+#: whole corpus is used instead — said out loud in `role_basis` rather than assumed.
+MIN_WORK_RECORDS = 40
+
+
+def build_role_corpus(conn: sqlite3.Connection, *,
+                      substrate: str = "all") -> List[Dict[str, Any]]:
     """(event date, text, walkable ref) for the owner's own work record.
 
     Journal entries carry `entry_at` directly. Goals are DATED THROUGH THEIR SOURCE RECORD
     — a goal that cannot be joined to a dated record is dropped, not defaulted, because
     `created_at` is the extraction-time trap the plan's acceptance criteria name.
+
+    `substrate="work"` returns the goals alone. The two record types are both owner-authored
+    but they are not one corpus: goals state work, journal entries narrate a life, and their
+    vocabularies barely overlap. Pooled, the document frequencies that decide what counts as
+    distinctive are computed across two different languages, and a word can look rare-and-
+    recurring merely by belonging to the smaller one. Measured on the live node that was not
+    a subtlety -- 84% of the records were goals, and every single role the bench named came
+    from the other 16%: `little`, `something`, `lot`, `too` and `him` appear in 100% journal
+    and zero goals. The bench was describing a diary.
     """
     out: List[Dict[str, Any]] = []
-    try:
-        for eid, at, content in conn.execute(
-                "SELECT entry_id, entry_at, content FROM journal_entries"
-                " WHERE entry_at IS NOT NULL AND content IS NOT NULL"):
-            out.append({"date": str(at)[:10], "text": str(content),
-                        "ref": {"table": "journal_entries", "record_id": str(eid)}})
-    except sqlite3.Error:
-        pass
+    if substrate != "work":
+        try:
+            for eid, at, content in conn.execute(
+                    "SELECT entry_id, entry_at, content FROM journal_entries"
+                    " WHERE entry_at IS NOT NULL AND content IS NOT NULL"):
+                out.append({"date": str(at)[:10], "text": str(content),
+                            "ref": {"table": "journal_entries", "record_id": str(eid)}})
+        except sqlite3.Error:
+            pass
     try:
         for gid, text, at in conn.execute(
                 """SELECT g.goal_id, g.goal_text, j.entry_at FROM user_goals g
@@ -149,7 +165,8 @@ def build_role_shapes_from_clusters(conn: sqlite3.Connection, *,
     return shapes[:top_n]
 
 
-def build_role_shapes(conn: sqlite3.Connection, *, top_n: int = 8) -> List[Dict[str, Any]]:
+def build_role_shapes(conn: sqlite3.Connection, *, top_n: int = 8,
+                      substrate: str = "work") -> List[Dict[str, Any]]:
     """Recurring work themes with recurrence and evidence, floors applied.
 
     Deliberately term-cooccurrence, not embeddings: the labels are crude, but every shape
@@ -157,7 +174,9 @@ def build_role_shapes(conn: sqlite3.Connection, *, top_n: int = 8) -> List[Dict[
     after the role-competence audit found a gold set that graded its own extractor. An
     embedding upgrade (the plan's L5-2 reuse) slots in behind the same interface.
     """
-    corpus = build_role_corpus(conn)
+    corpus = build_role_corpus(conn, substrate=substrate)
+    if len(corpus) < MIN_WORK_RECORDS and substrate == "work":
+        corpus = build_role_corpus(conn, substrate="all")
     if not corpus:
         return []
     from datetime import date as _date
@@ -182,8 +201,11 @@ def build_role_shapes(conn: sqlite3.Connection, *, top_n: int = 8) -> List[Dict[
     def _role_term(t: str) -> bool:
         return 3 <= df[t] <= n_docs * 0.20
 
+    # `records` counts, `refs` keeps a walkable sample. They were the same list, so
+    # `evidence_count` reported the SAMPLE CAP: every role above the cap came back as
+    # exactly 40 records, which is both wrong and flat -- `topos` has 168.
     by_term: Dict[str, Dict[str, Any]] = defaultdict(
-        lambda: {"weeks": set(), "refs": [], "co": Counter()})
+        lambda: {"weeks": set(), "refs": [], "records": 0, "co": Counter()})
     for row in corpus:
         ts = [t for t in _terms(row["text"]) if _role_term(t)]
         wk = week(row["date"])
@@ -192,6 +214,7 @@ def build_role_shapes(conn: sqlite3.Connection, *, top_n: int = 8) -> List[Dict[
         for t in set(ts):
             e = by_term[t]
             e["weeks"].add(wk)
+            e["records"] += 1
             if len(e["refs"]) < 40:
                 e["refs"].append(row["ref"])
             for o in set(ts):
@@ -202,21 +225,28 @@ def build_role_shapes(conn: sqlite3.Connection, *, top_n: int = 8) -> List[Dict[
 
     shapes = []
     for term, e in by_term.items():
-        if len(e["weeks"]) < MIN_RECURRENCE_WEEKS or len(e["refs"]) < MIN_EVIDENCE:
+        if len(e["weeks"]) < MIN_RECURRENCE_WEEKS or e["records"] < MIN_EVIDENCE:
             continue
         co = [w for w, _n in e["co"].most_common(4)]
-        # Recurrence alone ranked journal furniture first — a filler word recurs weekly by
-        # definition. Weeks x idf prefers terms that recur AND discriminate: a term in 4%
-        # of records that returns 12 weeks running is a role; one in 15% of records
-        # returning 17 weeks is how the owner writes.
-        idf = math.log(n_docs / max(df[term], 1))
+        # RECURRENCE x MASS. A role is a shape that both returns and has a body of work
+        # behind it, and the ranking has to say so, because recurrence alone cannot: this
+        # corpus spans 18 distinct weeks, so the week count saturates -- it ranges 6 to 16
+        # across every surviving term, a factor of 2.7 -- while the old `weeks x idf`
+        # multiplied it by a quantity that ranges 2.2 to 4.6 and REWARDS RARITY. idf
+        # therefore decided the ranking, and among terms that recur nearly every week the
+        # rarest won: `place` (23 records, 14 weeks) scored 63.8 against `topos` (248
+        # records, 16 weeks) at 34.8. The intent behind idf was right -- filter the
+        # furniture of a writing habit -- but the df BAND above already does that, and
+        # measured out to 20% of the corpus it keeps `topos` at 11% while dropping what
+        # appears in most records. Doing the job twice inverted the answer.
         shapes.append({
             "role_shape_id": f"role:{term}",
             "label": " / ".join([term] + co[:2]),
             "label_terms": [term] + co,
             "recurrence_weeks": len(e["weeks"]),
-            "evidence_count": len(e["refs"]),
-            "score": round(len(e["weeks"]) * idf, 2),
+            "evidence_count": e["records"],
+            "evidence_sampled": len(e["refs"]),
+            "score": round(len(e["weeks"]) * math.log1p(df[term]), 2),
             "evidence": e["refs"][:12],
             "self_performed_share": 1.0,   # journal + goals are owner-authored by source
             "blocking_score": None,        # NO SIGNAL EXISTS — stated, never faked
@@ -276,17 +306,26 @@ def build_bench_slate(conn: sqlite3.Connection) -> Dict[str, Any]:
     ordered by warmth — with what is missing stated as data."""
     roles = build_role_shapes_from_clusters(conn)
     basis = "topic_clusters(dimension=work) x dated journal recurrence"
+    substrate = "topic_clusters(dimension=work)"
     if not roles:
         # a node whose cluster machinery has not run still gets an answer, marked cruder
+        work_records = len(build_role_corpus(conn, substrate="work"))
+        used_work = work_records >= MIN_WORK_RECORDS
         roles = build_role_shapes(conn)
-        basis = "term-recurrence fallback (no work-dimension clusters on this node)"
+        basis = ("term-recurrence x mass over the work record"
+                 if used_work else
+                 "term-recurrence x mass over the whole record — the work record is too "
+                 "thin here to name a role from on its own")
+        substrate = ("event-dated user_goals (%d records)" % work_records if used_work
+                     else "journal_entries + event-dated user_goals")
     slate = []
     without: List[str] = []
     for role in roles:
         cands = find_candidates(conn, role)
         slate.append({**{k: role[k] for k in
                          ("role_shape_id", "label", "recurrence_weeks", "evidence_count",
-                          "score", "self_performed_share", "blocking_score")},
+                          "score", "self_performed_share", "blocking_score")
+                         if k in role},
                       "candidates": cands})
         if not cands:
             without.append(role["label"])
@@ -295,8 +334,14 @@ def build_bench_slate(conn: sqlite3.Connection) -> Dict[str, Any]:
         "roles_without_candidates": without,
         "coverage": {
             "role_basis": basis,
-            "role_substrate": "journal_entries + event-dated user_goals",
+            "role_substrate": substrate,
             "candidate_substrate": "net.demonstrated_skill facts",
             "blocking_signal": "unavailable — no proxy shipped, stated rather than faked",
+            # 1.0 on every role because both substrates are owner-authored BY CONSTRUCTION.
+            # It is true, not measured, and it discriminates nothing — said here so the
+            # field is never read as evidence that a role is self-performed.
+            "self_performed_signal": ("constant 1.0 by construction: the substrate is the "
+                                      "owner's own writing, so this separates no role from "
+                                      "another"),
         },
     }

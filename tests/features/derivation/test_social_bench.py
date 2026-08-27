@@ -14,6 +14,7 @@ import pytest
 from topos.features.derivation.social_bench import (
     MIN_EVIDENCE,
     MIN_RECURRENCE_WEEKS,
+    MIN_WORK_RECORDS,
     build_bench_slate,
     build_role_corpus,
     build_role_shapes,
@@ -138,3 +139,130 @@ def test_candidates_come_from_demonstrated_skill_and_order_by_warmth(conn):
 
 def test_floors_are_what_the_docstrings_say():
     assert MIN_RECURRENCE_WEEKS == 3 and MIN_EVIDENCE == 5
+
+
+# --------------------------------------------------------------------------- 2026-08-27
+
+def _goal(conn, gid, eid, day, text):
+    """A goal dated through a journal record, which is the only dating this accepts."""
+    conn.execute("INSERT OR IGNORE INTO journal_entries VALUES (?,?,?,NULL)",
+                 (eid, f"2026-{day}T09:00:00", "carrier"))
+    conn.execute("INSERT INTO user_goals VALUES (?,?,?)", (gid, eid, text))
+
+
+def _day(i):
+    """Spread across months and days so distinct ISO weeks accumulate."""
+    return f"0{(i % 6) + 1}-{(i % 27) + 1:02d}"
+
+
+def test_a_role_needs_mass_not_only_rarity(conn):
+    """The live defect: `weeks x idf` ranked `place` (23 records, 14 weeks) at 63.8 above
+    `topos` (248 records, 16 weeks) at 34.8.
+
+    The corpus spans a handful of weeks, so the week count saturates and idf -- which
+    rewards RARITY -- decides the order. Among terms that recur every week, the rarest won.
+    Filtering the furniture of a writing habit is the df band's job, and doing it twice
+    inverted the answer.
+    """
+    # `platform` in 14% of records, `sundial` in 5%, over the same span, in DISJOINT
+    # records with separate vocabulary — otherwise they co-occur and land in one shape.
+    platform_at = {i for i in range(200) if i % 7 == 0}
+    sundial_at = {i for i in range(200) if i % 20 == 1} - platform_at
+    for i in range(200):
+        text = "assorted%d notes" % (i % 37)
+        if i in platform_at:
+            text += " platform deployment migration"
+        if i in sundial_at:
+            text += " sundial calibration"
+        _goal(conn, f"g{i}", f"e{i}", _day(i), text)
+    conn.commit()
+    shapes = build_role_shapes(conn, top_n=40)
+
+    def rank(term):
+        for i, sh in enumerate(shapes):
+            if term in sh["label_terms"]:
+                return i
+        return None
+
+    assert rank("platform") is not None, "the theme with a body of work behind it is a role"
+    assert rank("sundial") is None or rank("platform") < rank("sundial"), \
+        "recurrence x mass: a rare term must not outrank the work it recurs beside"
+    # And the arithmetic itself, so the ordering above cannot pass for the wrong reason.
+    def shape_for(term):
+        return next((sh for sh in shapes if term in sh["label_terms"]), None)
+
+    heavy, rare = shape_for("platform"), shape_for("sundial")
+    if heavy and rare and heavy is not rare:
+        assert heavy["score"] > rare["score"]
+        assert heavy["evidence_count"] > rare["evidence_count"]
+
+
+def test_the_diary_does_not_supply_the_roles_when_a_work_record_exists(conn):
+    """84% of the live corpus was goals and every role came from the other 16%: `little`,
+    `something`, `lot`, `too` and `him` are 100% journal and zero goals.
+
+    Both substrates are owner-authored, but they are not one corpus -- goals state work and
+    entries narrate a life. Pooled, the document frequencies that decide what is
+    distinctive are computed across two languages at once, and a word can look
+    rare-and-recurring merely by belonging to the smaller one.
+    """
+    for i in range(200):
+        text = "assorted%d notes" % (i % 37)
+        if i % 7 == 0:
+            text += " ingestion pipeline"
+        _goal(conn, f"g{i}", f"e{i}", _day(i), text)
+    for i in range(40):
+        _journal(conn, f"j{i}", _day(i),
+                 "sundial walked" if i % 4 == 0 else "quiet%d evening" % i)
+    conn.commit()
+    terms = {t for s in build_role_shapes(conn, top_n=30) for t in s["label_terms"]}
+    assert "ingestion" in terms or "pipeline" in terms, "the work record names the roles"
+    for narrative in ("sundial", "walked"):
+        assert narrative not in terms, f"{narrative!r} is diary vocabulary, not a role"
+
+
+def test_a_thin_work_record_falls_back_and_says_so(conn):
+    """A node with almost no goals must still get an answer, and must not claim the answer
+    came from a work record it does not have."""
+    for i in range(60):
+        text = "assorted%d entry" % (i % 21)
+        if i % 6 == 0:
+            text += " deployment runbook"
+        _journal(conn, f"j{i}", _day(i), text)
+    conn.commit()
+    assert len(build_role_corpus(conn, substrate="work")) < MIN_WORK_RECORDS
+    assert build_role_shapes(conn), "a thin work record still produces roles"
+    basis = build_bench_slate(conn)["coverage"]["role_basis"]
+    assert "too thin" in basis, f"the fallback has to be visible, got {basis!r}"
+
+
+def test_evidence_count_is_a_count_not_the_sample_cap(conn):
+    """`evidence_count` was `len(refs)`, and refs stops at 40 -- so every role with a real
+    body of work reported exactly 40, which is both wrong and identical across roles."""
+    for i in range(500):
+        text = "assorted%d notes" % (i % 61)
+        if i % 8 == 0:
+            text += " harbour scheduling"
+        _goal(conn, f"g{i}", f"e{i}", _day(i), text)
+    conn.commit()
+    shapes = [s for s in build_role_shapes(conn, top_n=30)
+              if "harbour" in s["label_terms"]]
+    assert shapes, "the term recurs and has mass"
+    assert shapes[0]["evidence_count"] > 40, \
+        f"reported {shapes[0]['evidence_count']} — the sample cap leaked into the count"
+    assert shapes[0]["evidence_sampled"] <= 40, "the walkable sample stays bounded"
+
+
+def test_the_slate_names_the_substrate_it_actually_used(conn):
+    for i in range(200):
+        text = "assorted%d notes" % (i % 37)
+        if i % 7 == 0:
+            text += " harbour scheduling"
+        _goal(conn, f"g{i}", f"e{i}", _day(i), text)
+    conn.commit()
+    coverage = build_bench_slate(conn)["coverage"]
+    assert "user_goals" in coverage["role_substrate"]
+    assert "journal_entries" not in coverage["role_substrate"], \
+        "naming a substrate it did not read is how a report starts lying about itself"
+    assert "constant" in coverage["self_performed_signal"], \
+        "self_performed_share is 1.0 by construction and must not read as a measurement"

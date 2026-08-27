@@ -855,6 +855,52 @@ async def handle_replay_projection_preview(message: Dict[str, Any]) -> Optional[
         "payload": {"ops_replayed": 0, "total_ops": 0, "count": 0, "messages": []},
     }
 
+#: Reads about the owner's relationships, reachable by name from `get_analytics`.
+SOCIAL_ANALYTICS_QUERIES = frozenset({"social_bench", "social_graph", "luck_surface"})
+
+#: Every name this handler answers to. Returned in the error when a caller guesses wrong,
+#: because a name that cannot be discovered is a name nobody will use.
+SUPPORTED_ANALYTICS_QUERIES = frozenset({
+    "messages_per_day", "total_messages", "avg_message_length", "messages_by_sender",
+    "canonical_messages_per_day", "canonical_total_messages",
+    "canonical_avg_message_length", "canonical_messages_by_sender",
+    "chatgpt_messages_per_day", "chatgpt_total_messages",
+    "chatgpt_avg_message_length", "chatgpt_messages_by_sender",
+    "combined_messages_per_day", "combined_total_messages",
+    "combined_avg_message_length", "combined_messages_by_sender",
+    "jsonl_messages_per_day", "jsonl_total_messages",
+    "jsonl_avg_message_length", "jsonl_messages_by_sender",
+}) | SOCIAL_ANALYTICS_QUERIES
+
+#: Fields a caller needs to reason about a person. The full person graph is 356KB on this
+#: node, most of it identity plumbing and prose reasons; projecting it is what makes the
+#: read usable in a context window at all.
+_PERSON_FIELDS = ("label", "band", "closeness", "tie_state", "community_id",
+                  "message_count", "mention_count", "needs_name")
+
+
+def _agent_sized_person_graph(graph: Dict[str, Any]) -> Dict[str, Any]:
+    """The person graph with the plumbing dropped — every person, fewer fields.
+
+    Projected rather than truncated, deliberately. A row cap here would be read as "these
+    are the people", and a caller reporting "nobody matched" from a capped list is the
+    failure the routines' absence rule exists to stop.
+    """
+    people = [{k: n.get(k) for k in _PERSON_FIELDS}
+              for n in (graph.get("nodes") or []) if not n.get("is_owner")]
+    people.sort(key=lambda n: (-(n.get("closeness") or 0), str(n.get("label") or "")))
+    return {
+        "people": people,
+        "counts": graph.get("counts"),
+        "bands": graph.get("bands"),
+        "owner": graph.get("owner"),
+        "closeness_basis": graph.get("closeness_basis"),
+        "coverage": graph.get("coverage"),
+        "completeness": (f"all {len(people)} people, not a sample; "
+                         "fields reduced, rows are not"),
+    }
+
+
 @handles("get_analytics")
 async def handle_get_analytics(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
@@ -1098,7 +1144,38 @@ async def handle_get_analytics(message: Dict[str, Any]) -> Optional[Dict[str, An
             )
             return {"id": req_id, "status": "ok", "payload": {"query": query, "result": result}}
         
-        # Unknown query - return empty result
+        # The SOCIAL reads. These have been served at /v1/messenger-analytics/* and as
+        # `messenger_*` websocket types since they were written, but only the app's Social
+        # page could reach them -- an agent's `get_analytics` knew 21 query names and not
+        # one of them was a relationship. So `R0·BENCH`, a routine whose entire job is to
+        # produce the bench, re-inferred roles from raw text with an LLM while the
+        # derivation built for that exact question sat one call away, unused.
+        if query in SOCIAL_ANALYTICS_QUERIES:
+            from ...analytics import relationship_reads as _reads
+
+            if query == "social_bench":
+                result = _reads.read_bench(db_conn)
+            elif query == "luck_surface":
+                result = _reads.read_luck_surface(db_conn, dataset_id=dataset_id or "")
+            else:
+                result = _agent_sized_person_graph(
+                    _reads.read_person_graph(db_conn, dataset_id=dataset_id or ""))
+            record_mcp_request(
+                db_conn,
+                "get_analytics",
+                source=_mcp_source,
+                requester_id=_mcp_requester_id,
+                resource_owner_user_id=_resource_owner_for_mcp_log(db_conn),
+            )
+            return {"id": req_id, "status": "ok",
+                    "payload": {"query": query, "result": result}}
+
+        # Unknown query - name it, and say what DOES exist.
+        #
+        # This branch used to return `status: ok` with an empty list, so a caller who
+        # guessed a name got a clean, confident nothing -- indistinguishable from a real
+        # empty answer. That is the exact shape the routines' own absence rule forbids:
+        # never let a lookup failure become a finding.
         logger.warning("[PIPELINE:ANALYTICS] Unknown query: %s", query)
         record_mcp_request(
                 db_conn,
@@ -1107,7 +1184,9 @@ async def handle_get_analytics(message: Dict[str, Any]) -> Optional[Dict[str, An
                 requester_id=_mcp_requester_id,
                 resource_owner_user_id=_resource_owner_for_mcp_log(db_conn),
             )
-        return {"id": req_id, "status": "ok", "payload": {"query": query, "result": []}}
+        return {"id": req_id, "status": "error",
+                "error": (f"unknown analytics query {query!r}. Supported: "
+                          + ", ".join(sorted(SUPPORTED_ANALYTICS_QUERIES)))}
     except Exception as exc:  # noqa: BLE001
         logger.debug("[PIPELINE:ANALYTICS] Query error: %s", exc)
         return {"id": req_id, "status": "error", "error": str(exc)}
