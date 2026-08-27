@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.33] — 2026-08-26
+
 ### Security
 - **TCP demotion complete: no bearer mints the owner class on TCP.** The owner
   key still authenticates everywhere `require_api_key` guards, but resolves to
