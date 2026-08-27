@@ -25,9 +25,9 @@ def _creds(token):
 def test_uds_transport_mints_owner_without_bearer():
     token = _transport.set("uds")
     try:
-        p = resolve_request_principal(None)
+        p = resolve_request_principal(credentials=None)
         assert p is not None and p.cls == OWNER_APP and p.channel == "uds"
-        require_api_key(None)  # no raise
+        require_api_key(credentials=None)  # no raise
     finally:
         _transport.reset(token)
 
@@ -35,18 +35,18 @@ def test_uds_transport_mints_owner_without_bearer():
 def test_tcp_default_still_requires_bearer():
     assert current_transport() == "tcp"
     with pytest.raises(HTTPException):
-        resolve_request_principal(None)
+        resolve_request_principal(credentials=None)
     with pytest.raises(HTTPException):
-        require_api_key(None)
+        require_api_key(credentials=None)
 
 
 def test_headers_cannot_fake_the_transport():
     """The marker is a contextvar set only by the UDS server's wrapper — a TCP
     request has no field that reaches it. Garbage bearers on TCP still 401."""
     with pytest.raises(HTTPException):
-        resolve_request_principal(_creds("uds"))
+        resolve_request_principal(credentials=_creds("uds"))
     with pytest.raises(HTTPException):
-        resolve_request_principal(_creds("transport=uds"))
+        resolve_request_principal(credentials=_creds("transport=uds"))
 
 
 @pytest.mark.asyncio

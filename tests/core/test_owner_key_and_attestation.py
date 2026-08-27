@@ -107,5 +107,5 @@ def test_activates_enforcement_end_to_end(tmp_path, monkeypatch):
     def _c(t):
         return HTTPAuthorizationCredentials(scheme="Bearer", credentials=t)
 
-    assert resolve_request_principal(_c(minted)).cls == OWNER_APP
-    assert resolve_request_principal(_c("legacy-shared")).cls == THIRD_PARTY
+    assert resolve_request_principal(credentials=_c(minted)).cls == OWNER_APP
+    assert resolve_request_principal(credentials=_c("legacy-shared")).cls == THIRD_PARTY

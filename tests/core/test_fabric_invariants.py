@@ -173,7 +173,7 @@ def test_I6_require_api_key_rejects_tpk_tokens():
     tok = mint_client_token(c, client_id="claude-desktop")["token"]
     # require_api_key does not consult the registry — a tpk is simply not a key.
     with pytest.raises(HTTPException):
-        require_api_key(HTTPAuthorizationCredentials(scheme="Bearer", credentials=tok))
+        require_api_key(credentials=HTTPAuthorizationCredentials(scheme="Bearer", credentials=tok))
     c.close()
 
 
@@ -213,3 +213,42 @@ def test_I7_canonical_payload_is_frozen():
         "verification against the CP (fail-open to legacy). Change BOTH repos "
         "and update the golden in both test files in lockstep."
     )
+
+
+# ---- I8: the network is not an owner lane ----------------------------------
+# Two layers, both regression-gated: the node binds loopback by default, and
+# the owner CLASS is refused to non-loopback peers even with a valid key. A
+# credential that escaped into a log or a backup must not be usable from the
+# LAN. (Found live 2026-08-26: the node was binding 0.0.0.0 and answering on
+# the wifi address.)
+class _Peer:
+    def __init__(self, host):
+        self.client = type("C", (), {"host": host})()
+
+
+def test_I8_bind_host_defaults_to_loopback(monkeypatch):
+    from topos.cli.commands import _resolve_bind_host
+
+    monkeypatch.delenv("TOPOS_HOST", raising=False)
+    assert _resolve_bind_host(None) == "127.0.0.1"
+    assert _resolve_bind_host("0.0.0.0") == "0.0.0.0"        # explicit still wins
+    monkeypatch.setenv("TOPOS_HOST", "0.0.0.0")
+    assert _resolve_bind_host(None) == "0.0.0.0"             # container escape
+
+
+def test_I8_owner_key_from_the_network_is_not_owner(monkeypatch):
+    from fastapi.security import HTTPAuthorizationCredentials
+
+    from topos.auth import resolve_request_principal
+
+    monkeypatch.setattr(settings, "topos_key", "legacy", raising=False)
+    monkeypatch.setattr(settings, "topos_owner_key", "ok_secret", raising=False)
+    creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials="ok_secret")
+
+    local = resolve_request_principal(_Peer("127.0.0.1"), creds)
+    assert local is not None and local.cls == OWNER_APP
+
+    for remote in ("192.168.86.50", "10.0.0.7", "203.0.113.9"):
+        p = resolve_request_principal(_Peer(remote), creds)
+        assert p is not None and p.cls == THIRD_PARTY, remote
+        assert p.channel == "remote_http"
