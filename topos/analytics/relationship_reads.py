@@ -269,7 +269,8 @@ def read_luck_surface(conn: Any, *, dataset_id: str,
 
 
 def read_person_graph(conn: Any, *, dataset_id: str,
-                      include_automated: bool = False) -> Dict[str, Any]:
+                      include_automated: bool = False,
+                      include_third_party: bool = False) -> Dict[str, Any]:
     """The person-centric graph: one node per person, evidence-gated, owner first.
 
     Computed at read like the bench and the luck surface — 441 nodes in ~6ms on the live
@@ -277,7 +278,8 @@ def read_person_graph(conn: Any, *, dataset_id: str,
     month's relationships.
     """
     from .dataset_resolution import resolve_messaging_dataset
-    from .person_graph import build_person_nodes, resolve_owner_identity
+    from .person_graph import (build_person_edges, build_person_nodes,
+                               resolve_owner_identity)
 
     for table in ("entities",):
         if _table_missing(conn, table):
@@ -288,11 +290,14 @@ def read_person_graph(conn: Any, *, dataset_id: str,
     # "0 unnamed, 290 named" for a node with 121 unnamed people.
     dataset_id, dataset_resolved = resolve_messaging_dataset(conn, dataset_id)
     nodes = build_person_nodes(conn, dataset_id, include_automated=include_automated)
+    edges = build_person_edges(conn, dataset_id, nodes,
+                               include_third_party=include_third_party)
     owner = resolve_owner_identity(conn)
     people = [n for n in nodes if not n.get("is_owner")]
     return {
         "dataset_id": dataset_id,
         "nodes": nodes,
+        "edges": edges,
         "counts": {
             "total": len(nodes),
             "messaged": sum(1 for n in people if n["evidence"]["messaged"]),
@@ -300,6 +305,14 @@ def read_person_graph(conn: Any, *, dataset_id: str,
             "both": sum(1 for n in people
                         if n["evidence"]["messaged"] and n["evidence"]["mentioned"]),
             "needs_name": sum(1 for n in people if n.get("needs_name")),
+            "edges": len(edges),
+        },
+        "attribution": {
+            "observed": sum(1 for e in edges if e["attribution"] == "observed"),
+            "owner_asserted": sum(1 for e in edges if e["attribution"] == "owner_asserted"),
+            "in_your_records": sum(1 for e in edges if e["attribution"] == "in_your_records"),
+            "third_party_asserted": sum(1 for e in edges
+                                        if e["attribution"] == "third_party_asserted"),
         },
         "owner": {"entity_id": owner["canonical_id"], "label": owner["label"],
                   "identity_count": len(owner["ids"])},
@@ -310,6 +323,11 @@ def read_person_graph(conn: Any, *, dataset_id: str,
             "excluded": "automated shortcodes (2FA, delivery notices) are not people",
             "evidence_meaning": ("a node without `messaged` has no cadence, so warmth, drift "
                                  "and reciprocity are unavailable rather than zero"),
+            "attribution_meaning": ("every edge says who asserted it: observed (you messaged "
+                                    "them), owner_asserted (your own record names them), "
+                                    "in_your_records (someone named them to you), "
+                                    "third_party_asserted (someone else's record links two "
+                                    "other people — off unless you ask for it)"),
         },
     }
 

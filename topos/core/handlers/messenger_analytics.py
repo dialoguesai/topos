@@ -531,7 +531,8 @@ async def handle_relationship_reads(message: Dict[str, Any]) -> Optional[Dict[st
             elif msg_type == "messenger_person_graph":
                 result = reads.read_person_graph(
                     conn, dataset_id=dataset_id,
-                    include_automated=bool(payload.get("include_automated", False)))
+                    include_automated=bool(payload.get("include_automated", False)),
+                    include_third_party=bool(payload.get("include_third_party", False)))
             elif msg_type == "messenger_naming_queue":
                 result = reads.read_naming_queue(
                     conn, dataset_id=dataset_id,

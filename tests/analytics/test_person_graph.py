@@ -231,3 +231,78 @@ class TestLabelsAreSafeToRender:
         c.execute("INSERT INTO entity_mentions VALUES ('m1','e1','r1','grow_journal',1)")
         assert len([n for n in PG.build_person_nodes(c, "ds")
                     if not n["is_owner"]][0]["label"]) <= 120
+
+
+class TestEdgesCarryTheirAttribution:
+    """Owner decision D-1. Four ways an edge can be known, and they are NOT interchangeable:
+    one is the owner's lived experience, one their own account of it, one somebody telling
+    them about a person, and one somebody else's claim about two OTHER people."""
+
+    def _corpus(self):
+        c = _conn()
+        _person(c, "e-owner", "Owner", is_self=1)
+        _person(c, "e-dana", "Dana")
+        _person(c, "e-priya", "Priya")
+        _dyad(c, "+15551230000", msgs=40)
+        return c
+
+    def _edges(self, c, **kw):
+        nodes = PG.build_person_nodes(c, "ds")
+        return nodes, PG.build_person_edges(c, "ds", nodes, **kw)
+
+    def test_messaging_is_observed(self):
+        c = self._corpus()
+        _, edges = self._edges(c)
+        obs = [e for e in edges if e["attribution"] == PG.ATTRIBUTION_OBSERVED]
+        assert len(obs) == 1 and obs[0]["weight"] == 40
+
+    def test_the_owners_own_mention_is_owner_asserted(self):
+        c = self._corpus()
+        c.execute("INSERT INTO entity_mentions VALUES ('m1','e-dana','r1','grow_journal',1)")
+        _, edges = self._edges(c)
+        assert any(e["attribution"] == PG.ATTRIBUTION_OWNER_ASSERTED for e in edges)
+
+    def test_somebody_naming_a_person_TO_the_owner_is_still_first_party(self):
+        """The privacy boundary runs between owner-to-person and person-to-person, not
+        between authored and received. Withholding received mentions left 189 people
+        floating unconnected in a graph that knew exactly how the owner heard of them."""
+        c = self._corpus()
+        c.execute("INSERT INTO entity_mentions VALUES ('m1','e-dana','r1','imessage',0)")
+        _, edges = self._edges(c)
+        assert any(e["attribution"] == PG.ATTRIBUTION_RECEIVED for e in edges)
+
+    def test_an_edge_between_two_OTHER_people_is_off_by_default(self):
+        c = self._corpus()
+        for eid in ("e-dana", "e-priya"):
+            c.execute("INSERT INTO entity_mentions VALUES (?,?,?,?,0)",
+                      (f"m-{eid}", eid, "shared-record", "imessage"))
+        _, default_edges = self._edges(c)
+        assert not [e for e in default_edges
+                    if e["attribution"] == PG.ATTRIBUTION_THIRD_PARTY], \
+            "a claim about two non-consenting third parties must not render unasked"
+        _, opted_in = self._edges(c, include_third_party=True)
+        assert [e for e in opted_in if e["attribution"] == PG.ATTRIBUTION_THIRD_PARTY]
+
+    def test_the_owners_own_account_of_two_people_meeting_is_not_gated(self):
+        """"I met Dana with Priya" is the owner's own memory of their own life."""
+        c = self._corpus()
+        for eid in ("e-dana", "e-priya"):
+            c.execute("INSERT INTO entity_mentions VALUES (?,?,?,?,1)",
+                      (f"m-{eid}", eid, "my-journal-entry", "grow_journal"))
+        _, edges = self._edges(c)
+        co = [e for e in edges if e["kind"] == "co_mentioned"]
+        assert co and all(e["attribution"] == PG.ATTRIBUTION_OWNER_ASSERTED for e in co)
+
+    def test_no_edge_points_at_a_node_that_does_not_exist(self):
+        c = self._corpus()
+        c.execute("INSERT INTO entity_mentions VALUES ('m1','e-dana','r1','grow_journal',1)")
+        nodes, edges = self._edges(c, include_third_party=True)
+        ids = {n["node_id"] for n in nodes}
+        for e in edges:
+            assert e["source"] in ids and e["target"] in ids
+
+    def test_no_self_loops(self):
+        c = self._corpus()
+        c.execute("INSERT INTO entity_mentions VALUES ('m1','e-owner','r1','grow_journal',1)")
+        _, edges = self._edges(c)
+        assert all(e["source"] != e["target"] for e in edges)
