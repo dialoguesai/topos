@@ -432,6 +432,33 @@ class EntityResolver:
                         "UPDATE entities SET identifiers_json=?, updated_at=datetime('now') WHERE entity_id=?",
                         (json.dumps(sorted(set(identifiers))), existing[0]),
                     )
+                    # The comment above PROMISES that "a later pass that learns the real
+                    # name updates the same row" — and until 2026-08-26 nothing did. Once a
+                    # placeholder entity existed, naming the contact never renamed the
+                    # person: the owner could set a display_name and the graph, the dyads
+                    # and every fact card would keep saying "+1512…" forever. Promote the
+                    # placeholder when the contact has since gained a real name, keeping
+                    # the old surface as an alias so old references still resolve.
+                    real = str(display_name or "").strip()
+                    if real:
+                        row = self._conn.execute(
+                            "SELECT canonical_name, aliases_json FROM entities WHERE entity_id=?",
+                            (existing[0],)).fetchone()
+                        cur = str(row[0] or "").strip() if row else ""
+                        if cur and cur != real and (
+                                cur.lower() in {i.lower() for i in identifiers}
+                                or not any(ch.isalpha() for ch in cur)):
+                            try:
+                                aliases = json.loads((row[1] if row else "[]") or "[]")
+                            except (json.JSONDecodeError, TypeError):
+                                aliases = []
+                            if cur not in aliases:
+                                aliases.append(cur)
+                            self._conn.execute(
+                                "UPDATE entities SET canonical_name=?, normalized_name=?,"
+                                " aliases_json=?, updated_at=datetime('now')"
+                                " WHERE entity_id=?",
+                                (real, normalize_name(real), json.dumps(aliases), existing[0]))
                     continue
                 self._create_entity(
                     name,

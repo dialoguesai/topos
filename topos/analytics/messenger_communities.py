@@ -485,4 +485,9 @@ def _compute_directed_lane(db: Any, dataset_id: str, source_ids: Optional[Sequen
     periods = sorted({r[1] for r in rows})
     edges = persist_directed_edges(db, dataset_id, rows, periods=periods)
     dyads = persist_dyad_stats(db, dataset_id, dyad_rows)
-    return {"directed_edges_written": edges, "dyads_written": dyads}
+    # L1-8: fill the nullable person-id columns where identity is unambiguous. Runs after
+    # persistence because it reads the tables it fills; abstains on ambiguity.
+    from .messenger_directed import backfill_person_ids
+    ident = backfill_person_ids(db, dataset_id)
+    return {"directed_edges_written": edges, "dyads_written": dyads,
+            "person_ids_resolved": ident.get("resolved", 0)}
