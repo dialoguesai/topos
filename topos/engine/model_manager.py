@@ -367,17 +367,25 @@ def _sweep_superseded_backups(models_path: Path) -> Tuple[List[str], int]:
     that buys nothing is not a trade. Best-effort throughout — a backup
     directory that cannot be read is a reason to fall through to models, never
     a reason to fail the reclaim.
+
+    And only backups the data plane has handed over. This module does not
+    resolve a database path of its own (SYS-node I1): on a machine that is not
+    the one holding this node's database, `node_backups` is empty and rule 0
+    simply does not apply — the only honest answer when the ladder we would be
+    spending belongs to somebody else.
     """
     try:
-        from ..storage.db.migrations.backup import prune_to_retention
-        from .disk_space import backup_directory, on_same_volume
+        from .disk_space import backup_directory, node_backups, on_same_volume
 
+        custody = node_backups()
+        if custody is None:
+            return [], 0
         directory = backup_directory()
         if directory is None or not directory.is_dir():
             return [], 0
         if on_same_volume(directory, models_path) is not True:
             return [], 0
-        removed, freed = prune_to_retention(directory)
+        removed, freed = custody.prune(directory)
     except Exception as exc:  # noqa: BLE001 — an unreadable backup dir is not fatal
         logger.debug("backup sweep skipped: %s", exc)
         return [], 0
@@ -387,7 +395,7 @@ def _sweep_superseded_backups(models_path: Path) -> Tuple[List[str], int]:
             len(removed),
             format_bytes(freed),
         )
-    return [path.name for path in removed], freed
+    return list(removed), freed
 
 
 def reclaim_for(

@@ -232,12 +232,18 @@ async def _reap_upgrade_runner(timeout_s: float = _UPGRADE_JOIN_TIMEOUT_S) -> No
 @app.on_event("startup")
 async def startup_event() -> None:
     from .runtime_shutdown import begin_runtime, install_shutdown_signal_hooks
+    from .storage.db.migrations.backup_custody import hand_backups_to_the_disk_floor
 
     # Mint this run's generation rather than clearing a shared flag. Clearing
     # would un-stop a previous run's still-draining workers; a fresh generation
     # leaves theirs retired and gives this run its own.
     begin_runtime("app_startup")
     install_shutdown_signal_hooks()
+    # This process holds the database, so its backups are the ones the model
+    # manager may spend before it evicts a model. The disk floor never resolves
+    # that directory for itself — on a split node it runs beside the models, on
+    # a machine whose ~/.topos would belong to somebody else (SYS-node I1).
+    hand_backups_to_the_disk_floor()
     align_uvicorn_loggers()
     _log_runtime_banner()
     logger.info("CORS allowed origins: %s", settings.allowed_origins)

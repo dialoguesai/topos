@@ -83,6 +83,23 @@ The machine-readable twin of each release is
     bodies of work.
 
 ### Changed
+- **[O] The disk floor is handed the node's backups; it no longer goes looking
+  for them.** The retention work below let `disk_space` and `model_manager`
+  resolve the node's backup directory themselves, through
+  `storage.db.paths.resolve_active_database` — two new engine → data-plane
+  reaches, which `test_node_plane_split.py` caught (SYS-node I1, D-001). The
+  reaches are not a technicality: those modules run on the machine the *models*
+  land on, which under the plane split is the GPU box, and a floor that resolves
+  a database path for itself would — on any box holding a `~/.topos` of its own
+  — find a stranger's rollback ladder and prune it to make room for our
+  download. `unlink()` on somebody else's recovery path is a worse outcome than
+  the full disk it was avoiding. So custody is inverted: the data plane installs
+  a `NodeBackups` at startup (`storage/db/migrations/backup_custody.py`), and
+  the floor reports and spends only what it was handed. Nothing handed over
+  means no backups to count — the state a remote engine, the CLI, and any
+  non-node process are permanently in, and the right answer for all three.
+  Co-resident behaviour is unchanged: rule 0 still spends a superseded backup
+  before a model. The ratchet allowlist did not grow.
 - **[O] Pre-migration backups have a retention policy, and the disk floor can
   see them.** `~/.topos/backups/` held 5.9 GB while `disk_space` knew only about
   Ollama models — so a node under its 10 GB floor would evict a model it can

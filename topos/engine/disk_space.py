@@ -35,7 +35,7 @@ import logging
 import os
 import shutil
 from pathlib import Path
-from typing import Any, NamedTuple, Optional
+from typing import Any, Dict, List, NamedTuple, Optional, Protocol, Tuple
 from urllib.parse import urlparse
 
 logger = logging.getLogger("topos.engine.disk_space")
@@ -209,18 +209,63 @@ def check_space_for(
     )
 
 
-def backup_directory() -> Optional[Path]:
-    """Where this node's pre-migration backups live, or None if unresolvable.
+class NodeBackups(Protocol):
+    """What the data plane lets this floor see, and spend, of its own backups.
 
-    Resolved through the same two functions the migration path uses, so the
-    floor is looking at the directory that actually gets written rather than a
-    second guess at it — ``TOPOS_BACKUP_DIR`` and the profile slot both move it.
+    The floor does not go looking for a database. This module runs on the
+    machine the models land on, and on a split node that is the GPU box while
+    the database — with the backups beside it — is on the other one (SYS-node
+    I1, D-001). A floor that resolved a backup directory for itself would, on
+    any box that happens to hold a ``~/.topos`` of its own, find a *stranger's*
+    rollback ladder and prune it to make room for our download.
+
+    So the data plane hands its backups over instead, and a process that never
+    does leaves this floor with none — which is the safe answer and, once the
+    planes split, the correct one.
     """
-    try:
-        from ..storage.db.migrations.backup import backup_dir_for
-        from ..storage.db.paths import resolve_active_database
 
-        return backup_dir_for(resolve_active_database().path)
+    def directory(self) -> Optional[Path]:
+        """Where this node's pre-migration backups live, or None."""
+
+    def report(self, directory: Path) -> Dict[str, Any]:
+        """Retention split into prunable / retained / manual, as `backup_space` reports it."""
+
+    def prune(self, directory: Path) -> Tuple[List[str], int]:
+        """Delete what retention already condemned; return the names and the bytes freed."""
+
+
+#: Empty until the data plane installs one. Empty is not a degraded state — it
+#: is what a machine holding no database of its own should report.
+_CUSTODY: Optional[NodeBackups] = None
+
+
+def install_node_backups(custody: Optional[NodeBackups]) -> None:
+    """Data plane only: hand this node's backups to the disk floor.
+
+    Called once from node startup. Passing None withdraws them, which is what a
+    process holding no database should leave in place.
+    """
+    global _CUSTODY
+    _CUSTODY = custody
+
+
+def node_backups() -> Optional[NodeBackups]:
+    """The custody the data plane handed over, or None if it never did."""
+    return _CUSTODY
+
+
+def backup_directory() -> Optional[Path]:
+    """Where this node's pre-migration backups live, or None if we hold none.
+
+    None covers both "nothing was handed to us" — a remote engine, the CLI, a
+    test — and "custody could not resolve one". Neither is a disk fault, and
+    both mean the same thing to every caller: decide the floor without them.
+    """
+    custody = _CUSTODY
+    if custody is None:
+        return None
+    try:
+        return custody.directory()
     except Exception as exc:  # noqa: BLE001 — no database is not a disk fault
         logger.debug("backup directory unresolvable: %s", exc)
         return None
@@ -270,15 +315,14 @@ def backup_space(*, models_path: Optional[Path] = None) -> dict:
     unreadable device is not a match, so it reports False rather than guessing.
     """
     blank = _no_backup_space()
+    custody = _CUSTODY
     directory = backup_directory()
-    if directory is None or not directory.is_dir():
+    if custody is None or directory is None or not directory.is_dir():
         return blank
     if on_same_volume(directory, models_path or ollama_models_dir()) is not True:
         return {**blank, "path": str(directory)}
     try:
-        from ..storage.db.migrations.backup import retention_report
-
-        report = retention_report(directory)
+        report = custody.report(directory)
     except Exception as exc:  # noqa: BLE001 — a directory we cannot read is not a finding
         logger.debug("backup retention report failed for %s: %s", directory, exc)
         return {**blank, "path": str(directory)}

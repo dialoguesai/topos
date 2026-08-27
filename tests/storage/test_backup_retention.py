@@ -9,6 +9,7 @@ unrecoverable node.
 
 from __future__ import annotations
 
+import ast
 import os
 from pathlib import Path
 from unittest.mock import patch
@@ -19,6 +20,7 @@ from topos.engine import disk_space
 from topos.storage.db.migrations import backup as backup_mod
 
 GB = 1024**3
+REPO_ROOT = Path(__file__).resolve().parents[2]
 
 
 def write_backup(directory: Path, name: str, mtime: float, size: int = 64) -> Path:
@@ -194,7 +196,10 @@ class TestTheReportSplitsWhoMayReclaimWhat:
         assert backup_mod.retention_report(tmp_path, installed="1.3.32")["prunable_bytes"] == 0
 
 
+@pytest.mark.usefixtures("node_backups_handed_over")
 class TestTheFloorCanSeeTheBackups:
+    """With custody handed over, as node startup hands it over."""
+
     def test_a_different_volume_reports_nothing_rather_than_a_misleading_number(
         self, tmp_path, monkeypatch
     ):
@@ -231,3 +236,80 @@ class TestTheFloorCanSeeTheBackups:
         assert status["backups"]["applies"] is True
         assert status["backups"]["prunable_bytes"] == 200
         assert status["backups"]["retained_count"] == 3
+
+
+@pytest.mark.usefixtures("node_backups_withheld")
+class TestCustodyIsWhatTurnsTheLaneOn:
+    """SYS-node I1: the floor reports on no backups it was not handed.
+
+    The engine plane is meant to be movable to a second machine, so it never
+    resolves a database path of its own. A process that did not hand its backups
+    over — a remote engine, the CLI — has none to report, even standing in a
+    directory full of them. Both tests below stand in the same directory; the
+    only difference between them is custody.
+    """
+
+    def test_the_status_payload_reports_none(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TOPOS_BACKUP_DIR", str(tmp_path))
+        write_backup(tmp_path, named("1.3.10", "20260810T000000Z"), 1e9, size=100)
+
+        with patch.object(disk_space, "on_same_volume", return_value=True), patch.object(
+            disk_space, "min_free_bytes", return_value=10 * GB
+        ):
+            status = disk_space.disk_status()
+
+        assert disk_space.node_backups() is None
+        assert status["backups"]["applies"] is False
+        assert status["backups"]["prunable_bytes"] == 0
+
+    def test_handing_them_over_is_what_turns_the_lane_on(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("TOPOS_BACKUP_DIR", str(tmp_path))
+        for i in range(5):
+            write_backup(tmp_path, named("1.3.10", f"2026081{i}T000000Z"), 1e9 + i, size=100)
+
+        from topos.storage.db.migrations.backup_custody import ActiveNodeBackups
+
+        monkeypatch.setattr(disk_space, "_CUSTODY", ActiveNodeBackups())
+        with patch.object(disk_space, "on_same_volume", return_value=True):
+            assert disk_space.backup_space()["prunable_bytes"] == 200
+
+
+class TestTheHandoverIsActuallyWired:
+    """The seam is only worth anything if node startup crosses it.
+
+    Rule 0 goes quiet if nothing hands the backups over, and quiet is the one
+    failure mode it has: the node keeps working, keeps honouring the floor, and
+    keeps paying for it in re-downloaded models while a directory of condemned
+    database copies sits beside them. Nothing else in the suite notices.
+    """
+
+    def test_startup_hands_them_over(self):
+        source = (REPO_ROOT / "topos" / "app.py").read_text(encoding="utf-8")
+        startup = next(
+            node
+            for node in ast.walk(ast.parse(source))
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name == "startup_event"
+        )
+        called = {
+            node.func.id
+            for node in ast.walk(startup)
+            if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+        }
+        assert "hand_backups_to_the_disk_floor" in called, (
+            "Node startup no longer hands its backups to the disk floor, so "
+            "model_manager rule 0 is inert: the node will evict a model it has "
+            "to re-download while superseded backups sit on the same volume."
+        )
+
+    def test_the_handover_installs_custody(self, monkeypatch):
+        from topos.storage.db.migrations.backup_custody import (
+            hand_backups_to_the_disk_floor,
+        )
+
+        monkeypatch.setattr(disk_space, "_CUSTODY", None)
+        hand_backups_to_the_disk_floor()
+
+        custody = disk_space.node_backups()
+        assert custody is not None
+        assert custody.directory() == Path(os.environ["TOPOS_BACKUP_DIR"])

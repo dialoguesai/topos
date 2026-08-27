@@ -139,6 +139,32 @@ def test_shared_blobs_mean_the_volume_is_the_authority_not_the_arithmetic(no_pro
     assert result.reason == "still_short"
 
 
+def test_the_floor_spends_no_backup_it_was_never_handed(
+    no_protection, tmp_path, monkeypatch, node_backups_withheld
+):
+    """SYS-node I1: on a machine that is not this node's, rule 0 does not apply.
+
+    Same directory, same volume, same breached floor as
+    `test_a_superseded_backup_is_spent_before_a_model` — the one difference is
+    that nobody handed the backups over, which is the state a remote engine box
+    is permanently in. The ladder there belongs to somebody else, so a model is
+    what gives way instead.
+    """
+    directory = tmp_path / "backups"
+    monkeypatch.setenv("TOPOS_BACKUP_DIR", str(directory))
+    made = _condemned_backups(directory)
+    adapter = FakeAdapter(FLEET)
+
+    with patch("topos.engine.disk_space.on_same_volume", return_value=True), patch.object(
+        mm, "min_free_bytes", return_value=10 * GB
+    ), patch.object(mm, "free_bytes", return_value=5 * GB):
+        result = mm.reclaim_for(2 * GB, adapter=adapter)
+
+    assert all(path.is_file() for path in made), "not ours to spend"
+    assert result.removed_backups == ()
+    assert adapter.deleted, "a model is what gives way when there is no ladder to spend"
+
+
 def test_a_remote_ollama_is_never_ours_to_prune(no_protection):
     adapter = FakeAdapter(FLEET)
     with patch.object(mm, "min_free_bytes", return_value=10 * GB), patch.object(
@@ -274,8 +300,12 @@ def _condemned_backups(directory, count=2, keep=3):
 
 
 @pytest.fixture
-def backup_dir(tmp_path, monkeypatch):
-    """A backup directory of this node's own, on the models volume."""
+def backup_dir(tmp_path, monkeypatch, node_backups_handed_over):
+    """A backup directory of this node's own, on the models volume.
+
+    Handed over, because the floor is never given a database path to go find one
+    with — see `node_backups_handed_over`.
+    """
     directory = tmp_path / "backups"
     monkeypatch.setenv("TOPOS_BACKUP_DIR", str(directory))
     with patch("topos.engine.disk_space.on_same_volume", return_value=True):
@@ -314,7 +344,9 @@ def test_the_ladder_is_not_spent_even_under_the_floor(no_protection, backup_dir)
     assert adapter.deleted, "with no condemned backup, a model is what gives way"
 
 
-def test_backups_on_another_volume_are_not_spent_for_this_floor(no_protection, tmp_path, monkeypatch):
+def test_backups_on_another_volume_are_not_spent_for_this_floor(
+    no_protection, tmp_path, monkeypatch, node_backups_handed_over
+):
     """Deleting on the home volume does not make room on a second drive."""
     directory = tmp_path / "backups"
     monkeypatch.setenv("TOPOS_BACKUP_DIR", str(directory))

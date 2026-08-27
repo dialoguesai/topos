@@ -531,6 +531,41 @@ def pin_db_path(monkeypatch):
     return _pin
 
 
+@pytest.fixture
+def node_backups_handed_over(monkeypatch):
+    """Put this process in the position node startup leaves it in.
+
+    The disk floor does not resolve a backup directory for itself — it runs on
+    the machine the models land on, which on a split node is not the machine
+    holding the database (SYS-node I1). The data plane hands its backups over at
+    startup instead, and nothing here goes through startup, so a test about what
+    the floor may count or spend has to hand them over the same way.
+
+    Set on the module global rather than through ``install_node_backups`` so
+    monkeypatch puts the process back afterwards: custody is deliberately
+    process-wide, and a test that installed it for real would leave every later
+    test looking at whatever database path the environment resolves to.
+    """
+    from topos.engine import disk_space
+    from topos.storage.db.migrations.backup_custody import ActiveNodeBackups
+
+    monkeypatch.setattr(disk_space, "_CUSTODY", ActiveNodeBackups())
+
+
+@pytest.fixture
+def node_backups_withheld(monkeypatch):
+    """The other side of the seam: a process that holds none of this node's backups.
+
+    A remote engine box, the CLI, any process that did not run node startup.
+    Pinned rather than assumed — custody is a process-wide global, so a test that
+    merely *expected* it to be empty would start passing or failing on whether
+    something earlier in the run had installed it.
+    """
+    from topos.engine import disk_space
+
+    monkeypatch.setattr(disk_space, "_CUSTODY", None)
+
+
 @pytest.fixture(autouse=True)
 def _no_live_ollama_probe_guard(request, monkeypatch):
     """Same disease as the live-DB guard, one lane over.
