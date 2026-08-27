@@ -506,3 +506,102 @@ def test_the_attribution_summary_counts_every_class_present():
     present = {e["attribution"] for e in out["edges"]}
     assert set(out["attribution"]) == present
     assert out["attribution"].get("co_present", 0) >= 1
+
+
+class TestClosenessIsReciprocityNotVolume:
+    """98 of this node's 151 human ties are `broadcast_only` — high volume flowing one way.
+    Ranking by message count would put mailing lists ahead of the people the owner talks to."""
+
+    def test_a_broadcaster_is_not_close(self):
+        loud = PG.relationship_closeness(
+            {"tie_state": "broadcast_only", "total_msgs": 5000, "reciprocal_periods": 0})
+        quiet = PG.relationship_closeness(
+            {"tie_state": "active", "total_msgs": 40, "reciprocal_periods": 4})
+        assert quiet["closeness"] > loud["closeness"]
+        assert "nothing comes back" in loud["closeness_reason"]
+
+    def test_more_reciprocal_months_beats_more_messages(self):
+        deep = PG.relationship_closeness(
+            {"tie_state": "active", "total_msgs": 200, "reciprocal_periods": 5})
+        loud = PG.relationship_closeness(
+            {"tie_state": "active", "total_msgs": 2000, "reciprocal_periods": 1})
+        assert deep["closeness"] > loud["closeness"]
+
+    def test_going_quiet_lowers_it(self):
+        recent = PG.relationship_closeness(
+            {"tie_state": "active", "total_msgs": 100, "reciprocal_periods": 3,
+             "recent_gap_days": 2})
+        stale = PG.relationship_closeness(
+            {"tie_state": "active", "total_msgs": 100, "reciprocal_periods": 3,
+             "recent_gap_days": 300})
+        assert recent["closeness"] > stale["closeness"]
+
+    def test_no_messaging_tie_is_unknown_not_zero(self):
+        """Zero would place someone the owner has never texted at the same distance as
+        someone who ignores them — the record does not say that."""
+        c = _conn()
+        _person(c, "e-owner", "Owner", is_self=1)
+        _person(c, "e-m", "Dana")
+        c.execute("INSERT INTO entity_mentions VALUES ('m1','e-m','r1','grow_journal',1)")
+        nodes = PG.build_person_nodes(c, "ds")
+        PG.attach_closeness(c, "ds", nodes)
+        dana = [n for n in nodes if n["label"] == "Dana"][0]
+        assert dana["closeness"] is None
+        assert "unknown" in dana["closeness_reason"]
+
+    def test_every_score_states_its_reason(self):
+        for state in PG.TIE_STATE_CLOSENESS:
+            out = PG.relationship_closeness(
+                {"tie_state": state, "total_msgs": 30, "reciprocal_periods": 2})
+            assert 0.0 <= out["closeness"] <= 1.0 and len(out["closeness_reason"]) > 5
+
+
+class TestDuplicatesFoldToTheirStrongestSighting:
+    """Every duplicate here has the same shape: one `core` node holding the messaging
+    identity beside one `named` node holding the extracted entity."""
+
+    def _pair(self, band_a="core", band_b="named", **kw):
+        keep = {"node_id": "a", "label": "Dasha", "band": band_a, "band_reason": "msgs",
+                "evidence": {"messaged": True, "mentioned": False}, "is_owner": False,
+                "message_count": 606, "mention_count": 0, "needs_name": False,
+                "entity_id": "ent_a", "contact_id": None, "messenger_keys": ["+1555"],
+                "sources": []}
+        other = {"node_id": "b", "label": "Dasha", "band": band_b, "band_reason": "named",
+                 "evidence": {"messaged": False, "mentioned": True}, "is_owner": False,
+                 "message_count": 0, "mention_count": 4, "needs_name": False,
+                 "entity_id": "ent_b", "contact_id": None, "messenger_keys": [],
+                 "sources": ["grow_journal"]}
+        keep.update(kw)
+        return [keep, other]
+
+    def test_complementary_sightings_fold_into_one(self):
+        out = PG.auto_link_duplicates(self._pair())
+        assert len(out) == 1
+        assert out[0]["mention_count"] == 4 and out[0]["message_count"] == 606
+        assert out[0]["auto_linked"] is True
+
+    def test_differing_ENTITY_ids_do_not_block(self):
+        """Extraction emits one human twice — that split IS the duplicate problem, not
+        evidence of two people."""
+        assert len(PG.auto_link_duplicates(self._pair())) == 1
+
+    def test_differing_CONTACT_ids_DO_block(self):
+        """Two address-book entries sharing a name are two people the owner kept apart."""
+        pair = self._pair(contact_id="c1")
+        pair[1]["contact_id"] = "c2"
+        assert len(PG.auto_link_duplicates(pair)) == 2
+
+    def test_two_MESSAGED_nodes_are_never_folded(self):
+        """Two phone numbers may be two humans. That is a question for the owner."""
+        pair = self._pair()
+        pair[1]["evidence"] = {"messaged": True, "mentioned": False}
+        pair[1]["message_count"] = 31
+        assert len(PG.auto_link_duplicates(pair)) == 2
+
+    def test_the_strongest_band_wins(self):
+        out = PG.auto_link_duplicates(self._pair(band_a="ambient", band_b="core"))
+        assert out[0]["band"] == PG.BAND_CORE
+
+    def test_a_split_keeps_them_apart(self):
+        out = PG.auto_link_duplicates(self._pair(), split_ids=["b"])
+        assert len(out) == 2

@@ -17,6 +17,7 @@ Built on two decisions the owner made 2026-08-27 (PLAN_SOCIAL_GRAPH_PERSON_CENTR
 
 from __future__ import annotations
 
+import math
 import re
 import sqlite3
 from typing import Any, Dict, List, Optional, Set
@@ -804,3 +805,205 @@ def structural_metrics(conn: Any, dataset_id: str, nodes: List[Dict[str, Any]], 
             "communities": kept,
         },
     }
+
+
+# --------------------------------------------------------------------------- closeness
+
+#: How close a tie reads from its STATE. Reciprocity, not volume, is what closeness is made
+#: of: 98 of this node's 151 human ties are `broadcast_only` — high message counts flowing one
+#: way, which is a mailing list, not a friendship. Sorting by volume would put those ahead of
+#: the people the owner actually talks with.
+TIE_STATE_CLOSENESS = {
+    "active": 1.00,
+    "cooling": 0.60,
+    "dormant": 0.35,
+    "one_sided": 0.20,
+    "broadcast_only": 0.05,
+}
+
+#: Reciprocal months beyond this add nothing — the difference between talking back and forth
+#: for six months and for a year is not the difference between a friend and a stranger.
+RECIPROCITY_SATURATION = 6
+
+
+def relationship_closeness(row: Dict[str, Any]) -> Dict[str, Any]:
+    """How close a person is to the owner, 0..1, with the reason in words.
+
+    Deliberately NOT the same axis as the structural metrics. Betweenness and community say
+    how someone sits among the owner's OTHER people, with the owner removed. This says how
+    they sit with the owner — and the two answer different questions, so the graph can use
+    one for angle and the other for radius instead of muddling them into a single blob.
+
+    Three ingredients, in the order they matter:
+
+    1. **Reciprocity.** Whether it goes both ways, and for how many months. A tie that only
+       ever carries one direction stops being a relationship, whatever its volume.
+    2. **Recency.** A close tie that has gone quiet is not the same as a close tie.
+    3. **Volume**, log-scaled and last. It breaks ties between people who are otherwise
+       alike; it never promotes a broadcaster over a friend.
+    """
+    state = str(row.get("tie_state") or "").strip().lower()
+    base = TIE_STATE_CLOSENESS.get(state, 0.3)
+
+    reciprocal = float(row.get("reciprocal_periods") or 0)
+    reciprocity = min(1.0, reciprocal / RECIPROCITY_SATURATION)
+
+    total = float(row.get("total_msgs") or 0)
+    volume = min(1.0, math.log10(total + 1) / 3.0) if total > 0 else 0.0
+
+    recent_gap = row.get("recent_gap_days")
+    try:
+        gap = float(recent_gap) if recent_gap is not None else None
+    except (TypeError, ValueError):
+        gap = None
+    # Half a year of silence halves it; the curve is gentle because people go quiet for
+    # reasons that have nothing to do with closeness.
+    recency = 1.0 if gap is None else max(0.35, 1.0 - (gap / 365.0))
+
+    score = (0.50 * base + 0.30 * reciprocity + 0.20 * volume) * recency
+    score = max(0.0, min(1.0, round(score, 4)))
+
+    if state == "broadcast_only":
+        reason = "messages arrive but nothing comes back"
+    elif reciprocal >= 3:
+        reason = f"back and forth across {int(reciprocal)} months"
+    elif reciprocal >= 1:
+        reason = f"back and forth in {int(reciprocal)} month{'s' if reciprocal > 1 else ''}"
+    elif state in ("dormant", "cooling"):
+        reason = f"{state}, {int(gap)} days quiet" if gap else state
+    else:
+        reason = "little back and forth recorded"
+    return {"closeness": score, "closeness_reason": reason, "tie_state": state or None}
+
+
+def attach_closeness(conn: Any, dataset_id: str, nodes: List[Dict[str, Any]]) -> None:
+    """Stamp closeness onto every node that has a messaging tie with the owner."""
+    from .messenger_directed import MESSENGER_DYAD_STATS_TABLE, SELF_KEY
+
+    try:
+        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({MESSENGER_DYAD_STATS_TABLE})")}
+    except sqlite3.Error:
+        return
+    wanted = [c for c in ("total_msgs", "reciprocal_periods", "recent_gap_days", "tie_state")
+              if c in cols]
+    if not wanted:
+        return
+    try:
+        rows = conn.execute(
+            f"SELECT CASE WHEN a_key=? THEN b_key ELSE a_key END, {', '.join(wanted)}"
+            f"  FROM {MESSENGER_DYAD_STATS_TABLE}"
+            f" WHERE dataset_id=? AND involves_self=1", (SELF_KEY, dataset_id)).fetchall()
+    except sqlite3.Error:
+        return
+    by_peer = {str(r[0]): dict(zip(wanted, r[1:])) for r in rows}
+
+    for node in nodes:
+        if node.get("is_owner"):
+            node["closeness"] = 1.0
+            node["closeness_reason"] = "this is you"
+            continue
+        best = None
+        for key in node.get("messenger_keys", []):
+            row = by_peer.get(str(key))
+            if not row:
+                continue
+            scored = relationship_closeness(row)
+            if best is None or scored["closeness"] > best["closeness"]:
+                best = scored
+        if best:
+            node.update(best)
+        else:
+            # No messaging tie: closeness is UNKNOWN, not zero. A zero would place someone
+            # the owner has never texted at the same distance as someone who ignores them.
+            node["closeness"] = None
+            node["closeness_reason"] = "no messages exchanged, so closeness is unknown"
+
+
+# --------------------------------------------------------------------------- duplicates
+
+#: Strongest first. A person who appears in two bands is ONE person seen two ways, and the
+#: stronger sighting is the true one: someone you message and also mention is a core contact
+#: who happens to also turn up in your journal, not an ambient name who happens to text you.
+BAND_STRENGTH = {BAND_CORE: 3, BAND_NAMED: 2, BAND_DISCUSSED: 1, BAND_AMBIENT: 0}
+
+
+def _identities_conflict(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
+    """True when these cannot be the same person.
+
+    Only CONTACT ids count. Two different contacts sharing a name are two address-book
+    entries the owner (or their phone) kept apart, which is real evidence of two people.
+
+    Two different ENTITY ids are not: extraction routinely emits one human twice, which is
+    the whole duplicate problem. Dasha exists as `ent_4e1a089c…` (606 messages) and
+    `ent_612aa44f…` (4 mentions), and treating that split as proof of two Dashas is exactly
+    backwards.
+
+    The name-collision danger — `Bravo Yankee` versus `Charlie Yankee` — is handled where it
+    belongs: those have DIFFERENT names, so they never reach this function. Two people with
+    genuinely identical names remain possible, which is why the link is derived at read,
+    shown on the node, and undone by a `split`.
+    """
+    x, y = a.get("contact_id"), b.get("contact_id")
+    return bool(x and y and str(x) != str(y))
+
+
+def auto_link_duplicates(nodes: List[Dict[str, Any]], *, split_ids=()) -> List[Dict[str, Any]]:
+    """Fold same-name nodes with COMPLEMENTARY evidence into one, at read time.
+
+    On the live corpus every duplicate has the same shape: one `core` node holding the
+    messaging identity and one `named` node holding the extracted entity — Dasha (606
+    messages) beside Dasha (4 mentions). They are one person, and showing them twice makes
+    the graph look careless and understates both halves of the relationship.
+
+    Two guards keep this from inventing people:
+
+    * **Complementary evidence only.** Two nodes the owner MESSAGES are two phone numbers
+      that may well be two humans; those stay separate and go to the merge queue for a human
+      to confirm. Folding happens only when one side is messaged and the other mentioned.
+    * **No conflicting identity.** Different entity ids or different contact ids mean
+      extraction already decided they are distinct.
+
+    Derived at read, never written: `split_ids` (owner `split` overlay rows) suppress a link,
+    so the owner can always pull one apart and it stays pulled apart.
+    """
+    split = {str(x) for x in (split_ids or ())}
+    groups: Dict[str, List[Dict[str, Any]]] = {}
+    for node in nodes:
+        if node.get("is_owner") or node.get("needs_name") or node.get("dismissed"):
+            continue
+        key = _normalized_name(node.get("label"))
+        if len(key) < 3:
+            continue  # a two-letter nickname is not evidence of anything
+        groups.setdefault(key, []).append(node)
+
+    absorbed: Set[str] = set()
+    for key, group in groups.items():
+        if len(group) < 2 or key in split:
+            continue
+        messaged = [n for n in group if n["evidence"]["messaged"]]
+        mentioned = [n for n in group if not n["evidence"]["messaged"]]
+        if len(messaged) != 1 or not mentioned:
+            continue  # two messaged nodes may be two people — that is a question, not a fact
+        keep = messaged[0]
+        for other in mentioned:
+            if str(other["node_id"]) in split or _identities_conflict(keep, other):
+                continue
+            keep["mention_count"] = int(keep.get("mention_count", 0)) + int(other.get("mention_count", 0))
+            keep["evidence"]["mentioned"] = True
+            if not keep.get("entity_id") and other.get("entity_id"):
+                keep["entity_id"] = other["entity_id"]
+            keep["sources"] = sorted(set(keep.get("sources", [])) | set(other.get("sources", [])))
+            keep.setdefault("linked_from", []).append(
+                {"node_id": other["node_id"], "label": other.get("label"),
+                 "band": other.get("band")})
+            absorbed.add(str(other["node_id"]))
+            # The strongest sighting wins the band (owner instruction 2026-08-27): someone
+            # you message AND mention is a core contact, not an ambient name.
+            if BAND_STRENGTH.get(str(other.get("band")), 0) > BAND_STRENGTH.get(str(keep.get("band")), 0):
+                keep["band"] = other["band"]
+                keep["band_reason"] = other.get("band_reason", "")
+        if keep.get("linked_from"):
+            keep["auto_linked"] = True
+            keep["band_reason"] = (f"{keep.get('band_reason', '')}"
+                                   f" · also mentioned in your records").strip(" ·")
+    return [n for n in nodes if str(n["node_id"]) not in absorbed]

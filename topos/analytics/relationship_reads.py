@@ -279,7 +279,8 @@ def read_person_graph(conn: Any, *, dataset_id: str,
     month's relationships.
     """
     from .dataset_resolution import resolve_messaging_dataset
-    from .person_graph import (build_person_edges, build_person_nodes, merge_suggestions,
+    from .person_graph import (attach_closeness, auto_link_duplicates, build_person_edges,
+                               build_person_nodes, merge_suggestions,
                                resolve_owner_identity, structural_metrics)
 
     for table in ("entities",):
@@ -297,6 +298,15 @@ def read_person_graph(conn: Any, *, dataset_id: str,
 
     overlay_rows = load_overlay(conn, dataset_id)
     nodes = apply_overlay(nodes, overlay_rows)
+    # How close each person is to the OWNER — a different axis from the structural metrics,
+    # which are computed with the owner removed. The graph uses one for direction and the
+    # other for distance rather than muddling them.
+    attach_closeness(conn, dataset_id, nodes)
+    # One person seen two ways is one node. `split` rows let the owner pull any of these
+    # apart, and the link is derived at read so nothing is written on their behalf.
+    nodes = auto_link_duplicates(
+        nodes, split_ids=[r["value"] or r["subject_id"] for r in overlay_rows
+                          if r["action"] == "split"])
     if not include_dismissed:
         nodes = [n for n in nodes if not n.get("dismissed")]
     edges = build_person_edges(conn, dataset_id, nodes,
@@ -334,6 +344,10 @@ def read_person_graph(conn: Any, *, dataset_id: str,
         "owner_merge_candidates": owner.get("merge_candidates", []),
         "merge_suggestions": merge_suggestions(nodes),
         "structure": structure.get("coverage", {}),
+        "auto_linked": sum(1 for n in nodes if n.get("auto_linked")),
+        "closeness_basis": ("reciprocity first, then recency, then volume — a broadcaster "
+                            "with thousands of messages is not close, and 98 of 151 ties "
+                            "here are one-way"),
         "dismissed_count": sum(1 for n in nodes if n.get("dismissed")),
         "overlay_actions": len(overlay_rows),
         # Counted FROM the edges rather than from a hardcoded list of classes: adding
