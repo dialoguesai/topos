@@ -10,6 +10,15 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Security
+- **TCP demotion complete: no bearer mints the owner class on TCP.** The owner
+  key still authenticates everywhere `require_api_key` guards, but resolves to
+  `third_party` on every TCP peer — loopback included. Owner privilege is now
+  purely a channel property: the 0600 socket locally, a signed relay stamp
+  remotely. The FE reaches the socket through its same-origin dev proxy and
+  holds no owner credential at all. Pinned by invariant I8 (both directions:
+  TCP never owner, socket always owner).
+
+### Security
 - **The node binds loopback by default.** `--host` defaulted to `0.0.0.0`, so a
   personal node published its whole authenticated API to every device on the
   network — verified live: the node answered on the machine's wifi address.

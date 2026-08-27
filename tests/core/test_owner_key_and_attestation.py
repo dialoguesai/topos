@@ -107,5 +107,15 @@ def test_activates_enforcement_end_to_end(tmp_path, monkeypatch):
     def _c(t):
         return HTTPAuthorizationCredentials(scheme="Bearer", credentials=t)
 
-    assert resolve_request_principal(credentials=_c(minted)).cls == OWNER_APP
+    # Post-demotion: BOTH keys resolve third_party on TCP — the minted key's
+    # job is activating enforcement, not conferring owner over the network
+    # stack. Owner class needs the socket (or a relay stamp).
+    assert resolve_request_principal(credentials=_c(minted)).cls == THIRD_PARTY
     assert resolve_request_principal(credentials=_c("legacy-shared")).cls == THIRD_PARTY
+    from topos.uds import _transport
+
+    tok = _transport.set("uds")
+    try:
+        assert resolve_request_principal(credentials=None).cls == OWNER_APP
+    finally:
+        _transport.reset(tok)

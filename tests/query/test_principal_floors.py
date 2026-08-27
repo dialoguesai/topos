@@ -57,9 +57,11 @@ def legacy_only(monkeypatch):
 
 
 # ------------------------------------------------------------------- door
-def test_owner_key_resolves_owner_app(two_keys):
+def test_owner_key_on_tcp_is_third_party(two_keys):
+    """P4 endgame: no bearer mints owner on TCP — the owner key authenticates
+    but demotes. Owner class comes only from the socket or a relay stamp."""
     p = resolve_request_principal(credentials=_creds("owner-key"))
-    assert p is not None and p.cls == OWNER_APP and p.channel == "local_http"
+    assert p is not None and p.cls == THIRD_PARTY and p.channel == "local_http"
 
 
 def test_legacy_key_demotes_to_third_party(two_keys):
