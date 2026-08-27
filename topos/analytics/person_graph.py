@@ -670,3 +670,137 @@ def person_provenance(conn: Any, node: Dict[str, Any], *, limit: int = 20) -> Di
         "mentions": rows,
         "coverage": {"basis": "the records that named this person, most recent first"},
     }
+
+
+# --------------------------------------------------------------------------- structure
+
+#: Edge types that are evidence two PEOPLE are connected to each other.
+#:
+#: `semantic_affinity` is deliberately absent. It measures how alike two people's records
+#: read, which is a statement about text, not about acquaintance — rendering it as a social
+#: tie would put a line between two strangers who happen to write similarly. On this corpus
+#: it is 146 of 444 peer edges, so including it would have inflated the network by a third
+#: with relationships nobody has.
+STRUCTURAL_EDGE_TYPES = ("communicates_with", "co_occurrence")
+
+#: Below this, a component is too small for "community" to mean anything; its members are
+#: reported as unclustered rather than each being called a community of one.
+MIN_COMMUNITY_SIZE = 3
+
+#: Betweenness in a component this small is arithmetic, not insight: the middle node of a
+#: three-person path scores a perfect 1.0. Measured here, that let November Romeo and Trump top
+#: the broker list ahead of every real contact. Below this the score is computed but not
+#: offered as a finding.
+MIN_COMPONENT_FOR_BROKERAGE = 6
+
+#: Bands whose members belong in the STRUCTURE. Ambient is excluded: a celebrity seen on a
+#: web page is not part of the owner's network, and letting one broker between two others
+#: says something false about the owner's life. This is a display-structure decision, not a
+#: deletion — the node is still on the graph and still searchable.
+STRUCTURAL_BANDS = (BAND_CORE, BAND_NAMED, BAND_DISCUSSED)
+
+
+def structural_metrics(conn: Any, dataset_id: str, nodes: List[Dict[str, Any]], *,
+                       include_third_party: bool = False) -> Dict[str, Any]:
+    """Communities, degree and betweenness on the EGO-REMOVED person network.
+
+    Ego removal is what makes any of this mean something. The owner is connected to
+    everybody on their own graph — leaving them in makes them the only broker, collapses
+    every community into one blob, and inflates every centrality score. Measured here: with
+    the owner in, 522 of 538 edges touch them and the layout is a featureless ring.
+
+    Betweenness is the number worth having. It answers "who connects parts of my world that
+    would otherwise not touch", which is exactly what a person cannot see from the inside and
+    what neither message volume nor recency reveals.
+    """
+    import networkx as nx
+
+    structural = [n for n in nodes
+                  if not n.get("is_owner") and not n.get("dismissed")
+                  and n.get("band", BAND_AMBIENT) in STRUCTURAL_BANDS]
+    eligible = {str(n["node_id"]) for n in structural}
+    by_entity = {str(n["entity_id"]): n["node_id"] for n in structural if n.get("entity_id")}
+    owner_ids = {str(n["node_id"]) for n in nodes if n.get("is_owner")}
+
+    # Built from EDGES ONLY. Adding every node first puts ~280 isolates in the graph, and
+    # betweenness normalises by (n-1)(n-2)/2 — with n=436 the real brokers came out at 0.001
+    # instead of 0.53, i.e. the strongest structural signal on the graph rounded to nothing.
+    # A person with no measured connections has no betweenness to compute, not a tiny one.
+    graph = nx.Graph()
+
+    # 1. group co-presence — the owner was in the room, so this is first-party.
+    for edge in build_person_edges(conn, dataset_id, nodes,
+                                   include_third_party=include_third_party):
+        if edge["attribution"] != ATTRIBUTION_CO_PRESENT:
+            continue
+        if edge["source"] not in eligible or edge["target"] not in eligible:
+            continue
+        graph.add_edge(edge["source"], edge["target"],
+                       weight=float(edge.get("weight") or 1))
+
+    # 2. the canonical person-to-person edges the KG already holds.
+    placeholders = ",".join("?" for _ in STRUCTURAL_EDGE_TYPES)
+    try:
+        rows = conn.execute(
+            f"SELECT src_entity_id, dst_entity_id, weight FROM entity_edges"
+            f" WHERE edge_type IN ({placeholders})", STRUCTURAL_EDGE_TYPES).fetchall()
+    except sqlite3.Error:
+        rows = []
+    for src, dst, weight in rows:
+        a, b = by_entity.get(str(src)), by_entity.get(str(dst))
+        if not a or not b or a == b or a not in eligible or b not in eligible:
+            continue
+        graph.add_edge(a, b, weight=float(weight or 1))
+
+    if graph.number_of_edges() == 0:
+        return {"communities": {}, "degree": {}, "betweenness": {},
+                "coverage": {"reason": "no measured connections between your people yet"}}
+
+    degree = nx.degree_centrality(graph)
+    # Per-component: betweenness compares how much of the traffic INSIDE a person's own
+    # corner of the network flows through them. Normalising across disconnected components
+    # would let a large component's ordinary member outrank a small component's linchpin.
+    betweenness: Dict[str, float] = {}
+    brokerage_ok: Dict[str, bool] = {}
+    for component in nx.connected_components(graph):
+        big_enough = len(component) >= MIN_COMPONENT_FOR_BROKERAGE
+        if len(component) < 3:
+            scores = {str(x): 0.0 for x in component}
+        else:
+            scores = nx.betweenness_centrality(graph.subgraph(component), weight=None)
+        betweenness.update(scores)
+        for member in component:
+            brokerage_ok[str(member)] = big_enough
+
+    # Communities from greedy modularity, falling back to connected components — the point
+    # is a stable grouping to lay out by, not a claim about social clubs.
+    communities: Dict[str, int] = {}
+    try:
+        groups = list(nx.community.greedy_modularity_communities(graph))
+    except Exception:  # noqa: BLE001
+        groups = [set(component) for component in nx.connected_components(graph)]
+    kept = 0
+    for group in sorted(groups, key=len, reverse=True):
+        if len(group) < MIN_COMMUNITY_SIZE:
+            continue  # a pair is not a community, and calling it one crowds the legend
+        kept += 1
+        for member in group:
+            communities[str(member)] = kept
+    return {
+        "communities": communities,
+        "degree": {k: round(v, 5) for k, v in degree.items()},
+        "betweenness": {k: round(v, 5) for k, v in betweenness.items()},
+        # A score from a four-person component is arithmetic; the flag says which ones are
+        # worth showing as a finding rather than as a number.
+        "brokerage_meaningful": brokerage_ok,
+        "coverage": {
+            "basis": ("connections BETWEEN your people, with you removed — you are connected "
+                      "to everyone here, so leaving you in makes you the only broker and "
+                      "flattens every community"),
+            "excluded": ("semantic similarity between two people is not evidence they know "
+                         "each other"),
+            "nodes": graph.number_of_nodes(),
+            "edges": graph.number_of_edges(),
+            "communities": kept,
+        },
+    }

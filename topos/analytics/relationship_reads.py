@@ -280,7 +280,7 @@ def read_person_graph(conn: Any, *, dataset_id: str,
     """
     from .dataset_resolution import resolve_messaging_dataset
     from .person_graph import (build_person_edges, build_person_nodes, merge_suggestions,
-                               resolve_owner_identity)
+                               resolve_owner_identity, structural_metrics)
 
     for table in ("entities",):
         if _table_missing(conn, table):
@@ -301,6 +301,17 @@ def read_person_graph(conn: Any, *, dataset_id: str,
         nodes = [n for n in nodes if not n.get("dismissed")]
     edges = build_person_edges(conn, dataset_id, nodes,
                                include_third_party=include_third_party)
+    # Structure: communities, degree and betweenness on the EGO-REMOVED network. The owner is
+    # connected to everybody here, so leaving them in makes them the only broker and flattens
+    # every community into one blob — which is exactly what the ego-star layout looked like.
+    structure = structural_metrics(conn, dataset_id, nodes,
+                                   include_third_party=include_third_party)
+    for n in nodes:
+        nid = str(n["node_id"])
+        n["community_id"] = structure["communities"].get(nid)
+        n["centrality_degree"] = structure["degree"].get(nid, 0.0)
+        n["centrality_betweenness"] = structure["betweenness"].get(nid, 0.0)
+        n["brokerage_meaningful"] = bool(structure.get("brokerage_meaningful", {}).get(nid))
     owner = resolve_owner_identity(conn)
     people = [n for n in nodes if not n.get("is_owner")]
     return {
@@ -322,6 +333,7 @@ def read_person_graph(conn: Any, *, dataset_id: str,
         "posture_error": getattr(build_person_nodes, "last_posture_error", None),
         "owner_merge_candidates": owner.get("merge_candidates", []),
         "merge_suggestions": merge_suggestions(nodes),
+        "structure": structure.get("coverage", {}),
         "dismissed_count": sum(1 for n in nodes if n.get("dismissed")),
         "overlay_actions": len(overlay_rows),
         # Counted FROM the edges rather than from a hardcoded list of classes: adding
