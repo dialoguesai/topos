@@ -58,6 +58,40 @@ The machine-readable twin of each release is
     when the owner's own goals name them, so cafes and grocery stores stopped appearing as
     bodies of work.
 
+### Changed
+- **[O] Pre-migration backups have a retention policy, and the disk floor can
+  see them.** `~/.topos/backups/` held 5.9 GB while `disk_space` knew only about
+  Ollama models — so a node under its 10 GB floor would evict a model it can
+  re-download while gigabytes of superseded database copies sat beside it. Three
+  parts. (1) Retention is 3 per Topos, not 2: RELEASING.md makes these the whole
+  recovery story ("Rollback is not package downgrade. Recovery = restore
+  `~/.topos/backups/database-pre-v{X}-*.db`"), and two rungs leaves nowhere to
+  stand when a bad upgrade lands on a bad upgrade. (2) A count is no longer the
+  only thing that keeps a backup: the newest backup for each version at or above
+  the running one survives retention regardless, because it is the only route
+  back to that version's pre-migration schema and a downgraded node has no
+  other. Per *version*, not per file — protecting every file under one tag would
+  let a migration that fails on each boot fill the volume with its own protected
+  backups, fastest exactly when a broken upgrade has the node in a loop. (3)
+  `disk_status` gains a `backups` block (`schema` 1 → 2, additive) splitting the
+  directory three ways: `prunable` the node may take, `retained` it may not, and
+  `manual` — untagged hand-made snapshots — that only the owner may decide
+  about. On this machine that is 0 / 2.03 / 4.24 GB: the versioned backups were
+  already inside retention, and the 4.24 GB the node will now report is all
+  one-off snapshots it never wrote and will never delete.
+- **[O] The model manager spends a superseded backup before it spends a model.**
+  New rule 0, ahead of the three that order models among themselves. A backup
+  retention has already condemned is deleted by the next migration anyway, so
+  taking it under disk pressure costs the owner nothing, while every model below
+  it costs a download. Narrowly scoped by construction: it removes only what
+  `condemned_backups` already counts out, only when the backups share a volume
+  with the models (freeing bytes on a second drive does nothing for the floor
+  being cleared), and it re-probes the volume rather than trusting arithmetic.
+  `ReclaimResult` carries `removed_backups` so a caller can tell what went.
+  Tests pin the refusals: the ladder survives a breached floor, another Topos's
+  backups are never counted against this one's budget, and an owner's untagged
+  snapshot is never the node's to spend.
+
 ## [1.3.33] — 2026-08-26
 
 ### Security

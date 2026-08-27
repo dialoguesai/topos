@@ -480,6 +480,14 @@ def _no_live_db_guard(request, monkeypatch, _live_db_guard_path):
         yield
         return
     monkeypatch.setenv("TOPOS_DATABASE_PATH", _live_db_guard_path)
+    # And the backups beside it. `model_manager.reclaim_for` now sweeps
+    # superseded pre-migration backups before it evicts a model, and it resolves
+    # that directory from the live database path — so a test that fakes a
+    # breached floor would delete files out of the developer's real
+    # ~/.topos/backups, which is the documented rollback path for their node.
+    # Tests that want a backup directory still set TOPOS_BACKUP_DIR themselves;
+    # setting it later wins.
+    monkeypatch.setenv("TOPOS_BACKUP_DIR", str(Path(_live_db_guard_path).parent / "backups"))
     try:
         from topos.config.settings import settings as runtime_settings
     except Exception:

@@ -209,6 +209,92 @@ def check_space_for(
     )
 
 
+def backup_directory() -> Optional[Path]:
+    """Where this node's pre-migration backups live, or None if unresolvable.
+
+    Resolved through the same two functions the migration path uses, so the
+    floor is looking at the directory that actually gets written rather than a
+    second guess at it — ``TOPOS_BACKUP_DIR`` and the profile slot both move it.
+    """
+    try:
+        from ..storage.db.migrations.backup import backup_dir_for
+        from ..storage.db.paths import resolve_active_database
+
+        return backup_dir_for(resolve_active_database().path)
+    except Exception as exc:  # noqa: BLE001 — no database is not a disk fault
+        logger.debug("backup directory unresolvable: %s", exc)
+        return None
+
+
+def on_same_volume(left: Path, right: Path) -> Optional[bool]:
+    """Whether two paths sit on one filesystem, or None when it cannot be read."""
+    here = _existing_ancestor(left)
+    there = _existing_ancestor(right)
+    if here is None or there is None:
+        return None
+    try:
+        return here.stat().st_dev == there.stat().st_dev
+    except OSError as exc:
+        logger.debug("device probe failed for %s / %s: %s", here, there, exc)
+        return None
+
+
+def _no_backup_space() -> dict:
+    """The shape `backup_space` returns when it has nothing to say.
+
+    Every caller reads the same keys whether or not the numbers were reachable,
+    so "we could not look" and "there is nothing there" do not need two branches
+    at every call site — they are the same instruction: decide without us.
+    """
+    return {
+        "applies": False,
+        "path": None,
+        "keep": 0,
+        "prunable_bytes": 0,
+        "prunable_count": 0,
+        "retained_bytes": 0,
+        "retained_count": 0,
+        "manual_bytes": 0,
+        "manual_count": 0,
+    }
+
+
+def backup_space(*, models_path: Optional[Path] = None) -> dict:
+    """What the backup directory holds, and how much of it this floor can count.
+
+    `applies` is False unless the backups share a volume with the models. An
+    owner who moved `OLLAMA_MODELS` to a second drive would otherwise be told
+    that deleting files on their home volume makes room on the other one, which
+    is worse than saying nothing: it is a number that justifies a deletion
+    which cannot help. Same rule as everywhere else in this module — an
+    unreadable device is not a match, so it reports False rather than guessing.
+    """
+    blank = _no_backup_space()
+    directory = backup_directory()
+    if directory is None or not directory.is_dir():
+        return blank
+    if on_same_volume(directory, models_path or ollama_models_dir()) is not True:
+        return {**blank, "path": str(directory)}
+    try:
+        from ..storage.db.migrations.backup import retention_report
+
+        report = retention_report(directory)
+    except Exception as exc:  # noqa: BLE001 — a directory we cannot read is not a finding
+        logger.debug("backup retention report failed for %s: %s", directory, exc)
+        return {**blank, "path": str(directory)}
+    return {
+        "applies": True,
+        "path": report["path"],
+        "keep": report["keep"],
+        "prunable_bytes": report["prunable_bytes"],
+        "prunable_count": report["prunable_count"],
+        "retained_bytes": report["retained_bytes"],
+        "retained_count": report["retained_count"],
+        "manual_bytes": report["manual_bytes"],
+        "manual_count": report["manual_count"],
+    }
+
+
 def disk_status(conn: Any = None, *, base_url: Any = None) -> dict:
     """What the app shows: the volume, the floor, and whether we are under it.
 
@@ -217,6 +303,12 @@ def disk_status(conn: Any = None, *, base_url: Any = None) -> dict:
     an unreadable volume is not a full one, so `below_floor` stays False.
     `applies` is False for a remote Ollama — that machine's disk is not ours to
     report on, and the UI says so rather than showing this node's numbers.
+
+    The `backups` block is what stops a breached floor from spending an Ollama
+    model first. A model is the one large thing here that a download can put
+    back; a superseded database copy is dead weight the next migration deletes
+    anyway. Reporting both means the decision can be made in that order instead
+    of on models alone, which was the only number this payload used to carry.
     """
     floor = min_free_bytes(conn)
     target = ollama_models_dir()
@@ -231,7 +323,9 @@ def disk_status(conn: Any = None, *, base_url: Any = None) -> dict:
             logger.debug("disk total probe failed for %s: %s", resolved, exc)
     below = free is not None and free < floor
     return {
-        "schema": 1,
+        # 2 adds the `backups` block below. Additive — every key schema 1
+        # carried is still here and still means what it meant.
+        "schema": 2,
         "applies": applies,
         "path": str(resolved or target),
         "free_bytes": free,
@@ -239,4 +333,6 @@ def disk_status(conn: Any = None, *, base_url: Any = None) -> dict:
         "min_free_bytes": floor,
         "below_floor": below,
         "shortfall_bytes": max(0, floor - free) if below and free is not None else 0,
+        # Remote Ollama: not our volume, so not our backups to offer up either.
+        "backups": backup_space(models_path=target) if applies else _no_backup_space(),
     }

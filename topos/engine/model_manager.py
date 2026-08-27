@@ -8,8 +8,14 @@ volume that is *reproducible*. Deleting one costs a download; deleting anything
 else costs data. So when the floor is breached, models are what gets removed —
 and only the ones nothing is currently pointed at.
 
-Three rules, in order, and none of them is negotiable:
+Four rules, in order, and none of them is negotiable:
 
+  0. **Spend a superseded backup before a model.** A pre-migration backup that
+     retention has already condemned is deleted by the next migration anyway,
+     so taking it here costs the owner nothing; a model costs a download. This
+     rule only ever reaches backups the retention policy has ALREADY counted
+     out — the rollback ladder RELEASING.md sends owners to is untouchable, and
+     the owner's own hand-made snapshots are never the node's to spend.
   1. **Never evict a model something is bound to.** The active pack's roles and
      every node-function config (signal extraction, facts, conversation context,
      community naming, sanitization) name models this node runs to answer the
@@ -35,7 +41,8 @@ from __future__ import annotations
 import json
 import logging
 import time
-from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Sequence, Set
+from pathlib import Path
+from typing import Any, Dict, Iterable, List, NamedTuple, Optional, Sequence, Set, Tuple
 
 from .disk_space import (
     format_bytes,
@@ -77,6 +84,10 @@ class ReclaimResult(NamedTuple):
     #: Set when nothing was attempted, so a caller can tell "there was nothing
     #: to remove" from "we removed things and it was not enough".
     reason: str = ""
+    #: Superseded pre-migration backups swept before any model was touched. A
+    #: tuple, not a list: a NamedTuple default is shared by every instance, and
+    #: a shared mutable default is a bug waiting for the first caller to append.
+    removed_backups: Tuple[str, ...] = ()
 
 
 def normalize_tag(value: Any) -> str:
@@ -343,6 +354,42 @@ def recent_evictions(conn: Any = None) -> List[Dict[str, Any]]:
     return [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
 
 
+def _sweep_superseded_backups(models_path: Path) -> Tuple[List[str], int]:
+    """Delete pre-migration backups retention has already condemned.
+
+    Rule 0 of this module, and the narrowest possible reading of it. It removes
+    only what ``condemned_backups`` already counts out — never the retained
+    ladder, never an owner's hand-made snapshot — so the worst case is that the
+    next migration had one less file to delete.
+
+    Only when the backups share a volume with the models: freeing bytes on a
+    different drive does nothing for the floor being cleared, and a deletion
+    that buys nothing is not a trade. Best-effort throughout — a backup
+    directory that cannot be read is a reason to fall through to models, never
+    a reason to fail the reclaim.
+    """
+    try:
+        from ..storage.db.migrations.backup import prune_to_retention
+        from .disk_space import backup_directory, on_same_volume
+
+        directory = backup_directory()
+        if directory is None or not directory.is_dir():
+            return [], 0
+        if on_same_volume(directory, models_path) is not True:
+            return [], 0
+        removed, freed = prune_to_retention(directory)
+    except Exception as exc:  # noqa: BLE001 — an unreadable backup dir is not fatal
+        logger.debug("backup sweep skipped: %s", exc)
+        return [], 0
+    if removed:
+        logger.info(
+            "model manager pruned %d superseded backup(s) (%s) before touching a model",
+            len(removed),
+            format_bytes(freed),
+        )
+    return [path.name for path in removed], freed
+
+
 def reclaim_for(
     needed_bytes: Any = 0,
     *,
@@ -389,14 +436,39 @@ def reclaim_for(
     if available >= target:
         return ReclaimResult([], 0, 0, True, reason="already_above_floor")
 
+    started_with = available
+
+    # Rule 0, before a single model is considered: superseded backups are the
+    # cheapest bytes on this volume. Re-probe rather than subtract, for the same
+    # reason the model loop does — the number that matters is what the volume
+    # reports, not what we think we deleted.
+    swept, _ = _sweep_superseded_backups(path)
+    if swept:
+        probed = free_bytes(path)
+        if probed is not None:
+            available = probed
+        if available >= target:
+            return ReclaimResult(
+                [],
+                max(0, available - started_with),
+                0,
+                True,
+                reason="backups_pruned",
+                removed_backups=tuple(swept),
+            )
+
     resolved = _adapter(adapter)
     candidates = eviction_candidates(conn=conn, adapter=resolved, keep=keep)
     if not candidates:
         return ReclaimResult(
-            [], 0, max(0, target - available), False, reason="nothing_evictable"
+            [],
+            max(0, available - started_with),
+            max(0, target - available),
+            False,
+            reason="nothing_evictable",
+            removed_backups=tuple(swept),
         )
 
-    started_with = available
     removed: List[EvictionCandidate] = []
     for candidate in candidates:
         if available >= target:
@@ -438,6 +510,7 @@ def reclaim_for(
         freed_bytes=freed,
         shortfall_bytes=0 if satisfied else max(0, target - available),
         satisfied=satisfied,
+        removed_backups=tuple(swept),
         reason="" if satisfied else "still_short",
     )
 

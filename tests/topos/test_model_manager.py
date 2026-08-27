@@ -8,6 +8,7 @@ disk) for an invisible one (a 404 on the next question).
 
 from __future__ import annotations
 
+import os
 from unittest.mock import patch
 
 import pytest
@@ -253,3 +254,78 @@ def test_a_sweep_that_deletes_nothing_leaves_the_cache_alone(no_protection):
         mm.reclaim_for(2 * GB, adapter=adapter)
 
     assert calls == []
+
+
+# ---------------------------------------------------------------------------
+# Rule 0: a superseded backup goes before a model does
+# ---------------------------------------------------------------------------
+
+
+def _condemned_backups(directory, count=2, keep=3):
+    """A directory holding `keep` + `count` backups for one Topos, all superseded."""
+    directory.mkdir(parents=True, exist_ok=True)
+    made = []
+    for i in range(keep + count):
+        path = directory / f"database-pre-v1.0.0--personaldb-2026081{i}T000000Z.db"
+        path.write_bytes(b"x" * 1024)
+        os.utime(path, (1e9 + i, 1e9 + i))
+        made.append(path)
+    return made
+
+
+@pytest.fixture
+def backup_dir(tmp_path, monkeypatch):
+    """A backup directory of this node's own, on the models volume."""
+    directory = tmp_path / "backups"
+    monkeypatch.setenv("TOPOS_BACKUP_DIR", str(directory))
+    with patch("topos.engine.disk_space.on_same_volume", return_value=True):
+        yield directory
+
+
+def test_a_superseded_backup_is_spent_before_a_model(no_protection, backup_dir):
+    """The model is re-downloadable; the backup is deleted by the next migration anyway."""
+    made = _condemned_backups(backup_dir)
+    adapter = FakeAdapter(FLEET)
+
+    with patch.object(mm, "min_free_bytes", return_value=10 * GB), patch.object(
+        mm, "free_bytes", side_effect=[5 * GB, 13 * GB]
+    ):
+        result = mm.reclaim_for(2 * GB, adapter=adapter)
+
+    assert adapter.deleted == [], "no model should have been touched"
+    assert result.satisfied is True
+    assert result.reason == "backups_pruned"
+    assert set(result.removed_backups) == {made[0].name, made[1].name}
+    assert [path.is_file() for path in made[2:]] == [True] * 3
+
+
+def test_the_ladder_is_not_spent_even_under_the_floor(no_protection, backup_dir):
+    """Three rungs stay whatever the disk says; models are what gives way instead."""
+    made = _condemned_backups(backup_dir, count=0)
+    adapter = FakeAdapter(FLEET)
+
+    with patch.object(mm, "min_free_bytes", return_value=10 * GB), patch.object(
+        mm, "free_bytes", side_effect=[5 * GB, 13 * GB]
+    ):
+        result = mm.reclaim_for(2 * GB, adapter=adapter)
+
+    assert all(path.is_file() for path in made), "the rollback path is not reclaimable"
+    assert result.removed_backups == ()
+    assert adapter.deleted, "with no condemned backup, a model is what gives way"
+
+
+def test_backups_on_another_volume_are_not_spent_for_this_floor(no_protection, tmp_path, monkeypatch):
+    """Deleting on the home volume does not make room on a second drive."""
+    directory = tmp_path / "backups"
+    monkeypatch.setenv("TOPOS_BACKUP_DIR", str(directory))
+    made = _condemned_backups(directory)
+    adapter = FakeAdapter(FLEET)
+
+    with patch("topos.engine.disk_space.on_same_volume", return_value=False), patch.object(
+        mm, "min_free_bytes", return_value=10 * GB
+    ), patch.object(mm, "free_bytes", return_value=5 * GB):
+        result = mm.reclaim_for(2 * GB, adapter=adapter)
+
+    assert all(path.is_file() for path in made)
+    assert result.removed_backups == ()
+    assert adapter.deleted, "the models volume is still the one that has to clear"
