@@ -266,3 +266,53 @@ def test_the_slate_names_the_substrate_it_actually_used(conn):
         "naming a substrate it did not read is how a report starts lying about itself"
     assert "constant" in coverage["self_performed_signal"], \
         "self_performed_share is 1.0 by construction and must not read as a measurement"
+
+
+def test_work_clusters_are_dated_by_whatever_table_holds_them(conn):
+    """The good path was dead and the fallback message blamed the wrong thing.
+
+    All 123 members of this node's work clusters carry `record_type='journal_entry'` and
+    `source_id='github_activity'`, and NONE is in `journal_entries` — they are commits, keyed
+    `github:owner/repo:sha`, and `activity_events` holds the same commit as
+    `push:owner/repo:sha`. One prefix apart. Joining only the journal returned nothing, so
+    the bench fell through to term-counting and reported "no work-dimension clusters on this
+    node" while ten of them sat there naming real work.
+    """
+    conn.execute("ALTER TABLE topic_cluster_members ADD COLUMN record_type TEXT")
+    conn.execute("ALTER TABLE topic_cluster_members ADD COLUMN source_id TEXT")
+    conn.executescript("""
+      CREATE TABLE activity_events (event_id TEXT PRIMARY KEY, source_record_id TEXT,
+        occurred_at TEXT, source_id TEXT);
+    """)
+    conn.execute("INSERT INTO topic_clusters VALUES ('w1','Source pipeline creator','work',9,'[\"pipeline\",\"source\"]')")
+    for i in range(9):
+        sha = f"{i:040d}"
+        conn.execute("INSERT INTO topic_cluster_members VALUES (?,?,?,?,?)",
+                     (f"m{i}", "w1", f"github:acme/engine:{sha}", "journal_entry", "github_activity"))
+        conn.execute("INSERT INTO activity_events VALUES (?,?,?,?)",
+                     (f"a{i}", f"push:acme/engine:{sha}",
+                      f"2026-0{(i % 6) + 1}-{(i % 27) + 1:02d}T09:00:00", "github_activity"))
+    conn.commit()
+    shapes = build_role_shapes_from_clusters(conn)
+    assert [s["label"] for s in shapes] == ["Source pipeline creator"], \
+        "a work cluster made of commits is still a role"
+    assert shapes[0]["evidence_count"] == 9
+    assert shapes[0]["recurrence_weeks"] >= MIN_RECURRENCE_WEEKS
+
+    slate = build_bench_slate(conn)
+    assert "no work-dimension clusters" not in slate["coverage"]["role_basis"], \
+        "the fallback must not claim an input is missing when it is present"
+    assert slate["roles"][0]["label"] == "Source pipeline creator"
+
+
+def test_one_missing_table_does_not_take_the_whole_dating_down(conn):
+    """Written as a single UNION, a node without `activity_events` lost every dating path at
+    once and the bench silently reported no roles."""
+    conn.execute("INSERT INTO topic_clusters VALUES ('w2','Engine Relay','work',9,'[\"relay\"]')")
+    for i in range(9):
+        _journal(conn, f"jr{i}", f"0{(i % 6) + 1}-{(i % 27) + 1:02d}", "relay work")
+        conn.execute("INSERT INTO topic_cluster_members VALUES (?,?,?)",
+                     (f"mr{i}", "w2", f"jr{i}"))
+    conn.commit()
+    # no activity_events table exists on this fixture at all
+    assert [s["label"] for s in build_role_shapes_from_clusters(conn)] == ["Engine Relay"]

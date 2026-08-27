@@ -28,6 +28,7 @@ import json
 import re
 import sqlite3
 from collections import Counter, defaultdict
+from datetime import date as _date
 from typing import Any, Dict, List, Optional
 
 #: A role must recur across at least this many distinct ISO weeks. One busy afternoon is a
@@ -49,6 +50,14 @@ work working accomplish accomplished accomplishment feel felt feeling think thin
 knowing see seeing look looking well good better best today tomorrow yesterday""".split())
 
 _WORD = re.compile(r"[a-z][a-z0-9_-]{2,}")
+
+
+def _iso_week(at: str) -> str:
+    """ISO week of a date string, or "" when it cannot be read as one."""
+    try:
+        return "-W%s" % _date(int(at[:4]), int(at[5:7]), int(at[8:10])).strftime("%V")
+    except (ValueError, IndexError):
+        return ""
 
 
 def _terms(text: str) -> List[str]:
@@ -126,19 +135,58 @@ def build_role_shapes_from_clusters(conn: sqlite3.Connection, *,
     "layout / settings / client"). Recurrence is measured over the DATED corpus members,
     so a shape earns its place by returning week after week, not by cluster size.
     """
+    # Dated through EVERY table that can date a work-cluster member, not just the journal.
+    #
+    # This read used to join `journal_entries` alone and returned nothing, so the bench fell
+    # through to the term-counting fallback and reported "no work-dimension clusters on this
+    # node" -- while ten of them sat there naming real work. Measured: all 123 members of the
+    # work clusters carry `record_type='journal_entry'` and `source_id='github_activity'`,
+    # and NONE is in `journal_entries`. They are commits, keyed `github:owner/repo:sha`, and
+    # `activity_events` holds the same commit as `push:owner/repo:sha`. One prefix apart.
+    #
+    # The lesson is the message, not the join: a fallback that names a missing input should
+    # be checked against whether the input is actually missing. It was not.
+    #
+    # Each path runs on its own, because a node that lacks one of these tables must still be
+    # dated by the others -- written as a single UNION, one missing table took the whole
+    # query down and silently returned "no roles".
+    DATING_PATHS = (
+        """SELECT m.cluster_id, m.record_id, j.entry_at FROM topic_cluster_members m
+             JOIN journal_entries j
+               ON j.entry_id = m.record_id OR j.source_record_id = m.record_id
+            WHERE j.entry_at IS NOT NULL""",
+        """SELECT m.cluster_id, m.record_id, a.occurred_at FROM topic_cluster_members m
+             JOIN activity_events a ON a.source_record_id = m.record_id
+            WHERE a.occurred_at IS NOT NULL""",
+        # The commit case: `github:owner/repo:sha` here, `push:owner/repo:sha` there.
+        """SELECT m.cluster_id, m.record_id, a.occurred_at FROM topic_cluster_members m
+             JOIN activity_events a
+               ON a.source_record_id = 'push:' || substr(m.record_id, 8)
+            WHERE a.occurred_at IS NOT NULL AND m.record_id LIKE 'github:%'""",
+    )
+    dated: Dict[Any, Dict[str, Any]] = {}
+    for sql in DATING_PATHS:
+        try:
+            rows_for_path = conn.execute(sql).fetchall()
+        except sqlite3.Error:
+            continue  # this node does not have that table; the others still count
+        for cid, record_id, at in rows_for_path:
+            if not at:
+                continue
+            entry = dated.setdefault(cid, {"weeks": set(), "records": set()})
+            entry["weeks"].add(str(at)[:4] + _iso_week(str(at)))
+            entry["records"].add(str(record_id))
+    if not dated:
+        return []
     try:
-        rows = conn.execute("""
-            SELECT m.cluster_id, t.label, t.label_terms_json,
-                   COUNT(DISTINCT strftime('%Y-W%W', j.entry_at)),
-                   COUNT(DISTINCT m.record_id)
-            FROM topic_cluster_members m
-            JOIN topic_clusters t ON t.cluster_id = m.cluster_id AND t.dimension = 'work'
-            JOIN journal_entries j
-              ON j.entry_id = m.record_id OR j.source_record_id = m.record_id
-            WHERE j.entry_at IS NOT NULL
-            GROUP BY m.cluster_id ORDER BY 4 DESC, 5 DESC""").fetchall()
+        meta = {cid: (label, terms) for cid, label, terms in conn.execute(
+            "SELECT cluster_id, label, label_terms_json FROM topic_clusters"
+            " WHERE dimension = 'work'")}
     except sqlite3.Error:
         return []
+    rows = [(cid, meta[cid][0], meta[cid][1], len(v["weeks"]), len(v["records"]))
+            for cid, v in dated.items() if cid in meta]
+    rows.sort(key=lambda r: (-r[3], -r[4], str(r[0])))
     shapes = []
     for cid, label, terms_json, weeks, evidence in rows:
         if weeks < MIN_RECURRENCE_WEEKS or evidence < MIN_EVIDENCE:
@@ -305,8 +353,8 @@ def build_bench_slate(conn: sqlite3.Connection) -> Dict[str, Any]:
     """THE BENCH: roles from the owner's own record, candidates by demonstrated skill,
     ordered by warmth — with what is missing stated as data."""
     roles = build_role_shapes_from_clusters(conn)
-    basis = "topic_clusters(dimension=work) x dated journal recurrence"
-    substrate = "topic_clusters(dimension=work)"
+    basis = "topic_clusters(dimension=work) x recurrence over their dated source records"
+    substrate = "topic_clusters(dimension=work): commits and journal entries"
     if not roles:
         # a node whose cluster machinery has not run still gets an answer, marked cruder
         work_records = len(build_role_corpus(conn, substrate="work"))
