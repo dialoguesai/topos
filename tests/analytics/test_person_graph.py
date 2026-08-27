@@ -483,3 +483,26 @@ class TestGroupChatsMakeARealNetwork:
         _, edges = self._graph(c)
         co = [e for e in edges if e["attribution"] == PG.ATTRIBUTION_CO_PRESENT]
         assert co and co[0]["weight"] == 2
+
+
+def test_the_attribution_summary_counts_every_class_present():
+    """Adding co-presence left a hardcoded four-key summary silently omitting a whole class
+    it had never heard of — the quiet way a summary starts lying about its own data."""
+    import sqlite3 as _sq
+    from topos.analytics.relationship_reads import read_person_graph
+
+    c = _conn()
+    _person(c, "e-owner", "Owner", is_self=1)
+    for peer in ("+15550000001", "+15550000002"):
+        _dyad(c, peer, msgs=20)
+        for i in range(3):
+            c.execute("INSERT INTO conversation_messages VALUES (?,?,?,?,?,?,?,?,?)",
+                      ("ds", f"g-{peer}-{i}", "hi", 0, "group-1", peer,
+                       "2026-08-01T00:00:00Z", "imessage", None))
+    c.execute("INSERT INTO conversation_messages VALUES (?,?,?,?,?,?,?,?,?)",
+              ("ds", "g-self", "hi", 1, "group-1", "self", "2026-08-01T00:00:00Z",
+               "imessage", None))
+    out = read_person_graph(c, dataset_id="ds")
+    present = {e["attribution"] for e in out["edges"]}
+    assert set(out["attribution"]) == present
+    assert out["attribution"].get("co_present", 0) >= 1

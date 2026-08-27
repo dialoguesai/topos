@@ -324,12 +324,12 @@ def read_person_graph(conn: Any, *, dataset_id: str,
         "merge_suggestions": merge_suggestions(nodes),
         "dismissed_count": sum(1 for n in nodes if n.get("dismissed")),
         "overlay_actions": len(overlay_rows),
+        # Counted FROM the edges rather than from a hardcoded list of classes: adding
+        # co-presence left the fixed version silently omitting a whole class it had never
+        # heard of, which is the quiet way a summary starts lying about its own data.
         "attribution": {
-            "observed": sum(1 for e in edges if e["attribution"] == "observed"),
-            "owner_asserted": sum(1 for e in edges if e["attribution"] == "owner_asserted"),
-            "in_your_records": sum(1 for e in edges if e["attribution"] == "in_your_records"),
-            "third_party_asserted": sum(1 for e in edges
-                                        if e["attribution"] == "third_party_asserted"),
+            name: sum(1 for e in edges if e["attribution"] == name)
+            for name in sorted({str(e["attribution"]) for e in edges})
         },
         "owner": {"entity_id": owner["canonical_id"], "label": owner["label"],
                   "identity_count": len(owner["ids"])},
@@ -344,7 +344,8 @@ def read_person_graph(conn: Any, *, dataset_id: str,
                            "(personal/mixed/ambient) and whether you authored the row — never "
                            "from a list of connector names, so a new connector sorts itself"),
             "attribution_meaning": ("every edge says who asserted it: observed (you messaged "
-                                    "them), owner_asserted (your own record names them), "
+                                    "them), co_present (they were in a group conversation "
+                                    "with you), owner_asserted (your own record names them), "
                                     "in_your_records (someone named them to you), "
                                     "third_party_asserted (someone else's record links two "
                                     "other people — off unless you ask for it)"),
