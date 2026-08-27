@@ -261,11 +261,18 @@ async def handle_messenger_analytics_periods(message: Dict[str, Any]) -> Optiona
     msg_type = str(message.get("type") or "").strip().lower()
     payload = message.get("payload") or {}
     dataset_id = (payload.get("dataset_id") or "").strip()
-    if not dataset_id:
-        return {"id": req_id, "status": "error", "error": "dataset_id required"}
     conn = hub.get_db_connection()
     if not conn:
         return {"id": req_id, "status": "error", "error": "Database not available"}
+    # The Social page resolves its dataset from /v1/ingestion/datasets, which returns ZERO
+    # rows on a sync-fed node — so it asked for a dataset with no messages and got an empty
+    # graph beside a full database. Worse, the ensure_data branch below then COMPUTED AND
+    # PERSISTED analytics for that empty dataset, writing rows nobody would ever read.
+    from ...analytics.dataset_resolution import resolve_messaging_dataset
+
+    dataset_id, dataset_resolved_by_engine = resolve_messaging_dataset(conn, dataset_id)
+    if not dataset_id:
+        return {"id": req_id, "status": "error", "error": "dataset_id required"}
     ensure_messenger_analytics_tables(conn)
     source_filter = _normalize_messenger_source_filter(payload)
     source_scope = _messenger_source_scope(source_filter)
@@ -306,7 +313,9 @@ async def handle_messenger_analytics_periods(message: Dict[str, Any]) -> Optiona
             return {
                 "id": req_id,
                 "status": "ok",
-                "payload": {"status": "ok", "dataset_id": dataset_id, "source_scope": source_scope, "periods": periods},
+                "payload": {"status": "ok", "dataset_id": dataset_id,
+                            "dataset_resolved_by_engine": dataset_resolved_by_engine,
+                            "source_scope": source_scope, "periods": periods},
             }
 
         if not period_key:
@@ -376,6 +385,7 @@ async def handle_messenger_analytics_periods(message: Dict[str, Any]) -> Optiona
                 "payload": {
                     "status": "ok",
                     "dataset_id": dataset_id,
+                    "dataset_resolved_by_engine": dataset_resolved_by_engine,
                     "period": period_key,
                     "source_scope": source_scope,
                     "nodes": nodes,

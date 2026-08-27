@@ -452,46 +452,16 @@ def build_doing_events(conn: Any, items: List[Dict[str, Any]]) -> List[Tuple]:
 
 # --------------------------------------------------------------------------- LSU-4
 
-def resolve_primary_dataset(conn: Any) -> str:
-    """The dataset the owner's messaging actually lives in.
-
-    `/v1/ingestion/datasets` returns ZERO rows on a node whose messages arrived by sync
-    rather than upload (measured on the live node 2026-08-27), so the client has nothing to
-    resolve from and every messaging screen renders empty beside a full database. The engine
-    is not missing that information — it is one GROUP BY away — so a caller that cannot name
-    a dataset gets the busiest one rather than nothing.
-
-    Never a silent substitution: `rollup` reports the id it used in coverage.
-    """
-    try:
-        row = conn.execute(
-            "SELECT dataset_id, COUNT(*) n FROM conversation_messages"
-            " WHERE dataset_id IS NOT NULL GROUP BY dataset_id ORDER BY n DESC LIMIT 1"
-        ).fetchone()
-    except sqlite3.Error:
-        return ""
-    return str(row[0]) if row and row[0] else ""
-
-
 def _has_messaging_substrate(conn: Any, dataset_id: str) -> bool:
-    """Does THIS dataset carry the messages telling is read from?
+    from .dataset_resolution import has_messaging_substrate
 
-    Cheap existence probes, not counts: the point is only to distinguish "nobody was told"
-    from "this dataset cannot answer the question".
-    """
-    from .messenger_directed import MESSENGER_DYAD_STATS_TABLE
+    return has_messaging_substrate(conn, dataset_id)
 
-    for sql, args in (
-        (f"SELECT 1 FROM {MESSENGER_DYAD_STATS_TABLE} WHERE dataset_id=? LIMIT 1", (dataset_id,)),
-        ("SELECT 1 FROM conversation_messages WHERE dataset_id=? AND is_from_self=1 LIMIT 1",
-         (dataset_id,)),
-    ):
-        try:
-            if conn.execute(sql, args).fetchone():
-                return True
-        except sqlite3.Error:
-            continue
-    return False
+
+def resolve_primary_dataset(conn: Any) -> str:
+    from .dataset_resolution import resolve_primary_dataset as _resolve
+
+    return _resolve(conn)
 
 
 def messaging_population(conn: Any, dataset_id: str,
@@ -570,20 +540,10 @@ def rollup(conn: Any, dataset_id: str) -> Dict[str, Any]:
     """
     # An unnamed dataset is answered from the record rather than refused; the id used is
     # reported below so the screen can say which one it read.
-    resolved_by_engine = False
+    from .dataset_resolution import resolve_messaging_dataset
+
     requested_dataset = str(dataset_id or "").strip()
-    if not requested_dataset:
-        dataset_id = resolve_primary_dataset(conn)
-        resolved_by_engine = bool(dataset_id)
-    elif not _has_messaging_substrate(conn, requested_dataset):
-        # The caller named a dataset that holds no messages. Answering it literally reports
-        # every body of work with "who has heard is unknown", which is true of the id and
-        # useless to the person — the node holds the messages, just under another dataset.
-        # Fall back and SAY SO; coverage carries both ids, so this is never silent.
-        primary = resolve_primary_dataset(conn)
-        if primary and primary != requested_dataset:
-            dataset_id = primary
-            resolved_by_engine = True
+    dataset_id, resolved_by_engine = resolve_messaging_dataset(conn, requested_dataset)
 
     items = compile_surfaces(conn, dataset_id, build_work_items(conn))
     if not items:
