@@ -308,3 +308,38 @@ class TestTheMoveRanker:
                             lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")))
         moves = L.build_moves(conn, "ds", explore=0.5)
         assert isinstance(moves, list)
+
+
+class TestADatasetThatCannotAnswer:
+    """Doing is read from entity_mentions, which is NOT dataset-scoped. Telling is read from
+    this dataset's messages. Point the read at a dataset with no messaging substrate and
+    every work item keeps its true doing count while telling collapses to zero — which the
+    screen renders as "you built all this and told nobody". Measured on the live node
+    2026-08-27: 1,609 doing / 0 telling from a one-message device stub."""
+
+    def _corpus(self):
+        conn = _conn()
+        _entity(conn, "e1", "project", "Topos")
+        _mentions(conn, "e1", "github_activity", 40)
+        return conn
+
+    def test_a_dataset_without_messages_reports_telling_as_unmeasurable(self):
+        conn = self._corpus()
+        out = L.rollup(conn, "dataset-with-no-messages")
+        assert out["coverage"]["telling_measurable"] is False
+        for w in out["work_items"]:
+            assert w["matchable"] is False, "an unmeasurable dataset must not read as untold"
+            assert w["below_telling_floor"] is False
+
+    def test_doing_still_reports_truthfully(self):
+        """The work is real even when telling cannot be read; blanking it would be its own lie."""
+        conn = self._corpus()
+        out = L.rollup(conn, "dataset-with-no-messages")
+        assert sum(w["doing_events"] for w in out["work_items"]) == 40
+
+    def test_a_dataset_with_messages_is_measurable(self):
+        conn = self._corpus()
+        conn.execute("INSERT INTO conversation_messages VALUES (?,?,?,?,?,?,?,?,?)",
+                     ("ds", "m1", "shipping Topos today", 1, "c1", "self",
+                      "2026-08-01T00:00:00Z", "imessage", None))
+        assert L.rollup(conn, "ds")["coverage"]["telling_measurable"] is True

@@ -446,6 +446,27 @@ def build_doing_events(conn: Any, items: List[Dict[str, Any]]) -> List[Tuple]:
 
 # --------------------------------------------------------------------------- LSU-4
 
+def _has_messaging_substrate(conn: Any, dataset_id: str) -> bool:
+    """Does THIS dataset carry the messages telling is read from?
+
+    Cheap existence probes, not counts: the point is only to distinguish "nobody was told"
+    from "this dataset cannot answer the question".
+    """
+    from .messenger_directed import MESSENGER_DYAD_STATS_TABLE
+
+    for sql, args in (
+        (f"SELECT 1 FROM {MESSENGER_DYAD_STATS_TABLE} WHERE dataset_id=? LIMIT 1", (dataset_id,)),
+        ("SELECT 1 FROM conversation_messages WHERE dataset_id=? AND is_from_self=1 LIMIT 1",
+         (dataset_id,)),
+    ):
+        try:
+            if conn.execute(sql, args).fetchone():
+                return True
+        except sqlite3.Error:
+            continue
+    return False
+
+
 def messaging_population(conn: Any, dataset_id: str,
                          communities: Dict[str, str]) -> Dict[str, str]:
     """The subset of the community map the owner can actually reach by message.
@@ -525,7 +546,15 @@ def rollup(conn: Any, dataset_id: str) -> Dict[str, Any]:
         return {"dataset_id": dataset_id, "work_items": [], "coverage": {
             "reason": "no body of work with authored evidence has emerged from the record yet"}}
 
-    telling = build_telling_events(conn, dataset_id, items)
+    # DATASET-LEVEL LIBEL GUARD. Doing comes from entity_mentions, which is not scoped to a
+    # dataset; telling comes from this dataset's messages. Point the read at a dataset with
+    # no messaging substrate — a device stub, a fresh dataset, an id resolved by a race —
+    # and every work item keeps its real doing count while telling collapses to zero. On
+    # screen that reads "you built this and told nobody", which is a statement about the
+    # owner's life derived from a wrong id. Measured 2026-08-27: 1,609 doing / 0 telling.
+    messaging_present = _has_messaging_substrate(conn, dataset_id)
+
+    telling = build_telling_events(conn, dataset_id, items) if messaging_present else []
     doing = build_doing_events(conn, items)
     communities = _community_by_participant(conn, dataset_id)
     population = messaging_population(conn, dataset_id, communities)
@@ -565,11 +594,12 @@ def rollup(conn: Any, dataset_id: str) -> Dict[str, Any]:
             # The display rule: a breadth at or below chance is not a finding.
             "breadth_beats_chance": bool(breadth > control),
             # only a claim when the name could have been matched at all
-            "below_telling_floor": bool(item.get("matchable", True)
+            "below_telling_floor": bool(item.get("matchable", True) and messaging_present
                                         and len(tells) < MIN_TELLING_EVENTS),
             # A name too common to match was dropped by the share guard; without this the
             # screen would report a confident "told nobody" that was never measurable.
-            "matchable": item.get("matchable", True),
+            # The dataset guard folds in here for the same reason.
+            "matchable": bool(item.get("matchable", True) and messaging_present),
         })
     out.sort(key=lambda w: (-w["doing_events"], -w["telling_events"]))
     return {
@@ -586,6 +616,7 @@ def rollup(conn: Any, dataset_id: str) -> Dict[str, Any]:
                               " random from everyone the owner exchanges DMs with"),
             "communities_known": len(all_communities),
             "reachable_people": len(population),
+            "telling_measurable": messaging_present,
         },
     }
 
