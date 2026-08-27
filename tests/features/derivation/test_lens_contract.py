@@ -40,7 +40,8 @@ def test_every_shipped_lens_parses():
 
 def test_the_corpus_splits_into_producers_and_reconcilers():
     lenses = [l for p in load_packs(bundled_pack_dir()).values() for l in p.lenses]
-    assert sum(1 for l in lenses if not l.is_producer) == 5, "the reconciler set is enumerable"
+    # 5 shipped with the original 25 packs; obligations.commitments (G7) added a sixth.
+    assert sum(1 for l in lenses if not l.is_producer) == 6, "the reconciler set is enumerable"
     assert sum(1 for l in lenses if l.is_producer) >= 50
 
 

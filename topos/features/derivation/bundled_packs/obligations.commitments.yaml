@@ -1,0 +1,99 @@
+# G7 — the commitment ledger. Seven catalog rows (#10-#16, Obligations & Reciprocity) sat at
+# zero because no lane extracts promises; this is that lane, as an ontology rather than a
+# bespoke extractor, because the fact pipeline already runs packs.
+#
+# OWNER-SUBJECT on purpose. A commitment is the OWNER's fact — "I owe Dana an intro" is
+# about my obligation, with Dana as the counterparty — so this pack needs no net_subject
+# and no outward gate. The counterparty rides as an entity_ref inside the value, exactly
+# as relationships.social carries people inside owner-facts.
+pack: obligations.commitments
+version: 0.1.0
+status: draft
+title: "Promises made and owed"
+author: topos
+license: Apache-2.0
+sensitivity_class: personal
+role_policy: authored_addressed     # my own words, or words addressed to me
+disclosure_default: owner_only
+
+routing:
+  descriptors:
+    - "commitments the owner made to someone or someone made to the owner: sending things, intros, reviews, repayment, showing up"
+    - "the state of a promise: kept, still open, released, overdue"
+  exemplars: ["i'll send", "i owe you", "i'll get you", "you said you'd", "i promised",
+              "don't let me forget", "i'll intro", "i'll review", "pay you back", "i'll bring",
+              "remind me to send", "she said she'd", "he owes me", "by friday", "i'll have it"]
+
+predicates:
+  - name: commit.made
+    value_type: structured
+    cardinality: multi
+    temporal: episodic
+    altitude: stated
+    key_fields: [counterparty, description]
+    event_identity: "windowed:45"
+    value_schema:
+      counterparty: entity_ref
+      direction: {enum: [owed_by_owner, owed_to_owner]}
+      description: string
+      due: string
+      status: {enum: [open, kept, released, overdue, unknown]}
+    note: >
+      STATED promises only — "I'll send you the deck" is a commitment; "I should really
+      help more" is an aspiration and belongs to aspirations.goals. `due` stays a string
+      because people promise in human time ("by friday", "after the launch") and inventing
+      an ISO date the record does not state is fabrication.
+  - {name: commit.resolved, value_type: structured, cardinality: multi, temporal: episodic,
+     altitude: stated, key_fields: [counterparty, description], event_identity: "windowed:45",
+     value_schema: {counterparty: entity_ref, description: string,
+                    outcome: {enum: [kept, released, renegotiated]}},
+     note: "the closing half — 'sent!', 'no worries, forget it' — so the ledger can retire what was honoured"}
+
+cross_refs:
+  - "aspirations.goals — intentions with no counterparty; a commitment has someone waiting"
+  - "relationships.social — owns WHO people are; this pack owns what is owed between us"
+
+guidance:
+  definitions: >
+    A commitment is a stated promise with a counterparty: someone is waiting. Direction
+    matters and is extracted, never assumed — "I'll send it" is owed_by_owner, "you said
+    you'd send it" is owed_to_owner.
+  abstention:
+    - "Aspirations without a counterparty ('I should exercise more') are not commitments."
+    - "Hypotheticals and offers declined ('happy to review if you ever want') are not commitments until accepted."
+    - "An unresolvable counterparty ('I told that guy I'd call') gets a mention, not a ledger row."
+    - "Never infer status=overdue from silence; overdue requires the record to say so or a stated due date the corpus shows passed."
+
+revision:
+  supersedes_on: {commit.made: [status]}
+  noop_when: "re-statement within 7d at equal confidence"
+
+synthesis:
+  - kind: reconciliation
+    description: >
+      commit.resolved SHOULD close the matching commit.made (same counterparty, overlapping
+      description terms) via supersession — kept promises leave the open ledger without
+      losing their history.
+
+consumers: [brief_section, assistant_context]
+
+eval:
+  gold:
+    - {text: "I'll send you the enclosure drawings by Friday.",
+       expect: {predicate: commit.made, direction: owed_by_owner, due: "Friday", status: open}}
+    - {text: "You said you'd intro me to the Halcyon team after the launch.",
+       expect: {predicate: commit.made, direction: owed_to_owner, status: open}}
+    - {text: "Sent! Let me know if the dimensions look right.",
+       expect: {predicate: commit.resolved, outcome: kept}}
+  negative_controls:
+    - {text: "I should really get back into running.",
+       expect_none: true, why: "no counterparty — an aspiration, not a commitment"}
+    - {text: "Happy to review your deck sometime if you ever want another pair of eyes.",
+       expect_none: true, why: "an open offer, not an accepted promise"}
+    - {text: "He promised the moon during the pitch.",
+       expect_none: true, why: "idiom about a third party's salesmanship, not a ledger entry"}
+  calibration: {min_conf_for_assert: 0.6, ece_max: 0.15}
+
+decisions:
+  - "2026-08-26: owner-subject by design — the counterparty rides inside the value, so no net_subject gate is needed."
+  - "2026-08-26: ships DISABLED like every non-Wave-A pack; enabling is the owner's call and the F-S junk battery gates the wave."
