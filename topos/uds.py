@@ -62,24 +62,87 @@ def socket_path() -> Path:
     return Path(os.path.expanduser(os.environ.get("TOPOS_UDS_PATH") or SOCKET_PATH))
 
 
+def socket_is_live(path: "Path") -> bool:
+    """True when something is actually accepting on this socket path.
+
+    A socket FILE proves nothing — a crashed or clobbered instance leaves the
+    inode behind. Connecting is the only honest test, and it is what keeps us
+    from unlinking a socket another live node owns.
+    """
+    import socket as _socket
+
+    try:
+        s_ = _socket.socket(_socket.AF_UNIX, _socket.SOCK_STREAM)
+        s_.settimeout(0.5)
+        try:
+            s_.connect(str(path))
+            return True
+        finally:
+            s_.close()
+    except OSError:
+        return False
+
+
 def uds_enabled() -> bool:
     return str(os.environ.get("TOPOS_UDS_ENABLED") or "1").strip().lower() not in (
         "0", "false", "no", "off",
     )
 
 
+#: How often the supervisor re-checks that the owner socket is still ours and
+#: still accepting. The lane went silently dead once (2026-08-26: the socket
+#: file was replaced while this process kept a listener on the unlinked inode),
+#: and with TCP demoted there is no other local owner lane — so a dead socket
+#: must heal itself rather than wait for someone to notice.
+_SUPERVISE_INTERVAL_S = 20.0
+
+
 def start_uds_server(app) -> Optional[threading.Thread]:
-    """Start the owner socket on a daemon thread; never raises."""
+    """Start the owner socket and keep it alive on a daemon thread; never raises."""
     if not uds_enabled():
         return None
     try:
-        import uvicorn
-
         path = socket_path()
         path.parent.mkdir(parents=True, exist_ok=True)
+        if path.exists() and socket_is_live(path):
+            # Another live node owns this path. Unlinking it would sever THEIR
+            # listener (the inode survives, the name does not) — the exact way
+            # this lane died before. Stand down instead.
+            logger.warning("owner socket already served by another instance at %s", path)
+            return None
+
+        def _supervise() -> None:
+            server = None
+            while True:
+                try:
+                    if server is None or not socket_is_live(path):
+                        if server is not None:
+                            logger.warning("owner socket stopped serving — rebinding")
+                            server.should_exit = True
+                        elif path.exists() and socket_is_live(path):
+                            time.sleep(_SUPERVISE_INTERVAL_S)
+                            continue
+                        server = _bind_once(app, path)
+                except Exception:  # noqa: BLE001 — the supervisor must never die
+                    logger.debug("owner socket supervisor cycle failed", exc_info=True)
+                time.sleep(_SUPERVISE_INTERVAL_S)
+
+        thread = threading.Thread(target=_supervise, name="topos-uds", daemon=True)
+        thread.start()
+        return thread
+    except Exception:  # noqa: BLE001 — the second door must never break startup
+        logger.warning("owner socket startup failed", exc_info=True)
+        return None
+
+
+def _bind_once(app, path: "Path"):
+    """Bind one uvicorn server to the socket; returns the server or None."""
+    try:
+        import uvicorn
+
         try:
-            if path.exists():
-                path.unlink()  # stale socket from a previous run
+            if path.exists() and not socket_is_live(path):
+                path.unlink()  # dead inode from a crashed or clobbered run
         except OSError:
             logger.warning("could not remove stale socket at %s", path)
             return None
@@ -111,8 +174,7 @@ def start_uds_server(app) -> Optional[threading.Thread]:
             except Exception:  # noqa: BLE001
                 logger.warning("owner socket server exited", exc_info=True)
 
-        thread = threading.Thread(target=_run, name="topos-uds", daemon=True)
-        thread.start()
+        threading.Thread(target=_run, name="topos-uds-serve", daemon=True).start()
 
         def _tighten() -> None:
             # uvicorn creates the socket with the process umask; clamp to 0600
@@ -130,9 +192,9 @@ def start_uds_server(app) -> Optional[threading.Thread]:
             logger.warning("owner socket did not appear at %s", path)
 
         threading.Thread(target=_tighten, name="topos-uds-chmod", daemon=True).start()
-        return thread
-    except Exception:  # noqa: BLE001 — the second door must never break startup
-        logger.warning("owner socket startup failed", exc_info=True)
+        return server
+    except Exception:  # noqa: BLE001 — a bind failure is retried by the supervisor
+        logger.warning("owner socket bind failed", exc_info=True)
         return None
 
 

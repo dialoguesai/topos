@@ -157,3 +157,76 @@ def test_cp_base_derivation():
     assert cp_http_base_from_ws_url("ws://localhost:8000/ws/engine") == "http://localhost:8000"
     assert cp_http_base_from_ws_url("https://not-ws.example") is None
     assert cp_http_base_from_ws_url("") is None
+
+
+# ---- socket resilience: never clobber a live peer, always heal a dead one ---
+# AF_UNIX paths are capped near 104 bytes, so these use a SHORT temp dir rather
+# than pytest's tmp_path (which overflows it and fails to bind).
+import contextlib
+import shutil
+import socket as _s
+import tempfile
+from pathlib import Path
+
+
+@contextlib.contextmanager
+def _short_sock_dir():
+    d = tempfile.mkdtemp(dir="/tmp", prefix="tu")
+    try:
+        yield Path(d) / "e.sock"
+    finally:
+        shutil.rmtree(d, ignore_errors=True)
+
+
+def test_socket_is_live_distinguishes_file_from_listener():
+    """A socket FILE proves nothing — only a connect does. This is what keeps
+    us from unlinking a socket another live node owns (2026-08-26: the owner
+    lane died silently exactly that way)."""
+    from topos.uds import socket_is_live
+
+    with _short_sock_dir() as p:
+        assert socket_is_live(p) is False          # absent
+        p.write_text("")                            # plain file, nobody serving
+        assert socket_is_live(p) is False
+        p.unlink()
+
+        srv = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+        srv.bind(str(p))
+        srv.listen(64)
+        try:
+            assert socket_is_live(p) is True         # a real listener
+        finally:
+            srv.close()
+        assert socket_is_live(p) is False            # closed: file lingers, dead
+
+
+def test_start_refuses_to_clobber_a_live_socket(monkeypatch):
+    """Standing down beats severing another node's listener."""
+    import topos.uds as uds_mod
+
+    with _short_sock_dir() as p:
+        monkeypatch.setenv("TOPOS_UDS_PATH", str(p))
+        srv = _s.socket(_s.AF_UNIX, _s.SOCK_STREAM)
+        srv.bind(str(p))
+        srv.listen(64)
+        try:
+            assert uds_mod.start_uds_server(object()) is None   # stands down
+            assert uds_mod.socket_is_live(p) is True            # peer untouched
+            assert p.exists()
+        finally:
+            srv.close()
+
+
+def test_dead_socket_file_is_reclaimable(monkeypatch):
+    """A dead inode must not block the lane: _bind_once clears it first."""
+    import topos.uds as uds_mod
+
+    with _short_sock_dir() as p:
+        p.write_text("")  # stale file from a crashed run
+        assert uds_mod.socket_is_live(p) is False
+        monkeypatch.setattr(uds_mod, "socket_path", lambda: p)
+        # Bind for real: uvicorn must be able to take the path back.
+        server = uds_mod._bind_once(object(), p)
+        assert server is not None or not p.exists(), (
+            "a dead socket file must be unlinked so the lane can rebind"
+        )
