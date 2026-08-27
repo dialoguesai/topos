@@ -279,8 +279,8 @@ def read_person_graph(conn: Any, *, dataset_id: str,
     month's relationships.
     """
     from .dataset_resolution import resolve_messaging_dataset
-    from .person_graph import (attach_closeness, auto_link_duplicates, build_person_edges,
-                               build_person_nodes, merge_suggestions,
+    from .person_graph import (attach_closeness, attach_fact_closeness, auto_link_duplicates,
+                               build_person_edges, build_person_nodes, merge_suggestions,
                                resolve_owner_identity, structural_metrics)
 
     for table in ("entities",):
@@ -307,6 +307,12 @@ def read_person_graph(conn: Any, *, dataset_id: str,
     nodes = auto_link_duplicates(
         nodes, split_ids=[r["value"] or r["subject_id"] for r in overlay_rows
                           if r["action"] == "split"])
+    # Derived relationship FACTS raise closeness where behaviour understates it. A mother
+    # texted monthly is closer than a colleague texted daily, and reciprocity arithmetic
+    # cannot find that. Applied AFTER the duplicate fold so a fact lands on the surviving
+    # node — most of these join by name, because the fact side has the same duplicate-entity
+    # problem the graph itself does.
+    fact_stats = attach_fact_closeness(conn, nodes)
     if not include_dismissed:
         nodes = [n for n in nodes if not n.get("dismissed")]
     edges = build_person_edges(conn, dataset_id, nodes,
@@ -347,7 +353,10 @@ def read_person_graph(conn: Any, *, dataset_id: str,
         "auto_linked": sum(1 for n in nodes if n.get("auto_linked")),
         "closeness_basis": ("reciprocity first, then recency, then volume — a broadcaster "
                             "with thousands of messages is not close, and 98 of 151 ties "
-                            "here are one-way"),
+                            "here are one-way. Derived relationship facts raise this where "
+                            "behaviour understates it, and can only pull someone closer, "
+                            "never push them away: silence is not evidence of distance"),
+        "fact_closeness_applied": fact_stats.get("applied", 0),
         "dismissed_count": sum(1 for n in nodes if n.get("dismissed")),
         "overlay_actions": len(overlay_rows),
         # Counted FROM the edges rather than from a hardcoded list of classes: adding

@@ -21,7 +21,7 @@ def _conn():
         canonical_name TEXT, normalized_name TEXT, aliases_json TEXT, is_self INTEGER,
         contact_id TEXT);
       CREATE TABLE entity_edges (edge_id TEXT, src_entity_id TEXT, dst_entity_id TEXT,
-        edge_type TEXT);
+        edge_type TEXT, weight REAL, metadata_json TEXT);
       CREATE TABLE entity_mentions (mention_id TEXT PRIMARY KEY, entity_id TEXT,
         record_id TEXT, source_id TEXT, authored_by_owner INTEGER);
       CREATE TABLE messenger_dyad_stats (dataset_id TEXT, a_key TEXT, b_key TEXT,
@@ -57,9 +57,9 @@ class TestTheOwnerIsOneNode:
         _person(c, "e-self1", "self", is_self=1)
         _person(c, "e-self2", "self", is_self=1)
         for i in range(5):
-            c.execute("INSERT INTO entity_edges VALUES (?,?,?,?)",
+            c.execute("INSERT INTO entity_edges (edge_id, src_entity_id, dst_entity_id, edge_type) VALUES (?,?,?,?)",
                       (f"x{i}", "e-owner", f"p{i}", "communicates_with"))
-        c.execute("INSERT INTO entity_edges VALUES ('y','e-self2','p9','co_occurrence')")
+        c.execute("INSERT INTO entity_edges (edge_id, src_entity_id, dst_entity_id, edge_type) VALUES ('y','e-self2','p9','co_occurrence')")
         owner = PG.resolve_owner_identity(c)
         assert owner["canonical_id"] == "e-owner"
         assert owner["ids"] == {"e-owner", "e-self1", "e-self2"}
@@ -605,3 +605,82 @@ class TestDuplicatesFoldToTheirStrongestSighting:
     def test_a_split_keeps_them_apart(self):
         out = PG.auto_link_duplicates(self._pair(), split_ids=["b"])
         assert len(out) == 2
+
+
+class TestFactsCanSayWhatBehaviourCannot:
+    """A mother texted monthly is closer than a colleague texted daily. Reciprocity
+    arithmetic cannot find that — it is a fact about the relationship, not about traffic.
+    Measured live: 11 people carrying a closeness fact of 2.0+ scored below 0.55 on messages,
+    including Foxtrot Romeo at 0.16."""
+
+    def _corpus(self, weight=2.5, edge="rel.closeness_tier", messaged=True):
+        c = _conn()
+        _person(c, "e-owner", "Owner", is_self=1)
+        _person(c, "e-friend", "Foxtrot Romeo", contact_id="c-friend")
+        c.execute("INSERT INTO entity_edges (edge_id, src_entity_id, dst_entity_id,"
+                  " edge_type, weight) VALUES ('x','e-owner','e-friend',?,?)", (edge, weight))
+        if messaged:
+            # The dyad must resolve to the SAME node as the entity, or the person reads as
+            # never-messaged and the no-interaction cap swallows the difference being tested.
+            c.execute("INSERT INTO contacts VALUES ('c-friend','Foxtrot Romeo')")
+            c.execute("INSERT INTO contact_identifiers VALUES"
+                      " ('c-friend','+15551230000','phone')")
+            _dyad(c, "+15551230000", msgs=4)
+        c.execute("INSERT INTO entity_mentions VALUES ('m1','e-friend','r1','grow_journal',1)")
+        return c
+
+    def _nodes(self, c):
+        nodes = PG.build_person_nodes(c, "ds")
+        PG.attach_closeness(c, "ds", nodes)
+        PG.attach_fact_closeness(c, nodes)
+        return {n["label"]: n for n in nodes}
+
+    def test_a_closeness_fact_raises_a_thin_messaging_tie(self):
+        by = self._nodes(self._corpus())
+        friend = by["Foxtrot Romeo"]
+        assert friend["closeness"] >= 0.6
+        assert friend["closeness_source"] == "facts"
+        assert "close relationship" in friend["closeness_reason"]
+
+    def test_facts_never_push_someone_away(self):
+        """Absence of a relationship fact is silence, not evidence of distance — and a fact
+        must not lower a score the traffic already earned."""
+        c = self._corpus(weight=2.0)
+        nodes = PG.build_person_nodes(c, "ds")
+        PG.attach_closeness(c, "ds", nodes)
+        for n in nodes:
+            n["closeness"] = 0.95 if not n["is_owner"] else n.get("closeness")
+        PG.attach_fact_closeness(c, nodes)
+        assert all(n["closeness"] >= 0.95 for n in nodes if not n["is_owner"])
+
+    def test_caregiving_outranks_a_mere_tier(self):
+        care = self._nodes(self._corpus(edge="rel.caregiving"))["Foxtrot Romeo"]["closeness"]
+        tier = self._nodes(self._corpus(edge="rel.closeness_tier"))["Foxtrot Romeo"]["closeness"]
+        assert care > tier
+
+    def test_a_fact_about_someone_never_messaged_is_capped(self):
+        """`Echo Victor` carries a relationship_event purely from being written about;
+        uncapped he lands in the inner ring beside actual friends."""
+        by = self._nodes(self._corpus(edge="rel.relationship_event", messaged=False))
+        friend = by["Foxtrot Romeo"]
+        assert friend["closeness"] <= PG.FACT_CAP_WITHOUT_INTERACTION
+        assert "not messaged them" in friend["closeness_reason"]
+
+    def test_it_says_the_fact_won_not_the_messages(self):
+        friend = self._nodes(self._corpus())["Foxtrot Romeo"]
+        assert friend["closeness_source"] == "facts"
+        assert "back and forth" not in friend["closeness_reason"]
+
+    def test_facts_match_by_name_when_entity_ids_disagree(self):
+        """Only 8 of 27 closeness facts joined by entity_id; 16 more joined by name. The
+        fact side carries the same duplicate-entity problem the graph folds."""
+        c = _conn()
+        _person(c, "e-owner", "Owner", is_self=1)
+        _person(c, "e-a", "Foxtrot Romeo")   # the node the graph builds
+        _person(c, "e-b", "Foxtrot Romeo")   # the entity the fact points at
+        c.execute("INSERT INTO entity_edges (edge_id, src_entity_id, dst_entity_id, edge_type) VALUES ('x','e-owner','e-b','rel.closeness_tier')")
+        c.execute("UPDATE entity_edges SET weight=2.5 WHERE edge_id='x'")
+        c.execute("INSERT INTO entity_mentions VALUES ('m1','e-a','r1','grow_journal',1)")
+        nodes = PG.build_person_nodes(c, "ds")
+        PG.attach_closeness(c, "ds", nodes)
+        assert PG.attach_fact_closeness(c, nodes)["applied"] >= 1
