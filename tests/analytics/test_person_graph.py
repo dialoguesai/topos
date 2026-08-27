@@ -28,6 +28,11 @@ def _conn():
         involves_self INTEGER, peer_class TEXT, total_msgs INTEGER);
       CREATE TABLE contacts (contact_id TEXT PRIMARY KEY, display_name TEXT);
       CREATE TABLE contact_identifiers (contact_id TEXT, identifier TEXT, identifier_type TEXT);
+      CREATE TABLE conversation_messages (dataset_id TEXT, message_id TEXT, content TEXT,
+        is_from_self INTEGER, conversation_id TEXT, sender_id TEXT, event_at TEXT,
+        source_id TEXT, reply_to_message_id TEXT);
+      CREATE TABLE messenger_social_edges (dataset_id TEXT, period_key TEXT,
+        source_scope TEXT, source_id TEXT, target_id TEXT, weight REAL, edge_type TEXT);
     """)
     return c
 
@@ -407,3 +412,74 @@ class TestTheOwnerIsNotTheirOwnContact:
         c.execute("INSERT INTO signal_identity VALUES ('ds','+15125084318',NULL,'t')")
         _dyad(c, "+15125084318", msgs=25)
         assert [n for n in PG.build_person_nodes(c, "ds") if not n["is_owner"]] == []
+
+
+class TestGroupChatsMakeARealNetwork:
+    """Moving from the messaging view to the person view silently dropped every
+    peer-to-peer link, so the graph became a star around the owner. Two of your contacts
+    being in a room WITH you is something you witnessed — first-party, and it renders."""
+
+    def _msg(self, c, conv, sender, from_self=0, n=1, ds="ds"):
+        for i in range(n):
+            c.execute("INSERT INTO conversation_messages VALUES (?,?,?,?,?,?,?,?,?)",
+                      (ds, f"{conv}-{sender}-{i}", "hi", from_self, conv, sender,
+                       f"2026-08-0{(i % 8) + 1}T00:00:00Z", "imessage", None))
+
+    def _graph(self, c, **kw):
+        nodes = PG.build_person_nodes(c, "ds")
+        return nodes, PG.build_person_edges(c, "ds", nodes, **kw)
+
+    def _corpus(self):
+        c = _conn()
+        _person(c, "e-owner", "Owner", is_self=1)
+        for peer in ("+15550000001", "+15550000002", "+15550000003"):
+            _dyad(c, peer, msgs=20)
+        return c
+
+    def test_two_peers_in_a_group_with_the_owner_are_linked(self):
+        c = self._corpus()
+        for peer in ("+15550000001", "+15550000002"):
+            self._msg(c, "group-1", peer, n=4)
+        self._msg(c, "group-1", "self", from_self=1, n=4)
+        _, edges = self._graph(c)
+        co = [e for e in edges if e["attribution"] == PG.ATTRIBUTION_CO_PRESENT]
+        assert len(co) == 1, "a shared room is a relationship the owner saw"
+
+    def test_co_presence_is_first_party_and_not_gated(self):
+        """Distinct from a third party ASSERTING that two strangers know each other."""
+        c = self._corpus()
+        for peer in ("+15550000001", "+15550000002"):
+            self._msg(c, "group-1", peer, n=4)
+        self._msg(c, "group-1", "self", from_self=1, n=4)
+        _, default_edges = self._graph(c)          # include_third_party defaults False
+        assert any(e["attribution"] == PG.ATTRIBUTION_CO_PRESENT for e in default_edges)
+
+    def test_a_dm_creates_no_co_presence(self):
+        """One peer is not a room."""
+        c = self._corpus()
+        self._msg(c, "dm-1", "+15550000001", n=6)
+        self._msg(c, "dm-1", "self", from_self=1, n=6)
+        _, edges = self._graph(c)
+        assert not [e for e in edges if e["attribution"] == PG.ATTRIBUTION_CO_PRESENT]
+
+    def test_a_mailing_list_sized_roster_is_skipped(self):
+        """Pairing everyone on a 200-person blast would invent n-squared relationships."""
+        c = _conn()
+        _person(c, "e-owner", "Owner", is_self=1)
+        roster = [f"+1555000{i:04d}" for i in range(PG.MAX_CO_PRESENT_ROSTER + 5)]
+        for peer in roster:
+            _dyad(c, peer, msgs=3)
+            self._msg(c, "blast", peer, n=1)
+        self._msg(c, "blast", "self", from_self=1, n=1)
+        _, edges = self._graph(c)
+        assert not [e for e in edges if e["attribution"] == PG.ATTRIBUTION_CO_PRESENT]
+
+    def test_sharing_more_rooms_weighs_more(self):
+        c = self._corpus()
+        for conv in ("group-1", "group-2"):
+            for peer in ("+15550000001", "+15550000002"):
+                self._msg(c, conv, peer, n=4)
+            self._msg(c, conv, "self", from_self=1, n=4)
+        _, edges = self._graph(c)
+        co = [e for e in edges if e["attribution"] == PG.ATTRIBUTION_CO_PRESENT]
+        assert co and co[0]["weight"] == 2

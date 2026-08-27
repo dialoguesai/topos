@@ -451,6 +451,12 @@ def classify_band(*, messaged: bool, owner_authored: int, distinct_sources: int,
 #: and one is somebody else's account of two other people.
 ATTRIBUTION_OBSERVED = "observed"              # the owner and X exchanged messages
 ATTRIBUTION_OWNER_ASSERTED = "owner_asserted"  # the owner's own record names them
+ATTRIBUTION_CO_PRESENT = "co_present"          # they were in a room WITH the owner
+
+#: Above this many people a thread is a mailing list, not a room the owner shared with
+#: anyone, and pairing everyone in it would invent n-squared relationships that never
+#: existed. Same reasoning as MAX_BROADCAST_ROSTER in messenger_directed.
+MAX_CO_PRESENT_ROSTER = 32
 ATTRIBUTION_RECEIVED = "in_your_records"       # somebody named them TO the owner
 ATTRIBUTION_THIRD_PARTY = "third_party_asserted"  # somebody else's record names two others
 
@@ -472,11 +478,14 @@ def build_person_edges(conn: Any, dataset_id: str, nodes: List[Dict[str, Any]], 
     from .messenger_directed import MESSENGER_DYAD_STATS_TABLE, SELF_KEY
 
     by_key: Dict[str, str] = {}
+    by_contact: Dict[str, str] = {}
     for n in nodes:
         for mk in n.get("messenger_keys", []):
             by_key[str(mk)] = n["node_id"]
         if n.get("entity_id"):
             by_key[f"ent:{n['entity_id']}"] = n["node_id"]
+        if n.get("contact_id"):
+            by_contact[str(n["contact_id"])] = n["node_id"]
     owner_node = next((n["node_id"] for n in nodes if n.get("is_owner")), None)
     edges: Dict[tuple, Dict[str, Any]] = {}
 
@@ -542,6 +551,45 @@ def build_person_edges(conn: Any, dataset_id: str, nodes: List[Dict[str, Any]], 
             continue
         add(by_key.get(f"ent:{a_eid}"), by_key.get(f"ent:{b_eid}"),
             "co_mentioned", attribution, 1)
+
+    # A2 — co-presence: two people in a group conversation the OWNER was in.
+    #
+    # First-party, and it renders by default. The owner was in the room; that two of their
+    # contacts were also in it is something they witnessed, not something a third party
+    # asserted about two strangers. Losing this was a real regression when the graph moved
+    # from the messaging view to the person view — without "these two know each other" a
+    # social graph is a star, not a network.
+    #
+    # Derived through `load_messages`/`classify_conversations`, the same normalisation that
+    # produced the peer keys everywhere else. Two alternatives were measured and rejected:
+    # raw `sender_id` grouping (counts owner variants and duplicate handles as separate
+    # people, which inflated this to 182 before normalisation), and the precomputed
+    # `messenger_social_edges` table (keyed on contact ids that only 114 of 437 nodes carry,
+    # and contaminated with `test-dataset:` contacts — 9 usable edges against 16 here).
+    from .messenger_directed import EDGE_KIND_DM, classify_conversations, load_messages
+
+    try:
+        rows = load_messages(conn, dataset_id)
+    except sqlite3.Error:
+        rows = []
+    if rows:
+        kinds = classify_conversations(rows)
+        members: Dict[str, Set[str]] = {}
+        for conv, _mid, sender, _at, from_self, _src, _reply in rows:
+            if from_self or not sender or str(sender) == SELF_KEY:
+                continue
+            members.setdefault(str(conv), set()).add(str(sender))
+        for conv, people in members.items():
+            if kinds.get(conv) == EDGE_KIND_DM:
+                continue  # a DM has one peer; co-presence needs a room
+            resolved = sorted({by_key[p] for p in people if p in by_key})
+            # A broadcast blast to a huge roster is a mailing list, not a room the owner
+            # shared with anyone: pairing everyone in it would invent n^2 relationships.
+            if len(resolved) < 2 or len(resolved) > MAX_CO_PRESENT_ROSTER:
+                continue
+            for i in range(len(resolved)):
+                for j in range(i + 1, len(resolved)):
+                    add(resolved[i], resolved[j], "co_present", ATTRIBUTION_CO_PRESENT, 1)
 
     out = list(edges.values())
     out.sort(key=lambda e: (-e["weight"], e["source"], e["target"]))
