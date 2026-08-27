@@ -484,9 +484,26 @@ def get_relationships(
             "tie_state": d["tie_state"],
         })
     labels = _peer_labels(conn, dataset_id, [r["peer_key"] for r in out])
+    from ..analytics.messenger_directed import resolve_peer_identities
+    idents = resolve_peer_identities(conn, [r["peer_key"] for r in out])
+    unnamed = 0
     for r in out:
-        r["label"] = labels.get(r["peer_key"]) or r["peer_key"]
-    return {"dataset_id": dataset_id, "count": len(out), "relationships": out}
+        label = labels.get(r["peer_key"]) or r["peer_key"]
+        r["label"] = label
+        cid, eid, _dn = idents.get(r["peer_key"], (None, None, None))
+        r["contact_id"] = cid
+        r["person_id"] = eid
+        # Measured 2026-08-26: the address book carries a name for 584 of 1,386 contacts,
+        # and the messaging-active people are concentrated in the unnamed part — the top
+        # relationship (2,016 messages) has no name anywhere on the node. No engine work
+        # conjures a name that was never ingested; what the node CAN do is make asking
+        # cheap. `needs_name` + `contact_id` is that ask, wired to the existing
+        # PUT /sources/{source_id}/contacts/{contact_id} naming endpoint.
+        r["needs_name"] = bool(label == r["peer_key"] or not any(ch.isalpha() for ch in label))
+        if r["needs_name"]:
+            unnamed += 1
+    return {"dataset_id": dataset_id, "count": len(out), "unnamed_count": unnamed,
+            "relationships": out}
 
 
 @router.get("/messenger-analytics/directed-edges", dependencies=[Depends(require_api_key)])

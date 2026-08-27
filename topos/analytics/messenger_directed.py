@@ -704,3 +704,89 @@ def attach_affect(conn: Any, dataset_id: str, acc: dict) -> dict:
     return {k: {"affect_counts_json": _json.dumps(dict(v["counts"])),
                 "affect_coverage": round(sum(v["counts"].values()) / v["n"], 4) if v["n"] else 0.0}
             for k, v in tally.items()}
+
+
+# --------------------------------------------------------------------------- L1-8: identity
+
+def resolve_peer_identities(conn: Any, peer_keys: list) -> dict:
+    """peer_key -> (contact_id, entity_id, display_name|None), by identifier match.
+
+    The write-time half of the person spine that L1 carries nullable columns for. Ambiguity
+    abstains: a key matching two contacts fills nothing, because a wrong person id on a
+    relationship row is worse than a missing one — it survives joins silently.
+
+    Measured before building (the reason this does NOT normalize formats): full digit-suffix
+    normalization gains ZERO names on the live corpus. The unnamed majority fails because
+    the address book never ingested a name for them at all (584 of 1,386 contacts carry
+    one), not because formats disagree. What this resolves, it resolves exactly.
+    """
+    out: dict = {}
+    if not peer_keys:
+        return out
+    try:
+        ident_rows = conn.execute(
+            "SELECT ci.identifier, ci.contact_id, c.display_name FROM contact_identifiers ci"
+            " LEFT JOIN contacts c ON c.contact_id = ci.contact_id").fetchall()
+        ent_rows = conn.execute(
+            "SELECT contact_id, entity_id FROM entities"
+            " WHERE contact_id IS NOT NULL AND entity_type='person'").fetchall()
+    except Exception:  # noqa: BLE001 — a corpus without these tables has no identities
+        return out
+    by_ident: dict = {}
+    for ident, cid, dn in ident_rows:
+        k = str(ident or "").strip().lower()
+        if k:
+            by_ident.setdefault(k, set()).add((str(cid), str(dn or "") or None))
+    ent_by_contact: dict = {}
+    for cid, eid in ent_rows:
+        ent_by_contact.setdefault(str(cid), []).append(str(eid))
+    for peer in peer_keys:
+        k = str(peer or "").strip().lower()
+        hits = by_ident.get(k) or set()
+        cids = {c for c, _ in hits}
+        if len(cids) != 1:
+            continue  # unknown, or ambiguous — abstain either way
+        cid = next(iter(cids))
+        ents = ent_by_contact.get(cid) or []
+        eid = ents[0] if len(ents) == 1 else None
+        dn = next((d for _, d in hits if d), None)
+        out[peer] = (cid, eid, dn)
+    return out
+
+
+def backfill_person_ids(conn: Any, dataset_id: str) -> dict:
+    """Fill the nullable person-id columns on both L1 tables from resolved identities."""
+    from ..storage.db.write_gate import batched_writes
+
+    try:
+        keys = {r[0] for r in conn.execute(
+            f"SELECT DISTINCT from_key FROM {MESSENGER_DIRECTED_EDGES_TABLE}"
+            f" WHERE dataset_id=? AND from_key != ?", (dataset_id, SELF_KEY))}
+        keys |= {r[0] for r in conn.execute(
+            f"SELECT DISTINCT to_key FROM {MESSENGER_DIRECTED_EDGES_TABLE}"
+            f" WHERE dataset_id=? AND to_key != ?", (dataset_id, SELF_KEY))}
+    except Exception:  # noqa: BLE001
+        return {"resolved": 0, "edges_updated": 0, "dyads_updated": 0}
+    ids = resolve_peer_identities(conn, sorted(keys))
+    edges = dyads = 0
+    with batched_writes(conn):
+        for peer, (cid, eid, _dn) in ids.items():
+            if not eid:
+                continue
+            cur = conn.execute(
+                f"UPDATE {MESSENGER_DIRECTED_EDGES_TABLE} SET from_person_id=?"
+                f" WHERE dataset_id=? AND from_key=?", (eid, dataset_id, peer))
+            edges += cur.rowcount
+            cur = conn.execute(
+                f"UPDATE {MESSENGER_DIRECTED_EDGES_TABLE} SET to_person_id=?"
+                f" WHERE dataset_id=? AND to_key=?", (eid, dataset_id, peer))
+            edges += cur.rowcount
+            cur = conn.execute(
+                f"UPDATE {MESSENGER_DYAD_STATS_TABLE} SET a_person_id=?"
+                f" WHERE dataset_id=? AND a_key=?", (eid, dataset_id, peer))
+            dyads += cur.rowcount
+            cur = conn.execute(
+                f"UPDATE {MESSENGER_DYAD_STATS_TABLE} SET b_person_id=?"
+                f" WHERE dataset_id=? AND b_key=?", (eid, dataset_id, peer))
+            dyads += cur.rowcount
+    return {"resolved": len(ids), "edges_updated": edges, "dyads_updated": dyads}

@@ -32,7 +32,7 @@ def conn(tmp_path, monkeypatch):
     # on source_id/updated_at, and a thinner fixture silently matches nothing
     c.execute("""CREATE TABLE contacts (contact_id TEXT PRIMARY KEY, dataset_id TEXT,
         source_id TEXT, display_name TEXT, is_self INTEGER DEFAULT 0,
-        created_at TEXT, updated_at TEXT)""")
+        known_usernames_json TEXT, created_at TEXT, updated_at TEXT)""")
     c.execute("""CREATE TABLE contact_identifiers (dataset_id TEXT, source_id TEXT,
         identifier TEXT, identifier_type TEXT, contact_id TEXT,
         created_at TEXT, updated_at TEXT)""")
@@ -49,7 +49,7 @@ def conn(tmp_path, monkeypatch):
     # first version mocked the resolver, which hid a keyword-only signature mismatch
     # (HTTP 500 on every request) AND a nested-dict return shape. Mocks are for failure
     # injection; this surface is tested against the real collaborator.
-    c.execute("INSERT INTO contacts VALUES ('ct_1', ?, 'address_book', 'Tango Uniform', 0, 't', 't')", (DS,))
+    c.execute("INSERT INTO contacts VALUES ('ct_1', ?, 'address_book', 'Tango Uniform', 0, NULL, 't', 't')", (DS,))
     c.execute("INSERT INTO contact_identifiers VALUES (?, 'address_book', '+15125551234',"
               " 'phone', 'ct_1', 't', 't')", (DS,))
     c.commit()
@@ -204,3 +204,91 @@ def test_a_failing_resolver_degrades_to_keys_not_500(conn, monkeypatch):
     res = api.get_relationships(dataset_id=DS, tie_state=None, include_automated=False, limit=100)
     assert res["relationships"], "data flows"
     assert all(r["label"] == r["peer_key"] for r in res["relationships"])
+
+
+# --- G2: the naming loop ---
+
+def test_an_unnamed_relationship_says_so_and_carries_its_contact_id(conn):
+    """The node cannot conjure names it never ingested (measured: 584 of 1,386 contacts
+    named, zero of the top unnamed dyads recoverable by any normalization). What it can do
+    is make asking cheap: needs_name plus the contact_id the existing naming endpoint wants."""
+    from topos.api.messenger_analytics import get_relationships
+
+    conn.execute("INSERT INTO conversation_messages VALUES"
+                 " ('c9','n1',?, '+15550009999', '2026-05-02T09:00:00+00:00', 0, 'imessage', NULL)", (DS,))
+    for i in range(8):
+        conn.execute("INSERT INTO conversation_messages VALUES"
+                     " ('c9', ?, ?, ?, ?, ?, 'imessage', NULL)",
+                     (f"n{i+2}", DS, None if i % 2 else "+15550009999",
+                      f"2026-05-0{(i%7)+2}T1{i}:00:00+00:00", 1 if i % 2 else 0))
+    conn.commit()
+    from topos.analytics.messenger_communities import _compute_directed_lane
+    _compute_directed_lane(conn, DS, None)
+    res = get_relationships(dataset_id=DS, tie_state=None, include_automated=False, limit=100)
+    rows = {r["peer_key"]: r for r in res["relationships"]}
+    named = rows["+15125551234"]
+    assert named["needs_name"] is False and named["label"] == "Tango Uniform"
+    ghost = rows["+15550009999"]
+    assert ghost["needs_name"] is True
+    assert res["unnamed_count"] >= 1
+
+
+def test_naming_a_contact_renames_the_person_end_to_end(conn):
+    """The full loop the say-do gap broke: placeholder entity -> owner names the contact ->
+    seeding promotes the entity's canonical_name, old surface kept as an alias."""
+    import json as _json
+
+    from topos.features.entities.resolver import EntityResolver
+
+    conn.executescript("""
+      CREATE TABLE IF NOT EXISTS entities (entity_id TEXT PRIMARY KEY, entity_type TEXT,
+        canonical_name TEXT, normalized_name TEXT, aliases_json TEXT, identifiers_json TEXT,
+        is_self INTEGER DEFAULT 0, contact_id TEXT, mention_count INTEGER DEFAULT 0,
+        metadata_json TEXT, created_at TEXT, updated_at TEXT, first_seen TEXT, last_seen TEXT);
+      CREATE TABLE IF NOT EXISTS entity_mentions (entity_id TEXT, record_id TEXT);
+      CREATE TABLE IF NOT EXISTS entity_review (review_id TEXT PRIMARY KEY, surface_text TEXT,
+        candidate_entity_id TEXT, score REAL, status TEXT, created_at TEXT);
+    """)
+    conn.execute("INSERT INTO contacts VALUES ('ct_ghost', ?, 'address_book', NULL, 0, NULL, 't', 't')", (DS,))
+    conn.execute("INSERT INTO contact_identifiers VALUES (?, 'address_book', '+15550009999',"
+                 " 'phone', 'ct_ghost', 't', 't')", (DS,))
+    conn.commit()
+    r = EntityResolver(conn)
+    r.seed_from_contacts()
+    ent = conn.execute("SELECT entity_id, canonical_name FROM entities WHERE contact_id='ct_ghost'").fetchone()
+    assert ent and ent[1] == "+15550009999", "placeholder first"
+
+    # the owner names the contact (the existing PUT endpoint's effect)
+    conn.execute("UPDATE contacts SET display_name='Marcus Webb' WHERE contact_id='ct_ghost'")
+    conn.commit()
+    r.seed_from_contacts()
+    row = conn.execute("SELECT canonical_name, aliases_json FROM entities"
+                       " WHERE contact_id='ct_ghost'").fetchone()
+    assert row[0] == "Marcus Webb", "the person is renamed, not just the contact"
+    assert "+15550009999" in _json.loads(row[1] or "[]"), "the old surface survives as an alias"
+
+
+def test_a_real_name_is_never_demoted_by_reseeding(conn):
+    """Promotion is placeholder->name only. A hand-curated canonical_name must not be
+    overwritten because the contact's display_name differs."""
+    from topos.features.entities.resolver import EntityResolver
+
+    conn.executescript("""
+      CREATE TABLE IF NOT EXISTS entities (entity_id TEXT PRIMARY KEY, entity_type TEXT,
+        canonical_name TEXT, normalized_name TEXT, aliases_json TEXT, identifiers_json TEXT,
+        is_self INTEGER DEFAULT 0, contact_id TEXT, mention_count INTEGER DEFAULT 0,
+        metadata_json TEXT, created_at TEXT, updated_at TEXT, first_seen TEXT, last_seen TEXT);
+      CREATE TABLE IF NOT EXISTS entity_mentions (entity_id TEXT, record_id TEXT);
+      CREATE TABLE IF NOT EXISTS entity_review (review_id TEXT PRIMARY KEY, surface_text TEXT,
+        candidate_entity_id TEXT, score REAL, status TEXT, created_at TEXT);
+    """)
+    conn.execute("INSERT INTO contacts VALUES ('ct_k', ?, 'address_book', 'Kim H.', 0, NULL, 't', 't')", (DS,))
+    conn.execute("INSERT INTO contact_identifiers VALUES (?, 'address_book', '+15550001111',"
+                 " 'phone', 'ct_k', 't', 't')", (DS,))
+    conn.execute("INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name,"
+                 " aliases_json, identifiers_json, contact_id) VALUES"
+                 " ('ent_kim', 'person', 'Hotel India', 'hotel india', '[]', '[]', 'ct_k')")
+    conn.commit()
+    EntityResolver(conn).seed_from_contacts()
+    assert conn.execute("SELECT canonical_name FROM entities WHERE entity_id='ent_kim'"
+                        ).fetchone()[0] == "Hotel India"
