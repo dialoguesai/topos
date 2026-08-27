@@ -280,8 +280,8 @@ def read_person_graph(conn: Any, *, dataset_id: str,
     """
     from .dataset_resolution import resolve_messaging_dataset
     from .person_graph import (attach_closeness, attach_fact_closeness, auto_link_duplicates,
-                               build_person_edges, build_person_nodes, merge_suggestions,
-                               resolve_owner_identity, structural_metrics)
+                               build_person_edges, build_person_nodes, group_ambient_people,
+                               merge_suggestions, resolve_owner_identity, structural_metrics)
 
     for table in ("entities",):
         if _table_missing(conn, table):
@@ -313,6 +313,10 @@ def read_person_graph(conn: Any, *, dataset_id: str,
     # node — most of these join by name, because the fact side has the same duplicate-entity
     # problem the graph itself does.
     fact_stats = attach_fact_closeness(conn, nodes)
+    # Ambient is 173 of 437 and reads as an undifferentiated fringe, but it holds classical
+    # poets, GitHub collaborators, LinkedIn contacts and several pieces of software mistaken
+    # for people. Grouping by what each name was seen ALONGSIDE separates them.
+    ambient_stats = group_ambient_people(conn, nodes)
     if not include_dismissed:
         nodes = [n for n in nodes if not n.get("dismissed")]
     edges = build_person_edges(conn, dataset_id, nodes,
@@ -357,6 +361,7 @@ def read_person_graph(conn: Any, *, dataset_id: str,
                             "behaviour understates it, and can only pull someone closer, "
                             "never push them away: silence is not evidence of distance"),
         "fact_closeness_applied": fact_stats.get("applied", 0),
+        "ambient_groups": {k: ambient_stats.get(k) for k in ("grouped", "ungrouped", "groups")},
         "dismissed_count": sum(1 for n in nodes if n.get("dismissed")),
         "overlay_actions": len(overlay_rows),
         # Counted FROM the edges rather than from a hardcoded list of classes: adding

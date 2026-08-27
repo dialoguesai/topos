@@ -728,3 +728,112 @@ class TestFactsCanSayWhatBehaviourCannot:
         self._fact(c, predicate="rel.closeness_tier", altitude="stated", tier="close",
                    person="Foxtrot Romeo")
         assert self._closeness(c)["Foxtrot Romeo"]["closeness_source"] == "facts"
+
+
+class TestAmbientPeopleGroupByWhatTheyAppearBeside:
+    """Ambient is 173 of 437 people and reads as one undifferentiated fringe. It is not one
+    thing: classical poets, GitHub collaborators, LinkedIn contacts, film actors, and several
+    pieces of software extraction mistook for people."""
+
+    def _corpus(self):
+        c = _conn()
+        c.executescript("""
+          CREATE TABLE topic_clusters (cluster_id TEXT PRIMARY KEY, label TEXT);
+          CREATE TABLE topic_cluster_members (member_id TEXT, cluster_id TEXT,
+            record_id TEXT, source_id TEXT);
+        """)
+        _person(c, "e-owner", "Owner", is_self=1)
+        return c
+
+    def _ambient(self, c, name, records):
+        _person(c, f"e-{name}", name)
+        for i, rid in enumerate(records):
+            c.execute("INSERT INTO entity_mentions VALUES (?,?,?,?,0)",
+                      (f"m-{name}-{i}", f"e-{name}", rid, "browser_visits"))
+
+    def _cluster(self, c, cid, label, records):
+        c.execute("INSERT INTO topic_clusters VALUES (?,?)", (cid, label))
+        for i, rid in enumerate(records):
+            c.execute("INSERT INTO topic_cluster_members VALUES (?,?,?,?)",
+                      (f"tcm-{cid}-{i}", cid, rid, "browser_visits"))
+
+    def test_people_sharing_a_topic_become_a_group(self):
+        c = self._corpus()
+        # The domain must not share a word with the label, or the site-echo guard fires —
+        # which is correct behaviour on real data and merely awkward to fixture.
+        poets = ["Sappho", "Homer", "Dante"]
+        for p in poets:
+            self._ambient(c, p, [f"browser:https://litjournal.example/{p}"])
+        self._cluster(c, "c1", "Classical Poetry",
+                      [f"browser:https://litjournal.example/{p}" for p in poets])
+        nodes = PG.build_person_nodes(c, "ds")
+        PG.group_ambient_people(c, nodes)
+        grouped = {n["label"]: n.get("ambient_group") for n in nodes if n.get("ambient_group")}
+        assert set(grouped) == set(poets)
+        assert set(grouped.values()) == {"Classical Poetry"}
+
+    def test_a_cluster_named_after_its_own_website_is_rejected(self):
+        """`Google Trends` and `YouTube Studio` held 44 of 153 people and would have been the
+        two largest groups on screen. Detected by the label echoing the domain, not a list."""
+        c = self._corpus()
+        people = ["Alice Adams", "Bob Brown", "Carol Clark"]
+        for p in people:
+            self._ambient(c, p, [f"browser:https://www.youtube.com/watch/{p}"])
+        self._cluster(c, "c1", "YouTube Studio",
+                      [f"browser:https://www.youtube.com/watch/{p}" for p in people])
+        nodes = PG.build_person_nodes(c, "ds")
+        PG.group_ambient_people(c, nodes)
+        assert not [n for n in nodes if n.get("ambient_group_kind") == "topic"]
+
+    def test_a_site_groups_people_when_no_topic_does(self):
+        c = self._corpus()
+        for p in ("Dev One", "Dev Two", "Dev Three"):
+            self._ambient(c, p, [f"browser:https://github.com/{p}"])
+        nodes = PG.build_person_nodes(c, "ds")
+        PG.group_ambient_people(c, nodes)
+        assert {n.get("ambient_group") for n in nodes if n.get("ambient_group")} == {"github.com"}
+
+    def test_search_engines_never_group_anyone(self):
+        """google.com alone holds 42 of this node's ambient people — everyone ever looked up."""
+        c = self._corpus()
+        for p in ("Someone A", "Someone B", "Someone C"):
+            self._ambient(c, p, [f"browser:https://www.google.com/search?q={p}"])
+        nodes = PG.build_person_nodes(c, "ds")
+        assert PG.group_ambient_people(c, nodes)["grouped"] == 0
+
+    def test_a_pair_is_not_a_group(self):
+        c = self._corpus()
+        for p in ("Solo One", "Solo Two"):
+            self._ambient(c, p, [f"browser:https://example.org/{p}"])
+        nodes = PG.build_person_nodes(c, "ds")
+        assert PG.group_ambient_people(c, nodes)["grouped"] == 0
+
+    def test_a_group_left_undersized_by_a_bigger_one_is_released(self):
+        """A cluster passes the size test on its FULL membership, but larger clusters claim
+        shared members first — live that left a group of one on screen."""
+        c = self._corpus()
+        shared = ["A", "B", "C"]
+        for p in shared:
+            self._ambient(c, p, [f"browser:https://alpha.example/{p}",
+                                 f"browser:https://beta.example/{p}"])
+        self._cluster(c, "big", "Russian History",
+                      [f"browser:https://alpha.example/{p}" for p in shared])
+        self._cluster(c, "small", "Coffee Roasters",
+                      [f"browser:https://beta.example/{p}" for p in shared])
+        nodes = PG.build_person_nodes(c, "ds")
+        PG.group_ambient_people(c, nodes)
+        labels = {n.get("ambient_group") for n in nodes if n.get("ambient_group")}
+        assert labels == {"Russian History"}, "the smaller duplicate must not survive empty"
+
+    def test_grouping_only_touches_ambient_people(self):
+        c = self._corpus()
+        _person(c, "e-core", "Core Person", contact_id="c1")
+        c.execute("INSERT INTO contacts VALUES ('c1','Core Person')")
+        c.execute("INSERT INTO contact_identifiers VALUES ('c1','+15551230000','phone')")
+        _dyad(c, "+15551230000", msgs=50)
+        for p in ("Amb One", "Amb Two", "Amb Three"):
+            self._ambient(c, p, [f"browser:https://example.org/{p}"])
+        nodes = PG.build_person_nodes(c, "ds")
+        PG.group_ambient_people(c, nodes)
+        core = [n for n in nodes if n["label"] == "Core Person"][0]
+        assert core.get("ambient_group") is None

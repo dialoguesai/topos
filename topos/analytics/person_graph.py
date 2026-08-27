@@ -21,6 +21,7 @@ import json
 import math
 import re
 import sqlite3
+from collections import Counter
 from typing import Any, Dict, List, Optional, Set
 
 #: Message traffic that is not a relationship. 29 of this node's 180 peers are SMS shortcodes
@@ -1156,3 +1157,153 @@ def attach_fact_closeness(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[str, i
 
 
 
+
+
+# --------------------------------------------------------------------------- ambient groups
+
+#: Search engines and mail. Everyone the owner ever looked up passes through these, so a
+#: domain grouping built on them is a bucket of unrelated strangers — google.com alone holds
+#: 42 of this node's ambient people.
+NON_TOPICAL_DOMAINS = frozenset({
+    "google.com", "mail.google.com", "docs.google.com", "duckduckgo.com", "bing.com",
+    "search.yahoo.com", "chatgpt.com", "chat.openai.com",
+})
+
+#: A pair is not a cluster. Below this the members are left ungrouped rather than each being
+#: called a group of one — 23 topic clusters here hold exactly one ambient person.
+MIN_AMBIENT_GROUP = 3
+
+_WORD_SPLIT = re.compile(r"[^a-z0-9]+")
+
+
+def _tokens(text: Any) -> Set[str]:
+    return {t for t in _WORD_SPLIT.split(str(text or "").lower())
+            if len(t) > 2 and t not in ("com", "org", "net", "www", "the", "and")}
+
+
+def _domain_of(record_id: Any) -> Optional[str]:
+    match = re.search(r"https?://([^/]+)", str(record_id or ""))
+    return match.group(1).replace("www.", "").lower() if match else None
+
+
+def group_ambient_people(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """Cluster the ambient names by what they were seen ALONGSIDE.
+
+    Ambient is 173 of 437 people here and reads as an undifferentiated fringe, but the fringe
+    is not one thing: it holds classical poets, GitHub collaborators, LinkedIn contacts, film
+    actors and several pieces of software that extraction mistook for people. Two signals in
+    the record already separate them, and neither needs anything embedded.
+
+    1. **Topic cluster** — a person's records are already assigned to labelled topic clusters,
+       reachable by joining on `record_id`. Covers 153 of 173.
+    2. **Domain** — failing that, the site the name was read on. Covers 87 more loosely.
+
+    Site-name clusters are rejected by a DERIVED test rather than a list: a cluster whose
+    label echoes the domain its members were browsing is describing a website, not a subject.
+    That catches `Google Trends` (google.com) and `YouTube Studio` (youtube.com), which
+    between them held 44 of the 153 and would have been the two largest groups on screen.
+
+    Known limitation, accepted deliberately: a genuinely topical site NAMED after its topic
+    would be rejected too. The obvious alternative — requiring the cluster to draw from one
+    dominant domain — was measured and is worse: `Monologues of a Native Prince` is 100%
+    single-domain and is a real subject, while `Google Trends` spans eleven domains and is
+    not. Concentration says nothing here; the label does.
+    """
+    ambient = {str(n["entity_id"]): n for n in nodes
+               if n.get("band") == BAND_AMBIENT and n.get("entity_id") and not n.get("is_owner")}
+    if not ambient:
+        return {"grouped": 0, "groups": 0, "coverage": {"reason": "no ambient people"}}
+
+    placeholders = ",".join("?" for _ in ambient)
+    try:
+        rows = conn.execute(
+            f"SELECT m.entity_id, m.record_id, tcm.cluster_id FROM entity_mentions m"
+            f"  JOIN topic_cluster_members tcm ON tcm.record_id = m.record_id"
+            f" WHERE m.entity_id IN ({placeholders})", list(ambient)).fetchall()
+    except sqlite3.Error:
+        rows = []
+    try:
+        labels = {cid: lab for cid, lab in
+                  conn.execute("SELECT cluster_id, label FROM topic_clusters")}
+    except sqlite3.Error:
+        labels = {}
+
+    members: Dict[Any, Set[str]] = {}
+    cluster_domains: Dict[Any, Counter] = {}
+    for entity_id, record_id, cluster_id in rows:
+        members.setdefault(cluster_id, set()).add(str(entity_id))
+        domain = _domain_of(record_id)
+        if domain:
+            cluster_domains.setdefault(cluster_id, Counter())[domain] += 1
+
+    def echoes_its_site(cluster_id: Any) -> bool:
+        label_tokens = _tokens(labels.get(cluster_id))
+        if not label_tokens:
+            return True  # an unlabelled cluster cannot name itself on screen
+        for domain, _n in (cluster_domains.get(cluster_id) or Counter()).most_common(3):
+            if label_tokens & _tokens(domain):
+                return True
+        return False
+
+    assigned: Dict[str, Dict[str, Any]] = {}
+    # Largest first, so a person in several clusters lands in their most populated one and the
+    # groups stay stable rather than depending on scan order. 27 of 153 sit in more than one.
+    for cluster_id, group in sorted(members.items(), key=lambda kv: (-len(kv[1]), str(kv[0]))):
+        if len(group) < MIN_AMBIENT_GROUP or echoes_its_site(cluster_id):
+            continue
+        for entity_id in group:
+            assigned.setdefault(entity_id, {
+                "label": str(labels.get(cluster_id) or "").strip(),
+                "kind": "topic", "key": f"topic:{cluster_id}"})
+
+    # Domain fallback for whoever the topics missed.
+    by_domain: Dict[str, Set[str]] = {}
+    try:
+        mention_rows = conn.execute(
+            f"SELECT entity_id, record_id FROM entity_mentions"
+            f" WHERE entity_id IN ({placeholders})", list(ambient)).fetchall()
+    except sqlite3.Error:
+        mention_rows = []
+    for entity_id, record_id in mention_rows:
+        if str(entity_id) in assigned:
+            continue
+        domain = _domain_of(record_id)
+        if domain and domain not in NON_TOPICAL_DOMAINS:
+            by_domain.setdefault(domain, set()).add(str(entity_id))
+    for domain, group in sorted(by_domain.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        if len(group) < MIN_AMBIENT_GROUP:
+            continue
+        for entity_id in group:
+            assigned.setdefault(entity_id, {"label": domain, "kind": "site",
+                                            "key": f"site:{domain}"})
+
+    # A cluster passes the size test on its FULL membership, but larger clusters claim
+    # shared members first — so a group that qualified can end up below the minimum once
+    # everyone else has been taken. Live, that left "Notion integration" as a group of one.
+    # Re-check on the final membership and release anyone left in a group too small to mean
+    # anything; ungrouped is an honest answer, a group of one is not.
+    final: Counter = Counter(a["key"] for a in assigned.values())
+    assigned = {eid: a for eid, a in assigned.items()
+                if final[a["key"]] >= MIN_AMBIENT_GROUP}
+
+    keys = sorted({a["key"] for a in assigned.values()})
+    index = {k: i for i, k in enumerate(keys)}
+    for entity_id, group in assigned.items():
+        node = ambient.get(entity_id)
+        if not node:
+            continue
+        node["ambient_group"] = group["label"]
+        node["ambient_group_kind"] = group["kind"]
+        node["ambient_group_id"] = index[group["key"]]
+    return {
+        "grouped": len(assigned),
+        "ungrouped": len(ambient) - len(assigned),
+        "groups": len(keys),
+        "coverage": {
+            "basis": ("what each name was seen alongside — the topic cluster of the records "
+                      "naming them, or failing that the site they were read on"),
+            "excluded": ("clusters whose label echoes their own domain describe a website "
+                         "rather than a subject, and search engines group strangers"),
+            "min_group": MIN_AMBIENT_GROUP,
+        },
+    }
