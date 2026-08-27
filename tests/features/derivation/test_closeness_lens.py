@@ -182,3 +182,28 @@ def test_a_lens_that_raises_does_not_sink_the_pack(db):
         S._LENS_IMPLS["rel.closeness_tier"] = original
     assert report["facts_written"] == 0
     assert any("synthetic failure" in str(s.get("reason", "")) for s in report["skipped"])
+
+
+def test_the_known_item_aliases_cover_how_people_actually_ask():
+    """Measured against live chat turns: each of these matched NOTHING, so the
+    deterministic lane never fired and a 9B model answered from generic retrieval —
+    "Do I have any siblings?" came back as a bare "Yes." with the brother in hand."""
+    from topos.query.facts_direct import match_known_item
+
+    def preds(q):
+        m = match_known_item(q)
+        return m["predicates"] if m else []
+
+    # bare role words carry the owner frame in "I", not in "my <role>"
+    assert "rel.relationship" in preds("Do I have any siblings?")
+    assert "rel.relationship" in preds("Who are my parents?")
+    # person-scoped and comparative, not only owner-scoped list questions
+    for q in ("How close am I to Mitch?",
+              "Am I closer to Mike November or Alpha Xray?",
+              "Who should I reconnect with?",
+              "Who have I drifted away from?",
+              "Who haven't I talked to in a while?"):
+        assert "rel.closeness_tier" in preds(q), q
+    # and the neighbours still route where they did
+    assert preds("What medications am I taking?") == ["health.medication"]
+    assert preds("What's on my calendar?") == []
