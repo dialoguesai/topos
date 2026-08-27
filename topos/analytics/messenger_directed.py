@@ -138,6 +138,12 @@ def create_directed_tables(conn: Any) -> None:
     # migration, so user_version is untouched.
     _add_directed_column_if_missing(conn, "affect_counts_json", "TEXT")
     _add_directed_column_if_missing(conn, "affect_coverage", "REAL")
+    # G6 — topic mix on the edge, same shape as affect: counts plus the coverage that
+    # keeps the mix honest. Populated from message_topics, which for iMessage fills only
+    # when the owner runs the topics backfill — enrolling it in every sync would put an
+    # LLM generation on every message, a cost the source registry declines on purpose.
+    _add_directed_column_if_missing(conn, "topic_counts_json", "TEXT")
+    _add_directed_column_if_missing(conn, "topic_coverage", "REAL")
 
     conn.execute(
         f"""
@@ -421,19 +427,22 @@ def extract_directed_dyadic_edges(
 
 
 def rows_for_persist(acc: dict, dataset_id: str, session_gap_seconds: int,
-                     affect: Any = None) -> list:
+                     affect: Any = None, topics: Any = None) -> list:
     now = _utc_now()
     affect = affect or {}
+    topics = topics or {}
     out = []
     for key, e in acc.items():
         period, conn_id, kind, a, b = key
         af = affect.get(key) or {}
+        tp = topics.get(key) or {}
         out.append((dataset_id, period, str(conn_id or ""), kind, a, b, e.msgs,
                     e.sessions_initiated, e.replies, _median(e.latencies),
                     e.first_ts.isoformat() if e.first_ts else None,
                     e.last_ts.isoformat() if e.last_ts else None,
                     int(session_gap_seconds), None, None,
-                    af.get("affect_counts_json"), af.get("affect_coverage"), now, now))
+                    af.get("affect_counts_json"), af.get("affect_coverage"),
+                    tp.get("topic_counts_json"), tp.get("topic_coverage"), now, now))
     return out
 
 
@@ -460,8 +469,9 @@ def persist_directed_edges(conn: Any, dataset_id: str, rows: list, periods: Any 
                 (dataset_id, period_key, connector, edge_kind, from_key, to_key, msgs,
                  sessions_initiated, replies, median_reply_latency_s, first_ts, last_ts,
                  session_gap_seconds, from_person_id, to_person_id,
-                 affect_counts_json, affect_coverage, created_at, updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
+                 affect_counts_json, affect_coverage, topic_counts_json, topic_coverage,
+                 created_at, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
     return len(rows)
 
 
@@ -665,6 +675,14 @@ def ensure_directed_tables_present(conn: Any) -> None:
 #: So "what do we talk about" is not buildable: the enrichment does not exist for messages.
 #: "How does it feel" is, and this is that. Recording the gap in code rather than only in a
 #: plan is deliberate — the next person to reach for topic-on-edge should find out here.
+def _message_labels(conn: Any, sql: str) -> dict:
+    try:
+        return {}.__class__((str(r[0]), str(r[1])) for r in conn.execute(sql).fetchall()
+                            if r[1] is not None)
+    except Exception:  # noqa: BLE001 — a node without the enrichment simply has none
+        return {}
+
+
 def attach_affect(conn: Any, dataset_id: str, acc: dict) -> dict:
     """Fold per-message emotion labels onto the directed edges that carry those messages.
 
@@ -799,3 +817,48 @@ def backfill_person_ids(conn: Any, dataset_id: str) -> dict:
                 f" WHERE dataset_id=? AND b_key=?", (eid, dataset_id, peer))
             dyads += cur.rowcount
     return {"resolved": len(ids), "edges_updated": edges, "dyads_updated": dyads}
+
+
+def attach_topics(conn: Any, dataset_id: str, acc: dict) -> dict:
+    """Fold per-message topics onto the directed edges that carry those messages.
+
+    Same contract as `attach_affect`: counts plus coverage, because a topic mix over three
+    labelled messages and one over three hundred look identical once normalised. Reads
+    whatever `message_topics` holds — zero for iMessage until the owner runs the topics
+    backfill, and the coverage field says exactly that rather than hiding it.
+    """
+    import json as _json
+    from collections import Counter
+
+    labels = _message_labels(
+        conn, "SELECT COALESCE(message_id, record_id), topic FROM message_topics"
+              " WHERE topic IS NOT NULL")
+    if not labels:
+        return {}
+    rows = load_messages(conn, dataset_id)
+    kinds = classify_conversations(rows)
+    peers: dict = {}
+    for conv, _m, s, _e, sf, _src, _rt in rows:
+        if not sf and s and str(s) != SELF_KEY:
+            peers.setdefault(conv, set()).add(str(s))
+    tally: dict = {}
+    for conv, mid, sender, ea, is_self, src, _rt in rows:
+        if kinds.get(conv) != EDGE_KIND_DM:
+            continue
+        dt = _parse_ts(ea)
+        cp = peers.get(conv) or set()
+        if dt is None or not cp:
+            continue
+        peer = next(iter(cp))
+        a, b = (SELF_KEY, peer) if is_self else (peer, SELF_KEY)
+        key = (_period_of(dt), str(src or ""), EDGE_KIND_DM, a, b)
+        if key not in acc:
+            continue
+        t = tally.setdefault(key, {"counts": Counter(), "n": 0})
+        t["n"] += 1
+        lab = labels.get(str(mid))
+        if lab:
+            t["counts"][lab] += 1
+    return {k: {"topic_counts_json": _json.dumps(dict(v["counts"].most_common(8))),
+                "topic_coverage": round(sum(v["counts"].values()) / v["n"], 4) if v["n"] else 0.0}
+            for k, v in tally.items() if v["counts"]}
