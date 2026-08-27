@@ -236,7 +236,10 @@ def test_I8_bind_host_defaults_to_loopback(monkeypatch):
     assert _resolve_bind_host(None) == "0.0.0.0"             # container escape
 
 
-def test_I8_owner_key_from_the_network_is_not_owner(monkeypatch):
+def test_I8_no_bearer_mints_owner_on_tcp(monkeypatch):
+    """The P4 endgame, pinned: the owner CLASS is unreachable from TCP with
+    ANY bearer, from ANY peer — loopback included. It authenticates; it
+    demotes. Owner comes only from the socket transport or a relay stamp."""
     from fastapi.security import HTTPAuthorizationCredentials
 
     from topos.auth import resolve_request_principal
@@ -245,10 +248,20 @@ def test_I8_owner_key_from_the_network_is_not_owner(monkeypatch):
     monkeypatch.setattr(settings, "topos_owner_key", "ok_secret", raising=False)
     creds = HTTPAuthorizationCredentials(scheme="Bearer", credentials="ok_secret")
 
-    local = resolve_request_principal(_Peer("127.0.0.1"), creds)
-    assert local is not None and local.cls == OWNER_APP
+    for peer, channel in (("127.0.0.1", "local_http"), ("192.168.86.50", "remote_http"),
+                          ("10.0.0.7", "remote_http"), ("203.0.113.9", "remote_http")):
+        p = resolve_request_principal(_Peer(peer), creds)
+        assert p is not None and p.cls == THIRD_PARTY, peer
+        assert p.channel == channel
 
-    for remote in ("192.168.86.50", "10.0.0.7", "203.0.113.9"):
-        p = resolve_request_principal(_Peer(remote), creds)
-        assert p is not None and p.cls == THIRD_PARTY, remote
-        assert p.channel == "remote_http"
+
+def test_I8_socket_transport_is_the_owner_lane():
+    from topos.auth import resolve_request_principal
+    from topos.uds import _transport
+
+    tok = _transport.set("uds")
+    try:
+        p = resolve_request_principal(credentials=None)
+        assert p is not None and p.cls == OWNER_APP and p.channel == "uds"
+    finally:
+        _transport.reset(tok)

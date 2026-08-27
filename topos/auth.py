@@ -94,11 +94,16 @@ def resolve_request_principal(
     owner = str(getattr(runtime_settings, "topos_owner_key", None) or "")
 
     if owner and secrets.compare_digest(presented.encode(), owner.encode()):
-        if not _peer_is_loopback(request):
-            # Authenticates, but the owner CLASS is loopback-only: a leaked
-            # owner key used from the network is treated as a third party.
-            return Principal(cls=THIRD_PARTY, channel="remote_http")
-        return Principal(cls=OWNER_APP, channel="local_http")
+        # TCP DEMOTION (P4 endgame): the owner CLASS is no longer mintable by
+        # any bearer on any TCP peer — loopback included. Owner privilege is a
+        # CHANNEL property: the 0600 socket locally, the signed relay stamp
+        # remotely. The key still AUTHENTICATES (require_api_key accepts it,
+        # every plain-auth route keeps working), but as a third party — so a
+        # key that leaks into a log, a backup, or a synced dotfile is worth
+        # nothing more than the legacy key it replaced. The FE reaches the
+        # socket through its local proxy lane and needs no key at all.
+        channel = "local_http" if _peer_is_loopback(request) else "remote_http"
+        return Principal(cls=THIRD_PARTY, channel=channel)
     # P2: per-client enrolled tokens (tpk_<client_id>.<secret>). Resolved before
     # the shared legacy key so an enrolled client is NAMED in its principal —
     # and note these authenticate only on principal-aware routes: require_api_key
