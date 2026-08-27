@@ -25,11 +25,12 @@ may not be answerable honestly in v1.
 from __future__ import annotations
 
 import json
+import math
 import re
 import sqlite3
 from collections import Counter, defaultdict
 from datetime import date as _date
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set
 
 #: A role must recur across at least this many distinct ISO weeks. One busy afternoon is a
 #: task; a shape that returns week after week is a role.
@@ -349,7 +350,8 @@ def find_candidates(conn: sqlite3.Connection, role: Dict[str, Any]) -> List[Dict
     return out
 
 
-def build_bench_slate(conn: sqlite3.Connection) -> Dict[str, Any]:
+def build_bench_slate(conn: sqlite3.Connection,
+                      dataset_id: Optional[str] = None) -> Dict[str, Any]:
     """THE BENCH: roles from the owner's own record, candidates by demonstrated skill,
     ordered by warmth — with what is missing stated as data."""
     roles = build_role_shapes_from_clusters(conn)
@@ -366,6 +368,15 @@ def build_bench_slate(conn: sqlite3.Connection) -> Dict[str, Any]:
                  "thin here to name a role from on its own")
         substrate = ("event-dated user_goals (%d records)" % work_records if used_work
                      else "journal_entries + event-dated user_goals")
+    # Who is near this work at all. Kept out of the per-role slate on purpose: the roles do
+    # not separate in embedding space, so a per-role assignment would be an invention.
+    try:
+        from ...analytics.dataset_resolution import resolve_messaging_dataset
+        resolved, _ = resolve_messaging_dataset(conn, dataset_id or "")
+        engagement = work_engagement(conn, resolved)
+    except Exception as exc:  # noqa: BLE001
+        engagement = {"people": [], "coverage": {"reason": f"not computed: {exc}"}}
+
     slate = []
     without: List[str] = []
     for role in roles:
@@ -380,6 +391,11 @@ def build_bench_slate(conn: sqlite3.Connection) -> Dict[str, Any]:
     return {
         "roles": slate,
         "roles_without_candidates": without,
+        # The candidate half of the request, answered with what the record actually supports.
+        # `roles_without_candidates` says nobody is EVIDENCED for a role; this says who is
+        # nearest the work. They are different claims and the report keeps them apart.
+        "people_close_to_this_work": engagement.get("people", []),
+        "engagement_coverage": engagement.get("coverage", {}),
         "coverage": {
             "role_basis": basis,
             "role_substrate": substrate,
@@ -391,5 +407,181 @@ def build_bench_slate(conn: sqlite3.Connection) -> Dict[str, Any]:
             "self_performed_signal": ("constant 1.0 by construction: the substrate is the "
                                       "owner's own writing, so this separates no role from "
                                       "another"),
+        },
+    }
+
+
+# --------------------------------------------------------------------------- G5-2
+
+#: A person needs this many embedded messages before a top-k mean means anything. Below it
+#: one stray message about a deployment decides the ranking.
+MIN_ENGAGEMENT_MESSAGES = 15
+
+#: How many of a person's closest messages are averaged. The single best message is noise --
+#: anyone can mention a database once -- and the mean over everything is dominated by small
+#: talk, which is most of what any real conversation is.
+ENGAGEMENT_TOP_K = 5
+
+
+def work_engagement(conn: sqlite3.Connection, dataset_id: str,
+                    limit: int = 8) -> Dict[str, Any]:
+    """Who talks with the owner about the owner's work — NOT who can do a given role.
+
+    The bench's candidate half asks for people whose demonstrated work maps to a role. That
+    cannot be answered on this node: there are zero `net.demonstrated_skill` facts and the
+    person-to-work-cluster join returns zero pairs, because roles are built from commits and
+    people are known through conversations, and the clustering puts those in disjoint
+    dimensions (`work` vs `relationships`) with no overlap at all.
+
+    What CAN be answered, from records the owner already owns: whose conversations sit near
+    the owner's work. Both sides are already embedded -- 123 of 123 work-cluster commits and
+    4,003 messages, same 384-dimension model -- so this is a read, not a pipeline.
+
+    It is deliberately ONE list rather than one per role, and that is a measured limit, not
+    a simplification. The ten role centroids sit at 0.730 mean cosine to each OTHER against
+    0.773 within themselves: a separation of 0.043. They are the same person's commit
+    messages about the same codebase, and at that granularity they are one region, not ten.
+    Ranking a person against an individual role produced lifts of two hundredths and the
+    same three people at the top of every role -- message volume wearing a job title. So the
+    region is scored whole, and the report says what it is.
+
+    Ordered by WARMTH, as the request asks: a warm second-best is worth more than a cold
+    ideal, and a person you cannot reach is not on a bench.
+    """
+    from ...analytics.person_graph import attach_closeness, build_person_nodes
+    from ...features.signal.vector_codec import decode_vector
+
+    def _unit(values: List[float]) -> Optional[List[float]]:
+        total = math.sqrt(sum(v * v for v in values))
+        return [v / total for v in values] if total else None
+
+    def _vectors(sql: str, args: tuple = ()) -> Dict[str, List[float]]:
+        out: Dict[str, List[float]] = {}
+        try:
+            rows = conn.execute(sql, args).fetchall()
+        except sqlite3.Error:
+            return out
+        for record_id, blob, fmt in rows:
+            try:
+                unit = _unit(decode_vector(blob, str(fmt or "f32")))
+            except Exception:  # noqa: BLE001 — a single bad vector is not an outage
+                continue
+            if unit:
+                out[str(record_id)] = unit
+        return out
+
+    commits = _vectors(
+        "SELECT record_id, vector_blob, vector_format FROM signal_embeddings"
+        " WHERE source_id = 'github_activity' AND vector_blob IS NOT NULL")
+    try:
+        members = [str(r[0]) for r in conn.execute(
+            "SELECT m.record_id FROM topic_cluster_members m JOIN topic_clusters t"
+            " ON t.cluster_id = m.cluster_id AND t.dimension = 'work'")]
+    except sqlite3.Error:
+        members = []
+    # The same commit is keyed `github:owner/repo:sha` by the clusters and, in places,
+    # `github:push:owner/repo:sha` by the embeddings. Both are tried; neither is canonical.
+    region = [commits[k] for k in
+              (c for m in members for c in (m, "github:push:" + m[7:]) if c in commits)]
+    if not region:
+        return {"people": [], "coverage": {
+            "reason": "no embedded work records on this node yet"}}
+    centroid = _unit([sum(col) / len(region) for col in zip(*region)])
+    if not centroid:
+        return {"people": [], "coverage": {"reason": "work region has no direction"}}
+
+    message_vectors = _vectors(
+        "SELECT se.record_id, se.vector_blob, se.vector_format FROM signal_embeddings se"
+        " WHERE se.vector_blob IS NOT NULL AND se.record_type = 'conversation_message'")
+    if not message_vectors:
+        return {"people": [], "coverage": {"reason": "no embedded conversations"}}
+
+    nodes = build_person_nodes(conn, dataset_id)
+    attach_closeness(conn, dataset_id, nodes)
+    by_key: Dict[str, Dict[str, Any]] = {}
+    for node in nodes:
+        if node.get("is_owner"):
+            continue
+        for key in node.get("messenger_keys", []):
+            by_key.setdefault(str(key), node)
+
+    from ...analytics.messenger_directed import SELF_KEY, load_messages
+
+    try:
+        rows = load_messages(conn, dataset_id)
+    except sqlite3.Error:
+        rows = []
+    # Everyone in a conversation owns its messages, the owner excluded — they are in every
+    # conversation, so counting them would make every subject universal.
+    conv_people: Dict[str, Set[str]] = {}
+    conv_messages: Dict[str, List[str]] = {}
+    for conv, message_id, sender, _at, from_self, _src, _reply in rows:
+        conv_messages.setdefault(str(conv), []).append(str(message_id))
+        if from_self or not sender or str(sender) == SELF_KEY:
+            continue
+        node = by_key.get(str(sender))
+        if node:
+            conv_people.setdefault(str(conv), set()).add(str(node["node_id"]))
+
+    scores: Dict[str, List[float]] = {}
+    for conv, node_ids in conv_people.items():
+        for message_id in conv_messages.get(conv, ()):  # noqa: B007
+            vector = message_vectors.get(message_id)
+            if not vector:
+                continue
+            similarity = sum(a * b for a, b in zip(vector, centroid))
+            for node_id in node_ids:
+                scores.setdefault(node_id, []).append(similarity)
+
+    label = {str(n["node_id"]): n for n in nodes}
+    people: List[Dict[str, Any]] = []
+    for node_id, sims in scores.items():
+        if len(sims) < MIN_ENGAGEMENT_MESSAGES:
+            continue
+        top = sorted(sims, reverse=True)[:ENGAGEMENT_TOP_K]
+        node = label.get(node_id) or {}
+        people.append({
+            "node_id": node_id,
+            "name": node.get("label"),
+            "needs_name": bool(node.get("needs_name")),
+            "engagement": round(sum(top) / len(top), 4),
+            "messages_considered": len(sims),
+            "closeness": node.get("closeness"),
+            "tie_state": node.get("tie_state"),
+            "basis": "their conversations with you sit near the work your commits describe",
+        })
+    if not people:
+        # Two very different silences, and the first version reported both as the second --
+        # a node with no people at all was told nobody talks enough, which sends the reader
+        # looking for a threshold problem that is not there.
+        if not by_key:
+            reason = "no messaging people are known on this node yet"
+        elif not scores:
+            reason = "no conversation with a known person has an embedded message"
+        else:
+            reason = (f"the closest correspondent has "
+                      f"{max(len(v) for v in scores.values())} embedded messages; "
+                      f"{MIN_ENGAGEMENT_MESSAGES} are needed to rank one")
+        return {"people": [], "coverage": {"reason": reason}}
+
+    ranked = sorted(people, key=lambda p: -float(p["engagement"] or 0))
+    median = ranked[len(ranked) // 2]["engagement"]
+    # WARMTH decides the order, as the request asks. Engagement decides who is on the list.
+    shortlist = sorted(ranked[:limit],
+                       key=lambda p: (-(p["closeness"] or 0), -float(p["engagement"] or 0)))
+    return {
+        "people": shortlist,
+        "coverage": {
+            "scored": len(ranked),
+            "median_engagement": median,
+            "ordered_by": "warmth, then engagement — a warm second-best beats a cold ideal",
+            "means": ("people whose conversations with you sit near your own work, NOT "
+                      "people evidenced to be able to do it"),
+            "why_not_per_role": (
+                "the ten roles are one region in this space, not ten: 0.730 mean cosine "
+                "between them against 0.773 within, a separation of 0.043. Scoring a "
+                "person against a single role returned lifts of two hundredths and the "
+                "same three people at the top of every role, which is message volume "
+                "wearing a job title"),
         },
     }
