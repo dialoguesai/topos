@@ -594,3 +594,24 @@ def get_relationship_signals(
         for r in out.get(k, []):
             r["label"] = labels.get(r["peer_key"]) or r["peer_key"]
     return out
+
+
+@router.get("/messenger-analytics/bench", dependencies=[Depends(require_api_key)])
+def get_bench() -> Dict[str, Any]:
+    """THE BENCH (R0·BENCH, plan L5-8) — computed at read, owner-only by construction.
+
+    Roles come from the owner's own recurring dated work (the engine's work-dimension topic
+    clusters); candidates from demonstrated-skill facts; ordering from the stored calibrated
+    warmth band. `roles_without_candidates` is a field, not a footnote — on a node where the
+    outward pack is disabled it IS the answer, and the coverage block says what would have
+    to change for candidates to appear.
+
+    Path debt, recorded: this is not messenger analytics, it simply lives on the router that
+    already exists rather than minting a new registration surface for one route.
+    """
+    conn = get_db_connection()
+    if conn is None:
+        return {"roles": [], "error": "no database"}
+    from ..features.derivation.social_bench import build_bench_slate
+
+    return build_bench_slate(conn)
