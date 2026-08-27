@@ -473,9 +473,10 @@ def _compute_directed_lane(db: Any, dataset_id: str, source_ids: Optional[Sequen
     # rollup is lifetime-wide either way, so the filter only applies to the edge lane.
     only = str(source_ids[0]) if source_ids and len(source_ids) == 1 else None
     acc = extract_directed_dyadic_edges(db, dataset_id, connector=only)
-    from .messenger_directed import attach_affect
+    from .messenger_directed import attach_affect, attach_topics
     rows = rows_for_persist(acc, dataset_id, DEFAULT_SESSION_GAP_SECONDS,
-                            affect=attach_affect(db, dataset_id, acc))
+                            affect=attach_affect(db, dataset_id, acc),
+                            topics=attach_topics(db, dataset_id, acc))
     # BOTH computations complete BEFORE either persist. The first version persisted edges,
     # then computed and persisted dyads: a failure in the rollup left the two tables
     # describing different corpora while totals reported neither — a split brain the
