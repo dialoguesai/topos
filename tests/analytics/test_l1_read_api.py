@@ -292,3 +292,29 @@ def test_a_real_name_is_never_demoted_by_reseeding(conn):
     EntityResolver(conn).seed_from_contacts()
     assert conn.execute("SELECT canonical_name FROM entities WHERE entity_id='ent_kim'"
                         ).fetchone()[0] == "Hotel India"
+
+
+# --- G3: one labeler ---
+
+def test_the_stored_warmth_band_is_the_calibrated_one(conn):
+    """tie_state (fixed thresholds) and the warmth kernel (calibrated) were two answers to
+    the same question. The lane now stores the kernel's band on the dyad, and the API
+    exposes it as primary — one labeler, one answer."""
+    from topos.analytics.messenger_communities import _compute_directed_lane
+    from topos.api.messenger_analytics import get_relationships
+
+    _compute_directed_lane(conn, DS, None)
+    res = get_relationships(dataset_id=DS, tie_state=None, include_automated=False, limit=100)
+    for r in res["relationships"]:
+        assert "warmth_band" in r, "the authoritative label rides on every row"
+
+
+def test_a_phone_with_a_telephony_crumb_is_not_a_name():
+    """G3's nameability edge: '+1512633 ext' is still a phone number — digits dominate and
+    the letters are annotation, not identity."""
+    from topos.features.derivation.net_subject_policy import _looks_named
+
+    assert not _looks_named("+15126331615 ext")
+    assert not _looks_named("512-436-3842 x2")
+    assert _looks_named("Bo Xu 512")  # a real name with a number attached survives
+    assert _looks_named("Tango Uniform")
