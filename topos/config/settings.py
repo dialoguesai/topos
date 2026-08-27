@@ -196,7 +196,7 @@ class Settings(BaseSettings):
     # Minimum free disk the owner wants left on the volume Ollama writes models
     # to. Env default only; the per-node engine_config value overrides (the
     # General settings bar writes it). See topos/engine/disk_space.py.
-    topos_min_free_disk_bytes: int = Field(10 * 1024**3)
+    topos_min_free_disk_bytes: int = Field(10_000_000_000)
     topos_database_mode: str = Field("local")
     topos_database_service_url: Optional[str] = Field(None)
     topos_postgres_dsn: Optional[str] = Field(None)
@@ -422,9 +422,12 @@ ENGINE_CONFIG_KEY_MIN_FREE_DISK_BYTES = "min_free_disk_bytes"
 #: What the owner may set the floor to. Zero is allowed and means "do not hold
 #: anything back"; the ceiling only exists so a typo cannot make every download
 #: impossible forever.
-MIN_FREE_DISK_BYTES_DEFAULT = 10 * 1024**3
+#: Decimal GB, not binary — `format_bytes` divides by 1e9 because that is what
+#: the owner's file manager shows, and a floor stored in GiB would render as
+#: "10.7 GB" the moment after they typed 10.
+MIN_FREE_DISK_BYTES_DEFAULT = 10_000_000_000
 MIN_FREE_DISK_BYTES_MIN = 0
-MIN_FREE_DISK_BYTES_MAX = 1024**4  # 1 TB
+MIN_FREE_DISK_BYTES_MAX = 1_000_000_000_000  # 1 TB
 
 _TRUE_STRINGS = frozenset({"1", "true", "t", "yes", "y", "on"})
 _FALSE_STRINGS = frozenset({"0", "false", "f", "no", "n", "off"})

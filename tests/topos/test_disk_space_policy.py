@@ -26,7 +26,9 @@ from topos.config.settings import (
 )
 from topos.engine import disk_space
 
-GB = 1024**3
+#: Decimal GB — the unit the floor is stored in, because it is the unit the
+#: owner's file manager (and the engine's own `format_bytes`) reports.
+GB = 1_000_000_000
 
 
 @pytest.fixture
@@ -50,6 +52,15 @@ def test_the_shipped_default_is_ten_gigabytes(conn):
     assert resolve_min_free_disk_bytes(settings, conn) == 10 * GB
 
 
+def test_the_floor_is_stored_in_the_unit_it_is_displayed_in():
+    """A floor in GiB renders as "10.7 GB" the instant after the owner types 10.
+
+    `format_bytes` divides by 1e9 (what a file manager shows), so the stored
+    value has to be decimal or the settings screen argues with itself.
+    """
+    assert disk_space.format_bytes(MIN_FREE_DISK_BYTES_DEFAULT) == "10.0 GB"
+
+
 def test_the_owners_value_wins_over_the_default(conn):
     _store(conn, 25 * GB)
     assert resolve_min_free_disk_bytes(settings, conn) == 25 * GB
@@ -69,7 +80,7 @@ def test_a_stored_value_that_makes_no_sense_degrades_to_something_usable(conn):
     _store(conn, -5)
     assert resolve_min_free_disk_bytes(settings, conn) == 0
 
-    _store(conn, 900 * 1024**4)
+    _store(conn, 900_000 * GB)
     assert resolve_min_free_disk_bytes(settings, conn) == MIN_FREE_DISK_BYTES_MAX
 
 
@@ -106,7 +117,7 @@ def test_a_put_refuses_out_of_range_rather_than_quietly_clamping():
     with pytest.raises(ValueError, match="between"):
         normalize_put_min_free_bytes({"min_free_bytes": -1})
     with pytest.raises(ValueError, match="between"):
-        normalize_put_min_free_bytes({"min_free_bytes": 900 * 1024**4})
+        normalize_put_min_free_bytes({"min_free_bytes": 900_000 * GB})
 
 
 def test_the_policy_payload_carries_the_bounds_the_form_needs(conn):
