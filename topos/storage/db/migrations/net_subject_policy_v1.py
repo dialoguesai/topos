@@ -9,14 +9,16 @@ out of every write for ~25 minutes (2026-08-25).
 TO LAND: add `_spec(<next free order>, NET_SUBJECT_POLICY_V1_ID,
 apply_net_subject_policy_v1_up)` to registry.py as part of an engine release.
 
-Nothing depends on this table existing. `net_subject_policy.may_write_about`
-treats an absent table as a refusal with the distinct reason
-`net_subject_policy_absent`, so the code ships safely before the migration and
-simply writes nothing outward in the meantime — which is the correct behaviour
-for a consent plane that has not been installed.
+This table holds OVERRIDES, not the authorisation itself — revised 2026-08-26
+(owner). The default is a rule: the node may hold facts about people it can
+actually name, and a bare phone number with no contact behind it is not one.
+An explicit row wins in both directions over that rule.
 
-Absence of a ROW is also a refusal. The owner's standing decision is "off until
-asked", so a person nobody has ruled on is not a subject.
+So an absent table means "no overrides recorded", not "deny everything", and the
+code ships safely before the migration. The cost of the delay, stated plainly:
+until this lands the owner cannot record a `deny`, so the only way to exclude a
+nameable person is the blackhole. That is the reason to land it at the next
+release cut rather than whenever.
 """
 
 from __future__ import annotations
