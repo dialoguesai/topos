@@ -270,7 +270,8 @@ def read_luck_surface(conn: Any, *, dataset_id: str,
 
 def read_person_graph(conn: Any, *, dataset_id: str,
                       include_automated: bool = False,
-                      include_third_party: bool = False) -> Dict[str, Any]:
+                      include_third_party: bool = False,
+                      include_dismissed: bool = False) -> Dict[str, Any]:
     """The person-centric graph: one node per person, evidence-gated, owner first.
 
     Computed at read like the bench and the luck surface — 441 nodes in ~6ms on the live
@@ -278,7 +279,7 @@ def read_person_graph(conn: Any, *, dataset_id: str,
     month's relationships.
     """
     from .dataset_resolution import resolve_messaging_dataset
-    from .person_graph import (build_person_edges, build_person_nodes,
+    from .person_graph import (build_person_edges, build_person_nodes, merge_suggestions,
                                resolve_owner_identity)
 
     for table in ("entities",):
@@ -290,6 +291,14 @@ def read_person_graph(conn: Any, *, dataset_id: str,
     # "0 unnamed, 290 named" for a node with 121 unnamed people.
     dataset_id, dataset_resolved = resolve_messaging_dataset(conn, dataset_id)
     nodes = build_person_nodes(conn, dataset_id, include_automated=include_automated)
+    # The owner's own corrections, applied OVER the derived graph. Never a rewrite: a
+    # re-derivation would wipe them, and merge is not reliably reversible in this codebase.
+    from .person_overlay import apply_overlay, load as load_overlay
+
+    overlay_rows = load_overlay(conn, dataset_id)
+    nodes = apply_overlay(nodes, overlay_rows)
+    if not include_dismissed:
+        nodes = [n for n in nodes if not n.get("dismissed")]
     edges = build_person_edges(conn, dataset_id, nodes,
                                include_third_party=include_third_party)
     owner = resolve_owner_identity(conn)
@@ -312,6 +321,9 @@ def read_person_graph(conn: Any, *, dataset_id: str,
         "postures": getattr(build_person_nodes, "last_postures", {}),
         "posture_error": getattr(build_person_nodes, "last_posture_error", None),
         "owner_merge_candidates": owner.get("merge_candidates", []),
+        "merge_suggestions": merge_suggestions(nodes),
+        "dismissed_count": sum(1 for n in nodes if n.get("dismissed")),
+        "overlay_actions": len(overlay_rows),
         "attribution": {
             "observed": sum(1 for e in edges if e["attribution"] == "observed"),
             "owner_asserted": sum(1 for e in edges if e["attribution"] == "owner_asserted"),
@@ -351,3 +363,43 @@ def read_naming_queue(conn: Any, *, dataset_id: str, limit: int = 25) -> Dict[st
     out = naming_queue(conn, dataset_id, limit=limit)
     out["dataset_resolved_by_engine"] = dataset_resolved
     return out
+
+
+def read_person_provenance(conn: Any, *, dataset_id: str, node_id: str,
+                           limit: int = 20) -> Dict[str, Any]:
+    """C-6 — "why is this person here?" Without it, band/merge/dismiss are guesses."""
+    from .person_graph import person_provenance
+
+    graph = read_person_graph(conn, dataset_id=dataset_id, include_dismissed=True)
+    node = next((n for n in graph.get("nodes", []) if str(n.get("node_id")) == str(node_id)),
+                None)
+    if node is None:
+        return {"node_id": node_id, "mentions": [], "error": "no such person on this graph"}
+    return person_provenance(conn, node, limit=limit)
+
+
+def curate_person(conn: Any, *, dataset_id: str, subject_ids, action: str,
+                  value: Optional[str] = None) -> Dict[str, Any]:
+    """Record owner corrections. Returns every row so ONE undo can take back a whole sweep."""
+    from .person_overlay import record_many
+
+    ids = [subject_ids] if isinstance(subject_ids, str) else list(subject_ids or [])
+    rows = record_many(conn, dataset_id, ids, action, value)
+    return {"dataset_id": dataset_id, "action": action, "written": len(rows), "rows": rows,
+            "undo": [r["overlay_id"] for r in rows]}
+
+
+def undo_curation(conn: Any, *, overlay_ids) -> Dict[str, Any]:
+    from .person_overlay import revoke_many
+
+    ids = [overlay_ids] if isinstance(overlay_ids, str) else list(overlay_ids or [])
+    return {"revoked": revoke_many(conn, ids), "requested": len(ids)}
+
+
+def read_curation_history(conn: Any, *, dataset_id: str, limit: int = 50) -> Dict[str, Any]:
+    """Undo made visible rather than remembered."""
+    from .person_overlay import history
+
+    rows = history(conn, dataset_id, limit=limit)
+    return {"dataset_id": dataset_id, "history": rows,
+            "live": sum(1 for r in rows if not r.get("revoked_at"))}

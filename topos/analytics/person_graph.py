@@ -546,3 +546,79 @@ def build_person_edges(conn: Any, dataset_id: str, nodes: List[Dict[str, Any]], 
     out = list(edges.values())
     out.sort(key=lambda e: (-e["weight"], e["source"], e["target"]))
     return out
+
+
+# --------------------------------------------------------------------------- C-4 / C-6
+
+def merge_suggestions(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Nodes that look like the same human, offered with evidence — never merged silently.
+
+    Two people genuinely can share a name (`Bravo Yankee` and `Charlie Yankee` are both real
+    here), so a silent merge would be a falsehood the owner cannot see. Measured on the live
+    node: 8 name collisions between people the owner messages and people they only mention.
+    """
+    by_name: Dict[str, List[Dict[str, Any]]] = {}
+    for n in nodes:
+        if n.get("is_owner") or n.get("needs_name"):
+            continue
+        key = _normalized_name(n.get("label"))
+        if len(key) < 3:
+            continue  # a one-token nickname is not evidence of anything
+        by_name.setdefault(key, []).append(n)
+
+    out: List[Dict[str, Any]] = []
+    for key, group in by_name.items():
+        if len(group) < 2:
+            continue
+        group = sorted(group, key=lambda n: (-int(n.get("message_count", 0)),
+                                             -int(n.get("mention_count", 0))))
+        keep, rest = group[0], group[1:]
+        for other in rest:
+            def _how(n: Dict[str, Any]) -> str:
+                ev = n.get("evidence", {})
+                if ev.get("messaged"):
+                    return f"you message them ({n.get('message_count', 0)} messages)"
+                return f"mentioned {n.get('mention_count', 0)} times"
+            out.append({
+                "keep": keep["node_id"], "merge": other["node_id"],
+                "label": keep.get("label"),
+                "reason": f"both named {keep.get('label')!r} — "
+                          f"{_how(keep)}, and {_how(other)}",
+            })
+    out.sort(key=lambda r: str(r["label"]))
+    return out
+
+
+def person_provenance(conn: Any, node: Dict[str, Any], *, limit: int = 20) -> Dict[str, Any]:
+    """"Why is this person here?" — the records that produced the node.
+
+    Nothing else makes an unfamiliar name judgeable, and without it band, merge and dismiss
+    are guesses. Returns the mentions with their surface text, source and date.
+    """
+    entity_id = str(node.get("entity_id") or "")
+    rows: List[Dict[str, Any]] = []
+    if entity_id:
+        try:
+            for source_id, surface, when, authored in conn.execute(
+                    "SELECT source_id, surface_text, COALESCE(event_at, created_at),"
+                    "       COALESCE(authored_by_owner,0)"
+                    "  FROM entity_mentions WHERE entity_id=?"
+                    " ORDER BY COALESCE(event_at, created_at) DESC LIMIT ?",
+                    (entity_id, int(limit))):
+                rows.append({
+                    "source_id": str(source_id or ""),
+                    "text": clean_label(surface)[:200],
+                    "at": str(when or ""),
+                    "authored_by_owner": bool(authored),
+                })
+        except sqlite3.Error:
+            rows = []
+    return {
+        "node_id": node.get("node_id"),
+        "label": node.get("label"),
+        "band": node.get("band"),
+        "band_reason": node.get("band_reason"),
+        "messenger_keys": node.get("messenger_keys", []),
+        "mentions": rows,
+        "coverage": {"basis": "the records that named this person, most recent first"},
+    }

@@ -487,3 +487,53 @@ def get_naming_queue(
     from ..analytics.relationship_reads import read_naming_queue
 
     return read_naming_queue(conn, dataset_id=dataset_id, limit=limit)
+
+
+@router.get("/messenger-analytics/person-provenance", dependencies=[Depends(require_api_key)])
+def get_person_provenance(
+    node_id: str = Query(...),
+    dataset_id: str = Query(""),
+    limit: int = Query(20, ge=1, le=100),
+) -> Dict[str, Any]:
+    conn = get_db_connection()
+    if conn is None:
+        return {"node_id": node_id, "mentions": [], "error": "no database"}
+    from ..analytics.relationship_reads import read_person_provenance
+
+    return read_person_provenance(conn, dataset_id=dataset_id, node_id=node_id, limit=limit)
+
+
+@router.post("/messenger-analytics/person-curate", dependencies=[Depends(require_api_key)])
+def post_person_curate(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Owner corrections. An overlay row, never an edit to `entities`."""
+    conn = get_db_connection()
+    if conn is None:
+        return {"written": 0, "error": "no database"}
+    from ..analytics.relationship_reads import curate_person
+
+    return curate_person(
+        conn, dataset_id=str(payload.get("dataset_id") or ""),
+        subject_ids=payload.get("subject_ids") or payload.get("subject_id") or [],
+        action=str(payload.get("action") or ""), value=payload.get("value"))
+
+
+@router.post("/messenger-analytics/person-undo", dependencies=[Depends(require_api_key)])
+def post_person_undo(payload: Dict[str, Any]) -> Dict[str, Any]:
+    conn = get_db_connection()
+    if conn is None:
+        return {"revoked": 0, "error": "no database"}
+    from ..analytics.relationship_reads import undo_curation
+
+    return undo_curation(conn, overlay_ids=payload.get("overlay_ids")
+                         or payload.get("overlay_id") or [])
+
+
+@router.get("/messenger-analytics/curation-history", dependencies=[Depends(require_api_key)])
+def get_curation_history(dataset_id: str = Query(""), limit: int = Query(50, ge=1, le=200),
+                         ) -> Dict[str, Any]:
+    conn = get_db_connection()
+    if conn is None:
+        return {"history": [], "error": "no database"}
+    from ..analytics.relationship_reads import read_curation_history
+
+    return read_curation_history(conn, dataset_id=dataset_id, limit=limit)

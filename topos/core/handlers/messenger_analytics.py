@@ -490,7 +490,9 @@ async def handle_messenger_analytics_periods(message: Dict[str, Any]) -> Optiona
 
 @handles("messenger_relationships", "messenger_relationship_signals",
          "messenger_directed_edges", "messenger_bench", "messenger_luck_surface",
-         "messenger_person_graph", "messenger_naming_queue")
+         "messenger_person_graph", "messenger_naming_queue",
+         "messenger_person_provenance", "messenger_person_curate",
+         "messenger_person_undo", "messenger_curation_history")
 async def handle_relationship_reads(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     if not req_id:
@@ -514,7 +516,9 @@ async def handle_relationship_reads(message: Dict[str, Any]) -> Optional[Dict[st
             # rendered a full database as an empty screen.
             if not dataset_id and msg_type not in (
                     "messenger_luck_surface", "messenger_person_graph",
-                    "messenger_naming_queue"):
+                    "messenger_naming_queue", "messenger_person_provenance",
+                    "messenger_person_curate", "messenger_person_undo",
+                    "messenger_curation_history"):
                 return {"id": req_id, "status": "error", "error": "dataset_id required"}
             if msg_type == "messenger_relationships":
                 result = reads.read_relationships(
@@ -533,6 +537,24 @@ async def handle_relationship_reads(message: Dict[str, Any]) -> Optional[Dict[st
                     conn, dataset_id=dataset_id,
                     include_automated=bool(payload.get("include_automated", False)),
                     include_third_party=bool(payload.get("include_third_party", False)))
+            elif msg_type == "messenger_person_provenance":
+                result = reads.read_person_provenance(
+                    conn, dataset_id=dataset_id,
+                    node_id=str(payload.get("node_id") or ""),
+                    limit=min(max(int(payload.get("limit") or 20), 1), 100))
+            elif msg_type == "messenger_person_curate":
+                result = reads.curate_person(
+                    conn, dataset_id=dataset_id,
+                    subject_ids=payload.get("subject_ids") or payload.get("subject_id") or [],
+                    action=str(payload.get("action") or ""), value=payload.get("value"))
+            elif msg_type == "messenger_person_undo":
+                result = reads.undo_curation(
+                    conn, overlay_ids=payload.get("overlay_ids")
+                    or payload.get("overlay_id") or [])
+            elif msg_type == "messenger_curation_history":
+                result = reads.read_curation_history(
+                    conn, dataset_id=dataset_id,
+                    limit=min(max(int(payload.get("limit") or 50), 1), 200))
             elif msg_type == "messenger_naming_queue":
                 result = reads.read_naming_queue(
                     conn, dataset_id=dataset_id,

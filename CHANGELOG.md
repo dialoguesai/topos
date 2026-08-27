@@ -10,6 +10,30 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Added
+- **Social graph curation: the owner's own corrections, as an overlay.** `[E:analytics]`
+  New `person_graph_overlay` table (feature-owned, additive DDL — never a registry
+  migration) plus `messenger_person_curate`, `messenger_person_undo`,
+  `messenger_person_provenance` and `messenger_curation_history` across both transports.
+
+  Merge, split, re-band, dismiss, rename, note and tag are all stored as owner assertions
+  applied OVER the derived graph at read time. Nothing edits `entities` or
+  `entity_mentions`, for three reasons and the third decides it: re-derivation would wipe
+  the work; undo is free when nothing was destroyed; and `merge_entities` here is not
+  reliably reversible, so a destructive merge would be a one-way door the owner will
+  eventually walk through by accident.
+
+  - **Undo revokes, it does not delete.** A revoked row stays as history: "what did I
+    already decide about this person, and when" is worth keeping.
+  - **Dismiss hides, it does not delete.** The owner will dismiss wrongly, and a later
+    mention may prove the person real.
+  - **Merges are offered with evidence, never performed silently** — two people genuinely
+    can share a name. 10 candidates found on the live corpus.
+  - Merge chains resolve to their survivor and refuse to loop; a cycle is two clicks away
+    and must not hang a page load.
+  - Bulk actions return ONE undo set, because 173 ambient names is not a per-item job and a
+    sweep the owner cannot take back is a trap.
+
+### Added
 - **Person-centric social graph: one node per person, from evidence.** `[E:analytics]`
   New reads `messenger_person_graph` and `messenger_naming_queue` (HTTP + websocket, one
   shared body). 441 nodes in ~6ms on the live corpus, against 180 before.
