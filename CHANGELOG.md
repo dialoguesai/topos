@@ -255,6 +255,16 @@ The machine-readable twin of each release is
   shows. Decimal because `format_bytes` divides by 1e9 like a file manager does, so a
   floor typed as 10 does not read back as 10.7 GB.
 
+### Added
+- **[O] The net-subject policy table ships.** `net_subject_policy_v1` is registered as
+  migration 69, the same way 63 landed: written and deliberately held out of the repo
+  head so it could not stamp a live database past its installed engine, then shipped by
+  a release. The table holds OVERRIDES to the net-subject rule — the node may hold facts
+  about people it can actually name — so its absence was never a denial. What the owner
+  could not do until now is record an explicit `deny` for someone the node *can* name;
+  the only lever was the blackhole, which is read-side. An explicit row now wins in both
+  directions.
+
 ### Fixed
 - **[O] Evicting a model no longer leaves the pack resolver naming it.** The resolver
   caches the installed-tag set for 30 seconds and demotes any role bound to a tag missing
