@@ -190,6 +190,15 @@ def create_directed_tables(conn: Any) -> None:
         ON {MESSENGER_DYAD_STATS_TABLE}(dataset_id, involves_self, peer_class)
         """
     )
+    # G3 — ONE labeler. tie_state (fixed thresholds) and the warmth kernel (calibrated)
+    # were two answers to "what state is this relationship", disagreeing at band
+    # boundaries on 9 of 35 live dyads. The calibrated band is authoritative and is
+    # STORED beside the legacy column; tie_state survives for old readers but new code
+    # reads warmth_band. Additive ALTER for tables that predate the column.
+    cols = {row[1] for row in
+            conn.execute(f"PRAGMA table_info({MESSENGER_DYAD_STATS_TABLE})").fetchall()}
+    if "warmth_band" not in cols:
+        conn.execute(f"ALTER TABLE {MESSENGER_DYAD_STATS_TABLE} ADD COLUMN warmth_band TEXT")
 
 
 # --------------------------------------------------------------------------- extraction

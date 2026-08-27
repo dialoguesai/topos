@@ -489,5 +489,23 @@ def _compute_directed_lane(db: Any, dataset_id: str, source_ids: Optional[Sequen
     # persistence because it reads the tables it fills; abstains on ambiguity.
     from .messenger_directed import backfill_person_ids
     ident = backfill_person_ids(db, dataset_id)
+    # G3: the calibrated warmth band is the authoritative label and is stored with the
+    # dyad, so every reader — including ones that never import the kernel — gets ONE
+    # answer to "what state is this relationship".
+    banded = 0
+    try:
+        from ..features.derivation.social_kernels import _dyad_rows, compute_warmth
+        from ..storage.db.write_gate import batched_writes
+
+        bands = compute_warmth(_dyad_rows(db, dataset_id))
+        with batched_writes(db):
+            for b in bands:
+                cur = db.execute(
+                    "UPDATE messenger_dyad_stats SET warmth_band=? WHERE dataset_id=?"
+                    " AND (a_key=? OR b_key=?) AND involves_self=1",
+                    (b["warmth_band"], dataset_id, b["peer_key"], b["peer_key"]))
+                banded += cur.rowcount
+    except Exception as exc:  # noqa: BLE001 — labelling must not fail the lane
+        logger.warning("warmth banding failed for %s: %s", dataset_id, exc)
     return {"directed_edges_written": edges, "dyads_written": dyads,
-            "person_ids_resolved": ident.get("resolved", 0)}
+            "person_ids_resolved": ident.get("resolved", 0), "warmth_banded": banded}

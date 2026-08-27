@@ -129,7 +129,18 @@ def _looks_named(text: Optional[str]) -> bool:
     t = str(text or "").strip()
     if not t or _PHONE_ONLY.fullmatch(t) or _is_opaque_id(t):
         return False
-    return bool(_LETTERS.search(t)) or "@" in t
+    if "@" in t:
+        return True
+    if not _LETTERS.search(t):
+        return False
+    # A phone number with a telephony crumb attached — "+1512633 ext", "512-4361 x2" — is
+    # still a phone number. When digits dominate and the letters amount to a short single
+    # token, the letters are annotation, not identity.
+    digits = sum(ch.isdigit() for ch in t)
+    letters = sum(ch.isalpha() for ch in t)
+    if digits >= 7 and letters <= 3:
+        return False
+    return True
 
 
 def is_nameable_subject(conn: sqlite3.Connection, subject_entity_id: str) -> bool:

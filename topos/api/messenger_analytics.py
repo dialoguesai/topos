@@ -438,7 +438,7 @@ def get_relationships(
     sql = (f"SELECT a_key, b_key, peer_class, total_msgs, a_to_b, b_to_a, balance, first_ts,"
            f" last_ts, active_periods, reciprocal_periods, longest_contact_streak_weeks,"
            f" longest_reciprocal_streak_weeks, longest_contact_streak_months, max_gap_days,"
-           f" median_gap_days, recent_gap_days, drift_ratio, tie_state"
+           f" median_gap_days, recent_gap_days, drift_ratio, tie_state, warmth_band"
            f" FROM {MESSENGER_DYAD_STATS_TABLE} WHERE dataset_id = ? AND involves_self = 1"
            # an owner-owner row (both keys 'self') is corpus damage, not a relationship —
            # presenting it as one labels the owner as their own contact
@@ -456,7 +456,8 @@ def get_relationships(
     keys = ["a_key", "b_key", "peer_class", "total_msgs", "a_to_b", "b_to_a", "balance",
             "first_ts", "last_ts", "active_periods", "reciprocal_periods",
             "contact_streak_weeks", "reciprocal_streak_weeks", "contact_streak_months",
-            "max_gap_days", "median_gap_days", "days_since_last", "drift_ratio", "tie_state"]
+            "max_gap_days", "median_gap_days", "days_since_last", "drift_ratio", "tie_state",
+            "warmth_band"]
     out: List[Dict[str, Any]] = []
     for row in conn.execute(sql, args).fetchall():
         d = dict(zip(keys, tuple(row)))
@@ -481,6 +482,11 @@ def get_relationships(
             "median_gap_days": d["median_gap_days"],
             "max_gap_days": d["max_gap_days"],
             "drift_ratio": d["drift_ratio"],
+            # warmth_band is authoritative (calibrated, G3); tie_state is the legacy coarse
+            # label kept for old readers. A warm band beside a live drift alarm is not a
+            # contradiction — it is a close relationship that is SLOWING, and the pair of
+            # fields is how that is said.
+            "warmth_band": d["warmth_band"],
             "tie_state": d["tie_state"],
         })
     labels = _peer_labels(conn, dataset_id, [r["peer_key"] for r in out])
