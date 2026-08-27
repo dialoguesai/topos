@@ -15,6 +15,22 @@ import sqlite3
 from typing import Any, Dict, List, Optional
 
 
+def _table_missing(conn: Any, table: str) -> bool:
+    """Read paths never create tables.
+
+    `ensure_directed_tables_present` runs DDL, which takes SQLite's WRITE LOCK — on a read
+    endpoint that is a write on every page load, and on a read-only connection it raises
+    outright. A read whose table is absent has an honest answer already: nothing computed
+    yet. Measured while adding the read-cost guard, so the fix is cheaper than the bug.
+    """
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone()
+        return not row
+    except sqlite3.Error:
+        return True
+
+
 def peer_labels(conn: Any, dataset_id: str, keys: List[str]) -> Dict[str, str]:
     """Flat peer_key -> display string.
 
@@ -52,14 +68,23 @@ def read_relationships(
 ) -> Dict[str, Any]:
     """The lifetime view of every messaging relationship, stated from the owner's side."""
     from .messenger_directed import (MESSENGER_DYAD_STATS_TABLE, PEER_CLASS_HUMAN,
-                                     SELF_KEY, ensure_directed_tables_present,
-                                     resolve_peer_identities)
+                                     SELF_KEY, resolve_peer_identities)
 
-    ensure_directed_tables_present(conn)
-    sql = (f"SELECT a_key, b_key, peer_class, total_msgs, a_to_b, b_to_a, balance, first_ts,"
-           f" last_ts, active_periods, reciprocal_periods, longest_contact_streak_weeks,"
-           f" longest_reciprocal_streak_weeks, longest_contact_streak_months, max_gap_days,"
-           f" median_gap_days, recent_gap_days, drift_ratio, tie_state, warmth_band"
+    if _table_missing(conn, MESSENGER_DYAD_STATS_TABLE):
+        return {"dataset_id": dataset_id, "count": 0, "unnamed_count": 0,
+                "relationships": []}
+    # `warmth_band` arrived after the table did (G3), so a node whose lane has not re-run
+    # has the rows without the column. Select it only when present rather than 500ing on a
+    # mid-upgrade node — the rest of the relationship is still true and worth showing.
+    has_warmth = "warmth_band" in {
+        r[1] for r in conn.execute(f"PRAGMA table_info({MESSENGER_DYAD_STATS_TABLE})")}
+    columns = ("a_key, b_key, peer_class, total_msgs, a_to_b, b_to_a, balance, first_ts,"
+               " last_ts, active_periods, reciprocal_periods, longest_contact_streak_weeks,"
+               " longest_reciprocal_streak_weeks, longest_contact_streak_months,"
+               " max_gap_days, median_gap_days, recent_gap_days, drift_ratio, tie_state")
+    if has_warmth:
+        columns += ", warmth_band"
+    sql = (f"SELECT {columns}"
            f" FROM {MESSENGER_DYAD_STATS_TABLE} WHERE dataset_id = ? AND involves_self = 1"
            # an owner-owner row (both keys 'self') is corpus damage, not a relationship
            f" AND NOT (a_key = '{SELF_KEY}' AND b_key = '{SELF_KEY}')")
@@ -76,11 +101,13 @@ def read_relationships(
     keys = ["a_key", "b_key", "peer_class", "total_msgs", "a_to_b", "b_to_a", "balance",
             "first_ts", "last_ts", "active_periods", "reciprocal_periods",
             "contact_streak_weeks", "reciprocal_streak_weeks", "contact_streak_months",
-            "max_gap_days", "median_gap_days", "days_since_last", "drift_ratio", "tie_state",
-            "warmth_band"]
+            "max_gap_days", "median_gap_days", "days_since_last", "drift_ratio", "tie_state"]
+    if has_warmth:
+        keys.append("warmth_band")
     out: List[Dict[str, Any]] = []
     for row in conn.execute(sql, args).fetchall():
         d = dict(zip(keys, tuple(row)))
+        d.setdefault("warmth_band", None)
         peer = d["b_key"] if d["a_key"] == SELF_KEY else d["a_key"]
         owner_sent = d["a_to_b"] if d["a_key"] == SELF_KEY else d["b_to_a"]
         out.append({
@@ -130,13 +157,22 @@ def read_directed_edges(
     """Per-period, per-direction detail behind a relationship. Defaults to dm on purpose:
     group broadcast fans one message to every speaker and would outrank every real
     correspondence."""
-    from .messenger_directed import (MESSENGER_DIRECTED_EDGES_TABLE,
-                                     ensure_directed_tables_present)
+    from .messenger_directed import MESSENGER_DIRECTED_EDGES_TABLE
 
-    ensure_directed_tables_present(conn)
-    sql = (f"SELECT period_key, connector, edge_kind, from_key, to_key, msgs,"
-           f" sessions_initiated, replies, median_reply_latency_s, first_ts, last_ts,"
-           f" affect_counts_json, affect_coverage, topic_counts_json, topic_coverage"
+    if _table_missing(conn, MESSENGER_DIRECTED_EDGES_TABLE):
+        return {"dataset_id": dataset_id, "edge_kind": edge_kind, "count": 0, "edges": []}
+    # affect_* and topic_* were added to the table after it shipped, so a node whose lane
+    # has not re-run has the rows without them. Select what exists rather than 500ing on a
+    # mid-upgrade node; the counts and latencies are still true.
+    present = {r[1] for r in
+               conn.execute(f"PRAGMA table_info({MESSENGER_DIRECTED_EDGES_TABLE})")}
+    optional = [c for c in ("affect_counts_json", "affect_coverage",
+                            "topic_counts_json", "topic_coverage") if c in present]
+    columns = ("period_key, connector, edge_kind, from_key, to_key, msgs,"
+               " sessions_initiated, replies, median_reply_latency_s, first_ts, last_ts")
+    if optional:
+        columns += ", " + ", ".join(optional)
+    sql = (f"SELECT {columns}"
            f" FROM {MESSENGER_DIRECTED_EDGES_TABLE} WHERE dataset_id = ? AND edge_kind = ?")
     args: List[Any] = [dataset_id, edge_kind]
     if peer_key:
@@ -145,9 +181,17 @@ def read_directed_edges(
     sql += " ORDER BY period_key DESC, msgs DESC LIMIT ?"
     args.append(int(limit))
     keys = ["period_key", "connector", "edge_kind", "from_key", "to_key", "msgs",
-            "sessions_initiated", "replies", "median_reply_latency_s", "first_ts", "last_ts",
-            "affect_counts_json", "affect_coverage", "topic_counts_json", "topic_coverage"]
-    edges = [dict(zip(keys, tuple(r))) for r in conn.execute(sql, args).fetchall()]
+            "sessions_initiated", "replies", "median_reply_latency_s", "first_ts",
+            "last_ts"] + optional
+    edges = []
+    for r in conn.execute(sql, args).fetchall():
+        row = dict(zip(keys, tuple(r)))
+        # absent columns read as null, never as a zero coverage that would imply a measured
+        # "nothing" where the truth is "not measured"
+        for c in ("affect_counts_json", "affect_coverage",
+                  "topic_counts_json", "topic_coverage"):
+            row.setdefault(c, None)
+        edges.append(row)
     return {"dataset_id": dataset_id, "edge_kind": edge_kind, "count": len(edges),
             "edges": edges}
 
@@ -158,9 +202,11 @@ def read_relationship_signals(conn: Any, *, dataset_id: str, signal: str = "all"
     from ..features.derivation.social_kernels import (_dyad_rows, apply_evidence_floor,
                                                       compute_drift, compute_reciprocity,
                                                       compute_warmth)
-    from .messenger_directed import ensure_directed_tables_present
+    from .messenger_directed import MESSENGER_DYAD_STATS_TABLE
 
-    ensure_directed_tables_present(conn)
+    if _table_missing(conn, MESSENGER_DYAD_STATS_TABLE):
+        return {"dataset_id": dataset_id, "dyads_considered": 0, "dyads_above_floor": 0,
+                "excluded_below_floor": 0}
     rows = _dyad_rows(conn, dataset_id)
     kept, excluded = apply_evidence_floor(rows)
     out: Dict[str, Any] = {
