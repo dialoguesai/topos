@@ -276,12 +276,17 @@ def read_person_graph(conn: Any, *, dataset_id: str,
     corpus, which is a page load. Storing it would mean a graph that quietly describes last
     month's relationships.
     """
+    from .dataset_resolution import resolve_messaging_dataset
     from .person_graph import build_person_nodes, resolve_owner_identity
 
     for table in ("entities",):
         if _table_missing(conn, table):
             return {"dataset_id": dataset_id, "nodes": [], "coverage": {
                 "reason": "entity extraction has not run on this node yet"}}
+    # Same resolution the luck read uses. Without it an empty or wrong dataset_id finds no
+    # messaging at all, and the graph silently becomes mention-only: measured live, that read
+    # "0 unnamed, 290 named" for a node with 121 unnamed people.
+    dataset_id, dataset_resolved = resolve_messaging_dataset(conn, dataset_id)
     nodes = build_person_nodes(conn, dataset_id, include_automated=include_automated)
     owner = resolve_owner_identity(conn)
     people = [n for n in nodes if not n.get("is_owner")]
@@ -298,6 +303,7 @@ def read_person_graph(conn: Any, *, dataset_id: str,
         },
         "owner": {"entity_id": owner["canonical_id"], "label": owner["label"],
                   "identity_count": len(owner["ids"])},
+        "dataset_resolved_by_engine": dataset_resolved,
         "coverage": {
             "node_basis": ("evidence only — messaged or mentioned. The address book is a "
                            "naming source, never a node source."),
@@ -310,8 +316,12 @@ def read_person_graph(conn: Any, *, dataset_id: str,
 
 def read_naming_queue(conn: Any, *, dataset_id: str, limit: int = 25) -> Dict[str, Any]:
     """Unnamed human peers, busiest first."""
+    from .dataset_resolution import resolve_messaging_dataset
     from .person_graph import naming_queue
 
     if _table_missing(conn, "messenger_dyad_stats"):
         return {"dataset_id": dataset_id, "queue": [], "unnamed_count": 0}
-    return naming_queue(conn, dataset_id, limit=limit)
+    dataset_id, dataset_resolved = resolve_messaging_dataset(conn, dataset_id)
+    out = naming_queue(conn, dataset_id, limit=limit)
+    out["dataset_resolved_by_engine"] = dataset_resolved
+    return out

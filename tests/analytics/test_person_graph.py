@@ -201,3 +201,33 @@ class TestReadsNeverWrite:
         assert PG.build_person_nodes(ro, "ds")
         PG.naming_queue(ro, "ds")
         ro.close()
+
+
+class TestLabelsAreSafeToRender:
+    """Extraction emits fragments of records as names — `Topos\\n\\nAccomplished` is a real
+    canonical_name on the live node. A literal newline in a label produces JSON that strict
+    parsers reject outright; it broke a live verification of this very read."""
+
+    def test_control_characters_never_reach_a_label(self):
+        c = _conn()
+        _person(c, "e1", "Dana\r\n\tReyes\n\nAccomplished")
+        c.execute("INSERT INTO entity_mentions VALUES ('m1','e1','r1','grow_journal',1)")
+        label = [n for n in PG.build_person_nodes(c, "ds") if not n["is_owner"]][0]["label"]
+        assert not any(ch in label for ch in "\r\n\t")
+        assert label == "Dana Reyes Accomplished"
+
+    def test_the_whole_graph_serialises(self):
+        import json
+        c = _conn()
+        _person(c, "e-owner", "Owner\n", is_self=1)
+        _person(c, "e1", "Dana\nReyes")
+        c.execute("INSERT INTO entity_mentions VALUES ('m1','e1','r1','grow_journal',1)")
+        _dyad(c, "+15551230000", msgs=4)
+        json.dumps(PG.build_person_nodes(c, "ds"))
+
+    def test_a_runaway_label_is_bounded(self):
+        c = _conn()
+        _person(c, "e1", "x" * 900)
+        c.execute("INSERT INTO entity_mentions VALUES ('m1','e1','r1','grow_journal',1)")
+        assert len([n for n in PG.build_person_nodes(c, "ds")
+                    if not n["is_owner"]][0]["label"]) <= 120

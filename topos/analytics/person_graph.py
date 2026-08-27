@@ -59,10 +59,24 @@ def resolve_owner_identity(conn: Any) -> Dict[str, Any]:
         if n > best_edges:
             best, best_edges, best_name = str(eid), n, name
     # "Owner"/"self" are extraction artifacts, not what a person calls themselves.
-    label = str(best_name or "").strip()
+    label = clean_label(best_name)
     if label.lower() in ("", "owner", "self", "me"):
         label = "You"
     return {"canonical_id": best, "ids": ids, "label": label, "edge_count": best_edges}
+
+
+def clean_label(value: Any) -> str:
+    """A display label with no control characters and no runaway whitespace.
+
+    Extraction emits fragments of records as names — `"Topos\n\nAccomplished"` is a real
+    canonical_name on this node. A literal newline inside a label produces JSON that strict
+    parsers reject outright, and renders as a broken multi-line node label even when it does
+    not. Cleaned once here rather than in every consumer.
+    """
+    text = str(value or "")
+    text = "".join(" " if ch in "\r\n\t" else ch for ch in text if ch.isprintable() or ch in " \r\n\t")
+    text = " ".join(text.split())
+    return text[:120]
 
 
 def _digits_key(value: Any) -> Optional[str]:
@@ -132,7 +146,7 @@ def build_person_nodes(conn: Any, dataset_id: str, *,
         if contact_id and not n["contact_id"]:
             n["contact_id"] = str(contact_id)
         if display and any(ch.isalpha() for ch in str(display)) and not n["label"]:
-            n["label"] = str(display).strip()
+            n["label"] = clean_label(display)
 
     # --- mentioned ------------------------------------------------------------------
     try:
@@ -152,7 +166,7 @@ def build_person_nodes(conn: Any, dataset_id: str, *,
         n["evidence"]["mentioned"] = True
         n["mention_count"] = int(count or 0)
         if name and any(ch.isalpha() for ch in str(name)) and not n["label"]:
-            n["label"] = str(name).strip()
+            n["label"] = clean_label(name)
 
     # --- message volume, used for ranking and for the naming queue -------------------
     try:
