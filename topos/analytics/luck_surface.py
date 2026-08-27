@@ -446,6 +446,27 @@ def build_doing_events(conn: Any, items: List[Dict[str, Any]]) -> List[Tuple]:
 
 # --------------------------------------------------------------------------- LSU-4
 
+def resolve_primary_dataset(conn: Any) -> str:
+    """The dataset the owner's messaging actually lives in.
+
+    `/v1/ingestion/datasets` returns ZERO rows on a node whose messages arrived by sync
+    rather than upload (measured on the live node 2026-08-27), so the client has nothing to
+    resolve from and every messaging screen renders empty beside a full database. The engine
+    is not missing that information — it is one GROUP BY away — so a caller that cannot name
+    a dataset gets the busiest one rather than nothing.
+
+    Never a silent substitution: `rollup` reports the id it used in coverage.
+    """
+    try:
+        row = conn.execute(
+            "SELECT dataset_id, COUNT(*) n FROM conversation_messages"
+            " WHERE dataset_id IS NOT NULL GROUP BY dataset_id ORDER BY n DESC LIMIT 1"
+        ).fetchone()
+    except sqlite3.Error:
+        return ""
+    return str(row[0]) if row and row[0] else ""
+
+
 def _has_messaging_substrate(conn: Any, dataset_id: str) -> bool:
     """Does THIS dataset carry the messages telling is read from?
 
@@ -541,10 +562,18 @@ def rollup(conn: Any, dataset_id: str) -> Dict[str, Any]:
     Returns components — never a product. The screen says "you have built X for three
     months and told two people"; it does not say "your luck score is 74".
     """
+    # An unnamed dataset is answered from the record rather than refused; the id used is
+    # reported below so the screen can say which one it read.
+    resolved_by_engine = False
+    if not str(dataset_id or "").strip():
+        dataset_id = resolve_primary_dataset(conn)
+        resolved_by_engine = bool(dataset_id)
+
     items = compile_surfaces(conn, dataset_id, build_work_items(conn))
     if not items:
         return {"dataset_id": dataset_id, "work_items": [], "coverage": {
-            "reason": "no body of work with authored evidence has emerged from the record yet"}}
+            "reason": "no body of work with authored evidence has emerged from the record yet",
+            "dataset_resolved_by_engine": resolved_by_engine}}
 
     # DATASET-LEVEL LIBEL GUARD. Doing comes from entity_mentions, which is not scoped to a
     # dataset; telling comes from this dataset's messages. Point the read at a dataset with
@@ -617,6 +646,7 @@ def rollup(conn: Any, dataset_id: str) -> Dict[str, Any]:
             "communities_known": len(all_communities),
             "reachable_people": len(population),
             "telling_measurable": messaging_present,
+            "dataset_resolved_by_engine": resolved_by_engine,
         },
     }
 

@@ -448,7 +448,7 @@ def get_bench() -> Dict[str, Any]:
 
 @router.get("/messenger-analytics/luck-surface", dependencies=[Depends(require_api_key)])
 def get_luck_surface(
-    dataset_id: str = Query(...),
+    dataset_id: str = Query("", description="empty => the engine picks the busiest dataset"),
     explore: float = Query(0.5, ge=0.0, le=1.0,
                            description="0 = deepen existing ties, 1 = reach new circles"),
 ) -> Dict[str, Any]:

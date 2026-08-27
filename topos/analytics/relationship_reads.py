@@ -251,6 +251,7 @@ def read_luck_surface(conn: Any, *, dataset_id: str,
     """
     from .luck_surface import build_moves, rollup
 
+    # dataset_id may legitimately arrive empty — see resolve_primary_dataset
     for table in ("entities", "entity_mentions"):
         if _table_missing(conn, table):
             return {"dataset_id": dataset_id, "work_items": [], "moves": [], "coverage": {

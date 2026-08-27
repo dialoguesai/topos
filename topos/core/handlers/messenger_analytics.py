@@ -498,7 +498,10 @@ async def handle_relationship_reads(message: Dict[str, Any]) -> Optional[Dict[st
             result = reads.read_bench(conn)
         else:
             dataset_id = (payload.get("dataset_id") or "").strip()
-            if not dataset_id:
+            # luck surface resolves its own dataset when the client cannot name one:
+            # /v1/ingestion/datasets is empty on sync-fed nodes, so requiring an id here
+            # rendered a full database as an empty screen.
+            if not dataset_id and msg_type != "messenger_luck_surface":
                 return {"id": req_id, "status": "error", "error": "dataset_id required"}
             if msg_type == "messenger_relationships":
                 result = reads.read_relationships(

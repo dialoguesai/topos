@@ -343,3 +343,47 @@ class TestADatasetThatCannotAnswer:
                      ("ds", "m1", "shipping Topos today", 1, "c1", "self",
                       "2026-08-01T00:00:00Z", "imessage", None))
         assert L.rollup(conn, "ds")["coverage"]["telling_measurable"] is True
+
+
+class TestANodeThatCannotNameItsDataset:
+    """`/v1/ingestion/datasets` returns ZERO rows on a node whose messages arrived by sync
+    rather than upload — measured on the live node 2026-08-27. The client had nothing to
+    resolve from, so a database holding 7,668 messages rendered as an empty screen. The
+    engine is one GROUP BY away from the answer."""
+
+    def _corpus(self, dataset_id="ds-real", n=3):
+        conn = _conn()
+        _entity(conn, "e1", "project", "Topos")
+        _mentions(conn, "e1", "github_activity", 40)
+        for i in range(n):
+            conn.execute("INSERT INTO conversation_messages VALUES (?,?,?,?,?,?,?,?,?)",
+                         (dataset_id, f"m{i}", "shipping Topos today", 1, "c1", "self",
+                          "2026-08-01T00:00:00Z", "imessage", None))
+        return conn
+
+    def test_an_empty_dataset_id_resolves_to_the_busiest_one(self):
+        conn = self._corpus()
+        out = L.rollup(conn, "")
+        assert out["dataset_id"] == "ds-real"
+        assert out["coverage"]["telling_measurable"] is True
+
+    def test_the_substitution_is_never_silent(self):
+        """The screen has to be able to say which dataset it read."""
+        conn = self._corpus()
+        assert L.rollup(conn, "")["coverage"]["dataset_resolved_by_engine"] is True
+        assert L.rollup(conn, "ds-real")["coverage"]["dataset_resolved_by_engine"] is False
+
+    def test_it_picks_the_busiest_not_the_first(self):
+        conn = self._corpus(dataset_id="ds-real", n=5)
+        conn.execute("INSERT INTO conversation_messages VALUES (?,?,?,?,?,?,?,?,?)",
+                     ("user:default:device", "stub", "hi", 1, "c9", "self",
+                      "2026-08-01T00:00:00Z", "imessage", None))
+        assert L.rollup(conn, "")["dataset_id"] == "ds-real"
+
+    def test_no_messages_at_all_still_answers(self):
+        conn = _conn()
+        _entity(conn, "e1", "project", "Topos")
+        _mentions(conn, "e1", "github_activity", 40)
+        out = L.rollup(conn, "")
+        assert out["coverage"]["telling_measurable"] is False
+        assert sum(w["doing_events"] for w in out["work_items"]) == 40
