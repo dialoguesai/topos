@@ -65,10 +65,25 @@ def match_known_item(query_text: str) -> Optional[Dict[str, Any]]:
     # never be answered from the owner's fact sheet
     if not re.search(r"\b(i|my|me|am i|do i|i'm)\b", q):
         return None
-    for pattern, preds, special in _ALIASES:
-        if re.search(pattern, q):
-            return {"predicates": preds, "special": special}
-    return None
+    # UNION, not first-match. A question can span two predicate families —
+    # "Is my mom in my inner circle?" matches the role alias AND the closeness
+    # alias — and returning only the first meant the tiers never reached the
+    # answer. Live 2026-08-26 that question came back "there's no explicit
+    # 'inner circle' label in your relationship context" while Mike November
+    # and Quebec Lima held exactly that label.
+    #
+    # `special` is OR-ed: if any matching class is special it takes the stricter
+    # gate, so widening the match can never widen disclosure.
+    predicates: List[str] = []
+    special = False
+    for pattern, preds, is_special in _ALIASES:
+        if not re.search(pattern, q):
+            continue
+        special = special or is_special
+        for pred in preds:
+            if pred not in predicates:
+                predicates.append(pred)
+    return {"predicates": predicates, "special": special} if predicates else None
 
 
 def fetch_direct_facts(
