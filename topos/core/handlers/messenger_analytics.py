@@ -469,3 +469,58 @@ async def handle_messenger_analytics_periods(message: Dict[str, Any]) -> Optiona
         }
     except Exception as exc:
         return {"id": req_id, "status": "error", "error": str(exc)}
+
+
+# --------------------------------------------------------------------------- SGU-1: L1/L5 reads
+#
+# One grouped handler for the relationship read surfaces. Delegates to
+# analytics/relationship_reads — the SAME functions the HTTP routes wrap — so the relay can
+# never serve different fields than the local API. A contract test calls both transports on
+# one fixture and asserts byte-equal payloads.
+
+@handles("messenger_relationships", "messenger_relationship_signals",
+         "messenger_directed_edges", "messenger_bench")
+async def handle_relationship_reads(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    msg_type = str(message.get("type") or "").strip().lower()
+    payload = message.get("payload") or {}
+    conn = hub.get_db_connection()
+    if not conn:
+        return {"id": req_id, "status": "error", "error": "Database not available"}
+
+    from ...analytics import relationship_reads as reads
+
+    try:
+        if msg_type == "messenger_bench":
+            # the one read with no dataset scope: roles come from the owner's own record
+            result = reads.read_bench(conn)
+        else:
+            dataset_id = (payload.get("dataset_id") or "").strip()
+            if not dataset_id:
+                return {"id": req_id, "status": "error", "error": "dataset_id required"}
+            if msg_type == "messenger_relationships":
+                result = reads.read_relationships(
+                    conn,
+                    dataset_id=dataset_id,
+                    tie_state=(payload.get("tie_state") or None),
+                    include_automated=bool(payload.get("include_automated", False)),
+                    limit=min(max(int(payload.get("limit") or 100), 1), 500),
+                )
+            elif msg_type == "messenger_relationship_signals":
+                result = reads.read_relationship_signals(
+                    conn, dataset_id=dataset_id,
+                    signal=str(payload.get("signal") or "all"),
+                )
+            else:  # messenger_directed_edges
+                result = reads.read_directed_edges(
+                    conn,
+                    dataset_id=dataset_id,
+                    peer_key=(payload.get("peer_key") or None),
+                    edge_kind=str(payload.get("edge_kind") or "dm"),
+                    limit=min(max(int(payload.get("limit") or 200), 1), 1000),
+                )
+    except Exception as exc:  # noqa: BLE001 — a read must answer, never hang the relay
+        return {"id": req_id, "status": "error", "error": str(exc)[:200]}
+    return {"id": req_id, "status": "ok", "payload": {"status": "ok", **result}}

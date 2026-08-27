@@ -194,13 +194,19 @@ def test_an_owner_owner_row_is_not_presented_as_a_relationship(conn):
 
 
 def test_a_failing_resolver_degrades_to_keys_not_500(conn, monkeypatch):
-    """Labels are decoration; the data must still flow."""
+    """Labels are decoration; the data must still flow.
+
+    Patched at the RESOLVER module — the read bodies moved into
+    analytics/relationship_reads (SGU-1's shared-transport module), which imports the
+    resolver at call time, so the module attribute is the one real seam.
+    """
+    import topos.analytics.messenger_labels as labels_mod
     import topos.api.messenger_analytics as api
 
     def boom(*a, **k):
         raise RuntimeError("resolver down")
 
-    monkeypatch.setattr(api, "resolve_participant_labels", boom)
+    monkeypatch.setattr(labels_mod, "resolve_participant_labels", boom)
     res = api.get_relationships(dataset_id=DS, tie_state=None, include_automated=False, limit=100)
     assert res["relationships"], "data flows"
     assert all(r["label"] == r["peer_key"] for r in res["relationships"])
