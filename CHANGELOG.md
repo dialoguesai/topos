@@ -266,6 +266,16 @@ The machine-readable twin of each release is
   directions.
 
 ### Fixed
+- **[O] Three CI breaks on main, fixed rather than carried into a release.** The
+  handler-registry snapshot had not learned the seven `mcp_client_*` handlers the
+  connected-apps work added, so every push reported "registry drifted". The local
+  `verify_claim` tests still stubbed `require_api_key` after the routes moved to
+  `resolve_request_principal`, so the real door ran and answered 401 — a test that
+  had stopped reaching the code it was written to protect. And `test_peer_pid_is_this_process`
+  asserted a `LOCAL_PEERPID` result unconditionally, which tests the platform rather
+  than the code: the whole attestation lane (libproc + codesign) is macOS-only and
+  `_peer_pid` is documented to return None where the option does not exist, so it is
+  skipped off Darwin.
 - **[O] Evicting a model no longer leaves the pack resolver naming it.** The resolver
   caches the installed-tag set for 30 seconds and demotes any role bound to a tag missing
   from it. After a reclaim sweep deleted a model, that cache went on naming it for the rest

@@ -11,7 +11,8 @@ from fastapi.testclient import TestClient
 
 import topos.core.handlers as hub
 from topos.api.local_mcp import router
-from topos.auth import require_api_key
+from topos.auth import resolve_request_principal
+from topos.principal import OWNER_APP, Principal
 
 
 @pytest.fixture()
@@ -34,7 +35,13 @@ def client(tmp_path, monkeypatch):
 
     app = FastAPI()
     app.include_router(router)
-    app.dependency_overrides[require_api_key] = lambda: None
+    # The route resolves a channel-verified Principal rather than merely
+    # authenticating a bearer, so stubbing the key dependency no longer reaches
+    # it. Same-device local MCP is the owner socket's lane, so that is what the
+    # door is asked to hand back here.
+    app.dependency_overrides[resolve_request_principal] = lambda: Principal(
+        cls=OWNER_APP, channel="uds"
+    )
     test_client = TestClient(app)
     yield test_client
     conn.close()
