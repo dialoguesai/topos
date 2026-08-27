@@ -255,6 +255,16 @@ The machine-readable twin of each release is
   shows. Decimal because `format_bytes` divides by 1e9 like a file manager does, so a
   floor typed as 10 does not read back as 10.7 GB.
 
+### Fixed
+- **[O] Evicting a model no longer leaves the pack resolver naming it.** The resolver
+  caches the installed-tag set for 30 seconds and demotes any role bound to a tag missing
+  from it. After a reclaim sweep deleted a model, that cache went on naming it for the rest
+  of the window, so a role could resolve to a model that was no longer on disk — the exact
+  404 the eviction protection rules exist to prevent, arriving by the back door.
+  `reclaim_for` now resets the cache, and only when it actually deleted something (a reset
+  on a no-op sweep would throw away a valid probe and make the next resolve open a socket
+  for nothing).
+
 ## [1.3.32] — 2026-08-26
 
 ### Fixed

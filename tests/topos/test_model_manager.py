@@ -216,3 +216,40 @@ def test_a_zero_target_just_climbs_back_to_the_floor(no_protection):
 
     assert adapter.deleted == ["qwen3:8b"], "one 5 GB model clears a 2 GB shortfall"
     assert result.satisfied
+
+
+def test_eviction_forgets_the_cached_installed_set(no_protection):
+    """The pack resolver caches installed tags for 30s and demotes roles bound to
+    anything missing from it. A cache still naming a model we just deleted would
+    resolve a role to it for that window — the 404 the protection rules exist to
+    prevent, arriving by the back door."""
+    from topos.config import model_packs
+
+    adapter = FakeAdapter(FLEET)
+    calls = []
+    with patch.object(mm, "min_free_bytes", return_value=10 * GB), patch.object(
+        mm, "free_bytes", return_value=1 * GB
+    ), patch.object(
+        model_packs, "reset_installed_local_models_cache", side_effect=lambda: calls.append(1)
+    ):
+        mm.reclaim_for(2 * GB, adapter=adapter)
+
+    assert adapter.deleted, "nothing was deleted, so this test proves nothing"
+    assert calls == [1], "the installed-model cache still names deleted tags"
+
+
+def test_a_sweep_that_deletes_nothing_leaves_the_cache_alone(no_protection):
+    """Resetting on a no-op sweep would throw away a valid probe and make the
+    next resolve open a socket for nothing."""
+    from topos.config import model_packs
+
+    adapter = FakeAdapter(FLEET)
+    calls = []
+    with patch.object(mm, "min_free_bytes", return_value=10 * GB), patch.object(
+        mm, "free_bytes", return_value=40 * GB
+    ), patch.object(
+        model_packs, "reset_installed_local_models_cache", side_effect=lambda: calls.append(1)
+    ):
+        mm.reclaim_for(2 * GB, adapter=adapter)
+
+    assert calls == []

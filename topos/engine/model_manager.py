@@ -417,6 +417,19 @@ def reclaim_for(
         if probed is not None:
             available = probed
 
+    if removed:
+        # The pack resolver caches the installed-tag set for 30 seconds and
+        # demotes any role bound to a tag that is not in it. Leaving the cache
+        # holding models we have just deleted would let a role resolve to one
+        # for that window — the exact 404 the protection rules above exist to
+        # prevent, arriving by the back door.
+        try:
+            from ..config.model_packs import reset_installed_local_models_cache
+
+            reset_installed_local_models_cache()
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("could not reset the installed-model cache: %s", exc)
+
     _record_evictions(conn, removed, reason)
     freed = max(0, available - started_with)
     satisfied = available >= target
