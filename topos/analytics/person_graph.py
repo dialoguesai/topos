@@ -257,6 +257,7 @@ def build_person_nodes(conn: Any, dataset_id: str, *,
     except sqlite3.Error:
         detail = []
     postures = source_postures(conn, dataset_id, {d[1] for d in detail})
+    posture_error = postures.pop("__error__", None)
     facts: Dict[str, Dict[str, Any]] = {}
     for entity_id, source_id, authored, n in detail:
         f = facts.setdefault(str(entity_id), {
@@ -314,6 +315,9 @@ def build_person_nodes(conn: Any, dataset_id: str, *,
 
     out = sorted(nodes.values(),
                  key=lambda r: (-r["message_count"], -r["mention_count"], r["node_id"]))
+    # Surfaced so a caller can tell "these are the bands" from "posture never resolved".
+    build_person_nodes.last_postures = dict(postures)          # type: ignore[attr-defined]
+    build_person_nodes.last_posture_error = posture_error      # type: ignore[attr-defined]
 
     # --- the owner, centred (owner decision D-4) -------------------------------------
     if owner["canonical_id"] or peers:
@@ -404,13 +408,18 @@ def source_postures(conn: Any, dataset_id: str, source_ids) -> Dict[str, str]:
     out: Dict[str, str] = {}
     try:
         from ..sources.registry import effective_posture
-    except Exception:  # noqa: BLE001 — posture is a refinement; the graph still works without
-        return {str(s): "mixed" for s in source_ids}
+    except Exception as exc:  # noqa: BLE001
+        # Falling back silently would hand every source the `mixed` default, which quietly
+        # promotes every ambient sighting into "discussed" — a plausible band distribution
+        # built on a failure nobody saw. Record it instead.
+        out["__error__"] = f"registry import failed: {type(exc).__name__}"
+        return out
     for source_id in {str(s) for s in source_ids if s}:
         try:
             out[source_id] = str(effective_posture(source_id, dataset_id, conn) or "mixed")
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
             out[source_id] = "mixed"
+            out.setdefault("__error__", f"{source_id}: {type(exc).__name__}")
     return out
 
 

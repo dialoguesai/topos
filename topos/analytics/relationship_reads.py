@@ -309,6 +309,8 @@ def read_person_graph(conn: Any, *, dataset_id: str,
         },
         "bands": {b: sum(1 for n in people if n.get("band") == b)
                   for b in ("core", "named", "discussed", "ambient")},
+        "postures": getattr(build_person_nodes, "last_postures", {}),
+        "posture_error": getattr(build_person_nodes, "last_posture_error", None),
         "owner_merge_candidates": owner.get("merge_candidates", []),
         "attribution": {
             "observed": sum(1 for e in edges if e["attribution"] == "observed"),
