@@ -17,6 +17,7 @@ Built on two decisions the owner made 2026-08-27 (PLAN_SOCIAL_GRAPH_PERSON_CENTR
 
 from __future__ import annotations
 
+import json
 import math
 import re
 import sqlite3
@@ -1011,99 +1012,147 @@ def auto_link_duplicates(nodes: List[Dict[str, Any]], *, split_ids=()) -> List[D
 
 # --------------------------------------------------------------------------- fact closeness
 
-#: Derived relationship facts that say something about closeness which MESSAGE BEHAVIOUR
-#: cannot. A mother texted monthly is closer than a colleague texted daily, and no amount of
-#: reciprocity arithmetic will find that — it is a fact about the relationship, not about the
-#: traffic. Measured on the live corpus: 11 people carrying a closeness fact of 2.0+ score
-#: below 0.55 on messages alone, including Foxtrot Romeo (0.16) and Elin Vanterra (0.19).
+#: Closeness tiers the relationships pack assigns, strongest first. This is the vocabulary the
+#: owner already thinks in — inner circle, close, regular, peripheral.
+TIER_CLOSENESS = {
+    "inner_circle": 0.92,
+    "close": 0.78,
+    "regular": 0.55,
+    "peripheral": 0.30,
+}
+
+#: Relationship events the pack records. `loss` and `conflict` are NOT lowered: a falling-out
+#: happens between people who matter to each other, and the record does not say it ended.
+EVENT_CLOSENESS = {
+    "met": 0.62,
+    "reconnected": 0.72,
+    "loss": 0.70,
+    "conflict": 0.66,
+}
+
+#: Facts the OWNER stated, as against ones synthesis inferred.
 #:
-#: Each entry is (edge_type, floor) — the LOWEST closeness the fact justifies.
-FACT_CLOSENESS_FLOORS = (
-    # Caring for someone is the strongest tie a record can carry.
-    ("rel.caregiving", 0.90),
-    # A pack judged this person personally close, independent of how often they text.
-    ("rel.closeness_tier", 0.60),
-    # Something happened between them worth recording as a relationship event.
-    ("rel.relationship_event", 0.62),
-)
+#: This distinction is load-bearing and cost a correction. All 50 `rel.closeness_tier` facts
+#: here carry `altitude: inferred` with `source_refs` pointing at `messenger_dyad_stats` —
+#: they are a model's reading of the very message statistics the closeness score is already
+#: built from. Letting them move the score is the graph agreeing with itself and calling that
+#: corroboration, and worse, it means they can never surface the case that motivated this: a
+#: mother texted monthly. The 33 `stated` facts come from journal entries the owner wrote,
+#: carry a quote, and say things volume cannot.
+STATED_ALTITUDE = "stated"
 
-#: `rel.closeness_tier` weights land between about 2.0 and 2.9 on this corpus. The part above
-#: the floor scales the boost, so a stronger judgement sits closer without any of them
-#: outranking a genuinely reciprocal daily correspondence.
-FACT_WEIGHT_BASE = 2.0
-FACT_WEIGHT_SPAN = 1.0
-FACT_MAX_FLOOR = 0.88
-
-#: A relationship fact about somebody the owner has never messaged is weaker evidence than
-#: the same fact about somebody they text. `Echo Victor` carries a relationship_event on
-#: this corpus purely from being written about, and without this cap he lands in the inner
-#: ring beside actual friends. Interaction evidence plus a fact outranks a fact alone.
+#: A relationship fact about somebody never messaged is weaker than the same fact about
+#: somebody they text. `Echo Victor` carries a relationship_event purely from being
+#: written about; uncapped he lands in the inner ring beside actual friends.
 FACT_CAP_WITHOUT_INTERACTION = 0.66
 
 
-def attach_fact_closeness(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[str, int]:
-    """Raise closeness where a derived FACT says a relationship is closer than its traffic.
+def person_relationship_facts(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Attach the owner's relationship facts to the people they are about.
 
-    A floor, not a replacement: the message measure still decides among people the facts say
-    nothing about, and someone whose messages already read closer keeps that score. Facts can
-    only pull a person IN — never push them out — because absence of a relationship fact is
-    not evidence of distance, it is silence.
-
-    Matching falls back to NAME because the entity ids do not line up: only 8 of 27 closeness
-    facts joined by entity_id, while 16 more joined by name. That is the same duplicate-entity
-    problem the graph already folds, showing up on the fact side.
+    These belong on the person's card: a tier the owner can disagree with, an event with the
+    sentence that produced it, and whether the owner said it or a pack inferred it. A card
+    showing a closeness number without the fact behind it asks to be trusted rather than read.
     """
     by_entity = {str(n["entity_id"]): n for n in nodes if n.get("entity_id")}
     by_name: Dict[str, Dict[str, Any]] = {}
     for n in nodes:
         key = _normalized_name(n.get("label"))
-        if not key or n.get("is_owner"):
-            continue
-        current = by_name.get(key)
-        if current is None or (n.get("closeness") or 0) > (current.get("closeness") or 0):
-            by_name[key] = n
-
+        if key and not n.get("is_owner"):
+            by_name.setdefault(key, n)
     try:
-        entity_names = {str(r[0]): r[1] for r in
-                        conn.execute("SELECT entity_id, canonical_name FROM entities")}
+        rows = conn.execute(
+            "SELECT payload_json, confidence, source_refs_json FROM signal_objects").fetchall()
     except sqlite3.Error:
-        return {"applied": 0}
+        return {"attached": 0}
 
-    applied = 0
-    for edge_type, floor in FACT_CLOSENESS_FLOORS:
+    attached = 0
+    for payload, confidence, refs in rows:
         try:
-            rows = conn.execute(
-                "SELECT dst_entity_id, MAX(weight) FROM entity_edges"
-                " WHERE edge_type=? GROUP BY dst_entity_id", (edge_type,)).fetchall()
-        except sqlite3.Error:
+            fact = json.loads(payload or "{}")
+        except (TypeError, ValueError):
             continue
-        for dst, weight in rows:
-            node = by_entity.get(str(dst)) or by_name.get(
-                _normalized_name(entity_names.get(str(dst))))
-            if not node or node.get("is_owner"):
+        predicate = str(fact.get("predicate") or "")
+        if not predicate.startswith("rel."):
+            continue
+        struct = fact.get("value_struct") or {}
+        # The fact names its person. `object_entity_id` is often absent, and where present it
+        # suffers the same duplicate-entity split the graph already folds.
+        node = by_entity.get(str(fact.get("object_entity_id") or ""))
+        if node is None:
+            node = by_name.get(_normalized_name(struct.get("person")))
+        if node is None or node.get("is_owner"):
+            continue
+        note = None
+        try:
+            parsed = json.loads(refs or "[]")
+            if parsed:
+                note = parsed[0].get("note") or parsed[0].get("table")
+        except (TypeError, ValueError):
+            pass
+        node.setdefault("facts", []).append({
+            "predicate": predicate,
+            "tier": struct.get("tier"),
+            "event": struct.get("event"),
+            "quote": fact.get("quote"),
+            "confidence": confidence,
+            "altitude": fact.get("altitude"),
+            "stated_by_owner": str(fact.get("asserted_by") or "") == "owner",
+            "pack": fact.get("pack"),
+            "evidence": note,
+        })
+        attached += 1
+    for node in nodes:
+        for fact in node.get("facts", []):
+            if fact.get("tier"):
+                node["relationship_tier"] = fact["tier"]
+                break
+    return {"attached": attached}
+
+
+def attach_fact_closeness(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[str, int]:
+    """Raise closeness where a STATED relationship fact says more than the traffic does.
+
+    A floor, never a replacement, and it can only pull a person IN: absence of a relationship
+    fact is silence, not evidence of distance. Inferred tiers still ride along on the card,
+    where the owner can see and disagree with them — they just do not move the number.
+    """
+    person_relationship_facts(conn, nodes)
+    applied = 0
+    for node in nodes:
+        if node.get("is_owner"):
+            continue
+        best, reason = None, None
+        for fact in node.get("facts", []):
+            if str(fact.get("altitude")) != STATED_ALTITUDE:
                 continue
-            extra = max(0.0, (float(weight or 0) - FACT_WEIGHT_BASE) / FACT_WEIGHT_SPAN)
-            candidate = min(FACT_MAX_FLOOR, floor + extra * (FACT_MAX_FLOOR - floor))
-            if not node.get("evidence", {}).get("messaged"):
-                candidate = min(candidate, FACT_CAP_WITHOUT_INTERACTION)
-            current = node.get("closeness")
-            if current is not None and current >= candidate:
-                continue  # the traffic already says at least this much
-            node["closeness"] = round(candidate, 4)
-            node["closeness_source"] = "facts"
-            node["closeness_reason"] = _fact_reason(edge_type) + (
-                "" if node.get("evidence", {}).get("messaged")
-                else " — though you have not messaged them")
-            node.setdefault("relationship_facts", []).append(edge_type)
-            applied += 1
+            if fact.get("tier") in TIER_CLOSENESS:
+                candidate = TIER_CLOSENESS[str(fact["tier"])]
+                text = f"you place them in your {str(fact['tier']).replace('_', ' ')}"
+            elif str(fact.get("predicate")) == "rel.caregiving":
+                candidate, text = 0.90, "your records show you caring for them"
+            elif fact.get("event") in EVENT_CLOSENESS:
+                candidate = EVENT_CLOSENESS[str(fact["event"])]
+                text = f"you wrote about {fact['event']} with them"
+            else:
+                continue
+            if best is None or candidate > best:
+                best, reason = candidate, text
+        if best is None:
+            continue
+        if not node.get("evidence", {}).get("messaged"):
+            best = min(best, FACT_CAP_WITHOUT_INTERACTION)
+            reason = f"{reason} — though you have not messaged them"
+        current = node.get("closeness")
+        if current is not None and current >= best:
+            continue
+        node["closeness"] = round(best, 4)
+        node["closeness_source"] = "facts"
+        node["closeness_reason"] = reason
+        applied += 1
     for n in nodes:
         n.setdefault("closeness_source", "messages" if n.get("closeness") is not None else None)
     return {"applied": applied}
 
 
-def _fact_reason(edge_type: str) -> str:
-    return {
-        "rel.caregiving": "your records show you caring for them",
-        "rel.closeness_tier": "your records treat this as a close relationship",
-        "rel.relationship_event": "something happened between you worth recording",
-    }.get(edge_type, "a relationship fact in your records")
+
