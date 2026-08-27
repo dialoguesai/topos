@@ -266,6 +266,15 @@ The machine-readable twin of each release is
   directions.
 
 ### Fixed
+- **[S1] A gated `/healthcheck` answered 500 instead of 401.** `require_api_key`
+  grew a leading `request` parameter with the principal fabric, and `api/health.py`
+  calls it directly rather than through FastAPI's dependency injection — so the
+  positional call bound the credentials to `request`, left `credentials` holding its
+  `Depends(...)` default, and raised `'Depends' object has no attribute 'scheme'`
+  inside the handler. With `ENABLE_HEALTH_AUTH` on, an unauthenticated probe got a
+  server error where the route means to refuse. Nothing in the engine suite covered
+  the gated path (the setting defaults off), so it was only visible from the control
+  plane, which imports this module and does turn it on; there is now a test here.
 - **[O] Three CI breaks on main, fixed rather than carried into a release.** The
   handler-registry snapshot had not learned the seven `mcp_client_*` handlers the
   connected-apps work added, so every push reported "registry drifted". The local
