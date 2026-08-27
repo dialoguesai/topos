@@ -7,6 +7,7 @@ guards are the feature.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 
 import pytest
@@ -28,6 +29,8 @@ def _conn():
         involves_self INTEGER, peer_class TEXT, total_msgs INTEGER);
       CREATE TABLE contacts (contact_id TEXT PRIMARY KEY, display_name TEXT);
       CREATE TABLE contact_identifiers (contact_id TEXT, identifier TEXT, identifier_type TEXT);
+      CREATE TABLE signal_objects (object_id TEXT PRIMARY KEY, payload_json TEXT,
+        confidence REAL, source_refs_json TEXT);
       CREATE TABLE conversation_messages (dataset_id TEXT, message_id TEXT, content TEXT,
         is_from_self INTEGER, conversation_id TEXT, sender_id TEXT, event_at TEXT,
         source_id TEXT, reply_to_message_id TEXT);
@@ -609,78 +612,119 @@ class TestDuplicatesFoldToTheirStrongestSighting:
 
 class TestFactsCanSayWhatBehaviourCannot:
     """A mother texted monthly is closer than a colleague texted daily. Reciprocity
-    arithmetic cannot find that — it is a fact about the relationship, not about traffic.
-    Measured live: 11 people carrying a closeness fact of 2.0+ scored below 0.55 on messages,
-    including Foxtrot Romeo at 0.16."""
+    arithmetic cannot find that.
 
-    def _corpus(self, weight=2.5, edge="rel.closeness_tier", messaged=True):
+    But only STATED facts may move the number. Every `rel.closeness_tier` on the live node is
+    `altitude: inferred` from `messenger_dyad_stats` — a model reading the same statistics the
+    score is built from, so letting it move the score is the graph agreeing with itself.
+    """
+
+    def _fact(self, c, *, predicate, altitude, person="Foxtrot Romeo", tier=None, event=None,
+              quote=None, confidence=0.9, asserted="owner"):
+        payload = json.dumps({
+            "subject_entity_id": "e-owner", "predicate": predicate,
+            "object_entity_id": None, "confidence": confidence, "altitude": altitude,
+            "asserted_by": asserted, "pack": "relationships.social",
+            "value_struct": {k: v for k, v in
+                             (("person", person), ("tier", tier), ("event", event)) if v},
+            **({"quote": quote} if quote else {}),
+        })
+        c.execute("INSERT INTO signal_objects (object_id, payload_json, confidence,"
+                  " source_refs_json) VALUES (?,?,?,?)",
+                  (f"o{abs(hash(payload)) % 10**8}", payload, confidence,
+                   json.dumps([{"table": "journal_entries", "note": "a journal entry"}])))
+
+    def _corpus(self, messaged=True):
         c = _conn()
         _person(c, "e-owner", "Owner", is_self=1)
         _person(c, "e-friend", "Foxtrot Romeo", contact_id="c-friend")
-        c.execute("INSERT INTO entity_edges (edge_id, src_entity_id, dst_entity_id,"
-                  " edge_type, weight) VALUES ('x','e-owner','e-friend',?,?)", (edge, weight))
+        c.execute("INSERT INTO entity_mentions VALUES ('m1','e-friend','r1','grow_journal',1)")
         if messaged:
-            # The dyad must resolve to the SAME node as the entity, or the person reads as
-            # never-messaged and the no-interaction cap swallows the difference being tested.
             c.execute("INSERT INTO contacts VALUES ('c-friend','Foxtrot Romeo')")
             c.execute("INSERT INTO contact_identifiers VALUES"
                       " ('c-friend','+15551230000','phone')")
             _dyad(c, "+15551230000", msgs=4)
-        c.execute("INSERT INTO entity_mentions VALUES ('m1','e-friend','r1','grow_journal',1)")
         return c
 
-    def _nodes(self, c):
+    def _closeness(self, c):
         nodes = PG.build_person_nodes(c, "ds")
         PG.attach_closeness(c, "ds", nodes)
         PG.attach_fact_closeness(c, nodes)
         return {n["label"]: n for n in nodes}
 
-    def test_a_closeness_fact_raises_a_thin_messaging_tie(self):
-        by = self._nodes(self._corpus())
-        friend = by["Foxtrot Romeo"]
-        assert friend["closeness"] >= 0.6
+    def test_a_stated_tier_raises_a_thin_messaging_tie(self):
+        c = self._corpus()
+        self._fact(c, predicate="rel.closeness_tier", altitude="stated", tier="inner_circle")
+        friend = self._closeness(c)["Foxtrot Romeo"]
+        assert friend["closeness"] >= PG.TIER_CLOSENESS["inner_circle"] - 0.01
         assert friend["closeness_source"] == "facts"
-        assert "close relationship" in friend["closeness_reason"]
+        assert "inner circle" in friend["closeness_reason"]
+
+    def test_an_INFERRED_tier_does_not_move_the_number(self):
+        """It is a reading of the message statistics the score already uses."""
+        c = self._corpus()
+        self._fact(c, predicate="rel.closeness_tier", altitude="inferred",
+                   tier="inner_circle", asserted="extracted:synthesis")
+        friend = self._closeness(c)["Foxtrot Romeo"]
+        assert friend["closeness_source"] == "messages"
+        assert friend["closeness"] < 0.5
+
+    def test_but_an_inferred_tier_still_reaches_the_card(self):
+        """The owner should see it and be able to disagree — it just is not corroboration."""
+        c = self._corpus()
+        self._fact(c, predicate="rel.closeness_tier", altitude="inferred",
+                   tier="close", asserted="extracted:synthesis")
+        friend = self._closeness(c)["Foxtrot Romeo"]
+        assert friend["relationship_tier"] == "close"
+        assert any(f["tier"] == "close" for f in friend["facts"])
 
     def test_facts_never_push_someone_away(self):
-        """Absence of a relationship fact is silence, not evidence of distance — and a fact
-        must not lower a score the traffic already earned."""
-        c = self._corpus(weight=2.0)
+        """A `peripheral` tier must not demote someone the traffic says is close: absence of
+        closeness in a fact is not evidence of distance."""
+        c = self._corpus()
+        self._fact(c, predicate="rel.closeness_tier", altitude="stated", tier="peripheral")
         nodes = PG.build_person_nodes(c, "ds")
         PG.attach_closeness(c, "ds", nodes)
         for n in nodes:
-            n["closeness"] = 0.95 if not n["is_owner"] else n.get("closeness")
+            if not n["is_owner"]:
+                n["closeness"] = 0.95
         PG.attach_fact_closeness(c, nodes)
         assert all(n["closeness"] >= 0.95 for n in nodes if not n["is_owner"])
 
-    def test_caregiving_outranks_a_mere_tier(self):
-        care = self._nodes(self._corpus(edge="rel.caregiving"))["Foxtrot Romeo"]["closeness"]
-        tier = self._nodes(self._corpus(edge="rel.closeness_tier"))["Foxtrot Romeo"]["closeness"]
+    def test_caregiving_outranks_a_regular_tier(self):
+        c = self._corpus()
+        self._fact(c, predicate="rel.caregiving", altitude="stated")
+        care = self._closeness(c)["Foxtrot Romeo"]["closeness"]
+        c2 = self._corpus()
+        self._fact(c2, predicate="rel.closeness_tier", altitude="stated", tier="regular")
+        tier = self._closeness(c2)["Foxtrot Romeo"]["closeness"]
         assert care > tier
 
+    def test_a_conflict_does_not_lower_closeness(self):
+        """A falling-out happens between people who matter to each other."""
+        c = self._corpus()
+        self._fact(c, predicate="rel.relationship_event", altitude="stated", event="conflict",
+                   quote="I spoke very measured.")
+        friend = self._closeness(c)["Foxtrot Romeo"]
+        assert friend["closeness"] >= PG.EVENT_CLOSENESS["conflict"] - 0.01
+
     def test_a_fact_about_someone_never_messaged_is_capped(self):
-        """`Echo Victor` carries a relationship_event purely from being written about;
-        uncapped he lands in the inner ring beside actual friends."""
-        by = self._nodes(self._corpus(edge="rel.relationship_event", messaged=False))
-        friend = by["Foxtrot Romeo"]
+        c = self._corpus(messaged=False)
+        self._fact(c, predicate="rel.relationship_event", altitude="stated", event="met")
+        friend = self._closeness(c)["Foxtrot Romeo"]
         assert friend["closeness"] <= PG.FACT_CAP_WITHOUT_INTERACTION
         assert "not messaged them" in friend["closeness_reason"]
 
-    def test_it_says_the_fact_won_not_the_messages(self):
-        friend = self._nodes(self._corpus())["Foxtrot Romeo"]
-        assert friend["closeness_source"] == "facts"
-        assert "back and forth" not in friend["closeness_reason"]
+    def test_the_quote_reaches_the_card(self):
+        c = self._corpus()
+        self._fact(c, predicate="rel.relationship_event", altitude="stated", event="met",
+                   quote="Dasha stayed over last night on the couch.")
+        friend = self._closeness(c)["Foxtrot Romeo"]
+        assert any("stayed over" in str(f.get("quote")) for f in friend["facts"])
 
-    def test_facts_match_by_name_when_entity_ids_disagree(self):
-        """Only 8 of 27 closeness facts joined by entity_id; 16 more joined by name. The
-        fact side carries the same duplicate-entity problem the graph folds."""
-        c = _conn()
-        _person(c, "e-owner", "Owner", is_self=1)
-        _person(c, "e-a", "Foxtrot Romeo")   # the node the graph builds
-        _person(c, "e-b", "Foxtrot Romeo")   # the entity the fact points at
-        c.execute("INSERT INTO entity_edges (edge_id, src_entity_id, dst_entity_id, edge_type) VALUES ('x','e-owner','e-b','rel.closeness_tier')")
-        c.execute("UPDATE entity_edges SET weight=2.5 WHERE edge_id='x'")
-        c.execute("INSERT INTO entity_mentions VALUES ('m1','e-a','r1','grow_journal',1)")
-        nodes = PG.build_person_nodes(c, "ds")
-        PG.attach_closeness(c, "ds", nodes)
-        assert PG.attach_fact_closeness(c, nodes)["applied"] >= 1
+    def test_facts_match_by_name_when_entity_ids_are_absent(self):
+        """`object_entity_id` is often null; the fact names its person instead."""
+        c = self._corpus()
+        self._fact(c, predicate="rel.closeness_tier", altitude="stated", tier="close",
+                   person="Foxtrot Romeo")
+        assert self._closeness(c)["Foxtrot Romeo"]["closeness_source"] == "facts"
