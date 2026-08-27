@@ -4130,6 +4130,20 @@ def _semantic_hits(
                     # Without the event time, vector items are exempt from
                     # recency decay by accident and undated at synthesis.
                     "event_at": item.get("event_at"),
+                    # Derived signal objects share this index with raw records
+                    # and are split out of it by record_type below. Dropping
+                    # the type here is what would make the derived lane
+                    # unreachable AFTER it was written — the exact
+                    # written-but-never-read failure this lane was added to end.
+                    "record_type": item.get("record_type"),
+                    "object_type": item.get("object_type"),
+                    "object_key": item.get("object_key"),
+                    "title": item.get("title"),
+                    "disclosure": item.get("disclosure"),
+                    "person_name": item.get("person_name"),
+                    "entity_id": item.get("entity_id"),
+                    "predicate": item.get("predicate"),
+                    "message_count": item.get("message_count"),
                 }
             )
         return hits, result.get("error")
@@ -4244,6 +4258,11 @@ _OWNER_ONLY_GRANTS = {
     # fall to the default (`stat_insights`) and an unrelated grant would unlock it.
     "entity_mention": "entity_dossiers",
     "fact": "owner_facts",
+    # The derived relationship graph rides the grant the relationship scope
+    # already declares. Without an entry it would fall to the default
+    # (`stat_insights`) and a spend-pattern grant would unlock who the owner is
+    # close to — the same mis-binding the entity_mention note above records.
+    "RelationshipEdge": "relationship_edges",
 }
 
 
@@ -4609,7 +4628,11 @@ def _fusion_item_key(item: Dict[str, Any]) -> str:
 # windows, briefs and dossiers are maintained snapshots. Decaying these by
 # created_at would punish exactly the artifacts built to stay current.
 _NO_DECAY_FUSION_SOURCES = frozenset(
-    {"stat_insights", "facts_store", "entities", "briefs", "goals"}
+    # `derived_objects` belongs here for the same reason `facts_store` does:
+    # a RelationshipEdge or a dossier is a statement about how things ARE, not
+    # an event that happened at a time. Decaying it would rank the owner's
+    # mother below last night's chatter.
+    {"stat_insights", "facts_store", "entities", "briefs", "goals", "derived_objects"}
 )
 
 
@@ -5045,6 +5068,7 @@ def _build_summary_items(
     query_text: str,
     semantic_hits: List[Dict[str, Any]],
     ranked_clusters: List[Dict[str, Any]],
+    derived_hits: Optional[List[Dict[str, Any]]] = None,
     installed_source_ids: Optional[List[str]] = None,
     disclosure_tier: str = "owner_raw",
     plan=None,
@@ -5067,6 +5091,7 @@ def _build_summary_items(
         query_text=query_text,
         semantic_hits=semantic_hits,
         ranked_clusters=ranked_clusters,
+        derived_hits=derived_hits,
         installed_source_ids=installed_source_ids,
         disclosure_tier=disclosure_tier,
         plan=plan,
@@ -5113,6 +5138,7 @@ def _build_summary_items_unfiltered(
     query_text: str,
     semantic_hits: List[Dict[str, Any]],
     ranked_clusters: List[Dict[str, Any]],
+    derived_hits: Optional[List[Dict[str, Any]]] = None,
     installed_source_ids: Optional[List[str]] = None,
     disclosure_tier: str = "owner_raw",
     plan=None,
@@ -5394,6 +5420,33 @@ def _build_summary_items_unfiltered(
         else:
             vector_context_items.append(item)
 
+    # The derived layer's own lane. These items are already sentences — the
+    # index stores the rendered text, not the object's JSON — so the whole
+    # contribution is a re-key, not a second rendering pass. `topic` carries the
+    # subject's NAME rather than the sentence: it is what the rare-token gate
+    # reads (`_item_text_blob`) and what synthesis shows, and a lane about
+    # people that never surfaces a name answers nothing.
+    derived_items: List[Dict[str, Any]] = []
+    for hit in derived_hits or []:
+        text = str(hit.get("text_preview") or "").strip()
+        if not text:
+            continue
+        object_type = str(hit.get("object_type") or "")
+        derived_items.append(
+            {
+                "topic": str(hit.get("title") or text.splitlines()[-1])[:160],
+                "summary_text": text,
+                "record_id": hit.get("record_id"),
+                "object_type": object_type,
+                "object_key": hit.get("object_key"),
+                "entity_id": hit.get("entity_id"),
+                "disclosure": hit.get("disclosure"),
+                "signal_dimension": hit.get("signal_dimension"),
+                "relevance_score": round(float(hit.get("similarity") or 0.0), 4),
+                "retrieval_source": f"derived:{object_type}" if object_type else "derived_object",
+            }
+        )
+
     if first_person and bundle_conn is not None:
         # Owner-authored preference in the vector lane (P3.3): belief/identity
         # asks drop other people's message-backed hits (their words must not
@@ -5663,6 +5716,12 @@ def _build_summary_items_unfiltered(
                 ("stat_insights", 2.0, stat_items),
                 ("facts_store", _facts_lane_weight(), fact_store_items),
                 ("entities", 1.5, entity_items),
+                # Above the raw vector lane and beside `entities`, because that
+                # is what these items ARE: the entity plane's conclusions,
+                # reached semantically instead of by the query happening to
+                # contain the subject's name. Below `facts_store`, which is the
+                # same content addressed exactly rather than by similarity.
+                ("derived_objects", 1.5, derived_items),
                 # Beside the scope routes, never above them: a thread record is
                 # ordinary canonical evidence that arrived by a different key, so
                 # it fuses at the canonical lane's own weight.
@@ -5701,6 +5760,7 @@ def _build_summary_items_unfiltered(
         stat_items
         + fact_store_items
         + entity_items
+        + derived_items
         + entity_thread_items
         + commitment_items
         + goal_items
@@ -6251,6 +6311,94 @@ class DefaultSignalRetrievalAdapter:
             elif vector_error:
                 logger.debug("vector search unavailable: %s", vector_error)
 
+        # The derived layer's own lane, searched SEPARATELY rather than filtered
+        # out of the shared result set. Both live in `signal_embeddings`, so one
+        # search would make them compete for one top-N — and there are ~350
+        # derived rows against ~9,000 raw ones, so the lane that exists to
+        # answer "who is close to me" would be starved by whichever messages
+        # happened to contain the word "close". Their own `source_id` gives them
+        # their own budget; the query embedding is already cached, so the second
+        # call costs a filtered scan and no inference.
+        derived_hits: List[Dict[str, Any]] = []
+        if query_text and global_layers_apply and request.access_mode in ("summary", "inference"):
+            from ..features.signal.derived_index import (
+                DERIVED_SOURCE_ID,
+                is_derived_record_type,
+            )
+            from ..features.signal.vector_settings import derived_object_index_enabled
+
+            # Raw is raw: `packet["semantic_hits"]` promises dated source rows a
+            # consumer can follow back to a connector, and a derived summary is
+            # not one. Nothing should reach here (the derived rows carry their
+            # own source_id) — this holds if a future writer forgets that.
+            semantic_hits = [
+                h for h in semantic_hits if not is_derived_record_type(h.get("record_type"))
+            ]
+            # NOT `semantic_query`. That is the residual — the query minus the
+            # spans the entity and time planes already claimed — and the derived
+            # lane is the one lane those spans are the CONTENT of. Measured on
+            # this corpus: "who are my parents" links `parents` to a junk
+            # 0-mention dossier ("Parents kinfolk"), leaving the residual "who
+            # are my", which retrieves generic acquaintances while
+            # "dad is my parent" sits at rank 0 of the full-text search.
+            # `needle_text` still applies — stripping a bulk instruction is a
+            # different operation from stripping the subject.
+            derived_query = (
+                needle_text if (needle_text and needle_text != query_text) else query_text
+            )
+            derived_error = None
+            if derived_object_index_enabled():
+                derived_hits, derived_error = _semantic_hits(
+                    derived_query, source_id=DERIVED_SOURCE_ID
+                )
+            derived_hits = [h for h in derived_hits if is_derived_record_type(h.get("record_type"))]
+            if derived_hits and str(request.disclosure_tier or "") != "owner_raw":
+                # OWNER TIER ONLY, and not because `_fact_disclosure_allowed`
+                # says so — measured 2026-08-26, it says the opposite. A
+                # RelationshipEdge maps to the `relationship_edges` grant, which
+                # `relationship_context:read` declares, so a grantee at
+                # `default_disclosure` asking "who's in my close circle" got the
+                # owner's mother, grandmother and closest friends BY NAME. The
+                # grantee scrub does not save it: `_redact_pii` removes emails
+                # and phone numbers, never names.
+                #
+                # That declaration was written when nothing emitted names from
+                # that store — it granted bands and counts, and this lane is the
+                # first thing that would have turned it into a roster. Widening
+                # a grant as a side effect of adding a lane is not a decision
+                # this change gets to make. The rest of the node already holds
+                # this line (`_build_cohort_aggregate_summary`: "Individual
+                # people are not disclosed in this rollup").
+                #
+                # A grantee-facing derived lane is a real thing to want. It
+                # needs an aggregate rendering (bands, counts, no names) and its
+                # own review, not this filter relaxed.
+                #
+                # Debug, not ledger: on the leaking direction a stamped receipt
+                # is itself the disclosure (see the note in
+                # `_build_summary_items`), and the owner never loses a row here.
+                logger.debug(
+                    "derived-object lane withheld from tier %s (%d item(s))",
+                    request.disclosure_tier,
+                    len(derived_hits),
+                )
+                derived_hits = []
+            elif derived_hits:
+                # Owner tier still honours each object type's own declared
+                # grant, so a future relaxation of the line above cannot let a
+                # stat-insights grant unlock the relationship graph.
+                derived_hits = [
+                    h
+                    for h in derived_hits
+                    if _fact_disclosure_allowed(h, request.disclosure_tier, manifest)
+                ]
+            if derived_hits:
+                touched.append("derived_objects")
+                retrieval_meta["derived_objects_returned"] = len(derived_hits)
+                retrieval_meta["retrieval_strategy"] = "query_aware"
+            elif derived_error:
+                logger.debug("derived-object search unavailable: %s", derived_error)
+
         ranked_clusters: List[Dict[str, Any]] = []
         if global_layers_apply and request.access_mode in ("summary", "inference"):
             ranked_clusters = _load_ranked_clusters(
@@ -6383,6 +6531,7 @@ class DefaultSignalRetrievalAdapter:
                     query_text=query_text,
                     semantic_hits=semantic_hits,
                     ranked_clusters=ranked_clusters,
+                    derived_hits=derived_hits,
                     installed_source_ids=request.installed_source_ids,
                     disclosure_tier=request.disclosure_tier,
                     plan=plan,

@@ -30,23 +30,38 @@ def fts_search(
     query: str,
     *,
     limit: int = 20,
+    source_id: Optional[str] = None,
 ) -> List[str]:
+    """Keyword half of the hybrid search.
+
+    ``source_id`` mirrors the vector half's filter. Without it a source-scoped
+    search returns scoped vectors fused with UNSCOPED keyword hits, so the
+    scope silently applies to one contributor out of two — and the caller
+    that surfaced this (the derived-object lane, which is scoped by source)
+    would have spent most of its budget on rows it then discarded. Omitted
+    means unfiltered, which is every existing call site.
+    """
     if not _fts_available(conn) or not str(query or "").strip():
         return []
     fts_query = _tokenize_query(query)
     if not fts_query:
         return []
+    source_clause = " AND e.source_id = ?" if source_id is not None else ""
+    params: List[Any] = [fts_query]
+    if source_id is not None:
+        params.append(source_id)
+    params.append(limit)
     try:
         rows = conn.execute(
             f"""
             SELECT e.embedding_id
             FROM {_FTS_TABLE} f
             JOIN signal_embeddings e ON e.rowid = f.rowid
-            WHERE f.search_text MATCH ?
+            WHERE f.search_text MATCH ?{source_clause}
             ORDER BY rank
             LIMIT ?
             """,
-            (fts_query, limit),
+            params,
         ).fetchall()
     except sqlite3.Error:
         return []

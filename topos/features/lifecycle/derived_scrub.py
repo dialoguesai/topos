@@ -549,6 +549,14 @@ def sweep_orphans(conn: sqlite3.Connection) -> Dict[str, int]:
             "DELETE FROM entity_review WHERE candidate_entity_id NOT IN (SELECT entity_id FROM entities)"
         )
         out["entity_review"] = int(cursor.rowcount or 0)
+        # The derived-object index is keyed by object_id, so it survives every
+        # sweep above by construction: nothing here carries a source_id it could
+        # be matched on. Its rows are rendered SENTENCES naming people, and the
+        # producer that would prune them next runs on the next enrichment batch
+        # — which is not a schedule a deletion request gets to be put on.
+        from ..signal.derived_index import prune_orphaned_derived_embeddings
+
+        out["derived_object_index"] = prune_orphaned_derived_embeddings(conn)
         commit_connection(conn)
     return out
 
