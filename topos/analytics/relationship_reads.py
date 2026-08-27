@@ -281,7 +281,8 @@ def read_person_graph(conn: Any, *, dataset_id: str,
     from .dataset_resolution import resolve_messaging_dataset
     from .person_graph import (attach_closeness, attach_fact_closeness, auto_link_duplicates,
                                build_person_edges, build_person_nodes, group_ambient_people,
-                               merge_suggestions, resolve_owner_identity, structural_metrics)
+                               merge_suggestions, resolve_owner_identity,
+                               shared_context_affinity, structural_metrics)
 
     for table in ("entities",):
         if _table_missing(conn, table):
@@ -332,6 +333,13 @@ def read_person_graph(conn: Any, *, dataset_id: str,
         n["centrality_degree"] = structure["degree"].get(nid, 0.0)
         n["centrality_betweenness"] = structure["betweenness"].get(nid, 0.0)
         n["brokerage_meaningful"] = bool(structure.get("brokerage_meaningful", {}).get(nid))
+    # People who turn up in the same subjects. A pull on the LAYOUT only: not an edge, not a
+    # community, nothing that changes a colour or a count. The graph places people by their
+    # relationship to the owner and to each other through messages, and neither of those
+    # notices that two of them are in the same band or the same company unless they happen
+    # to have texted each other. Measured live, that is nearly all of it — of 1,718 pairs
+    # who share a subject, 12 already had an edge.
+    context = shared_context_affinity(conn, dataset_id, nodes)
     owner = resolve_owner_identity(conn)
     people = [n for n in nodes if not n.get("is_owner")]
     return {
@@ -362,6 +370,8 @@ def read_person_graph(conn: Any, *, dataset_id: str,
                             "never push them away: silence is not evidence of distance"),
         "fact_closeness_applied": fact_stats.get("applied", 0),
         "ambient_groups": {k: ambient_stats.get(k) for k in ("grouped", "ungrouped", "groups")},
+        "context_affinity": context["pairs"],
+        "context_coverage": context["coverage"],
         "dismissed_count": sum(1 for n in nodes if n.get("dismissed")),
         "overlay_actions": len(overlay_rows),
         # Counted FROM the edges rather than from a hardcoded list of classes: adding

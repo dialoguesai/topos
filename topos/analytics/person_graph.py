@@ -1307,3 +1307,228 @@ def group_ambient_people(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[str, An
             "min_group": MIN_AMBIENT_GROUP,
         },
     }
+
+
+# --------------------------------------------------------------------------- SGU-13
+
+#: A shared topic cluster wider than this fraction of the people it could cover is not a
+#: subject, it is a stopword. Measured on the live node: at 0.30 it drops exactly two --
+#: `Blackjack Team (always leave)` at 46 of 103 people and `Friends (movie)` at 35 -- and
+#: keeps `Blue Hillbillies`, `Dialogues Technologies`, `Bandmates` and `CODAME ART+TECH`,
+#: every one of which a size CAP would have thrown away. The cap was tried first: at 12 it
+#: kept `Houseplants` and discarded the bands and the company, which is backwards.
+CONTEXT_STOPWORD_SHARE = 0.30
+
+#: ...but a share alone is meaningless on a small graph: with six people covered, 0.30 puts
+#: the bound below two and EVERY subject is discarded as too broad, leaving a node with a
+#: real answer being told it has none. A subject shared by fewer than this many people is
+#: never a stopword however small the graph. On the live node the share bound is 30 people,
+#: so this floor changes nothing there — it exists for the node that is just starting.
+CONTEXT_STOPWORD_MIN_PEOPLE = 8
+
+#: One shared topic is a coincidence; two is a pattern. Without this floor the strongest
+#: score on the live node was 1.00 for pairs of unnamed numbers whose ONLY cluster was
+#: `Clear Business Funding` -- a lead-generation blast. Cosine cannot tell a perfect match
+#: from a match with nothing behind it, so the evidence floor has to be separate.
+CONTEXT_MIN_SHARED = 2
+
+#: Each person keeps only their strongest partners. A person in many clusters would otherwise
+#: acquire an affinity to half the graph, and the layout would read their VOLUME as everyone
+#: else's closeness -- the same mistake reciprocity-weighted closeness exists to avoid.
+CONTEXT_TOP_PER_PERSON = 6
+
+
+def _context_label_key(label: Any) -> str:
+    """Fold near-duplicate cluster labels together.
+
+    The cluster set itself contains `Friends`/`Friend` and `Blackjack Team`/`Blackjack Team
+    (httpurl)`. Left alone each duplicate counts a pair twice, which is how a coincidence
+    gets promoted to a pattern.
+    """
+    text = re.sub(r"\(.*?\)", " ", str(label or "")).lower()
+    text = " ".join(re.sub(r"[^a-z0-9 ]+", " ", text).split())
+    return " ".join(w[:-1] if len(w) > 3 and w.endswith("s") else w for w in text.split())
+
+
+def shared_context_affinity(conn: Any, dataset_id: str,
+                            nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """People who turn up in the same subjects, as a pull on the LAYOUT only.
+
+    The graph places people by how they relate to the OWNER (distance) and to each other
+    through messages (direction). Neither notices that two people belong to the same band,
+    the same company or the same weekly thing unless they happen to have texted each other.
+    Measured on the live node, that is nearly all of it: of 1,718 pairs who share a topic
+    cluster, only 12 already have an edge drawn between them and 24 are already in the same
+    detected community. About 98% of this is information the picture did not have.
+
+    The join is the one `group_ambient_people` uses, pointed at the messaging people instead:
+    person -> the conversations they are in -> those messages' topic clusters. Conversations
+    come from `load_messages`, so peer keys get the same normalisation as everywhere else and
+    no connector is named here.
+
+    Scored as IDF-weighted cosine over each person's cluster set. Three failures were
+    measured before this shape survived:
+
+    * A plain sum of ``1/size`` ranked pairs by how MANY clusters each person appeared in,
+      which is message volume wearing an affinity costume -- the top ten pairs were all
+      driven by the same three broad clusters.
+    * Cosine alone put the perfect 1.00 scores on people with a single cluster each, because
+      two one-item vectors always match. Hence ``CONTEXT_MIN_SHARED``.
+    * A cluster size cap discarded the real groups and kept the small talk. Hence a share of
+      the population rather than a count.
+
+    Returns pairs with the clusters that produced them. The graph does not draw these and
+    never labels an edge with one, but a person's card can say what it found: a layout that
+    moves people for reasons nothing can state is a layout that cannot be argued with.
+    """
+    people = {str(n["node_id"]): n for n in nodes
+              if not n.get("is_owner") and n.get("band") != BAND_AMBIENT}
+    if len(people) < 2:
+        return {"pairs": [], "coverage": {"reason": "fewer than two people to relate"}}
+
+    by_key: Dict[str, str] = {}
+    for n in people.values():
+        for mk in n.get("messenger_keys", []):
+            by_key[str(mk)] = str(n["node_id"])
+
+    from .messenger_directed import SELF_KEY, load_messages
+
+    try:
+        rows = load_messages(conn, dataset_id)
+    except sqlite3.Error:
+        rows = []
+    # Everyone in a conversation owns that conversation's subjects. In a DM that is the one
+    # peer; in a room it is everybody who spoke. The owner is excluded because they are in
+    # every conversation, so counting them would make every subject universal.
+    conv_people: Dict[str, Set[str]] = {}
+    conv_messages: Dict[str, Set[str]] = {}
+    for conv, message_id, sender, _at, from_self, _src, _reply in rows:
+        conv_messages.setdefault(str(conv), set()).add(str(message_id))
+        if from_self or not sender or str(sender) == SELF_KEY:
+            continue
+        node_id = by_key.get(str(sender))
+        if node_id:
+            conv_people.setdefault(str(conv), set()).add(node_id)
+
+    message_ids = {m for conv in conv_people for m in conv_messages.get(conv, ())}
+    if not message_ids:
+        return {"pairs": [], "coverage": {"reason": "no conversations reach a person here"}}
+
+    cluster_of: Dict[str, Any] = {}
+    try:
+        for chunk in _chunks(sorted(message_ids), 400):
+            placeholders = ",".join("?" for _ in chunk)
+            for record_id, cluster_id in conn.execute(
+                    f"SELECT record_id, cluster_id FROM topic_cluster_members"
+                    f" WHERE record_id IN ({placeholders})", chunk).fetchall():
+                cluster_of[str(record_id)] = cluster_id
+    except sqlite3.Error:
+        return {"pairs": [], "coverage": {"reason": "this node has no topic clusters yet"}}
+    try:
+        labels = {cid: lab for cid, lab in
+                  conn.execute("SELECT cluster_id, label FROM topic_clusters")}
+    except sqlite3.Error:
+        labels = {}
+
+    # Fold duplicate labels before counting anyone, so a pair cannot be counted twice for
+    # what is really one subject.
+    members: Dict[str, Set[str]] = {}
+    label_of: Dict[str, str] = {}
+    for conv, folks in conv_people.items():
+        for message_id in conv_messages.get(conv, ()):
+            cluster_id = cluster_of.get(message_id)
+            if cluster_id is None:
+                continue
+            raw = str(labels.get(cluster_id) or "").strip()
+            key = _context_label_key(raw) or f"cluster:{cluster_id}"
+            members.setdefault(key, set()).update(folks)
+            label_of.setdefault(key, raw)
+
+    covered = {p for folks in members.values() for p in folks}
+    if len(covered) < 2:
+        return {"pairs": [], "coverage": {"reason": "no subject reaches two people"}}
+
+    too_broad = max(CONTEXT_STOPWORD_MIN_PEOPLE, CONTEXT_STOPWORD_SHARE * len(covered))
+    subjects = {k: m for k, m in members.items() if 2 <= len(m) <= too_broad}
+    dropped = sorted(((len(m), label_of.get(k, k)) for k, m in members.items()
+                      if len(m) > too_broad), reverse=True)
+    if not subjects:
+        return {"pairs": [], "coverage": {
+            "reason": "every shared subject was too broad to mean anything"}}
+
+    # SMOOTHED, because the plain form is exactly zero for a subject that covers everyone
+    # counted -- and on a small graph that is every subject, so two people sharing two niche
+    # interests were told they share nothing. The niche is niche in the world; it only looks
+    # universal because two people are all this node has yet. The +1s keep the ordering
+    # (rarer still scores higher) and put a floor under it.
+    idf = {k: math.log((len(covered) + 1) / (len(m) + 1)) + 1 for k, m in subjects.items()}
+    of_person: Dict[str, Set[str]] = {}
+    for key, folks in subjects.items():
+        for person in folks:
+            of_person.setdefault(person, set()).add(key)
+    magnitude = {p: math.sqrt(sum(idf[k] ** 2 for k in keys))
+                 for p, keys in of_person.items()}
+
+    scored: List[Dict[str, Any]] = []
+    ordered = sorted(of_person)
+    for i, a in enumerate(ordered):
+        for b in ordered[i + 1:]:
+            shared = of_person[a] & of_person[b]
+            if len(shared) < CONTEXT_MIN_SHARED:
+                continue
+            denominator = magnitude[a] * magnitude[b]
+            if not denominator:
+                continue
+            # Shrunk by how much evidence is behind it. Cosine cannot tell a perfect match
+            # from a match with nothing behind it: two people whose ONLY two subjects are
+            # the same score 1.00, and on the live node the top of the list was three
+            # unnamed numbers who had each received the same lead-generation blast. The
+            # factor costs a well-evidenced pair almost nothing (27 shared subjects keeps
+            # 93%) and halves a pair scraping the floor.
+            overlap = len(shared)
+            confidence = overlap / (overlap + CONTEXT_MIN_SHARED)
+            score = confidence * sum(idf[k] ** 2 for k in shared) / denominator
+            scored.append({
+                "source": a, "target": b, "weight": round(score, 4),
+                "shared": [label_of.get(k, k) for k in
+                           sorted(shared, key=lambda k: -idf[k])[:4]],
+                "shared_count": len(shared),
+            })
+
+    # MUTUAL: a pair survives only if each end is among the other's strongest. Keeping a
+    # pair when EITHER end wanted it was tried first and does not hold: someone who turns up
+    # in every subject is the strongest match FOR everybody, so every other person spends one
+    # of their slots on them and the hub keeps a pull to the entire graph -- exactly the
+    # volume-read-as-closeness this cap exists to prevent. Reciprocity is also the honest
+    # relation: "we are each among the other's nearest" says something, "I am your nearest
+    # and you are nowhere near mine" does not.
+    top: Dict[str, Set[tuple]] = {}
+    per_person: Dict[str, List[Dict[str, Any]]] = {}
+    for pair in scored:
+        per_person.setdefault(pair["source"], []).append(pair)
+        per_person.setdefault(pair["target"], []).append(pair)
+    for person, pairs in per_person.items():
+        pairs.sort(key=lambda p: (-p["weight"], p["source"], p["target"]))
+        top[person] = {(p["source"], p["target"]) for p in pairs[:CONTEXT_TOP_PER_PERSON]}
+    out = [p for p in scored
+           if (p["source"], p["target"]) in top.get(p["source"], ())
+           and (p["source"], p["target"]) in top.get(p["target"], ())]
+    out.sort(key=lambda p: (-p["weight"], p["source"], p["target"]))
+    return {
+        "pairs": out,
+        "coverage": {
+            "people": len(of_person),
+            "subjects": len(subjects),
+            "pairs_considered": len(scored),
+            "meaning": ("people who turn up in the same subjects, pulled together in the "
+                        "layout only — never drawn as an edge and never counted as a "
+                        "community"),
+            "dropped_as_too_broad": [f"{label} ({n} people)" for n, label in dropped[:6]],
+            "min_shared": CONTEXT_MIN_SHARED,
+        },
+    }
+
+
+def _chunks(items: List[Any], size: int):
+    for start in range(0, len(items), size):
+        yield items[start:start + size]
