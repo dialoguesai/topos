@@ -776,10 +776,22 @@ def _registry_posture_default(source_id: str) -> Optional[str]:
     _runtime_installed_sources_by_scope reads). Returns None when the source
     is unknown so effective_posture can fall through to the safe 'mixed'
     default."""
-    defn = REGISTRY.get((source_id or "").strip())
-    if defn is not None:
-        return getattr(defn, "posture", None)
     sid = (source_id or "").strip()
+    defn = REGISTRY.get(sid)
+    if defn is not None:
+        posture = getattr(defn, "posture", None)
+        # A runtime install REPLACES the bundled definition, and a payload that simply omits
+        # `posture` lands on the dataclass default `mixed` — silently downgrading a source
+        # that the bundle declares `ambient` or `personal`. Measured live: browser_visits,
+        # imessage, grow_journal and github_activity all resolved `mixed` this way, so
+        # posture stopped distinguishing anything and nothing raised. Prefer the bundled
+        # declaration when the active definition only carries the default.
+        if posture == "mixed":
+            bundled = BUNDLED_REGISTRY.get(sid)
+            bundled_posture = getattr(bundled, "posture", None) if bundled is not None else None
+            if bundled_posture and bundled_posture != "mixed" and defn is not bundled:
+                return bundled_posture
+        return posture
     if not sid:
         return None
     try:
@@ -806,7 +818,13 @@ def _registry_posture_default(source_id: str) -> Optional[str]:
     except _json.JSONDecodeError:
         return None
     posture = source_def.get("posture") if isinstance(source_def, dict) else None
-    return str(posture) if posture else None
+    if posture:
+        return str(posture)
+    # Same rule for the stored-JSON path: an install that never declared a posture must not
+    # erase what the bundle knows.
+    bundled = BUNDLED_REGISTRY.get(sid)
+    bundled_posture = getattr(bundled, "posture", None) if bundled is not None else None
+    return str(bundled_posture) if bundled_posture else None
 
 
 def effective_posture(source_id: str, dataset_id: str = "", conn=None) -> str:

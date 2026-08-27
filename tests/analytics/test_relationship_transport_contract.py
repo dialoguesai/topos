@@ -60,7 +60,10 @@ def conn(tmp_path, monkeypatch):
 def _ws(msg_type, payload):
     from topos.core.handlers.messenger_analytics import handle_relationship_reads
 
-    res = asyncio.get_event_loop().run_until_complete(
+    # asyncio.get_event_loop() is deprecated and returns a loop that ANOTHER test may have
+    # closed: running this file after tests/sources failed every case here with "no current
+    # event loop", which reads as a contract break and is only test hygiene. Own the loop.
+    res = asyncio.run(
         handle_relationship_reads({"id": "t1", "type": msg_type, "payload": payload}))
     assert res["status"] == "ok", res
     out = dict(res["payload"])
@@ -147,7 +150,7 @@ def test_a_read_error_answers_rather_than_hanging(conn, monkeypatch):
     monkeypatch.setattr(reads, "read_relationship_signals", boom)
     from topos.core.handlers.messenger_analytics import handle_relationship_reads
 
-    res = asyncio.get_event_loop().run_until_complete(
+    res = asyncio.run(
         handle_relationship_reads({"id": "t9", "type": "messenger_relationship_signals",
                                    "payload": {"dataset_id": DS}}))
     assert res["status"] == "error"

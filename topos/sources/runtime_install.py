@@ -102,12 +102,45 @@ def _adopt_bundled_lane_policy(payload: Dict[str, Any]) -> Dict[str, Any]:
     return merged
 
 
+def _inherit_bundled_posture(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Keep the bundled posture when an install payload does not declare one.
+
+    `install_source_definition` replaces the bundled definition wholesale, and
+    `DataSourceDefinition.posture` defaults to `mixed` — so an install payload that simply
+    omits the field silently DOWNGRADES a source's posture. Measured on the live node
+    2026-08-27: active installs for `browser_visits`, `imessage`, `grow_journal` and
+    `github_activity` all carry `posture: null`, so every one of them resolved `mixed` in the
+    engine while the bundled registry said `ambient`. Nothing raised; posture simply stopped
+    distinguishing anything, and every consumer of it — role gating, the net-subject policy,
+    salience — quietly lost its input.
+
+    An omitted field means "unchanged", not "mixed". A payload that DOES declare a posture
+    still wins, which is what lets an install deliberately re-posture a source.
+    """
+    from .registry import BUNDLED_REGISTRY
+
+    if str(payload.get("posture") or "").strip():
+        return payload
+    source_id = str(payload.get("source_id") or "").strip()
+    if not source_id:
+        return payload
+    bundled = BUNDLED_REGISTRY.get(source_id)
+    bundled_posture = str(getattr(bundled, "posture", "") or "").strip()
+    if not bundled_posture:
+        return payload
+    out = dict(payload)
+    out["posture"] = bundled_posture
+    return out
+
+
 def _build_source_definition(payload: Dict[str, Any]) -> DataSourceDefinition:
     from .bundled_canonical_triples import apply_bundled_canonical_defaults
     from .definitions import definition_from_payload
 
     return definition_from_payload(
-        _adopt_bundled_lane_policy(apply_bundled_canonical_defaults(payload))
+        _inherit_bundled_posture(
+            _adopt_bundled_lane_policy(apply_bundled_canonical_defaults(payload))
+        )
     )
 
 
