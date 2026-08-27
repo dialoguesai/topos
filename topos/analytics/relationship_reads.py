@@ -236,3 +236,32 @@ def read_bench(conn: Any) -> Dict[str, Any]:
     from ..features.derivation.social_bench import build_bench_slate
 
     return build_bench_slate(conn)
+
+
+def read_luck_surface(conn: Any, *, dataset_id: str,
+                      explore: float = 0.5) -> Dict[str, Any]:
+    """LSU-5 — Doing x Telling per body of work, with every basis stated.
+
+    Computed at read like the bench, not stored: the inputs (entity mentions, communities,
+    messages) change on every sync, and a cached luck surface would quietly describe last
+    month's life. The rollup measures ~330ms on the live corpus, which is a page load.
+
+    Needs `entities` and `entity_mentions`; a node whose extraction has not run yet gets the
+    honest empty answer rather than a 500.
+    """
+    from .luck_surface import build_moves, rollup
+
+    for table in ("entities", "entity_mentions"):
+        if _table_missing(conn, table):
+            return {"dataset_id": dataset_id, "work_items": [], "moves": [], "coverage": {
+                "reason": "entity extraction has not run on this node yet"}}
+    out = rollup(conn, dataset_id)
+    # Moves ride along rather than taking a second round trip: the ranker re-derives the
+    # rollup anyway, and two calls could show a panel of suggestions computed from a
+    # different snapshot than the chart above them.
+    try:
+        out["moves"] = build_moves(conn, dataset_id, explore=explore)
+    except Exception:  # noqa: BLE001 — the chart stands on its own if the ranker fails
+        out["moves"] = []
+    out["explore"] = explore
+    return out

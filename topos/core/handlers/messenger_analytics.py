@@ -479,7 +479,7 @@ async def handle_messenger_analytics_periods(message: Dict[str, Any]) -> Optiona
 # one fixture and asserts byte-equal payloads.
 
 @handles("messenger_relationships", "messenger_relationship_signals",
-         "messenger_directed_edges", "messenger_bench")
+         "messenger_directed_edges", "messenger_bench", "messenger_luck_surface")
 async def handle_relationship_reads(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     if not req_id:
@@ -508,6 +508,10 @@ async def handle_relationship_reads(message: Dict[str, Any]) -> Optional[Dict[st
                     include_automated=bool(payload.get("include_automated", False)),
                     limit=min(max(int(payload.get("limit") or 100), 1), 500),
                 )
+            elif msg_type == "messenger_luck_surface":
+                result = reads.read_luck_surface(
+                    conn, dataset_id=dataset_id,
+                    explore=min(max(float(payload.get("explore", 0.5)), 0.0), 1.0))
             elif msg_type == "messenger_relationship_signals":
                 result = reads.read_relationship_signals(
                     conn, dataset_id=dataset_id,

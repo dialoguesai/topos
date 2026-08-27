@@ -444,3 +444,17 @@ def get_bench() -> Dict[str, Any]:
     from ..analytics.relationship_reads import read_bench
 
     return read_bench(conn)
+
+
+@router.get("/messenger-analytics/luck-surface", dependencies=[Depends(require_api_key)])
+def get_luck_surface(
+    dataset_id: str = Query(...),
+    explore: float = Query(0.5, ge=0.0, le=1.0,
+                           description="0 = deepen existing ties, 1 = reach new circles"),
+) -> Dict[str, Any]:
+    conn = get_db_connection()
+    if conn is None:
+        return {"dataset_id": dataset_id, "work_items": [], "error": "no database"}
+    from ..analytics.relationship_reads import read_luck_surface
+
+    return read_luck_surface(conn, dataset_id=dataset_id, explore=explore)

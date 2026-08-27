@@ -100,13 +100,22 @@ def test_bench_identical_over_both_transports(conn):
     assert ws == http
 
 
+def test_luck_surface_identical_over_both_transports(conn):
+    from topos.api.messenger_analytics import get_luck_surface
+
+    http = get_luck_surface(dataset_id=DS)
+    ws = _ws("messenger_luck_surface", {"dataset_id": DS})
+    assert ws == http
+
+
 def test_the_protocol_names_are_pinned():
     """The CP proxy routes and the client will address these exact strings; renaming one
     silently strands the other side."""
     from topos.core.handlers.registry import HANDLERS
 
     for name in ("messenger_relationships", "messenger_relationship_signals",
-                 "messenger_directed_edges", "messenger_bench"):
+                 "messenger_directed_edges", "messenger_bench",
+                 "messenger_luck_surface"):
         assert name in HANDLERS, f"protocol name {name!r} unregistered"
 
 

@@ -122,6 +122,7 @@
   "messenger_bench",
   "messenger_contact_graph",
   "messenger_directed_edges",
+  "messenger_luck_surface",
   "messenger_relationship_signals",
   "messenger_relationships",
   "migrate_browser_plugin_app_id",

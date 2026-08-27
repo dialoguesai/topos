@@ -9,6 +9,30 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **Luck surface: what you have built, against who has heard about it.** `[E:analytics]`
+  New read `messenger_luck_surface` (HTTP `/messenger-analytics/luck-surface` and the
+  websocket handler, sharing one body per the SGU-1 no-drift rule). Per body of work it
+  reports Doing events, Telling events, who was told, community breadth, and a shuffle
+  control — components only, never a score. Ships with a rule-based move ranker and an
+  explore↔exploit weight.
+
+  Work items come from the engine's OWN canonical entities (`entities` +
+  `entity_mentions`), not a parallel heuristic. The first cut matched topic-cluster labels
+  against message text and resolved **2 of 2,802** owner messages, because cluster labels
+  are code identifiers and nobody types `graphworkspacepage` into a message. Riding the
+  existing extraction took telling to 50 events across 12 people on the same corpus.
+
+  Three honesty rules are enforced by tests, each from a defect that shipped once during
+  development:
+  - Work with no speakable name (a repo slug is its only surface) is reported as **not
+    measurable**, never as "told nobody".
+  - Breadth is shown only where it beats a null drawn from the owner's real DM population;
+    below that it reads "indistinguishable from chance".
+  - `grow_journal` is a record of a life, not of work: journal-only entities qualify only
+    when the owner's own goals name them, so cafes and grocery stores stopped appearing as
+    bodies of work.
+
 ## [1.3.33] — 2026-08-26
 
 ### Security
