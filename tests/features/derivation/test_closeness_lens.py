@@ -207,3 +207,22 @@ def test_the_known_item_aliases_cover_how_people_actually_ask():
     # and the neighbours still route where they did
     assert preds("What medications am I taking?") == ["health.medication"]
     assert preds("What's on my calendar?") == []
+
+
+def test_a_question_spanning_two_predicate_families_gets_both():
+    """First-match-wins hid one half. "Is my mom in my inner circle?" matches the
+    role alias AND the closeness alias; returning only the first meant the tiers
+    never reached the answer, and the live reply was "there's no explicit 'inner
+    circle' label in your relationship context" while two people held that label."""
+    from topos.query.facts_direct import match_known_item
+
+    both = match_known_item("Is my mom in my inner circle?")
+    assert both is not None
+    assert set(both["predicates"]) >= {"rel.relationship", "rel.closeness_tier"}
+
+    # a single-family question is unchanged
+    assert match_known_item("Who is in my family?")["predicates"] == ["rel.relationship"]
+
+    # widening the match must never widen disclosure: special is OR-ed, so a
+    # health class still takes the stricter gate
+    assert match_known_item("What medications am I taking?")["special"] is True
