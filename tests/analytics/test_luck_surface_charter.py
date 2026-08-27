@@ -387,3 +387,70 @@ class TestANodeThatCannotNameItsDataset:
         out = L.rollup(conn, "")
         assert out["coverage"]["telling_measurable"] is False
         assert sum(w["doing_events"] for w in out["work_items"]) == 40
+
+
+class TestTheJournalIsAFirstClassDoingSource:
+    """The growth journal is in WORK_SOURCES and counts toward doing. The goals gate exists
+    ONLY to keep places of daily life out — measured on the live corpus, a threshold of 3
+    also dropped Mursion, TinyCloud and Yale, which are real."""
+
+    def _journal_entity(self, conn, name, events, goal_hits):
+        _entity(conn, f"e-{name}", "org", name)
+        _mentions(conn, f"e-{name}", "grow_journal", events)
+        for i in range(goal_hits):
+            conn.execute("INSERT INTO user_goals VALUES (?,?)",
+                         (f"g{name}{i}", f"Follow up with {name} about the pilot {i}"))
+
+    def test_journal_events_count_toward_doing(self):
+        conn = _conn()
+        _entity(conn, "e1", "project", "Topos")
+        _mentions(conn, "e1", "github_activity", 10)
+        _mentions(conn, "e1", "grow_journal", 7)
+        item = L.build_work_items(conn)[0]
+        assert item["doing_events"] == 17
+        assert item["doing_by_source"]["grow_journal"] == 7
+
+    def test_a_journal_only_body_of_work_qualifies_on_two_goal_mentions(self):
+        conn = _conn()
+        self._journal_entity(conn, "Mursion", 4, L.MIN_GOALS_FOR_JOURNAL_WORK)
+        assert [i["label"] for i in L.build_work_items(conn)] == ["Mursion"]
+
+    def test_places_of_daily_life_still_do_not_qualify(self):
+        conn = _conn()
+        self._journal_entity(conn, "the Whole Foods", 6, 0)
+        self._journal_entity(conn, "LA Fitness", 3, 0)
+        assert L.build_work_items(conn) == []
+
+
+class TestAWrongDatasetIsNotAnAnswer:
+    """A caller naming a dataset with no messages got every body of work back with
+    "who has heard is unknown" — true of the id, useless to the person, and the node held
+    the messages under another dataset the whole time."""
+
+    def _corpus(self):
+        conn = _conn()
+        _entity(conn, "e1", "project", "Topos")
+        _mentions(conn, "e1", "github_activity", 40)
+        for i in range(4):
+            conn.execute("INSERT INTO conversation_messages VALUES (?,?,?,?,?,?,?,?,?)",
+                         ("ds-real", f"m{i}", "shipping Topos today", 1, "c1", "self",
+                          "2026-08-01T00:00:00Z", "imessage", None))
+        return conn
+
+    def test_a_dataset_without_messages_falls_back_to_the_one_with_them(self):
+        conn = self._corpus()
+        out = L.rollup(conn, "user:default:device")
+        assert out["dataset_id"] == "ds-real"
+        assert out["coverage"]["telling_measurable"] is True
+
+    def test_the_fallback_reports_both_ids(self):
+        conn = self._corpus()
+        cov = L.rollup(conn, "user:default:device")["coverage"]
+        assert cov["dataset_resolved_by_engine"] is True
+        assert cov["dataset_requested"] == "user:default:device"
+
+    def test_a_good_dataset_is_left_alone(self):
+        conn = self._corpus()
+        out = L.rollup(conn, "ds-real")
+        assert out["dataset_id"] == "ds-real"
+        assert out["coverage"]["dataset_resolved_by_engine"] is False

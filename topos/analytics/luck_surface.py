@@ -51,7 +51,13 @@ JOURNAL_SOURCES = ("grow_journal", "grow_data_file")
 #: How many of the owner's own goals must name a journal-only entity before it counts as
 #: work they are pursuing. Matched on WORD boundaries: substring matching let "first" collect
 #: 22 hits from "first draft" and "first pass" and promoted a truncation into a project.
-MIN_GOALS_FOR_JOURNAL_WORK = 3
+#:
+#: Set from the live corpus, not from taste. At 3 this dropped Mursion, TinyCloud and Yale
+#: (2 goal mentions each) alongside the cafes it was aimed at; at 2 those return while
+#: the Whole Foods (0), LA Fitness (0) and The Lantern Cafe (1) still do not. The journal is
+#: a first-class doing source -- it is in WORK_SOURCES -- and this gate exists only to keep
+#: places of daily life from being presented as bodies of the owner's work.
+MIN_GOALS_FOR_JOURNAL_WORK = 2
 
 #: Words extraction sometimes canonicalises into an entity. None of them is a body of work,
 #: and each would otherwise ride in on goal text that merely uses the word.
@@ -565,15 +571,26 @@ def rollup(conn: Any, dataset_id: str) -> Dict[str, Any]:
     # An unnamed dataset is answered from the record rather than refused; the id used is
     # reported below so the screen can say which one it read.
     resolved_by_engine = False
-    if not str(dataset_id or "").strip():
+    requested_dataset = str(dataset_id or "").strip()
+    if not requested_dataset:
         dataset_id = resolve_primary_dataset(conn)
         resolved_by_engine = bool(dataset_id)
+    elif not _has_messaging_substrate(conn, requested_dataset):
+        # The caller named a dataset that holds no messages. Answering it literally reports
+        # every body of work with "who has heard is unknown", which is true of the id and
+        # useless to the person — the node holds the messages, just under another dataset.
+        # Fall back and SAY SO; coverage carries both ids, so this is never silent.
+        primary = resolve_primary_dataset(conn)
+        if primary and primary != requested_dataset:
+            dataset_id = primary
+            resolved_by_engine = True
 
     items = compile_surfaces(conn, dataset_id, build_work_items(conn))
     if not items:
         return {"dataset_id": dataset_id, "work_items": [], "coverage": {
             "reason": "no body of work with authored evidence has emerged from the record yet",
-            "dataset_resolved_by_engine": resolved_by_engine}}
+            "dataset_resolved_by_engine": resolved_by_engine,
+            "dataset_requested": requested_dataset or None}}
 
     # DATASET-LEVEL LIBEL GUARD. Doing comes from entity_mentions, which is not scoped to a
     # dataset; telling comes from this dataset's messages. Point the read at a dataset with
@@ -647,6 +664,7 @@ def rollup(conn: Any, dataset_id: str) -> Dict[str, Any]:
             "reachable_people": len(population),
             "telling_measurable": messaging_present,
             "dataset_resolved_by_engine": resolved_by_engine,
+            "dataset_requested": requested_dataset or None,
         },
     }
 
