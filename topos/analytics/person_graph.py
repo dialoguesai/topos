@@ -17,12 +17,47 @@ Built on two decisions the owner made 2026-08-27 (PLAN_SOCIAL_GRAPH_PERSON_CENTR
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from typing import Any, Dict, List, Optional, Set
 
 #: Message traffic that is not a relationship. 29 of this node's 180 peers are SMS shortcodes
 #: (2FA codes, delivery notices); they are not people and must never occupy a social graph.
 PEER_CLASS_HUMAN = "human"
+
+
+def _normalized_name(value: Any) -> str:
+    return " ".join(re.sub(r"[^a-z ]", " ", str(value or "").lower()).split())
+
+
+def _digits10(value: Any) -> Optional[str]:
+    text = re.sub(r"\D", "", str(value or ""))
+    return text[-10:] if len(text) >= 10 else None
+
+
+def owner_identifiers(conn: Any) -> Dict[str, Any]:
+    """What this node canonically knows about who its owner is.
+
+    Deliberately NOT a name-similarity search. `Bravo Yankee` and `Charlie Yankee` are real
+    other people on this corpus who share the owner's surname; a fuzzy rule would swallow
+    them into the owner node and delete two humans from the graph.
+    """
+    names, phones = set(), set()
+    try:
+        for (dn,) in conn.execute("SELECT display_name FROM user_identity"):
+            n = _normalized_name(dn)
+            if n:
+                names.add(n)
+    except sqlite3.Error:
+        pass
+    try:
+        for (phone,) in conn.execute("SELECT my_phone_number FROM signal_identity"):
+            d = _digits10(phone)
+            if d:
+                phones.add(d)
+    except sqlite3.Error:
+        pass
+    return {"names": names, "phones": phones}
 
 
 def resolve_owner_identity(conn: Any) -> Dict[str, Any]:
@@ -43,10 +78,65 @@ def resolve_owner_identity(conn: Any) -> Dict[str, Any]:
         rows = conn.execute(
             "SELECT entity_id, canonical_name FROM entities WHERE is_self = 1").fetchall()
     except sqlite3.Error:
-        return {"canonical_id": None, "ids": set(), "label": "You"}
+        return {"canonical_id": None, "ids": set(), "label": "You", "merge_candidates": []}
     ids = {str(r[0]) for r in rows if r and r[0]}
+
+    # `is_self` alone missed SIX owner entities on the live node — `Jonny Johnson` (29
+    # mentions), `Jonny` (20), `Delta Yankee` (13), and more — so the owner was drawn on
+    # their own social graph as up to six separate contacts. These three rules use what the
+    # node actually KNOWS rather than what a name looks like.
+    known = owner_identifiers(conn)
+    candidates: List[Dict[str, str]] = []
+    try:
+        people = conn.execute(
+            "SELECT entity_id, canonical_name, contact_id FROM entities"
+            " WHERE entity_type='person'").fetchall()
+    except sqlite3.Error:
+        people = []
+    for eid, name, contact_id in people:
+        eid = str(eid)
+        if eid in ids:
+            continue
+        why = None
+        if contact_id:
+            try:
+                if conn.execute("SELECT 1 FROM contacts WHERE contact_id=? AND is_self=1",
+                                (contact_id,)).fetchone():
+                    why = "your own contact card"
+            except sqlite3.Error:
+                pass
+        if not why and _normalized_name(name) and _normalized_name(name) in known["names"]:
+            why = "the name you gave this node"
+        if not why and contact_id and known["phones"]:
+            try:
+                for (ident,) in conn.execute(
+                        "SELECT identifier FROM contact_identifiers WHERE contact_id=?",
+                        (contact_id,)):
+                    if _digits10(ident) in known["phones"]:
+                        why = "your own phone number"
+                        break
+            except sqlite3.Error:
+                pass
+        if why:
+            ids.add(eid)
+            rows.append((eid, name))
+        else:
+            # A shared surname is NOT evidence. Offered for the owner to confirm, never taken.
+            tokens = set(_normalized_name(name).split())
+            for owner_name in known["names"]:
+                owner_tokens = set(owner_name.split())
+                if len(owner_tokens) > 1 and len(owner_tokens & tokens) >= len(owner_tokens) - 1 \
+                        and owner_tokens & tokens:
+                    candidates.append({
+                        "entity_id": eid, "label": str(name or ""),
+                        "reason": f"shares {', '.join(sorted(owner_tokens & tokens))} "
+                                  f"with your name — confirm before merging",
+                    })
+                    break
+
     if not ids:
-        return {"canonical_id": None, "ids": set(), "label": "You"}
+        return {"canonical_id": None, "ids": set(), "label": "You",
+                "merge_candidates": candidates}
 
     best, best_edges, best_name = None, -1, None
     for eid, name in rows:
@@ -62,7 +152,8 @@ def resolve_owner_identity(conn: Any) -> Dict[str, Any]:
     label = clean_label(best_name)
     if label.lower() in ("", "owner", "self", "me"):
         label = "You"
-    return {"canonical_id": best, "ids": ids, "label": label, "edge_count": best_edges}
+    return {"canonical_id": best, "ids": ids, "label": label, "edge_count": best_edges,
+            "merge_candidates": candidates}
 
 
 def clean_label(value: Any) -> str:
@@ -102,6 +193,10 @@ def build_person_nodes(conn: Any, dataset_id: str, *,
 
     owner = resolve_owner_identity(conn)
     owner_ids: Set[str] = set(owner["ids"])
+    # The owner's own handles. A self-thread ("Notes to Self", or texting your own number)
+    # arrives as an ordinary peer that resolves to NO entity, so the entity check above never
+    # fires and the owner is drawn as one of their own contacts.
+    owner_phones = owner_identifiers(conn)["phones"]
 
     peers: List[str] = []
     try:
@@ -133,6 +228,8 @@ def build_person_nodes(conn: Any, dataset_id: str, *,
         contact_id, entity_id, display = idents.get(peer, (None, None, None))
         if entity_id and str(entity_id) in owner_ids:
             continue  # the owner's own handle is not a peer
+        if owner_phones and _digits10(peer) in owner_phones:
+            continue  # messaging yourself is not a relationship
         # A person with an entity id keys on it, so a second identity for the same human
         # lands on the SAME node instead of creating a duplicate (owner decision D-3).
         key = f"ent:{entity_id}" if entity_id else f"msg:{peer}"
@@ -149,6 +246,28 @@ def build_person_nodes(conn: Any, dataset_id: str, *,
             n["label"] = clean_label(display)
 
     # --- mentioned ------------------------------------------------------------------
+    # Grouped by SOURCE and authorship as well as entity, because the band depends on the
+    # posture of each source the person appears under and on whether the owner wrote the row.
+    try:
+        detail = conn.execute(
+            "SELECT e.entity_id, m.source_id, COALESCE(m.authored_by_owner,0), COUNT(*)"
+            "  FROM entity_mentions m JOIN entities e ON e.entity_id = m.entity_id"
+            " WHERE e.entity_type = 'person'"
+            " GROUP BY e.entity_id, m.source_id, COALESCE(m.authored_by_owner,0)").fetchall()
+    except sqlite3.Error:
+        detail = []
+    postures = source_postures(conn, dataset_id, {d[1] for d in detail})
+    facts: Dict[str, Dict[str, Any]] = {}
+    for entity_id, source_id, authored, n in detail:
+        f = facts.setdefault(str(entity_id), {
+            "sources": set(), "owner_authored": 0, "non_ambient": 0, "mentions": 0})
+        f["sources"].add(str(source_id))
+        f["mentions"] += int(n or 0)
+        if int(authored or 0) == 1:
+            f["owner_authored"] += int(n or 0)
+        if postures.get(str(source_id), "mixed") != POSTURE_AMBIENT:
+            f["non_ambient"] += int(n or 0)
+
     try:
         rows = conn.execute(
             "SELECT e.entity_id, MAX(e.canonical_name), COUNT(*)"
@@ -180,6 +299,15 @@ def build_person_nodes(conn: Any, dataset_id: str, *,
         n["message_count"] = sum(volume.get(k, 0) for k in n["messenger_keys"])
         # A node with no alphabetic label is a phone number on screen. Say so explicitly
         # rather than letting the caller infer it from the shape of the string.
+        f = facts.get(str(n.get("entity_id") or ""), {})
+        n["band"], n["band_reason"] = classify_band(
+            messaged=n["evidence"]["messaged"],
+            owner_authored=int(f.get("owner_authored", 0)),
+            distinct_sources=len(f.get("sources", ())),
+            non_ambient_mentions=int(f.get("non_ambient", 0)),
+            mention_count=int(n["mention_count"]),
+        )
+        n["sources"] = sorted(f.get("sources", ()))
         n["needs_name"] = not bool(n["label"])
         if not n["label"]:
             n["label"] = n["messenger_keys"][0] if n["messenger_keys"] else (n["entity_id"] or "unknown")
@@ -198,6 +326,9 @@ def build_person_nodes(conn: Any, dataset_id: str, *,
             "label": owner["label"],
             "evidence": {"messaged": True, "mentioned": True},
             "is_owner": True,
+            "band": BAND_CORE,
+            "band_reason": "this is you",
+            "sources": [],
             "message_count": sum(volume.values()),
             "mention_count": 0,
             "needs_name": False,
@@ -243,6 +374,65 @@ def naming_queue(conn: Any, dataset_id: str, *, limit: int = 25) -> Dict[str, An
                                    "address book, and 30 of those are already named"),
         },
     }
+
+
+# --------------------------------------------------------------------------- bands
+
+#: How strongly the record supports treating someone as part of the owner's life. Bands, not
+#: a score: a band can state its reason in a sentence the owner can argue with, and a score
+#: cannot.
+BAND_CORE = "core"
+BAND_NAMED = "named"
+BAND_DISCUSSED = "discussed"
+BAND_AMBIENT = "ambient"
+BAND_ORDER = (BAND_CORE, BAND_NAMED, BAND_DISCUSSED, BAND_AMBIENT)
+
+#: Sources whose rows are exposure rather than expression. Read from the SOURCE CONTRACT
+#: (`sources.registry.effective_posture`), never from a list of connector names — the first
+#: draft of this model ranked grow_journal > imessage > browser_visits, which is three
+#: source_ids that happen to be on one node and worthless to anybody who connects Slack.
+POSTURE_AMBIENT = "ambient"
+
+
+def source_postures(conn: Any, dataset_id: str, source_ids) -> Dict[str, str]:
+    """posture per source, honouring the owner's per-connector override.
+
+    An unknown source resolves to `mixed` — the registry's own default, and the safe
+    direction: a new connector's people are neither promoted to Core nor buried as Ambient
+    until its rows say more.
+    """
+    out: Dict[str, str] = {}
+    try:
+        from ..sources.registry import effective_posture
+    except Exception:  # noqa: BLE001 — posture is a refinement; the graph still works without
+        return {str(s): "mixed" for s in source_ids}
+    for source_id in {str(s) for s in source_ids if s}:
+        try:
+            out[source_id] = str(effective_posture(source_id, dataset_id, conn) or "mixed")
+        except Exception:  # noqa: BLE001
+            out[source_id] = "mixed"
+    return out
+
+
+def classify_band(*, messaged: bool, owner_authored: int, distinct_sources: int,
+                  non_ambient_mentions: int, mention_count: int):
+    """(band, reason). Pure, and deliberately free of any connector name.
+
+    The reason is not decoration. "Seen once, on a page you visited" is falsifiable and the
+    owner can correct it; a rank cannot be argued with.
+    """
+    if messaged:
+        return BAND_CORE, "you exchange messages with them"
+    if owner_authored > 0:
+        return BAND_NAMED, "you wrote their name down yourself"
+    if distinct_sources >= 2:
+        return BAND_NAMED, f"they turn up in {distinct_sources} different places"
+    if non_ambient_mentions > 0 and mention_count >= 2:
+        return BAND_DISCUSSED, f"mentioned {mention_count} times in things you took part in"
+    if non_ambient_mentions > 0:
+        return BAND_AMBIENT, "mentioned once, in something you took part in"
+    return BAND_AMBIENT, ("seen once in passing" if mention_count <= 1
+                          else f"seen {mention_count} times in passing, never discussed")
 
 
 # --------------------------------------------------------------------------- edges

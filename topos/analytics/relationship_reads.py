@@ -307,6 +307,9 @@ def read_person_graph(conn: Any, *, dataset_id: str,
             "needs_name": sum(1 for n in people if n.get("needs_name")),
             "edges": len(edges),
         },
+        "bands": {b: sum(1 for n in people if n.get("band") == b)
+                  for b in ("core", "named", "discussed", "ambient")},
+        "owner_merge_candidates": owner.get("merge_candidates", []),
         "attribution": {
             "observed": sum(1 for e in edges if e["attribution"] == "observed"),
             "owner_asserted": sum(1 for e in edges if e["attribution"] == "owner_asserted"),
@@ -323,6 +326,9 @@ def read_person_graph(conn: Any, *, dataset_id: str,
             "excluded": "automated shortcodes (2FA, delivery notices) are not people",
             "evidence_meaning": ("a node without `messaged` has no cadence, so warmth, drift "
                                  "and reciprocity are unavailable rather than zero"),
+            "band_basis": ("bands come from the SOURCE CONTRACT — each source's posture "
+                           "(personal/mixed/ambient) and whether you authored the row — never "
+                           "from a list of connector names, so a new connector sorts itself"),
             "attribution_meaning": ("every edge says who asserted it: observed (you messaged "
                                     "them), owner_asserted (your own record names them), "
                                     "in_your_records (someone named them to you), "

@@ -306,3 +306,104 @@ class TestEdgesCarryTheirAttribution:
         c.execute("INSERT INTO entity_mentions VALUES ('m1','e-owner','r1','grow_journal',1)")
         _, edges = self._edges(c)
         assert all(e["source"] != e["target"] for e in edges)
+
+
+class TestBandsFollowTheSourceContract:
+    """The first draft of this model ranked grow_journal > imessage > browser_visits — three
+    source_ids that happen to be on one node, and worthless to anyone who connects Slack.
+    Bands key on POSTURE (the source contract) and ROLE (who authored the row) instead."""
+
+    def test_no_connector_name_appears_in_the_salience_path(self):
+        """The guard against overfitting to one person's data. The moment a source_id literal
+        appears in a band condition, this model has started describing one node again."""
+        import inspect
+        import re as _re
+        from topos.analytics import person_graph as mod
+
+        src = inspect.getsource(mod.classify_band) + inspect.getsource(mod.source_postures)
+        for connector in ("grow_journal", "browser_visits", "imessage", "github_activity",
+                          "grow_data_file", "chatgpt", "slack", "gmail", "notion"):
+            assert connector not in src, f"{connector!r} hardcoded in the salience path"
+        # and the band constants themselves must not be connector names
+        assert not _re.search(r"_visits|_journal|imessage", " ".join(mod.BAND_ORDER))
+
+    def test_messaging_is_core(self):
+        assert PG.classify_band(messaged=True, owner_authored=0, distinct_sources=0,
+                                non_ambient_mentions=0, mention_count=0)[0] == PG.BAND_CORE
+
+    def test_an_owner_authored_mention_is_named_whatever_the_posture(self):
+        """github_activity is AMBIENT posture, yet 196 of its mentions are owner-authored —
+        that is the "GitHub repo owners are relevant, ambient browsing is not" distinction,
+        and it must come from the row, not from the connector."""
+        band, reason = PG.classify_band(messaged=False, owner_authored=3, distinct_sources=1,
+                                        non_ambient_mentions=0, mention_count=3)
+        assert band == PG.BAND_NAMED
+        assert "wrote their name" in reason
+
+    def test_corroboration_across_sources_is_named(self):
+        assert PG.classify_band(messaged=False, owner_authored=0, distinct_sources=2,
+                                non_ambient_mentions=0, mention_count=2)[0] == PG.BAND_NAMED
+
+    def test_recurring_non_ambient_mentions_are_discussed(self):
+        assert PG.classify_band(messaged=False, owner_authored=0, distinct_sources=1,
+                                non_ambient_mentions=4, mention_count=4)[0] == PG.BAND_DISCUSSED
+
+    def test_a_single_ambient_sighting_is_ambient(self):
+        band, reason = PG.classify_band(messaged=False, owner_authored=0, distinct_sources=1,
+                                        non_ambient_mentions=0, mention_count=1)
+        assert band == PG.BAND_AMBIENT and "passing" in reason
+
+    def test_many_ambient_sightings_are_still_ambient(self):
+        """38 browser sightings of a name is not a relationship. Volume alone never promotes."""
+        assert PG.classify_band(messaged=False, owner_authored=0, distinct_sources=1,
+                                non_ambient_mentions=0, mention_count=38)[0] == PG.BAND_AMBIENT
+
+    def test_every_band_states_a_reason(self):
+        for kw in ({"messaged": True}, {"owner_authored": 2}, {"distinct_sources": 3},
+                   {"non_ambient_mentions": 5, "mention_count": 5}, {"mention_count": 1}):
+            args = {"messaged": False, "owner_authored": 0, "distinct_sources": 0,
+                    "non_ambient_mentions": 0, "mention_count": 0, **kw}
+            band, reason = PG.classify_band(**args)
+            assert band in PG.BAND_ORDER and len(reason) > 10
+
+    def test_an_unknown_connector_resolves_to_mixed(self):
+        """Neither promoted nor buried until its rows say more."""
+        c = _conn()
+        assert PG.source_postures(c, "ds", {"a_connector_shipped_next_year"}) \
+            == {"a_connector_shipped_next_year": "mixed"}
+
+
+class TestTheOwnerIsNotTheirOwnContact:
+    """`is_self` alone missed SIX owner entities on the live node, so the owner was drawn on
+    their own social graph as up to six separate people."""
+
+    def test_a_shared_surname_is_never_evidence(self):
+        """`Bravo Yankee` and `Charlie Yankee` are real other people on this corpus. A fuzzy
+        name rule would have swallowed them into the owner and deleted two humans."""
+        c = _conn()
+        _person(c, "e-owner", "Owner", is_self=1)
+        _person(c, "e-other", "Bravo Yankee")
+        c.execute("CREATE TABLE user_identity (key TEXT, display_name TEXT, updated_at TEXT)")
+        c.execute("INSERT INTO user_identity VALUES ('k','Jonny Johnson','t')")
+        owner = PG.resolve_owner_identity(c)
+        assert "e-other" not in owner["ids"], "a surname match must not merge a stranger"
+        assert any(x["entity_id"] == "e-other" for x in owner["merge_candidates"])
+
+    def test_the_name_the_owner_gave_the_node_does_merge(self):
+        c = _conn()
+        _person(c, "e-owner", "Owner", is_self=1)
+        _person(c, "e-me", "Jonny Johnson")
+        c.execute("CREATE TABLE user_identity (key TEXT, display_name TEXT, updated_at TEXT)")
+        c.execute("INSERT INTO user_identity VALUES ('k','Jonny Johnson','t')")
+        assert "e-me" in PG.resolve_owner_identity(c)["ids"]
+
+    def test_messaging_yourself_is_not_a_relationship(self):
+        """A self-thread arrives as an ordinary peer that resolves to NO entity, so the
+        entity check never fires and the owner appears as one of their own contacts."""
+        c = _conn()
+        _person(c, "e-owner", "Owner", is_self=1)
+        c.execute("CREATE TABLE signal_identity (dataset_id TEXT, my_phone_number TEXT,"
+                  " my_signal_id TEXT, updated_at TEXT)")
+        c.execute("INSERT INTO signal_identity VALUES ('ds','+15125084318',NULL,'t')")
+        _dyad(c, "+15125084318", msgs=25)
+        assert [n for n in PG.build_person_nodes(c, "ds") if not n["is_owner"]] == []
