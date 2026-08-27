@@ -58,22 +58,22 @@ def legacy_only(monkeypatch):
 
 # ------------------------------------------------------------------- door
 def test_owner_key_resolves_owner_app(two_keys):
-    p = resolve_request_principal(_creds("owner-key"))
+    p = resolve_request_principal(credentials=_creds("owner-key"))
     assert p is not None and p.cls == OWNER_APP and p.channel == "local_http"
 
 
 def test_legacy_key_demotes_to_third_party(two_keys):
-    p = resolve_request_principal(_creds("legacy-key"))
+    p = resolve_request_principal(credentials=_creds("legacy-key"))
     assert p is not None and p.cls == THIRD_PARTY
 
 
 def test_unconfigured_owner_key_is_legacy_mode(legacy_only):
-    assert resolve_request_principal(_creds("legacy-key")) is None
+    assert resolve_request_principal(credentials=_creds("legacy-key")) is None
 
 
 def test_wrong_key_is_401_not_a_principal(two_keys):
     with pytest.raises(HTTPException) as exc:
-        resolve_request_principal(_creds("not-a-key"))
+        resolve_request_principal(credentials=_creds("not-a-key"))
     assert exc.value.status_code == 401
 
 

@@ -132,6 +132,34 @@ def _emit_startup_banner(host: str, port: int, package_name: str = DEFAULT_PACKA
     os.environ["TOPOS_STARTUP_BANNER_EMITTED"] = "1"
 
 
+def _resolve_bind_host(explicit: str | None) -> str:
+    """Bind LOOPBACK by default — a personal node is not a LAN service.
+
+    The old default was 0.0.0.0, which published the node's whole authenticated
+    API to every device on the network: the only thing between a coffee-shop
+    peer and the owner's data was a long-lived bearer token that lives in a
+    dotfile, rides along in backups, and used to be pasted into MCP configs.
+    Loopback removes the network as an attack surface entirely.
+
+    Escapes, in order: an explicit --host wins; TOPOS_HOST covers containers
+    and deliberate LAN exposure; hosted-pool nodes still need 0.0.0.0 because
+    their traffic arrives from outside the container's loopback.
+    """
+    if explicit:
+        return explicit
+    env_host = str(os.environ.get("TOPOS_HOST") or "").strip()
+    if env_host:
+        return env_host
+    try:
+        from topos.config.settings import settings as _s
+
+        if bool(getattr(_s, "hosted_pool_lease_enabled", False)):
+            return "0.0.0.0"
+    except Exception:  # noqa: BLE001 — settings trouble must not change the bind
+        pass
+    return "127.0.0.1"
+
+
 def _probe_running_node(host: str, port: int) -> dict | None:
     """Return the running node's shell status (or minimal version dict) if one
     is already serving this port; None when the port is free or not a topos node."""
@@ -209,8 +237,8 @@ def _maybe_offer_self_update(
 )
 @click.option(
     "--host",
-    default="0.0.0.0",
-    help="Host to bind to (default: 0.0.0.0)",
+    default=None,
+    help="Host to bind to (default: 127.0.0.1; 0.0.0.0 in hosted mode or via TOPOS_HOST).",
 )
 @click.option(
     "--skip-update-check",
@@ -298,6 +326,8 @@ def main(
 
     _load_env_file(USER_ENV_PATH)
     _load_env_file(LEGACY_ENV_PATH)
+
+    host = _resolve_bind_host(host)
 
     if app_mode and tray is None:
         tray = True

@@ -101,7 +101,7 @@ def registry_db(conn, monkeypatch):
 
 def test_tpk_token_resolves_named_third_party_principal(registry_db):
     token = mint_client_token(registry_db, client_id="claude-desktop")["token"]
-    p = resolve_request_principal(_creds(token))
+    p = resolve_request_principal(credentials=_creds(token))
     assert p is not None
     assert p.cls == THIRD_PARTY and p.client_id == "claude-desktop"
 
@@ -110,7 +110,7 @@ def test_revoked_tpk_token_is_401(registry_db):
     token = mint_client_token(registry_db, client_id="claude-desktop")["token"]
     revoke_client(registry_db, "claude-desktop")
     with pytest.raises(HTTPException) as exc:
-        resolve_request_principal(_creds(token))
+        resolve_request_principal(credentials=_creds(token))
     assert exc.value.status_code == 401
 
 
@@ -119,7 +119,7 @@ def test_require_api_key_rejects_tpk_tokens(registry_db):
     guarded by require_api_key stays closed to enrolled clients."""
     token = mint_client_token(registry_db, client_id="claude-desktop")["token"]
     with pytest.raises(HTTPException) as exc:
-        require_api_key(_creds(token))
+        require_api_key(credentials=_creds(token))
     assert exc.value.status_code == 401
 
 

@@ -1,15 +1,35 @@
 import secrets
 from typing import Optional
 
-from fastapi import Depends, HTTPException, status
+from fastapi import Depends, HTTPException, Request, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 
 from .principal import OWNER_APP, THIRD_PARTY, Principal
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
+#: Peers that are unambiguously this machine. The owner CLASS is confined to
+#: them: a credential that leaked into a log, a backup, or a synced dotfile
+#: must not confer owner privilege from somewhere else on the network. The
+#: node also binds loopback by default now, so this is the second layer.
+_LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost", "::ffff:127.0.0.1"})
 
-def require_api_key(credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme)) -> None:
+
+def _peer_is_loopback(request: "Optional[Request]") -> bool:
+    client = getattr(request, "client", None) if request is not None else None
+    host = str(getattr(client, "host", "") or "").strip().lower()
+    if not host:
+        # No peer info (test client, ASGI transports without a peer): treat as
+        # local — the UDS lane and the test suite both land here, and neither
+        # is a network path.
+        return True
+    return host in _LOOPBACK_HOSTS
+
+
+def require_api_key(
+    request: Request = None,  # noqa: B008 — populated by FastAPI
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+) -> None:
     """Validate incoming Bearer token against TOPOS_KEY or TOPOS_OWNER_KEY.
 
     Authentication only — WHO the caller is (client class) is the separate
@@ -41,6 +61,7 @@ def require_api_key(credentials: HTTPAuthorizationCredentials = Depends(bearer_s
 
 
 def resolve_request_principal(
+    request: Request = None,  # noqa: B008 — populated by FastAPI
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
 ) -> Optional[Principal]:
     """Authenticate the Bearer and resolve the channel-verified Principal.
@@ -73,6 +94,10 @@ def resolve_request_principal(
     owner = str(getattr(runtime_settings, "topos_owner_key", None) or "")
 
     if owner and secrets.compare_digest(presented.encode(), owner.encode()):
+        if not _peer_is_loopback(request):
+            # Authenticates, but the owner CLASS is loopback-only: a leaked
+            # owner key used from the network is treated as a third party.
+            return Principal(cls=THIRD_PARTY, channel="remote_http")
         return Principal(cls=OWNER_APP, channel="local_http")
     # P2: per-client enrolled tokens (tpk_<client_id>.<secret>). Resolved before
     # the shared legacy key so an enrolled client is NAMED in its principal —
