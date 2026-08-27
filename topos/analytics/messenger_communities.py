@@ -473,8 +473,40 @@ def _compute_directed_lane(db: Any, dataset_id: str, source_ids: Optional[Sequen
     # rollup is lifetime-wide either way, so the filter only applies to the edge lane.
     only = str(source_ids[0]) if source_ids and len(source_ids) == 1 else None
     acc = extract_directed_dyadic_edges(db, dataset_id, connector=only)
-    rows = rows_for_persist(acc, dataset_id, DEFAULT_SESSION_GAP_SECONDS)
+    from .messenger_directed import attach_affect, attach_topics
+    rows = rows_for_persist(acc, dataset_id, DEFAULT_SESSION_GAP_SECONDS,
+                            affect=attach_affect(db, dataset_id, acc),
+                            topics=attach_topics(db, dataset_id, acc))
+    # BOTH computations complete BEFORE either persist. The first version persisted edges,
+    # then computed and persisted dyads: a failure in the rollup left the two tables
+    # describing different corpora while totals reported neither — a split brain the
+    # adversarial pass demonstrated. Compute everything, then write; a failure now leaves
+    # the previous consistent state intact.
+    dyad_rows = build_dyad_stats(db, dataset_id)
     periods = sorted({r[1] for r in rows})
     edges = persist_directed_edges(db, dataset_id, rows, periods=periods)
-    dyads = persist_dyad_stats(db, dataset_id, build_dyad_stats(db, dataset_id))
-    return {"directed_edges_written": edges, "dyads_written": dyads}
+    dyads = persist_dyad_stats(db, dataset_id, dyad_rows)
+    # L1-8: fill the nullable person-id columns where identity is unambiguous. Runs after
+    # persistence because it reads the tables it fills; abstains on ambiguity.
+    from .messenger_directed import backfill_person_ids
+    ident = backfill_person_ids(db, dataset_id)
+    # G3: the calibrated warmth band is the authoritative label and is stored with the
+    # dyad, so every reader — including ones that never import the kernel — gets ONE
+    # answer to "what state is this relationship".
+    banded = 0
+    try:
+        from ..features.derivation.social_kernels import _dyad_rows, compute_warmth
+        from ..storage.db.write_gate import batched_writes
+
+        bands = compute_warmth(_dyad_rows(db, dataset_id))
+        with batched_writes(db):
+            for b in bands:
+                cur = db.execute(
+                    "UPDATE messenger_dyad_stats SET warmth_band=? WHERE dataset_id=?"
+                    " AND (a_key=? OR b_key=?) AND involves_self=1",
+                    (b["warmth_band"], dataset_id, b["peer_key"], b["peer_key"]))
+                banded += cur.rowcount
+    except Exception as exc:  # noqa: BLE001 — labelling must not fail the lane
+        logger.warning("warmth banding failed for %s: %s", dataset_id, exc)
+    return {"directed_edges_written": edges, "dyads_written": dyads,
+            "person_ids_resolved": ident.get("resolved", 0), "warmth_banded": banded}

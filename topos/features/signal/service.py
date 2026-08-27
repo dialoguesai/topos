@@ -138,7 +138,7 @@ class SignalService:
         use_hybrid = vector_hybrid_enabled() and search_mode == "hybrid"
         conn = self._conn if self._conn is not None else get_db_connection()
         if use_hybrid and conn is not None:
-            fts_ids = fts_search(conn, q, limit=fetch_limit)
+            fts_ids = fts_search(conn, q, limit=fetch_limit, source_id=source_id)
             items = merge_hybrid_results(conn, items, fts_ids, limit=fetch_limit)
 
         # Rank by RRF score when hybrid ran (comparable across contributors);

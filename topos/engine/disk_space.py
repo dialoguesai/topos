@@ -45,7 +45,7 @@ logger = logging.getLogger("topos.engine.disk_space")
 #: own. Not tuned to a measurement — it is the smallest number that is obviously
 #: more than "a few writes", raised to 10 GB when the floor became a setting so
 #: the shipped default matches what Settings -> General shows.
-DEFAULT_MIN_FREE_BYTES = 10 * 1024**3
+DEFAULT_MIN_FREE_BYTES = 10_000_000_000
 
 #: Historical spelling, kept because callers and tests import it by this name.
 DEFAULT_RESERVE_BYTES = DEFAULT_MIN_FREE_BYTES

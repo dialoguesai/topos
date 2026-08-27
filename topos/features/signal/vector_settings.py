@@ -27,6 +27,18 @@ def vector_hybrid_enabled() -> bool:
     return _flag("TOPOS_VECTOR_HYBRID", "on")
 
 
+def derived_object_index_enabled() -> bool:
+    """Whether the derived-object lane is searched and written.
+
+    Off is a real position, not just a rollback: it makes the node answer from
+    raw records only. Both the writer and the reader consult this, so turning
+    it off stops the index growing AND stops it being served — an index that
+    keeps being written while nothing reads it is the state this whole lane
+    was built to end.
+    """
+    return _flag("TOPOS_DERIVED_OBJECT_INDEX", "on")
+
+
 def vector_ann_mode() -> str:
     mode = os.environ.get("TOPOS_VECTOR_ANN", "auto").strip().lower()
     if mode in ("auto", "sqlite_vec", "pgvector", "brute_force"):

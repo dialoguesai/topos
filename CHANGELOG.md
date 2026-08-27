@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.33] — 2026-08-26
+
 ### Security
 - **TCP demotion complete: no bearer mints the owner class on TCP.** The owner
   key still authenticates everywhere `require_api_key` guards, but resolves to
@@ -254,6 +256,45 @@ The machine-readable twin of each release is
   "obviously more than a few writes" and no more; 10 GB is what the settings screen now
   shows. Decimal because `format_bytes` divides by 1e9 like a file manager does, so a
   floor typed as 10 does not read back as 10.7 GB.
+
+### Added
+- **[O] The net-subject policy table ships.** `net_subject_policy_v1` is registered as
+  migration 69, the same way 63 landed: written and deliberately held out of the repo
+  head so it could not stamp a live database past its installed engine, then shipped by
+  a release. The table holds OVERRIDES to the net-subject rule — the node may hold facts
+  about people it can actually name — so its absence was never a denial. What the owner
+  could not do until now is record an explicit `deny` for someone the node *can* name;
+  the only lever was the blackhole, which is read-side. An explicit row now wins in both
+  directions.
+
+### Fixed
+- **[S1] A gated `/healthcheck` answered 500 instead of 401.** `require_api_key`
+  grew a leading `request` parameter with the principal fabric, and `api/health.py`
+  calls it directly rather than through FastAPI's dependency injection — so the
+  positional call bound the credentials to `request`, left `credentials` holding its
+  `Depends(...)` default, and raised `'Depends' object has no attribute 'scheme'`
+  inside the handler. With `ENABLE_HEALTH_AUTH` on, an unauthenticated probe got a
+  server error where the route means to refuse. Nothing in the engine suite covered
+  the gated path (the setting defaults off), so it was only visible from the control
+  plane, which imports this module and does turn it on; there is now a test here.
+- **[O] Three CI breaks on main, fixed rather than carried into a release.** The
+  handler-registry snapshot had not learned the seven `mcp_client_*` handlers the
+  connected-apps work added, so every push reported "registry drifted". The local
+  `verify_claim` tests still stubbed `require_api_key` after the routes moved to
+  `resolve_request_principal`, so the real door ran and answered 401 — a test that
+  had stopped reaching the code it was written to protect. And `test_peer_pid_is_this_process`
+  asserted a `LOCAL_PEERPID` result unconditionally, which tests the platform rather
+  than the code: the whole attestation lane (libproc + codesign) is macOS-only and
+  `_peer_pid` is documented to return None where the option does not exist, so it is
+  skipped off Darwin.
+- **[O] Evicting a model no longer leaves the pack resolver naming it.** The resolver
+  caches the installed-tag set for 30 seconds and demotes any role bound to a tag missing
+  from it. After a reclaim sweep deleted a model, that cache went on naming it for the rest
+  of the window, so a role could resolve to a model that was no longer on disk — the exact
+  404 the eviction protection rules exist to prevent, arriving by the back door.
+  `reclaim_for` now resets the cache, and only when it actually deleted something (a reset
+  on a no-op sweep would throw away a valid probe and make the next resolve open a socket
+  for nothing).
 
 ## [1.3.32] — 2026-08-26
 

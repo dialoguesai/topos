@@ -143,3 +143,33 @@ def test_a_shortcode_is_not_a_relationship():
     assert classify_peer("262966") == PEER_CLASS_AUTOMATED
     assert classify_peer("+15125551234") == PEER_CLASS_HUMAN
     assert classify_peer("someone@example.com") == PEER_CLASS_HUMAN
+
+
+def test_affect_columns_upgrade_a_table_that_predates_them(tmp_path):
+    """The live shape, and the failure this prevents.
+
+    A node that ran an earlier build already has `messenger_directed_edges`, and
+    CREATE TABLE IF NOT EXISTS is a no-op on it — so a column added later would be missing
+    forever there while being present on every node installed after. That is the
+    silent-partial-schema failure P0-4 hit on messenger_social_edges.
+    """
+    c = sqlite3.connect(str(tmp_path / "old.db"))
+    c.execute(f"""CREATE TABLE {MESSENGER_DIRECTED_EDGES_TABLE} (
+        dataset_id TEXT NOT NULL, period_key TEXT NOT NULL, connector TEXT NOT NULL,
+        edge_kind TEXT NOT NULL DEFAULT 'dm', from_key TEXT NOT NULL, to_key TEXT NOT NULL,
+        msgs INTEGER NOT NULL DEFAULT 0, sessions_initiated INTEGER NOT NULL DEFAULT 0,
+        replies INTEGER NOT NULL DEFAULT 0, median_reply_latency_s REAL,
+        first_ts TEXT, last_ts TEXT, session_gap_seconds INTEGER NOT NULL,
+        from_person_id TEXT, to_person_id TEXT, created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (dataset_id, period_key, connector, edge_kind, from_key, to_key))""")
+    c.commit()
+    assert "affect_counts_json" not in _cols(c, MESSENGER_DIRECTED_EDGES_TABLE)
+
+    before = c.execute("PRAGMA user_version").fetchone()[0]
+    create_directed_tables(c)
+
+    cols = _cols(c, MESSENGER_DIRECTED_EDGES_TABLE)
+    assert "affect_counts_json" in cols and "affect_coverage" in cols
+    assert c.execute("PRAGMA user_version").fetchone()[0] == before
+    c.close()

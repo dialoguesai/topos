@@ -49,6 +49,10 @@ DEFAULT_SESSION_GAP_SECONDS = 6 * 3600
 PEER_CLASS_HUMAN = "human"
 PEER_CLASS_AUTOMATED = "automated"
 
+#: Rooms larger than this mint no broadcast edges — fan-out is quadratic in the roster, and
+#: a hundreds-strong room is an announcement channel, not a set of relationships.
+MAX_BROADCAST_ROSTER = 32
+
 #: What produced a directed edge. In the PRIMARY KEY on purpose.
 #:
 #: A single message to a 10-person room would otherwise mint 9 directed edges, and group
@@ -84,6 +88,14 @@ def dyad_key(a: str, b: str) -> tuple:
     return (x, y) if x <= y else (y, x)
 
 
+def _add_directed_column_if_missing(conn: Any, column: str, col_type: str) -> None:
+    cols = {row[1] for row in
+            conn.execute(f"PRAGMA table_info({MESSENGER_DIRECTED_EDGES_TABLE})").fetchall()}
+    if column not in cols:
+        conn.execute(
+            f"ALTER TABLE {MESSENGER_DIRECTED_EDGES_TABLE} ADD COLUMN {column} {col_type}")
+
+
 def create_directed_tables(conn: Any) -> None:
     """DDL for both L1 tables.
 
@@ -111,12 +123,28 @@ def create_directed_tables(conn: Any) -> None:
             session_gap_seconds INTEGER NOT NULL,
             from_person_id TEXT,
             to_person_id TEXT,
+            affect_counts_json TEXT,
+            affect_coverage REAL,
             created_at TEXT NOT NULL,
             updated_at TEXT NOT NULL,
             PRIMARY KEY (dataset_id, period_key, connector, edge_kind, from_key, to_key)
         )
         """
     )
+    # Additive upgrade for a table that already exists. CREATE TABLE IF NOT EXISTS is a
+    # no-op on an existing table, so a column added later would be missing forever on every
+    # node that ran an earlier build — the silent-partial-schema failure P0-4 hit on
+    # messenger_social_edges. Same reasoning as there: additive ALTER, never a registry
+    # migration, so user_version is untouched.
+    _add_directed_column_if_missing(conn, "affect_counts_json", "TEXT")
+    _add_directed_column_if_missing(conn, "affect_coverage", "REAL")
+    # G6 — topic mix on the edge, same shape as affect: counts plus the coverage that
+    # keeps the mix honest. Populated from message_topics, which for iMessage fills only
+    # when the owner runs the topics backfill — enrolling it in every sync would put an
+    # LLM generation on every message, a cost the source registry declines on purpose.
+    _add_directed_column_if_missing(conn, "topic_counts_json", "TEXT")
+    _add_directed_column_if_missing(conn, "topic_coverage", "REAL")
+
     conn.execute(
         f"""
         CREATE INDEX IF NOT EXISTS idx_{MESSENGER_DIRECTED_EDGES_TABLE}_period
@@ -168,6 +196,15 @@ def create_directed_tables(conn: Any) -> None:
         ON {MESSENGER_DYAD_STATS_TABLE}(dataset_id, involves_self, peer_class)
         """
     )
+    # G3 — ONE labeler. tie_state (fixed thresholds) and the warmth kernel (calibrated)
+    # were two answers to "what state is this relationship", disagreeing at band
+    # boundaries on 9 of 35 live dyads. The calibrated band is authoritative and is
+    # STORED beside the legacy column; tie_state survives for old readers but new code
+    # reads warmth_band. Additive ALTER for tables that predate the column.
+    cols = {row[1] for row in
+            conn.execute(f"PRAGMA table_info({MESSENGER_DYAD_STATS_TABLE})").fetchall()}
+    if "warmth_band" not in cols:
+        conn.execute(f"ALTER TABLE {MESSENGER_DYAD_STATS_TABLE} ADD COLUMN warmth_band TEXT")
 
 
 # --------------------------------------------------------------------------- extraction
@@ -178,12 +215,33 @@ SELF_KEY = "self"
 
 
 def _parse_ts(value: Any) -> Any:
+    """Parse an event timestamp into an AWARE datetime, always.
+
+    Three shapes broke the first version, all found by adversarial testing:
+      * a tz-less string parses NAIVE, and one naive value crashes every aware
+        comparison after it — a single odd connector row zeroed the whole lane;
+      * epoch seconds appear as digit strings on the live corpus and silently
+        contributed nothing;
+      * TEXT ORDER BY sorts '+02:00' offsets lexicographically, not temporally.
+    Naive values are stamped UTC — the storage convention — because dropping them
+    would un-count real messages while guessing a local zone would invent times.
+    """
     if not value:
         return None
+    text = str(value).strip()
+    if text.replace(".", "", 1).isdigit():
+        try:
+            secs = float(text)
+            if secs > 1e12:  # milliseconds
+                secs /= 1000.0
+            return datetime.fromtimestamp(secs, tz=timezone.utc)
+        except (ValueError, OSError, OverflowError):
+            return None
     try:
-        return datetime.fromisoformat(str(value).replace("Z", "+00:00").replace(" ", "T"))
+        dt = datetime.fromisoformat(text.replace("Z", "+00:00").replace(" ", "T"))
     except ValueError:
         return None
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
 def _period_of(dt: Any) -> str:
@@ -234,7 +292,12 @@ def load_messages(conn: Any, dataset_id: str, connector: Any = None) -> list:
         sql += " AND source_id = ?"
         args.append(connector)
     sql += " ORDER BY conversation_id, event_at"
-    return conn.execute(sql, args).fetchall()
+    rows = conn.execute(sql, args).fetchall()
+    # TEXT ORDER BY sorts timezone OFFSETS lexicographically: '09:00+02:00' orders after
+    # '08:30+00:00' even though it happened first. Adversarial run measured the result —
+    # negative reply latencies and initiations credited to the responder. Re-sort by the
+    # parsed instant; the SQL ORDER BY remains only to make ties deterministic.
+    return sorted(rows, key=lambda r: (str(r[0] or ""), _parse_ts(r[3]) or datetime.min.replace(tzinfo=timezone.utc)))
 
 
 def classify_conversations(rows: list) -> dict:
@@ -247,7 +310,10 @@ def classify_conversations(rows: list) -> dict:
     """
     senders: dict = {}
     for conv, _mid, sender, _ea, is_self, _src, _rt in rows:
-        if not is_self and sender:
+        # A non-self sender whose id equals the owner sentinel is unattributable: counting
+        # it would merge a stranger into the owner's own node (the token 'self' exists as a
+        # sender_id on the live corpus, so this is a real row shape, not a hypothetical).
+        if not is_self and sender and str(sender) != SELF_KEY:
             senders.setdefault(conv, set()).add(str(sender))
     return {conv: (EDGE_KIND_DM if len(s) == 1 else EDGE_KIND_GROUP_BROADCAST)
             for conv, s in senders.items()}
@@ -279,7 +345,7 @@ def extract_directed_dyadic_edges(
     kinds = classify_conversations(rows)
     peers: dict = {}
     for conv, _mid, sender, _ea, is_self, _src, _rt in rows:
-        if not is_self and sender:
+        if not is_self and sender and str(sender) != SELF_KEY:
             peers.setdefault(conv, set()).add(str(sender))
 
     acc: dict = {}
@@ -302,6 +368,8 @@ def extract_directed_dyadic_edges(
         speaker = SELF_KEY if is_self else str(sender or "")
         if not speaker:
             continue
+        if not is_self and speaker == SELF_KEY:
+            continue  # unattributable: see classify_conversations
         if conv != cur_conv:
             cur_conv, last_dt, last_speaker = conv, None, None
 
@@ -338,6 +406,13 @@ def extract_directed_dyadic_edges(
                         e.latencies.append(latency)
             # Broadcast: speaker -> everyone else who has ever spoken in the room. Soft by
             # construction, kept in its own rows so it can be excluded wholesale.
+            #
+            # Bounded: fan-out is quadratic in the roster (a 500-speaker room mints 250k
+            # rows per period), and a room that size is an announcement channel, not a set
+            # of relationships — minting nothing is the honest reading of it.
+            if len(conv_peers) > MAX_BROADCAST_ROSTER:
+                last_dt, last_speaker = dt, speaker
+                continue
             room = set(conv_peers) | {SELF_KEY}
             for other in room:
                 if other == speaker:
@@ -351,15 +426,23 @@ def extract_directed_dyadic_edges(
     return acc
 
 
-def rows_for_persist(acc: dict, dataset_id: str, session_gap_seconds: int) -> list:
+def rows_for_persist(acc: dict, dataset_id: str, session_gap_seconds: int,
+                     affect: Any = None, topics: Any = None) -> list:
     now = _utc_now()
+    affect = affect or {}
+    topics = topics or {}
     out = []
-    for (period, conn_id, kind, a, b), e in acc.items():
+    for key, e in acc.items():
+        period, conn_id, kind, a, b = key
+        af = affect.get(key) or {}
+        tp = topics.get(key) or {}
         out.append((dataset_id, period, str(conn_id or ""), kind, a, b, e.msgs,
                     e.sessions_initiated, e.replies, _median(e.latencies),
                     e.first_ts.isoformat() if e.first_ts else None,
                     e.last_ts.isoformat() if e.last_ts else None,
-                    int(session_gap_seconds), None, None, now, now))
+                    int(session_gap_seconds), None, None,
+                    af.get("affect_counts_json"), af.get("affect_coverage"),
+                    tp.get("topic_counts_json"), tp.get("topic_coverage"), now, now))
     return out
 
 
@@ -385,8 +468,10 @@ def persist_directed_edges(conn: Any, dataset_id: str, rows: list, periods: Any 
             f"""INSERT OR REPLACE INTO {MESSENGER_DIRECTED_EDGES_TABLE}
                 (dataset_id, period_key, connector, edge_kind, from_key, to_key, msgs,
                  sessions_initiated, replies, median_reply_latency_s, first_ts, last_ts,
-                 session_gap_seconds, from_person_id, to_person_id, created_at, updated_at)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
+                 session_gap_seconds, from_person_id, to_person_id,
+                 affect_counts_json, affect_coverage, topic_counts_json, topic_coverage,
+                 created_at, updated_at)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", rows)
     return len(rows)
 
 
@@ -452,7 +537,7 @@ def build_dyad_stats(conn: Any, dataset_id: str, *, now: Any = None,
     kinds = classify_conversations(rows)
     peers: dict = {}
     for conv, _m, s, _e, sf, _src, _rt in rows:
-        if not sf and s:
+        if not sf and s and str(s) != SELF_KEY:
             peers.setdefault(conv, set()).add(str(s))
 
     per: dict = {}
@@ -490,7 +575,10 @@ def build_dyad_stats(conn: Any, dataset_id: str, *, now: Any = None,
 
     months = sorted(all_months)
     weeks = sorted(all_weeks)
-    ref = now or (max((t for d in per.values() for t in d["times"]), default=None))
+    # The reference instant is NOW, not the corpus maximum. Deriving it from the data let
+    # one future-dated message mark every other dyad dormant — the poisoned row set the
+    # clock for everyone. A caller may still pass `now` (tests do); production gets wall time.
+    ref = now or datetime.now(timezone.utc)
     stamp = _utc_now()
     out = []
     for (a, b), d in per.items():
@@ -499,7 +587,10 @@ def build_dyad_stats(conn: Any, dataset_id: str, *, now: Any = None,
         gaps = [(times[i] - times[i - 1]).total_seconds() / 86400.0
                 for i in range(1, len(times))]
         peer = b if a == SELF_KEY else a
-        recent_gap = ((ref - times[-1]).total_seconds() / 86400.0) if ref else None
+        # Clamped at zero: a future-dated LAST message yields a negative gap, which every
+        # downstream comparison reads as "extremely recent". The poison stays confined to
+        # the dyad that carries the bad row.
+        recent_gap = max(0.0, (ref - times[-1]).total_seconds() / 86400.0) if ref else None
         # own-baseline drift: recent rate vs this dyad's own lifetime rate, never a global one
         span_days = max((times[-1] - times[0]).total_seconds() / 86400.0, 1.0)
         baseline = total / span_days
@@ -512,7 +603,7 @@ def build_dyad_stats(conn: Any, dataset_id: str, *, now: Any = None,
         if ref is not None:
             age_days = (ref - times[0]).total_seconds() / 86400.0
             observable = max(min(recent_window_days, age_days), 1.0)
-        drift = round((recent / observable) / baseline, 4) if baseline > 0 else None
+        drift = round(min(max((recent / observable) / baseline, 0.0), 10.0), 4) if baseline > 0 else None
         recip_m = d["m_out"] & d["m_in"]
         recip_w = d["w_out"] & d["w_in"]
         # BALANCE IS OWNER-RELATIVE, and it has to be stated because the naive definition is
@@ -570,3 +661,204 @@ def ensure_directed_tables_present(conn: Any) -> None:
     with with_db_write():
         create_directed_tables(conn)
         commit_connection(conn)
+
+
+# --------------------------------------------------------------------------- L3: affect
+
+#: L3 asks for topic mix, affect and co-produced artifacts ON the edge. Measured on the live
+#: corpus, only ONE of the three has any messaging coverage at all:
+#:
+#:   message_topics     2,594 rows — 0 of them match a conversation message (all ChatGPT)
+#:   message_sentiment  1,792 rows — likewise, entirely ChatGPT ingestion
+#:   message_emotions   4,889 rows — 4,234 of them iMessage
+#:
+#: So "what do we talk about" is not buildable: the enrichment does not exist for messages.
+#: "How does it feel" is, and this is that. Recording the gap in code rather than only in a
+#: plan is deliberate — the next person to reach for topic-on-edge should find out here.
+def _message_labels(conn: Any, sql: str) -> dict:
+    try:
+        return {}.__class__((str(r[0]), str(r[1])) for r in conn.execute(sql).fetchall()
+                            if r[1] is not None)
+    except Exception:  # noqa: BLE001 — a node without the enrichment simply has none
+        return {}
+
+
+def attach_affect(conn: Any, dataset_id: str, acc: dict) -> dict:
+    """Fold per-message emotion labels onto the directed edges that carry those messages.
+
+    `affect_coverage` rides beside the counts because a distribution over three labelled
+    messages and a distribution over three hundred look identical once normalised, and a
+    reader that cannot tell them apart will rank relationships by how much of them happened
+    to get enriched. Coverage is the number that makes the mix honest.
+    """
+    import json as _json
+    from collections import Counter
+
+    try:
+        labels = {str(r[0]): str(r[1]) for r in conn.execute(
+            "SELECT message_id, emotion_label FROM message_emotions"
+            " WHERE emotion_label IS NOT NULL").fetchall()}
+    except Exception:  # noqa: BLE001 — a node without the enrichment simply has no affect
+        return {}
+    if not labels:
+        return {}
+
+    rows = load_messages(conn, dataset_id)
+    kinds = classify_conversations(rows)
+    peers: dict = {}
+    for conv, _m, s, _e, sf, _src, _rt in rows:
+        if not sf and s and str(s) != SELF_KEY:
+            peers.setdefault(conv, set()).add(str(s))
+
+    tally: dict = {}
+    for conv, mid, sender, ea, is_self, src, _rt in rows:
+        if kinds.get(conv) != EDGE_KIND_DM:
+            continue
+        dt = _parse_ts(ea)
+        cp = peers.get(conv) or set()
+        if dt is None or not cp:
+            continue
+        peer = next(iter(cp))
+        a, b = (SELF_KEY, peer) if is_self else (peer, SELF_KEY)
+        key = (_period_of(dt), str(src or ""), EDGE_KIND_DM, a, b)
+        if key not in acc:
+            continue
+        t = tally.setdefault(key, {"counts": Counter(), "n": 0})
+        t["n"] += 1
+        lab = labels.get(str(mid))
+        if lab:
+            t["counts"][lab] += 1
+    return {k: {"affect_counts_json": _json.dumps(dict(v["counts"])),
+                "affect_coverage": round(sum(v["counts"].values()) / v["n"], 4) if v["n"] else 0.0}
+            for k, v in tally.items()}
+
+
+# --------------------------------------------------------------------------- L1-8: identity
+
+def resolve_peer_identities(conn: Any, peer_keys: list) -> dict:
+    """peer_key -> (contact_id, entity_id, display_name|None), by identifier match.
+
+    The write-time half of the person spine that L1 carries nullable columns for. Ambiguity
+    abstains: a key matching two contacts fills nothing, because a wrong person id on a
+    relationship row is worse than a missing one — it survives joins silently.
+
+    Measured before building (the reason this does NOT normalize formats): full digit-suffix
+    normalization gains ZERO names on the live corpus. The unnamed majority fails because
+    the address book never ingested a name for them at all (584 of 1,386 contacts carry
+    one), not because formats disagree. What this resolves, it resolves exactly.
+    """
+    out: dict = {}
+    if not peer_keys:
+        return out
+    try:
+        ident_rows = conn.execute(
+            "SELECT ci.identifier, ci.contact_id, c.display_name FROM contact_identifiers ci"
+            " LEFT JOIN contacts c ON c.contact_id = ci.contact_id").fetchall()
+        ent_rows = conn.execute(
+            "SELECT contact_id, entity_id FROM entities"
+            " WHERE contact_id IS NOT NULL AND entity_type='person'").fetchall()
+    except Exception:  # noqa: BLE001 — a corpus without these tables has no identities
+        return out
+    by_ident: dict = {}
+    for ident, cid, dn in ident_rows:
+        k = str(ident or "").strip().lower()
+        if k:
+            by_ident.setdefault(k, set()).add((str(cid), str(dn or "") or None))
+    ent_by_contact: dict = {}
+    for cid, eid in ent_rows:
+        ent_by_contact.setdefault(str(cid), []).append(str(eid))
+    for peer in peer_keys:
+        k = str(peer or "").strip().lower()
+        hits = by_ident.get(k) or set()
+        cids = {c for c, _ in hits}
+        if len(cids) != 1:
+            continue  # unknown, or ambiguous — abstain either way
+        cid = next(iter(cids))
+        ents = ent_by_contact.get(cid) or []
+        eid = ents[0] if len(ents) == 1 else None
+        dn = next((d for _, d in hits if d), None)
+        out[peer] = (cid, eid, dn)
+    return out
+
+
+def backfill_person_ids(conn: Any, dataset_id: str) -> dict:
+    """Fill the nullable person-id columns on both L1 tables from resolved identities."""
+    from ..storage.db.write_gate import batched_writes
+
+    try:
+        keys = {r[0] for r in conn.execute(
+            f"SELECT DISTINCT from_key FROM {MESSENGER_DIRECTED_EDGES_TABLE}"
+            f" WHERE dataset_id=? AND from_key != ?", (dataset_id, SELF_KEY))}
+        keys |= {r[0] for r in conn.execute(
+            f"SELECT DISTINCT to_key FROM {MESSENGER_DIRECTED_EDGES_TABLE}"
+            f" WHERE dataset_id=? AND to_key != ?", (dataset_id, SELF_KEY))}
+    except Exception:  # noqa: BLE001
+        return {"resolved": 0, "edges_updated": 0, "dyads_updated": 0}
+    ids = resolve_peer_identities(conn, sorted(keys))
+    edges = dyads = 0
+    with batched_writes(conn):
+        for peer, (cid, eid, _dn) in ids.items():
+            if not eid:
+                continue
+            cur = conn.execute(
+                f"UPDATE {MESSENGER_DIRECTED_EDGES_TABLE} SET from_person_id=?"
+                f" WHERE dataset_id=? AND from_key=?", (eid, dataset_id, peer))
+            edges += cur.rowcount
+            cur = conn.execute(
+                f"UPDATE {MESSENGER_DIRECTED_EDGES_TABLE} SET to_person_id=?"
+                f" WHERE dataset_id=? AND to_key=?", (eid, dataset_id, peer))
+            edges += cur.rowcount
+            cur = conn.execute(
+                f"UPDATE {MESSENGER_DYAD_STATS_TABLE} SET a_person_id=?"
+                f" WHERE dataset_id=? AND a_key=?", (eid, dataset_id, peer))
+            dyads += cur.rowcount
+            cur = conn.execute(
+                f"UPDATE {MESSENGER_DYAD_STATS_TABLE} SET b_person_id=?"
+                f" WHERE dataset_id=? AND b_key=?", (eid, dataset_id, peer))
+            dyads += cur.rowcount
+    return {"resolved": len(ids), "edges_updated": edges, "dyads_updated": dyads}
+
+
+def attach_topics(conn: Any, dataset_id: str, acc: dict) -> dict:
+    """Fold per-message topics onto the directed edges that carry those messages.
+
+    Same contract as `attach_affect`: counts plus coverage, because a topic mix over three
+    labelled messages and one over three hundred look identical once normalised. Reads
+    whatever `message_topics` holds — zero for iMessage until the owner runs the topics
+    backfill, and the coverage field says exactly that rather than hiding it.
+    """
+    import json as _json
+    from collections import Counter
+
+    labels = _message_labels(
+        conn, "SELECT COALESCE(message_id, record_id), topic FROM message_topics"
+              " WHERE topic IS NOT NULL")
+    if not labels:
+        return {}
+    rows = load_messages(conn, dataset_id)
+    kinds = classify_conversations(rows)
+    peers: dict = {}
+    for conv, _m, s, _e, sf, _src, _rt in rows:
+        if not sf and s and str(s) != SELF_KEY:
+            peers.setdefault(conv, set()).add(str(s))
+    tally: dict = {}
+    for conv, mid, sender, ea, is_self, src, _rt in rows:
+        if kinds.get(conv) != EDGE_KIND_DM:
+            continue
+        dt = _parse_ts(ea)
+        cp = peers.get(conv) or set()
+        if dt is None or not cp:
+            continue
+        peer = next(iter(cp))
+        a, b = (SELF_KEY, peer) if is_self else (peer, SELF_KEY)
+        key = (_period_of(dt), str(src or ""), EDGE_KIND_DM, a, b)
+        if key not in acc:
+            continue
+        t = tally.setdefault(key, {"counts": Counter(), "n": 0})
+        t["n"] += 1
+        lab = labels.get(str(mid))
+        if lab:
+            t["counts"][lab] += 1
+    return {k: {"topic_counts_json": _json.dumps(dict(v["counts"].most_common(8))),
+                "topic_coverage": round(sum(v["counts"].values()) / v["n"], 4) if v["n"] else 0.0}
+            for k, v in tally.items() if v["counts"]}

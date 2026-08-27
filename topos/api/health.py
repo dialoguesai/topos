@@ -23,7 +23,11 @@ async def healthcheck(
     from ..config.settings import settings as runtime_settings
 
     if runtime_settings.enable_health_auth:
-        require_api_key(credentials)
+        # By keyword: `require_api_key` grew a leading `request` parameter with the
+        # principal fabric, and a positional call binds the credentials to it — the
+        # credentials parameter then falls back to its `Depends(...)` default and
+        # this route answers 500 where it means to answer 401.
+        require_api_key(credentials=credentials)
     cp_status = (
         state.control_plane_client.get_connection_status()
         if state.control_plane_client and hasattr(state.control_plane_client, "get_connection_status")

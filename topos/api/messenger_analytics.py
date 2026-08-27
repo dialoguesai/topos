@@ -385,6 +385,33 @@ async def get_messenger_sources(dataset_id: str = Query(...)) -> Dict[str, Any]:
     return {"status": "ok", "dataset_id": dataset_id, "sources": [r["source_id"] for r in rows]}
 
 
+def _peer_labels(conn: Any, dataset_id: str, keys: List[str]) -> Dict[str, str]:
+    """Flat peer_key -> display string.
+
+    `resolve_participant_labels` is keyword-only and returns NESTED dicts
+    ({label, display_name, identifier}). The first version of these endpoints called it
+    positionally (TypeError -> HTTP 500 on every request that reached labelling) and would
+    then have embedded the nested object where a string was promised. Both defects were
+    invisible to the endpoint tests because they MOCKED the resolver — the mock is the
+    documented counter-example for why these tests now use the real one.
+    """
+    if not keys:
+        return {}
+    try:
+        raw = resolve_participant_labels(conn, dataset_id=dataset_id, participant_ids=keys)
+    except Exception:  # noqa: BLE001 — labels are decoration; data must still flow
+        return {}
+    out: Dict[str, str] = {}
+    for k, entry in (raw or {}).items():
+        if isinstance(entry, dict):
+            label = str(entry.get("label") or entry.get("display_name") or "").strip()
+        else:
+            label = str(entry or "").strip()
+        if label:
+            out[str(k)] = label
+    return out
+
+
 # --------------------------------------------------------------------------- L1 read
 
 @router.get("/messenger-analytics/relationships", dependencies=[Depends(require_api_key)])
@@ -411,8 +438,11 @@ def get_relationships(
     sql = (f"SELECT a_key, b_key, peer_class, total_msgs, a_to_b, b_to_a, balance, first_ts,"
            f" last_ts, active_periods, reciprocal_periods, longest_contact_streak_weeks,"
            f" longest_reciprocal_streak_weeks, longest_contact_streak_months, max_gap_days,"
-           f" median_gap_days, recent_gap_days, drift_ratio, tie_state"
-           f" FROM {MESSENGER_DYAD_STATS_TABLE} WHERE dataset_id = ? AND involves_self = 1")
+           f" median_gap_days, recent_gap_days, drift_ratio, tie_state, warmth_band"
+           f" FROM {MESSENGER_DYAD_STATS_TABLE} WHERE dataset_id = ? AND involves_self = 1"
+           # an owner-owner row (both keys 'self') is corpus damage, not a relationship —
+           # presenting it as one labels the owner as their own contact
+           f" AND NOT (a_key = '{SELF_KEY}' AND b_key = '{SELF_KEY}')")
     args: List[Any] = [dataset_id]
     if not include_automated:
         sql += " AND peer_class = ?"
@@ -426,7 +456,8 @@ def get_relationships(
     keys = ["a_key", "b_key", "peer_class", "total_msgs", "a_to_b", "b_to_a", "balance",
             "first_ts", "last_ts", "active_periods", "reciprocal_periods",
             "contact_streak_weeks", "reciprocal_streak_weeks", "contact_streak_months",
-            "max_gap_days", "median_gap_days", "days_since_last", "drift_ratio", "tie_state"]
+            "max_gap_days", "median_gap_days", "days_since_last", "drift_ratio", "tie_state",
+            "warmth_band"]
     out: List[Dict[str, Any]] = []
     for row in conn.execute(sql, args).fetchall():
         d = dict(zip(keys, tuple(row)))
@@ -451,12 +482,34 @@ def get_relationships(
             "median_gap_days": d["median_gap_days"],
             "max_gap_days": d["max_gap_days"],
             "drift_ratio": d["drift_ratio"],
+            # warmth_band is authoritative (calibrated, G3); tie_state is the legacy coarse
+            # label kept for old readers. A warm band beside a live drift alarm is not a
+            # contradiction — it is a close relationship that is SLOWING, and the pair of
+            # fields is how that is said.
+            "warmth_band": d["warmth_band"],
             "tie_state": d["tie_state"],
         })
-    labels = resolve_participant_labels(conn, dataset_id, [r["peer_key"] for r in out])
+    labels = _peer_labels(conn, dataset_id, [r["peer_key"] for r in out])
+    from ..analytics.messenger_directed import resolve_peer_identities
+    idents = resolve_peer_identities(conn, [r["peer_key"] for r in out])
+    unnamed = 0
     for r in out:
-        r["label"] = labels.get(r["peer_key"]) or r["peer_key"]
-    return {"dataset_id": dataset_id, "count": len(out), "relationships": out}
+        label = labels.get(r["peer_key"]) or r["peer_key"]
+        r["label"] = label
+        cid, eid, _dn = idents.get(r["peer_key"], (None, None, None))
+        r["contact_id"] = cid
+        r["person_id"] = eid
+        # Measured 2026-08-26: the address book carries a name for 584 of 1,386 contacts,
+        # and the messaging-active people are concentrated in the unnamed part — the top
+        # relationship (2,016 messages) has no name anywhere on the node. No engine work
+        # conjures a name that was never ingested; what the node CAN do is make asking
+        # cheap. `needs_name` + `contact_id` is that ask, wired to the existing
+        # PUT /sources/{source_id}/contacts/{contact_id} naming endpoint.
+        r["needs_name"] = bool(label == r["peer_key"] or not any(ch.isalpha() for ch in label))
+        if r["needs_name"]:
+            unnamed += 1
+    return {"dataset_id": dataset_id, "count": len(out), "unnamed_count": unnamed,
+            "relationships": out}
 
 
 @router.get("/messenger-analytics/directed-edges", dependencies=[Depends(require_api_key)])
@@ -493,3 +546,72 @@ def get_directed_edges(
     edges = [dict(zip(keys, tuple(r))) for r in conn.execute(sql, args).fetchall()]
     return {"dataset_id": dataset_id, "edge_kind": edge_kind, "count": len(edges),
             "edges": edges}
+
+
+@router.get("/messenger-analytics/relationship-signals", dependencies=[Depends(require_api_key)])
+def get_relationship_signals(
+    dataset_id: str = Query(...),
+    signal: str = Query("all", description="all | warmth | drift | reciprocity"),
+) -> Dict[str, Any]:
+    """L5 — the derived read of the relationship graph.
+
+    Everything here is calibrated against the owner's OWN distribution, and each response
+    carries the thresholds it was computed under: a warmth band is a claim about a person,
+    and a claim about a person should be able to say what would have changed it.
+
+    `excluded_below_floor` is reported rather than hidden. A dyad under the evidence floor
+    has not been judged and found wanting — it has not been judged, and saying so is the
+    difference between "you have 35 relationships" and "116 of your contacts are events".
+    """
+    conn = get_db_connection()
+    if conn is None:
+        return {"dataset_id": dataset_id, "error": "no database"}
+    from ..analytics.messenger_directed import ensure_directed_tables_present
+    from ..features.derivation.social_kernels import (_dyad_rows, apply_evidence_floor,
+                                                      compute_drift, compute_reciprocity,
+                                                      compute_warmth)
+
+    ensure_directed_tables_present(conn)
+    rows = _dyad_rows(conn, dataset_id)
+    kept, excluded = apply_evidence_floor(rows)
+    out: Dict[str, Any] = {
+        "dataset_id": dataset_id,
+        "dyads_considered": len(rows),
+        "dyads_above_floor": len(kept),
+        "excluded_below_floor": excluded,
+    }
+    if signal in ("all", "warmth"):
+        out["warmth"] = compute_warmth(rows)
+    if signal in ("all", "drift"):
+        out["drift_alarms"] = compute_drift(rows)
+    if signal in ("all", "reciprocity"):
+        out["reciprocity"] = compute_reciprocity(rows)
+
+    labels_for = {r["peer_key"] for k in ("warmth", "drift_alarms", "reciprocity")
+                  for r in out.get(k, [])}
+    labels = _peer_labels(conn, dataset_id, sorted(labels_for))
+    for k in ("warmth", "drift_alarms", "reciprocity"):
+        for r in out.get(k, []):
+            r["label"] = labels.get(r["peer_key"]) or r["peer_key"]
+    return out
+
+
+@router.get("/messenger-analytics/bench", dependencies=[Depends(require_api_key)])
+def get_bench() -> Dict[str, Any]:
+    """THE BENCH (R0·BENCH, plan L5-8) — computed at read, owner-only by construction.
+
+    Roles come from the owner's own recurring dated work (the engine's work-dimension topic
+    clusters); candidates from demonstrated-skill facts; ordering from the stored calibrated
+    warmth band. `roles_without_candidates` is a field, not a footnote — on a node where the
+    outward pack is disabled it IS the answer, and the coverage block says what would have
+    to change for candidates to appear.
+
+    Path debt, recorded: this is not messenger analytics, it simply lives on the router that
+    already exists rather than minting a new registration surface for one route.
+    """
+    conn = get_db_connection()
+    if conn is None:
+        return {"roles": [], "error": "no database"}
+    from ..features.derivation.social_bench import build_bench_slate
+
+    return build_bench_slate(conn)

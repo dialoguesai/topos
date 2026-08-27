@@ -110,6 +110,103 @@ def map_ner_type(ner_label: Optional[str]) -> Optional[str]:
     return _NER_TYPE_MAP.get(label, "topic")
 
 
+def _remap_derivation_corpus(conn: sqlite3.Connection, *, keep_id: str, absorb_id: str) -> dict:
+    """Repoint everything keyed on the absorbed entity that the edge/mention fold misses.
+
+    Each of these tables stores the subject as an opaque id, so a merge that skips them
+    leaves rows describing a person who no longer exists. `signal_objects` needs both the
+    key and the payload rewritten, because the subject appears in both and a reader that
+    trusts one over the other would see two different answers.
+    """
+    counts = {}
+    # signal_objects is rewritten in Python, never with SQL REPLACE. REPLACE is substring
+    # blind: absorbing `ent_abc` would also corrupt `ent_abc2`'s keys and payloads —
+    # demonstrated by the adversarial pass, and precisely the class of silent corruption a
+    # merge must never introduce. Keys are rewritten per `:`-delimited segment; payloads per
+    # exact JSON string value.
+    counts["signal_objects_key"] = counts["signal_objects_payload"] = 0
+    try:
+        rows = self_conn = None
+        rows = conn.execute(
+            "SELECT object_id, object_key, payload_json FROM signal_objects"
+            " WHERE object_key LIKE '%' || ? || '%' OR payload_json LIKE '%' || ? || '%'",
+            (absorb_id, absorb_id)).fetchall()
+        for oid, key, pj in rows:
+            new_key = ":".join(keep_id if seg == absorb_id else seg
+                               for seg in str(key or "").split(":"))
+            new_pj = pj
+            if pj and absorb_id in pj:
+                try:
+                    def _swap(v):
+                        if isinstance(v, str):
+                            return keep_id if v == absorb_id else v
+                        if isinstance(v, list):
+                            return [_swap(x) for x in v]
+                        if isinstance(v, dict):
+                            return {k: _swap(x) for k, x in v.items()}
+                        return v
+                    new_pj = json.dumps(_swap(json.loads(pj)), ensure_ascii=False)
+                except (ValueError, TypeError):
+                    new_pj = pj  # unparseable payload: leave it rather than corrupt it
+            if new_key != key or new_pj != pj:
+                conn.execute("UPDATE signal_objects SET object_key=?, payload_json=?"
+                             " WHERE object_id=?", (new_key, new_pj, oid))
+                if new_key != key:
+                    counts["signal_objects_key"] += 1
+                if new_pj != pj:
+                    counts["signal_objects_payload"] += 1
+    except sqlite3.Error:
+        pass
+    stmts = [
+        ("fact_conflicts",
+         "UPDATE fact_conflicts SET subject_entity_id=? WHERE subject_entity_id=?",
+         (keep_id, absorb_id)),
+        ("intelligence_exclusions",
+         "UPDATE intelligence_exclusions SET entity_id=? WHERE entity_id=?",
+         (keep_id, absorb_id)),
+        ("entity_blackholes",
+         "UPDATE entity_blackholes SET entity_id=? WHERE entity_id=?", (keep_id, absorb_id)),
+        ("net_subject_policy",
+         "UPDATE OR IGNORE net_subject_policy SET subject_entity_id=? WHERE subject_entity_id=?",
+         (keep_id, absorb_id)),
+    ]
+    for name, sql, args in stmts:
+        try:
+            counts[name] = conn.execute(sql, args).rowcount
+        except sqlite3.Error:
+            # A table this node does not have is not a failure — net_subject_policy ships
+            # ahead of its migration by design. Recording a zero keeps the summary honest.
+            counts[name] = 0
+    return counts
+
+
+def _write_merge_tombstone(conn: sqlite3.Connection, *, keep_id: str, absorb_id: str,
+                           name: str, aliases: list, identifiers: list) -> None:
+    """Record what was absorbed, so an incorrect merge is reviewable rather than only
+    re-ingestable. Created on demand: this is feature-owned state, and a registry migration
+    would bump user_version past an installed engine."""
+    try:
+        conn.execute(
+            """CREATE TABLE IF NOT EXISTS entity_merge_tombstones (
+                   absorbed_entity_id TEXT PRIMARY KEY,
+                   merged_into TEXT NOT NULL,
+                   canonical_name TEXT,
+                   aliases_json TEXT,
+                   identifiers_json TEXT,
+                   merged_at TEXT NOT NULL DEFAULT (datetime('now'))
+               )""")
+        conn.execute(
+            "INSERT OR REPLACE INTO entity_merge_tombstones"
+            " (absorbed_entity_id, merged_into, canonical_name, aliases_json, identifiers_json)"
+            " VALUES (?,?,?,?,?)",
+            (absorb_id, keep_id, name, json.dumps(aliases), json.dumps(identifiers)))
+        # a chain of merges must resolve to the surviving row, not to an intermediate
+        conn.execute("UPDATE entity_merge_tombstones SET merged_into=? WHERE merged_into=?",
+                     (keep_id, absorb_id))
+    except sqlite3.Error:
+        pass
+
+
 def value_label_surfaces(conn: sqlite3.Connection) -> frozenset:
     """Normalized surfaces the NER model judged to be VALUES, not identities.
 
@@ -335,6 +432,33 @@ class EntityResolver:
                         "UPDATE entities SET identifiers_json=?, updated_at=datetime('now') WHERE entity_id=?",
                         (json.dumps(sorted(set(identifiers))), existing[0]),
                     )
+                    # The comment above PROMISES that "a later pass that learns the real
+                    # name updates the same row" — and until 2026-08-26 nothing did. Once a
+                    # placeholder entity existed, naming the contact never renamed the
+                    # person: the owner could set a display_name and the graph, the dyads
+                    # and every fact card would keep saying "+1512…" forever. Promote the
+                    # placeholder when the contact has since gained a real name, keeping
+                    # the old surface as an alias so old references still resolve.
+                    real = str(display_name or "").strip()
+                    if real:
+                        row = self._conn.execute(
+                            "SELECT canonical_name, aliases_json FROM entities WHERE entity_id=?",
+                            (existing[0],)).fetchone()
+                        cur = str(row[0] or "").strip() if row else ""
+                        if cur and cur != real and (
+                                cur.lower() in {i.lower() for i in identifiers}
+                                or not any(ch.isalpha() for ch in cur)):
+                            try:
+                                aliases = json.loads((row[1] if row else "[]") or "[]")
+                            except (json.JSONDecodeError, TypeError):
+                                aliases = []
+                            if cur not in aliases:
+                                aliases.append(cur)
+                            self._conn.execute(
+                                "UPDATE entities SET canonical_name=?, normalized_name=?,"
+                                " aliases_json=?, updated_at=datetime('now')"
+                                " WHERE entity_id=?",
+                                (real, normalize_name(real), json.dumps(aliases), existing[0]))
                     continue
                 self._create_entity(
                     name,
@@ -837,5 +961,25 @@ class EntityResolver:
                 "UPDATE entities SET mention_count = (SELECT COUNT(*) FROM entity_mentions WHERE entity_id=?) WHERE entity_id=?",
                 (keep_id, keep_id),
             )
+            # --- the derivation corpus ---
+            #
+            # Folding aliases, mentions and edges is not the whole merge. The absorbed
+            # entity is also the SUBJECT of stored facts, of quarantined conflicts and of
+            # the owner's exclusions, and none of those live in the three tables above.
+            # Measured on the live node before this was written: collapsing the owner's nine
+            # entities would have stranded 335 signal_objects (178 facts + 157 dossier rows),
+            # 13 fact_conflicts and 3 intelligence_exclusions — pointing at a row that no
+            # longer exists, which is precisely the dangling-subject shape that made two
+            # promoted facts unreachable earlier the same day.
+            _remap_derivation_corpus(self._conn, keep_id=keep_id, absorb_id=absorb_id)
+            # --- the tombstone ---
+            #
+            # The docstring says "reversible merge". It was not: this ended in a DELETE with
+            # nothing recorded, so an incorrect merge could be re-split only by re-ingesting.
+            # The tombstone makes the claim true enough to act on — what was absorbed, into
+            # what, and when.
+            _write_merge_tombstone(self._conn, keep_id=keep_id, absorb_id=absorb_id,
+                                   name=str(gone[0] or ""), aliases=json.loads(gone[1] or "[]"),
+                                   identifiers=json.loads(gone[2] or "[]"))
             self._conn.execute("DELETE FROM entities WHERE entity_id=?", (absorb_id,))
             commit_connection(self._conn)

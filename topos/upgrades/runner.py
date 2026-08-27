@@ -575,6 +575,14 @@ def _exec_derived_rebuild(step: Dict[str, Any], conn: sqlite3.Connection) -> Dic
                         int(r.get("cluster_member_previews_blanked") or 0) for r in reports
                     ),
                 }
+            elif name in ("derived_object_index", "derived_objects"):
+                # Backfill for the derived-object index. The enrichment job of
+                # the same name keeps it current from here on; this is what
+                # catches the objects a node already holds, which on a
+                # well-derived node is all of them.
+                from ..features.signal.derived_index import index_derived_objects
+
+                detail["targets"][name] = dict(index_derived_objects(conn) or {})
             elif name in ("timeline",):
                 from ..features.timeline_projection import repair_timeline_for_source
 

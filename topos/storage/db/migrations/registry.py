@@ -54,6 +54,10 @@ from .derivation_factory_v1 import (
     MIGRATION_ID as DERIVATION_FACTORY_V1_ID,
     apply_derivation_factory_v1_up,
 )
+from .net_subject_policy_v1 import (
+    MIGRATION_ID as NET_SUBJECT_POLICY_V1_ID,
+    apply_net_subject_policy_v1_up,
+)
 from .pack_registry_v1 import (
     MIGRATION_ID as PACK_REGISTRY_V1_ID,
     apply_pack_registry_v1_up,
@@ -369,6 +373,12 @@ MIGRATIONS: List[MigrationSpec] = [
     _spec(66, DERIVATION_FACTORY_V1_ID, apply_derivation_factory_v1_up),
     _spec(67, COMMUNITY_NAMES_V1_ID, apply_community_names_v1_up),
     _spec(68, CONFLICT_PROVENANCE_V1_ID, apply_conflict_provenance_v1_up),
+    # 69 shipped the same way 63 did — written and held out of the head so it could not
+    # stamp a live database past its installed engine, then landed at a release cut. The
+    # table holds OVERRIDES to the net-subject rule, so its absence was never a denial;
+    # what the owner could not do until now is record an explicit `deny` for someone the
+    # node can name, for which the only lever was the blackhole.
+    _spec(69, NET_SUBJECT_POLICY_V1_ID, apply_net_subject_policy_v1_up),
 ]
 
 

@@ -366,6 +366,14 @@ def _display_value(raw) -> str:
     return str(v or "").strip()
 
 
+def _owner_entity_ids(conn: sqlite3.Connection) -> "set[str]":
+    """Every is_self entity — the shared selector, so this guard cannot drift from the
+    ten other places that ask the same question."""
+    from .owner import owner_entity_ids
+
+    return owner_entity_ids(conn)
+
+
 def materialize_signal_objects_to_graph(
     conn: sqlite3.Connection,
     *,
@@ -461,6 +469,32 @@ def materialize_signal_objects_to_graph(
             )
 
     # 2) SPO facts -> subject->object labeled edges.
+    #
+    # L4-8 — THE PROJECTION GUARD. This query used to have no subject filter, which was
+    # harmless while every pack fact was about the owner and became unsafe the moment one
+    # was not. An outward fact is a claim about a third party who never consented; the
+    # engine holds it at owner_only disclosure, but the ENTITY GRAPH is a different surface
+    # with different readers, and projecting the claim onto an edge would restate it
+    # somewhere the disclosure rule does not reach.
+    #
+    # Owner-subject facts project exactly as before. Everything else is counted and skipped,
+    # so "how many claims are we declining to project" is answerable rather than invisible.
+    owner_ids = _owner_entity_ids(conn)
+    try:
+        blackholed = {str(r[0]) for r in conn.execute(
+            "SELECT entity_id FROM entity_blackholes WHERE entity_id IS NOT NULL"
+            " AND entity_id != ''").fetchall()}
+    except sqlite3.Error:
+        blackholed = set()
+    if not owner_ids:
+        # FAIL CLOSED — reversed 2026-08-26 after adversarial review. The first version
+        # stood the guard down here, reasoning a fresh node cannot hold outward facts. But
+        # the realistic way to LOSE the is_self flag is an entity merge gone wrong — and in
+        # that state the old behaviour projected every third-party fact on the node. Owner
+        # facts pausing until the flag is repaired is recoverable; a dossier restated into
+        # the graph is not.
+        logger.warning("materializer: no is_self entity — refusing to project ANY subject "
+                       "facts until the owner flag is restored (L4-8 fails closed)")
     frows = conn.execute(
         """
         SELECT object_id, payload_json, valid_from, valid_to, confidence
@@ -468,12 +502,24 @@ def materialize_signal_objects_to_graph(
         WHERE object_type = 'fact' AND valid_to IS NULL
         """
     ).fetchall()
+    net_facts_skipped = 0
     for object_id, payload_json, valid_from, valid_to, confidence in frows:
         try:
             payload = json.loads(payload_json or "{}")
         except (TypeError, ValueError):
             continue
         subj = str(payload.get("subject_entity_id") or "").strip()
+        if subj and subj not in owner_ids:
+            net_facts_skipped += 1
+            continue
+        # The blackhole binds at PROJECTION too, on the OBJECT side. An owner-subject fact
+        # may name an excluded person as its object; the fact store hides it at read, but an
+        # edge pointing at that person restates them into a surface the read filter never
+        # sees. "Forget this person" has to hold everywhere their identity lands.
+        obj_ent = str(payload.get("object_entity_id") or "").strip()
+        if obj_ent and obj_ent in blackholed:
+            net_facts_skipped += 1
+            continue
         pred = str(payload.get("predicate") or "").strip()
         obj_val = _display_value(payload.get("object_value"))
         obj_id = str(payload.get("object_entity_id") or "").strip()
@@ -528,6 +574,9 @@ def materialize_signal_objects_to_graph(
         purged += 1
     if purged:
         logger.info("materializer purged %d value-surface entities (dates/quantities)", purged)
+    if net_facts_skipped:
+        logger.info("materializer skipped %d non-owner-subject facts (L4-8 projection guard)",
+                    net_facts_skipped)
 
     conn.commit()
     return {"topic_edges": topic_edges, "fact_edges": fact_edges, "purged_value_nodes": purged}

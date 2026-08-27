@@ -6,6 +6,7 @@ existing one, so an upgrade auto-activates the fabric without stranding the app.
 """
 import os
 import socket
+import sys
 
 import pytest
 
@@ -50,6 +51,15 @@ def test_attestation_admits_matching_team(monkeypatch):
         b.close()
 
 
+@pytest.mark.skipif(
+    sys.platform != "darwin",
+    reason=(
+        "LOCAL_PEERPID is a Darwin socket option; the whole attestation lane "
+        "(libproc + codesign) is macOS-only and `_peer_pid` is documented to "
+        "return None where it does not exist. Asserting a pid on Linux CI "
+        "tested the platform, not the code."
+    ),
+)
 def test_peer_pid_is_this_process():
     a, b = socket.socketpair(socket.AF_UNIX)
     try:

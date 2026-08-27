@@ -147,7 +147,9 @@ def run_derivation_batch(
     seed_pack_registry(conn, pack_dir)
     all_packs = load_packs(pack_dir)
     packs = enabled_packs(conn, pack_dir)
-    owner_row = conn.execute("SELECT entity_id FROM entities WHERE is_self=1").fetchone()
+    from ....features.entities.owner import owner_entity_id
+    _o = owner_entity_id(conn)
+    owner_row = (_o,) if _o else None
     if not owner_row:
         st["skipped"] = "no_owner_entity"
         return 0

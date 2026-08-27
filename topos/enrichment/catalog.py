@@ -174,6 +174,17 @@ _STATIC_METADATA: Dict[str, Dict[str, Any]] = {
         "hf_task": "feature-extraction",
         "value_props": ("precision_retrieval", "latency"),
     },
+    "derived_object_embeddings": {
+        "title": "Derived-object index",
+        "description": (
+            "Renders derived objects — relationship edges, entity dossiers, "
+            "stated facts — as short sentences and embeds them, so questions "
+            "reach the node's own conclusions instead of only raw records."
+        ),
+        "cost_tier": COST_LOW,
+        "hf_task": "feature-extraction",
+        "value_props": ("precision_retrieval", "signal_density"),
+    },
     "dimension_summary": {
         "title": "Dimension briefs",
         "description": (

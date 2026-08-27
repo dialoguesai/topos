@@ -158,7 +158,9 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500) 
     pack = load_packs(pack_dir, only=[pack_id]).get(pack_id)
     if pack is None:
         raise ValueError(f"unknown pack {pack_id}")
-    owner_row = conn.execute("SELECT entity_id FROM entities WHERE is_self=1").fetchone()
+    from ..entities.owner import owner_entity_id
+    _owner = owner_entity_id(conn)
+    owner_row = (_owner,) if _owner else None
     if not owner_row:
         raise ValueError("no owner entity")
     owner = owner_row[0]
@@ -298,7 +300,10 @@ def promote_conflict(conn: sqlite3.Connection, conflict_id: str, *,
     final_value = value if value is not None else stored_value
 
     if to_owner:
-        subject = conn.execute("SELECT entity_id FROM entities WHERE is_self=1").fetchone()[0]
+        from ..entities.owner import owner_entity_id
+        subject = owner_entity_id(conn)
+        if not subject:
+            raise ValueError("no owner entity on this node")
     elif subject_entity_id:
         ok = conn.execute("SELECT 1 FROM entities WHERE entity_id=?", (subject_entity_id,)).fetchone()
         if not ok:
@@ -321,8 +326,32 @@ def promote_conflict(conn: sqlite3.Connection, conflict_id: str, *,
     else:
         raise ValueError("supply subject_entity_id, new_person_name, or to_owner")
 
+    # D-E: the owner's promotion IS the consent decision, so the pack gate and the
+    # nameability rule do not apply here — but the blackhole still does. These call sites
+    # pass about="owner" with a caller-supplied subject, which means the writer's own
+    # three-gate block never fires (it is keyed on the `about` string, finding F10), so
+    # the exclusion check has to happen HERE or nowhere.
+    from .net_subject_policy import may_owner_write_about, record_owner_decision
+    _d = may_owner_write_about(conn, subject)
+    if not _d.allowed:
+        raise ValueError(f"cannot promote onto this subject: {_d.reason}")
+
     writer = DerivationWriter(conn, model="owner-promote")
     refs = _json.loads(refs_json or "[]")
+    if not refs:
+        # The conflict row carries no evidence. That is a real state, not an error: rows
+        # minted before `1a82a5c` added source_refs/quote to the quarantine INSERT have
+        # SQL NULL there (13 of them on the first live node checked, all with pack_id
+        # populated, which is why the pack_id guard above lets them through).
+        #
+        # Promoting one with `source_refs=[]` would mint a fact whose empty evidence list
+        # reads as "no sources were needed" when the truth is "the sources were never
+        # recorded" — and _quarantine's whole stated purpose is that the owner can promote
+        # without minting evidence-less rows. So say which it is, in a form that stays
+        # walkable: the conflict row IS the provenance now, and the note makes the gap
+        # queryable instead of invisible.
+        refs = [{"table": "fact_conflicts", "record_id": conflict_id,
+                 "note": "evidence unavailable: conflict row predates provenance capture"}]
     out = writer.assert_pack_fact(
         pack=pack, predicate=predicate, subject_entity_id=subject,
         value=final_value, actor_role="authored", source_refs=refs,
@@ -331,6 +360,10 @@ def promote_conflict(conn: sqlite3.Connection, conflict_id: str, *,
     with with_db_write():
         conn.execute("UPDATE fact_conflicts SET status='accepted', updated_at=datetime('now')"
                      " WHERE conflict_id=?", (conflict_id,))
+        # Record what the action already implied, so the decision is a row rather than an
+        # inference someone has to reconstruct from a fact's existence.
+        if _d.reason != "owner_subject":
+            record_owner_decision(conn, subject, note=f"promoted conflict {conflict_id}")
         try:
             conn.execute(
                 """INSERT INTO derivation_training_ledger
@@ -382,11 +415,21 @@ def revise_fact(conn: sqlite3.Connection, object_id: str, *,
         if not ok:
             raise ValueError(f"unknown entity {subject_entity_id}")
 
+    # D-E, as in promote_conflict: owner-directed, blackhole still binding. Checked BEFORE
+    # the supersede below, so a refusal cannot leave the old fact closed and no new one
+    # written — which would silently delete a fact under the guise of protecting someone.
+    from .net_subject_policy import may_owner_write_about, record_owner_decision
+    _d = may_owner_write_about(conn, subject)
+    if not _d.allowed:
+        raise ValueError(f"cannot revise onto this subject: {_d.reason}")
+
     from ...storage.db.write_gate import commit_connection, with_db_write
     with with_db_write():
         conn.execute("UPDATE signal_objects SET valid_to=?, updated_at=datetime('now'),"
                      " updated_by='owner_revision' WHERE object_id=?",
                      ((evidence_date or str(vf)), object_id))
+        if _d.reason != "owner_subject":
+            record_owner_decision(conn, subject, note=f"revised fact {object_id}")
         commit_connection(conn)
     writer = DerivationWriter(conn, model="owner-revise")
     out = writer.assert_pack_fact(

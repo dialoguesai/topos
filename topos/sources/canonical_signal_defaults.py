@@ -15,6 +15,10 @@ CANONICAL_BASELINE_SIGNAL_JOBS: Tuple[str, ...] = (
     "facts",
     "timeline",
     "attention_triage",
+    # Runs after the producers above and indexes what they wrote, so the
+    # derivation layer's own objects are reachable by meaning rather than only
+    # through a hand-written alias per question.
+    "derived_object_embeddings",
 )
 
 

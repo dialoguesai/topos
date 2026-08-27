@@ -222,3 +222,37 @@ def test_first_and_last_timestamps_bound_the_period(conn):
     e = _edges(conn)[("2026-05", "imessage", EDGE_KIND_DM, "peer", SELF_KEY)]
     assert e.first_ts < e.last_ts
     assert DEFAULT_SESSION_GAP_SECONDS == 21600
+
+
+# --- G6: topic mix on the edge ---
+
+def test_topics_land_on_the_edge_with_coverage(conn):
+    """Same contract as affect: counts plus the coverage that keeps the mix honest — a mix
+    over three labelled messages must not impersonate one over three hundred."""
+    import json as _json
+
+    from topos.analytics.messenger_directed import attach_topics
+
+    conn.execute("""CREATE TABLE message_topics (topic_id TEXT PRIMARY KEY, record_id TEXT,
+        message_id TEXT, topic TEXT)""")
+    for i in range(4):
+        _msg(conn, "c1", f"m{i}", "peer", i * 30)
+    conn.execute("INSERT INTO message_topics VALUES ('t1','m0','m0','hardware build')")
+    conn.execute("INSERT INTO message_topics VALUES ('t2','m1','m1','hardware build')")
+    conn.commit()
+    acc = _edges(conn)
+    topics = attach_topics(conn, DS, acc)
+    key = ("2026-05", "imessage", EDGE_KIND_DM, "peer", SELF_KEY)
+    assert _json.loads(topics[key]["topic_counts_json"]) == {"hardware build": 2}
+    assert topics[key]["topic_coverage"] == 0.5, "2 of 4 messages labelled — said, not hidden"
+
+
+def test_a_node_without_topic_enrichment_attaches_nothing(conn):
+    """iMessage ships un-enrolled in the topics job on purpose — an LLM generation per
+    message per sync is a cost the source registry declines. Zero enrichment must mean
+    zero topic fields, never empty-but-present ones."""
+    from topos.analytics.messenger_directed import attach_topics
+
+    _msg(conn, "c1", "m1", "peer", 0)
+    conn.commit()
+    assert attach_topics(conn, DS, _edges(conn)) == {}
