@@ -36,12 +36,24 @@ _ALIASES: List[tuple] = [
     (r"\b(job title|my role|my job|what do i do for work)\b", ["work.role", "work.employment_shape"], False),
     (r"\b(project)s?\b.*\b(work|current|active|my)\b|\bmy projects\b", ["work.project", "works_on"], False),
     (r"\b(career|fired|hired|promoted|laid off)\b", ["work.career_event"], False),
-    (r"\bfamily member|my (family|relatives|parents|siblings|kids|children)\b",
+    # Bare role words, not just "my <role>": "Do I have any siblings?" carries the
+    # owner frame in "I" and was matching nothing, so it fell past the fact lane and
+    # the model answered "Yes." without naming the brother it had in hand.
+    (r"\bfamily member|(?:my |any |have any )?\b(family|relatives|parents?|siblings?|kids|children|"
+     r"brothers?|sisters?|mom|dad|mother|father|grandma|grandpa|grandparents?)\b",
      ["rel.relationship"], False),
     # `friends?` alone matters: it is the most natural phrasing of the question and
     # it matched nothing here, so "Who are my friends?" fell past the fact view to
     # the interim query-time lane while 23 closeness_tier facts sat in the store.
-    (r"\b(closest|inner circle|close circle|close friend|best friend|friend)s?\b",
+    # Person-scoped and relational forms, not only owner-scoped LIST questions.
+    # "How close am I to X", "am I closer to X or Y", "who should I reconnect with"
+    # all matched nothing, so the deterministic lane never fired and the model
+    # reasoned from generic retrieval — it once claimed no determination about how
+    # often the owner talks to someone who is inner_circle at 550 messages.
+    (r"\b(closest|inner circle|close circle|close friend|best friend|friend)s?\b"
+     r"|\bhow close (?:am i|are we)\b|\bclos(?:er|est) to\b"
+     r"|\breconnect\b|\bdrift(?:ed|ing)?\b|\bout of touch\b"
+     r"|\bhaven'?t (?:i )?(?:talked|spoken|messaged|texted|heard)\b",
      ["rel.closeness_tier", "rel.relationship"], False),
     (r"\bchronotype|night owl|early bird\b", ["behavior.chronotype"], False),
 ]
