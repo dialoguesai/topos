@@ -554,6 +554,18 @@ class QueryPipelineOrchestrator:
         _shadow_observe(query_text, scope_id)
 
         from ..disclosure.tier import resolve_disclosure_tier
+        from ..principal import current_principal
+
+        # Channel-verified client class, stamped by the entry point that
+        # authenticated this request (dispatcher contextvar). Read ONCE per
+        # turn and threaded to both disclosure floors and the fingerprint —
+        # never from the payload. GRANTEE turns run pure legacy logic
+        # (principal dropped): a grantee arriving through a stamped relay must
+        # never inherit the OWNER's elevation for a client that happens to
+        # share a name — grantees have no elevation path, structurally.
+        _principal = current_principal()
+        if is_grantee_request:
+            _principal = None
 
         disclosure_tier = resolve_disclosure_tier(
             requester_id=requester_id,
@@ -561,6 +573,7 @@ class QueryPipelineOrchestrator:
             is_grantee_request=is_grantee_request,
             explicit_tier=explicit_disclosure_tier,  # type: ignore[arg-type]
             disclosure_ceiling=disclosure_ceiling,
+            principal=_principal,
         )
 
         from ..core.state import get_db_connection
@@ -582,7 +595,7 @@ class QueryPipelineOrchestrator:
         try:
             _pr = effective_packet_resolution(
                 db_conn, requester_id=str(requester_id), disclosure_tier=disclosure_tier,
-                owner_id=str(owner_id or ""),
+                owner_id=str(owner_id or ""), principal=_principal, scope_id=str(scope_id or ""),
             )
         except Exception:  # noqa: BLE001
             _pr = {"setting": "scores_only", "effective": "scores_only",
@@ -814,6 +827,10 @@ class QueryPipelineOrchestrator:
         public_dict["packet_resolution"] = _pr["effective"]
         if _pr["reason"] != "active" and _pr["setting"] != _pr["effective"]:
             public_dict["packet_resolution_reason"] = _pr["reason"]
+        # Introspection ("are we running ours?"): the caller's own verified class,
+        # surfaced only when a channel stamped one — legacy turns stay byte-identical.
+        if _pr.get("principal_cls"):
+            public_dict["principal_cls"] = _pr["principal_cls"]
         # The model that writes the owner's answer reads `public_result`, not the
         # envelope — so the cause of an empty lane has to be IN it, or the answer is
         # "no data" again. Stored on the artifact too, so a memory hit replays the
@@ -855,6 +872,7 @@ class QueryPipelineOrchestrator:
             grant_id=str(requester_id),
             field_transforms=field_transforms,
             packet_resolution=_pr["effective"],
+            principal_cls=str(getattr(_principal, "cls", "") or ""),
         )
         cache_key = build_cache_key(scope_id=scope_id, access_mode=access_mode,
                                     intent_hash=intent_hash, packet_resolution=_pr["effective"])

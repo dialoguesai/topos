@@ -36,12 +36,24 @@ _ALIASES: List[tuple] = [
     (r"\b(job title|my role|my job|what do i do for work)\b", ["work.role", "work.employment_shape"], False),
     (r"\b(project)s?\b.*\b(work|current|active|my)\b|\bmy projects\b", ["work.project", "works_on"], False),
     (r"\b(career|fired|hired|promoted|laid off)\b", ["work.career_event"], False),
-    (r"\bfamily member|my (family|relatives|parents|siblings|kids|children)\b",
+    # Bare role words, not just "my <role>": "Do I have any siblings?" carries the
+    # owner frame in "I" and was matching nothing, so it fell past the fact lane and
+    # the model answered "Yes." without naming the brother it had in hand.
+    (r"\bfamily member|(?:my |any |have any )?\b(family|relatives|parents?|siblings?|kids|children|"
+     r"brothers?|sisters?|mom|dad|mother|father|grandma|grandpa|grandparents?)\b",
      ["rel.relationship"], False),
     # `friends?` alone matters: it is the most natural phrasing of the question and
     # it matched nothing here, so "Who are my friends?" fell past the fact view to
     # the interim query-time lane while 23 closeness_tier facts sat in the store.
-    (r"\b(closest|inner circle|close circle|close friend|best friend|friend)s?\b",
+    # Person-scoped and relational forms, not only owner-scoped LIST questions.
+    # "How close am I to X", "am I closer to X or Y", "who should I reconnect with"
+    # all matched nothing, so the deterministic lane never fired and the model
+    # reasoned from generic retrieval — it once claimed no determination about how
+    # often the owner talks to someone who is inner_circle at 550 messages.
+    (r"\b(closest|inner circle|close circle|close friend|best friend|friend)s?\b"
+     r"|\bhow close (?:am i|are we)\b|\bclos(?:er|est) to\b"
+     r"|\breconnect\b|\bdrift(?:ed|ing)?\b|\bout of touch\b"
+     r"|\bhaven'?t (?:i )?(?:talked|spoken|messaged|texted|heard)\b",
      ["rel.closeness_tier", "rel.relationship"], False),
     (r"\bchronotype|night owl|early bird\b", ["behavior.chronotype"], False),
 ]
@@ -53,10 +65,25 @@ def match_known_item(query_text: str) -> Optional[Dict[str, Any]]:
     # never be answered from the owner's fact sheet
     if not re.search(r"\b(i|my|me|am i|do i|i'm)\b", q):
         return None
-    for pattern, preds, special in _ALIASES:
-        if re.search(pattern, q):
-            return {"predicates": preds, "special": special}
-    return None
+    # UNION, not first-match. A question can span two predicate families —
+    # "Is my mom in my inner circle?" matches the role alias AND the closeness
+    # alias — and returning only the first meant the tiers never reached the
+    # answer. Live 2026-08-26 that question came back "there's no explicit
+    # 'inner circle' label in your relationship context" while Mike November
+    # and Quebec Lima held exactly that label.
+    #
+    # `special` is OR-ed: if any matching class is special it takes the stricter
+    # gate, so widening the match can never widen disclosure.
+    predicates: List[str] = []
+    special = False
+    for pattern, preds, is_special in _ALIASES:
+        if not re.search(pattern, q):
+            continue
+        special = special or is_special
+        for pred in preds:
+            if pred not in predicates:
+                predicates.append(pred)
+    return {"predicates": predicates, "special": special} if predicates else None
 
 
 def fetch_direct_facts(

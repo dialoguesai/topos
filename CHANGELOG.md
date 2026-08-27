@@ -9,7 +9,90 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Security
+- **TCP demotion complete: no bearer mints the owner class on TCP.** The owner
+  key still authenticates everywhere `require_api_key` guards, but resolves to
+  `third_party` on every TCP peer — loopback included. Owner privilege is now
+  purely a channel property: the 0600 socket locally, a signed relay stamp
+  remotely. The FE reaches the socket through its same-origin dev proxy and
+  holds no owner credential at all. Pinned by invariant I8 (both directions:
+  TCP never owner, socket always owner).
+
+### Security
+- **The node binds loopback by default.** `--host` defaulted to `0.0.0.0`, so a
+  personal node published its whole authenticated API to every device on the
+  network — verified live: the node answered on the machine's wifi address.
+  Between a coffee-shop peer and the owner's data stood only a long-lived
+  bearer token that lives in a dotfile, rides along in backups, and used to be
+  pasted into MCP configs. Default is now `127.0.0.1`; an explicit `--host`,
+  `TOPOS_HOST`, or hosted-pool mode still bind wider.
+- **The owner CLASS is loopback-only.** Even with a valid `TOPOS_OWNER_KEY`, a
+  non-loopback peer resolves to `third_party` (channel `remote_http`) rather
+  than `owner_app`. A credential that escaped into a log, a screen share, or a
+  synced dotfile cannot confer owner privilege from the network. Both layers
+  are pinned by invariant I8.
+
+### Fixed
+- **Names on the facts page are no longer lowercased.** `object_value` is documented
+  in `features/facts/reads.py` as the display string the facts surface renders, but the
+  writer filled it with `_canon_value`, whose stated job is "keying + equality" and which
+  therefore folds case. Every name rendered as "mike november" and "k.l. oscar". It
+  stayed invisible for years of values like "brother" and "active" and only surfaced once
+  a lens began writing proper nouns. Display and identity are now separate functions:
+  `_display_value` is key-sorted and case-preserving, `_canon_value` is unchanged, so two
+  spellings of a name still collide for dedup — they are just no longer both stored as
+  the thing people read. Existing rows backfilled from `value_struct`, which had the
+  correct case all along.
 ### Added
+- **[S1] Principal fabric P4.1 — Team ID peer attestation on the owner socket.**
+  With `TOPOS_UDS_TEAM_IDS` set (comma-separated Apple Team IDs), the owner
+  socket attests the connecting PROCESS — peer pid via `LOCAL_PEERPID`,
+  executable via `proc_pidpath`, Team ID via `codesign` — and closes any
+  unsigned or non-allowlisted peer at accept, before a request byte is parsed
+  (the same-uid-malware defense). Unset ⇒ permissive-log so the dev lane's
+  unsigned processes keep working; set ⇒ fail-closed on every error.
+- **[S1] Principal fabric — owner-key self-mint (install-flow invariant).** On
+  boot the node ensures `TOPOS_OWNER_KEY` exists in `~/.topos/.env`, minting one
+  locally (0600) if absent and setting it on the live settings so enforcement
+  activates this boot. Idempotent and additive — an existing key is never
+  rewritten, a value already in the process env (pairing) wins — so the fabric
+  auto-activates on every node, fresh or upgraded, with no manual step and no
+  secret over the wire.
+
+### Changed
+- **The closeness lens reads the L1 rail instead of deriving interaction twice.**
+  `comms_stats` and `analytics/messenger_directed` were built in parallel and each
+  derived per-partner direction from the same messages, which is how two views drift.
+  The 2026-08-25 decision made the rail the ANALYTICAL view and `rel.closeness_tier`
+  the durable FACT view, sharing evidence — so exactly one of them derives it. The
+  lens now reads `messenger_dyad_stats`, which knows things a second pass would not:
+  session initiation, reply latency, reciprocal streaks, drift, `tie_state`, and which
+  peers are automated (29 of 180 dyads here). Ranking is volume x reciprocity
+  (`balance`) x reciprocal streak x recency (`recent_gap_days`) x tie state, so 140
+  mutual and current outranks 80 one-sided and 90 long-dormant. `broadcast_only` ties
+  are dropped: a channel talking at the owner is not a relationship.
+  `comms_stats.py` becomes `person_bridge.py` and keeps only the handle -> contact ->
+  entity resolution both lanes need, which is also the fix for a person holding several
+  handles — one contact with two numbers arrived as two dyads, split her traffic
+  (105 and 31) and listed her twice in one answer; she is now one fact at 136.
+
+### Added
+- **[S1] Principal fabric P4 — the owner socket.** A second server on
+  `~/.topos/engine.sock` (mode 0600) serves the same API with NO bearer at
+  all: the kernel's filesystem ACL is the credential, so owner privilege on
+  this lane depends on no secret that a log, a backup, or a leaked config
+  could carry. The transport marker is set only by the socket server's ASGI
+  wrapper — nothing a TCP request contains can reach the owner branch. Off
+  switch: `TOPOS_UDS_ENABLED=0`; Team ID attestation of the peer process is
+  the explicit P4.1 follow-up.
+- **[S1] Principal fabric P5 — convergence.** (1) The node auto-pins the CP's
+  stamp verification key on first boot (trust-on-first-use over the relay's
+  own TLS channel; an existing pin is NEVER overwritten — rotation is a
+  deliberate owner action), making signed relay stamps zero-step for every
+  node, local and hosted alike. (2) The `owner_automation` class is real:
+  the CP stamps all three routine lanes, and packet resolution caps that
+  class at `facts` (reason `automation_cap`) — unattended runs never carry
+  special-class content regardless of the owner's global dial.
 - **[E] The lens dispatcher, and closeness as a reviewable fact.** Packs have carried
   `synthesis[]` since the catalog was written and `Pack.lenses` calls itself "what the
   runtime will dispatch on", but nothing dispatched it: `synthesize_closeness` had ZERO
@@ -31,6 +114,41 @@ The machine-readable twin of each release is
   has not run. Tier facts also sorted as events (`_is_durable` tested only role/status),
   and all 23 share one `valid_from`, so the answer to "Who's in my close circle?" opened
   with four `peripheral` people.
+- **[S1] Principal fabric P3 — signed relay stamps: the CP's classification
+  reaches the node with proof.** The gateway attaches an Ed25519-signed
+  `principal_stamp` (`cls`, `client_id`, `acting_user`, `iat`, `exp`) to each
+  owner-path relay message, bound to that message's id and type so a captured
+  stamp cannot be replayed. The engine verifies against a pinned CP public key
+  (`TOPOS_CP_STAMP_PUBKEY` env or `~/.topos/cp_stamp_key.pub`) on the relay
+  dispatch path ONLY, and mints the named principal — a remote third-party
+  client finally carries a `client_id`, so enrollment and elevation now apply
+  over the relay, not just to engine-direct tpk tokens. Every failure branch
+  (no key, missing stamp, bad signature, tampering, expiry, unknown class) is
+  legacy CP_RELAY behavior — never wider — so nodes and CPs on either side of
+  this release interoperate. Grantee turns drop the principal entirely, on
+  both sides: a grantee must never inherit the owner's elevation for a
+  same-named client. Signing is off until `RELAY_STAMP_SIGNING_KEY` is set on
+  the CP; the node pins the key from GET /v1/relay/stamp-public-key. Tests:
+  `tests/core/test_relay_stamp.py` incl. a CP↔engine cross-repo verify.
+
+### Fixed
+- **Warmth is no longer a constant the extractor invents.** `warmth_band: "medium"`
+  and `cadence_band: "recent"` were string literals in the rule extractor, so all 216
+  stored `RelationshipEdge` rows read identically — a constant is indistinguishable
+  from a measurement once written, and two layers above consumed it as one: the
+  relationship aggregate defaulted an ABSENT band to "medium" as well, and
+  `fit/evaluator`'s `relationship_warmth` facet scored on the PRESENCE of any band,
+  so the stamped constant was the entire evidence base for telling the owner their
+  network is warm (0.75, `warm_network`). The extractor now says "unknown", the
+  aggregate defaults to "unknown", and the facet filters unknown before scoring, so
+  an unmeasured network reads `cold_network` with low confidence. Ranking that needs
+  real warmth comes from `query/closeness.py`, which has the corpus. Existing rows
+  were backfilled to "unknown" and the aggregate recomputed.
+- **The owner is no longer the most important person in their own social graph.**
+  Messenger analytics were last computed before the ego exclusion shipped, so the
+  owner still held top centrality (0.582) and their star collapsed the partition.
+  Recomputed: importance rows 350 -> 345, and the August partition went from one
+  community holding 58% of participants to 37 communities with the largest at 20%.
 
 ### Fixed
 - **Known-item facts: delimiter-aware predicates and a deterministic owner.** A bare
@@ -45,6 +163,41 @@ The machine-readable twin of each release is
   pre-fix payload as `memory_hit` for 21 minutes, with 24h of session TTL to run.
 
 ### Added
+- **[S1] Principal fabric P2 — elevation consent, in the UMA ledger.** An
+  enrolled client can now be consented up from the `scores_only` floor:
+  UMA-shaped lifecycle (`mcp_client_request_elevation` — the one type a
+  third-party principal may call, for ITSELF only, subject taken from the
+  channel stamp never the payload — then owner-only
+  `mcp_client_decide_elevation` / `mcp_client_revoke_elevation` /
+  `mcp_client_list_elevations`), per-scope, expiring, tombstoned, mirrored
+  into the engine's UMA audit tables with subject `client:<id>`.
+  Enforcement in `effective_packet_resolution`: an approved, unexpired grant
+  lifts the packet to min(owner setting, `facts`) — never `facts_all`, so
+  special-class content stays owner-first-party — with reason
+  `consent_grant:<id>` on the turn; the owner's global `scores_only` dial and
+  the model-locality gate both outrank consent, and a revoked client's grants
+  are inert regardless of row state. Storage is the node-local ledger next to
+  `mcp_clients` because the engine is the enforcement point; the CP/FE surface
+  reads it by relay proxy. Tests: `tests/core/test_mcp_client_elevations.py`.
+
+- **[S1] Principal fabric P2 (engine core) — enrolled clients, named and revocable.**
+  A per-client registry (`mcp_clients`, lazy-created like `mcp_request_log`)
+  mints `tpk_<client_id>.<secret>` tokens — hash at rest, plaintext shown once
+  at enrollment. A tpk bearer resolves to `Principal(third_party,
+  client_id=…)` on principal-aware routes only; `require_api_key` rejects it,
+  so an enrolled client's surface is the MCP tool set, never the full REST
+  surface the shared key could reach. Revocation is a tombstone and takes
+  effect on the next request. New owner-only message types
+  `mcp_client_enroll` / `mcp_client_list` / `mcp_client_revoke` (Settings →
+  Connected apps backend), with an in-handler guard so one enrolled client can
+  never mint another. `mcp_request_log` gains `verified_cls` /
+  `verified_client_id` — the channel-verified principal recorded next to the
+  payload-claimed `source`/`requester_id`, ending accounting-by-self-report;
+  claimed-vs-verified divergence is itself a spoof signal. Elevation consent
+  is NOT here by design: it lands in UMA's existing ledger with subject
+  `client:<id>` ("one consent ledger", Who's Asking §03b). Tests:
+  `tests/core/test_mcp_client_registry.py`.
+
 - **[E] The close circle is ranked from who the owner actually talks to.** It was
   answered from six `rel.relationship` facts a pack happened to extract from journal
   sentences, omitting the highest-volume correspondents in the corpus.
@@ -57,6 +210,24 @@ The machine-readable twin of each release is
   Gated on packet_resolution exactly as facts-direct is, so a grantee gets nothing and
   the relationships grant policy — entity keys and warmth bands, not contact names —
   still holds.
+- **[S1] Principal fabric P1 — the channel decides who is asking.** A second
+  credential, `TOPOS_OWNER_KEY`, held only by first-party surfaces, resolves to
+  the `owner_app` principal at the HTTP door; the legacy shared `TOPOS_KEY`
+  demotes to `third_party`. The verified class is stamped by the entry point
+  (HTTP dependency or the relay wrapper), scoped through the dispatcher, and
+  consumed by both disclosure floors: `effective_packet_resolution` floors a
+  `third_party` caller to `scores_only` even when the payload claims
+  `requester_id == owner_id` (reason `principal_floor`), and
+  `resolve_disclosure_tier` clamps it to `default_disclosure`, bypassing the
+  payload-id heuristic — including its spoofable `"mcp"` whitelist — whenever a
+  real principal exists. The class joins the retrieval fingerprint (`pcls=`)
+  and surfaces as `principal_cls` on stamped turns. With `TOPOS_OWNER_KEY`
+  unset, every path is byte-identical to before (install-flow invariant: an
+  upgraded engine never demotes the owner's app before the app learns the
+  key). Relay turns carry `cp_relay` and keep the forwarded-id equality test —
+  the CP stamps owner ids for Topos-native clients only since the 2026-08-26
+  containment. Design: the "Who's Asking" doc; tests:
+  `tests/query/test_principal_floors.py`.
 
 ### Added
 - **[O] A minimum-free-disk limit the owner sets, and a model manager that works to

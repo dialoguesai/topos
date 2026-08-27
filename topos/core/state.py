@@ -777,7 +777,9 @@ def _ensure_mcp_request_log_table(conn: sqlite3.Connection) -> None:
                         requested_at TEXT NOT NULL DEFAULT (datetime('now')),
                         source TEXT,
                         requester_id TEXT,
-                        access_context TEXT
+                        access_context TEXT,
+                        verified_cls TEXT,
+                        verified_client_id TEXT
                     )
                 """)
                 commit_connection(conn)
@@ -788,7 +790,7 @@ def _ensure_mcp_request_log_table(conn: sqlite3.Connection) -> None:
         cursor = conn.execute(f"PRAGMA table_info({MCP_REQUEST_LOG_TABLE})")
         columns = [row[1] for row in cursor.fetchall()]
         missing = [
-            col for col in ("source", "requester_id", "access_context") if col not in columns
+            col for col in ("source", "requester_id", "access_context", "verified_cls", "verified_client_id") if col not in columns
         ]
         if missing:
             with with_db_write():
@@ -823,10 +825,23 @@ def record_mcp_request(
         access_ctx = derive_mcp_access_context(resource_owner_user_id, requester_id)
         if is_routine_mcp_source(source):
             access_ctx = ROUTINE_ACCESS_CONTEXT
+        # Principal fabric P2: record the CHANNEL-verified principal next to the
+        # claimed source/requester strings. `source` and `requester_id` are
+        # payload-supplied (audit of claims); these two columns are what the
+        # entry point actually authenticated, so per-client accounting stops
+        # depending on what callers say about themselves — the "Unknown" bucket
+        # and split same-client rows become structurally impossible for stamped
+        # channels. Divergence between claimed and verified is itself a signal.
+        from ..principal import current_principal
+
+        _p = current_principal()
+        verified_cls = str(getattr(_p, "cls", "") or "") or None
+        verified_client_id = str(getattr(_p, "client_id", "") or "") or None
         with with_db_write():
             conn.execute(
-                f"INSERT INTO {MCP_REQUEST_LOG_TABLE} (tool_name, requested_at, source, requester_id, access_context) VALUES (?, ?, ?, ?, ?)",
-                (tool_name, requested_at, source or None, requester_id or None, access_ctx),
+                f"INSERT INTO {MCP_REQUEST_LOG_TABLE} (tool_name, requested_at, source, requester_id, access_context, verified_cls, verified_client_id) VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (tool_name, requested_at, source or None, requester_id or None, access_ctx,
+                 verified_cls, verified_client_id),
             )
             commit_connection(conn)
         if is_routine_mcp_source(source) and resource_owner_user_id:
