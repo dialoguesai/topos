@@ -10,6 +10,25 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Fixed
+- **The starter's disk preflight decided whether its own tests passed.** `[O]`
+  `setup-models --yes` runs `check_space_for` before the curated starter's
+  download, and the test asserting `--yes` pulls read the real volume: the floor
+  defaults to 10 GB and the starter needs 2, so the assertion held only on a
+  machine with 12 GB free. It failed exactly that way — green alone, red inside
+  a full lane whose own temporary databases had taken the volume under the floor
+  by the time it ran, which reads as an ordering leak and is not one. The
+  harness now supplies the verdict (`space_verdict`, `None` by default), so disk
+  is one test's subject rather than every test's environment. That branch had no
+  test of its own; the refusal now has one, verified to fail when the guard is
+  neutralised. 14 passed, including under a simulated 11 GB volume.
+- **Two migration checksums recorded prose, and CI stopped on it.** `[O]` The
+  owner-data scrub rewrote a docstring line in `entity_review_provenance_v1` and
+  `entity_review_candidate_bar_v1`; migrations 70 and 71 were never registered
+  at all. The ledger hashes whole files, so the append-only gate failed on all
+  four and every push since 04:53 was red at that step — which sits *before* the
+  test lane, so **18 commits reached `main` without their tests running in CI**.
+  Re-synced. No shipped SQL moved: both diffs are comment text, and the hash
+  difference is the scrub's, not a schema edit's.
 - **Half the iMessage corpus was stored as archive bytes, not text.**
   `[E:ingestion]` An iMessage with no plain `text` keeps its body in
   `attributedBody` as an `NSAttributedString` archive. The reader did not decode

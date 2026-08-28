@@ -31,7 +31,7 @@ class _Adapter:
         return list(self._models)
 
 
-def _run(args, *, platform, reachable, models, input_text=None):
+def _run(args, *, platform, reachable, models, input_text=None, space_verdict=None):
     runner = CliRunner()
     adapter = _Adapter(reachable, models)
     with patch.object(guidance_mod, "current_platform", return_value=platform):
@@ -44,7 +44,22 @@ def _run(args, *, platform, reachable, models, input_text=None):
                 with patch(
                     "topos.cli.setup_models_cmd._list_tags_or_raise", return_value=models
                 ):
-                    result = runner.invoke(setup_models_command, args, input=input_text)
+                    # The starter's preflight reads the REAL volume otherwise, so
+                    # whether these tests pass depends on the free space of the
+                    # machine running them: the floor defaults to 10 GB and the
+                    # starter needs 2, so any developer or runner under 12 GB free
+                    # fails the pull tests for a reason none of them are about.
+                    # It failed exactly that way here — green alone, red inside a
+                    # full lane whose own temp databases had taken the volume below
+                    # the floor by the time it ran. Disk is `space_verdict`'s
+                    # subject and nothing else's.
+                    with patch(
+                        "topos.engine.disk_space.check_space_for",
+                        return_value=space_verdict,
+                    ):
+                        result = runner.invoke(
+                            setup_models_command, args, input=input_text
+                        )
     return result, pull
 
 
@@ -157,6 +172,35 @@ def test_a_failed_model_list_never_offers_a_download():
     assert result.exit_code == 1
     assert "would not list its models" in result.output
     assert "Nothing was downloaded" in result.output
+
+
+def test_the_starter_refuses_before_the_transfer_when_it_will_not_fit():
+    """The starter's own preflight, which until now only ran by accident.
+
+    `--yes --model X` is guarded by the pull stream (below); the curated starter
+    is guarded earlier, by `check_space_for`, because the CLI knows its size
+    without asking. That branch had no test — it was exercised only on a machine
+    that happened to be short of space, which is the one condition under which a
+    passing suite tells you nothing.
+    """
+    from topos.engine.disk_space import SpaceVerdict
+
+    verdict = SpaceVerdict(
+        needed_bytes=2_000_000_000,
+        free_bytes=11_000_000_000,
+        reserve_bytes=10_000_000_000,
+        path="/home/x/.ollama/models",
+    )
+
+    result, pull = _run(
+        ["--yes"], platform="linux", reachable=True, models=[], space_verdict=verdict
+    )
+
+    # Refused before the transfer, not at 97%.
+    pull.assert_not_called()
+    assert result.exit_code == 1
+    assert "Not enough disk space" in result.output
+    assert "Free up some space" in result.output
 
 
 def test_an_arbitrary_model_is_now_guarded_too():
