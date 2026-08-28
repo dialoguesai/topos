@@ -222,6 +222,38 @@ def _find(haystack: str, needle: str) -> int:
     return 0
 
 
+def _git(*args: str) -> str:
+    """Stripped stdout of a git command, or "" if git fails or is not installed."""
+    try:
+        out = subprocess.run(["git", *args], capture_output=True, text=True)
+    except OSError:
+        return ""
+    return out.stdout.strip() if out.returncode == 0 else ""
+
+
+def _hooks_dir() -> str:
+    """Where git will ACTUALLY look for hooks in this checkout.
+
+    Not ``.git/hooks``. Inside a worktree ``.git`` is a FILE holding
+    ``gitdir: <main>/.git/worktrees/<name>``, so nothing under the literal path
+    opens at all and every stage reads as absent — which is how this check
+    blocked every commit made from a worktree while the hooks were correctly
+    wired the whole time. ``core.hooksPath`` relocates the directory as well,
+    and the worktrees this project's tooling creates set it per-worktree.
+
+    ``git rev-parse --git-path hooks`` is the one answer that honours both.
+    """
+    return (
+        _git("rev-parse", "--path-format=absolute", "--git-path", "hooks")
+        # --path-format landed in git 2.31. Without it the answer is still
+        # correct, just expressed relative to this process's directory.
+        or _git("rev-parse", "--git-path", "hooks")
+        # No git on PATH, or not a repository at all. The literal path is the
+        # last guess left; being wrong here fails loudly rather than quietly.
+        or os.path.join(".git", "hooks")
+    )
+
+
 def _verify_commit_msg_hook() -> int:
     """Refuse to commit at all unless the MESSAGE guard is actually wired.
 
@@ -234,25 +266,44 @@ def _verify_commit_msg_hook() -> int:
     Running this from an ``always_run`` pre-commit-stage hook means the absence
     is loud and immediate instead of discovered by a leak.
     """
+    hooks = _hooks_dir()
     missing = []
     for stage in ("commit-msg", "pre-push"):
         try:
-            body = open(os.path.join(".git", "hooks", stage), encoding="utf-8", errors="ignore").read()
+            body = open(os.path.join(hooks, stage), encoding="utf-8", errors="ignore").read()
         except OSError:
             body = ""
         if f"hook-type={stage}" not in body:
             missing.append(stage)
     if not missing:
         return 0
-    print(
-        f"guard stages NOT installed in this checkout: {', '.join(missing)}\n\n"
-        + "".join(f"  uvx pre-commit install --hook-type {m}\n" for m in missing)
-        + "\n"
+    lines = [
+        f"guard stages NOT installed in this checkout: {', '.join(missing)}",
+        "",
+        # Name the directory that was read. The version that assumed
+        # ``.git/hooks`` reported two correctly-wired stages as missing and gave
+        # no way to see why, because the path it checked never appeared.
+        f"  hooks directory checked: {hooks}",
+        "",
+    ]
+    hooks_path = _git("config", "--get", "core.hooksPath")
+    if hooks_path:
+        # pre-commit refuses outright when this is set — "Cowardly refusing to
+        # install hooks with `core.hooksPath` set" — so printing its one-liner
+        # on its own sends someone to a command that cannot succeed.
+        lines += [
+            f"core.hooksPath is set to {hooks_path}, and pre-commit refuses to install",
+            "while it is. Run the install from the checkout that owns that directory:",
+            "",
+        ]
+    lines += [f"  uvx pre-commit install --hook-type {m}" for m in missing]
+    lines += [
+        "",
         "Without it, files are scanned and the commit MESSAGE is not — which is "
         "the surface that publishes with the commit and cannot be fixed after a "
         "push without rewriting history.",
-        file=sys.stderr,
-    )
+    ]
+    print("\n".join(lines), file=sys.stderr)
     return 1
 
 
