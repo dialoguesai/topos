@@ -279,7 +279,8 @@ def read_person_graph(conn: Any, *, dataset_id: str,
     month's relationships.
     """
     from .dataset_resolution import resolve_messaging_dataset
-    from .person_graph import (attach_closeness, attach_fact_closeness, auto_link_duplicates,
+    from .person_graph import (attach_closeness, attach_fact_closeness, attach_shared_with_owner,
+                               auto_link_duplicates,
                                build_person_edges, build_person_nodes, group_ambient_people,
                                merge_suggestions, resolve_owner_identity,
                                shared_context_affinity, structural_metrics)
@@ -314,6 +315,11 @@ def read_person_graph(conn: Any, *, dataset_id: str,
     # node — most of these join by name, because the fact side has the same duplicate-entity
     # problem the graph itself does.
     fact_stats = attach_fact_closeness(conn, nodes)
+    # What the owner and each person BOTH engage with. `shared_context_affinity` below
+    # relates two OTHER people and — measured — never involves the owner, so without this a
+    # card could say two contacts share a subject and never what YOU share with the person
+    # in front of you.
+    attach_shared_with_owner(conn, nodes)
     # Ambient is 173 of 437 and reads as an undifferentiated fringe, but it holds classical
     # poets, GitHub collaborators, LinkedIn contacts and several pieces of software mistaken
     # for people. Grouping by what each name was seen ALONGSIDE separates them.

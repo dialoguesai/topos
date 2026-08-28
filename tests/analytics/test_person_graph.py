@@ -1062,3 +1062,87 @@ class TestAFactSaysWhenAndWhatFromV:
         assert stats["dated"] is False
         assert nodes[0]["facts"][0]["at"] is None
         assert nodes[0]["facts"][0]["sources"][0]["kind"] == "record"
+
+
+class TestWhatYouShareWithThisPerson:
+    """`shared_context_affinity` relates two OTHER people, and measured on the live node not
+    one of its 45 rows involves the owner. So a card could say two of your contacts share a
+    subject and never say what YOU share with the person in front of you."""
+
+    def _conn_with_mentions(self):
+        c = _conn()
+        c.execute("""CREATE TABLE IF NOT EXISTS entity_mentions_x (x INT)""")
+        c.execute("DELETE FROM entity_mentions")
+        return c
+
+    def _seed(self, c, *, owner_ents, peer_msgs, mention_rows):
+        for eid, name, etype in owner_ents:
+            c.execute("INSERT INTO entities (entity_id, canonical_name, entity_type) VALUES (?,?,?)",
+                      (eid, name, etype))
+            c.execute("""INSERT INTO entity_mentions (mention_id, entity_id, record_id,
+                         source_id, authored_by_owner) VALUES (?,?,?,?,1)""",
+                      (f"own-{eid}", eid, f"ownrec-{eid}", "grow_journal"))
+        for mid, sender in peer_msgs:
+            c.execute("""INSERT INTO conversation_messages (dataset_id, message_id, content,
+                         is_from_self, conversation_id, sender_id, event_at, source_id)
+                         VALUES ('d',?,'hi',0,'c',?, '2026-08-01','imessage')""", (mid, sender))
+        for i, (mid, eid) in enumerate(mention_rows):
+            c.execute("""INSERT INTO entity_mentions (mention_id, entity_id, record_id,
+                         source_id, authored_by_owner) VALUES (?,?,?,?,0)""",
+                      (f"m{i}", eid, mid, "imessage"))
+
+    def test_names_the_KIND_of_thing_in_common(self):
+        c = self._conn_with_mentions()
+        self._seed(c,
+                   owner_ents=[("e1", "NYC", "place"), ("e2", "Brooklyn", "place")],
+                   peer_msgs=[(f"m{i}", "+1555") for i in range(6)],
+                   mention_rows=[("m0","e1"),("m1","e1"),("m2","e1"),("m3","e2"),("m4","e2")])
+        nodes = [{"node_id": "p1", "label": "Peer", "messenger_keys": ["+1555"]}]
+        PG.attach_shared_with_owner(c, nodes)
+        shared = nodes[0]["shared_with_owner"]
+        assert shared["kind"] == "place"
+        assert shared["label"] == "Places"
+        assert shared["examples"][0] == "NYC"
+
+    def test_an_entity_the_owner_never_WROTE_about_does_not_count(self):
+        """Received is not shared. An entity the owner was merely told about is evidence of
+        being told, not of a common interest."""
+        c = self._conn_with_mentions()
+        c.execute("INSERT INTO entities (entity_id, canonical_name, entity_type) VALUES ('e9','SF','place')")
+        for i in range(5):
+            c.execute("""INSERT INTO conversation_messages (dataset_id, message_id, content,
+                         is_from_self, conversation_id, sender_id, event_at, source_id)
+                         VALUES ('d',?,'hi',0,'c','+1555','2026-08-01','imessage')""", (f"z{i}",))
+            c.execute("""INSERT INTO entity_mentions (mention_id, entity_id, record_id,
+                         source_id, authored_by_owner) VALUES (?,?,?,?,0)""",
+                      (f"zz{i}", "e9", f"z{i}", "imessage"))
+        nodes = [{"node_id": "p1", "label": "Peer", "messenger_keys": ["+1555"]}]
+        PG.attach_shared_with_owner(c, nodes)
+        assert "shared_with_owner" not in nodes[0]
+
+    def test_four_singletons_are_four_coincidences(self):
+        """Measured on a live node: one case had four shared entities at one mention each,
+        another had its top entity mentioned eleven times. Only the second is a shared
+        interest."""
+        c = self._conn_with_mentions()
+        self._seed(c,
+                   owner_ents=[(f"e{i}", f"Place{i}", "place") for i in range(4)],
+                   peer_msgs=[(f"m{i}", "+1555") for i in range(4)],
+                   mention_rows=[(f"m{i}", f"e{i}") for i in range(4)])
+        nodes = [{"node_id": "p1", "label": "Peer", "messenger_keys": ["+1555"]}]
+        PG.attach_shared_with_owner(c, nodes)
+        assert "shared_with_owner" not in nodes[0]
+
+    def test_says_nothing_rather_than_something_thin(self):
+        c = self._conn_with_mentions()
+        nodes = [{"node_id": "p1", "label": "Peer", "messenger_keys": ["+nobody"]}]
+        stats = PG.attach_shared_with_owner(c, nodes)
+        assert stats["attached"] == 0
+        assert "shared_with_owner" not in nodes[0]
+
+    def test_the_owner_is_not_compared_with_themselves(self):
+        c = self._conn_with_mentions()
+        nodes = [{"node_id": "owner", "label": "You", "is_owner": True,
+                  "messenger_keys": ["self"]}]
+        PG.attach_shared_with_owner(c, nodes)
+        assert "shared_with_owner" not in nodes[0]

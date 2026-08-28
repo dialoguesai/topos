@@ -1762,6 +1762,151 @@ def _attach_evidence(
         entry["sources"] = sources
 
 
+#: A theme, not a coincidence. One entity in common is two people mentioning Texas once.
+SHARED_OWNER_MIN_ENTITIES = 2
+#: And it has to have been said more than in passing.
+SHARED_OWNER_MIN_MENTIONS = 4
+#: At least one of them has to RECUR. Measured, the two gates above still admitted a case of
+#: four entities at one mention each — four coincidences, not a shared interest. The strong
+#: case has its top entity mentioned eleven times; that is the difference worth marking.
+SHARED_OWNER_MIN_TOP_MENTIONS = 3
+SHARED_OWNER_TOP = 3
+
+#: How each entity type reads on a card. The card answers "what do we have in common" and
+#: the answer should be a word, not a schema value.
+_SHARED_OWNER_KIND_WORDS: Dict[str, str] = {
+    "place": "Places",
+    "org": "Organisations",
+    "project": "Projects",
+    "topic": "Topics",
+    "person": "People",
+    "product": "Things",
+    "event": "Events",
+    "work_of_art": "Works",
+    "goal": "Goals",
+}
+
+
+def attach_shared_with_owner(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[str, int]:
+    """What the owner and this person BOTH engage with, and what KIND of thing it is.
+
+    The graph already computes affinity between two OTHER people (`shared_context_affinity`),
+    and measured on the live node not one of its 45 rows involves the owner — so a card could
+    say two of your contacts share a subject, and never what YOU share with the person you
+    are looking at. That is the more useful of the two, and it was missing.
+
+    An entity counts only if the owner has WRITTEN about it (`authored_by_owner`) and it also
+    appears in a record this person took part in. That direction matters: an entity the owner
+    merely received is not evidence of a shared interest, it is evidence of being told.
+
+    Gated hard, because the tail is noise. Three shapes measured on a live node:
+      · the strong case — 13 shared entities over 42 mentions, the top three at x11, x10
+        and x5, all of one kind. That is a real "you talk about the same places".
+      · the tie case — 4 entities, every one of them x1, spread across five kinds. A
+        dominant "kind" there is an artefact of ties, not a shared interest.
+      · the thin case — two `org` rows that are actually cuisines. Sparse AND mis-typed.
+    So: at least two distinct entities of the dominant kind, at least four mentions behind
+    them, and the kind must actually dominate. Otherwise the node says nothing, which is the
+    correct output for "nothing in common that the record can show".
+    """
+    if not _appearance_table_exists(conn, "entity_mentions"):
+        return {"attached": 0}
+
+    try:
+        owner_entity_ids = [
+            str(r[0]) for r in conn.execute(
+                "SELECT DISTINCT entity_id FROM entity_mentions "
+                "WHERE authored_by_owner = 1 AND entity_id IS NOT NULL")
+        ]
+    except sqlite3.Error:
+        return {"attached": 0}
+    if not owner_entity_ids:
+        return {"attached": 0}
+
+    names: Dict[str, str] = {}
+    kinds: Dict[str, str] = {}
+    try:
+        for eid, cname, etype in conn.execute(
+                "SELECT entity_id, canonical_name, entity_type FROM entities"):
+            names[str(eid)] = str(cname or "")
+            kinds[str(eid)] = str(etype or "")
+    except sqlite3.Error:
+        return {"attached": 0}
+
+    # sender handle -> node, the same keying the appearance lane uses
+    key_to_nid: Dict[str, str] = {}
+    for node in nodes:
+        if node.get("is_owner"):
+            continue
+        nid = str(node.get("node_id") or "")
+        if not nid:
+            continue
+        for key in _peer_handle_keys(node):
+            key_to_nid.setdefault(key, nid)
+    if not key_to_nid:
+        return {"attached": 0}
+
+    # Query by SENDER and filter the owner set in Python. Both lists are long — 381 owner
+    # entities against every handle on the graph — and one query carrying both would run
+    # past SQLite's 999-variable limit on a busy node, silently, as an sqlite3.Error that
+    # this function is written to swallow.
+    owner_set = set(owner_entity_ids)
+    per_node: Dict[str, Counter] = defaultdict(Counter)
+    for chunk in _appearance_chunks(list(key_to_nid), 400):
+        placeholders = ",".join("?" * len(chunk))
+        try:
+            rows = conn.execute(
+                "SELECT cm.sender_id, em.entity_id, COUNT(*) "
+                "FROM conversation_messages cm "
+                "JOIN entity_mentions em ON em.record_id = cm.message_id "
+                f"WHERE cm.sender_id IN ({placeholders}) "
+                "GROUP BY 1, 2",
+                chunk,
+            ).fetchall()
+        except sqlite3.Error:
+            continue
+        for sender, eid, n in rows:
+            eid = str(eid or "")
+            if eid not in owner_set:
+                continue
+            nid = key_to_nid.get(str(sender or ""))
+            if not nid:
+                continue
+            per_node[nid][eid] += int(n or 0)
+
+    by_node = {str(n.get("node_id") or ""): n for n in nodes}
+    attached = 0
+    for nid, hits in per_node.items():
+        node = by_node.get(nid)
+        if node is None:
+            continue
+        by_kind: Dict[str, List[Tuple[str, int]]] = defaultdict(list)
+        for eid, n in hits.items():
+            kind = kinds.get(eid) or ""
+            if not kind:
+                continue
+            by_kind[kind].append((names.get(eid) or eid, n))
+        if not by_kind:
+            continue
+        kind, entries = max(
+            by_kind.items(), key=lambda kv: (len(kv[1]), sum(n for _, n in kv[1])))
+        total = sum(n for _, n in entries)
+        entries.sort(key=lambda e: (-e[1], e[0]))
+        if (len(entries) < SHARED_OWNER_MIN_ENTITIES
+                or total < SHARED_OWNER_MIN_MENTIONS
+                or entries[0][1] < SHARED_OWNER_MIN_TOP_MENTIONS):
+            continue
+        node["shared_with_owner"] = {
+            "kind": kind,
+            "label": _SHARED_OWNER_KIND_WORDS.get(kind, kind.replace("_", " ").title()),
+            "examples": [name for name, _ in entries[:SHARED_OWNER_TOP]],
+            "entity_count": len(entries),
+            "mention_count": total,
+        }
+        attached += 1
+    return {"attached": attached}
+
+
 def person_relationship_facts(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[str, int]:
     """Attach the owner's relationship facts to the people they are about.
 
