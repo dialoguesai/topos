@@ -45,6 +45,17 @@ repos:
         language: system
         types: [text]
 
+      # The message is its own leak surface, and a worse one: it publishes with
+      # the commit, no file scan covers it, and fixing it after a push means
+      # rewriting history. The file hook above passed a commit whose own message
+      # named a home address and a real goal, which is how this stage came to
+      # exist.
+      - id: no-owner-data-in-message
+        name: no personal data from the local node in the commit message
+        entry: python3 scripts/scan_repo_for_owner_data.py --message-file
+        language: system
+        stages: [commit-msg]
+
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.28.0
     hooks:

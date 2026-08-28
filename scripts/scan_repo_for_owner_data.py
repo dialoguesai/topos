@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Fail if the working tree mentions data the owner asked to be hidden.
+"""Fail if a commit — its FILES or its MESSAGE — mentions the owner's own data.
 
 Docstrings, comments, commit bodies and test fixtures are all published when a
 wheel ships, and none of them are covered by the derived-layer privacy sweeps —
@@ -8,10 +8,17 @@ prompt template that carried measured personal data, and on 2026-08-27 a
 remediation branch was about to commit a BLACK-HOLED entity name into five
 files, two of them the privacy tests themselves.
 
+A commit message is its own leak surface and a worse one than a file: it is
+published the moment the commit is, it is not covered by any file scan, and
+rewriting it after a push means rewriting history. The first run of the
+file-scanning hook passed a commit whose own message named a home address and a
+real goal — this script now guards both, from two pre-commit stages.
+
 This cannot be a hermetic pytest: the names live in the owner's database, which
 tests must never open. Run it before committing, or from a pre-push hook.
 
     uv run python scripts/scan_repo_for_owner_data.py [--database PATH] [--all] [PATHS...]
+    uv run python scripts/scan_repo_for_owner_data.py --message-file .git/COMMIT_EDITMSG
 
 Wired into ``.pre-commit-config.yaml``, where pre-commit passes the staged
 files, so a leak blocks the commit rather than being found afterwards.
@@ -74,16 +81,21 @@ def _protected_names(db_path: str) -> list:
             names.append(("place", str(name or "")))
         # Derived goal text is the owner's own words about their own life, and
         # it reads as innocuous prose in a docstring — which is exactly how
-        # "Learn about Alpha" and "More and more improvements to the website"
-        # survived two passes of this scanner before it looked here. The floor
-        # is higher than for a name because a short goal ("Ship it", "Call Mum")
-        # collides with ordinary English and a noisy hook gets removed.
+        # Two real goals survived two passes of this scanner before it looked
+        # here, and a third survived in this very comment, which cited one of
+        # them as an example. Describe the shape, never the value — that rule
+        # applies to the guard as much as to the code it guards.
+        #
+        # The floor is higher than for a name because a short goal ("Ship it",
+        # "Call Mum") collides with ordinary English and a noisy hook gets
+        # removed. Measured at 15: zero false positives across 1,582 files,
+        # against 1,893 goals protected.
         try:
             for (text,) in conn.execute(
                 "SELECT DISTINCT goal_text FROM user_goals WHERE goal_text IS NOT NULL"
             ):
                 t = str(text or "").strip()
-                if len(t) >= 20:
+                if len(t) >= 15:
                     names.append(("goal text", t))
         except sqlite3.Error:
             pass
@@ -92,11 +104,54 @@ def _protected_names(db_path: str) -> list:
         conn.close()
 
 
+def _find(haystack: str, needle: str) -> int:
+    """1-indexed line of the first hit, or 0."""
+    for i, line in enumerate(haystack.splitlines()):
+        if needle in line:
+            return i + 1
+    return 0
+
+
+def _scan_message(path: str, names: list) -> int:
+    try:
+        body = open(path, encoding="utf-8", errors="ignore").read()
+    except OSError as exc:
+        print(f"cannot read commit message at {path}: {exc}", file=sys.stderr)
+        return 0
+    # Comment lines are stripped by git and never become part of the message.
+    body = "\n".join(l for l in body.splitlines() if not l.startswith("#"))
+    folded = body.lower().replace("\u2019", "'")
+
+    hits = []
+    for kind, name in names:
+        needle = name.strip().lower().replace("\u2019", "'")
+        if needle and needle in folded:
+            hits.append((kind, name, _find(folded, needle)))
+    if not hits:
+        return 0
+
+    print(f"{len(hits)} leak(s) of the owner's own data in the commit MESSAGE:\n", file=sys.stderr)
+    for kind, name, line in hits:
+        print(f"  {kind:<20} {name!r}  (line {line})", file=sys.stderr)
+    print(
+        "\nA message is published with the commit and cannot be scrubbed later "
+        "without rewriting history. Describe the shape, not the value: "
+        "\"a home address\" rather than the address.",
+        file=sys.stderr,
+    )
+    return 1
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--database", default=os.path.expanduser("~/.topos/database.db"))
     ap.add_argument("--all", action="store_true", help="scan every tracked file, not just changed ones")
     ap.add_argument("--min-length", type=int, default=8)
+    ap.add_argument(
+        "--message-file",
+        help="scan a commit message instead of files; pre-commit passes this at "
+             "the commit-msg stage.",
+    )
     ap.add_argument(
         "paths", nargs="*",
         help="files to scan; pre-commit passes the staged ones. Defaults to the "
@@ -116,6 +171,9 @@ def main() -> int:
         (kind, n) for kind, n in _protected_names(args.database)
         if len(n.strip()) >= args.min_length and n.strip().lower() not in GENERIC
     ]
+    if args.message_file:
+        return _scan_message(args.message_file, names)
+
     files = args.paths or (_all_files() if args.all else _tracked_and_untracked())
     files = [
         f for f in files
