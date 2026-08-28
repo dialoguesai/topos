@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.35] — 2026-08-28
+
 ### Fixed
 - **An upgrade step approved from the UI never ran, and reported success.**
   `[O]` `[E:enrichment]` Found by approving 1.3.34's own entities reprocess on a

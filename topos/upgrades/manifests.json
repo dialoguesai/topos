@@ -653,8 +653,8 @@
       ]
     },
     {
-      "version": "unreleased",
-      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "version": "1.3.35",
+      "summary": "Release 1.3.35.",
       "steps": [
         {
           "id": "reextract-entities-structured-fields-retry",
@@ -679,6 +679,12 @@
       "notes": [
         "The runner fix ships in the same release: _run_coro runs the coroutine on its own loop in a worker thread when one already owns the caller's, and a step whose sources ALL errored now fails instead of being ledgered done. Without both, approving the step above would fail the same silent way."
       ]
+    },
+    {
+      "version": "unreleased",
+      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "steps": [],
+      "notes": []
     }
   ]
 }
