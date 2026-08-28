@@ -1,10 +1,10 @@
 """Owner unbind: split a surface's mentions OUT of an entity, permanently.
 
-The accidental-merge case (Claire → contact "Romeo Tango" via the
+The accidental-merge case (Romeo → contact "Romeo Tango" via the
 resolver's unique-contact tier) needs two things:
   1. split: mentions whose surface matches move to a fresh entity, counts
      recount, any matching alias is removed;
-  2. a persistent no-bind guard — "Claire" is a token-subset of "Claire
+  2. a persistent no-bind guard — "Romeo" is a token-subset of "Romeo
      Duncombe" (similarity 1.0), so without a guard the very next resolve()
      re-merges the pair via the contact/alias/fuzzy tiers.
 """
@@ -38,7 +38,7 @@ def _mention(conn, entity_id: str, mention_id: str, surface: str) -> None:
 
 
 def _seed_claire(conn) -> str:
-    """Contact-anchored 'Romeo Tango' holding mentions surfaced as 'Claire'."""
+    """Contact-anchored 'Romeo Tango' holding mentions surfaced as 'Romeo'."""
     conn.execute(
         "INSERT INTO contacts (contact_id, dataset_id, source_id, display_name, is_self) "
         "VALUES ('c-cd', 'ds', 'import', 'Romeo Tango', 0)"
@@ -46,7 +46,7 @@ def _seed_claire(conn) -> str:
     r = EntityResolver(conn)
     eid = r._create_entity("Romeo Tango", "person", contact_id="c-cd")
     for i in range(3):
-        _mention(conn, eid, f"m{i}", "Claire")
+        _mention(conn, eid, f"m{i}", "Romeo")
     conn.execute(
         "UPDATE entities SET mention_count=3 WHERE entity_id=?", (eid,)
     )
@@ -56,7 +56,7 @@ def _seed_claire(conn) -> str:
 
 def test_split_moves_mentions_and_recounts(conn):
     eid = _seed_claire(conn)
-    out = split_surface(conn, eid, "Claire")
+    out = split_surface(conn, eid, "Romeo")
     assert out["mentions_moved"] == 3
     new_id = out["new_entity_id"]
     assert new_id and new_id != eid
@@ -68,24 +68,24 @@ def test_split_moves_mentions_and_recounts(conn):
     ).fetchone()[0] == 0
     assert conn.execute(
         "SELECT canonical_name FROM entities WHERE entity_id=?", (new_id,)
-    ).fetchone()[0] == "Claire"
+    ).fetchone()[0] == "Romeo"
 
 
 def test_split_guard_blocks_rebind_via_contact_tier(conn):
     eid = _seed_claire(conn)
     r = EntityResolver(conn)
-    # Baseline: the unique-contact tier binds 'Claire' to Romeo Tango.
-    hit, tier = r.resolve("Claire", entity_type="person")
+    # Baseline: the unique-contact tier binds 'Romeo' to Romeo Tango.
+    hit, tier = r.resolve("Romeo", entity_type="person")
     assert hit == eid
 
-    split_surface(conn, eid, "Claire")
-    # After the split, 'Claire' must NEVER resolve to Romeo Tango again —
+    split_surface(conn, eid, "Romeo")
+    # After the split, 'Romeo' must NEVER resolve to Romeo Tango again —
     # it resolves to the split-out entity instead.
-    hit2, _tier2 = EntityResolver(conn).resolve("Claire", entity_type="person")
+    hit2, _tier2 = EntityResolver(conn).resolve("Romeo", entity_type="person")
     assert hit2 != eid
     assert conn.execute(
         "SELECT canonical_name FROM entities WHERE entity_id=?", (hit2,)
-    ).fetchone()[0] == "Claire"
+    ).fetchone()[0] == "Romeo"
 
 
 def test_split_removes_matching_alias(conn):

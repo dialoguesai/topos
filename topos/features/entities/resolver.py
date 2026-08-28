@@ -92,7 +92,7 @@ def token_set_similarity(
     being compared, and the two answers are opposite.
 
     For a person or an org, a shorter name abbreviates a longer one — "Robin"
-    is "Robin Ellery", "Anthropic" is "Anthropic Inc" — so containment is
+    is "Sierra Yankee", "Anthropic" is "Anthropic Inc" — so containment is
     identity and scores 1.0. That is this function's historical behaviour and
     stays the default.
 
@@ -866,7 +866,7 @@ class EntityResolver:
         that a name in today's data is that person — so a question that exists
         only because a surface fuzzy-matches an address-book entry is noise.
         The live queue showed exactly that: 35 of its 39 contact questions
-        proposed a never-mentioned contact, among them "Delta Whiskey" (the Palantir
+        proposed a never-mentioned contact, among them "Delta Whiskey" (the Acme
         CEO) offered as the owner's contact "Alex", "Alexis" as "Alex", "Alice"
         as "Allie", "Dan" as "Delta Sierra" — first names colliding, not
         identities matching.

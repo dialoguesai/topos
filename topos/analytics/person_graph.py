@@ -84,8 +84,8 @@ def resolve_owner_identity(conn: Any) -> Dict[str, Any]:
         return {"canonical_id": None, "ids": set(), "label": "You", "merge_candidates": []}
     ids = {str(r[0]) for r in rows if r and r[0]}
 
-    # `is_self` alone missed SIX owner entities on the live node — `Robin Ellery` (29
-    # mentions), `Robin` (20), `Jordan Ellery` (13), and more — so the owner was drawn on
+    # `is_self` alone missed SIX owner entities on the live node — `Sierra Yankee` (29
+    # mentions), `Robin` (20), `Delta Yankee` (13), and more — so the owner was drawn on
     # their own social graph as up to six separate contacts. These three rules use what the
     # node actually KNOWS rather than what a name looks like.
     known = owner_identifiers(conn)

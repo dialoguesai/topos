@@ -53,7 +53,7 @@ def conn() -> sqlite3.Connection:
             _obj("interests", "activity_tags", "e9:edtech", {"tag": "edtech"}),
             # A personal fact that happens to live in interests — must survive.
             _obj("interests", "fact", "fact:self:goes_by",
-                 {"predicate": "goes_by", "object_value": "Robin Ellery"}, "facts_v1"),
+                 {"predicate": "goes_by", "object_value": "Sierra Yankee"}, "facts_v1"),
             # Another dimension entirely — must survive.
             _obj("work", "activity_tags", "w1:Business",
                  {"tag": "Business", "source_kind": "browser_url_classification"}),

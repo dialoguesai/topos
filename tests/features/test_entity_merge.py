@@ -90,22 +90,22 @@ def test_merge_clears_no_bind_so_rebind_works(conn):
     )
     keep = r._create_entity("Romeo Tango", "person", contact_id="c-cd")
     for i in range(2):
-        _mention(conn, keep, f"m{i}", "Claire")
+        _mention(conn, keep, f"m{i}", "Romeo")
     conn.execute("UPDATE entities SET mention_count=2 WHERE entity_id=?", (keep,))
     conn.commit()
 
-    split_out = split_surface(conn, keep, "Claire")
+    split_out = split_surface(conn, keep, "Romeo")
     absorb = split_out["new_entity_id"]
     assert absorb
 
-    # Guard is active: Claire must not resolve back to Romeo Tango.
-    hit, _ = EntityResolver(conn).resolve("Claire", entity_type="person")
+    # Guard is active: Romeo must not resolve back to Romeo Tango.
+    hit, _ = EntityResolver(conn).resolve("Romeo", entity_type="person")
     assert hit != keep
 
     merge_entity_pair(conn, keep, absorb)
 
-    # Guard cleared: Claire can bind to Romeo Tango again.
-    hit2, _ = EntityResolver(conn).resolve("Claire", entity_type="person")
+    # Guard cleared: Romeo can bind to Romeo Tango again.
+    hit2, _ = EntityResolver(conn).resolve("Romeo", entity_type="person")
     assert hit2 == keep
     assert conn.execute(
         "SELECT COUNT(*) FROM entity_review WHERE kind='no_bind' AND candidate_entity_id=?",

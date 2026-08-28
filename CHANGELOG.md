@@ -9,34 +9,7 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
-### Added
-- **A relationship fact now says WHEN, and what it was built from.**
-  `[E:entities]` The person card showed a sentence about a relationship with no
-  date and no way back to the record behind it, which makes a fact an assertion
-  rather than something the owner can check. Each `rel.*` fact now carries `at`
-  (from `valid_from` — the day the fact is ABOUT, not the day the pack ran; on a
-  live node 83/83 facts carry it with 76 distinct values) and a `sources` list
-  built from every `source_ref`.
-
-  Sources are split by kind because they are not the same evidence. A
-  `journal_entries` or `conversation_messages` ref resolves to the real text,
-  bounded at 320 characters and flagged when truncated. An `entity_edges` or
-  `messenger_dyad_stats` ref does not resolve at all — its `record_id` is an
-  entity id, not that table's key (measured: 0 of 23 `entity_edges` refs resolve
-  by `edge_id`, and `messenger_dyad_stats` has a composite key) — so its evidence
-  is the ref's own note, presented as the statistic it is. Dressing that up as a
-  quoted document would make one witness look like two, which is the same
-  distinction the card already draws between "you wrote this" and "inferred from
-  your data". A ref that resolves to nothing is reported as missing rather than
-  dropped, so the source count never understates the claim.
-
 ### Fixed
-- **One missing column silently emptied every person's relationship facts.**
-  `[E:entities]` `person_relationship_facts` wrapped its whole read in
-  `except sqlite3.Error: return {"attached": 0}`, so adding a column to the
-  SELECT dropped all 83 facts anywhere that column was absent — with nothing
-  logged. It now falls back to the previous column set and reports `dated:
-  False`: a fact without its date is still the fact.
 - **A short place name swallowed every longer place containing it.**
   `[E:entities]` `token_set_similarity` scores a contained token set as a
   perfect 1.0. For a person that is right — "Robin" abbreviates "Claire

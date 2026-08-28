@@ -279,7 +279,7 @@ class TestOneRowPerDecision:
 
     def test_answered_decision_is_never_asked_again(self, conn) -> None:
         """The owner's answer lives in their Topos and binds the resolver."""
-        person = _mk_entity(conn, "Robin Ellery", mentions=40)
+        person = _mk_entity(conn, "Sierra Yankee", mentions=40)
         resolver = EntityResolver(conn)
         resolver._queue_review("Robin", person, 0.85, "rec-1")
         conn.commit()
@@ -423,7 +423,7 @@ class TestReviewGates:
 
         Most imported contacts are someone met in passing years ago. A contact
         row says the owner once had a phone number, not that a name in today's
-        data is that person — so this is "Delta Whiskey" (the Palantir CEO) offered
+        data is that person — so this is "Delta Whiskey" (the Acme CEO) offered
         as their contact "Alex", which is a first-name collision, not an
         identity match. 35 of the live queue's 39 contact questions were this.
         """

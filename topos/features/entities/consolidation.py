@@ -221,7 +221,7 @@ def _scan_candidate_pairs(
     load a model, or drift into its own private name-similarity heuristic.
 
     Yields the FULL fuzzy range, not just the review band — a subset pair like
-    "robin" ⊂ "robin ellery" scores 1.0 and so is never queued for review, yet
+    "robin" ⊂ "sierra yankee" scores 1.0 and so is never queued for review, yet
     it is exactly the alias an affinity edge must not be built on.
     """
     from ..signal.vector_math import cosine_similarity
@@ -596,7 +596,7 @@ def split_surface(conn: sqlite3.Connection, entity_id: str, surface: str) -> Dic
     """Owner unbind: split a surface's mentions OUT of an entity, permanently.
 
     The reverse of an accidental merge/bind (e.g. the resolver's unique-contact
-    tier binding "Robin" to the contact "Robin Ellery"):
+    tier binding "Robin" to the contact "Sierra Yankee"):
 
       * mentions whose surface_text normalizes to ``surface`` move to a fresh
         entity named after the surface (created only when mentions exist);

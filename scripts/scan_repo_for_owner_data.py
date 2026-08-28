@@ -40,6 +40,9 @@ GENERIC = {
     "unknown", "owner", "home", "west", "east", "north", "south", "avenue",
     "midtown", "southwest", "northeast", "shadow", "porter", "ollama", "claude",
     "anthropic", "github", "google", "apple", "openai", "python", "slack",
+    # Transcript role labels the extractor mints as person entities. They name
+    # a turn, not a human, and every diarised fixture in the tree contains them.
+    "speaker 1", "speaker 2", "speaker 3", "speaker one", "speaker two",
 }
 SKIP_DIRS = (".git/", "node_modules/", ".venv/", "dist/", "build/", "__pycache__/")
 # Data fixtures count. A CSV or JSONL sample carrying real rows is the same
@@ -126,6 +129,32 @@ def _protected_names(db_path: str) -> list:
                 squashed = "".join(full.split()).lower()
                 if len(squashed) >= 8:
                     names.append(("owner handle", squashed))
+        except sqlite3.Error:
+            pass
+        # Other people. Restricted to FULL names — a name with a space in it —
+        # because that is what makes a person identifiable and what keeps this
+        # usable. Single first names are most of the 1,249 contacts and collide
+        # with ordinary English ("Unknown", "Porter", "May"); a hook that fires
+        # on those gets deleted, and a deleted hook protects nobody.
+        #
+        # Measured 2026-08-28: 562 full names in the database, **35 of them
+        # present in tracked files across 71 sites** — roughly 25 private
+        # individuals plus public figures from the owner's reading. None were
+        # reachable by the place, goal, black-hole or owner-name scans.
+        try:
+            for query in (
+                "SELECT DISTINCT canonical_name FROM entities"
+                " WHERE entity_type='person' AND canonical_name IS NOT NULL",
+                "SELECT DISTINCT display_name FROM contacts WHERE display_name IS NOT NULL",
+            ):
+                for (person,) in conn.execute(query):
+                    full = str(person or "").strip()
+                    # A space is the whole filter: a first name and a surname
+                    # together identify a human; a first name alone
+                    # identifies a string. (Naming a real example here is what
+                    # this scanner caught on its own third run.)
+                    if " " in full and len(full) >= 6:
+                        names.append(("person name", full))
         except sqlite3.Error:
             pass
         return names

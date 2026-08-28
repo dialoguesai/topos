@@ -10,7 +10,7 @@ to resemble.
 Contacts get no exemption. An address book is not a list of important people:
 most imported contacts are someone met in passing, often years ago, who will
 never come up again. On the first live node, 35 of the 39 open contact
-questions proposed a never-mentioned contact — "Delta Whiskey" (the Palantir CEO)
+questions proposed a never-mentioned contact — "Delta Whiskey" (the Acme CEO)
 as the owner's contact "Alex", "Alexis" as "Alex", "Alice" as "Allie". Of 76
 open decisions there, 24 clear this bar.
 

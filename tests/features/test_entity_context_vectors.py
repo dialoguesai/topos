@@ -168,11 +168,11 @@ class TestSourceDiversityFloor:
     """
 
     def test_three_mentions_of_one_document_do_not_clear_the_floor(self, conn) -> None:
-        _add_entity(conn, "woolf", "person", "Victor Whiskey2")
+        _add_entity(conn, "wren", "person", "Victor Whiskey2")
         for i in range(MIN_CONTEXT_SOURCES):
             _add_mention_with_embedding(
                 conn,
-                "woolf",
+                "wren",
                 f"browser:http://example.test/epigrams.htm_2026-07-2{i}T00:00:00.000Z",
                 _basis(0),
                 content_hash="one-page",
@@ -185,13 +185,13 @@ class TestSourceDiversityFloor:
 
         assert result["centroids_written"] == 0
         assert result["skipped_below_source_floor"] == 1
-        assert load_context_centroid(conn, "woolf") is None
+        assert load_context_centroid(conn, "wren") is None
 
     def test_three_mentions_across_three_documents_do_clear_the_floor(self, conn) -> None:
-        _add_entity(conn, "woolf", "person", "Victor Whiskey2")
+        _add_entity(conn, "wren", "person", "Victor Whiskey2")
         for i in range(MIN_CONTEXT_SOURCES):
             _add_mention_with_embedding(
-                conn, "woolf", f"rec-woolf-{i}", _basis(i), content_hash=f"page-{i}"
+                conn, "wren", f"rec-wren-{i}", _basis(i), content_hash=f"page-{i}"
             )
         conn.commit()
 
@@ -200,17 +200,17 @@ class TestSourceDiversityFloor:
         )
 
         assert result["centroids_written"] == 1
-        assert load_context_centroid(conn, "woolf") is not None
+        assert load_context_centroid(conn, "wren") is not None
 
     def test_source_count_is_recorded_separately_from_the_mention_count(
         self, conn
     ) -> None:
         """Their ratio is the re-read factor that hid the defect."""
-        _add_entity(conn, "woolf", "person", "Victor Whiskey2")
+        _add_entity(conn, "wren", "person", "Victor Whiskey2")
         # Six records, three documents: each page read twice.
         for i in range(6):
             _add_mention_with_embedding(
-                conn, "woolf", f"rec-woolf-{i}", _basis(i % 3), content_hash=f"page-{i % 3}"
+                conn, "wren", f"rec-wren-{i}", _basis(i % 3), content_hash=f"page-{i % 3}"
             )
         conn.commit()
 
@@ -218,7 +218,7 @@ class TestSourceDiversityFloor:
 
         row = conn.execute(
             "SELECT mention_sample, source_sample FROM entity_context_vectors "
-            "WHERE entity_id='woolf'"
+            "WHERE entity_id='wren'"
         ).fetchone()
         assert row == (6, 3)
 
@@ -246,10 +246,10 @@ class TestSourceDiversityFloor:
 
     def test_browser_revisits_collapse_by_url_when_no_content_hash(self, conn) -> None:
         """Fallback path for rows predating ``content_hash``."""
-        _add_entity(conn, "woolf", "person", "Victor Whiskey2")
+        _add_entity(conn, "wren", "person", "Victor Whiskey2")
         base = "browser:http://www.thehypertexts.com/Epigrams.htm"
         for stamp in ("2026-07-22T00:46:42.328Z", "2026-07-22T04:14:39.394Z", "2026-07-22T04:14:39.632Z"):
-            _add_mention_with_embedding(conn, "woolf", f"{base}_{stamp}", _basis(0))
+            _add_mention_with_embedding(conn, "wren", f"{base}_{stamp}", _basis(0))
         conn.commit()
 
         result = rebuild_entity_context_vectors(conn, min_sources=3, min_mentions=1)

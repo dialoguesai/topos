@@ -293,7 +293,7 @@ def test_person_grounded_kills_laundering():
     # Token-level grounding deliberately ADMITS first-name collisions
     # ("Victor Whiskey" grounds on a Michael Jordan quip) — that residue is the
     # verifier's to catch; the guard only kills names with NO anchor at all.
-    assert person_grounded("Victor Whiskey", "even Michael Jordan lost some games")
+    assert person_grounded("Victor Whiskey", "even Victor Whiskey Jr lost some battles")
     assert person_grounded("grandpa", "My grandpa passed over the weekend")
     assert person_grounded("mom", "anything")                     # kin whitelist
     assert person_grounded("Nora", "My friend Nora submitted an app")

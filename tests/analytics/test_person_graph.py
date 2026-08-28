@@ -386,13 +386,13 @@ class TestTheOwnerIsNotTheirOwnContact:
     their own social graph as up to six separate people."""
 
     def test_a_shared_surname_is_never_evidence(self):
-        """`Peter Ellery` and `Jack Ellery` are real other people on this corpus. A fuzzy
+        """`Bravo Yankee` and `Charlie Yankee` are real other people on this corpus. A fuzzy
         name rule would have swallowed them into the owner and deleted two humans."""
         c = _conn()
         _person(c, "e-owner", "Owner", is_self=1)
-        _person(c, "e-other", "Peter Ellery")
+        _person(c, "e-other", "Bravo Yankee")
         c.execute("CREATE TABLE user_identity (key TEXT, display_name TEXT, updated_at TEXT)")
-        c.execute("INSERT INTO user_identity VALUES ('k','Robin Ellery','t')")
+        c.execute("INSERT INTO user_identity VALUES ('k','Sierra Yankee','t')")
         owner = PG.resolve_owner_identity(c)
         assert "e-other" not in owner["ids"], "a surname match must not merge a stranger"
         assert any(x["entity_id"] == "e-other" for x in owner["merge_candidates"])
@@ -400,9 +400,9 @@ class TestTheOwnerIsNotTheirOwnContact:
     def test_the_name_the_owner_gave_the_node_does_merge(self):
         c = _conn()
         _person(c, "e-owner", "Owner", is_self=1)
-        _person(c, "e-me", "Robin Ellery")
+        _person(c, "e-me", "Sierra Yankee")
         c.execute("CREATE TABLE user_identity (key TEXT, display_name TEXT, updated_at TEXT)")
-        c.execute("INSERT INTO user_identity VALUES ('k','Robin Ellery','t')")
+        c.execute("INSERT INTO user_identity VALUES ('k','Sierra Yankee','t')")
         assert "e-me" in PG.resolve_owner_identity(c)["ids"]
 
     def test_messaging_yourself_is_not_a_relationship(self):

@@ -37,8 +37,8 @@ def test_user_identity_storage_round_trip(tmp_path):
     conn = sqlite3.connect(str(tmp_path / "user_identity.db"))
     assert get_user_identity(conn, "user:default") is None
 
-    put_user_identity(conn, "user:default", display_name="Robin Ellery")
-    assert get_user_identity(conn, "user:default") == {"display_name": "Robin Ellery"}
+    put_user_identity(conn, "user:default", display_name="Sierra Yankee")
+    assert get_user_identity(conn, "user:default") == {"display_name": "Sierra Yankee"}
 
     put_user_identity(conn, "user:default", display_name="Johnny")
     assert get_user_identity(conn, "user:default") == {"display_name": "Johnny"}
@@ -51,7 +51,7 @@ def test_signal_identity_storage_still_works_independently(tmp_path):
     from topos.storage.user_identity import put_user_identity
 
     conn = sqlite3.connect(str(tmp_path / "signal_identity.db"))
-    put_user_identity(conn, "user:default", display_name="Robin Ellery")
+    put_user_identity(conn, "user:default", display_name="Sierra Yankee")
     put_signal_identity(conn, "user:default", my_phone_number="+15555550123", my_signal_id="signal-self")
 
     assert get_signal_identity(conn, "user:default") == {
@@ -93,13 +93,13 @@ async def test_user_identity_api_get_and_put(monkeypatch, tmp_path):
             put_resp = await client.put(
                 "/v1/user-identity",
                 headers={"Authorization": "Bearer test-key"},
-                json={"dataset_id": "user:default", "display_name": "Robin Ellery"},
+                json={"dataset_id": "user:default", "display_name": "Sierra Yankee"},
             )
             assert put_resp.status_code == 200
             assert put_resp.json() == {
                 "status": "ok",
                 "dataset_id": "user:default",
-                "display_name": "Robin Ellery",
+                "display_name": "Sierra Yankee",
             }
 
             get_full = await client.get(
@@ -111,7 +111,7 @@ async def test_user_identity_api_get_and_put(monkeypatch, tmp_path):
             assert get_full.json() == {
                 "status": "ok",
                 "dataset_id": "user:default",
-                "display_name": "Robin Ellery",
+                "display_name": "Sierra Yankee",
             }
 
 

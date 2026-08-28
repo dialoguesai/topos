@@ -142,7 +142,7 @@ async def test_enrich_resolves_declared_into_spine(monkeypatch, tmp_path) -> Non
     apply_all_migrations(conn)
     conn.execute(
         "INSERT INTO contacts (contact_id, dataset_id, source_id, display_name, known_usernames_json, is_self)"
-        " VALUES ('c-self', 'ds', 'src', 'Robin Ellery', '[]', 1)"
+        " VALUES ('c-self', 'ds', 'src', 'Sierra Yankee', '[]', 1)"
     )
     conn.commit()
     monkeypatch.setattr(core.state, "get_db_connection", lambda: conn)

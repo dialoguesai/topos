@@ -1,7 +1,7 @@
 """A place name that contains another names a different place, not the same one.
 
 ``token_set_similarity`` returns 1.0 whenever one token set contains the other.
-For a person that is right — "Robin" abbreviates "Robin Ellery" — and the
+For a person that is right — "Sierra" abbreviates "Sierra Yankee" — and the
 resolver's docstring cites exactly that case as intended. For a PLACE it
 inverts: place names compose by containment. "Ashford" is not short for "Ashford
 Public Library", it is the city the library stands in.
@@ -124,13 +124,13 @@ def test_people_keep_the_abbreviation_reading():
     Type scoping is what protects it — people never reach ``place_similarity``.
     Note the demotion is narrower than "any containment": "Duncombe" is not a
     feature word, so even the place rule would leave this pair alone. What would
-    have broken people is the BLUNT whole-name score, where "Robin" against
-    "Robin Ellery" is 0.57.
+    have broken people is the BLUNT whole-name score, where a first name against
+    its own full name scores 0.63.
     """
     from difflib import SequenceMatcher
 
-    assert _merges(token_set_similarity("Robin", "Robin Ellery"))
-    assert round(SequenceMatcher(None, "claire", "claire duncombe").ratio(), 2) == 0.57
+    assert _merges(token_set_similarity("Sierra", "Sierra Yankee"))
+    assert round(SequenceMatcher(None, "sierra", "sierra yankee").ratio(), 2) == 0.63
 
 
 def test_orgs_keep_the_abbreviation_reading():
@@ -218,15 +218,15 @@ def test_a_person_of_the_same_shape_still_merges(conn):
     conn.execute(
         "INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name,"
         " mention_count, is_self) VALUES (?,?,?,?,1,0)",
-        ("ent-robin", "person", "Robin Ellery", normalize_name("Robin Ellery")),
+        ("ent-sierra", "person", "Sierra Yankee", normalize_name("Sierra Yankee")),
     )
     conn.commit()
 
     eid, _tier = EntityResolver(conn).resolve(
-        "Robin", entity_type="person", queue_review=False
+        "Sierra", entity_type="person", queue_review=False
     )
 
-    assert eid == "ent-robin"
+    assert eid == "ent-sierra"
 
 
 # ------------------------------------------------------------ the repair
