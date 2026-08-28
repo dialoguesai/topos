@@ -29,11 +29,13 @@ Exit 0 clean (or skipped for want of a database), 1 on a hit.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import os
 import re
 import sqlite3
 import subprocess
 import sys
+from typing import Dict
 
 # Surfaces that are real entities on a live node but ordinary English in source.
 GENERIC = {
@@ -289,6 +291,54 @@ def _scan_message(path: str, names: list) -> int:
     return _scan_text(body, names, where="commit MESSAGE")
 
 
+#: A repo-local list of hits that are NOT leaks, one line each.
+#:
+#: The need is real: a scrub is the right answer for someone else's name in a fixture, and
+#: the WRONG answer for the owner's byline on their own essay, the account handle in a deploy
+#: runbook, or the e2e fixtures that must use the real account to test anything. Blanket
+#: scrubbing those makes the repo worse and teaches people to reach for --no-verify.
+#:
+#: THE ENTRY MUST NOT NAME THE THING. Writing "this name is fine here" in a tracked file
+#: leaks it exactly as the source did — so an entry carries a HASH of (path, kind, term),
+#: not the term. Consequences, all deliberate:
+#:   · an exemption is pinned to one term in one file. A different name in the same file,
+#:     or the same name in a new file, still fails.
+#:   · nobody can read the list to learn what is protected.
+#:   · you cannot hand-write an entry; use --emit-allow, which prints the lines for the
+#:     current hits and refuses to invent the reason for you.
+#: The hash is over the triple, not the bare term, so the file is not a rainbow-table
+#: lookup for the name on its own. It is not a secret-strength construction and is not
+#: meant to be: the goal is that the repo never carries the plaintext.
+ALLOW_FILE = ".owner-data-allow"
+
+
+def _allow_key(path: str, kind: str, term: str) -> str:
+    raw = "\0".join((path.strip(), kind.strip(), term.strip().lower().replace("\u2019", "'")))
+    return hashlib.sha256(raw.encode("utf-8")).hexdigest()[:16]
+
+
+def _load_allowed(allow_file: str) -> Dict[str, str]:
+    """key -> reason. A missing file is the normal case and means "allow nothing"."""
+    allowed: Dict[str, str] = {}
+    if not os.path.exists(allow_file):
+        return allowed
+    with open(allow_file, encoding="utf-8") as fh:
+        for lineno, raw in enumerate(fh, 1):
+            line = raw.strip()
+            if not line or line.startswith("#"):
+                continue
+            parts = line.split(None, 1)
+            # A reason is mandatory. An exemption whose justification nobody wrote down is
+            # indistinguishable from one nobody understood, and it outlives the person who
+            # added it — which is how allowlists become the hole they were meant to avoid.
+            if len(parts) < 2 or not parts[1].strip():
+                print(f"{allow_file}:{lineno}: entry has no reason — refusing to honour it",
+                      file=sys.stderr)
+                continue
+            allowed[parts[0].strip()] = parts[1].strip()
+    return allowed
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--database", default=os.path.expanduser("~/.topos/database.db"))
@@ -304,6 +354,15 @@ def main() -> int:
     ap.add_argument(
         "--verify-install", action="store_true",
         help="fail unless the commit-msg hook is actually wired into this checkout.",
+    )
+    ap.add_argument(
+        "--allow-file", default=ALLOW_FILE,
+        help="repo-local list of hits that are NOT leaks, keyed by hash; see ALLOW_FILE.",
+    )
+    ap.add_argument(
+        "--emit-allow", action="store_true",
+        help="print allowlist lines for the current hits instead of failing, so the file "
+             "can be written without hand-hashing. You still supply every reason.",
     )
     ap.add_argument(
         "--message-file",
@@ -369,10 +428,33 @@ def main() -> int:
                 )
                 hits.append((kind, name, path, line))
 
+    # Allowlisted hits are dropped here, at the REPORT, never at the scan: the scan still
+    # finds them, so `--emit-allow` can print an entry for something already exempt and a
+    # stale entry is visible as one that no longer matches anything.
+    allowed = _load_allowed(args.allow_file)
+    if args.emit_allow:
+        if not hits:
+            print("nothing to allow — the scan is clean")
+            return 0
+        print(f"# add to {args.allow_file}; REPLACE every <reason> before committing")
+        seen = set()
+        for kind, name, path, _line in hits:
+            key = _allow_key(path, kind, name)
+            if key in seen:
+                continue
+            seen.add(key)
+            note = allowed.get(key)
+            print(f"{key}  {note}" if note else f"{key}  <reason: why this is not a leak>")
+        return 0
+
+    exempt = sum(1 for k, n, p, _ in hits if _allow_key(p, k, n) in allowed)
+    hits = [h for h in hits if _allow_key(h[2], h[0], h[1]) not in allowed]
+
     if not hits:
         src = f"{len(names)} protected names"
         src += f" ({len(local)} from {args.local_terms})" if local else " (no local terms file)"
-        print(f"clean — {len(files)} files checked against {src}")
+        extra = f", {exempt} allowed by {args.allow_file}" if exempt else ""
+        print(f"clean — {len(files)} files checked against {src}{extra}")
         return 0
 
     print(f"{len(hits)} leak(s) of the owner's own data:\n", file=sys.stderr)
@@ -381,6 +463,12 @@ def main() -> int:
     print(
         "\nReplace with a synthetic name that keeps the same shape "
         "(compound hyphen, possessive, containment) so the test still means what it did.",
+        file=sys.stderr,
+    )
+    print(
+        f"If a hit is genuinely NOT a leak — your own byline, your account handle in a "
+        f"runbook — run the same command with --emit-allow, write a reason on each line, "
+        f"and commit them to {args.allow_file}.",
         file=sys.stderr,
     )
     return 1
