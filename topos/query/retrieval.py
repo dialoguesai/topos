@@ -1100,13 +1100,17 @@ def _row_summary_text(table: str, row: Dict[str, Any], *, scope_id: str = "") ->
             if row.get(field)
         )
     if table == "location_events":
+        # `event_at` is the column this table actually has, and it is populated
+        # on every row. Reading `occurred_at`/`starts_at` — neither of which
+        # exists here — meant every location item reached synthesis undated,
+        # silently, because a missing key is just an empty part.
         parts = [
             str(row.get(field) or "")
-            for field in ("place_name", "city", "event_type", "occurred_at")
+            for field in ("place_name", "city", "event_type")
             if row.get(field)
         ]
         human_date = _human_date_from_iso(
-            str(row.get("occurred_at") or row.get("starts_at") or "")
+            str(row.get("event_at") or row.get("occurred_at") or row.get("starts_at") or "")
         )
         if human_date:
             parts.append(human_date)
@@ -5402,11 +5406,23 @@ def _build_summary_items_unfiltered(
     vector_items: List[Dict[str, Any]] = []
     vector_context_items: List[Dict[str, Any]] = []
     for hit in semantic_hits:
-        preview_lower = str(hit.get("text_preview") or "").lower()
+        # `text_preview` is a 200-char label; `search_text` is the indexed body
+        # and sits in the same dict, written by the same insert. Handing the
+        # preview to synthesis delivered every long entry cut off mid-sentence
+        # while the full text was already in hand — no extra query, no extra
+        # cost. The label stays short (it is what the UI shows as the topic);
+        # the SUMMARY, which synthesis actually reads, gets the body.
+        #
+        # The lexical check reads the body too. Matching a content token only
+        # within the first 200 characters made "is this hit about the ask?"
+        # depend on where in the entry the word happened to fall.
+        preview = str(hit.get("text_preview") or "")
+        body = str(hit.get("search_text") or "") or preview
+        preview_lower = body.lower()
         similarity = float(hit.get("similarity") or 0.0)
         item = {
-            "topic": hit.get("text_preview"),
-            "summary_text": hit.get("text_preview"),
+            "topic": preview,
+            "summary_text": body,
             "record_id": hit.get("record_id"),
             "source_id": hit.get("source_id"),
             "signal_dimension": hit.get("signal_dimension"),

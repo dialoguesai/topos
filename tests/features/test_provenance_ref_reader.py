@@ -132,10 +132,15 @@ def test_every_ref_read_site_goes_through_the_reader():
         rest.index("def _delete_entity_cascade(") :
     ]
 
+    # Matches ANY variable name, not just `ref`. The first version of this
+    # check looked for `ref.get(...)` specifically and therefore sailed past
+    # `r.get("record_id")` in `purge_derived_for_records` — a loop that called
+    # its variable `r`. That one missed line meant the owner's "remove this from
+    # my intelligence" saw 307 of 3,245 refs.
     offenders = [
         line.strip()
         for line in rest.splitlines()
-        if re.search(r'\bref\.get\(\s*["\'](record_id|id)["\']', line)
+        if re.search(r'\b[A-Za-z_][A-Za-z0-9_]*\.get\(\s*["\'](record_id|id)["\']', line)
     ]
     assert offenders == [], (
         "these read a provenance ref's key directly and will miss the other shape; "

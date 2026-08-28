@@ -926,6 +926,56 @@ def purge_derived_for_source(
     return report
 
 
+def _purge_extraction_artifacts_for_records(
+    conn: sqlite3.Connection, id_set: Set[str]
+) -> Dict[str, int]:
+    """Drop extraction artifacts whose only evidence is these records.
+
+    ``extraction_artifacts`` carries ``source_refs_json`` in exactly the shape
+    ``ref_record_key`` reads, and **no lifecycle sweep opened the table at all**.
+    Measured on the owner's node 2026-08-27: 5,817 rows, 5,814 of them with a
+    resolvable ref — 3,273 to conversation_messages, 2,497 to journal_entries.
+    Every one survived a record deletion that named its source.
+
+    Trimmed rather than deleted when other records still evidence the artifact,
+    matching how ``signal_objects`` is treated a few lines above: a derived row
+    with surviving evidence is still true, just less so.
+    """
+    out = {"extraction_artifacts_deleted": 0, "extraction_artifacts_trimmed": 0}
+    if not id_set or not _table_exists(conn, "extraction_artifacts"):
+        return out
+    rows = conn.execute(
+        "SELECT artifact_id, source_refs_json FROM extraction_artifacts"
+    ).fetchall()
+    with batched_writes(conn):
+        for artifact_id, refs_json in rows:
+            try:
+                refs = json.loads(refs_json or "[]")
+            except json.JSONDecodeError:
+                continue
+            if not isinstance(refs, list) or not refs:
+                continue
+            surviving = []
+            for ref in refs:
+                key = ref_record_key(ref)
+                if key is None or key[1] not in id_set:
+                    surviving.append(ref)
+            if len(surviving) == len(refs):
+                continue
+            if surviving:
+                conn.execute(
+                    "UPDATE extraction_artifacts SET source_refs_json=? WHERE artifact_id=?",
+                    (json.dumps(surviving), str(artifact_id)),
+                )
+                out["extraction_artifacts_trimmed"] += 1
+            else:
+                conn.execute(
+                    "DELETE FROM extraction_artifacts WHERE artifact_id=?", (str(artifact_id),)
+                )
+                out["extraction_artifacts_deleted"] += 1
+    return out
+
+
 def purge_derived_for_records(
     conn: sqlite3.Connection,
     record_ids: List[str],
@@ -980,10 +1030,18 @@ def purge_derived_for_records(
     report.update(refold_statistics(conn))
     report.update(repromote_stat_insights(conn))
 
-    # Facts evidenced only by these records are removed.
+    # Derived objects evidenced only by these records are removed.
+    #
+    # Two restrictions used to make this a near no-op, and they compounded.
+    # It read `record_id` off each ref while 92% of live refs key on `id`, and
+    # it looked only at `object_type='fact'`. Measured on the owner's node
+    # 2026-08-27: the pair saw **307 of 3,245 refs** and **127 of 3,262 active
+    # objects** — so "remove this from my intelligence" reached about 4% of the
+    # derived layer it names. A PlaceContext or a topic summary derived from a
+    # withdrawn record outlives it exactly as a fact would.
     id_set = set(ids)
     rows = conn.execute(
-        "SELECT object_id, source_refs_json FROM signal_objects WHERE object_type='fact'"
+        "SELECT object_id, source_refs_json FROM signal_objects"
     ).fetchall()
     facts_deleted = 0
     facts_trimmed = 0
@@ -995,10 +1053,14 @@ def purge_derived_for_records(
                 refs = []
             if not refs:
                 continue
-            surviving = [
-                r for r in refs
-                if not (isinstance(r, dict) and str(r.get("record_id") or "") in id_set)
-            ]
+            surviving = []
+            for r in refs:
+                key = ref_record_key(r)
+                # A ref this reader cannot resolve (a day-scoped aggregate) is
+                # not evidence for or against these records — keep it, so an
+                # unverifiable ref never causes a deletion.
+                if key is None or key[1] not in id_set:
+                    surviving.append(r)
             if len(surviving) == len(refs):
                 continue
             if surviving:
@@ -1012,6 +1074,7 @@ def purge_derived_for_records(
                 facts_deleted += 1
     report["facts_deleted"] = facts_deleted
     report["facts_trimmed"] = facts_trimmed
+    report.update(_purge_extraction_artifacts_for_records(conn, id_set))
 
     try:
         from ..entities.dossier import refresh_dossiers

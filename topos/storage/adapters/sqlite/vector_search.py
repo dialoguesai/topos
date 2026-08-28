@@ -102,7 +102,8 @@ def search_similar_brute_force(
     fetch = fetch_limit or limit
     fetch = max(fetch, limit)
     query_sql = """
-        SELECT provenance_json, vector_blob, vector_format
+        SELECT provenance_json, vector_blob, vector_format,
+               signal_dimension, record_type, event_at, cluster_id
         FROM signal_embeddings
         WHERE vector_blob IS NOT NULL
     """
@@ -126,7 +127,7 @@ def search_similar_brute_force(
     rows = conn.execute(query_sql, params).fetchall()
     scored: List[tuple[float, Dict[str, Any]]] = []
     query_dims = len(query_vector)
-    for prov_raw, blob, vector_format in rows:
+    for prov_raw, blob, vector_format, *cols in rows:
         if not blob:
             continue
         try:
@@ -135,7 +136,9 @@ def search_similar_brute_force(
             continue
         if len(stored) != query_dims:
             continue
-        meta = json.loads(prov_raw)
+        meta = _reconcile(
+            json.loads(prov_raw), cols, ("signal_dimension", "record_type", "event_at", "cluster_id")
+        )
         sim = similarity(query_vector, stored, normalized=True)
         meta["similarity"] = round(sim, 6)
         scored.append((sim, meta))
@@ -200,7 +203,8 @@ def search_similar_ann(
         filter_params.append(event_before)
     meta_rows = conn.execute(
         f"""
-        SELECT embedding_id, provenance_json
+        SELECT embedding_id, provenance_json,
+               signal_dimension, record_type, event_at, cluster_id
         FROM signal_embeddings
         WHERE embedding_id IN ({placeholders}){filter_sql}
         """,
@@ -208,9 +212,11 @@ def search_similar_ann(
     ).fetchall()
 
     scored: List[tuple[float, Dict[str, Any]]] = []
-    for embedding_id, prov_raw in meta_rows:
+    for embedding_id, prov_raw, *cols in meta_rows:
         distance = distance_by_id.get(str(embedding_id))
-        meta = json.loads(prov_raw)
+        meta = _reconcile(
+            json.loads(prov_raw), cols, ("signal_dimension", "record_type", "event_at", "cluster_id")
+        )
         sim = 1.0 - float(distance) if distance is not None else 0.0
         meta["similarity"] = round(sim, 6)
         scored.append((sim, meta))
@@ -223,6 +229,24 @@ def search_similar_ann(
         return None
     scored.sort(key=lambda pair: pair[0], reverse=True)
     return [meta for _, meta in scored[:fetch]], len(scored)
+
+
+# `provenance_json` is a snapshot taken when the row was written; the COLUMNS
+# are the current truth, because every filter, index and migration reads and
+# writes those. When the two disagree the snapshot wins today, so a migrated
+# correction is invisible to vector search while being visible to every filter
+# — the row is selected by its new dimension and reported with its old one.
+# Measured on the owner's node 2026-08-27: 416 embeddings whose frozen
+# dimension contradicts the column, all of them from dimension backfills.
+_COLUMN_TRUTH = ("signal_dimension", "record_type", "event_at", "cluster_id")
+
+
+def _reconcile(meta: dict, row: "sqlite3.Row | tuple", columns: tuple) -> dict:
+    """Let live columns override the write-time snapshot."""
+    for name, value in zip(columns, row):
+        if name in _COLUMN_TRUTH and value is not None:
+            meta[name] = value
+    return meta
 
 
 def search_similar(

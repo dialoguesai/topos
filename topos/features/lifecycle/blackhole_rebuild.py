@@ -34,6 +34,7 @@ from typing import Any, Dict, List, Optional, Set
 
 from ...storage.db.write_gate import batched_writes
 from .blackhole import BlackholeStore, normalize_entity_name
+from .derived_scrub import _table_exists
 
 logger = logging.getLogger("topos.features.lifecycle.blackhole_rebuild")
 
@@ -90,6 +91,8 @@ class RebuildReport:
     cluster_labels_withdrawn: int = 0
     embeddings_withdrawn: int = 0
     goals_withdrawn: int = 0
+    community_names_withdrawn: int = 0
+    chat_sessions_withdrawn: int = 0
     details: Dict[str, Any] = field(default_factory=dict)
 
     def as_dict(self) -> Dict[str, Any]:
@@ -362,6 +365,95 @@ def _strip_metadata_names(metadata: dict, terms: Set[str]) -> bool:
     return changed
 
 
+def _withdraw_community_names(conn: sqlite3.Connection, terms: Set[str]) -> int:
+    """Retire community names that carry the protected entity.
+
+    A community name is generated FROM its members, so a community the entity
+    belongs to can be called after them — the same producer relationship that
+    makes cluster labels write the name back on the next pass. 168 rows on the
+    owner's node, reachable by no record, source or entity key, so no sweep in
+    the lifecycle touched them.
+
+    Retired rather than deleted: the row carries ``times_matched`` and a
+    fingerprint the namer uses to avoid re-proposing a name it has already
+    settled on, and destroying that would make the next pass re-derive the same
+    withdrawn name from scratch.
+    """
+    if not _table_exists(conn, "community_names"):
+        return 0
+    try:
+        rows = conn.execute(
+            "SELECT name_id, name FROM community_names WHERE retired_at IS NULL"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return 0
+    cleaned = 0
+    for name_id, name in rows:
+        if not _mentions(name, terms):
+            continue
+        conn.execute(
+            "UPDATE community_names SET name=?, retired_at=datetime('now') WHERE name_id=?",
+            ("community", str(name_id)),
+        )
+        cleaned += 1
+    return cleaned
+
+
+def _withdraw_home_chat_sessions(conn: sqlite3.Connection, terms: Set[str]) -> int:
+    """Blank chat titles and turns that name the protected entity.
+
+    ``home_chat_sessions`` holds the owner's own conversations — a title and a
+    ``history_json`` of turns — and is keyed on the session, not on any record,
+    source or entity, so nothing in the lifecycle reached it. A withdrawn name
+    sitting in a chat history is served back to the owner verbatim by the
+    sessions list.
+
+    The session is kept and the naming turns are blanked, not deleted: dropping
+    turns would renumber a conversation the owner may be reading, and an
+    absent turn reads as a bug where an emptied one reads as a redaction.
+    """
+    if not _table_exists(conn, "home_chat_sessions"):
+        return 0
+    try:
+        rows = conn.execute(
+            "SELECT id, title, history_json FROM home_chat_sessions"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return 0
+    cleaned = 0
+    for session_id, title, history_json in rows:
+        title_hit = _mentions(title, terms)
+        history = history_json
+        history_hit = False
+        if history_json and _mentions(history_json, terms):
+            try:
+                turns = json.loads(history_json)
+            except json.JSONDecodeError:
+                turns = None
+            if isinstance(turns, list):
+                for turn in turns:
+                    if isinstance(turn, dict):
+                        for field in ("content", "text", "message"):
+                            if field in turn and _mentions(turn.get(field), terms):
+                                turn[field] = ""
+                                history_hit = True
+                if history_hit:
+                    history = json.dumps(turns)
+            if not history_hit:
+                # Shape we cannot walk safely — withhold the whole blob rather
+                # than serve a name the owner withdrew.
+                history = "[]"
+                history_hit = True
+        if not title_hit and not history_hit:
+            continue
+        conn.execute(
+            "UPDATE home_chat_sessions SET title=?, history_json=? WHERE id=?",
+            ("conversation" if title_hit else title, history, session_id),
+        )
+        cleaned += 1
+    return cleaned
+
+
 def _withdraw_cluster_labels(conn: sqlite3.Connection, terms: Set[str]) -> int:
     """Take the protected name out of topic cluster labels and previews.
 
@@ -472,6 +564,8 @@ def rebuild_for_blackhole(conn: sqlite3.Connection, entity_ref: str) -> RebuildR
             )
             report.embeddings_withdrawn = _withdraw_embeddings(conn, terms)
             report.goals_withdrawn = _withdraw_goals(conn, terms)
+            report.community_names_withdrawn = _withdraw_community_names(conn, terms)
+            report.chat_sessions_withdrawn = _withdraw_home_chat_sessions(conn, terms)
     except Exception as exc:  # noqa: BLE001
         conn.rollback()
         # Leaves rebuild_state='failed', which keeps the withholding in force.
