@@ -1,4 +1,11 @@
-# Install once per checkout:  uvx pre-commit install
+# Install once per checkout — BOTH stages, the second is not optional:
+#   uvx pre-commit install
+#   uvx pre-commit install --hook-type commit-msg
+#
+# `pre-commit install` alone wires the pre-commit stage only, which scans FILES
+# and leaves the commit MESSAGE unscanned. The `no-owner-data-installed` hook
+# below refuses to commit until the second line has been run, so a checkout
+# cannot quietly end up half-guarded the way gitleaks did (see below).
 #
 # The upstream hook runs `gitleaks git --pre-commit --redact --staged --verbose`,
 # so it sees only what is about to be committed. This repo is public and has no
@@ -39,6 +46,16 @@ repos:
       # this" — into five files, two of them the black-hole tests themselves.
       # Skips cleanly where there is no local database, so CI and fresh clones
       # are unaffected.
+      # Fails until `pre-commit install --hook-type commit-msg` has been run.
+      # Without it the message guard is silently absent, which is exactly how
+      # this repo lost gitleaks for a month.
+      - id: no-owner-data-installed
+        name: the commit-message guard is wired into this checkout
+        entry: python3 scripts/scan_repo_for_owner_data.py --verify-install
+        language: system
+        pass_filenames: false
+        always_run: true
+
       - id: no-owner-data
         name: no personal data from the local node in committed source
         entry: python3 scripts/scan_repo_for_owner_data.py

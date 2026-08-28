@@ -8,7 +8,13 @@ This repository is intentionally consumer-facing. Keep changes focused on local 
 
 ```bash
 uv sync --extra dev --extra local
+uvx pre-commit install
+uvx pre-commit install --hook-type commit-msg
 ```
+
+Both `install` lines are required. The first wires the file hooks; the second
+wires the commit-message guard. A commit will refuse to run until both are
+present, so you cannot end up half-guarded without noticing.
 
 ## Test lanes
 
@@ -79,3 +85,34 @@ Keep out of this repo:
 
 - Never commit secrets, keys, or real credentials.
 - Use placeholders in examples and fixtures.
+
+### Never commit the owner's own data — in code OR in a commit message
+
+This repo is public, and a node's database holds one real person's life. The
+product's privacy machinery operates on that database and never reads source or
+git history, so nothing downstream will catch a name that reaches a docstring, a
+fixture, or a commit message.
+
+**The rule is: describe the shape, not the value.** Write "a home address", not
+the address. "Two real goals", not the goals. This applies to prose you write
+about a measurement as much as to test data — a docstring citing what you
+measured is the most common way this happens, because it does not feel like
+handling data at all.
+
+**Check a draft before you write it**, which is cheaper than being blocked:
+
+```bash
+uv run python scripts/scan_repo_for_owner_data.py --text "your draft message"
+uv run python scripts/scan_repo_for_owner_data.py --all   # whole tree
+```
+
+Two hooks enforce it at commit time — one on staged files, one on the message.
+They compare against the local node's black-holed entities, places and goal
+text, and skip cleanly where there is no local database, so CI and fresh clones
+are unaffected. That last point is the limit worth knowing: **the guard only
+runs where the data lives.** A contributor without a node is not protected by
+it, which is why the rule above matters more than the tooling.
+
+Person names are deliberately out of scope — every person entity would collide
+with ordinary English ("Unknown", "Claude") and a noisy hook gets removed. Names
+are on you.

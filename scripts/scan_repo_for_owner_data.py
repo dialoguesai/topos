@@ -112,12 +112,37 @@ def _find(haystack: str, needle: str) -> int:
     return 0
 
 
-def _scan_message(path: str, names: list) -> int:
+def _verify_commit_msg_hook() -> int:
+    """Refuse to commit at all unless the MESSAGE guard is actually wired.
+
+    ``pre-commit install`` wires only the pre-commit stage, so a checkout that
+    follows the documented one-liner gets file scanning and NO message scanning,
+    silently. This repo has already lost a guard exactly that way once — its own
+    config records gitleaks sitting inert for a month because `pre-commit
+    install` had never been run here.
+
+    Running this from an ``always_run`` pre-commit-stage hook means the absence
+    is loud and immediate instead of discovered by a leak.
+    """
+    hook = os.path.join(".git", "hooks", "commit-msg")
     try:
-        body = open(path, encoding="utf-8", errors="ignore").read()
-    except OSError as exc:
-        print(f"cannot read commit message at {path}: {exc}", file=sys.stderr)
+        body = open(hook, encoding="utf-8", errors="ignore").read()
+    except OSError:
+        body = ""
+    if "hook-type=commit-msg" in body:
         return 0
+    print(
+        "the commit-message guard is NOT installed in this checkout.\n\n"
+        "  uvx pre-commit install --hook-type commit-msg\n\n"
+        "Without it, files are scanned and the commit MESSAGE is not — which is "
+        "the surface that publishes with the commit and cannot be fixed after a "
+        "push without rewriting history.",
+        file=sys.stderr,
+    )
+    return 1
+
+
+def _scan_text(body: str, names: list, *, where: str) -> int:
     # Comment lines are stripped by git and never become part of the message.
     body = "\n".join(l for l in body.splitlines() if not l.startswith("#"))
     folded = body.lower().replace("\u2019", "'")
@@ -128,9 +153,10 @@ def _scan_message(path: str, names: list) -> int:
         if needle and needle in folded:
             hits.append((kind, name, _find(folded, needle)))
     if not hits:
+        print(f"clean — {where} checked against {len(names)} protected names")
         return 0
 
-    print(f"{len(hits)} leak(s) of the owner's own data in the commit MESSAGE:\n", file=sys.stderr)
+    print(f"{len(hits)} leak(s) of the owner's own data in the {where}:\n", file=sys.stderr)
     for kind, name, line in hits:
         print(f"  {kind:<20} {name!r}  (line {line})", file=sys.stderr)
     print(
@@ -142,11 +168,27 @@ def _scan_message(path: str, names: list) -> int:
     return 1
 
 
+def _scan_message(path: str, names: list) -> int:
+    try:
+        body = open(path, encoding="utf-8", errors="ignore").read()
+    except OSError as exc:
+        print(f"cannot read commit message at {path}: {exc}", file=sys.stderr)
+        return 0
+    return _scan_text(body, names, where="commit MESSAGE")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--database", default=os.path.expanduser("~/.topos/database.db"))
     ap.add_argument("--all", action="store_true", help="scan every tracked file, not just changed ones")
     ap.add_argument("--min-length", type=int, default=8)
+    ap.add_argument(
+        "--text", help="scan a literal string — for checking a DRAFT message before writing it.",
+    )
+    ap.add_argument(
+        "--verify-install", action="store_true",
+        help="fail unless the commit-msg hook is actually wired into this checkout.",
+    )
     ap.add_argument(
         "--message-file",
         help="scan a commit message instead of files; pre-commit passes this at "
@@ -171,6 +213,12 @@ def main() -> int:
         (kind, n) for kind, n in _protected_names(args.database)
         if len(n.strip()) >= args.min_length and n.strip().lower() not in GENERIC
     ]
+    if args.verify_install:
+        return _verify_commit_msg_hook()
+
+    if args.text is not None:
+        return _scan_text(args.text, names, where="draft message")
+
     if args.message_file:
         return _scan_message(args.message_file, names)
 
