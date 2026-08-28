@@ -401,6 +401,67 @@ class BlackholeStore:
             commit_connection(self._conn)
         return bool(cursor.rowcount)
 
+    def rebind_dead_entity_ids(self) -> int:
+        """Re-point black holes whose stored entity_id no longer exists.
+
+        A black hole stores the entity_id it was created against. If that entity
+        is later reaped and the name is then re-extracted from a record, the
+        spine mints a NEW id — and the black hole goes on excluding a row that
+        is gone while the live entity carrying the withdrawn name matches
+        nothing. The name terms still cover it, which is why this is a narrowing
+        of protection rather than a loss of it, but the id join is the primary
+        filter and it silently covers nothing.
+
+        Found on the owner's node 2026-08-27: one of three black holes pointed
+        at a deleted id while an entity with the identical canonical name sat in
+        the spine under a fresh one.
+
+        Matches on the stored normalization AND one freshly derived from
+        ``canonical_name``, because ``normalize_entity_name`` has changed since
+        some rows were written — see :meth:`renormalize_stored_names`. Only ever
+        re-points to an entity whose name matches; it never invents a binding.
+        """
+        try:
+            rows = self._conn.execute(
+                "SELECT blackhole_id, entity_id, normalized_name, canonical_name"
+                " FROM entity_blackholes WHERE entity_id != ''"
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if _missing_table(exc):
+                return 0
+            raise
+        rebound = 0
+        with with_db_write():
+            for blackhole_id, entity_id, normalized_name, canonical_name in rows:
+                alive = self._conn.execute(
+                    "SELECT 1 FROM entities WHERE entity_id=?", (str(entity_id),)
+                ).fetchone()
+                if alive:
+                    continue
+                candidates = {
+                    str(normalized_name or ""),
+                    normalize_entity_name(str(canonical_name or "")),
+                }
+                candidates.discard("")
+                if not candidates:
+                    continue
+                placeholders = ",".join("?" for _ in candidates)
+                match = self._conn.execute(
+                    f"SELECT entity_id FROM entities WHERE normalized_name IN ({placeholders})"
+                    " ORDER BY mention_count DESC LIMIT 1",
+                    tuple(candidates),
+                ).fetchone()
+                if not match:
+                    continue
+                self._conn.execute(
+                    "UPDATE entity_blackholes SET entity_id=?, updated_at=datetime('now')"
+                    " WHERE blackhole_id=?",
+                    (str(match[0]), str(blackhole_id)),
+                )
+                rebound += 1
+            commit_connection(self._conn)
+        return rebound
+
     # ------------------------------------------------------ rebuild state
 
     def _set_rebuild_state(self, entity_ref: str, state: str) -> bool:

@@ -8,6 +8,8 @@ display are unaffected.
 
 from __future__ import annotations
 
+import re
+
 from typing import Any, Dict, Optional
 
 from .vector_settings import embed_context_headers_enabled
@@ -159,10 +161,29 @@ _BINARY_ARTIFACT_MARKERS = (
 )
 
 
+# A document that is nothing but redaction placeholders carries no information
+# to retrieve on. It happens when a record's only embeddable field is a
+# disclosed one — a location event whose whole document is its `place_name` —
+# so redaction collapses the document to the token itself. Measured on the
+# owner's node 2026-08-27: **134 such embeddings, 126 of them the literal
+# `[ADDRESS]` sharing 23 distinct vectors between them**. They occupy ANN slots,
+# match everything and nothing, and the junk reaper could not see them because
+# it only knew about binary-serialization markers.
+_PLACEHOLDER_ONLY = re.compile(r"^(?:\s*\[[A-Z_]{2,20}\]\s*[-–—,;:/]*\s*)+$")
+
+
+def is_placeholder_only(text: str) -> bool:
+    """True when a document consists solely of redaction placeholders."""
+    value = str(text or "").strip()
+    return bool(value) and bool(_PLACEHOLDER_ONLY.match(value))
+
+
 def is_derivable_content(text: str) -> bool:
     """False for serialization garbage that must not enter derived layers."""
     value = str(text or "")
     if not value.strip():
+        return False
+    if is_placeholder_only(value):
         return False
     head = value[:200]
     return not any(marker in head for marker in _BINARY_ARTIFACT_MARKERS)
