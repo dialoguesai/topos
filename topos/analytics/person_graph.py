@@ -41,7 +41,7 @@ def _digits10(value: Any) -> Optional[str]:
 def owner_identifiers(conn: Any) -> Dict[str, Any]:
     """What this node canonically knows about who its owner is.
 
-    Deliberately NOT a name-similarity search. `Bravo Yankee` and `Charlie Yankee` are real
+    Deliberately NOT a name-similarity search. `Bravo Yankee` and `Wendel Yankee` are real
     other people on this corpus who share the owner's surname; a fuzzy rule would swallow
     them into the owner node and delete two humans from the graph.
     """
@@ -274,12 +274,12 @@ def build_person_nodes(conn: Any, dataset_id: str, *,
 
     try:
         rows = conn.execute(
-            "SELECT e.entity_id, MAX(e.canonical_name), COUNT(*)"
+            "SELECT e.entity_id, MAX(e.canonical_name), COUNT(*), MAX(e.aliases_json)"
             "  FROM entity_mentions m JOIN entities e ON e.entity_id = m.entity_id"
             " WHERE e.entity_type = 'person' GROUP BY e.entity_id").fetchall()
     except sqlite3.Error:
         rows = []
-    for entity_id, name, count in rows:
+    for entity_id, name, count, aliases_json in rows:
         eid = str(entity_id)
         if eid in owner_ids:
             continue
@@ -290,6 +290,15 @@ def build_person_nodes(conn: Any, dataset_id: str, *,
         n["mention_count"] = int(count or 0)
         if name and any(ch.isalpha() for ch in str(name)) and not n["label"]:
             n["label"] = clean_label(name)
+        # The spine's own nickname record, carried so the duplicate fold can use it. The
+        # entity for "Rowan Alvestad" already lists "Rowan" here; without it the fold groups
+        # on the display name alone and a person known by both never meets themselves.
+        try:
+            parsed = json.loads(aliases_json or "[]")
+        except (TypeError, ValueError):
+            parsed = []
+        if isinstance(parsed, list) and parsed:
+            n["aliases"] = [str(a) for a in parsed if str(a or "").strip()]
 
     # --- message volume, used for ranking and for the naming queue -------------------
     try:
@@ -604,7 +613,7 @@ def build_person_edges(conn: Any, dataset_id: str, nodes: List[Dict[str, Any]], 
 def merge_suggestions(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Nodes that look like the same human, offered with evidence — never merged silently.
 
-    Two people genuinely can share a name (`Bravo Yankee` and `Charlie Yankee` are both real
+    Two people genuinely can share a name (`Bravo Yankee` and `Wendel Yankee` are both real
     here), so a silent merge would be a falsehood the owner cannot see. Measured on the live
     node: 8 name collisions between people the owner messages and people they only mention.
     """
@@ -1293,7 +1302,7 @@ STRUCTURAL_EDGE_TYPES = ("communicates_with", "co_occurrence")
 MIN_COMMUNITY_SIZE = 3
 
 #: Betweenness in a component this small is arithmetic, not insight: the middle node of a
-#: three-person path scores a perfect 1.0. Measured here, that let November Romeo and Trump top
+#: three-person path scores a perfect 1.0. Measured here, that let November Romeo and a head of state top
 #: the broker list ahead of every real contact. Below this the score is computed but not
 #: offered as a finding.
 MIN_COMPONENT_FOR_BROKERAGE = 6
@@ -1542,7 +1551,7 @@ def _identities_conflict(a: Dict[str, Any], b: Dict[str, Any]) -> bool:
     `ent_612aa44f…` (4 mentions), and treating that split as proof of two Dashas is exactly
     backwards.
 
-    The name-collision danger — `Bravo Yankee` versus `Charlie Yankee` — is handled where it
+    The name-collision danger — `Bravo Yankee` versus `Wendel Yankee` — is handled where it
     belongs: those have DIFFERENT names, so they never reach this function. Two people with
     genuinely identical names remain possible, which is why the link is derived at read,
     shown on the node, and undone by a `split`.
@@ -1575,10 +1584,22 @@ def auto_link_duplicates(nodes: List[Dict[str, Any]], *, split_ids=()) -> List[D
     for node in nodes:
         if node.get("is_owner") or node.get("needs_name") or node.get("dismissed"):
             continue
-        key = _normalized_name(node.get("label"))
-        if len(key) < 3:
-            continue  # a two-letter nickname is not evidence of anything
-        groups.setdefault(key, []).append(node)
+        # Display name AND the spine's aliases. Folding on the display name alone catches
+        # only the exact-duplicate shape (one display name, twice) and misses the
+        # commonest one: a person messaged under a full name and written down by first name.
+        # Measured on the live node — "Rowan Alvestad" (498 messages, contact-linked) and
+        # "Rowan" (12 mentions, the journal's name for the same human) sat as two nodes, so
+        # every reading derived from the journal landed on the half of him with no card.
+        #
+        # An alias is the spine's own claim, not a guess made here, and the existing guards
+        # still apply: only one messaged node may absorb, differing contact ids still block,
+        # and a `split` still pulls it apart and keeps it apart.
+        keys = {_normalized_name(node.get("label"))}
+        keys.update(_normalized_name(a) for a in (node.get("aliases") or []))
+        for key in keys:
+            if len(key) < 3:
+                continue  # a two-letter nickname is not evidence of anything
+            groups.setdefault(key, []).append(node)
 
     absorbed: Set[str] = set()
     for key, group in groups.items():
@@ -1591,6 +1612,10 @@ def auto_link_duplicates(nodes: List[Dict[str, Any]], *, split_ids=()) -> List[D
         keep = messaged[0]
         for other in mentioned:
             if str(other["node_id"]) in split or _identities_conflict(keep, other):
+                continue
+            # A node reachable by both its name and an alias appears in two groups; without
+            # this its mention_count would be added to the keeper twice.
+            if str(other["node_id"]) in absorbed:
                 continue
             keep["mention_count"] = int(keep.get("mention_count", 0)) + int(other.get("mention_count", 0))
             keep["evidence"]["mentioned"] = True
@@ -1800,6 +1825,124 @@ _SHARED_OWNER_KIND_WORDS: Dict[str, str] = {
 }
 
 
+#: One session together is co-presence, not collaboration. Two is the floor at which
+#: "you work on this together" is a description of a pattern rather than of an evening.
+#:
+#: Measured on the live journal (2026-08-28): 56 people share at least one declared
+#: session with the owner, 19 share two or more, across 23 person×project pairs. The
+#: floor costs 37 readings and every one it drops is a single co-occurrence.
+COACTIVITY_MIN_SESSIONS = 2
+
+#: Kinds that can be WORKED ON. A person co-occurring with a place is where they were,
+#: not what they were doing, and `shared_with_owner` already says that better.
+COACTIVITY_KINDS = ("project", "org")
+
+
+def attach_coactivity(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[str, int]:
+    """What this person and the owner DO together, from the owner's own declaration.
+
+    The card could say how much a relationship happens — volume, balance, recency — and
+    never what it was about, because every reading on it was a transform of a message
+    count. This is the other witness: the owner writes a journal entry naming who they
+    were with and what they were working on, in two adjacent columns, and the entity
+    spine folds both into one record's co-occurrence bucket.
+
+    So this reads the SPINE, not the artifact: `entity_edges` already carries a resolved
+    person↔project edge with an evidence count, and reading it here means the number on
+    the card is the number of sessions the owner logged. Matching the artifact's name
+    slug instead would have to guess which "Rowan" it meant, and on this node it would
+    guess wrong — there are two.
+
+    Measured before this existed: the owner's closest person by every message statistic
+    (0.9224 of 428) had ten declared Topos sessions across three months, and his card
+    said "Warm · Inner circle" and nothing else.
+    """
+    from ..features.entities.structured_fields import STRUCTURED_CONFIDENCE
+
+    if not _appearance_table_exists(conn, "entity_mentions"):
+        return {"attached": 0}
+
+    by_entity = {
+        str(n["entity_id"]): n
+        for n in nodes
+        if n.get("entity_id") and not n.get("is_owner")
+    }
+    if not by_entity:
+        return {"attached": 0}
+
+    # Counted from the JOURNAL RECORDS themselves, not from `entity_edges`.
+    #
+    # Reading the co_occurrence edge was the obvious implementation and it was wrong: that
+    # edge is minted wherever two entities land in one record of ANY kind, so a browsing
+    # session and a news article count the same as a working afternoon. Run against the
+    # live node it attached 42 readings, and the top of the list was "a head of state · a nationality · 6
+    # sessions", "a public figure · ChatGPT · 4" and the owner co-occurring with a jobs board.
+    # None of those is a session anybody logged, and the word "sessions" made the number a
+    # claim rather than a count.
+    #
+    # So: both ends must be mentioned in the SAME journal entry, and the person must be
+    # there because the owner DECLARED them — STRUCTURED_CONFIDENCE, the participant column
+    # — not because a model found a name in the prose. That is what makes "10 sessions"
+    # mean the thing a reader assumes it means.
+    kinds = ",".join("?" * len(COACTIVITY_KINDS))
+    try:
+        rows = conn.execute(
+            "SELECT pm.entity_id, om.entity_id, oe.canonical_name, oe.entity_type,"
+            "       COUNT(DISTINCT pm.record_id), MAX(pm.event_at)"
+            "  FROM entity_mentions pm"
+            "  JOIN entity_mentions om ON om.record_id = pm.record_id"
+            "                         AND om.canonical_table = 'journal_entries'"
+            "  JOIN entities oe ON oe.entity_id = om.entity_id"
+            " WHERE pm.canonical_table = 'journal_entries'"
+            "   AND pm.confidence >= ?"
+            "   AND pm.entity_id <> om.entity_id"
+            f"   AND oe.entity_type IN ({kinds})"
+            " GROUP BY 1, 2, 3, 4",
+            (STRUCTURED_CONFIDENCE, *COACTIVITY_KINDS),
+        ).fetchall()
+    except sqlite3.Error:
+        return {"attached": 0}
+
+    #: node_id -> [(sessions, label, kind, last_at), ...]
+    per_node: Dict[str, List[Tuple[int, str, str, Any]]] = defaultdict(list)
+    for person_id, _other_id, label, kind, sessions, at in rows:
+        node = by_entity.get(str(person_id))
+        if node is None:
+            continue
+        sessions = int(sessions or 0)
+        if sessions < COACTIVITY_MIN_SESSIONS:
+            continue
+        per_node[str(node["node_id"])].append(
+            (sessions, str(label or ""), str(kind or ""), at)
+        )
+
+    by_node = {str(n.get("node_id") or ""): n for n in nodes}
+    attached = 0
+    for node_id, entries in per_node.items():
+        node = by_node.get(node_id)
+        if node is None:
+            continue
+        entries.sort(key=lambda e: (-e[0], e[1]))
+        sessions, label, kind, last_at = entries[0]
+        node["coactivity"] = {
+            "label": label,
+            "kind": kind,
+            "sessions": sessions,
+            "last_at": last_at,
+            # The owner typed this into a column; it is not a model's reading of prose,
+            # and the card must be able to say so — a declared fact and an inferred one
+            # are not two witnesses agreeing.
+            "declared": True,
+            # Everything else they work on together, so a tooltip can be honest about
+            # what the headline leaves out.
+            "also": [
+                {"label": lbl, "sessions": n} for n, lbl, _k, _at in entries[1:4]
+            ],
+        }
+        attached += 1
+    return {"attached": attached}
+
+
 def attach_shared_with_owner(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[str, int]:
     """What the owner and this person BOTH engage with, and what KIND of thing it is.
 
@@ -1909,11 +2052,31 @@ def attach_shared_with_owner(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[str
                 or total < SHARED_OWNER_MIN_MENTIONS
                 or entries[0][1] < SHARED_OWNER_MIN_TOP_MENTIONS):
             continue
+        # NAMED examples must have been seen more than once. The gate above measures the
+        # BREADTH of shared ground and lets a kind through on the strength of one repeated
+        # entity; the names on the chip are a different promise, and a single co-mention is
+        # a coincidence wearing a shared interest's clothes.
+        #
+        # Reported by the owner, 2026-08-28, looking at his closest collaborator's card:
+        # "Halden Vry appeared in Rowan's, which I would rank way less important". The set
+        # behind that chip was one person at ×2 and four entities at ×1 —
+        # ties at one, so the second and third names were alphabetical noise, and one of
+        # them is a PLACE the extractor had typed as a person.
+        #
+        # Raising the gate instead was measured and rejected: MIN_TOP_MENTIONS 2→3 halves
+        # the feature, 12 people to 6, to fix a presentation problem. This keeps every
+        # reading and drops only the names that were never evidence — Kim's "Arlington×1",
+        # Mom's "the Statue of Liberty park×1", Rowan's Halden Vry.
+        evidenced = [(name, n) for name, n in entries if n >= SHARED_OWNER_MIN_TOP_MENTIONS]
         node["shared_with_owner"] = {
             "kind": kind,
             "label": _SHARED_OWNER_KIND_WORDS.get(kind, kind.replace("_", " ").title()),
-            "examples": [name for name, _ in entries[:SHARED_OWNER_TOP]],
+            "examples": [name for name, _ in evidenced[:SHARED_OWNER_TOP]],
             "entity_count": len(entries),
+            # How many of those were seen more than once — the ones the chip is willing to
+            # NAME. Carried so the tooltip can say "5 in common, 1 more than once" instead
+            # of claiming five and listing one.
+            "evidenced_count": len(evidenced),
             "mention_count": total,
         }
         attached += 1

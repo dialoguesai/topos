@@ -386,7 +386,7 @@ class TestTheOwnerIsNotTheirOwnContact:
     their own social graph as up to six separate people."""
 
     def test_a_shared_surname_is_never_evidence(self):
-        """`Bravo Yankee` and `Charlie Yankee` are real other people on this corpus. A fuzzy
+        """`Bravo Yankee` and `Wendel Yankee` are real other people on this corpus. A fuzzy
         name rule would have swallowed them into the owner and deleted two humans."""
         c = _conn()
         _person(c, "e-owner", "Owner", is_self=1)
@@ -564,12 +564,12 @@ class TestDuplicatesFoldToTheirStrongestSighting:
     identity beside one `named` node holding the extracted entity."""
 
     def _pair(self, band_a="core", band_b="named", **kw):
-        keep = {"node_id": "a", "label": "Dasha", "band": band_a, "band_reason": "msgs",
+        keep = {"node_id": "a", "label": "Ilva", "band": band_a, "band_reason": "msgs",
                 "evidence": {"messaged": True, "mentioned": False}, "is_owner": False,
                 "message_count": 606, "mention_count": 0, "needs_name": False,
                 "entity_id": "ent_a", "contact_id": None, "messenger_keys": ["+1555"],
                 "sources": []}
-        other = {"node_id": "b", "label": "Dasha", "band": band_b, "band_reason": "named",
+        other = {"node_id": "b", "label": "Ilva", "band": band_b, "band_reason": "named",
                  "evidence": {"messaged": False, "mentioned": True}, "is_owner": False,
                  "message_count": 0, "mention_count": 4, "needs_name": False,
                  "entity_id": "ent_b", "contact_id": None, "messenger_keys": [],
@@ -718,7 +718,7 @@ class TestFactsCanSayWhatBehaviourCannot:
     def test_the_quote_reaches_the_card(self):
         c = self._corpus()
         self._fact(c, predicate="rel.relationship_event", altitude="stated", event="met",
-                   quote="Dasha stayed over last night on the couch.")
+                   quote="Ilva stayed over last night on the couch.")
         friend = self._closeness(c)["Foxtrot Romeo"]
         assert any("stayed over" in str(f.get("quote")) for f in friend["facts"])
 
@@ -972,14 +972,14 @@ class TestAFactSaysWhenAndWhatFromV:
                      content TEXT, place_name TEXT)""")
         c.execute(
             "INSERT INTO journal_entries VALUES (?,?,?,?)",
-            ("tl-8", "2026-05-02T17:00:00", "Dasha stayed over last night.", "Williamsburg"))
+            ("tl-8", "2026-05-02T17:00:00", "Ilva stayed over last night.", "Williamsburg"))
         return c
 
     def _fact(self, c, *, refs, valid_from="2026-05-02", object_id="s1"):
         payload = json.dumps({
             "predicate": "rel.relationship_event", "asserted_by": "owner",
-            "altitude": "stated", "quote": "Dasha stayed over last night.",
-            "value_struct": {"person": "Dasha", "event": "met"},
+            "altitude": "stated", "quote": "Ilva stayed over last night.",
+            "value_struct": {"person": "Ilva", "event": "met"},
         })
         c.execute("INSERT INTO signal_objects VALUES (?,?,?,?,?)",
                   (object_id, payload, 0.9, json.dumps(refs), valid_from))
@@ -987,18 +987,18 @@ class TestAFactSaysWhenAndWhatFromV:
     def test_a_fact_carries_the_day_it_is_about(self):
         c = self._facts_conn()
         self._fact(c, refs=[{"table": "journal_entries", "record_id": "tl-8"}])
-        nodes = [{"entity_id": "e1", "label": "Dasha", "is_owner": False}]
+        nodes = [{"entity_id": "e1", "label": "Ilva", "is_owner": False}]
         PG.person_relationship_facts(c, nodes)
         assert nodes[0]["facts"][0]["at"] == "2026-05-02"
 
     def test_a_journal_ref_resolves_to_the_text_the_owner_can_read(self):
         c = self._facts_conn()
         self._fact(c, refs=[{"table": "journal_entries", "record_id": "tl-8"}])
-        nodes = [{"entity_id": "e1", "label": "Dasha", "is_owner": False}]
+        nodes = [{"entity_id": "e1", "label": "Ilva", "is_owner": False}]
         PG.person_relationship_facts(c, nodes)
         src = nodes[0]["facts"][0]["sources"][0]
         assert src["kind"] == "record"
-        assert "Dasha stayed over" in src["text"]
+        assert "Ilva stayed over" in src["text"]
         assert src["where"] == "Williamsburg"
         assert src["at"] == "2026-05-02T17:00:00"
 
@@ -1008,7 +1008,7 @@ class TestAFactSaysWhenAndWhatFromV:
         c = self._facts_conn()
         self._fact(c, refs=[{"table": "messenger_dyad_stats", "record_id": "ent_x",
                              "note": "550 msgs, balance -0.16"}])
-        nodes = [{"entity_id": "e1", "label": "Dasha", "is_owner": False}]
+        nodes = [{"entity_id": "e1", "label": "Ilva", "is_owner": False}]
         PG.person_relationship_facts(c, nodes)
         src = nodes[0]["facts"][0]["sources"][0]
         assert src["kind"] == "measure"
@@ -1020,7 +1020,7 @@ class TestAFactSaysWhenAndWhatFromV:
         built from, which reads as a smaller claim rather than a broken link."""
         c = self._facts_conn()
         self._fact(c, refs=[{"table": "journal_entries", "record_id": "tl-gone"}])
-        nodes = [{"entity_id": "e1", "label": "Dasha", "is_owner": False}]
+        nodes = [{"entity_id": "e1", "label": "Ilva", "is_owner": False}]
         PG.person_relationship_facts(c, nodes)
         sources = nodes[0]["facts"][0]["sources"]
         assert len(sources) == 1
@@ -1033,7 +1033,7 @@ class TestAFactSaysWhenAndWhatFromV:
             {"table": "messenger_dyad_stats", "record_id": "ent_x", "note": "550 msgs"},
             {"table": "journal_entries", "record_id": "tl-gone"},
         ])
-        nodes = [{"entity_id": "e1", "label": "Dasha", "is_owner": False}]
+        nodes = [{"entity_id": "e1", "label": "Ilva", "is_owner": False}]
         PG.person_relationship_facts(c, nodes)
         kinds = [s["kind"] for s in nodes[0]["facts"][0]["sources"]]
         assert kinds == ["record", "measure", "missing"]
@@ -1043,7 +1043,7 @@ class TestAFactSaysWhenAndWhatFromV:
         c.execute("INSERT INTO journal_entries VALUES (?,?,?,?)",
                   ("tl-long", "2026-05-02", "x" * 900, None))
         self._fact(c, refs=[{"table": "journal_entries", "record_id": "tl-long"}])
-        nodes = [{"entity_id": "e1", "label": "Dasha", "is_owner": False}]
+        nodes = [{"entity_id": "e1", "label": "Ilva", "is_owner": False}]
         PG.person_relationship_facts(c, nodes)
         src = nodes[0]["facts"][0]["sources"][0]
         assert len(src["text"]) == PG.EVIDENCE_TEXT_CHARS
@@ -1056,7 +1056,7 @@ class TestAFactSaysWhenAndWhatFromV:
         c = self._facts_conn()
         self._fact(c, refs=[{"table": "journal_entries", "record_id": "tl-8"}])
         c.execute("ALTER TABLE signal_objects DROP COLUMN valid_from")
-        nodes = [{"entity_id": "e1", "label": "Dasha", "is_owner": False}]
+        nodes = [{"entity_id": "e1", "label": "Ilva", "is_owner": False}]
         stats = PG.person_relationship_facts(c, nodes)
         assert stats["attached"] == 1
         assert stats["dated"] is False
@@ -1103,6 +1103,117 @@ class TestWhatYouShareWithThisPerson:
         assert shared["kind"] == "place"
         assert shared["label"] == "Places"
         assert shared["examples"][0] == "NYC"
+
+    def test_it_will_not_NAME_a_single_coincidence(self):
+        """Reported by the owner, 2026-08-28, on his closest collaborator's card: "Halden Vry
+        appeared in Rowan's, which I would rank way less important."
+
+        The gate measures the BREADTH of shared ground and admits a kind on the strength of
+        one repeated entity. The NAMES are a different promise. Behind that chip: Teodor×2,
+        one entity at ×2 and four at ×1 — ties, so the second and
+        third names were alphabetical noise, and one of them is a place the extractor typed
+        as a person.
+        """
+        c = self._conn_with_mentions()
+        self._seed(c,
+                   owner_ents=[("e1", "Teodor", "person"), ("e2", "Halden Vry", "person"),
+                               ("e3", "Nadia Orme", "person"), ("e4", "Ardennes", "person")],
+                   peer_msgs=[(f"m{i}", "+1555") for i in range(6)],
+                   mention_rows=[("m0","e1"),("m1","e1"),("m2","e2"),("m3","e3"),("m4","e4")])
+        nodes = [{"node_id": "p1", "label": "Rowan", "messenger_keys": ["+1555"]}]
+        PG.attach_shared_with_owner(c, nodes)
+
+        shared = nodes[0]["shared_with_owner"]
+        assert shared["examples"] == ["Teodor"], "only what was seen more than once is named"
+        assert "Halden Vry" not in shared["examples"]
+
+    def test_the_reading_survives_even_when_only_one_name_does(self):
+        """Raising the gate instead was measured and rejected: MIN_TOP_MENTIONS 2→3 halves
+        the feature on the live node, 12 people to 6, to fix a presentation problem. The
+        reading stays; only the unevidenced names go."""
+        c = self._conn_with_mentions()
+        self._seed(c,
+                   owner_ents=[("e1", "Teodor", "person"), ("e2", "Halden Vry", "person"),
+                               ("e3", "Nadia Orme", "person"), ("e4", "Ardennes", "person")],
+                   peer_msgs=[(f"m{i}", "+1555") for i in range(6)],
+                   mention_rows=[("m0","e1"),("m1","e1"),("m2","e2"),("m3","e3"),("m4","e4")])
+        nodes = [{"node_id": "p1", "label": "Rowan", "messenger_keys": ["+1555"]}]
+        assert PG.attach_shared_with_owner(c, nodes)["attached"] == 1
+
+        shared = nodes[0]["shared_with_owner"]
+        assert shared["entity_count"] == 4, "four things in common is still true"
+        assert shared["evidenced_count"] == 1, "one of them was seen more than once"
+        assert shared["mention_count"] == 5
+
+    def test_a_well_evidenced_set_keeps_all_its_names(self):
+        c = self._conn_with_mentions()
+        self._seed(c,
+                   owner_ents=[("e1", "Dallas", "place"), ("e2", "Iowa", "place"),
+                               ("e3", "Arlington", "place")],
+                   peer_msgs=[(f"m{i}", "+1555") for i in range(8)],
+                   mention_rows=[("m0","e1"),("m1","e1"),("m2","e1"),
+                                 ("m3","e2"),("m4","e2"),("m5","e3")])
+        nodes = [{"node_id": "p1", "label": "Peer", "messenger_keys": ["+1555"]}]
+        PG.attach_shared_with_owner(c, nodes)
+
+        shared = nodes[0]["shared_with_owner"]
+        assert shared["examples"] == ["Dallas", "Iowa"]
+        assert shared["evidenced_count"] == 2
+
+    def test_it_will_not_NAME_a_single_coincidence(self):
+        """Reported by the owner on the card of the person he is closest to: a musician he
+        would "rank way less important" was being shown as shared ground.
+
+        The gate measures the BREADTH of shared ground and admits a kind on the strength of
+        one repeated entity. The NAMES are a different promise. Behind that chip: one entity
+        at x2 and four at x1 — ties, so the second and third names were alphabetical noise,
+        and one of them was a PLACE the extractor had typed as a person.
+        """
+        c = self._conn_with_mentions()
+        self._seed(c,
+                   owner_ents=[("e1", "Teodor Vask", "person"), ("e2", "Halden Vry", "person"),
+                               ("e3", "Nadia Orme", "person"), ("e4", "Ardennes", "person")],
+                   peer_msgs=[(f"m{i}", "+1555") for i in range(6)],
+                   mention_rows=[("m0","e1"),("m1","e1"),("m2","e2"),("m3","e3"),("m4","e4")])
+        nodes = [{"node_id": "p1", "label": "Peer", "messenger_keys": ["+1555"]}]
+        PG.attach_shared_with_owner(c, nodes)
+
+        shared = nodes[0]["shared_with_owner"]
+        assert shared["examples"] == ["Teodor Vask"], "only what was seen twice is named"
+        assert "Halden Vry" not in shared["examples"]
+
+    def test_the_reading_survives_even_when_only_one_name_does(self):
+        """Raising the gate instead was measured and rejected: MIN_TOP_MENTIONS 2->3 halves
+        the feature on the live node, 12 people to 6, to fix a presentation problem. The
+        reading stays; only the unevidenced names go."""
+        c = self._conn_with_mentions()
+        self._seed(c,
+                   owner_ents=[("e1", "Teodor Vask", "person"), ("e2", "Halden Vry", "person"),
+                               ("e3", "Nadia Orme", "person"), ("e4", "Ardennes", "person")],
+                   peer_msgs=[(f"m{i}", "+1555") for i in range(6)],
+                   mention_rows=[("m0","e1"),("m1","e1"),("m2","e2"),("m3","e3"),("m4","e4")])
+        nodes = [{"node_id": "p1", "label": "Peer", "messenger_keys": ["+1555"]}]
+        assert PG.attach_shared_with_owner(c, nodes)["attached"] == 1
+
+        shared = nodes[0]["shared_with_owner"]
+        assert shared["entity_count"] == 4, "four things in common is still true"
+        assert shared["evidenced_count"] == 1, "one of them was seen more than once"
+        assert shared["mention_count"] == 5
+
+    def test_a_well_evidenced_set_keeps_all_its_names(self):
+        c = self._conn_with_mentions()
+        self._seed(c,
+                   owner_ents=[("e1", "Bruges", "place"), ("e2", "Kolding", "place"),
+                               ("e3", "Nantes", "place")],
+                   peer_msgs=[(f"m{i}", "+1555") for i in range(8)],
+                   mention_rows=[("m0","e1"),("m1","e1"),("m2","e1"),
+                                 ("m3","e2"),("m4","e2"),("m5","e3")])
+        nodes = [{"node_id": "p1", "label": "Peer", "messenger_keys": ["+1555"]}]
+        PG.attach_shared_with_owner(c, nodes)
+
+        shared = nodes[0]["shared_with_owner"]
+        assert shared["examples"] == ["Bruges", "Kolding"]
+        assert shared["evidenced_count"] == 2
 
     def test_an_entity_the_owner_never_WROTE_about_does_not_count(self):
         """Received is not shared. An entity the owner was merely told about is evidence of

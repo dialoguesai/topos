@@ -279,7 +279,8 @@ def read_person_graph(conn: Any, *, dataset_id: str,
     month's relationships.
     """
     from .dataset_resolution import resolve_messaging_dataset
-    from .person_graph import (attach_closeness, attach_fact_closeness, attach_shared_with_owner,
+    from .person_graph import (attach_closeness, attach_coactivity, attach_fact_closeness,
+                               attach_shared_with_owner,
                                auto_link_duplicates,
                                build_person_edges, build_person_nodes, group_ambient_people,
                                merge_suggestions, resolve_owner_identity,
@@ -320,6 +321,13 @@ def read_person_graph(conn: Any, *, dataset_id: str,
     # card could say two contacts share a subject and never what YOU share with the person
     # in front of you.
     attach_shared_with_owner(conn, nodes)
+    # What the owner and each person DO together, from the owner's own declaration rather
+    # than from message statistics. `shared_with_owner` above reads what both parties talk
+    # ABOUT and reaches 5 of 427 people, all of them places; this reads the journal's
+    # declared participant and project columns through the entity spine, and answers the
+    # different question of what the two of them WORK ON. Run after the duplicate fold, for
+    # the same reason the facts are: the edge must land on the surviving node.
+    attach_coactivity(conn, nodes)
     # Ambient is 173 of 437 and reads as an undifferentiated fringe, but it holds classical
     # poets, GitHub collaborators, LinkedIn contacts and several pieces of software mistaken
     # for people. Grouping by what each name was seen ALONGSIDE separates them.
