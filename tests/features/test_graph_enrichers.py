@@ -108,8 +108,8 @@ def test_similar_goal_texts_cluster_into_one_node(conn):
     its weight reflects the combined occurrences."""
     owner = _owner(conn)
     texts = [
-        "Deepen UMA scope coverage",
-        "Deepen the UMA scope coverage work this week",
+        "Deepen Orion scope coverage",
+        "Deepen the Orion scope coverage work this week",
         "Plan a trip to Yosemite",  # unrelated — must stay its own node
     ]
     for i, t in enumerate(texts):
@@ -126,25 +126,25 @@ def test_similar_goal_texts_cluster_into_one_node(conn):
 
     # Injectable embedder: first two texts share a vector; the third is orthogonal.
     def fake_embed(batch):
-        return [[1.0, 0.0] if "UMA" in t else [0.0, 1.0] for t in batch]
+        return [[1.0, 0.0] if "Orion" in t else [0.0, 1.0] for t in batch]
 
     import json as _json
 
     materialize_graph_enrichments(conn, goal_embed_fn=fake_embed)
     labels = _labels(conn)
     goal_nodes = [n for n in labels.values() if n["node_type"] == "goal"]
-    assert len(goal_nodes) == 2  # UMA pair clustered; Yosemite separate
+    assert len(goal_nodes) == 2  # Orion pair clustered; Yosemite separate
 
-    uma = next(n for n in goal_nodes if "UMA" in str(n["label"]))
-    meta = _json.loads(uma.get("metadata_json") or "{}")
+    orion = next(n for n in goal_nodes if "Orion" in str(n["label"]))
+    meta = _json.loads(orion.get("metadata_json") or "{}")
     variants = meta.get("goal_variants") or []
     assert len(variants) == 2 and any("this week" in v for v in variants)
 
     pursues = _edges(conn, "pursues")
-    uma_edge = next(e for e in pursues if e["dst_node_id"] == uma["node_id"])
-    assert uma_edge["weight"] > _edges(conn, "pursues")[0]["weight"] * 0 + 2.0  # bumped past floor
-    assert str(uma_edge["valid_from"]).startswith("2026-06-01")
-    assert str(uma_edge["last_event_at"]).startswith("2026-06-02")
+    orion_edge = next(e for e in pursues if e["dst_node_id"] == orion["node_id"])
+    assert orion_edge["weight"] > _edges(conn, "pursues")[0]["weight"] * 0 + 2.0  # bumped past floor
+    assert str(orion_edge["valid_from"]).startswith("2026-06-01")
+    assert str(orion_edge["last_event_at"]).startswith("2026-06-02")
 
 
 def test_goal_clustering_falls_back_to_token_similarity(conn):
@@ -171,7 +171,7 @@ def test_duplicate_goal_texts_collapse_to_one_node(conn):
     for i, (rid, day) in enumerate([("r1", "2025-03-01"), ("r2", "2025-04-01"), ("r3", "2025-05-01")]):
         conn.execute(
             "INSERT INTO user_goals (goal_id, record_id, source_id, goal_text, payload_json) "
-            f"VALUES ('dup{i}', '{rid}', 'chatgpt_file_ingestion', 'Deepen UMA coverage', '{{}}')"
+            f"VALUES ('dup{i}', '{rid}', 'chatgpt_file_ingestion', 'Deepen Orion coverage', '{{}}')"
         )
         conn.execute(
             "INSERT OR REPLACE INTO timeline (event_at, record_id, source_id, canonical_table) "
@@ -198,7 +198,7 @@ def test_visits_become_located_at_edges_weighted_by_count(conn):
     for i in range(3):
         conn.execute(
             "INSERT INTO location_events (event_id, place_name, event_at, source_id) "
-            f"VALUES ('l{i}', 'LA Fitness', '2026-06-0{i + 1}T10:00:00Z', 'grow_journal')"
+            f"VALUES ('l{i}', 'Metro Fitness', '2026-06-0{i + 1}T10:00:00Z', 'grow_journal')"
         )
     conn.commit()
 
@@ -212,7 +212,7 @@ def test_visits_become_located_at_edges_weighted_by_count(conn):
     meta = json.loads(located[0]["metadata_json"] or "{}")
     assert meta.get("visit_count") == 3
     labels = _labels(conn)
-    assert labels["LA Fitness"]["node_type"] == "place"
+    assert labels["Metro Fitness"]["node_type"] == "place"
 
 
 # ----------------------------------------------------------- conversations

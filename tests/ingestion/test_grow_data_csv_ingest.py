@@ -193,7 +193,13 @@ async def test_grow_data_file_ingests_full_csv(
     assert first["starts_at"] == "2026-05-01T08:00:00"
     assert first["ends_at"] == "2026-05-01T08:55:00"
     assert first["category"] == "Job Applications"
-    assert first["place_name"] == "Timbercreek Apt"
+    # Compare against the export's own value rather than a copy of it. The CSV
+    # is the owner's real Grow data and lives outside the repo; hardcoding a row
+    # from it here would publish a home address in a test fixture, which is the
+    # leak class `scripts/scan_repo_for_owner_data.py` exists to stop. Reading
+    # the expectation from the source also makes this a stronger assertion —
+    # that ingest PRESERVES the location, not that it equals one fixed string.
+    assert first["place_name"] == (rows[0].get("location") or "").strip()
     assert "Goal: Update resume" in first["content"]
     assert "better-half.ai" in first["content"]
 

@@ -32,7 +32,7 @@ def apply_query_eval_seed(conn: sqlite3.Connection) -> None:
             message_id, conversation_id, sender_type, source_id, content, event_at
         ) VALUES (
             'eval-q6-git', 'eval-conv', 'user', 'chatgpt_ui_conversation',
-            'git push to GitHub repository main branch', '2026-01-03'
+            'git push to the upstream remote main branch', '2026-01-03'
         )
         """
     )

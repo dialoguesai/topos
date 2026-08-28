@@ -21,11 +21,11 @@ from topos.storage.db.migrations import apply_all_migrations
 
 NEEDLE = "coverage, and pursue edtech"
 FULL_MESSAGE = (
-    "My Q2 goals: ship goal extraction for the personal AI node, deepen UMA "
-    f"scope {NEEDLE} pilots in Austin."
+    "My Q2 goals: ship goal tracking for the assistant surface, deepen Orion "
+    f"scope {NEEDLE} pilots in Ashford."
 )
-GOAL_TEXT = "Ship goal extraction for the personal AI node"
-QUERY = "Find my AI conversations about goals extraction personal"
+GOAL_TEXT = "Ship goal tracking for the assistant surface"
+QUERY = "Find my AI conversations about goals tracking assistant"
 
 
 @pytest.fixture

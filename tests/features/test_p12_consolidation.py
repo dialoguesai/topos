@@ -64,8 +64,8 @@ class TestSweep:
         assert result["fuzzy"] == 1
 
     def test_different_types_never_paired(self, conn) -> None:
-        _mk_entity(conn, "Austin Barbaro", "person", mentions=5)
-        _mk_entity(conn, "Austin", "place", mentions=40)
+        _mk_entity(conn, "Ashford Barbaro", "person", mentions=5)
+        _mk_entity(conn, "Ashford", "place", mentions=40)
         result = propose_merges(conn, use_embeddings=False)
         assert result["total"] == 0
 
@@ -268,10 +268,10 @@ class TestOneRowPerDecision:
         conn.commit()
 
     def test_resolver_queues_one_row_per_decision(self, conn) -> None:
-        brooklyn = _mk_entity(conn, "Brooklyn", "place", mentions=18)
+        northgate = _mk_entity(conn, "Northgate", "place", mentions=18)
         resolver = EntityResolver(conn)
         for _ in range(50):
-            resolver._queue_review("Williamsburg- Brooklyn", brooklyn, 0.85, "rec-1")
+            resolver._queue_review("Millburg- Northgate", northgate, 0.85, "rec-1")
         conn.commit()
 
         rows = conn.execute("SELECT COUNT(*) FROM entity_review").fetchone()[0]
@@ -294,8 +294,8 @@ class TestOneRowPerDecision:
         assert list_review(conn) == [], "settled decision came back"
 
     def test_backlog_of_duplicates_lists_once(self, conn) -> None:
-        brooklyn = _mk_entity(conn, "Brooklyn", "place", mentions=18)
-        self._duplicate_sightings(conn, "Williamsburg- Brooklyn", brooklyn, 5)
+        northgate = _mk_entity(conn, "Northgate", "place", mentions=18)
+        self._duplicate_sightings(conn, "Millburg- Northgate", northgate, 5)
 
         items = list_review(conn)
         assert len(items) == 1
@@ -304,8 +304,8 @@ class TestOneRowPerDecision:
         assert count_review(conn) == 1
 
     def test_one_answer_settles_every_duplicate(self, conn) -> None:
-        brooklyn = _mk_entity(conn, "Brooklyn", "place", mentions=18)
-        self._duplicate_sightings(conn, "Williamsburg- Brooklyn", brooklyn, 5)
+        northgate = _mk_entity(conn, "Northgate", "place", mentions=18)
+        self._duplicate_sightings(conn, "Millburg- Northgate", northgate, 5)
 
         result = resolve_review(conn, list_review(conn)[0]["review_id"], action="dismiss")
         assert result["also_settled"] == 4
@@ -413,8 +413,8 @@ class TestReviewGates:
         assert count_review(conn) == 0
 
     def test_mention_backed_surface_is_queued(self, conn) -> None:
-        brooklyn = _mk_entity(conn, "Brooklyn", "place", mentions=18)
-        EntityResolver(conn)._queue_review("Williamsburg- Brooklyn", brooklyn, 0.85, "rec-1")
+        northgate = _mk_entity(conn, "Northgate", "place", mentions=18)
+        EntityResolver(conn)._queue_review("Millburg- Northgate", northgate, 0.85, "rec-1")
         conn.commit()
         assert count_review(conn) == 1
 
@@ -607,7 +607,7 @@ class TestProvenanceMigration:
         hub = _mk_entity(conn, "Personal", "topic", mentions=0)
         thin = _mk_entity(conn, "Code", "topic", mentions=1)
         contact = _mk_entity(conn, "Alex", mentions=0, contact="c-1")
-        attested = _mk_entity(conn, "Brooklyn", "place", mentions=18)
+        attested = _mk_entity(conn, "Northgate", "place", mentions=18)
 
         self._row(conn, "rev_derived", hub, record_id=None)
         self._row(conn, "rev_blank", hub, record_id="  ")
@@ -723,7 +723,7 @@ class TestCandidateBarMigration:
 
         contact = _mk_entity(conn, "Alex", mentions=0, contact="c-1")
         thin = _mk_entity(conn, "Code", "topic", mentions=1)
-        seen = _mk_entity(conn, "Brooklyn", "place", mentions=18)
+        seen = _mk_entity(conn, "Northgate", "place", mentions=18)
         just_enough = _mk_entity(conn, "Domino park", "place", mentions=2)
 
         self._row(conn, "rev_contact", contact)
@@ -759,7 +759,7 @@ class TestCandidateBarMigration:
         )
 
         contact = _mk_entity(conn, "Alex", mentions=0, contact="c-1")
-        seen = _mk_entity(conn, "Brooklyn", "place", mentions=18)
+        seen = _mk_entity(conn, "Northgate", "place", mentions=18)
         self._row(conn, "rev_contact", contact, status="stale")
         self._row(conn, "rev_seen", seen, status="stale")
         self._row(conn, "rev_derived", seen, record_id=None)
@@ -786,14 +786,14 @@ class TestDedupMigration:
             apply_entity_review_dedup_v1_up,
         )
 
-        brooklyn = _mk_entity(conn, "Brooklyn", "place", mentions=18)
+        northgate = _mk_entity(conn, "Northgate", "place", mentions=18)
         codex = _mk_entity(conn, "Code", "topic", mentions=1)
         for i in range(20):
             conn.execute(
                 "INSERT INTO entity_review (review_id, surface_text, candidate_entity_id,"
                 " score, status, kind, created_at) VALUES (?, ?, ?, 0.85, 'pending',"
                 " 'resolution', ?)",
-                (f"rev_w{i}", "Williamsburg- Brooklyn", brooklyn, f"2026-08-11 00:00:{i:02d}"),
+                (f"rev_w{i}", "Millburg- Northgate", northgate, f"2026-08-11 00:00:{i:02d}"),
             )
         for i in range(8):
             conn.execute(
@@ -814,13 +814,13 @@ class TestDedupMigration:
             "INSERT INTO entity_review (review_id, surface_text, candidate_entity_id,"
             " score, status, kind) VALUES ('rev_done', 'Jonny', ?, 0.85, 'dismissed',"
             " 'resolution')",
-            (brooklyn,),
+            (northgate,),
         )
         conn.execute(
             "INSERT INTO entity_review (review_id, surface_text, candidate_entity_id,"
             " score, status, kind) VALUES ('rev_again', 'Jonny', ?, 0.85, 'pending',"
             " 'resolution')",
-            (brooklyn,),
+            (northgate,),
         )
         # an owner guard, which is not a question and must survive untouched
         conn.execute(

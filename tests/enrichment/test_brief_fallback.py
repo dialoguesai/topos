@@ -53,13 +53,13 @@ def test_brief_input_text_compresses_structured_journal_content() -> None:
     digest = brief_input_text(
         {
             "category": "Job Applications",
-            "place_name": "Timbercreek Apt",
+            "place_name": "Elmcourt Apt",
             "content": (
                 "Project: Job Applications\n\n"
                 "Goal: Update resume\n\n"
                 "Accomplished: Updated and sent to better-half.ai.\n\n"
                 "I will see what they say.\n\n"
-                "Location: Timbercreek Apt\n\n"
+                "Location: Elmcourt Apt\n\n"
                 "With: Solo\n\n"
                 "Duration: 55 min\n\n"
                 "Completed: TRUE"
@@ -69,7 +69,7 @@ def test_brief_input_text_compresses_structured_journal_content() -> None:
     assert "Job Applications" in digest
     assert "Update resume" in digest
     assert "Updated and sent" in digest
-    assert "Timbercreek Apt" in digest
+    assert "Elmcourt Apt" in digest
     assert "Location:" not in digest
     assert "Duration:" not in digest
     assert "Project:" not in digest
@@ -79,14 +79,14 @@ def test_rules_brief_sections_places_travel_patterns() -> None:
     sections = rules_brief_sections(
         "places",
         [
-            {"place_name": "Austin- Downtown", "category": "Chill", "content": "Project: Chill\n\nLocation: Austin- Downtown"},
-            {"place_name": "NYC", "category": "Chill", "content": "Project: Chill\n\nLocation: NYC"},
-            {"place_name": "Brooklyn- The Convent", "category": "Topos", "content": "Project: Topos\n\nLocation: Brooklyn- The Convent"},
+            {"place_name": "Ashford- Downtown", "category": "Chill", "content": "Project: Chill\n\nLocation: Ashford- Downtown"},
+            {"place_name": "Metro", "category": "Chill", "content": "Project: Chill\n\nLocation: NYC"},
+            {"place_name": "Northgate- The Foundry", "category": "Topos", "content": "Project: Topos\n\nLocation: Northgate- The Foundry"},
         ],
     )
     travel = sections.get("travel_patterns") or ""
-    assert "NYC" in travel
-    assert "Brooklyn" in travel
+    assert "Metro" in travel
+    assert "Northgate" in travel
 
 
 def test_rules_brief_sections_memory_uses_compressed_bullets() -> None:
@@ -96,7 +96,7 @@ def test_rules_brief_sections_memory_uses_compressed_bullets() -> None:
             "Project: Topos\n\n"
             "Goal: Ship investors page\n\n"
             "Accomplished: Created the investors page on the website.\n\n"
-            "Location: Timbercreek Apt\n\n"
+            "Location: Elmcourt Apt\n\n"
             "Duration: 68 min"
         ),
     }

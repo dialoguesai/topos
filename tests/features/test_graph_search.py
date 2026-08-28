@@ -85,8 +85,8 @@ def test_event_window_passes_through_to_search_fn(conn):
 def test_materialized_goal_node_matches_by_label(conn):
     conn.execute(
         "INSERT INTO entities (entity_id, entity_type, canonical_name, normalized_name, is_self, mention_count, metadata_json) "
-        "VALUES ('goal_g1', 'goal', 'Summarize edtech pilot opportunities in Austin', "
-        "'summarize edtech pilot opportunities in austin', 0, 0, '{\"mz\":1}')"
+        "VALUES ('goal_g1', 'goal', 'Summarize edtech pilot opportunities in Ashford', "
+        "'summarize edtech pilot opportunities in ashford', 0, 0, '{\"mz\":1}')"
     )
     conn.commit()
     out = graph_search(conn, query="edtech pilots", search_fn=_fake_search([]))

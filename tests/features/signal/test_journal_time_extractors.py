@@ -75,13 +75,13 @@ def test_time_log_journal_place_emits_places_artifact() -> None:
         "entry_at": "2026-05-01T10:00:00",
         "category": "Topos",
         "content": "Project: Topos",
-        "place_name": "Timbercreek Apt",
+        "place_name": "Elmcourt Apt",
         "metadata_json": json.dumps({"ends_at": "2026-05-01T11:00:00"}),
     }
     drafts = extract_artifacts("journal_entries", record)
     places = [d for d in drafts if d[0] == "EntityRef" and "places" in d[2]]
     assert len(places) == 1
-    assert places[0][1]["display_band"] == "Timbercreek Apt"
+    assert places[0][1]["display_band"] == "Elmcourt Apt"
 
 
 def test_time_log_journal_goal_emits_intentions_artifact() -> None:

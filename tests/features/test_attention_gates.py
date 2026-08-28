@@ -126,10 +126,10 @@ def test_null_percentile_novel_vs_routine(conn):
 
 def test_resolved_support_merges_fragments():
     """WS1.2: venue fragments and the -burgh variant collapse to one area token."""
-    assert _norm_area("Williamsburg- Greta's") == "williamsburg"
-    assert _norm_area("Williamsburg- Henry Norman Hotel") == "williamsburg"
-    assert _norm_area("Williamsburgh- Ball Field") == "williamsburg"
-    assert _norm_area("NYC- Battery Park") == "nyc"
+    assert _norm_area("Millburg- Rosa's") == "millburg"
+    assert _norm_area("Millburg- Norton Grand Hotel") == "millburg"
+    assert _norm_area("Millburgh- Ball Field") == "millburg"
+    assert _norm_area("Metro- Kestrel Park") == "metro"
 
 
 def test_length_residualizer_removes_length_effect():

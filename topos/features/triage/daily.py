@@ -225,7 +225,7 @@ def load_triage_delta(conn: sqlite3.Connection, start_iso: str, end_iso: str) ->
 
 
 def _norm_area(place: str) -> str:
-    """Area-level place token (WS1.2): 'Williamsburg- Greta's' → 'williamsburg'.
+    """Area-level place token (WS1.2): 'Millburg- Rosa's' → 'millburg'.
     Collapses the venue fragment and the common '-burgh/-burg' spelling variant."""
     area = str(place or "").split("-")[0].strip().lower()
     if area.endswith("burgh"):

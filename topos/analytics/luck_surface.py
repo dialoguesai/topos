@@ -43,7 +43,7 @@ WORK_SOURCES = ("github_activity", "grow_journal", "grow_data_file")
 AUTHORED_WORK_SOURCES = ("github_activity",)
 
 #: Evidence that the owner wrote something down — which is not the same thing. The growth
-#: journal is a record of a LIFE, not of work: "The Lantern Cafe" and "the Whole Foods" each
+#: journal is a record of a LIFE, not of work: "The Lantern Cafe" and "the Greenmart" each
 #: carry six journal mentions and were duly presented as bodies of work the owner had built
 #: and told nobody about. Journal-only entities have to earn their place (see below).
 JOURNAL_SOURCES = ("grow_journal", "grow_data_file")
@@ -54,7 +54,7 @@ JOURNAL_SOURCES = ("grow_journal", "grow_data_file")
 #:
 #: Set from the live corpus, not from taste. At 3 this dropped Mursion, TinyCloud and Yale
 #: (2 goal mentions each) alongside the cafes it was aimed at; at 2 those return while
-#: the Whole Foods (0), LA Fitness (0) and The Lantern Cafe (1) still do not. The journal is
+#: the Greenmart (0), Metro Fitness (0) and The Lantern Cafe (1) still do not. The journal is
 #: a first-class doing source -- it is in WORK_SOURCES -- and this gate exists only to keep
 #: places of daily life from being presented as bodies of the owner's work.
 MIN_GOALS_FOR_JOURNAL_WORK = 2
@@ -66,7 +66,7 @@ today tomorrow yesterday morning evening week month year time day home work life
 thing things stuff place places""".split())
 
 #: Entity types that can BE a body of work. `place` and `person` are deliberately absent:
-#: the owner journals from Brooklyn and about Albiona, which gives both authored-work
+#: the owner journals from Northgate and about Albiona, which gives both authored-work
 #: evidence, but neither is a thing they are building — and listing a friend as a work item
 #: with "told 1 person" would be both wrong and unpleasant.
 WORK_ENTITY_TYPES = ("project", "product", "org", "topic", "event")

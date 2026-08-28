@@ -2,7 +2,7 @@
 
 1. NER wordpiece fragments ('##dy') must never become entities
 2. Fragmented org entities get part_of hierarchy edges (Google Docs -> Google)
-3. Contact-seeded people outrank NER typing ("Austin" the person vs the city)
+3. Contact-seeded people outrank NER typing ("Ashford" the person vs the city)
 4. Experience currency inferred from verb tense / since / open ranges
 """
 
@@ -56,10 +56,10 @@ class TestWordpieceFilter:
             "Google",
             "AWS",
             "Dr. Patel",
-            "Austin Barbaro",
+            "Ashford Barbaro",
             "C3",
             "Hotel Juliett",
-            "LA Fitness",
+            "Metro Fitness",
             "Max",
         ],
     )
@@ -105,7 +105,7 @@ class TestOrgHierarchy:
 
 
 class TestContactFirstTyping:
-    def _seed_contact(self, conn, name="Austin Barbaro") -> None:
+    def _seed_contact(self, conn, name="Ashford Barbaro") -> None:
         conn.execute(
             "INSERT INTO contacts (contact_id, dataset_id, source_id, display_name, is_self)"
             " VALUES ('c-austin', 'ds', 'src', ?, 0)",
@@ -114,29 +114,29 @@ class TestContactFirstTyping:
         conn.commit()
 
     def test_place_typed_mention_resolves_to_contact_person(self, conn) -> None:
-        """NER says 'Austin' is a place; the contact registry knows better."""
+        """NER says 'Ashford' is a place; the contact registry knows better."""
         self._seed_contact(conn)
         resolver = EntityResolver(conn)
         resolver.seed_from_contacts()
-        entity_id, tier = resolver.resolve("Austin", entity_type="place")
+        entity_id, tier = resolver.resolve("Ashford", entity_type="place")
         assert tier == "contact"
         row = conn.execute(
             "SELECT canonical_name, entity_type FROM entities WHERE entity_id=?",
             (entity_id,),
         ).fetchone()
-        assert row == ("Austin Barbaro", "person")
+        assert row == ("Ashford Barbaro", "person")
 
     def test_ambiguous_contact_token_falls_through(self, conn) -> None:
-        self._seed_contact(conn, "Austin Barbaro")
+        self._seed_contact(conn, "Ashford Barbaro")
         conn.execute(
             "INSERT INTO contacts (contact_id, dataset_id, source_id, display_name, is_self)"
-            " VALUES ('c-austin2', 'ds', 'src', 'Austin Reyes', 0)"
+            " VALUES ('c-austin2', 'ds', 'src', 'Ashford Reyes', 0)"
         )
         conn.commit()
         resolver = EntityResolver(conn)
         resolver.seed_from_contacts()
-        entity_id, tier = resolver.resolve("Austin", entity_type="place")
-        assert tier != "contact"  # two Austins -> never guess a person
+        entity_id, tier = resolver.resolve("Ashford", entity_type="place")
+        assert tier != "contact"  # two Ashfords -> never guess a person
         etype = conn.execute(
             "SELECT entity_type FROM entities WHERE entity_id=?", (entity_id,)
         ).fetchone()[0]
@@ -146,7 +146,7 @@ class TestContactFirstTyping:
         self._seed_contact(conn)
         resolver = EntityResolver(conn)
         resolver.seed_from_contacts()
-        entity_id, tier = resolver.resolve("Austin Barbaro", entity_type="place")
+        entity_id, tier = resolver.resolve("Ashford Barbaro", entity_type="place")
         assert tier == "contact"
 
 
@@ -201,7 +201,7 @@ class TestExperienceCurrency:
     def test_advisor_role_is_concurrent_not_superseding(self, conn) -> None:
         self._extract(conn, "Staff Engineer", "Topos", "Lead ingestion pipelines.")
         facts = self._extract(conn, "Edtech Advisor", "Pilot Schools Network",
-                              "Advising edtech pilot schools in Austin.")
+                              "Advising edtech pilot schools in Ashford.")
         by_pred = {}
         for f in facts:
             by_pred.setdefault(f["payload"]["predicate"], []).append(f["payload"]["object_value"])

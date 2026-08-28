@@ -30,10 +30,10 @@ def test_journal_location_event_skips_empty_place() -> None:
 
 def test_journal_location_signal_record_for_enrichment() -> None:
     loc = journal_location_event_from_entry(
-        {"entry_id": "tl-161", "place_name": "Brooklyn- The Convent", "entry_at": "2026-06-14T16:00:00"},
+        {"entry_id": "tl-161", "place_name": "Northgate- The Foundry", "entry_at": "2026-06-14T16:00:00"},
         source_id="time_log",
     )
     assert loc is not None
     signal = journal_location_signal_record(loc)
     assert signal["canonical_table"] == "location_events"
-    assert signal["place_name"] == "Brooklyn- The Convent"
+    assert signal["place_name"] == "Northgate- The Foundry"

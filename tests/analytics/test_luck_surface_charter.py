@@ -45,11 +45,11 @@ def _mentions(conn, eid, source, n, when="2026-08-01T00:00:00Z"):
 
 class TestWhatCountsAsWork:
     def test_place_and_person_are_never_work_items(self):
-        """The owner journals FROM Brooklyn and ABOUT their friends, which gives both
+        """The owner journals FROM Northgate and ABOUT their friends, which gives both
         authored-work evidence. Listing a friend as a body of work with "told 1 person"
         is both wrong and unkind — it shipped once and must not again."""
         conn = _conn()
-        _entity(conn, "e1", "place", "Brooklyn")
+        _entity(conn, "e1", "place", "Northgate")
         _entity(conn, "e2", "person", "Mike Echo")
         _entity(conn, "e3", "project", "Topos")
         # github evidence for all three: the point is that TYPE excludes the place and the
@@ -93,7 +93,7 @@ class TestWhatCountsAsWork:
 
 
 class TestAJournalIsARecordOfALifeNotOfWork:
-    """The growth journal made "The Lantern Cafe" and "the Whole Foods" into bodies of work
+    """The growth journal made "The Lantern Cafe" and "the Greenmart" into bodies of work
     the owner had supposedly built and told nobody about. Writing something down is not
     working on it."""
 
@@ -417,8 +417,8 @@ class TestTheJournalIsAFirstClassDoingSource:
 
     def test_places_of_daily_life_still_do_not_qualify(self):
         conn = _conn()
-        self._journal_entity(conn, "the Whole Foods", 6, 0)
-        self._journal_entity(conn, "LA Fitness", 3, 0)
+        self._journal_entity(conn, "the Greenmart", 6, 0)
+        self._journal_entity(conn, "Metro Fitness", 3, 0)
         assert L.build_work_items(conn) == []
 
 
