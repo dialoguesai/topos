@@ -626,9 +626,30 @@
     {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
-      "steps": [],
+      "steps": [
+        {
+          "id": "reextract-entities-structured-fields",
+          "kind": "enrichment_reprocess",
+          "title": "Re-extract entities so declared structured columns become mentions",
+          "why": "The entities job now folds mentions from DECLARED structured columns -- a journal entry's place_name -- into the record's bucket BEFORE co-occurrence, so the person named in the prose and the place named in the column land in one bucket, and the record carrying the evidence is the one a black hole blocks on. Records derived before this carry the prose mentions only. Migrations 70 and 71 repair what can be recomputed from stored values; this cannot be -- the mention never existed -- so the spec bump is what marks those records stale. PRECONDITION: migration 72 (derived_row_identity_v1) must have run. Derived rows were keyed on a fresh uuid per write, so before it this step would have appended a second copy of every row it re-derived instead of replacing it.",
+          "params": {
+            "job_names": [
+              "entities"
+            ],
+            "force_reprocess": false,
+            "include_signal": false,
+            "per_source": true
+          },
+          "progress": "TUI progress bar on the node + GET /v1/upgrade/status",
+          "idempotent": "Yes, and newly so: message_entities rows are keyed on (record_id, entity_text, entity_type), so a re-run REPLACES rather than appends. Measured against a copy of a live node: reprocessing 500 already-derived records left the row count unchanged at 8,572.",
+          "estimated_duration": "~10-20 min per 1.5k records (CPU-bound local NER, no API cost); node stays usable and serves the existing graph meanwhile",
+          "consent": "prompt",
+          "order": 2
+        }
+      ],
       "notes": [
-        "iMessage bodies need a re-sync, not a reprocess. The attributedBody decode fix corrects the READER; rows already on disk hold archive bytes (3,722 of 7,602 on the node this was found on), and raw_chat_messages_imessage stores the reader's output, so reprocess-from-raw heals nothing here -- only re-reading chat.db can. No automatic step: that needs Full Disk Access and a full-history window (mode 6m/1y/5y, which restarts from rowid 0; 'all' resumes from the checkpoint and re-reads nothing). Count before and after with scripts/audit_imessage_body_decode.py, then run backfill_disclosure.py --source-id imessage; embeddings re-derive themselves on the changed content_hash."
+        "iMessage bodies need a re-sync, not a reprocess. The attributedBody decode fix corrects the READER; rows already on disk hold archive bytes (3,722 of 7,602 on the node this was found on), and raw_chat_messages_imessage stores the reader's output, so reprocess-from-raw heals nothing here -- only re-reading chat.db can. No automatic step: that needs Full Disk Access and a full-history window (mode 6m/1y/5y, which restarts from rowid 0; 'all' resumes from the checkpoint and re-reads nothing). Count before and after with scripts/audit_imessage_body_decode.py, then run backfill_disclosure.py --source-id imessage; embeddings re-derive themselves on the changed content_hash.",
+        "Migration 72 (derived_row_identity_v1) runs before the step above and is what makes it safe. It collapses derived rows duplicated by re-derivation and re-keys the survivors onto their identity. On a copy of a live node it took message_entities from 50,049 rows to 8,572 -- exactly the count of distinct typed identities, verified independently in SQL -- with user_goals 4,192->1,942, message_topics 2,594->762 and message_sentiment 1,792->105. Rows whose required identity fields are missing are left untouched rather than merged."
       ]
     }
   ]

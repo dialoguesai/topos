@@ -25,7 +25,14 @@ MVP_JOB_SPECS = [
 # missing/NULL coverage ``spec_version`` as 0.
 JOB_SPEC_VERSIONS: dict[str, int] = {
     "emo_27": 1,
-    "entities": 1,
+    # 2 (1.3.34): the entities job now folds mentions from DECLARED structured
+    # columns (a journal entry's place_name) into the record's bucket before
+    # co-occurrence. Records derived before that carry the prose mentions only,
+    # and no backfill recovers them -- the bump is what marks them stale.
+    # Safe to bump only because derived rows are now keyed on their identity
+    # (topos/storage/derived_row_identity.py); under the old per-run uuid this
+    # would have appended a second copy of every row it re-derived.
+    "entities": 2,
     "embeddings": 1,
     "sentiment": 1,
     "topics": 1,

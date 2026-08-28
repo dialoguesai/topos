@@ -74,6 +74,12 @@ from .query_artifacts_duration_ms_v1 import (
     MIGRATION_ID as QUERY_ARTIFACTS_DURATION_MS_V1_ID,
     apply_query_artifacts_duration_ms_v1_up,
 )
+from .derived_row_identity_v1 import (
+    MIGRATION_ID as DERIVED_ROW_IDENTITY_V1_ID,
+)
+from .derived_row_identity_v1 import (
+    apply_derived_row_identity_v1_up,
+)
 from .mention_table_stamp_backfill_v1 import (
     MIGRATION_ID as MENTION_TABLE_STAMP_BACKFILL_V1_ID,
 )
@@ -393,6 +399,7 @@ MIGRATIONS: List[MigrationSpec] = [
     _spec(69, NET_SUBJECT_POLICY_V1_ID, apply_net_subject_policy_v1_up),
     _spec(70, FACT_DIMENSION_BY_ENTITY_TYPE_V1_ID, apply_fact_dimension_by_entity_type_v1_up),
     _spec(71, MENTION_TABLE_STAMP_BACKFILL_V1_ID, apply_mention_table_stamp_backfill_v1_up),
+    _spec(72, DERIVED_ROW_IDENTITY_V1_ID, apply_derived_row_identity_v1_up),
 ]
 
 

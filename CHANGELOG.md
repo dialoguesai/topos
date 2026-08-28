@@ -10,6 +10,68 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Fixed
+- **Re-deriving a record duplicated its rows instead of replacing them.**
+  `[S2] [E:enrichment]` `[E:storage]` The derived-table writers keyed each row on
+  a fresh `uuid4()` whenever the incoming record carried no id — and the
+  enrichment jobs build fresh dicts on every pass, so a record's id was different
+  on every run. The write is `INSERT OR REPLACE` keyed on that id, so a new id
+  never conflicted and the row was INSERTed beside the old one; nothing deleted a
+  record's prior rows first. Measured against the writer in isolation: the same 5
+  records written three times produced 5, then 10, then 15 rows.
+
+  This is what multiplied derived rows 2x-4.3x across re-syncs, and it is what
+  made a `spec_version` bump dangerous rather than routine — the bump exists to
+  mark every record stale so it re-derives, which under the old id is an
+  instruction to duplicate the table on every node that upgrades.
+
+  A derived row is now keyed on what it IS: a UUID5 over its identity fields
+  (`topos/storage/derived_row_identity.py`), so the second write of a row is the
+  REPLACE the statement always claimed to be. Identity is deliberately narrow and
+  compares text exactly — two rows differing only in case stay two rows, because
+  "Apple" and "apple" may be one company and one fruit and merging them is a loss
+  no later pass could undo. A row whose required identity fields are missing keeps
+  a per-run uuid: a duplicate is recoverable, a merge is not, so the code refuses
+  to guess. Each of the five producing jobs uses its own field names, which is not
+  decoration — a first draft declared `("record_id", "label")` for
+  `message_emotions`, both of which are absent from a real emotions record, and
+  would have collapsed that entire table onto one row.
+
+  Migration 72 repairs what is already on disk, and re-keys as well as deletes:
+  survivors left on random ids would be duplicated again by the very next pass, so
+  a delete-only repair lasts one enrichment cycle. Against a copy of a live node
+  it took `message_entities` from 50,049 rows to **8,572** — exactly the count of
+  distinct typed identities, verified independently in SQL — with `user_goals`
+  4,192 -> 1,942, `message_topics` 2,594 -> 762 and `message_sentiment`
+  1,792 -> 105. Two thirds of the deletions were the empty twins of an already-
+  fixed defect, whose content was recovered from their payload before they went.
+  Post-conditions checked on that copy: no typed identity lost, no survivor left
+  untyped, every id equal to its identity, and a second run a no-op. Reprocessing
+  500 already-derived records afterwards left the count unchanged.
+
+  Both halves are gated by tests verified to fail when reverted: without the
+  writer fix a record written three times is three rows; without the re-key the
+  next enrichment pass duplicates the repaired row.
+- **The owner socket could be clobbered, and could not heal.** `[O]` Found live:
+  the node was healthy on TCP while `~/.topos/engine.sock` refused every
+  connection. The socket file had been replaced after this process bound it,
+  leaving the listener on an unlinked inode and the owner lane silently dead —
+  and with TCP demoted that means no local owner lane at all, with nothing
+  reporting it. `start_uds_server` now probes before it binds and stands down
+  when a live listener already owns the path, instead of unlinking another
+  instance's socket, which is exactly how the lane died. A supervisor re-checks
+  liveness every 20s and rebinds when the path stops serving: a dead inode is
+  cleared, a live peer is never touched. `socket_is_live()` is the honest test —
+  a socket file proves nothing, only a connect does.
+- **Ingest LLMs never saw the prepaid wallet.** `[O]` Chat and routines get a 402
+  from the control plane before they generate. Ingest adapters run on the engine
+  with a node key and never checked at all, so an empty balance surfaced as an
+  obscure adapter failure partway through a sync rather than as "you are out of
+  credit". `hosted_llm_wallet` is a short-TTL probe the platform and redpill
+  backends call first. It fails OPEN on transport errors but reuses the last
+  successful probe, so a brief outage cannot flip an empty wallet back to allowed
+  — the failure mode that would spend money the owner does not have. Work paused
+  for credit is re-queued when the wallet fills or when ingest moves to a local
+  model, so a topped-up account resumes on its own.
 - **The starter's disk preflight decided whether its own tests passed.** `[O]`
   `setup-models --yes` runs `check_space_for` before the curated starter's
   download, and the test asserting `--yes` pulls read the real volume: the floor
@@ -704,6 +766,46 @@ The machine-readable twin of each release is
   never occurs), so that check belongs against the live database, not the unit suite.
 
 ### Added
+- **The four relationship reads now answer over both transports.** `[P]`
+  `[E:analytics]` The app reaches the engine through CP routes -> websocket
+  messages -> handlers; local tools hit HTTP. The relationship reads existed as
+  HTTP only, so nothing the social-graph UI renders was reachable from the app at
+  all. The bodies moved to `analytics/relationship_reads.py`, transport-free —
+  explicit connection, explicit arguments, no FastAPI types, no hub state — with
+  the HTTP routes as thin wrappers and one grouped websocket handler delegating
+  to the same functions. A contract test runs every read through BOTH transports
+  on one fixture and requires equal payloads, and pins the protocol names so a
+  rename cannot strand one side silently. A read exception becomes an error
+  REPLY: on a single-worker control plane an unanswered relay request is a stuck
+  spinner for every tenant, not just the caller.
+- **A collaborator lane, and close circle ranked the way the graph ranks.**
+  `[E:query]` "Who works on this with me" reached nothing: roles come from commits
+  and land in `topic_clusters(dimension=work)`, people come from conversations and
+  land in `dimension=relationships`, the two share zero labels, so the question
+  fell through to the model with a packet holding goals and no people. The new
+  lane answers from `work_engagement`. Close circle now ranks by the person
+  graph's closeness — reciprocity, then recency, then volume, with derived
+  relationship facts able to raise it — instead of inbound message count; the two
+  surfaces had been disagreeing on the same question, and the counting one was
+  the weaker computation. A close contact with few but reciprocal messages now
+  surfaces where volume had buried them. Volume stays the fallback so a node whose
+  graph has not been built still gets a ranked list, `ranked_by` says which was
+  used, and an unmeasured closeness is None rather than zero. No new scope:
+  a scope is a CONSENT boundary, not a tool bundle, and neither answer needs data
+  the caller cannot already reach.
+- **The commit message is a leak surface, and a worse one than files.** `[O]`
+  The file hook shipped two commits earlier passed a commit whose own message
+  named a home address and a real goal. Files were the obvious surface; the
+  message is the one that publishes with the commit, that no file scan covers,
+  and that cannot be fixed after a push without rewriting history.
+  `--message-file` scans a message against the same protected names, wired as a
+  `commit-msg` stage, and the error names the rule that avoids it: describe the
+  shape, not the value. The goal-text floor drops 20 -> 15 characters, which
+  measured across 1,582 files costs zero false positives while protecting 45 more
+  goals — including the one the scanner's own comment had been quoting as an
+  example of what it catches. Installing it needs one extra step per checkout,
+  because pre-commit wires only the pre-commit stage by default:
+  `uvx pre-commit install --hook-type commit-msg`.
 - **`scripts/retract_fanout_artifacts.py`** — retract derived rows from fan-outs that
   should never have produced them. `[E:lifecycle]`
 

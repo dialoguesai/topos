@@ -10,10 +10,11 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from ..storage.db.write_gate import batched_writes, commit_connection, with_db_write
+from ..storage.derived_row_identity import derived_row_id_for
 from ..utils.base_object import BaseObject
 
 
-def _stable_row_id(record: Dict[str, Any], id_field: str) -> str:
+def _stable_row_id(record: Dict[str, Any], id_field: str, table: str = "") -> str:
     """Mint this row's id once, and stamp it back onto the record.
 
     Two writers persist these tables from the SAME batch of record dicts: this
@@ -34,8 +35,21 @@ def _stable_row_id(record: Dict[str, Any], id_field: str) -> str:
     of the row this one just inserted, instead of an INSERT of a twin. It relies
     on the two writers sharing the same dict objects, which they do —
     ``_write_signal_records_unlocked`` passes one ``records`` list to both.
+
+    That fixed one write producing two rows. It did NOT fix the same row written
+    on two different RUNS: the jobs build fresh dicts each pass, so ``uuid4()``
+    gave a new id every time, ``INSERT OR REPLACE`` never conflicted, and the row
+    landed beside its predecessor. Measured 2026-08-28 against this writer: 5
+    records written three times produced 5, then 10, then 15 rows. With ``table``
+    supplied the id comes from :func:`derived_row_id_for` instead — a UUID5 over
+    what the row IS — so the second run REPLACES the first. Without it the old
+    per-run uuid is kept, which is why every caller passes one.
     """
-    row_id = str(record.get(id_field) or uuid.uuid4())
+    existing = record.get(id_field)
+    if existing:
+        row_id = str(existing)
+    else:
+        row_id = derived_row_id_for(table, record) or str(uuid.uuid4())
     record[id_field] = row_id
     return row_id
 
@@ -316,7 +330,7 @@ class DerivedTablesManager(BaseObject):
 
                         for record in batch:
                             message_id = record.get("message_id") or record.get("record_id")
-                            emotion_id = str(record.get("emotion_id") or uuid.uuid4())
+                            emotion_id = _stable_row_id(record, "emotion_id", "message_emotions")
                             payload = json.dumps({**record, "message_id": message_id})
                             row = {
                                 "emotion_id": emotion_id,
@@ -359,7 +373,7 @@ class DerivedTablesManager(BaseObject):
                     entity_text = record.get("entity_text") or record.get("text")
                     if not record_id or not entity_text:
                         continue
-                    entity_id = _stable_row_id(record, "entity_id")
+                    entity_id = _stable_row_id(record, "entity_id", "message_entities")
                     payload = json.dumps({**record, "record_id": record_id, "entity_id": entity_id})
                     if "payload_json" in cols:
                         _insert_matching_columns(
@@ -408,7 +422,7 @@ class DerivedTablesManager(BaseObject):
                     goal_text = record.get("goal_text") or record.get("text")
                     if not goal_text:
                         continue
-                    goal_id = _stable_row_id(record, "goal_id")
+                    goal_id = _stable_row_id(record, "goal_id", "user_goals")
                     _insert_matching_columns(
                         self.conn,
                         "user_goals",
@@ -462,7 +476,7 @@ class DerivedTablesManager(BaseObject):
             if not topic:
                 return None
             record_id = record.get("record_id") or record.get("message_id")
-            topic_id = _stable_row_id(record, "topic_id")
+            topic_id = _stable_row_id(record, "topic_id", "message_topics")
             values = {
                 "topic_id": topic_id,
                 "record_id": record_id,
@@ -490,7 +504,7 @@ class DerivedTablesManager(BaseObject):
             if label is None and record.get("score") is None:
                 return None
             record_id = record.get("record_id") or record.get("message_id")
-            sentiment_id = _stable_row_id(record, "sentiment_id")
+            sentiment_id = _stable_row_id(record, "sentiment_id", "message_sentiment")
             values = {
                 "sentiment_id": sentiment_id,
                 "record_id": record_id,
