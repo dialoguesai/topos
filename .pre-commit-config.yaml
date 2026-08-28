@@ -57,11 +57,18 @@ repos:
         pass_filenames: false
         always_run: true
 
+      # `stages: [pre-commit]` is load-bearing, not tidiness. Without it this hook also
+      # runs at pre-push, where pre-commit hands it every path the outgoing commits touch
+      # — INCLUDING paths a commit REMOVES from tracking, which are still on disk. Hit in
+      # the control plane: a commit whose whole purpose was to untrack a file carrying
+      # owner data was blocked by that file's contents. The pre-push hook below re-scans
+      # the tracked tree, which is what that stage is for.
       - id: no-owner-data
         name: no personal data from the local node in committed source
         entry: python3 scripts/scan_repo_for_owner_data.py
         language: system
         types: [text]
+        stages: [pre-commit]
 
       # The message is its own leak surface, and a worse one: it publishes with
       # the commit, no file scan covers it, and fixing it after a push means
