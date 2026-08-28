@@ -1,6 +1,7 @@
-# Install once per checkout — BOTH stages, the second is not optional:
+# Install once per checkout — ALL THREE stages:
 #   uvx pre-commit install
 #   uvx pre-commit install --hook-type commit-msg
+#   uvx pre-commit install --hook-type pre-push
 #
 # `pre-commit install` alone wires the pre-commit stage only, which scans FILES
 # and leaves the commit MESSAGE unscanned. The `no-owner-data-installed` hook
@@ -67,6 +68,25 @@ repos:
       # rewriting history. The file hook above passed a commit whose own message
       # named a home address and a real goal, which is how this stage came to
       # exist.
+      # `git commit --no-verify` skips every hook above, and nothing inside a
+      # hook can prevent that — it is a git built-in, and GitHub allows no
+      # custom pre-receive hook outside Enterprise. What CAN be done is a
+      # second gate at the point data actually leaves the machine.
+      #
+      # Skipping commit hooks is often reflexive (they are slow, the change is
+      # trivial); pushing is a deliberate act with a different weight. This
+      # re-scans the whole tree before anything leaves, so a --no-verify commit
+      # is caught while it is still local and fixable without a history
+      # rewrite. `git push --no-verify` still bypasses it, but that is now two
+      # deliberate refusals rather than one habit.
+      - id: no-owner-data-before-push
+        name: no personal data leaves this machine
+        entry: python3 scripts/scan_repo_for_owner_data.py --all
+        language: system
+        pass_filenames: false
+        always_run: true
+        stages: [pre-push]
+
       - id: no-owner-data-in-message
         name: no personal data from the local node in the commit message
         entry: python3 scripts/scan_repo_for_owner_data.py --message-file

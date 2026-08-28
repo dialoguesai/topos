@@ -249,4 +249,11 @@ def test_run_gc_reports_all_sections(conn):
         "junk_embeddings_purged",
         "deprecated_tables_marked",
         "audit_rows_trimmed",
+        # Recurring repairs — conditions new data recreates, so unlike a
+        # migration they have to re-run on every pass. An exact set is the
+        # point of this assertion: a section added without a line here, or
+        # silently dropped, is what it exists to catch.
+        "timeline_renderings_normalized",
+        "fanout_stub_clusters_retracted",
+        "blackhole_ids_rebound",
     }

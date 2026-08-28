@@ -10,11 +10,20 @@ This repository is intentionally consumer-facing. Keep changes focused on local 
 uv sync --extra dev --extra local
 uvx pre-commit install
 uvx pre-commit install --hook-type commit-msg
+uvx pre-commit install --hook-type pre-push
 ```
 
-Both `install` lines are required. The first wires the file hooks; the second
-wires the commit-message guard. A commit will refuse to run until both are
-present, so you cannot end up half-guarded without noticing.
+All three `install` lines are required: file hooks, the commit-message guard,
+and a last check before anything leaves the machine. A commit refuses to run
+until all three are present, so you cannot end up half-guarded without noticing.
+
+`git commit --no-verify` skips the commit hooks, and nothing inside a hook can
+prevent that — it is a git built-in, and GitHub allows no custom pre-receive
+hook outside Enterprise. The pre-push stage exists for that case: skipping
+commit hooks is often reflexive, while pushing is deliberate, so a `--no-verify`
+commit is caught while it is still local and fixable without rewriting history.
+`git push --no-verify` still bypasses it — but that is two deliberate refusals
+rather than one habit.
 
 ## Test lanes
 

@@ -927,4 +927,20 @@ async def run_post_canonical_pipeline(
         mark_graph_dirty()
     except Exception as exc:  # noqa: BLE001 — refresh must never break ingest
         logger.debug("graph refresh mark skipped: %s", exc)
+
+    # Derived-drift repairs on the same signal. `run_gc` had NO caller at all —
+    # the maintenance pass was itself the stored-but-never-applied pattern, and
+    # the corrections inside it (junk embeddings, timeline twins, place-name
+    # stub clusters, black holes pointing at reaped entities) are exactly the
+    # conditions a new sync recreates. A migration fixes a backlog once; these
+    # have to re-run or the numbers drift back.
+    #
+    # Debounced by the same marker the graph refresh uses, so a multi-source
+    # walk coalesces rather than running the sweep per source.
+    try:
+        from ..features.entities.graph_refresh import mark_gc_due
+
+        mark_gc_due()
+    except Exception as exc:  # noqa: BLE001 — maintenance must never break ingest
+        logger.debug("gc mark skipped: %s", exc)
     return outcome

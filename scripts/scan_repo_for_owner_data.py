@@ -232,16 +232,20 @@ def _verify_commit_msg_hook() -> int:
     Running this from an ``always_run`` pre-commit-stage hook means the absence
     is loud and immediate instead of discovered by a leak.
     """
-    hook = os.path.join(".git", "hooks", "commit-msg")
-    try:
-        body = open(hook, encoding="utf-8", errors="ignore").read()
-    except OSError:
-        body = ""
-    if "hook-type=commit-msg" in body:
+    missing = []
+    for stage in ("commit-msg", "pre-push"):
+        try:
+            body = open(os.path.join(".git", "hooks", stage), encoding="utf-8", errors="ignore").read()
+        except OSError:
+            body = ""
+        if f"hook-type={stage}" not in body:
+            missing.append(stage)
+    if not missing:
         return 0
     print(
-        "the commit-message guard is NOT installed in this checkout.\n\n"
-        "  uvx pre-commit install --hook-type commit-msg\n\n"
+        f"guard stages NOT installed in this checkout: {', '.join(missing)}\n\n"
+        + "".join(f"  uvx pre-commit install --hook-type {m}\n" for m in missing)
+        + "\n"
         "Without it, files are scanned and the commit MESSAGE is not — which is "
         "the surface that publishes with the commit and cannot be fixed after a "
         "push without rewriting history.",

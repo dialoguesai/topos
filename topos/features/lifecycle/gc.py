@@ -263,6 +263,51 @@ def mark_deprecated_tables(conn: sqlite3.Connection) -> int:
     return len(present)
 
 
+def _repair_derived_drift(conn: sqlite3.Connection) -> Dict[str, Any]:
+    """Corrections that must re-run, because new data recreates the condition.
+
+    A migration fixes a backlog once. These do not: every sync can mint another
+    timeline twin, another cluster of place-name stubs, or reap the entity a
+    black hole points at. Left to a person remembering to run them, the numbers
+    drift back — which is how the defects this repairs were found in the first
+    place.
+
+    Each step is wrapped: a repair that fails must not take the GC pass with it,
+    and the report says which one failed rather than swallowing it.
+    """
+    out: Dict[str, Any] = {}
+    steps = (
+        ("timeline_renderings_normalized", _normalize_timeline_renderings),
+        ("fanout_stub_clusters_retracted", _retract_fanout_stub_clusters),
+        ("blackhole_ids_rebound", _rebind_blackhole_entity_ids),
+    )
+    for name, fn in steps:
+        try:
+            out[name] = fn(conn)
+        except Exception as exc:  # noqa: BLE001 — one repair must not stop the rest
+            logger.warning("gc repair %s failed: %s", name, exc)
+            out[name] = f"failed: {exc}"
+    return out
+
+
+def _normalize_timeline_renderings(conn: sqlite3.Connection) -> int:
+    from ..timeline_projection import normalize_timeline_renderings
+
+    return int(normalize_timeline_renderings(conn, dry_run=False).get("rows_removed", 0))
+
+
+def _retract_fanout_stub_clusters(conn: sqlite3.Connection) -> int:
+    from ..signal.topic_clustering import retract_fanout_stub_clusters
+
+    return int(retract_fanout_stub_clusters(conn, dry_run=False).get("clusters_retracted", 0))
+
+
+def _rebind_blackhole_entity_ids(conn: sqlite3.Connection) -> int:
+    from .blackhole import BlackholeStore
+
+    return int(BlackholeStore(conn).rebind_dead_entity_ids())
+
+
 def run_gc(conn: sqlite3.Connection) -> Dict[str, Any]:
     """Full GC pass. Derived/audit data only; canonical rows are never touched."""
     report: Dict[str, Any] = {
@@ -271,6 +316,7 @@ def run_gc(conn: sqlite3.Connection) -> Dict[str, Any]:
         "junk_embeddings_purged": purge_junk_embeddings(conn),
         "deprecated_tables_marked": mark_deprecated_tables(conn),
     }
+    report.update(_repair_derived_drift(conn))
     # Every step above commits its own gated writes; this is a gated flush for
     # anything a future step forgets, not the primary commit.
     report["audit_rows_trimmed"] = apply_audit_retention(conn)

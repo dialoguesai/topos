@@ -194,6 +194,65 @@ class _Refresher:
 _refresher = _Refresher()
 
 
+_GC_LOCK = threading.Lock()
+_GC_TIMER: Optional[threading.Timer] = None
+_GC_LAST: Dict[str, Any] = {}
+
+
+def _gc_enabled() -> bool:
+    return os.getenv("TOPOS_GC_SWEEP", "on").strip().lower() not in {"off", "0", "false"}
+
+
+def _run_gc_now() -> None:
+    """The derived-drift sweep, on its own debounce.
+
+    Separate timer from the graph rebuild deliberately. The rebuild is the
+    common case and must stay quick to arm; the sweep touches more tables and
+    is worth coalescing over a longer window, and a failure in one must not
+    disarm the other.
+    """
+    from ...core import state as _state
+    from ..lifecycle.gc import run_gc
+
+    conn = _state.get_db_connection()
+    if conn is None:
+        return
+    try:
+        _GC_LAST.update(run_gc(conn))
+        _GC_LAST["ran_at"] = datetime.now(timezone.utc).isoformat()
+    except Exception as exc:  # noqa: BLE001 — maintenance never breaks the caller
+        logger.warning("gc sweep failed: %s", exc)
+        _GC_LAST["error"] = str(exc)
+
+
+def mark_gc_due() -> None:
+    """Enrichment completed — schedule the debounced derived-drift sweep.
+
+    `run_gc` previously had no caller anywhere: the maintenance pass was itself
+    the stored-but-never-applied pattern this workstream keeps finding. The
+    corrections inside it are ones new data recreates — a sync can mint another
+    timeline twin or another place-name stub cluster — so they have to re-run
+    rather than be fixed once by a migration.
+    """
+    global _GC_TIMER
+    if not _gc_enabled():
+        return
+    delay = float(os.getenv("TOPOS_GC_DEBOUNCE_S", "300") or 300)
+    with _GC_LOCK:
+        if _GC_TIMER is not None:
+            _GC_TIMER.cancel()
+        _GC_TIMER = threading.Timer(delay, _run_gc_now)
+        _GC_TIMER.daemon = True
+        _GC_TIMER.name = "topos-gc-sweep-debounce"
+        _GC_TIMER.start()
+
+
+def gc_status() -> Dict[str, Any]:
+    """What the last sweep did, so an unrun sweep is visible rather than silent."""
+    with _GC_LOCK:
+        return {"enabled": _gc_enabled(), "pending": _GC_TIMER is not None, **_GC_LAST}
+
+
 def mark_graph_dirty() -> None:
     """Enrichment completed for a source — schedule a debounced graph rebuild."""
     try:
