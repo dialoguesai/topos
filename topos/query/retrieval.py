@@ -1383,6 +1383,11 @@ def _canonical_row_to_item(
         "relevance_score": round(_canonical_relevance(text, query_text), 4),
         "retrieval_source": retrieval_source or f"canonical:{table}",
     }
+    # The fan-out link, carried so result assembly can collapse a child against
+    # its own parent. Written by ingest since the beginning and read by nothing
+    # until now — the same join this workstream opened with.
+    if clean.get("source_record_id"):
+        item["source_record_id"] = clean.get("source_record_id")
     # B8 / GEN-judged IMB: speaker_label + owner_authored survive inference
     # stripping of topic/summary_text so the generative answer can attribute
     # non-owner evidence without a raw-content side channel.
@@ -1399,6 +1404,37 @@ def _canonical_row_to_item(
     if owner is not None:
         item["owner_authored"] = owner
     return item
+
+
+def _collapse_fanout_children(items: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Drop a fan-out child when its own parent is in the same result set.
+
+    A child and its parent describe one moment. Once a place hit carries the
+    parent's narrative, a result holding both shows that narrative twice and
+    spends two slots saying one thing — measured before the narrative was
+    attached, a child's parent was already present in 55 of 55 sessions that
+    surfaced one, so this is the common case rather than the corner.
+
+    Collapsing is preferred to excluding children from retrieval outright: a
+    child that surfaces WITHOUT its parent is the only way some asks reach the
+    moment at all (the child is what carries the place name into the index), and
+    it now brings the parent's text with it.
+
+    Keyed on ``source_record_id``, the link the fan-out has always written and
+    nothing had read.
+    """
+    parent_ids = {
+        str(item.get("record_id") or "")
+        for item in items
+        if str(item.get("record_id") or "")
+    }
+    kept: List[Dict[str, Any]] = []
+    for item in items:
+        parent = str(item.get("source_record_id") or "").strip()
+        if parent and parent != str(item.get("record_id") or "") and parent in parent_ids:
+            continue
+        kept.append(item)
+    return kept
 
 
 def _load_canonical_summary_items(
@@ -1479,6 +1515,7 @@ def _load_canonical_summary_items(
             )
             if item is not None:
                 items.append(item)
+    items = _collapse_fanout_children(items)
     items.sort(key=lambda item: float(item.get("relevance_score") or 0.0), reverse=True)
     if first_person:
         # Strong downweight, not a drop: owner-authored rows first, exempt
