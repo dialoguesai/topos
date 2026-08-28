@@ -50,26 +50,35 @@ def _resolve_source_def(source_id: str):
 
 
 def _count_canonical_rows(conn, source_def) -> int:
+    """Rows this source owns, across EVERY table its group writes.
+
+    One table per group is the assumption that hides a fan-out. A journal
+    reprocess counted `journal_entries` and never saw the `location_events`
+    children beside them — 362 rows on a live node — so the children stayed at
+    whatever spec produced them while their parents moved on.
+    """
+    from ..disclosure.field_registry import canonical_tables_for_group
+
     group = getattr(source_def, "canonical_group_id", None)
     source_id = source_def.source_id
-    if group == "conversations":
-        row = conn.execute(
-            "SELECT COUNT(*) FROM conversation_messages WHERE source_id=?",
-            (source_id,),
-        ).fetchone()
-        return int(row[0]) if row else 0
     if group == "activity":
         row = conn.execute(
             "SELECT COUNT(*) FROM activity_events WHERE source_id=?",
             (source_id,),
         ).fetchone()
         return int(row[0]) if row else 0
-    if group == "journal":
-        row = conn.execute(
-            "SELECT COUNT(*) FROM journal_entries WHERE source_id=?",
-            (source_id,),
-        ).fetchone()
-        return int(row[0]) if row else 0
+    tables = canonical_tables_for_group(group)
+    if tables:
+        total = 0
+        for table in tables:
+            try:
+                row = conn.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE source_id=?", (source_id,)
+                ).fetchone()
+            except sqlite3.Error:
+                continue
+            total += int(row[0]) if row else 0
+        return total
     row = conn.execute(
         "SELECT COUNT(*) FROM ai_chat_messages WHERE source_id=?",
         (source_id,),

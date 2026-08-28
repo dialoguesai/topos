@@ -178,7 +178,12 @@ class SignalService:
             record_key = str(item.get("record_id") or item.get("embedding_id") or "")
             if record_key and record_key in seen_records:
                 continue
+            # Chunk-aware: `content_hash` is the PARENT record's hash, shared by
+            # every chunk of it, so keying on it alone folds a multi-chunk
+            # document down to one chunk and silently loses the rest.
             content_key = str(item.get("content_hash") or "")
+            if content_key:
+                content_key = f"{content_key}#{item.get('chunk_index') or 0}"
             twin = kept_by_content.get(content_key) if content_key else None
             if twin is not None:
                 twin["occurrences"] = int(twin.get("occurrences") or 1) + 1

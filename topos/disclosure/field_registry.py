@@ -41,6 +41,21 @@ _GROUP_TO_TABLE = {
     "journal": "journal_entries",
 }
 
+# A canonical group writes ONE table per record — except where a source fans a
+# record out into several. The one-to-one map above is the PRIMARY table (what a
+# record maps to by default); this names every table the group can write.
+#
+# The distinction is not cosmetic. Anything that asks "what does this group
+# touch?" and gets one answer walks past the children: a reprocess of the
+# journal counted `journal_entries` alone and never saw the 362 `location_events`
+# rows fanned out beside them, so those children stayed frozen at whatever spec
+# produced them while their parents were re-derived.
+_GROUP_TO_ALL_TABLES = {
+    "ai_messages": ("ai_chat_messages",),
+    "conversations": ("conversation_messages",),
+    "journal": ("journal_entries", "location_events"),
+}
+
 
 # Grantee-facing placeholder when a record's ingest disclosure has not completed.
 # Read paths must emit this instead of raw content (fail closed). Kept in sync with
@@ -65,6 +80,22 @@ def canonical_table_for_group(group: Optional[str]) -> Optional[str]:
     if not group:
         return None
     return _GROUP_TO_TABLE.get(str(group).strip())
+
+
+def canonical_tables_for_group(group: Optional[str]) -> tuple:
+    """Every canonical table a group can write, children included.
+
+    Callers deciding what to count, reprocess or sweep for a source must use
+    this rather than :func:`canonical_table_for_group`, which answers only for
+    the primary table and therefore silently omits fan-out children.
+    """
+    if not group:
+        return ()
+    key = str(group).strip()
+    if key in _GROUP_TO_ALL_TABLES:
+        return _GROUP_TO_ALL_TABLES[key]
+    primary = _GROUP_TO_TABLE.get(key)
+    return (primary,) if primary else ()
 
 
 def canonical_table_for_message(msg: Dict[str, Any], *, source_group: Optional[str] = None) -> Optional[str]:

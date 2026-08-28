@@ -90,7 +90,8 @@ def fts_search(
             FROM {_FTS_TABLE} f
             JOIN signal_embeddings e ON e.rowid = f.rowid
             WHERE f.search_text MATCH ?{source_clause}
-            GROUP BY COALESCE(NULLIF(e.content_hash, ''), f.search_text)
+            GROUP BY COALESCE(NULLIF(e.content_hash, ''), f.search_text),
+                     COALESCE(e.chunk_index, 0)
             HAVING f.rank = MIN(f.rank)
             ORDER BY f.rank
             LIMIT ?
