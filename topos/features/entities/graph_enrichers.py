@@ -206,7 +206,7 @@ def _materialize_goals(
             g["records"].append((str(record_id), str(event_at) if event_at else None))
 
     # Near-duplicate clustering: exact-text groups union by embedding cosine /
-    # token similarity, so "Deepen UMA scope coverage" and "Deepen the UMA
+    # token similarity, so "Deepen Orion scope coverage" and "Deepen the Orion
     # scope coverage work" become ONE node with the variants listed on it.
     clusters = _cluster_goal_keys(grouped, goal_embed_fn)
 
@@ -251,6 +251,7 @@ def _materialize_goals(
                     valid_from=first_at, valid_to=None, last_event_at=last_at,
                     statement=f"pursues: {rep['text'][:80]}" + (f" (×{occurrences})" if occurrences > 1 else ""),
                     source_object_id=rep["goal_id"], actor_role="authored",
+                    evidence_count=occurrences,
                 ))
                 edges += 1
             # Entities mentioned on the goal's provenance records relate to the goal.
@@ -304,26 +305,63 @@ def _materialize_places(
         GROUP BY place_name
         """
     ).fetchall()
+    # Fold by RESOLVED entity, not by raw name.
+    #
+    # The rows arrive grouped by `place_name`, but several names can resolve to
+    # one place entity, and the upsert keys on (owner, place_id, 'located_at') —
+    # so each name overwrote the previous one's count instead of adding to it.
+    # Measured on the owner's node 2026-08-27: 69 distinct names resolve to 65
+    # entities; 4 entities receive two names each and the collapse loses 4
+    # visits. Small, but silently wrong in a way that grows with the corpus.
+    #
+    # (The deeper problem those collisions expose is resolver-side and NOT fixed
+    # here: "Ashford Public Library" and "Kelvin Park- Ashford" are different
+    # places sharing a node. Summing their visits is correct given the
+    # resolution; the resolution itself is the separate bug.)
+    folded: Dict[str, Dict[str, Any]] = {}
+    for place_name, visits, first_at, last_at in rows:
+        name = str(place_name).strip()
+        if not is_valid_entity_surface(name):
+            continue
+        try:
+            place_id, _tier = resolver.resolve(
+                name, entity_type="place", queue_review=False
+            )
+        except ValueError:
+            continue
+        if place_id == owner:
+            continue
+        acc = folded.setdefault(
+            place_id,
+            {"visits": 0, "first": first_at, "last": last_at, "names": []},
+        )
+        acc["visits"] += int(visits or 0)
+        acc["names"].append((int(visits or 0), name))
+        if first_at and (not acc["first"] or first_at < acc["first"]):
+            acc["first"] = first_at
+        if last_at and (not acc["last"] or last_at > acc["last"]):
+            acc["last"] = last_at
+
     with with_db_write():
-        for place_name, visits, first_at, last_at in rows:
-            name = str(place_name).strip()
-            if not is_valid_entity_surface(name):
-                continue
-            try:
-                place_id, _tier = resolver.resolve(
-                    name, entity_type="place", queue_review=False
-                )
-            except ValueError:
-                continue
-            if place_id == owner:
-                continue
+        for place_id, acc in folded.items():
+            visits = acc["visits"]
+            # Name the node by its most-visited surface, so a merged node reads
+            # as the place the owner actually goes to.
+            name = max(acc["names"])[1] if acc["names"] else ""
             # Repeat presence outweighs a single text mention: scale with visits.
             weight = min(_MZ_WEIGHT_FLOOR + float(visits) * 0.25, 10.0)
             _record_touched(_upsert_materialized_edge(
                 conn, src=owner, dst=place_id, edge_type="located_at",
-                weight=weight, valid_from=first_at, valid_to=None,
+                weight=weight, valid_from=acc["first"], valid_to=None,
                 statement=f"visited {name} ×{visits}", source_object_id=f"loc:{name[:40]}",
                 actor_role="participated",
+                # The count is the EVIDENCE, so it belongs in evidence_count and
+                # not only in a metadata blob nothing ranks on. `location_events`
+                # is one row per journal session at a place (127 events across
+                # 127 distinct parent entries for the owner's most-visited
+                # place), so this is a real observation count, not a mention
+                # tally.
+                evidence_count=visits,
             ))
             conn.execute(
                 """
@@ -331,7 +369,7 @@ def _materialize_places(
                 SET last_event_at=?, metadata_json=json_patch(COALESCE(metadata_json,'{}'), ?)
                 WHERE src_entity_id=? AND dst_entity_id=? AND edge_type='located_at' AND valid_to IS NULL
                 """,
-                (last_at, f'{{"visit_count": {int(visits)}}}', owner, place_id),
+                (acc["last"], f'{{"visit_count": {int(visits)}}}', owner, place_id),
             )
             edges += 1
         commit_connection(conn)
@@ -370,6 +408,7 @@ def _materialize_conversations(
                 valid_from=last_at, valid_to=None,
                 statement=f"mentioned in conversation ×{count}",
                 source_object_id=f"conv:{conv_id}", actor_role="observed",
+                evidence_count=int(count or 1),
             ))
             edges += 1
         if _table_exists(conn, "conversation_participants"):

@@ -42,6 +42,50 @@ EDGE_SEMANTIC_AFFINITY = "semantic_affinity"
 #: the earlier row would never be superseded and duplicate pairs would pile up.
 _SYMMETRIC_EDGE_TYPES = (EDGE_CO_OCCURRENCE, EDGE_COMMUNICATES, EDGE_SEMANTIC_AFFINITY)
 
+#: Upper bound on entities folded into co-occurrence for ONE record.
+#:
+#: A bound is prudent — the fold is O(n^2) and a long-document connector could
+#: hand it a hundred entities — but it must be the same bound everywhere, and 8
+#: was not. Measured on the owner's node 2026-08-27: 3,372 records carry <=8
+#: entities and the cap never touches them; exactly 5 exceed it, the largest at
+#: 13. So 8 bought no protection worth having and cost 166 pair-observations.
+#: 32 leaves today's data entirely untouched while still refusing a pathological
+#: record.
+CO_OCCURRENCE_MAX_ENTITIES_PER_RECORD = 32
+
+
+def record_cooccurrence_pairs(entity_ids):
+    """Every unordered pair of distinct entities named in one record.
+
+    THE single definition, because there were two and they disagreed. The
+    rebuild in ``maintenance.rebuild_evidence_edges`` truncated each record to 8
+    entities with the comment "(mirrors the ingest path)"; the ingest path in
+    ``entities_job._resolve_into_spine`` had no cap at all. Since the rebuild
+    DELETEs the whole active co-occurrence set before re-inserting, and does so
+    unconditionally with no ``valid_to`` tombstone, every maintenance run
+    silently destroyed the edges ingest had created for any record above the cap
+    — 66 of them, measured. The graph was not a function of the evidence; it was
+    a function of which writer ran last, and nothing recorded the difference.
+
+    The truncation was also arbitrary in a way a cap should never be. Insertion
+    order comes from the read query's ``ORDER BY COALESCE(event_at, created_at)``,
+    which orders ACROSS records; within a record every mention shares an
+    event_at, so the surviving 8 were decided by SQLite's tie-break — in
+    practice the order the extractor emitted spans. "Who shows up alongside X"
+    was answered by paragraph position, and would change under a model swap with
+    no schema change to signal it. Sorting makes the retained set deterministic
+    at least, so two runs over the same evidence agree.
+    """
+    unique = sorted(dict.fromkeys(str(e) for e in entity_ids if str(e).strip()))
+    if len(unique) > CO_OCCURRENCE_MAX_ENTITIES_PER_RECORD:
+        unique = unique[:CO_OCCURRENCE_MAX_ENTITIES_PER_RECORD]
+    return [
+        (unique[i], unique[j])
+        for i in range(len(unique))
+        for j in range(i + 1, len(unique))
+    ]
+
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -354,6 +398,49 @@ def top_edges(
     return out
 
 
+def _allocate_edge_budget(type_counts, window: int) -> Dict[str, int]:
+    """How many slots each edge type gets in a page of ``window`` edges.
+
+    Proportional to the type's size, with a floor so a small relation is never
+    squeezed to nothing, then leftovers handed back to the largest types. Never
+    allocates more than a type actually has.
+
+    The floor is what stops this being just a slower version of the bug it
+    fixes: without it, proportional allocation still hands almost everything to
+    the biggest relation.
+    """
+    total = sum(n for _t, n in type_counts)
+    if not type_counts or total <= 0 or window <= 0:
+        return {}
+    ordered = sorted(type_counts, key=lambda tn: -tn[1])
+    floor = max(1, window // (len(ordered) * 3))
+    budgets: Dict[str, int] = {}
+    for edge_type, n in ordered:
+        share = max(floor, round(window * (n / total)))
+        budgets[edge_type] = min(share, n)
+    # Rounding plus the floor can over-subscribe: three types over a 300 page
+    # summed to 309. The SQL LIMIT would then drop the excess by GLOBAL weight,
+    # handing those slots straight back to the heaviest relation — the bias this
+    # function exists to remove, reappearing in the last nine rows. Trim from the
+    # largest budgets first so the cut lands where there is most to spare.
+    used = sum(budgets.values())
+    while used > window:
+        edge_type = max(budgets, key=lambda t: budgets[t])
+        if budgets[edge_type] <= 1:
+            break
+        take = min(budgets[edge_type] - 1, used - window)
+        budgets[edge_type] -= take
+        used -= take
+
+    for edge_type, n in ordered:
+        if used >= window:
+            break
+        extra = min(n - budgets[edge_type], window - used)
+        budgets[edge_type] += extra
+        used += extra
+    return budgets
+
+
 def graph_snapshot(
     conn: sqlite3.Connection,
     *,
@@ -419,15 +506,70 @@ def graph_snapshot(
     else:
         order_sql = "ORDER BY weight DESC, edge_id DESC"
 
-    edge_params = list(where_params) + [lim_e, off]
-    edge_rows = conn.execute(
-        f"""
-        SELECT edge_id, src_entity_id, dst_entity_id, edge_type, weight, evidence_count,
-               last_event_at, valid_from, valid_to, metadata_json
-        {where_sql} {order_sql} LIMIT ? OFFSET ?
-        """,
-        tuple(edge_params),
-    ).fetchall()
+    # Allocate the page ACROSS edge types before ordering within them.
+    #
+    # A single global `ORDER BY weight DESC` ranks scales that are not
+    # comparable. `communicates_with` accumulates message counts and reaches
+    # 2,772; `co_occurrence` accumulates co-mention counts and tops out near 7;
+    # `located_at` is a computed 2.25-10 band. Sorting them together let one
+    # relation swallow the page: measured on the owner's node 2026-08-27,
+    # `communicates_with` is 4.9% of the graph (267 of 5,445 edges) and took
+    # **203 of 300 slots**, while `relates_to` — the LARGEST relation at 2,030
+    # edges, 37% of the graph — got **zero**, along with `discusses` and
+    # `participates_in`.
+    #
+    # Each type now gets a share proportional to its size, with a floor so a
+    # small relation is never squeezed out entirely, and the caller's
+    # `selection` still orders WITHIN each type. Weight keeps its meaning —
+    # "strongest first" — it just stops being compared across units.
+    #
+    # Deliberately NOT a fix for weak edges. A single co-occurrence is weight
+    # 1.0 and still will not reach a top-N-by-strength overview; that is what
+    # the entity-scoped view is for, and surfacing it here would mean surfacing
+    # every weight-1 edge — a different view, not a better ranking.
+    type_counts = [
+        (str(r[0] or ""), int(r[1]))
+        for r in conn.execute(
+            f"SELECT edge_type, COUNT(*) {where_sql} GROUP BY edge_type",
+            tuple(where_params),
+        ).fetchall()
+    ]
+    window = off + lim_e
+    budgets = _allocate_edge_budget(type_counts, window)
+
+    if budgets:
+        cases = " ".join(
+            f"WHEN ? THEN {int(n)}" for _t, n in sorted(budgets.items())
+        )
+        budget_params = [t for t, _n in sorted(budgets.items())]
+        edge_params = list(where_params) + budget_params + [lim_e, off]
+        edge_rows = conn.execute(
+            f"""
+            SELECT edge_id, src_entity_id, dst_entity_id, edge_type, weight, evidence_count,
+                   last_event_at, valid_from, valid_to, metadata_json
+            FROM (
+                SELECT edge_id, src_entity_id, dst_entity_id, edge_type, weight,
+                       evidence_count, last_event_at, valid_from, valid_to, metadata_json,
+                       ROW_NUMBER() OVER (
+                           PARTITION BY edge_type {order_sql}
+                       ) AS _rn
+                {where_sql}
+            )
+            WHERE _rn <= CASE edge_type {cases} ELSE 0 END
+            {order_sql} LIMIT ? OFFSET ?
+            """,
+            tuple(edge_params),
+        ).fetchall()
+    else:
+        edge_params = list(where_params) + [lim_e, off]
+        edge_rows = conn.execute(
+            f"""
+            SELECT edge_id, src_entity_id, dst_entity_id, edge_type, weight, evidence_count,
+                   last_event_at, valid_from, valid_to, metadata_json
+            {where_sql} {order_sql} LIMIT ? OFFSET ?
+            """,
+            tuple(edge_params),
+        ).fetchall()
 
     def _edge_metadata(evidence, last_at, stored_json) -> str:
         """Stored edge metadata (provenance role_mix, fact statement, mz tag)
@@ -442,11 +584,35 @@ def graph_snapshot(
         merged["last_event_at"] = last_at
         return json.dumps(merged)
 
+    # Collect node ids INTERLEAVED across edge types, not in global weight order.
+    #
+    # The cap below is what the caller's `limit_nodes` buys, and a diverse edge
+    # page touches far more distinct nodes than a homogeneous one: 203
+    # `communicates_with` edges reuse the same handful of contacts, while 300
+    # edges spread over 21 relations reach hundreds of entities. Walking the
+    # edges in weight order and then truncating would hand the whole node budget
+    # back to the heaviest relation — re-introducing, one layer down, exactly the
+    # bias the per-type allocation above removes. Measured before this change:
+    # `relates_to` recovered 91 slots in the edge query and then collapsed to 6
+    # in the response.
+    #
+    # Round-robin by type keeps the node budget representative, so the edges that
+    # survive the cap are a proportional slice rather than the top of one pile.
+    by_type: Dict[str, List[tuple]] = {}
+    for row in edge_rows:
+        by_type.setdefault(str(row[3] or ""), []).append(row)
     node_ids: List[str] = []
-    for _eid, src, dst, *_ in edge_rows:
-        for node in (src, dst):
-            if node not in node_ids:
-                node_ids.append(node)
+    seen_nodes = set()
+    lanes = list(by_type.values())
+    depth = max((len(v) for v in lanes), default=0)
+    for i in range(depth):
+        for lane in lanes:
+            if i >= len(lane):
+                continue
+            for node in (lane[i][1], lane[i][2]):
+                if node not in seen_nodes:
+                    seen_nodes.add(node)
+                    node_ids.append(node)
     nodes_before_cap = len(node_ids)
     node_ids = node_ids[:lim_n]
     # Event-time birth per node (earliest mention) so temporal UIs can plot

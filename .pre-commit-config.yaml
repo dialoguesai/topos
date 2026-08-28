@@ -30,6 +30,21 @@ repos:
         always_run: true
         fail_fast: true
 
+      # gitleaks catches secrets. This catches the other thing a privacy product
+      # must never publish: the owner's OWN data, pasted into a docstring or a
+      # test fixture while measuring something. Those are invisible to the
+      # derived-layer privacy sweeps, which operate on the database and never
+      # look at source. On 2026-08-27 a remediation branch was one command away
+      # from committing a BLACK-HOLED entity name — the owner's explicit "hide
+      # this" — into five files, two of them the black-hole tests themselves.
+      # Skips cleanly where there is no local database, so CI and fresh clones
+      # are unaffected.
+      - id: no-owner-data
+        name: no personal data from the local node in committed source
+        entry: python3 scripts/scan_repo_for_owner_data.py
+        language: system
+        types: [text]
+
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.28.0
     hooks:

@@ -50,10 +50,31 @@ def _write_wiki_table(
     *,
     id_field: str,
     provenance: Dict[str, Any],
-) -> None:
+    typed_writer_ran: bool = False,
+) -> bool:
+    """Add provenance/spec_version to the row the typed writer just wrote.
+
+    This is an UPSERT onto that row, not a second insert. It only works because
+    ``DerivedTablesManager._stable_row_id`` stamps the id it minted back onto the
+    shared record dict — without that both writers minted their own uuid and the
+    table ended up with a typed row and an untyped twin for every record.
+
+    ``typed_writer_ran`` closes the other half. The typed writers SKIP a record
+    whose typed field is empty (``if not entity_text: continue``,
+    ``if not goal_text: continue``), so an unstamped record here means "there is
+    no row to add provenance to" — writing one anyway is how a bare row with a
+    NULL typed column gets created. When the typed writer did not run at all
+    (no ``tables_manager``), the old mint-and-insert behaviour is kept, because
+    then this is the only writer and the row is not a duplicate of anything.
+
+    Returns True when a row was written.
+    """
     from .models.mvp_defaults import job_spec_version
 
-    row_id = str(record.get(id_field) or uuid.uuid4())
+    stamped = str(record.get(id_field) or "").strip()
+    if typed_writer_ran and not stamped:
+        return False
+    row_id = stamped or str(uuid.uuid4())
     payload = _merge_provenance({**record, id_field: row_id}, provenance)
     job_id = str(payload.get("job_id") or provenance.get("job_id") or "")
     spec_v = payload.get("spec_version")
@@ -82,7 +103,7 @@ def _write_wiki_table(
                 int(spec_v),
             ),
         )
-        return
+        return True
     conn.execute(
         f"""
         INSERT INTO {table} (
@@ -102,6 +123,7 @@ def _write_wiki_table(
             json.dumps(payload),
         ),
     )
+    return True
 
 
 def _resolve_write_conn(
@@ -168,8 +190,10 @@ def _write_signal_records_unlocked(
         rec.setdefault("job_id", job_name)
 
     legacy_table = _LEGACY_TABLE_BY_JOB.get(job_name)
+    typed_writer_ran = False
     if tables_manager and legacy_table and job_name not in _SIGNAL_ONLY_JOBS:
         written = tables_manager.write_enrichment_batch(records, legacy_table)
+        typed_writer_ran = True
 
     if conn is not None and job_name in (
         "entities",
@@ -186,7 +210,14 @@ def _write_signal_records_unlocked(
         if wiki_table:
             table, id_field = wiki_table
             for rec in records:
-                _write_wiki_table(conn, table, rec, id_field=id_field, provenance=prov)
+                _write_wiki_table(
+                    conn,
+                    table,
+                    rec,
+                    id_field=id_field,
+                    provenance=prov,
+                    typed_writer_ran=typed_writer_ran,
+                )
             commit_connection(conn)
 
     if job_name == "embeddings":
@@ -282,27 +313,77 @@ def _write_signal_records_unlocked(
             entity_text = rec.get("entity_text") or rec.get("text")
             if not entity_text:
                 continue
-            node_id = adapters.graph.upsert_node(
-                _merge_provenance(
-                    {
-                        "node_type": "entity",
-                        "label": entity_text,
-                        "source_id": rec.get("source_id"),
-                        "dimension": "relationships",
-                        "record_id": rec.get("record_id") or rec.get("message_id"),
-                    },
-                    prov,
+            # No graph_nodes row for an extracted entity.
+            #
+            # This call passed no ``node_id``, so ``upsert_node`` minted a fresh
+            # uuid4 for EVERY mention. Nothing ever resolved those ids: measured
+            # on the owner's node 2026-08-27, 32,631 `entity` nodes existed, **0
+            # matched a spine entity_id** and **0 were referenced by any edge**.
+            # Only 365 of 32,996 graph_nodes rows were reachable at all, and all
+            # 3,866 edges belong to the messenger `message_frequency` projection
+            # between contact/conversation nodes.
+            #
+            # It was also writing to a table the codebase has already retired:
+            # ``lifecycle/gc.py`` declares graph_nodes "superseded by entity graph
+            # (entities + entity_edges)" and graph_edges "superseded by
+            # entity_edges", and the product read path is
+            # ``entities/reads.py`` -> ``edges.graph_snapshot``. Adding record
+            # provenance to these rows — the obvious reading of "graph edges
+            # carry no record_id" — would have been work in the direction of a
+            # store that is on its way out. The entity graph carries the real
+            # thing: ``entity_mentions`` links every entity to its record, and
+            # ``entity_edges`` carries validity and evidence counts.
+            #
+            # The fact payload drops ``node_id`` with it. 32,039 signal_facts on
+            # the owner's node carry one, and every value points at an orphan. A
+            # key holding a dead id reads as provenance and is worse than no key.
+            #
+            # A RESOLVED identity is the exception, and it is exactly what PRD_04
+            # ("relationship edges use person_id") asks for. When the caller has
+            # already resolved this mention to a person, the node is keyed on that
+            # id: joinable, stable across mentions, and not an orphan. The uuid4
+            # path produced 32,631 unreferenced rows precisely BECAUSE it had no
+            # identity to key on and invented one anyway — the gap test that
+            # covers this passed on the strength of those invented ids while the
+            # `person_id` it carefully resolved was never read.
+            person_id = str(rec.get("person_id") or "").strip()
+            node_id = (
+                adapters.graph.upsert_node(
+                    _merge_provenance(
+                        {
+                            "node_id": person_id,
+                            "node_type": "person",
+                            "label": entity_text,
+                            "source_id": rec.get("source_id"),
+                            "dimension": "relationships",
+                            "record_id": rec.get("record_id") or rec.get("message_id"),
+                        },
+                        prov,
+                    )
                 )
+                if person_id
+                else None
             )
+            # File the fact by what the entity IS, not by which job wrote it.
+            # `entity_type` was already in this dict and the dimension beside it
+            # said "relationships" regardless — so an ORG, a city and a calendar
+            # date all landed in the relationships filter. Untypable mentions
+            # fall back to the record's own dimension rather than a guess.
+            from ..features.signal.dimension_registry import dimension_for_entity_type
+            from ..features.signal.embed_context import dimension_for_record
+
+            entity_type = rec.get("entity_type")
             adapters.signal.put_fact(
                 _merge_provenance(
                     {
-                        "dimension": "relationships",
+                        "dimension": dimension_for_entity_type(
+                            entity_type, fallback=dimension_for_record(rec)
+                        ),
                         "source_id": rec.get("source_id"),
                         "record_id": rec.get("record_id") or rec.get("message_id"),
                         "entity_text": entity_text,
-                        "entity_type": rec.get("entity_type"),
-                        "node_id": node_id,
+                        "entity_type": entity_type,
+                        **({"node_id": node_id} if node_id else {}),
                     },
                     prov,
                 )

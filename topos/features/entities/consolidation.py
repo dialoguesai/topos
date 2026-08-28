@@ -596,7 +596,7 @@ def split_surface(conn: sqlite3.Connection, entity_id: str, surface: str) -> Dic
     """Owner unbind: split a surface's mentions OUT of an entity, permanently.
 
     The reverse of an accidental merge/bind (e.g. the resolver's unique-contact
-    tier binding "Claire" to the contact "Romeo Tango"):
+    tier binding "Robin" to the contact "Robin Ellery"):
 
       * mentions whose surface_text normalizes to ``surface`` move to a fresh
         entity named after the surface (created only when mentions exist);
@@ -645,6 +645,24 @@ def split_surface(conn: sqlite3.Connection, entity_id: str, surface: str) -> Dic
                 f"UPDATE entity_mentions SET entity_id=? WHERE mention_id IN ({placeholders})",
                 (new_entity_id, *moved_ids),
             )
+            # Protection follows the mentions. Splitting a surface off a
+            # black-holed entity moves records out of `blocked_record_ids()` —
+            # the new entity is not in `blackholed_entity_ids()`, nothing binds
+            # it, and the canonical rows survive untouched, so those records
+            # become servable to every non-owner caller. The split is a
+            # statement about identity, never about protection, so the new
+            # entity inherits the flag at the same processing tier.
+            from ..lifecycle.blackhole import BlackholeStore
+            from ..lifecycle.derived_scrub import is_entity_protected
+
+            if is_entity_protected(conn, str(entity_id)):
+                store = BlackholeStore(conn)
+                source = store.get(str(entity_id)) or {}
+                store.blackhole_entity(
+                    entity_ref=new_entity_id,
+                    processing_tier=str(source.get("processing_tier") or "secure"),
+                    note="inherited from a split of a protected entity",
+                )
 
         # Remove a matching alias from the source entity.
         alias_removed = False
@@ -776,3 +794,80 @@ def merge_entity_pair(
         "absorbed_name": absorb_name,
         "mentions_moved": mentions_moved,
     }
+
+
+def container_swallowed_aliases(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
+    """Place aliases a general container swallowed from a specific place.
+
+    The resolver scored a contained token set as a perfect match, so any short
+    place entity became a magnet for every longer name containing its tokens.
+    ``place_similarity`` stops that happening again, but the merges already made
+    recorded ALIASES, and an exact alias is matched at tier 2 — before fuzzy
+    scoring ever runs. So the fixed code alone changes nothing for existing
+    data; the aliases have to be split out.
+
+    Two conditions, and the second is what keeps the repair safe:
+
+      * the alias would no longer resolve to this entity under the fixed rule;
+      * the entity's own name is strictly CONTAINED in the alias.
+
+    Direction is the whole safeguard. A container swallowing a specific place
+    ("Ashford" holding "Ashford Public Library") is the demonstrated defect. The
+    reverse — a short alias on a longer entity, "Battery" on "Kestrel Park",
+    "U.S" on "US" — usually IS the same place, and splitting those would destroy
+    correct merges to fix nothing. Measured on the owner's node 2026-08-27 the
+    unscoped sweep proposed 21 splits of which 4 were wrong, all 4 in the
+    reverse direction; requiring containment leaves 17, and the losses stop.
+    """
+    from .resolver import AUTO_MERGE_SCORE, normalize_name, place_similarity
+
+    out: List[Dict[str, Any]] = []
+    rows = conn.execute(
+        "SELECT entity_id, canonical_name, normalized_name, aliases_json"
+        " FROM entities WHERE entity_type='place'"
+    ).fetchall()
+    for entity_id, canonical_name, normalized_name, aliases_json in rows:
+        try:
+            aliases = json.loads(aliases_json or "[]")
+        except (ValueError, TypeError):
+            continue
+        own = str(normalized_name or "")
+        own_tokens = set(own.split())
+        if not own_tokens:
+            continue
+        for alias in aliases:
+            alias_norm = normalize_name(str(alias))
+            if not alias_norm or alias_norm == own:
+                continue
+            if not own_tokens < set(alias_norm.split()):
+                continue
+            score = place_similarity(alias_norm, own)
+            if score >= AUTO_MERGE_SCORE:
+                continue
+            out.append({
+                "entity_id": str(entity_id),
+                "entity_name": str(canonical_name),
+                "alias": str(alias),
+                "score": round(float(score), 3),
+            })
+    return out
+
+
+def split_container_swallowed_aliases(
+    conn: sqlite3.Connection, *, dry_run: bool = True
+) -> Dict[str, Any]:
+    """Split every alias :func:`container_swallowed_aliases` identifies."""
+    plan = container_swallowed_aliases(conn)
+    stats: Dict[str, Any] = {"candidates": len(plan), "split": 0, "failed": 0, "items": plan}
+    if dry_run:
+        return stats
+    for item in plan:
+        try:
+            split_surface(conn, item["entity_id"], item["alias"])
+            stats["split"] += 1
+        except (ValueError, LookupError) as exc:
+            logger.warning(
+                "could not split %r out of %s: %s", item["alias"], item["entity_name"], exc
+            )
+            stats["failed"] += 1
+    return stats

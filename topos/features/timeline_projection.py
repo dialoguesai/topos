@@ -43,6 +43,7 @@ class TimelineProjectionResult:
     written: int = 0
     existing: int = 0
     timestamp_mismatch: int = 0
+    rendering_normalized: int = 0
     identity_mismatch: int = 0
     excluded: int = 0
     missing_timestamp: int = 0
@@ -54,6 +55,90 @@ class TimelineProjectionResult:
     def add(self, other: "TimelineProjectionResult") -> None:
         for field_name in self.__dataclass_fields__:
             setattr(self, field_name, getattr(self, field_name) + getattr(other, field_name))
+
+
+def normalize_timeline_renderings(
+    conn: sqlite3.Connection, *, dry_run: bool = True
+) -> Dict[str, int]:
+    """Collapse timeline rows that are one instant stored under two renderings.
+
+    The projection can no longer create these, but it also cannot reach the ones
+    already written: its identity lookup takes a single row and asks whether the
+    INSTANT changed, and for a twin the answer is no. So the backlog needs an
+    explicit pass.
+
+    Rows are grouped by ``(record_id, source_id, canonical_table)`` and then by
+    PARSED INSTANT — never by record alone. One ``time_log`` record on the
+    owner's node carries 10 genuinely distinct events under a shared
+    ``record_id``; grouping by record would have destroyed 9 real events while
+    "removing duplicates". A duplicate here means the same moment written twice,
+    nothing looser.
+
+    The surviving row keeps the canonical ``isoformat()`` rendering and the
+    richest metadata across the group — a later pass may have attached entities
+    or a dimension to whichever twin it happened to find, and that enrichment
+    belongs to the record, not to the spelling of its timestamp.
+    """
+    groups: Dict[tuple, list] = {}
+    for row in conn.execute(
+        """
+        SELECT event_at, record_id, source_id, canonical_table, record_type,
+               entity_ids_json, signal_dimension, cluster_id, created_at
+        FROM timeline
+        """
+    ).fetchall():
+        parsed = parse_ts(str(row[0]))
+        if parsed is None:
+            continue
+        groups.setdefault((row[1], row[2], row[3], parsed), []).append(row)
+
+    stats = {"groups": 0, "rows_removed": 0, "metadata_merged": 0, "rewritten": 0}
+    plan = []
+    for (record_id, source_id, table, parsed), rows in groups.items():
+        canonical = parsed.isoformat()
+        if len(rows) == 1 and str(rows[0][0]) == canonical:
+            continue
+        stats["groups"] += 1
+        stats["rows_removed"] += len(rows) - 1
+        # Richest wins per field, independent of which rendering carried it.
+        best_type = next((r[4] for r in rows if r[4]), None)
+        best_entities = next((r[5] for r in rows if r[5] and r[5] != "[]"), "[]")
+        best_dimension = next((r[6] for r in rows if r[6]), None)
+        best_cluster = next((r[7] for r in rows if r[7]), None)
+        keeper = next((r for r in rows if str(r[0]) == canonical), rows[0])
+        if (best_type, best_entities, best_dimension, best_cluster) != (
+            keeper[4], keeper[5] or "[]", keeper[6], keeper[7]
+        ):
+            stats["metadata_merged"] += 1
+        if str(keeper[0]) != canonical:
+            stats["rewritten"] += 1
+        plan.append(
+            (record_id, source_id, table, [str(r[0]) for r in rows], canonical,
+             best_type, best_entities, best_dimension, best_cluster, keeper[8])
+        )
+
+    if dry_run or not plan:
+        return stats
+
+    with batched_writes(conn):
+        for (record_id, source_id, table, renderings, canonical, rtype,
+             entities, dimension, cluster, created_at) in plan:
+            for rendering in renderings:
+                conn.execute(
+                    "DELETE FROM timeline WHERE event_at=? AND record_id=?",
+                    (rendering, record_id),
+                )
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO timeline (
+                    event_at, record_id, source_id, canonical_table, record_type,
+                    entity_ids_json, cluster_id, signal_dimension, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (canonical, record_id, source_id, table, rtype,
+                 entities or "[]", cluster, dimension, created_at),
+            )
+    return stats
 
 
 def project_timeline_rows(
@@ -138,11 +223,27 @@ def project_timeline_rows(
             if identity_row is not None:
                 existing_event_at = str(identity_row[0])
                 existing_ts = parse_ts(existing_event_at)
-                timestamp_changed = (
-                    existing_ts != event_at if existing_ts is not None else existing_event_at != values[0]
-                )
-                if timestamp_changed:
-                    result.timestamp_mismatch += 1
+                # Two different questions, and conflating them silently doubled
+                # rows. `parse_ts` answers "is this the same INSTANT", but the
+                # primary key is the raw STRING. `2026-06-28T18:00:00` and
+                # `2026-06-28T18:00:00+00:00` parse equal and key apart, so the
+                # instant check reported "nothing to do" while the insert landed
+                # a second row — and every future projection agreed there was
+                # nothing to do, because the check that would delete the twin is
+                # the one declaring it fine. 195 such shadows on the owner's
+                # node, all written in one backfill window on 2026-07-10, none
+                # reachable by re-projection.
+                if existing_ts is not None:
+                    timestamp_changed = existing_ts != event_at
+                    rendering_changed = not timestamp_changed and existing_event_at != values[0]
+                else:
+                    timestamp_changed = existing_event_at != values[0]
+                    rendering_changed = False
+                if timestamp_changed or rendering_changed:
+                    if timestamp_changed:
+                        result.timestamp_mismatch += 1
+                    else:
+                        result.rendering_normalized += 1
                     if dry_run or missing_only:
                         result.existing += 1
                         continue

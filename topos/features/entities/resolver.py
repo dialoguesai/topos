@@ -83,16 +83,45 @@ def normalize_name(name: str) -> str:
     return " ".join(tokens)
 
 
-def token_set_similarity(a: str, b: str) -> float:
-    """Order-insensitive similarity in [0, 1] (rapidfuzz-style token_set_ratio)."""
+def token_set_similarity(
+    a: str, b: str, *, subset_is_abbreviation: bool = True
+) -> float:
+    """Order-insensitive similarity in [0, 1] (rapidfuzz-style token_set_ratio).
+
+    ``subset_is_abbreviation`` is what a contained token set MEANS for the type
+    being compared, and the two answers are opposite.
+
+    For a person or an org, a shorter name abbreviates a longer one — "Robin"
+    is "Robin Ellery", "Anthropic" is "Anthropic Inc" — so containment is
+    identity and scores 1.0. That is this function's historical behaviour and
+    stays the default.
+
+    For a PLACE it inverts: place names compose by containment, not
+    abbreviation. "Ashford" is not short for "Ashford Public Library", it is the
+    city the library stands in; "Mill Pond" is not "Mill Pond Trail"; "Barton
+    Springs" (a spring) is not "Cedar Springs Saloon" (a bar named after it).
+    Measured on the owner's node 2026-08-27, this made every short place entity
+    a magnet that swallowed any longer name containing its tokens — "US" (123
+    mentions), "Ashford" (88), "NYC" (49), "SF", "6th" — and the swallowed place
+    never got a node of its own.
+
+    Note that the ``ta <= tb`` shortcut is NOT the whole mechanism, and removing
+    it alone changes nothing: when ``ta`` is contained in ``tb`` the intersection
+    equals ``sa`` exactly, so ``ratio(inter, sa)`` returns 1.0 by construction.
+    Suppressing containment means dropping the intersection comparisons too and
+    scoring the whole name, which is the honest question for a place: how much
+    of this name is the same name?
+    """
     ta, tb = set(normalize_name(a).split()), set(normalize_name(b).split())
     if not ta or not tb:
         return 0.0
+    sa = " ".join(sorted(ta))
+    sb = " ".join(sorted(tb))
+    if not subset_is_abbreviation:
+        return SequenceMatcher(None, sa, sb).ratio()
     if ta <= tb or tb <= ta:
         return 1.0
     inter = " ".join(sorted(ta & tb))
-    sa = " ".join(sorted(ta))
-    sb = " ".join(sorted(tb))
     scores = [
         SequenceMatcher(None, sa, sb).ratio(),
     ]
@@ -100,6 +129,70 @@ def token_set_similarity(a: str, b: str) -> float:
         scores.append(SequenceMatcher(None, inter, sa).ratio())
         scores.append(SequenceMatcher(None, inter, sb).ratio())
     return max(scores)
+
+
+# Entity types whose names compose by CONTAINMENT rather than abbreviation, so
+# a contained token set means "inside that one", not "the same as that one".
+# Scoped to places because that is where the evidence is; person and org keep
+# the abbreviation reading they were designed around.
+CONTAINMENT_TYPES = frozenset({"place"})
+
+# Words that make a place name name a DIFFERENT place rather than the same one.
+#
+# Two families, and the distinction is the whole rule. Adding a venue or
+# landform noun creates a new place inside the old one — "Ashford" + "Public
+# Library", "Mill Pond" + "Trail", "Cedar Springs" + "Saloon". Adding a region
+# qualifier or an article does not — "Ashford" + "TX", "Riverside Park" with "the",
+# "Kestrel Park" with "NYC-" are all the same place said differently. Directions
+# behave like venue nouns, because "East Ashford" is a district and not the city.
+#
+# The list is a heuristic and will have gaps, but it degrades in the safe
+# direction: an unknown word falls through to the historical "same place"
+# reading, so a gap costs a missed split, never a wrong one.
+PLACE_FEATURE_TOKENS = frozenset(
+    """
+    library trail saloon bar pub club lounge cafe restaurant diner deli bakery brewery
+    hotel motel inn hostel station airport terminal museum gallery theater theatre cinema
+    stadium arena gym market mall store shop school university college campus hospital
+    clinic church temple synagogue bridge tower building center centre plaza square court
+    house hq office garage lot apt apartment condo ferry port harbor harbour dock beach
+    lake river creek bay pond hill mountain canyon falls springs street st road rd ave
+    avenue blvd boulevard lane drive highway parkway trailhead park playground field farm
+    ranch studio factory warehouse
+    east west north south northeast northwest southeast southwest upper lower downtown
+    uptown midtown
+    """.split()
+)
+
+
+def _feature_tokens(tokens: set) -> set:
+    """Feature words in a token set, ignoring the punctuation normalize keeps."""
+    return {t.strip("-.") for t in tokens} & PLACE_FEATURE_TOKENS
+
+
+def place_similarity(a: str, b: str) -> float:
+    """Similarity for names that compose by containment.
+
+    Containment stops meaning "the same place" when either
+
+      * the extra tokens name a venue, a landform or a direction — the longer
+        name is then a place INSIDE the shorter one; or
+      * the shorter name is nothing but feature words. An entity called "park"
+        or "6th" is a fragment, not a place, and it will otherwise swallow every
+        name that happens to contain the word. Without this clause the fix for
+        the first case makes the second WORSE: it thins the field of competing
+        candidates, and the ambiguity guard (``at_threshold == 1``) that had
+        been holding "the Old Lighthouse park" apart from the junk entity
+        "Park”" stops firing.
+
+    Anything else keeps the historical reading, so "Ashford TX" is still Ashford.
+    """
+    ta, tb = set(normalize_name(a).split()), set(normalize_name(b).split())
+    if ta and tb and (ta < tb or tb < ta):
+        small, big = (ta, tb) if ta < tb else (tb, ta)
+        if _feature_tokens(big - small) or small == _feature_tokens(small):
+            return token_set_similarity(a, b, subset_is_abbreviation=False)
+    return token_set_similarity(a, b)
 
 
 def map_ner_type(ner_label: Optional[str]) -> Optional[str]:
@@ -288,7 +381,7 @@ def clean_entity_surface(text: str) -> str:
     """Trim the punctuation a mention drags in from the sentence around it.
 
     Extraction hands over spans as they were cut, so a list item or a range
-    keeps its dash: "Williamsburg-", "NYC-", "- Hood Circle". Left alone the
+    keeps its dash: "Rivermouth-", "NYC-", "- Hood Circle". Left alone the
     stray character is part of the identity, and the entity never matches the
     clean spelling of the same place.
     """
@@ -303,15 +396,28 @@ def is_valid_entity_surface(text: str) -> bool:
     junk (plan C4), and all-stopword surfaces ('IS', 'Go', 'The One') must never
     enter the registry.
 
-    Redaction placeholders are rejected too. Text bound for a model that must
-    not see names comes back with "[NAME]", "[EMAIL]" and friends standing in
-    for them (see sanitization.privacy_filter.ENTITY_PLACEHOLDERS); anything
-    minted from that text names the redaction, not a thing in the world.
+    Redaction placeholders are rejected too, terminated or not. Text bound for a
+    model that must not see names comes back with "[NAME]", "[EMAIL]" and friends
+    standing in for them (see sanitization.privacy_filter.ENTITY_PLACEHOLDERS);
+    anything minted from that text names the redaction, not a thing in the world.
+
+    Truncated compound surfaces ("Rivermouth-", cut from "Rivermouth- 35
+    Broadway") are NOT rejected here, and deliberately: ``clean_entity_surface``
+    above already strips the trailing delimiter, leaving "Rivermouth" — a real
+    neighbourhood name that must resolve. The three stub place entities on the
+    owner's node predate that cleaning; they are stale data, not an open hole,
+    and a guard here would be dead code that reads as live protection.
     """
     surface = clean_entity_surface(text)
     if not surface or "##" in surface:
         return False
-    if re.search(r"\[[A-Z][A-Z_]*\]", surface):
+    # The closing bracket is deliberately optional. NER spans cut THROUGH a
+    # placeholder as often as around it, producing "Vish[NAME", "Sh[NAME][NAME"
+    # and "Ashford[DATE" — 14 such surfaces reached the spine on the owner's node
+    # and minted 9 entities, 5 of them typed `person`. Phantom people named after
+    # the privacy mechanism, which is the exact failure this guard exists to
+    # prevent, slipping past it on a missing "]".
+    if re.search(r"\[[A-Z][A-Z_]*(\]|$|[^\]a-z])", surface):
         return False
     normalized = normalize_name(surface)
     if not normalized:
@@ -328,7 +434,7 @@ def is_valid_entity_surface(text: str) -> bool:
         ):
             return False
     # All-stopword surface → junk. Keep names where at least one token is a
-    # real word ('Hotel Juliett', 'The Weeknd', 'LA Fitness').
+    # real word ('Hotel Juliett', 'The Weeknd', 'Metro Fitness').
     alpha_tokens = [t for t in normalized.split() if any(c.isalpha() for c in t)]
     if alpha_tokens and all(t in _JUNK_SURFACE_WORDS for t in alpha_tokens):
         return False
@@ -507,7 +613,7 @@ class EntityResolver:
             raise ValueError(f"entity excluded by owner: {surface_text!r}")
 
         # Owner unbinds: entities this surface must NEVER resolve to again
-        # (split_surface guards). "Claire" is a token-subset of "Claire
+        # (split_surface guards). "Robin" is a token-subset of "Claire
         # Duncombe" (similarity 1.0), so without this every tier below would
         # happily re-merge an owner-corrected mislink.
         blocked = self._no_bind_targets(normalized)
@@ -519,8 +625,8 @@ class EntityResolver:
                 return hit, "identifier"
 
         # Tier 1.5: contact-seeded people outrank NER typing. NER labels
-        # "Austin" a place even when the owner's contacts contain exactly one
-        # Austin — the contact registry is ground truth about people the owner
+        # "Ashford" a place even when the owner's contacts contain exactly one
+        # Ashford — the contact registry is ground truth about people the owner
         # knows, so a unique contact match wins regardless of the NER label.
         contact_hit = self._match_contact_person(normalized)
         if contact_hit and contact_hit not in blocked:
@@ -646,8 +752,11 @@ class EntityResolver:
             "SELECT entity_id, normalized_name FROM entities WHERE entity_type=?",
             (etype,),
         ).fetchall()
+        similarity = (
+            place_similarity if etype in CONTAINMENT_TYPES else token_set_similarity
+        )
         for entity_id, name in rows:
-            score = token_set_similarity(normalized, str(name))
+            score = similarity(normalized, str(name))
             if score >= AUTO_MERGE_SCORE:
                 at_threshold += 1
             if score > best_score:
@@ -900,15 +1009,38 @@ class EntityResolver:
             )
         if not cursor.rowcount:
             return  # duplicate mention (batch replay) — don't inflate counts
+        # The observation window is derived from the EVIDENCE, both ends, by the
+        # same expression the repair in derived_scrub._recount_entity_mentions
+        # uses — one definition, so a write and a rebuild cannot disagree.
+        #
+        # It used to be stamped with datetime('now') at mint and only ever pushed
+        # UPWARD, which made first_seen mean "when extraction reached this
+        # entity" and left last_seen ahead of the newest real mention. Measured
+        # on the owner's node 2026-08-27, of 989 mentioned entities: first_seen
+        # late for 835 (worst by 1,191 days — `plurigrid`, first mentioned
+        # 2023-04-11, stamped 2026-07-15) and last_seen ahead for 699. A
+        # max-with-the-incumbent cannot fix either, because the wrong value is
+        # already the extreme one; only recomputing from the mentions can.
+        #
+        # Arrival order is not chronological order — a backfill extracts
+        # newest-first — so "the mention I just wrote" is not the bound. The
+        # subqueries see it, because the INSERT above has already landed.
         self._conn.execute(
             """
             UPDATE entities SET
                 mention_count = mention_count + 1,
-                last_seen = COALESCE(MAX(COALESCE(last_seen, ''), COALESCE(?, '')), last_seen),
+                first_seen = COALESCE((
+                    SELECT MIN(NULLIF(COALESCE(m.event_at, m.created_at), ''))
+                    FROM entity_mentions m WHERE m.entity_id = entities.entity_id
+                ), first_seen),
+                last_seen = COALESCE((
+                    SELECT MAX(NULLIF(COALESCE(m.event_at, m.created_at), ''))
+                    FROM entity_mentions m WHERE m.entity_id = entities.entity_id
+                ), last_seen),
                 updated_at = datetime('now')
             WHERE entity_id = ?
             """,
-            (event_at, entity_id),
+            (entity_id,),
         )
 
     # ------------------------------------------------------- owner tooling
@@ -932,6 +1064,26 @@ class EntityResolver:
         if str(keep[2]) != str(gone[3]):
             raise ValueError(
                 f"cannot merge across entity types (keep={keep[2]!r}, absorb={gone[3]!r})"
+            )
+        # A merge across a protection boundary INVERTS the black hole rather than
+        # moving it. _remap_derivation_corpus repoints
+        # `entity_blackholes.entity_id` at keep_id, so absorbing a protected
+        # entity into an unprotected one hides the survivor's own records while
+        # leaving the protected name bound to an entity that was never protected
+        # — and because bind_entity_id only rebinds rows with an empty
+        # entity_id, a later re-mint of the protected name can never re-attach.
+        # Reachable from the owner clicking "yes, same person" on a dedupe review.
+        # Fail before any write, like the cross-type check above.
+        from ..lifecycle.derived_scrub import is_entity_protected
+
+        keep_protected = is_entity_protected(self._conn, str(keep_id))
+        gone_protected = is_entity_protected(self._conn, str(absorb_id))
+        if keep_protected != gone_protected:
+            raise ValueError(
+                "cannot merge a black-holed entity with an unprotected one "
+                f"(keep={keep_id!r} protected={keep_protected}, "
+                f"absorb={absorb_id!r} protected={gone_protected}). "
+                "Protect both or lift the black hole first."
             )
         aliases = list(
             dict.fromkeys(

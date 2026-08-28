@@ -164,6 +164,9 @@ class ExclusionStore:
         entity_ref may be an entity_id or a name. Mentions, edges, and the
         dossier are removed; the canonical record content is untouched (this
         is intelligence exclusion, not content deletion).
+
+        Raises ``ValueError`` for a black-holed entity — see
+        ``_refuse_if_black_holed`` for why the two intents cannot be combined.
         """
         from ..entities.resolver import normalize_name
 
@@ -176,6 +179,12 @@ class ExclusionStore:
                 "SELECT entity_id, canonical_name FROM entities WHERE normalized_name=?",
                 (normalize_name(entity_ref),),
             ).fetchone()
+        # Refuse BEFORE the tombstone: a partially-applied exclusion on a
+        # protected entity is the leak, not a tidy-up.
+        if row is not None:
+            self._refuse_if_black_holed(
+                self._conn, str(row[0]), normalize_name(str(row[1] or entity_ref))
+            )
         with batched_writes(self._conn):
             exclusion_id = self._tombstone(
                 "entity", row[1] if row else entity_ref, note
@@ -207,6 +216,31 @@ class ExclusionStore:
             )
             self._conn.execute("DELETE FROM entities WHERE entity_id=?", (entity_id,))
         return result
+
+    @staticmethod
+    def _refuse_if_black_holed(conn, entity_id: str, normalized_name=None) -> None:
+        """A black hole and an intelligence-exclusion are conflicting intents.
+
+        Exclusion deletes the entity and every mention while DELIBERATELY leaving
+        the canonical rows — "intelligence exclusion, not content deletion". For a
+        protected entity that is the worst possible combination: the messages that
+        name it survive, the flag row survives, and `blocked_record_ids()`
+        collapses to empty because the join table it reads has been emptied. Every
+        non-owner caller can then be served those records, and the substring name
+        scan does not cover a record whose text never names the entity.
+
+        Refusing is the honest resolution — "keep everything, show no one" and
+        "forget this from my intelligence" are different decisions and the owner
+        should make the second one explicitly, by lifting the black hole first.
+        """
+        from .derived_scrub import is_entity_protected
+
+        if is_entity_protected(conn, str(entity_id), normalized_name):
+            raise ValueError(
+                "This entity is protected by a black hole. Lift the black hole "
+                "before excluding it from intelligence — excluding it now would "
+                "delete the filter while leaving the records it hides."
+            )
 
     def exclude_stat_insight(
         self, *, stat_id: str, group_key: str = "", note: Optional[str] = None

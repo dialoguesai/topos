@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Any, Dict, Iterator, List, Optional, Sequence, Set, Tuple
 
-from .data_explorer_tables import is_canonical_schema_table
+from .data_explorer_tables import CANONICAL_ROW_ID_COLUMN, is_canonical_schema_table
 from .sources.scrub_attribution import (
     TableAction,
     _delete_vec_rows_batched,
@@ -50,6 +50,23 @@ _PROTECTED_TABLES = frozenset(
 _RECORD_LINK_COLUMNS = ("record_id", "message_id", "entry_id", "event_id", "transaction_id")
 _PRIMARY_KEY_FALLBACKS = ("record_id", "id", "entry_id", "message_id", "event_id", "transaction_id")
 
+#: Tables holding DERIVED rows — what "delete everything derived from this" means.
+#:
+#: Membership decides two things at once, which is why the omissions below were
+#: costly. ``_delete_downstream_for_canonical`` sweeps only tables that pass
+#: ``_is_enrichment_or_signal_table``, and ``_is_upstream_table`` returns False
+#: for them — so a derived table missing from here is not merely unswept by
+#: ``with_downstream``, it is actively MISCLASSIFIED as upstream and swept by
+#: ``with_upstream`` instead. The owner gets the opposite of what each scope
+#: promises.
+#:
+#: The misclassification is not an oversight in the list so much as a heuristic
+#: that cannot tell the two apart: ``_is_upstream_table`` treats
+#: ``record_id + source_id`` as an upstream signature, and every derived table
+#: carries both. Only an explicit declaration separates them.
+#:
+#: Measured on the owner's node 2026-08-27, the five added here hold 38,700 rows
+#: that "delete this row and everything derived from it" did not reach.
 _ENRICHMENT_SIGNAL_TABLES = frozenset(
     {
         "message_emotions",
@@ -65,8 +82,43 @@ _ENRICHMENT_SIGNAL_TABLES = frozenset(
         "graph_nodes",
         "graph_edges",
         "data_health_dimension",
+        # --- added 2026-08-27, all record-linked and unambiguously derived ---
+        "timeline",             # 14,724 — the record registry, rebuilt by projection
+        "topic_cluster_members",#  9,934 — cluster membership, recomputed on demand
+        "triage_verdicts",      #  7,957 — per-record triage output
+        "entity_mentions",      #  5,830 — extraction output, rebuilt from records
+        "cluster_candidates",   #     93 — clustering scratch
+        "entity_review",        #    172 — review queue rows raised by extraction
     }
 )
+
+#: Record-linked tables deliberately NOT swept as derived, with the reason.
+#: Kept as documentation rather than code because the cost of a wrong entry runs
+#: both ways: including a source table deletes the owner's data, excluding a
+#: derived one leaves it behind after they asked for it to go.
+#:
+#:   canonical (journal_entries, conversation_messages, activity_events, …)
+#:       the record itself or a sibling of it, not something derived from it.
+#:   flat source tables (grow_journal_sessions, browser_visits, browser_events,
+#:   time_log_sessions, grow_data_sessions, calendar_raw_auto)
+#:       the landing shape of the source, upstream of canonical. No `raw_` prefix
+#:       and no `source_system` column, so the heuristic misses them — but they
+#:       are the owner's ingested data, not a restatement of it.
+#:   the full-text and ANN companion stores behind signal_embeddings
+#:       maintained by triggers and by the VectorIndex seam. A direct DELETE on
+#:       either corrupts the index instead of updating it, which is why this
+#:       module must not name their physical tables at all
+#:       (tests/storage/test_vector_index_seam.py enforces that).
+#:   signal_objects, graph_nodes/graph_edges provenance
+#:       BLOCKED, not excluded. signal_objects carries provenance only in
+#:       source_refs_json under two incompatible key schemas, and graph edges
+#:       carry no record provenance at all (0 of 3,826). Neither can be swept by
+#:       record until that is unified — see the C lane.
+#:   llm_usage_events, stat_seen, *_lab_run, derivation_training_ledger,
+#:   query_audit_events
+#:       audit, billing and fold-dedupe bookkeeping. Deleting stat_seen in
+#:       particular would let a later refold double-count. Judgment call, left
+#:       out pending an explicit decision.
 
 
 @dataclass(frozen=True)
@@ -77,6 +129,13 @@ class LineageAnchor:
     canonical_id: Optional[str]
     source_id: Optional[str]
     source_record_id: Optional[str]
+    #: Set when this canonical row is a FAN-OUT CHILD: the canonical row it was
+    #: split out of. Deliberately not folded into ``source_record_id`` — see
+    #: ``_parent_canonical_row``. Reported, never deleted on: expanding a delete
+    #: across the split is a separate, named scope, not a side effect of
+    #: resolving lineage.
+    parent_canonical_table: Optional[str] = None
+    parent_canonical_id: Optional[str] = None
 
 
 @dataclass
@@ -86,6 +145,11 @@ class RowDeleteResult:
     row_ids: List[str]
     rows_deleted: int = 0
     table_actions: List[TableAction] = field(default_factory=list)
+    #: Canonical rows a deleted row was FANNED OUT OF, kept rather than deleted.
+    #: Surfaced so the caller can say "this row was split out of
+    #: journal_entries/tl-1, which was left in place" instead of reporting a
+    #: partial delete as a complete one.
+    parents_retained: List[Dict[str, str]] = field(default_factory=list)
 
     def to_payload(self) -> Dict[str, Any]:
         return {
@@ -97,6 +161,7 @@ class RowDeleteResult:
                 {"table": item.table, "action": item.action, "count": int(item.count)}
                 for item in self.table_actions
             ],
+            "parents_retained": [dict(item) for item in self.parents_retained],
         }
 
 
@@ -211,6 +276,74 @@ def _table_exists(conn: Any, table_name: str) -> bool:
     return table_name in set(_list_user_tables(conn))
 
 
+def _parent_canonical_row(
+    conn: Any,
+    *,
+    table_name: str,
+    row_id: str,
+    source_record_id: Optional[str],
+    source_id: Optional[str],
+) -> Optional[tuple]:
+    """``(table, id)`` of the canonical row this one was fanned out of, if any.
+
+    ``source_record_id`` carries two incompatible meanings today. On an ordinary
+    canonical row it is what the name says — the id of the record in the SOURCE
+    system. But a fan-out child writes its PARENT's canonical id there instead:
+    every one of the 362 ``location_events`` rows minted by
+    ``journal_location_fanout`` points at a real ``journal_entries.entry_id``.
+
+    Measured on the live node 2026-08-27, ``journal_entries`` splits three ways:
+    369 rows are self-referential (``source_record_id = entry_id``, the
+    grow_data_file and grow_journal lanes) and 121 carry a genuine external
+    ``github_activity`` key (``push:{repo}:{sha}:{sha}``) that resolves to no
+    canonical row at all. Both fall through this probe, which is what it is for —
+    the rule keys on "resolves to another canonical row", not on "differs".
+
+    That difference is load-bearing, because ``_delete_upstream_rows`` treats
+    ``source_record_id`` as an upstream key and deletes ``WHERE record_id = ?``
+    across every upstream table. For a fan-out child that key belongs to a
+    sibling canonical row, so deleting one place event stripped 1,073 rows off
+    the journal entry it came from — its flat source row, timeline entries,
+    entity mentions, triage verdict and cluster membership — while the journal
+    entry itself survived, invisible to retrieval, the graph and the timeline.
+
+    The discrimination is exact rather than heuristic: a value that differs from
+    the row's own id AND resolves to a canonical row that is not this one is a
+    parent pointer, because a source-system id has no reason to be another
+    canonical row's primary key. Self-referential values and values that match
+    nothing both fall through.
+
+    Two refinements the first version got wrong:
+
+    * the match is constrained to the SAME ``source_id``. Ids are only unique
+      within a source, so without it a collision across two connectors would
+      silently re-anchor — and re-anchoring NARROWS a legitimate upstream delete,
+      which fails quietly rather than loudly.
+    * the candidate set no longer excludes the row's own table. A declared
+      ``fan_out`` mints its children into whatever table the declaration names,
+      including the parent's own — the ``canonical_field_map`` docstring's GitHub
+      example fans commits into ``journal_entries``, the same table the base row
+      lands in. The ``source_record_id == row_id`` guard above is what keeps a row
+      from being its own parent.
+    """
+    if not source_record_id or source_record_id == row_id:
+        return None
+    for candidate_table, id_col in CANONICAL_ROW_ID_COLUMN.items():
+        if not _table_exists(conn, candidate_table):
+            continue
+        columns = set(_list_table_columns(conn, candidate_table))
+        if id_col not in columns:
+            continue
+        sql = f'SELECT 1 FROM "{candidate_table}" WHERE "{id_col}" = %s'
+        params: List[Any] = [source_record_id]
+        if source_id and "source_id" in columns:
+            sql += " AND source_id = %s"
+            params.append(source_id)
+        if fetch_one(conn, sql + " LIMIT 1", tuple(params)) is not None:
+            return candidate_table, source_record_id
+    return None
+
+
 def _resolve_lineage(
     conn: Any,
     *,
@@ -218,15 +351,39 @@ def _resolve_lineage(
     pk_column: str,
     row_id: str,
     row: Dict[str, Any],
+    probe_parent: bool = True,
 ) -> LineageAnchor:
     source_id = str(row.get("source_id") or row.get("source_system") or "").strip() or None
     source_record_id = str(row.get("source_record_id") or row.get("record_id") or "").strip() or None
     canonical_table: Optional[str] = None
     canonical_id: Optional[str] = None
+    parent_table: Optional[str] = None
+    parent_id: Optional[str] = None
 
     if is_canonical_schema_table(table_name):
         canonical_table = table_name
         canonical_id = row_id
+        # The probe only changes the UPSTREAM anchor, so a row_only delete pays
+        # nothing for it: it scans every canonical table per row, which on a
+        # 50-row selection was measured at hundreds of extra statements for a
+        # result that is discarded.
+        parent = (
+            _parent_canonical_row(
+                conn,
+                table_name=table_name,
+                row_id=row_id,
+                source_record_id=source_record_id,
+                source_id=source_id,
+            )
+            if probe_parent
+            else None
+        )
+        if parent:
+            # A parent pointer is not an upstream key. Re-anchor the upstream
+            # sweep on this row's OWN id so it can only ever reach rows that
+            # belong to it, and carry the parent separately for reporting.
+            parent_table, parent_id = parent
+            source_record_id = row_id
         if not source_record_id:
             source_record_id = row_id
         if not source_id:
@@ -294,6 +451,8 @@ def _resolve_lineage(
         canonical_id=canonical_id,
         source_id=source_id,
         source_record_id=source_record_id,
+        parent_canonical_table=parent_table,
+        parent_canonical_id=parent_id,
     )
 
 
@@ -546,7 +705,34 @@ def delete_database_rows(
             row = _fetch_row(conn, table, pk_column, row_id)
             if row is None:
                 raise ValueError(f"Row not found: {row_id}")
-            lineage = _resolve_lineage(conn, table_name=table, pk_column=pk_column, row_id=row_id, row=row)
+            lineage = _resolve_lineage(
+                conn,
+                table_name=table,
+                pk_column=pk_column,
+                row_id=row_id,
+                row=row,
+                probe_parent=include_upstream,
+            )
+            if lineage.parent_canonical_table and lineage.parent_canonical_id:
+                result.parents_retained.append(
+                    {
+                        "table": str(lineage.parent_canonical_table),
+                        "id": str(lineage.parent_canonical_id),
+                        "child_table": table,
+                        "child_id": str(row_id),
+                    }
+                )
+                # Reported, never deleted on. Expanding a delete across a split is
+                # a separate named scope, not a side effect of resolving lineage —
+                # but an under-delete that says nothing reads as a complete one,
+                # which is the failure mode this surfaces.
+                actions.append(
+                    TableAction(
+                        table=str(lineage.parent_canonical_table),
+                        action="parent_retained",
+                        count=1,
+                    )
+                )
             skip_tables: Set[str] = {table}
 
             if include_downstream and lineage.canonical_id:

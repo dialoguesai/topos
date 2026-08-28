@@ -238,6 +238,7 @@ def _upsert_materialized_edge(
     asserted_by: Optional[str] = None,
     actor_role: Optional[str] = None,
     last_event_at: Optional[str] = None,
+    evidence_count: int = 1,
 ) -> Optional[str]:
     """Idempotent directed edge with a materialized marker + carried validity.
 
@@ -245,6 +246,21 @@ def _upsert_materialized_edge(
     whose provenance isn't an assertion (presence, participation, witnessing).
     ``last_event_at`` defaults to valid_from — pass explicitly when the edge's
     evidence spans a window (e.g. a goal recurring across months).
+
+    ``evidence_count`` is how many observations back the edge. It was hardcoded
+    to 1 here, so on the owner's node 2026-08-27 **every one of the 4,204
+    materialized edges claimed a single observation** while the evidence lane
+    (co_occurrence, communicates_with) folded real counts up to 2,784. Three
+    callers already knew the true number and wrote it into the statement string
+    — "visited X ×127", "mentioned in conversation ×18" — while the queryable
+    column said 1, so nothing could rank or filter on it.
+
+    It is SET, not incremented, and that is the whole difference from
+    ``_fold_observation`` in ``edges.py``. This lane re-derives every edge from
+    a full aggregate on each rebuild; adding would compound the same visits on
+    every pass, which is the derived-row multiplication this workstream keeps
+    finding. Folding is for streamed observations, setting is for recomputed
+    aggregates.
 
     Returns the edge_id written (existing or new) so callers can record it as
     touched for the end-of-rebuild stale sweep; None when the edge is skipped.
@@ -277,11 +293,11 @@ def _upsert_materialized_edge(
             INSERT INTO entity_edges
                 (edge_id, src_entity_id, dst_entity_id, edge_type, weight,
                  evidence_count, last_event_at, valid_from, valid_to, metadata_json)
-            VALUES (?, ?, ?, ?, ?, 1, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 edge_id,
-                src, dst, edge_type, float(weight),
+                src, dst, edge_type, float(weight), max(1, int(evidence_count or 1)),
                 effective_last, valid_from or _now_iso(), valid_to, meta,
             ),
         )
@@ -289,11 +305,14 @@ def _upsert_materialized_edge(
     conn.execute(
         """
         UPDATE entity_edges
-        SET weight=?, valid_from=?, valid_to=?, last_event_at=?, metadata_json=?,
-            updated_at=datetime('now')
+        SET weight=?, evidence_count=?, valid_from=?, valid_to=?, last_event_at=?,
+            metadata_json=?, updated_at=datetime('now')
         WHERE edge_id=?
         """,
-        (float(weight), valid_from, valid_to, effective_last, meta, row[0]),
+        (
+            float(weight), max(1, int(evidence_count or 1)),
+            valid_from, valid_to, effective_last, meta, row[0],
+        ),
     )
     return str(row[0])
 
@@ -464,9 +483,14 @@ def materialize_signal_objects_to_graph(
             (topic_id, topic_id),
         ).fetchone():
             # No real entities to link — drop the orphan hub we just made.
-            conn.execute(
-                "DELETE FROM entities WHERE entity_id=? AND mention_count=0", (topic_id,)
-            )
+            # ...unless it is black-holed. A topic hub can be protected like any
+            # other entity, and every id-keyed reap has to honour that.
+            from ..lifecycle.derived_scrub import is_entity_protected
+
+            if not is_entity_protected(conn, str(topic_id)):
+                conn.execute(
+                    "DELETE FROM entities WHERE entity_id=? AND mention_count=0", (topic_id,)
+                )
 
     # 2) SPO facts -> subject->object labeled edges.
     #
@@ -557,7 +581,18 @@ def materialize_signal_objects_to_graph(
     # mention_count = 0 means the surface was never extracted as an entity in
     # its own right, and the no-edge check runs after the refresh above, so a
     # real entity that merely shares a value-ish surface is never touched.
+    # A black-holed entity is never a value surface to be purged, whatever its
+    # name looks like. This purge is its own reap predicate — it does not go
+    # through derived_scrub._delete_entity_cascade — and rebuild_entity_graph
+    # calls it TWO STEPS AFTER the guarded orphan sweep, so without this the
+    # exact chain the guard exists to stop still completed: recount zeroes
+    # mention_count, the sweep correctly refuses, and this loop deletes the row.
+    # Any protected name the NER lane usually labels as a value ("May",
+    # "Jordan", "Phoenix", a street number) lands in `values`.
+    from ..lifecycle.derived_scrub import is_entity_protected
+
     purged = 0
+    protected_kept = 0
     for entity_id, _norm in [
         (eid, norm)
         for eid, norm in conn.execute(
@@ -570,8 +605,13 @@ def materialize_signal_objects_to_graph(
             (entity_id, entity_id),
         ).fetchone():
             continue
+        if is_entity_protected(conn, str(entity_id), str(_norm or "") or None):
+            protected_kept += 1
+            continue
         conn.execute("DELETE FROM entities WHERE entity_id=?", (entity_id,))
         purged += 1
+    if protected_kept:
+        logger.info("materializer kept %d black-holed value-surface entities", protected_kept)
     if purged:
         logger.info("materializer purged %d value-surface entities (dates/quantities)", purged)
     if net_facts_skipped:

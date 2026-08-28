@@ -293,19 +293,37 @@ class EntitiesJob(BaseEnrichmentJob):
                 # Mention-only third parties (IMB7 Odile) are not talked-to partners;
                 # co-participation is folded below from conversation senders.
 
-            # Co-occurrence within the same record
+            # Mentions from DECLARED structured columns (a journal entry's
+            # place_name). Folded into entities_by_record BEFORE co-occurrence, so
+            # the person named in the prose and the place named in the column land
+            # in one bucket instead of two — and so the record that carries the
+            # evidence is the one a black hole blocks on.
+            try:
+                from ....features.entities.structured_fields import (
+                    record_structured_mentions,
+                )
+
+                for record_id, ids in record_structured_mentions(
+                    conn, resolver, canonical_messages
+                ).items():
+                    entities_by_record.setdefault(record_id, []).extend(ids)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("structured-field mentions skipped: %s", exc)
+
+            # Co-occurrence within the same record, through the SHARED fold —
+            # see edges.record_cooccurrence_pairs for why there is only one.
+            from ....features.entities.edges import record_cooccurrence_pairs
+
             for record_id, ids in entities_by_record.items():
-                unique = list(dict.fromkeys(ids))
                 event_at = (msg_by_id.get(record_id) or {}).get("event_at")
-                for i in range(len(unique)):
-                    for j in range(i + 1, len(unique)):
-                        update_edge(
-                            conn,
-                            src_entity_id=unique[i],
-                            dst_entity_id=unique[j],
-                            edge_type=EDGE_CO_OCCURRENCE,
-                            event_at=event_at,
-                        )
+                for src, dst in record_cooccurrence_pairs(ids):
+                    update_edge(
+                        conn,
+                        src_entity_id=src,
+                        dst_entity_id=dst,
+                        edge_type=EDGE_CO_OCCURRENCE,
+                        event_at=event_at,
+                    )
 
             # Thread co-participation → communicates_with (talked-to vs mentioned).
             conv_ids = {

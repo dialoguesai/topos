@@ -9,7 +9,733 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **A short place name swallowed every longer place containing it.**
+  `[E:entities]` `token_set_similarity` scores a contained token set as a
+  perfect 1.0. For a person that is right — "Robin" abbreviates "Claire
+  Duncombe" — but place names compose the other way: "Ashford" is not short for
+  "Ashford Public Library", it is the city the library stands in. So every short
+  place entity became a magnet. On a live node the magnets were "US" (123
+  mentions), "Ashford" (88), "NYC" (49) and "6th" (5), and four place entities
+  each held two genuinely different places — the Ashford Public Library and
+  Kelvin Park were one node, as were a members' club and a Greenmart.
+
+  Note for anyone revisiting this: deleting the `ta <= tb` shortcut does
+  nothing. When one set contains the other the intersection equals the smaller
+  sorted string, so the score is 1.0 by construction either way.
+
+  Resolution for places now runs through `place_similarity`, which demotes
+  containment only when the extra tokens name a venue, a landform or a
+  direction ("Public Library", "Trail", "Saloon", "East"), or when the shorter
+  name is nothing but feature words — an entity called "park" or "6th" is a
+  fragment, not a place. A region qualifier or an article still means the same
+  place, so "Ashford TX" is still Ashford and "the Riverside Park" is still Central
+  Park. Scoring the whole name instead, without that distinction, would have
+  split 40 of 115 live surfaces, most of them correctly merged.
+
+  Existing merges recorded aliases, and an exact alias matches before fuzzy
+  scoring runs, so the code fix alone changed nothing for stored data.
+  `split_container_swallowed_aliases` splits them out through the same
+  `split_surface` path the People page's Unlink control uses, and only in the
+  container direction — a short alias on a longer entity ("Battery" on "Battery
+  Park") is usually the same place, and the unscoped sweep would have destroyed
+  4 correct merges to fix 17. On a live node: 17 splits, place entities 213 →
+  229, mentions unchanged at 5,835, colliding place entities 4 → 0. Regression:
+  `tests/features/test_place_containment_resolution.py`.
+
+- **Every materialized graph edge claimed a single observation.** `[E:entities]`
+  `_upsert_materialized_edge` wrote `evidence_count` as the literal `1`, so all
+  4,204 materialized edges on a live node reported one piece of evidence while
+  the evidence lane beside them folded real counts up to 2,784. Three callers
+  already knew the true number and had written it into the human-readable
+  statement — "visited X ×127", "mentioned in conversation ×18" — while the
+  column a query can rank on said 1. The count is now carried, and it is SET
+  rather than incremented: this lane recomputes from a full aggregate on every
+  rebuild, so folding would have compounded the same visits on each pass.
+  Regression: `tests/features/test_materialized_edge_evidence.py`.
+
+- **Places on the graph folded by name, so visits to one place overwrote each
+  other.** `[E:entities]` `_materialize_places` groups `location_events` by
+  `place_name`, but the edge keys on the RESOLVED place, and several names
+  resolve to one entity — each name's count replaced the previous one's. On a
+  live node 69 names resolve to 65 entities and 4 visits were lost. Places now
+  fold by identity, span both windows, and take their label from the
+  most-visited surface. (The visit counts themselves are real:
+  `location_events` is one row per journal session at a place. Separately, the
+  collisions expose a resolver defect — "Ashford Public Library" and "Kelvin
+  Park" share a node — which is not fixed here.)
+
+- **One instant could occupy two timeline rows.** `[E:ingestion]` `timeline`'s
+  primary key is the raw timestamp STRING; the projection's "has this changed?"
+  check parses to an INSTANT. `2026-06-28T18:00:00` and
+  `2026-06-28T18:00:00+00:00` parse equal and key apart, so the projection
+  reported "nothing to do" while the insert landed a second row — and every
+  later projection agreed, because the check that would delete the twin is the
+  one declaring it fine. 195 such shadows on a live node, written in one
+  backfill window and unreachable since; those records were counted twice in
+  every timeline window they fall in. The projection now normalizes the
+  rendering, and `normalize_timeline_renderings` collapses the backlog —
+  grouping by parsed instant, never by record, so one `time_log` record's 10
+  genuinely distinct events are untouched. Regression:
+  `tests/features/test_timeline_rendering_duplicates.py`.
+
+- **Entity facts were filed by which job wrote them, not by what they are
+  about.** `[E:enrichment]` The entities job stamped
+  `dimension="relationships"` on every fact while carrying the entity's own
+  type in the same dict. `get_by_dimension` is a live API filter, so this is
+  read at decision time: of 32,293 facts filed as relationships, 10,924 were
+  ORG, 2,704 DATE and 2,088 GPE, and under a fifth of the typed ones resolved
+  to an actual person. Facts are now filed by entity type, with the record's
+  own dimension as the fallback for types deliberately left unmapped (CARDINAL,
+  ORDINAL, QUANTITY, PERCENT, MISC, NORP, LAW — a bare number is not an entity
+  in any dimension, and guessing would move noise between filters). Migration
+  `fact_dimension_by_entity_type_v1` re-derives the backlog from each row's
+  stored type, scoped to rows carrying an `entity_type` so `relationship_edges`
+  and dossier facts are untouched. On a live node this re-filed 23,228 of
+  38,842 rows and populated two dimensions that were effectively empty:
+  `places` 13 → 4,001 and `time` 0 → 4,610. Regression:
+  `tests/features/test_fact_dimension_by_entity_type.py`.
+
+- **Any derived object can now be closed when its evidence is gone, not just facts.** `[E:lifecycle]`
+  `close_dangling_facts` was scoped to `object_type='fact'`, which was never principled —
+  a dossier, a `PlaceContext` and a fact all outlive their evidence the same way. Combined
+  with reading only the `record_id` ref key, the sweep was looking at 7% of the provenance
+  in the database.
+
+  **Dry-run first, and it earned the caution.** The opening pass would have closed 164 of
+  170 dossiers, **158 of them citing entities that are perfectly alive**:
+  `entities/dossier.py` writes an ENTITY id into a `record_id` field aimed at
+  `entity_mentions`, a table keyed on `mention_id`, so it can never match and reads GONE.
+  `_ref_record_exists` now resolves a spine-shaped id (`ent_`/`goal_`/`topic_`/`conv_`)
+  against `entities` rather than the mis-declared table — the id identifies the thing
+  unambiguously and the table label is the part that is wrong. That bucket went 164 → 6.
+
+  A second near-miss ran the other way: the 702 `user_goals` objects *looked* like the same
+  trap, their ids turning up in `signal_facts` and `message_topics`. Those are the
+  ORPHANED DERIVED ROWS of a deleted `chatgpt_ingestion` record — the record itself is in
+  no canonical table and no timeline, so closing them is correct. Every one of the 1,497
+  was checked against all nine canonical tables and the entity spine before applying: zero
+  reachable.
+
+  Applied to the live database — 1,497 closed, active objects 4,583 → 3,086,
+  `integrity_check` ok, backup at `database-pre-dangling-sweep-20260827T211143Z.db`. Both
+  traps are pinned as permanent regressions: a dossier citing a live entity must survive,
+  one citing a reaped entity must close, and day-scoped objects are never touched.
+
+- **Extracting an entity no longer mints a row in the retired graph store.** `[E:entities]`
+  The entities job called `upsert_node` with no `node_id`, so a fresh uuid4 was minted for
+  EVERY mention. Nothing resolved them: 32,631 `graph_nodes` rows of type `entity`, **0**
+  matching a spine `entity_id` and **0** referenced by any edge. Only 365 of 32,996 nodes
+  were reachable at all, and all 3,866 edges belong to the messenger `message_frequency`
+  projection between contact/conversation nodes.
+
+  It was writing into a store the codebase has already retired: `lifecycle/gc.py` declares
+  `graph_nodes` "superseded by entity graph (entities + entity_edges)" and `graph_edges`
+  "superseded by entity_edges", and the product read path is `entities/reads.py` →
+  `edges.graph_snapshot`.
+
+  **This is why "graph edges carry no record provenance (0 of 3,826)" did not want the
+  obvious fix.** Adding `record_id` to those rows would have been work in the direction of
+  a store on its way out. The entity graph already carries the real thing —
+  `entity_mentions` links every entity to its record and `entity_edges` carries validity
+  and evidence counts. The fix was to stop the store growing, not to enrich it.
+
+  The fact payload drops `node_id` with it: 32,039 `signal_facts` carry one and every value
+  points at an orphan. A key holding a dead id reads as provenance, and is worse than no
+  key. The contact/conversation writes are deliberately untouched — they pass an explicit
+  `node_id`, form a connected graph, and are what the legacy route still serves. Gated by
+  `tests/enrichment/test_no_orphan_graph_nodes.py`, including a check that the tables are
+  still declared deprecated, so an un-deprecation like `relationship_edges` got on
+  2026-08-26 forces the decision to be made again rather than inherited.
+
+- **Provenance refs are readable whichever key their producer used.** `[E:lifecycle]`
+  `signal_objects.source_refs_json` has two legitimate shapes and neither is going away:
+  `facts/extract.py`, `facts/llm_extract.py`, `derivation/surfaces.py` and
+  `entities/dossier.py` write `{"table":…, "record_id":…}`, while `signal/typed_stores` and
+  the derivation extraction path write `{"table":…, "id":…}`.
+
+  Every sweep read `record_id` only. Measured on the owner's node 2026-08-27 over 4,577
+  active objects: **4,229 refs key on `id` and 307 on `record_id`** — so the lifecycle
+  sweeps saw **7%** of the provenance in the database and silently treated the rest as
+  unattributable. One shared `ref_record_key`, used by all three read sites, takes
+  resolvable refs **307 → 4,536** and reachable objects **291 → 4,236**.
+
+  A `day`-keyed ref is deliberately not a record key. Those 303 are day-scoped aggregates
+  citing a date, not a row, and resolving them would invent provenance pointing at
+  nothing — which is worse than admitting there is none, because a sweep would then treat
+  the object as attributable and act on it.
+
+  This is the prerequisite the F lane is blocked on: `signal_objects` cannot be swept by
+  record while 92% of its provenance is invisible, and it is why the fan-out retraction
+  had to be written against tables rather than refs. Gated by
+  `tests/features/test_provenance_ref_reader.py`, including a source check that fails when
+  a new site reaches into a ref dict directly and reintroduces the blind spot.
+
+- **"Delete everything derived from this" now reaches 38,710 more rows.** `[E:lifecycle]` `[E:privacy]`
+  The downstream sweep visited 10 of 138 tables. The cause was sharper than a list with
+  gaps: `_is_upstream_table` treats `record_id + source_id` as an upstream signature, and
+  **every derived table carries both**. So `timeline` and `entity_mentions` were not merely
+  unswept by `with_downstream` — they were MISCLASSIFIED as upstream and swept by
+  `with_upstream` instead. The owner got the inverse of what each scope promises.
+
+  Membership of `_ENRICHMENT_SIGNAL_TABLES` decides both predicates, so one declaration
+  fixes both directions. Added, all record-linked and unambiguously derived: `timeline`
+  (14,724), `topic_cluster_members` (9,934), `triage_verdicts` (7,957), `entity_mentions`
+  (5,830), `cluster_candidates`, `entity_review`. Reachability 10 tables / 116,974 rows →
+  16 tables / 155,684.
+
+  A test in this repo asserted the old behaviour — that `with_upstream` removes
+  `entity_mentions` — so the change surfaced it. It encoded the bug; corrected, with a
+  case naming why the scopes must stay distinct.
+
+  The exclusions are now written down in code, because on a delete path a wrong entry cuts
+  both ways: including a source table deletes the owner's data, excluding a derived one
+  leaves it behind after they asked for it to go. Notably **flat source tables**
+  (`grow_journal_sessions`, `browser_visits`, `browser_events`) carry `record_id` and
+  `source_id` with no `raw_` prefix, so a heuristic sweeping on columns alone would treat
+  the owner's ingested data as derived.
+
+  Still unreachable and BLOCKED rather than excluded: `signal_objects` carries provenance
+  only in `source_refs_json` under two incompatible key schemas, and `graph_nodes` /
+  `graph_edges` carry no record provenance at all. Neither can be swept by record until
+  that is unified. Audit and bookkeeping tables (`llm_usage_events`, `stat_seen`, the lab
+  ledgers) are left out pending an explicit policy decision — deleting `stat_seen` would
+  let a later refold double-count.
+
+- **The split entries are connected on the graph again.** `[E:entities]`
+  This is the outcome the whole workstream was for, measured against the defect as
+  originally stated: *an entry with one source gets split into different canonical places
+  and arrives on the knowledge graph unassociated.*
+
+  Scope: journal entries that name a place in `place_name` AND mention a person or org —
+  100 of them on the owner's node.
+
+  | | before | after |
+  |---|---|---|
+  | carrying **both** the person and the place on the entry | 13 | **100** |
+  | person–place pairs the graph can even see | 51 | **228** |
+  | …with an edge between them | 48 | **228** |
+  | person↔place `co_occurrence` edges, whole graph | 70 | **143** |
+  | active `co_occurrence` edges | 753 | 1,016 |
+
+  **87 of 100 entries** had a person and a place that co-occurred in reality and the graph
+  held no pair for them at all — not a missing edge, a missing pair. The place mention sat
+  on the `-loc` child; the person sat on the parent; nothing joined them.
+
+  The case this started from, `tl-14eb4cfe` — "Steady progress on the site refresh",
+  written at Rivermouth- 35 Chapel, mentioning Claude:
+
+      before:  Claude (person) on the parent, Rivermouth- (place) on the -loc child, 0 edges
+      after:   Rivermouth- 35 Chapel  --co_occurrence-->  Claude
+
+  Note the edge names the REAL place, not the truncated stub. Removing the three stub
+  place entities was what made that resolve correctly: `Rivermouth-` had absorbed
+  `Rivermouth- 35 Chapel` and five other distinct places as aliases, so before the
+  cleanup the edge pointed at a node meaning "a residence, a climbing gym, a comedy club, a
+  hotel, a cafe and a restaurant".
+
+  Applied to the live database with a backup at
+  `~/.topos/backups/database-pre-graph-rederive-20260827T201549Z.db`: 3 stub place entities
+  and 10 placeholder entities removed, 724 structured-field mentions written, 4,027
+  observation windows repaired, evidence edges rebuilt. `integrity_check` ok.
+
+- **An entity's observation window now describes the evidence, not the extractor.** `[E:entities]`
+  `first_seen` and `last_seen` were both stamped `datetime('now')` at mint, and
+  `record_mention` only ever advanced `last_seen` UPWARD. So `first_seen` meant "when
+  extraction happened to reach this entity" and `last_seen` sat ahead of the newest real
+  mention — the window was fiction at both ends, and a max-with-the-incumbent could never
+  repair either, because the wrong value was already the extreme one.
+
+  Measured on the owner's node 2026-08-27, of 989 mentioned entities: `first_seen` late for
+  **835** (worst by 1,191 days — `plurigrid`, first mentioned 2023-04-11, stamped
+  2026-07-15) and `last_seen` ahead of the latest mention for **699**. "Entities first seen
+  before 2024" returned nothing on a node holding three years of history, and the value is
+  read by the dossier handed to the LLM, the graph node property exposed to queries, and
+  the API.
+
+  Arrival order is not chronological order — a backfill extracts newest-first — so the
+  mention being written is not the bound. Both ends are now derived from the mentions
+  table by the same expression in both places that maintain them:
+
+  - `record_mention` recomputes the window on every write, keeping new data honest;
+  - `_recount_entity_mentions` repairs what is already stored. Placed there because that
+    function already rebuilds count-from-mentions, so **every scrub and rebuild corrects
+    the window as a side effect** — no migration for anyone to remember.
+
+  Entities with no mentions are left alone: a materialized hub (goal, topic, conversation)
+  is a vertex, not a sighting, and inventing a window for it from no evidence would be a
+  different lie. Gated by `tests/features/test_entity_observation_window.py`.
+
+- **Ingest and rebuild now fold co-occurrence identically.** `[E:entities]`
+  Two paths write `co_occurrence` edges from the same evidence, and they had their own
+  copies of the fold. `maintenance.rebuild_evidence_edges` truncated each record to 8
+  entities with the comment "(mirrors the ingest path)"; `entities_job._resolve_into_spine`
+  had **no cap at all**.
+
+  That is not cosmetic. The rebuild DELETEs the whole active co-occurrence set and
+  re-inserts, unconditionally and with no `valid_to` tombstone, so every maintenance run
+  silently destroyed the edges ingest had created above the cap. Reconstructed: for an
+  11-entity record, ingest writes 55 pairs and the shipped rebuild writes 28 — **27
+  deleted, with nothing recording that they had existed.** The graph was not a function of
+  the evidence, it was a function of which writer ran last.
+
+  The truncation was also arbitrary in a way a cap should never be. Insertion order came
+  from the read query's `ORDER BY COALESCE(event_at, created_at)`, which orders ACROSS
+  records; within a record every mention shares an `event_at`, so the surviving 8 were
+  decided by SQLite's tie-break — in practice the order the extractor emitted spans. "Who
+  shows up alongside X" was answered by paragraph position, and would change under a model
+  swap with no schema change to signal it.
+
+  - Single `edges.record_cooccurrence_pairs`, called by both paths, sorted so the retained
+    set is deterministic.
+  - `CO_OCCURRENCE_MAX_ENTITIES_PER_RECORD = 32`. A bound is kept (the fold is O(n²) and a
+    long-document connector could hand it a hundred entities), but 8 was not it: measured
+    on the live corpus, 3,372 records carry ≤8 entities and the cap never touched them,
+    exactly 5 exceed it, and the largest carries 13. The old cap bought no protection
+    worth having and cost 166 pair-observations.
+  - Gated by `tests/features/test_cooccurrence_fold_agreement.py`. The load-bearing case
+    drives the real rebuild against the real ingest fold over one corpus and compares the
+    produced edge sets — asserting on a shared constant would pass even if one path
+    stopped calling the helper.
+
+- **Unterminated redaction placeholders no longer become entities.** `[E:entities]` `[E:privacy]`
+  `is_valid_entity_surface` rejected placeholders with `re.search(r"\[[A-Z][A-Z_]*\]")` — a
+  pattern requiring the closing bracket. NER spans cut THROUGH a placeholder as often as
+  around one, so `Vish[NAME`, `Ashford[DATE`, `Dallas.[NAME` and `West Virginia.[NAME`
+  sailed past a guard written specifically to stop them.
+
+  Measured on the owner's node 2026-08-27: 14 such surfaces reached the spine and minted 9
+  entities, **5 of them typed `person`** — phantom people named after the privacy
+  mechanism meant to remove the real ones. Of the 8 live shapes the old pattern caught 4
+  and missed 4; the new one catches all 8 and would refuse 80 of the 82 bracket-bearing
+  entity names currently in the registry. `purge_junk_minted_entities` uses the same
+  predicate, so the existing ones become reapable.
+
+  Gated by `tests/features/test_entity_surface_placeholder_guard.py`, driven off
+  `privacy_filter.ENTITY_PLACEHOLDERS` rather than a hand-written list — a new placeholder
+  token the guard does not recognise becomes an entity, so the producer is read directly.
+  The controls carry equal weight: this sits on the mint path for every entity, so a
+  pattern that over-matches silently deletes real names (`AT&T`, `Coca-Cola`,
+  `Jean-Luc Picard`, `E[3]` are all asserted to survive).
+
+  **Not changed, after investigation:** truncated compound surfaces like `Rivermouth-`.
+  The register read this as a `normalize_name` defect, but `resolve()` calls
+  `clean_entity_surface` first, which strips the trailing delimiter and leaves
+  `Rivermouth` — a real neighbourhood that must resolve. The three stub place entities
+  on the live node (`Northgate-` 60 mentions, `Rivermouth-` 31 over 6 absorbed places,
+  `NYC-` 8) predate that cleaning: they are stale DATA, not an open hole, and a guard for
+  them would be dead code reading as live protection. Their mentions all carry the
+  truncated surface, so the real place is not recoverable from the mention — but it IS in
+  `journal_entries.place_name`, which the new structured-field pass reads, so a
+  re-derivation re-attaches the correct places.
+
+- **A black hole could stop matching its own name.** `[E:privacy]`
+  `entity_blackholes.normalized_name` is computed by `normalize_entity_name` at write time
+  and then frozen. Any later change to that function silently invalidates every row
+  written before it, and nothing re-derives them.
+
+  Found while running the retraction against the live database. `Old Harbor- Rey's
+  Place` was flagged 2026-08-07 and stored as `old harbor- rey s place`; the current
+  function yields `old harbor- rey place`, because a one-character token is now
+  dropped. **`blocks_name()` returned False for the entity's own exact name.** Combined
+  with the entity row having already been reaped, that black hole had no protection left
+  at all — the id filter was empty and the name filter could not match. One of three live
+  black holes was in this state.
+
+  - `blackholed_name_terms()` now returns the stored normalization AND a fresh one derived
+    from `canonical_name`, so the read path self-heals through any future change to the
+    normalizer.
+  - New `renormalize_stored_names()` repairs the frozen column, because the LOOKUP paths
+    cannot tolerate the drift: `get()` and `is_blackholed()` match `normalized_name = ?`
+    against a freshly-normalized argument, so a stale row is unreachable by name and the
+    owner cannot even un-blackhole it through the UI. Idempotent; only rewrites rows that
+    actually disagree.
+
+- **Withdrawal now sees names hidden by encoding.** `[E:privacy]`
+  It greps stored strings, and those strings are not always the plain text a reader sees.
+  Two live misses, both leaving the protected name in place while the rebuild reported
+  `complete`: `signal_objects.payload_json` holds JSON, where `json.dumps` escapes a curly
+  apostrophe to `\u2019` — so the raw column read `Jeff\u2019s` and normalized to
+  `jeff u2019s`, matching nothing; and an embedding's `search_text` carried the name
+  HTML-escaped as `Jeff&#39;s`. `_mentions` now tests a JSON-decoded and an HTML-unescaped
+  variant alongside the raw text, which is cheaper and more honest than trying to
+  canonicalise every producer.
+
+- **The reap guard no longer trusts a stale snapshot of what is protected.** `[E:lifecycle]`
+  `_delete_entity_cascade` accepted the hoisted protected-set the selectors compute for
+  their candidate filter, which made the backstop useless in exactly the case it exists
+  for: a black hole applied BETWEEN the candidate scan and the delete was invisible,
+  because the snapshot predated it. Found by writing the test for the retention counter,
+  not by reading the code. The cascade now resolves the set itself — one indexed read of a
+  table holding a handful of rows, against a loop that deletes tens of entities.
+  The selectors keep their hoist; it is a filter, not the guarantee.
+
+  Deletion reports also gained `entities_retained_protected` and
+  `junk_entities_retained_protected`. "Nothing was orphaned" and "something was protected"
+  are different outcomes, and the junk scrub used to increment `junk_entities_removed`
+  without checking whether the cascade had actually removed anything — a false receipt for
+  a row that is still there.
+
+- **A record that names an entity in its own column now carries that mention.** `[E:entities]` `[E:privacy]`
+  NER reads `content`. A journal entry's place lives in `place_name`, a declared column —
+  so the record naming the place got no mention for it, while the fan-out child minted
+  from that same column got one instead. Measured on the live node 2026-08-27: **333 of
+  362 `journal_entries` rows carry a non-empty `place_name` and have no place mention of
+  their own**; place mentions sit 178 on children against 648 on parents, and 51 of the 69
+  distinct place names already resolve to a place entity — the resolution existed, it was
+  attached to the wrong row.
+
+  New `features/entities/structured_fields.py` declares which
+  `(canonical table, column)` pairs hold a whole-cell entity and records a mention against
+  the record whose column holds it, folded into `entities_by_record` BEFORE the
+  co-occurrence pass so the person in the prose and the place in the column land in one
+  bucket instead of two.
+
+  **This is what replaces widening the black hole**, per the decision taken 2026-08-27.
+  Protecting a place must not hide a day's journal entry because a *sibling row* named it.
+  But these records are not siblings of the evidence — they contain it — so the parent is
+  blocked *because the parent names it*, and a record that never names the entity is still
+  never blocked. Strictly narrower than unit-scoping, and it closes the same leak.
+
+  Gated by `tests/features/test_structured_field_mentions.py`, which pins the no-widen
+  property directly (a second entry with a different place must not acquire the first
+  one's) and refuses free-text columns in the declaration — `content` there would mint an
+  entity per journal entry named after the entry's prose.
+
+- **A black-hole withdrawal now clears the retrieval index, not just the prose.** `[E:lifecycle]` `[E:privacy]`
+  `rebuild_for_blackhole` covered six prose surfaces and marked itself `complete`. It
+  never touched `signal_embeddings`, its FTS index, its ANN companion rows, or
+  `user_goals` — so on the owner's node a black hole reading `rebuild_state='complete'`
+  left the protected place name live in `text_preview`, `search_text` and the full-text
+  index, still returnable by search. `user_goals` was reached by nothing at all, and it
+  has its own unfiltered path into an answer (`retrieval._load_user_goals` reads the table
+  directly, bypassing the embedding corpus).
+
+  The canonical/derived line the design draws is kept — canonical rows are the owner's own
+  record and read-time filtering is what protects them. What changed is recognising that
+  **the embedding lane is derived, not canonical**, and it is what a search actually reads.
+
+  - Matching embeddings are DELETED rather than blanked. A blanked embedding is a
+    zero-information vector still occupying a point in the ANN index — the `[ADDRESS]`
+    pathology, where 126 identical placeholder vectors sit equidistant from every
+    address-shaped query — and unlike a canonical row it is cheap to lose, because
+    re-enrichment rebuilds it if the owner lifts the black hole.
+  - Ordering is load-bearing: ANN companions go first through `SQLiteVectorIndex` (it needs
+    the ids), then the base DELETE fires `signal_embeddings_ad`, the external-content FTS5
+    delete trigger — the only thing that takes the term out of the full-text index. A raw
+    DELETE leaves the ANN shadow behind.
+  - The report gained `embeddings_withdrawn` and `goals_withdrawn`. Silent removal is as
+    bad as silent retention.
+
+  Gated by `tests/evals/privacy/blackhole/test_withdrawal_completeness.py`, driven off a
+  single declared `DERIVED_TEXT_SURFACES` list so adding a surface to one side without the
+  other fails rather than passing quietly. Verified before/after against a reconstruction
+  of the shipped behaviour: `status=complete` with embeddings=2, goals=2, FTS=1 → 0, 0, 0.
+
+- **A fan-out child can no longer mint a goal.** `[E:enrichment]`
+  Follows from the table-stamp fix: `GoalExtractionJob` already gated on belief role and
+  reads `_table` only, so a machine-generated place string misfiled as a journal entry
+  resolved `authored` and went to the model. That is where "Watch Northgate- The Foundry"
+  and "Seeking information about the book 'The Foundry' by Northgate" came from. Correctly
+  stamped it resolves `ambient` and never reaches extraction.
+
+  No minimum-content gate was added, deliberately. Measured against the live corpus:
+  `location_events` produced 77 of 77 goals from short sources — all fabricated, all now
+  blocked by provenance — while `journal_entries` produced only 7 of 1,721 from sources
+  under 40 characters, and those include legitimate ones ("Accomplished: Learn about
+  Alpha" → "Review Beta specs"). Verbatim echoes of the source were 3 of 2,019. A length
+  threshold would delete real goals to catch a residue the role gate already covers; the
+  gate that works is provenance, not size. `tests/enrichment/test_goal_gate_fanout_child.py`
+  pins that distinction — one case gives the child long, goal-shaped content and requires
+  it to still be refused, so swapping the role gate for a length gate turns it red.
+
+- **A canonical record's own table declaration now beats the batch's group default.** `[E:ingestion]` `[E:privacy]`
+  `run_post_canonical_pipeline` filled the table marker in with
+  `rec.setdefault("_table", <group default>)`, which only consults `_table`. A fan-out
+  child declares `canonical_table='location_events'` and leaves `_table` unset, so it was
+  overwritten with `journal_entries` — the group its PARENT belongs to. Five readers
+  resolve the table as `_table or canonical_table`, so the wrong value won.
+
+  One omission, measured across the owner's node 2026-08-27, put all 362 place rows in the
+  wrong table for: the ingest-time PII disclosure write (addressed to `journal_entries` by
+  a location id — zero rows matched, `True` returned); the grant bound on entity mentions
+  (a journal-only grant admitted location evidence, a location grant admitted nothing);
+  the embedding dimension (360 rows filed as `wellbeing`, leaving the shipped `places`
+  dimension empty); the belief-role gate in `goal_extraction_job`, which reads `_table`
+  only and so treated a machine-generated place string as the owner's own journal writing;
+  and `journal.category.mix`, over-reported by 28%.
+
+  `canonical_table_for_message` already encoded the right precedence — `_table`, then the
+  record's own `canonical_table`, then the group. New `stamp_canonical_table` applies it
+  at both sites where the pipeline was guessing, so this fixes the class, not the one
+  fan-out.
+
+  **Sequenced with the registration below, and the order is load-bearing.** These children
+  are redacted today *only because* they are misfiled: `fields_for_table('journal_entries')`
+  is `("content",)` and the child's content is its place name. Correcting the stamp on its
+  own would have turned 138 masked embeddings back into raw home and gym addresses.
+
+- **One enrichment record now writes one derived row, not two.** `[E:enrichment]`
+  Two writers persist `message_entities` / `message_topics` / `message_sentiment` /
+  `user_goals` from the same batch of record dicts — `DerivedTablesManager`, which knows
+  the typed columns, and `job_writer._write_wiki_table`, which adds provenance and
+  `spec_version`. Both resolved the row id independently as
+  `record.get(<id_field>) or uuid4()`, so every record produced two rows under two ids,
+  the second carrying none of the typed columns.
+
+  Measured on the live node 2026-08-27: `message_entities` held 25,146 typed rows and
+  25,128 untyped twins over the same 4,924 records, 4,919 of them pairing exactly 1:1;
+  `user_goals` was exactly half real. **Every derived-row count in the product read 2x
+  reality** — the "154 fabricated goals" found in the fan-out audit is 77 written twice.
+
+  - New `_stable_row_id` mints the id once and stamps it back onto the shared record
+    dict, so the provenance write becomes an `ON CONFLICT` update of the row the typed
+    writer just inserted rather than an insert of a twin.
+  - The typed writers SKIP a record whose typed field is empty (`if not entity_text:
+    continue`). `_write_wiki_table` now takes `typed_writer_ran` and declines an
+    unstamped record on that path, which is the other way a bare row with a NULL typed
+    column was created. With no `tables_manager` it is the only writer, so the original
+    mint-and-insert behaviour is kept — dropping the row there would lose the data.
+  - Gated by `tests/enrichment/test_no_double_write.py`. Both halves were verified to be
+    independently sufficient against a reconstruction of the shipped state, which
+    reproduces the live signature exactly: 2 rows for 1 record, 1 untyped.
+
+  Note for anyone reading dashboards: derived-row counts will HALVE. That is the
+  correction, not a loss — the second row never held anything.
+
+- **Deleting a fan-out child no longer destroys its parent's rows.** `[E:lifecycle]`
+  `journal_location_fanout` writes the PARENT's canonical id into the child's
+  `source_record_id`, and `_delete_upstream_rows` treats that column as an upstream key
+  — so deleting one `location_events` row deleted 1,073 rows belonging to the
+  `journal_entries` row it was split from (its flat source row, timeline entries, entity
+  mentions, triage verdict, cluster membership) while the journal entry itself survived,
+  invisible to retrieval, the graph and the timeline. Silent data loss at a user-facing
+  control, on `with_upstream` and `full_lineage` alike.
+
+  New `_parent_canonical_row` discriminates the two meanings `source_record_id` carries,
+  exactly rather than heuristically: a value that differs from the row's own id AND
+  resolves to a row in a DIFFERENT canonical table is a parent pointer, because a
+  source-system id has no reason to be another canonical row's primary key. On the live
+  node that separates the two populations cleanly — all 490 `journal_entries` rows are
+  self-referential, all 362 `location_events` rows point at a real parent.
+
+  When a parent pointer is found the upstream sweep is re-anchored on the row's own id, so
+  it can only reach rows that belong to it. The parent is carried on new
+  `LineageAnchor.parent_canonical_table` / `parent_canonical_id` fields — reported, never
+  deleted on. Expanding a delete across a split is a separate named scope, not a side
+  effect of resolving lineage, and `row_only` stays literally one row.
+
+  **Four corrections from adversarial review of the first cut:**
+
+  - The match is now constrained to the same `source_id`. Ids are unique only within a
+    source, so a cross-connector collision re-anchored the sweep — and re-anchoring
+    NARROWS a legitimate delete, which fails silently rather than loudly. Verified: a
+    chatgpt row pointing at grow_journal's `tl-1` resolved as a parent without the
+    constraint and does not with it.
+  - The probe no longer excludes the row's own table. A declared `fan_out` mints children
+    into whatever table it names — the `canonical_field_map` docstring's own GitHub
+    example fans commits into `journal_entries`, the same table the base row lands in — so
+    that shape was exempt by construction. The `source_record_id == row_id` guard is what
+    keeps a row from being its own parent.
+  - New `CANONICAL_ROW_ID_COLUMN` in `data_explorer_tables` replaces the borrowed
+    `_NATIVE_ID_COL`, which covered 10 of the 14 canonical tables: a parent in `documents`,
+    `conversations` or `ai_chat_conversations` was never detected and the destructive
+    delete survived for it. Tables with no single-column identity are absent deliberately
+    and pinned as such — `contact_identifiers` is keyed on
+    `(dataset_id, source_id, identifier)` and its `contact_id` is a non-unique FK, so
+    probing it returned a value that names no row.
+  - The probe is skipped on `row_only`, where its result is discarded — it scans every
+    canonical table per row.
+
+  The retained parent is now REPORTED: `RowDeleteResult.parents_retained` plus a
+  `parent_retained` table action. An under-delete that says nothing reads as a complete
+  one, and this is the seam the future `observation` scope attaches to.
+
+  A correction to this entry's own earlier claim: `journal_entries` is not uniformly
+  self-referential. Measured on the live node — 369 rows are (`grow_data_file`,
+  `grow_journal`) and 121 carry a genuine external `github_activity` key
+  (`push:{repo}:{sha}:{sha}`) that resolves to no canonical row. Both fall through, which
+  is what the rule is for: it keys on "resolves to another canonical row", not "differs".
+
+  Gated by `tests/topos/test_delete_fanout_child_lineage.py`, in both directions: deleting
+  the child must not reach the parent, and deleting the parent must still reach everything
+  genuinely its own — the second guards against a "fix" that just switches the upstream
+  sweep off.
+
+- **A black hole no longer switches itself off during housekeeping.** `[E:lifecycle]`
+  `derived_scrub` contained zero references to the black-hole tables, and
+  `_delete_orphan_entities` had no exemption for a protected entity. That made the
+  maintenance path a silent way to revoke protection:
+
+      mentions removed -> `mention_count` hits 0 -> the next `rebuild_evidence_edges`
+      drops the entity's co-occurrence edges -> the next orphan sweep DELETES the
+      entity -> `blocked_record_ids()` and `sql_exclusion()` both return empty
+
+  Both halves of `BlackholeGuard`'s exact filter resolve from the entity id, so
+  reaping the row degrades a hard protection to the read-time substring name scan
+  without changing any flag. One of three black holes on the owner's node had already
+  been through it: `rebuild_state='complete'` with the `entities` row gone and the
+  protected name still live in five columns plus the FTS index.
+
+  - New shared `_protected_entity_keys` / `_is_protected`, keyed on **both**
+    `entity_id` and `normalized_name`. The name key is not redundant: it covers a
+    re-mint under a fresh id after a reap already happened, and `BlackholeStore`'s
+    pre-emptive protection of a name nothing has minted yet.
+  - The refusal lives in `_delete_entity_cascade`, the one door every entity deletion
+    passes through — not only in the two selectors that call it. A keep-clause is
+    something the next caller can forget, and this module had three reap paths that
+    had each grown their own copy of the keep rules. The selectors filter as well, so
+    their reported counts stay honest.
+  - `purge_junk_minted_entities` was an independent second route: the C4 predicate
+    rejects trailing-hyphen, apostrophe-bearing, multi-token surfaces — exactly the
+    shape of the compound place name that was reaped.
+  - Reads fail OPEN on a missing table (nothing to protect) and RAISE on any other
+    error. An unreadable protection list must stop a scrub rather than resolve to
+    "nothing is protected".
+  - Gated by `tests/evals/privacy/blackhole/test_reap_resistance.py` under the
+    existing tier-1 `bhlr` marker. The load-bearing test is not the known case but the
+    **invariant**: parametrized over every scrub entry point, protection may never
+    narrow, and record blocking may shrink only for records the operation was asked to
+    delete.
+
+    Reviewing the gate found two of its three original assertions were decorative —
+    `blackholed_entity_ids` and `blackholed_name_terms` read `entity_blackholes`
+    directly, and no scrub touches that table, so they could never shrink. The live
+    failure is exactly the case they miss: the flag row survives while the `entities`
+    row it names is deleted. A fourth component now resolves the flag THROUGH
+    `entities`, which is the one that can actually narrow. The cascade test asserts the
+    database rather than the returned dict, and the junk-scrub case asserts its own
+    premise — it had used the live compound place name on the assumption that
+    `is_valid_entity_surface` rejects it, and it does not, so that test proved nothing
+    while passing. It now uses `"Ana"`, which the short-name rule genuinely rejects.
+
+    A source-walking `test_no_unguarded_writer_deletes_from_entities` fails on any
+    `DELETE FROM entities` outside an explicit allowlist, because a hand-maintained
+    parametrization cannot notice the fifth door.
+
+### Changed
+- **Black-hole withdrawal covers `PlaceContext` and `AvailabilityWindow`.** `[E:privacy]`
+  Both carry a protected place name in `display_band` — 76 and 406 rows on the owner's node
+  — and both sat outside every withdrawal.
+
+  The list stays a curated list, after two attempts to replace it with a mechanical rule
+  both broke something the existing suite defends. "Withdraw everything derived" deleted
+  the id-joinable facts that `test_rebuild_leaves_id_joinable_facts_intact` protects
+  deliberately: a `fact` is keyed `fact:ent_<id>:…`, so read-time filtering already covers
+  it and withdrawing it would delete owner truth that is safely hidden. "Leave anything
+  carrying the entity id" then kept the dossiers, which are id-keyed too. The line between
+  a structured claim worth keeping and a generated restatement worth withdrawing is a
+  judgment, so it stays written down — `PROSE_OBJECT_TYPES + UNREACHABLE_OBJECT_TYPES`,
+  with the second named for what it means: no spine id anywhere in the object, so nothing
+  but the name text identifies the protected entity.
+
+  Gated from both sides — every member of the list is exercised, and an id-keyed fact is
+  asserted to survive. Discovering a type the list has fallen BEHIND on needs real object
+  shapes rather than synthesized ones (a planted `fact` with no entity id is a shape that
+  never occurs), so that check belongs against the live database, not the unit suite.
+
 ### Added
+- **`scripts/retract_fanout_artifacts.py`** — retract derived rows from fan-outs that
+  should never have produced them. `[E:lifecycle]`
+
+  Three populations, three recovery rules, which is why this is a script with a plan/apply
+  split rather than a migration. Measured on the owner's node 2026-08-27 and verified
+  end-to-end against a 513MB snapshot of it:
+
+  - **fabricated goals** — 154 `user_goals` rows over 63 records (77 real plus 77 untyped
+    twins from the double write), 76 distinct texts, which minted 37 `goal` entities
+    carrying 54 edges. Those entities are exempt from orphan pruning by an explicit
+    `goal_%` keep rule, so nothing else would ever remove them.
+  - **the retired GitHub per-commit fan-out** — the code path went on 2026-08-14, the data
+    did not: 121 `journal_entries` rows feeding 485 stale relationship facts, 121
+    embeddings that duplicate an `activity_events` embedding verbatim, 121 duplicate
+    timeline rows, 196 mentions and 906 `message_entities`. The canonical rows go too —
+    retracting only the derived rows is not stable, since the next reprocess re-derives
+    them, and the same content is already on the sibling `activity_events` rows.
+  - **one unrecoverable orphan** — `tl-job-time-log-1-loc`: a timeline row with no
+    `location_events` row and no parent. It can only be deleted.
+
+  Dry run is the default and `--apply` is the only way to write. The database path is
+  required with no fallback to `~/.topos/database.db`, because a backfill that can find
+  the owner's live database on its own will eventually run against it by accident.
+  **A black-holed entity is never removed, whatever population it falls in** — protection
+  says "must not be reachable", not "must be gone", and removing the entity is the exact
+  failure this workstream started from.
+
+  **A bug this found, which only a real run could:** the first snapshot pass deleted 121
+  embeddings and left all 121 ANN companion rows behind — `signal_embeddings_vec_rowids`
+  stayed at 9,583 against a baseline of 0 orphans. `signal_embeddings_vec` is a vec0
+  VIRTUAL table, so without the sqlite-vec extension loaded every statement against it
+  raises; `delete_vec_rows` swallows that error, and `_sqlite_vec_ready` checks only that
+  the table exists in `sqlite_master`, not that the module is loaded. A plain
+  `sqlite3.connect` therefore removed the documents and left the vectors searchable — a
+  retraction that leaves the thing it retracted reachable. The script now loads the
+  extension, counts ANN orphans before and after, and **exits 3** rather than reporting a
+  clean run it did not achieve.
+
+  The gate missed it because it asserted FTS/base agreement only, which stayed green
+  throughout. It now asserts ANN orphan count directly, with a fixture that writes a real
+  vec0 row — a hand-inserted shadow row has nothing behind it, so no correct delete would
+  clean it and the test would fail for the wrong reason.
+
+  Snapshot verification: the owner's 369 real journal entries untouched, all 1,657
+  surviving `github:`-keyed facts still anchored to a live `activity_events` row (zero
+  orphaned), FTS/base/ANN all in sync at 9,462, `PRAGMA integrity_check` ok, dangling
+  timeline pointers REDUCED 80 -> 79 with none created, migrations re-apply cleanly and
+  the retrieval surfaces still read. A second run is a no-op. Gated by
+  `tests/topos/test_retract_fanout_artifacts.py`.
+
+- **A self-serve fan-out must declare where each child came from.** `[E:ingestion]`
+  `DeclaredFieldMapper._mint` writes only the declared columns, and `metadata_json` — the
+  channel the built-in location fan-out uses for its parent pointer — is reserved. A
+  declared fan-out therefore minted children with no link of any kind: strictly worse than
+  the built-in one, on the path the connector catalog advertises as self-serve.
+
+  `validate_canonical_field_map` now requires, for any block with a `fan_out`:
+
+  - `source_record_id`, declared and **record-scoped**. Both failures it prevents were
+    made by the built-in Python fan-outs first, which is the argument for enforcing them
+    in the spec rather than trusting the registerer: the retired GitHub per-commit fan-out
+    overwrote that column with a synthetic composite, and 0 of its 121 surviving children
+    join back to anything.
+  - the table's id column **item-scoped**. `_mint` checks only that an id resolved to a
+    non-empty string, so a record-scoped id template gives every item the same id — the
+    upserts overwrite each other and N-1 records are discarded in silence. A bare path
+    string defaults to record scope, which is the shape a registerer is most likely to
+    write by accident, so it fails rather than collapsing quietly.
+
+  The validator is the single gate on every declaration and
+  `DataSourceDefinition.__post_init__` calls it, so this covers bundled definitions and
+  runtime-installed sources alike. The control-plane bundled mirror is regenerated in the
+  same change — a spec-vocabulary change is exactly the kind that needs it, unlike a
+  column addition. Gated by `tests/sources/test_fan_out_requires_a_parent_link.py`,
+  including that the `declared_field_map` docstring's own worked example still validates
+  and that every bundled definition still passes.
+
+- **`location_events` joins the ingest-time disclosure pipeline.** `[E:privacy]`
+  It was absent from `CANONICAL_ID_COLUMN` and `PII_DISCLOSURE_FIELDS` and had no
+  disclosure columns at all, so every canonical place row on the node sat outside PII
+  disclosure while the pipeline reported success.
+
+  - `canonical_disclosure_v1` (additive, `always_run` — the spec map is the declaration)
+    adds `place_name_disclosure`, `place_name_disclosure_hash`,
+    `place_name_disclosure_model`.
+  - `PII_DISCLOSURE_FIELDS["location_events"]` is `("place_name", "content")`. `content`
+    is not a column and is there on purpose: the signal record carries the place name
+    twice, and `content` is the copy that gets embedded, FTS-indexed and fed to
+    extraction. The privacy layer redacts `msg[field]` in the in-flight record — which is
+    what protects those consumers — while the persisted write filters itself to columns
+    that exist. **Removing `content` from that tuple is a privacy regression, not a
+    tidy-up**, and `test_correcting_the_stamp_does_not_unredact_the_child` fails if anyone
+    does.
+  - `upsert_disclosure_fields` now derives the model column from the table's declared
+    fields instead of hardcoding `content_`, so provenance is recorded for tables that
+    disclose something else.
+
+  Gated by `tests/disclosure/test_fanout_table_stamp.py`, including two structural
+  invariants: every table declared for disclosure has an id column, and every declared
+  field that IS a raw column has a disclosure column to write into.
+
 - **Social graph curation: the owner's own corrections, as an overlay.** `[E:analytics]`
   New `person_graph_overlay` table (feature-owned, additive DDL — never a registry
   migration) plus `messenger_person_curate`, `messenger_person_undo`,
@@ -3194,7 +3920,7 @@ The machine-readable twin of each release is
   nouns are unique, so this was invisible in the duplication metrics: the
   labels got more distinct and less informative at the same time. A
   wrong-length answer now earns the same one bounded retry the generic and
-  link answers do, naming the specific fault ("\"Austin\" is one word. Keep it
+  link answers do, naming the specific fault ("\"Ashford\" is one word. Keep it
   and add what about it"). Length ranks BELOW duplication and genericness when
   the retry is scored, so a distinct bare noun still beats a repeat, and a
   stubbornly terse answer ships rather than reverting to `https / good / here`.
@@ -3202,7 +3928,7 @@ The machine-readable twin of each release is
   labels **81 → 34**, with distinctness unharmed (151 → **152 of 152**, worst
   duplication 2 → 1) and banned words still **0%**. Still short of the control
   arm's 90%: the 34 that remain are mostly real proper nouns (`Gmail`,
-  `Brooklyn`, `Smithers`, `Dialoguesai`), which the rule above arguably wants,
+  `Northgate`, `Smithers`, `Dialoguesai`), which the rule above arguably wants,
   alongside a weaker tail of bare common nouns (`Friend`, `Food`, `Account`).
   `scripts/eval_cluster_labels.py` reports `word_rule_share` and
   `single_word_labels` so this cannot regress unnoticed again.
@@ -3332,7 +4058,7 @@ The machine-readable twin of each release is
   never seen in the data is not something to merge into — contacts included,
   because an address book is not a list of important people, and 35 of 39 open
   contact questions offered a never-mentioned contact. And `"Altman's"`,
-  `"Williamsburg-"` and text redacted to `[NAME]` are no longer identities.
+  `"Rivermouth-"` and text redacted to `[NAME]` are no longer identities.
 - `[E:entities]` Orphan cleanup stops reaping the vertices derivation just
   minted. They carry ordinary `ent_` ids, so neither the type nor the id-prefix
   exemption saw them: every scrub deleted 173 mention-less entities on a live

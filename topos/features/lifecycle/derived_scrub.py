@@ -32,10 +32,143 @@ from ...storage.db.write_gate import batched_writes, commit_connection, with_db_
 logger = logging.getLogger("topos.features.lifecycle.derived_scrub")
 
 
+# ------------------------------------------------------- protected entities
+
+
+def _protected_entity_keys(conn: sqlite3.Connection) -> tuple:
+    """``(entity_ids, normalized_names)`` a scrub may never reap.
+
+    A black-holed entity must survive its own housekeeping. ``BlackholeGuard``
+    resolves the *exact* half of its filter from the entity id — both
+    ``blocked_record_ids()`` (joining ``entity_mentions``) and
+    ``sql_exclusion()`` — so deleting the row silently empties that half and
+    degrades a hard protection to the read-time substring name scan. Nothing in
+    this module used to know the black-hole tables existed, and the reap chain
+    is quiet: mentions removed -> ``mention_count`` hits 0 -> the next
+    ``rebuild_evidence_edges`` drops the entity's co-occurrence edges -> the
+    next orphan sweep deletes the entity.
+
+    Measured on the live node 2026-08-27: ``Old Harbor- Rey's Place`` carried
+    ``rebuild_state='complete'`` while its ``entities`` row was gone, and the
+    protected name still sat in ``journal_entries.place_name``,
+    ``location_events.place_name``, ``grow_journal_sessions.location``, the
+    embedding preview, the search text, and the FTS index.
+
+    Both keys are returned because they protect different things. The id covers
+    an entity the flag is bound to. The normalized name covers the two cases the
+    id cannot: a re-mint under a fresh id after a reap already happened, and
+    ``BlackholeStore``'s pre-emptive protection of a name that has no entity
+    yet (``bind_entity_id``).
+
+    Fails OPEN on a missing table only — a database with no black-hole schema
+    has nothing to protect. Every other error RAISES: an unreadable protection
+    list must stop the scrub, because the alternative is proceeding on the
+    assumption that nothing is protected, which is the exact failure this
+    function exists to prevent.
+    """
+    ids: Set[str] = set()
+    names: Set[str] = set()
+    if not _table_exists(conn, "entity_blackholes"):
+        return ids, names
+    from .blackhole import BlackholeStore
+
+    store = BlackholeStore(conn)
+    try:
+        ids = set(store.blackholed_entity_ids())
+        # blackholed_name_terms() folds in aliases_json. Reading normalized_name
+        # alone made the scrub protect a strict SUBSET of what the guard
+        # protects, so an entity minted under a protected ALIAS was reapable by
+        # every path this module owns while the guard was still filtering it.
+        names = set(store.blackholed_name_terms())
+    except sqlite3.Error as exc:  # noqa: BLE001
+        logger.error(
+            "scrub: could not read entity_blackholes (%s) — refusing to reap any entity",
+            exc,
+        )
+        raise
+    return ids, names
+
+
+def is_entity_protected(
+    conn: sqlite3.Connection, entity_id: str, normalized_name: Optional[str] = None
+) -> bool:
+    """Public predicate for writers OUTSIDE this module that delete entities.
+
+    ``_delete_entity_cascade`` was described as "the one door every entity
+    deletion passes through". That was wrong, and an adversarial review found
+    four more doors, two of which reap a protected entity in the same pass this
+    module refuses to:
+
+      * ``fact_materializer.materialize_signal_objects_to_graph`` — its own
+        value-surface purge, which ``maintenance.rebuild_entity_graph`` calls two
+        steps AFTER the guarded orphan sweep;
+      * ``ExclusionStore.exclude_entity`` — deletes the entity and every mention
+        while deliberately leaving the canonical rows, which is precisely the
+        shape that empties ``blocked_record_ids()`` and serves the records;
+      * ``EntityResolver.merge_entities`` — rebinds the flag onto the surviving
+        unrelated entity;
+      * ``consolidation.split_surface`` — moves alias mentions to a fresh
+        unprotected entity.
+
+    Each of those now calls this. Anything new that deletes from ``entities`` or
+    repoints ``entity_mentions`` must call it too; the bhlr gate has a discovery
+    test that fails on an unguarded ``DELETE FROM entities``.
+    """
+    return _is_protected(conn, entity_id, normalized_name)
+
+
+def _is_protected(
+    conn: sqlite3.Connection,
+    entity_id: str,
+    normalized_name: Optional[str] = None,
+    *,
+    protected: Optional[tuple] = None,
+) -> bool:
+    """True when this entity is black-holed and must not be deleted.
+
+    ``protected`` lets a caller hoist the lookup out of a loop; omitting it
+    resolves per call. The default is deliberately the safe one — a future
+    caller that forgets to pass the set still gets the protection.
+    """
+    ids, names = protected if protected is not None else _protected_entity_keys(conn)
+    if not ids and not names:
+        return False
+    if str(entity_id) in ids:
+        return True
+    if normalized_name and str(normalized_name) in names:
+        return True
+    return False
+
+
 # ---------------------------------------------------------------- entities
 
 
 def _recount_entity_mentions(conn: sqlite3.Connection) -> int:
+    """Recompute mention_count AND the observation window from surviving mentions.
+
+    The window was fiction at both ends. ``_create_entity`` stamped both
+    ``first_seen`` and ``last_seen`` with ``datetime('now')`` at mint time, and
+    ``record_mention`` only ever advanced ``last_seen`` upward — so ``first_seen``
+    meant "when extraction happened to reach this entity" and ``last_seen`` sat
+    ahead of the newest real mention. Measured on the owner's node 2026-08-27, of
+    989 mentioned entities: ``first_seen`` was late for **835** (worst by 1,191
+    days — ``plurigrid``, first mentioned 2023-04-11, stamped 2026-07-15) and
+    ``last_seen`` was ahead of the latest mention for **699**.
+
+    Every surface reads it: the dossier handed to the LLM, the graph node
+    property exposed to queries, the API. "Entities first seen before 2024"
+    returned nothing on a node holding three years of history.
+
+    ``record_mention`` now lowers ``first_seen`` as it raises ``last_seen``, which
+    keeps new writes honest. This is the repair for everything already stored, and
+    it belongs here because this function already rebuilds count-from-mentions —
+    so every scrub and rebuild corrects the window as a side effect, with no
+    separate migration to remember to run.
+
+    Entities with NO mentions are left alone. A materialized graph hub (goal,
+    topic, conversation) is a vertex, not a sighting; it has no observation window
+    and inventing one from nothing would be a different lie.
+    """
     cursor = conn.execute(
         """
         UPDATE entities SET mention_count = (
@@ -43,7 +176,65 @@ def _recount_entity_mentions(conn: sqlite3.Connection) -> int:
         )
         """
     )
-    return int(cursor.rowcount or 0)
+    recounted = int(cursor.rowcount or 0)
+    try:
+        conn.execute(
+            """
+            UPDATE entities SET
+                first_seen = COALESCE((
+                    SELECT MIN(NULLIF(COALESCE(m.event_at, m.created_at), ''))
+                    FROM entity_mentions m WHERE m.entity_id = entities.entity_id
+                ), first_seen),
+                last_seen = COALESCE((
+                    SELECT MAX(NULLIF(COALESCE(m.event_at, m.created_at), ''))
+                    FROM entity_mentions m WHERE m.entity_id = entities.entity_id
+                ), last_seen)
+            WHERE EXISTS (
+                SELECT 1 FROM entity_mentions m2 WHERE m2.entity_id = entities.entity_id
+            )
+            """
+        )
+    except sqlite3.Error as exc:  # noqa: BLE001
+        logger.debug("observation-window repair skipped: %s", exc)
+    return recounted
+
+
+def ref_record_key(ref: Any) -> Optional[tuple]:
+    """``(table, record_id)`` a provenance ref points at, whatever key it used.
+
+    THE single reader, because there were several and they all read one key.
+    Producers disagree: ``facts/extract.py``, ``facts/llm_extract.py``,
+    ``derivation/surfaces.py`` and ``entities/dossier.py`` write
+    ``{"table":…, "record_id":…}``, while ``signal/typed_stores`` and the
+    derivation extraction path write ``{"table":…, "id":…}``. Both are legitimate
+    and neither is going away on its own.
+
+    Every sweep read ``record_id`` only. Measured on the owner's node 2026-08-27
+    across 4,577 active objects: **4,229 refs key on ``id`` and 307 on
+    ``record_id``**, so the sweeps saw 7% of the provenance in the database and
+    silently treated the rest as unattributable.
+
+    A ``day``-keyed ref (303 of them) is deliberately NOT a record key — those are
+    day-scoped aggregates citing a date, not a row — so this returns None for them
+    rather than inventing a record id that resolves to nothing.
+    """
+    if not isinstance(ref, dict):
+        return None
+    table = str(ref.get("table") or "").strip()
+    record_id = str(ref.get("record_id") or ref.get("id") or "").strip()
+    if not record_id:
+        return None
+    return (table, record_id)
+
+
+def ref_record_ids(refs: Any) -> List[str]:
+    """Just the record ids from a ref list, both key shapes."""
+    out: List[str] = []
+    for ref in refs if isinstance(refs, list) else []:
+        parsed = ref_record_key(ref)
+        if parsed and parsed[1]:
+            out.append(parsed[1])
+    return out
 
 
 def _delete_entity_cascade(conn: sqlite3.Connection, entity_id: str) -> Dict[str, int]:
@@ -51,7 +242,49 @@ def _delete_entity_cascade(conn: sqlite3.Connection, entity_id: str) -> Dict[str
 
     Closes the open dossier (valid_to) rather than deleting the signal_object
     row — same provenance-preserving choice as orphan prune.
+
+    Refuses outright for a black-holed entity. The check lives HERE as well as in
+    the selectors that call it: a keep-clause is something the next caller can
+    forget, and this module has three reap paths that each grew their own copy of
+    the keep rules. The selectors filter so their reported counts stay honest;
+    this is the guarantee.
+
+    It deliberately resolves the protected set ITSELF rather than accepting the
+    hoisted one the selectors compute. Taking the caller's snapshot made the
+    backstop useless in exactly the case it exists for — a protection applied
+    between the candidate scan and this delete was invisible, because the
+    snapshot predated it. The lookup is one indexed read of a table that holds a
+    handful of rows, against a loop that deletes tens of entities; correctness
+    wins that trade easily. Skips and logs rather than raising —
+    this is an internal maintenance path, and failing an unrelated scrub gives
+    the caller nothing it can act on. ``M4``'s invariant test is what turns a
+    skip into a red build.
     """
+    normalized_name: Optional[str] = None
+    try:
+        row = conn.execute(
+            "SELECT normalized_name FROM entities WHERE entity_id=?", (entity_id,)
+        ).fetchone()
+        if row:
+            normalized_name = str(row[0] or "") or None
+    except sqlite3.Error:
+        normalized_name = None
+    if _is_protected(conn, entity_id, normalized_name):
+        logger.warning(
+            "scrub: refused to delete black-holed entity %s (%s) — "
+            "a selector let a protected entity reach the cascade",
+            entity_id,
+            normalized_name or "?",
+        )
+        return {
+            "mentions": 0,
+            "edges": 0,
+            "vectors": 0,
+            "reviews": 0,
+            "dossiers_closed": 0,
+            "skipped_protected": 1,
+        }
+
     counts = {"mentions": 0, "edges": 0, "vectors": 0, "reviews": 0, "dossiers_closed": 0}
     try:
         cur = conn.execute(
@@ -135,7 +368,7 @@ def _delete_orphan_entities(conn: sqlite3.Connection) -> List[str]:
     try:
         rows = conn.execute(
             f"""
-            SELECT entity_id FROM entities e
+            SELECT entity_id, normalized_name FROM entities e
             WHERE mention_count = 0 AND is_self = 0
               AND (contact_id IS NULL
                    OR NOT EXISTS (SELECT 1 FROM contacts c WHERE c.contact_id = e.contact_id))
@@ -147,14 +380,29 @@ def _delete_orphan_entities(conn: sqlite3.Connection) -> List[str]:
         # Same alias, so the shared keep_clause binds here too.
         rows = conn.execute(
             f"""
-            SELECT entity_id FROM entities e
+            SELECT entity_id, normalized_name FROM entities e
             WHERE mention_count = 0 AND contact_id IS NULL AND is_self = 0
               {keep_clause}
             """
         ).fetchall()
-    orphan_ids = [str(r[0]) for r in rows]
+    # Black-holed entities are filtered out of the candidate list, not just
+    # refused by the cascade, so the returned ids (which callers report as
+    # "entities_removed") describe what actually went.
+    protected = _protected_entity_keys(conn)
+    orphan_ids: List[str] = []
+    retained_protected: List[str] = []
+    for row in rows:
+        entity_id, normalized = str(row[0]), str(row[1] or "") or None
+        if _is_protected(conn, entity_id, normalized, protected=protected):
+            retained_protected.append(entity_id)
+            continue
+        orphan_ids.append(entity_id)
     for entity_id in orphan_ids:
         _delete_entity_cascade(conn, entity_id)
+    # Callers report len(orphan_ids) as "entities_removed"; a retention is a
+    # different outcome and reporting it as neither leaves the owner unable to
+    # tell "nothing was orphaned" from "something was protected".
+    _delete_orphan_entities.last_retained_protected = list(retained_protected)  # type: ignore[attr-defined]
     return orphan_ids
 
 
@@ -190,13 +438,23 @@ def purge_junk_minted_entities(
     )
     try:
         rows = conn.execute(
-            f"SELECT entity_id, canonical_name FROM entities WHERE {keep_clause}"
+            f"SELECT entity_id, canonical_name, normalized_name FROM entities WHERE {keep_clause}"
         ).fetchall()
     except sqlite3.OperationalError:
         return report
 
+    # A black-holed entity is never junk, however its surface reads. The C4
+    # predicate rejects truncated and punctuation-heavy names — exactly the
+    # shape of a compound place name like "Old Harbor- Rey's Place" — so
+    # without this filter the one-shot scrub is a second route to the reap the
+    # cascade guard exists to stop.
+    protected = _protected_entity_keys(conn)
     junk: List[tuple] = []
-    for entity_id, canonical_name in rows:
+    for entity_id, canonical_name, normalized_name in rows:
+        if _is_protected(
+            conn, str(entity_id), str(normalized_name or "") or None, protected=protected
+        ):
+            continue
         if not is_valid_entity_surface(str(canonical_name or "")):
             junk.append((str(entity_id), str(canonical_name or "")))
 
@@ -210,6 +468,13 @@ def purge_junk_minted_entities(
     with batched_writes(conn):
         for entity_id, _name in junk:
             counts = _delete_entity_cascade(conn, entity_id)
+            if counts.get("skipped_protected"):
+                # A protection applied between the scan and this loop. Reporting it
+                # as removed would be a false receipt for a row that is still there.
+                report["junk_entities_retained_protected"] = (
+                    report.get("junk_entities_retained_protected", 0) + 1
+                )
+                continue
             report["junk_entities_removed"] += 1
             report["mentions_removed"] += counts["mentions"]
             report["edges_removed"] += counts["edges"]
@@ -375,14 +640,16 @@ def purge_facts_for_source(
             refs = []
         parsed.append((str(object_id), refs))
         for ref in refs:
-            if isinstance(ref, dict) and ref.get("record_id"):
-                all_ref_ids.add(str(ref["record_id"]))
+            ref_key = ref_record_key(ref)
+            if ref_key and ref_key[1]:
+                all_ref_ids.add(ref_key[1])
 
     source_by_record = _record_source_map(conn, all_ref_ids)
     scrubbed_records = scrubbed_record_ids or set()
 
     def _ref_is_scrubbed(ref: Dict[str, Any]) -> bool:
-        record_id = str(ref.get("record_id") or "")
+        ref_key = ref_record_key(ref)
+        record_id = ref_key[1] if ref_key else ""
         if ref.get("source_id"):
             return str(ref["source_id"]) == source_id
         if record_id in scrubbed_records:
@@ -419,8 +686,37 @@ def purge_facts_for_source(
 _REF_ID_COLUMNS = ("record_id", "message_id", "entry_id", "event_id", "transaction_id", "id")
 
 
+#: Spine id prefixes. An id shaped like this names an ENTITY, not a canonical
+#: record, whatever table the ref claims.
+_SPINE_ID_PREFIXES = ("ent_", "goal_", "topic_", "conv_")
+
+
 def _ref_record_exists(conn: sqlite3.Connection, table: str, record_id: str) -> Optional[bool]:
     """Does the referenced record still exist? None = unverifiable (be conservative)."""
+    # A spine id resolves against `entities`, whatever table the ref names.
+    #
+    # `entities/dossier.py` writes its provenance as
+    # ``{"table": "entity_mentions", "record_id": "ent_01f5a601f0a84816"}`` — an
+    # ENTITY id in a record_id field, pointed at a table keyed on `mention_id`.
+    # It can never match, so a liveness check that trusts the declared table
+    # reports GONE for a dossier whose entity is perfectly alive.
+    #
+    # Measured on the owner's node 2026-08-27 while dry-running a widened sweep:
+    # 164 refs carry this shape, and **158 of them name an entity that still
+    # exists**. Trusting the table would have closed 158 live dossiers — the
+    # widening's first act would have been data loss.
+    #
+    # Resolving by shape rather than by the declared table is not a workaround
+    # for a malformed ref so much as reading what it means: the id identifies the
+    # thing unambiguously, and the table label is the part that is wrong.
+    if record_id.startswith(_SPINE_ID_PREFIXES):
+        try:
+            row = conn.execute(
+                "SELECT 1 FROM entities WHERE entity_id=? LIMIT 1", (record_id,)
+            ).fetchone()
+        except sqlite3.Error:
+            return None
+        return row is not None
     if not table.replace("_", "").isalnum():
         return None  # suspicious table name — never interpolate it
     try:
@@ -439,7 +735,29 @@ def _ref_record_exists(conn: sqlite3.Connection, table: str, record_id: str) -> 
 
 
 def close_dangling_facts(conn: sqlite3.Connection) -> int:
-    """Close active facts whose every source_ref points at a deleted record.
+    """Close any active derived object whose every source_ref points at a deleted record.
+
+    Widened from ``object_type='fact'`` 2026-08-27. The restriction was never
+    principled — a dossier, a PlaceContext and a fact all outlive their evidence
+    the same way — and combined with reading only the ``record_id`` key it left
+    the sweep looking at 7% of the provenance in the database.
+
+    Dry-run against the owner's node before widening, and it earned the caution:
+    the first pass would have closed 164 of 170 dossiers, 158 of them citing
+    entities that are perfectly alive, because ``entities/dossier.py`` writes an
+    ENTITY id into a ``record_id`` field aimed at ``entity_mentions``. That is
+    fixed in ``_ref_record_exists`` by resolving a spine-shaped id against
+    ``entities`` rather than the mis-declared table.
+
+    After that correction the sweep closes 1,497 objects, and every one was
+    checked against all nine canonical tables and the entity spine: zero are
+    reachable. The bulk are derived from ``chatgpt_ingestion`` records the owner
+    deleted, whose derived rows outlived them — the leak this sweep exists for,
+    which had simply never been allowed to look outside ``fact``.
+
+    Original note follows.
+
+    Close active facts whose every source_ref points at a deleted record.
 
     purge_facts_for_source only removes refs attributable to the scrubbed
     source; legacy refs without a source_id can keep a fact alive after its
@@ -452,7 +770,7 @@ def close_dangling_facts(conn: sqlite3.Connection) -> int:
     rows = conn.execute(
         """
         SELECT object_id, source_refs_json FROM signal_objects
-        WHERE object_type='fact' AND valid_to IS NULL
+        WHERE valid_to IS NULL
         """
     ).fetchall()
     # Read pass first: the per-ref liveness checks are SELECTs, so they must
@@ -475,8 +793,9 @@ def close_dangling_facts(conn: sqlite3.Connection) -> int:
             if ref.get("source_id"):
                 any_alive = True
                 break
-            table = str(ref.get("table") or "")
-            record_id = str(ref.get("record_id") or "")
+            ref_key = ref_record_key(ref)
+            table = ref_key[0] if ref_key else ""
+            record_id = ref_key[1] if ref_key else ""
             if not table or not record_id:
                 any_alive = True  # unverifiable → conservative
                 break
@@ -582,6 +901,9 @@ def purge_derived_for_source(
         report["entities_recounted"] = _recount_entity_mentions(conn)
         orphans = _delete_orphan_entities(conn)
     report["entities_removed"] = len(orphans)
+    report["entities_retained_protected"] = len(
+        getattr(_delete_orphan_entities, "last_retained_protected", []) or []
+    )
     # Self-gating (M2.2) — must not run under a caller's hold.
     report["edges_rebuilt"] = _rebuild_entity_edges(conn)
 
@@ -647,6 +969,9 @@ def purge_derived_for_records(
 
         report["entities_recounted"] = _recount_entity_mentions(conn)
         report["entities_removed"] = len(_delete_orphan_entities(conn))
+        report["entities_retained_protected"] = len(
+            getattr(_delete_orphan_entities, "last_retained_protected", []) or []
+        )
     report["embeddings_removed"] = len(embedding_ids)
     # Self-gating (M2.2) — must not run under a caller's hold.
     report["edges_rebuilt"] = _rebuild_entity_edges(conn)

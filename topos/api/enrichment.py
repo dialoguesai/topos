@@ -55,85 +55,15 @@ _CANONICAL_TABLE_BY_GROUP: Dict[str, tuple[str, str]] = {
     "contacts": ("contacts", "contact_id"),
 }
 
-_RECORD_ID_KEYS = (
-    "message_id",
-    "record_id",
-    "event_id",
-    "entry_id",
-    "transaction_id",
-    "contact_id",
+# Marker helpers live in `enrichment/record_progress.py` so BOTH lanes share one
+# definition of "processed". They used to live here, which is why only this lane
+# wrote them: the orchestrator could not import from `api/` without inverting the
+# layering, so the automatic ingest path simply never marked anything.
+from ..enrichment.record_progress import (  # noqa: E402
+    _mark_records_processed,
+    _processed_record_ids,
+    _record_identifier,
 )
-
-
-def _record_identifier(record: Dict[str, Any]) -> Optional[str]:
-    for key in _RECORD_ID_KEYS:
-        value = record.get(key)
-        if value:
-            return str(value)
-    return None
-
-
-def _processed_record_ids(conn, source_id: str, job_id: str, min_spec: int) -> set[str]:
-    """Ids this job has already run over, at or above ``min_spec``.
-
-    Distinct from coverage: coverage witnesses OUTPUT, this witnesses the RUN.
-    Returns empty on any failure — the caller then falls back to coverage-only
-    behaviour, which over-scans rather than skipping work that never happened.
-    """
-    if not conn:
-        return set()
-    try:
-        if not _table_exists(conn, "enrichment_record_progress"):
-            return set()
-        rows = conn.execute(
-            "SELECT record_id FROM enrichment_record_progress "
-            "WHERE source_id=? AND job_id=? AND COALESCE(spec_version, 0) >= ?",
-            (source_id, job_id, int(min_spec or 0)),
-        ).fetchall()
-        return {str(row[0]) for row in rows if row and row[0]}
-    except Exception as exc:  # noqa: BLE001 — a marker read must never fail a backfill
-        logger.warning("enrichment_record_progress read failed for %s/%s: %s", source_id, job_id, exc)
-        return set()
-
-
-def _mark_records_processed(
-    conn, source_id: str, job_id: str, records: List[Dict[str, Any]], spec_version: int
-) -> int:
-    """Record that this job ran over these records, whatever it produced.
-
-    Best-effort by design: the enrichment already happened and its output is
-    committed, so a failure here costs a future re-scan, never correctness.
-    """
-    if not conn or not records:
-        return 0
-    ids = [rid for rid in (_record_identifier(r) for r in records) if rid]
-    if not ids:
-        return 0
-    try:
-        if not _table_exists(conn, "enrichment_record_progress"):
-            return 0
-        from ..storage.db.write_gate import batched_writes
-
-        # `batched_writes` holds the write gate across the statements AND the
-        # commit. Doing the executemany bare and only calling commit_connection
-        # takes SQLite's write lock ungated, which the gate detects and warns
-        # about — it can deadlock-until-busy_timeout against whoever holds the
-        # gate, and this runs right after a long enrichment batch, when that is
-        # most likely.
-        with batched_writes(conn):
-            conn.executemany(
-                "INSERT INTO enrichment_record_progress "
-                "(source_id, job_id, record_id, spec_version) VALUES (?,?,?,?) "
-                "ON CONFLICT(source_id, job_id, record_id) DO UPDATE SET "
-                "spec_version=excluded.spec_version, processed_at=datetime('now')",
-                [(source_id, job_id, rid, int(spec_version or 0)) for rid in ids],
-            )
-        return len(ids)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("enrichment_record_progress write failed for %s/%s: %s", source_id, job_id, exc)
-        return 0
-
-
 def _table_exists(conn, table: str) -> bool:
     try:
         row = conn.execute(

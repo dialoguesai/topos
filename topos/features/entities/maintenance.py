@@ -497,7 +497,13 @@ def rebuild_evidence_edges(
     """
     del sender_lookup  # unused — kept for call-site compatibility
     from ...storage.db.write_gate import with_db_write
-    from .edges import EDGE_CO_OCCURRENCE, EDGE_COMMUNICATES, _canonical_order, _now_iso
+    from .edges import (
+        EDGE_CO_OCCURRENCE,
+        EDGE_COMMUNICATES,
+        _canonical_order,
+        _now_iso,
+        record_cooccurrence_pairs,
+    )
     from .resolver import EntityResolver
 
     # Seeding mints person entities the participation load resolves against,
@@ -540,16 +546,16 @@ def rebuild_evidence_edges(
     acc = _EdgeAccumulator()
 
     for record_id, rec in by_record.items():
-        # Cap per-record fan-out (mirrors the ingest path) so a giant record
-        # doesn't create O(n^2) edges.
-        unique = list(dict.fromkeys(rec["ents"]))[:8]
+        # ONE definition of the fold, shared with the ingest path. These two had
+        # their own copies and disagreed: this one capped at 8 and claimed to
+        # mirror ingest, which had no cap — so every rebuild silently deleted the
+        # edges ingest created above the cap.
         event_at = rec["event_at"]
         role = role_by_record.get(record_id, "ambient")
-        for i in range(len(unique)):
-            for j in range(i + 1, len(unique)):
-                acc.add(unique[i], unique[j], EDGE_CO_OCCURRENCE, event_at)
-                _tally(unique[i], unique[j], EDGE_CO_OCCURRENCE, role)
-                co += 1
+        for src, dst in record_cooccurrence_pairs(rec["ents"]):
+            acc.add(src, dst, EDGE_CO_OCCURRENCE, event_at)
+            _tally(src, dst, EDGE_CO_OCCURRENCE, role)
+            co += 1
 
     # P3.2: talked-to edges from thread co-participants only.
     comm = 0

@@ -191,21 +191,73 @@ class BlackholeStore:
         Used by the egress alias-scan on high-stakes surfaces (routine email,
         grantee answers) where a mention the resolver never bound would slip past
         an id-only filter.
+
+        Returns the STORED normalization and a FRESH one derived from
+        ``canonical_name``, because those can disagree. ``normalized_name`` is
+        computed by ``normalize_entity_name`` at write time and then frozen; any
+        later change to that function silently invalidates every row written
+        before it, and nothing re-derives them.
+
+        Measured on the owner's node 2026-08-27: ``Old Harbor- Rey's Place``
+        was flagged on 2026-08-07 and stored as ``old harbor- rey s place``,
+        while the current function yields ``old harbor- rey place`` — the
+        one-character token is now dropped. ``blocks_name()`` therefore returned
+        **False for the entity's own exact name**. Together with the entity row
+        having been reaped, that black hole had no protection left at all: the id
+        filter was empty and the name filter could not match.
+
+        Emitting both is self-healing without a migration, and it stays correct
+        through the next change to the normalizer too.
         """
         try:
             rows = self._conn.execute(
-                "SELECT normalized_name, aliases_json FROM entity_blackholes"
+                "SELECT normalized_name, aliases_json, canonical_name FROM entity_blackholes"
             ).fetchall()
         except sqlite3.OperationalError as exc:
             if _missing_table(exc):
                 return set()
             raise
         terms: Set[str] = set()
-        for normalized_name, aliases_json in rows:
+        for normalized_name, aliases_json, canonical_name in rows:
             if normalized_name:
                 terms.add(str(normalized_name))
+            fresh = normalize_entity_name(str(canonical_name or ""))
+            if fresh:
+                terms.add(fresh)
             terms.update(_normalized_aliases(aliases_json))
         return terms
+
+    def renormalize_stored_names(self) -> int:
+        """Re-derive frozen ``normalized_name`` values with the current function.
+
+        The read path above tolerates the drift; the LOOKUP paths cannot, because
+        ``get()`` and ``is_blackholed()`` match ``normalized_name = ?`` against a
+        freshly-normalized argument. A stale row is therefore unreachable by name
+        — the owner cannot even un-blackhole it through the UI.
+
+        Idempotent, and safe to call at startup: it only rewrites rows whose
+        stored value disagrees with what ``canonical_name`` normalizes to now.
+        """
+        try:
+            rows = self._conn.execute(
+                "SELECT blackhole_id, canonical_name, normalized_name FROM entity_blackholes"
+            ).fetchall()
+        except sqlite3.OperationalError as exc:
+            if _missing_table(exc):
+                return 0
+            raise
+        repaired = 0
+        for blackhole_id, canonical_name, stored in rows:
+            fresh = normalize_entity_name(str(canonical_name or ""))
+            if not fresh or fresh == str(stored or ""):
+                continue
+            self._conn.execute(
+                "UPDATE entity_blackholes SET normalized_name=?, updated_at=datetime('now')"
+                " WHERE blackhole_id=?",
+                (fresh, blackhole_id),
+            )
+            repaired += 1
+        return repaired
 
     def pending_rebuild_names(self) -> Set[str]:
         """Black holes whose derived-artifact rebuild has not finished (D4/I6).

@@ -181,3 +181,66 @@ def dimensions_for_brief_update(
         return CANONICAL_GROUP_BRIEF_DIMENSIONS[group]
 
     return DEFAULT_BRIEF_UPDATE_DIMENSIONS
+
+
+# --------------------------------------------------------------------------
+# Entity type -> signal dimension
+# --------------------------------------------------------------------------
+#
+# The entities job stamped every fact it wrote with ``dimension="relationships"``
+# while carrying the entity's own type in the very same dict. Measured on the
+# owner's node 2026-08-27 across the 32,293 facts filed under "relationships":
+# 10,924 are ORG, 3,932 PERSON, 2,704 DATE, 2,088 GPE, 1,253 LOC. Resolving the
+# fact text against the entity spine puts only **4,769 of 24,340 typed facts —
+# under a fifth — on an actual person**. `get_by_dimension("relationships")` is
+# a live API filter, so four-fifths of what it returns is not a relationship.
+#
+# Two label families arrive here and both are real: OntoNotes NER tags from the
+# extractor (ORG, GPE, WORK_OF_ART) and spine types from the resolver (org,
+# place, topic). Matching is case-insensitive so one table serves both.
+_DIMENSION_BY_ENTITY_TYPE: Dict[str, str] = {
+    # people
+    "person": "relationships",
+    "per": "relationships",
+    # where
+    "gpe": "places",        # geo-political entity: countries, cities, states
+    "loc": "places",
+    "fac": "places",        # facility: buildings, airports, highways
+    "place": "places",
+    # institutions and undertakings
+    "org": "work",
+    "project": "work",
+    # what someone attends to
+    "product": "interests",
+    "work_of_art": "interests",
+    "topic": "interests",
+    "language": "interests",
+    # when
+    "date": "time",
+    "time": "time",
+    "event": "time",
+    # what someone has
+    "money": "resources",
+}
+
+# Deliberately absent, and this is the decision rather than an omission:
+# CARDINAL, ORDINAL, QUANTITY, PERCENT, MISC, NORP and LAW — 3,396 facts. A
+# bare number, an ordinal or a measurement is not an entity in any dimension,
+# and NORP (nationalities, religious and political groups) is genuinely
+# ambiguous between relationships and interests. Guessing a dimension for these
+# would move noise from one filter to another and call it a fix. They fall back
+# to the record's own dimension, which is at least a fact about where they came
+# from.
+
+
+def dimension_for_entity_type(
+    entity_type: Optional[str], *, fallback: str = "memory"
+) -> str:
+    """Signal dimension implied by an entity's type, or ``fallback``.
+
+    ``fallback`` is for the types this map deliberately does not cover — pass
+    the record's own dimension so an untypable mention still lands somewhere
+    truthful rather than somewhere invented.
+    """
+    key = str(entity_type or "").strip().lower()
+    return _DIMENSION_BY_ENTITY_TYPE.get(key, fallback)

@@ -5,11 +5,40 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from ..storage.db.write_gate import batched_writes, commit_connection, with_db_write
 from ..utils.base_object import BaseObject
+
+
+def _stable_row_id(record: Dict[str, Any], id_field: str) -> str:
+    """Mint this row's id once, and stamp it back onto the record.
+
+    Two writers persist these tables from the SAME batch of record dicts: this
+    typed writer, and ``job_writer._write_wiki_table``, which adds provenance and
+    ``spec_version``. Both resolved the id independently as
+    ``record.get(<id_field>) or uuid4()`` — so each record produced TWO rows under
+    two different ids, and the wiki copy carried none of the typed columns
+    (``entity_text``, ``goal_text``) because that writer only knows the generic
+    ones.
+
+    Measured on the live node 2026-08-27: ``message_entities`` held 25,146 typed
+    rows and 25,128 empty twins over the same 4,924 records — 4,919 of those
+    records paired exactly 1:1 — and ``user_goals`` was exactly half real, which
+    is why "154 fabricated goals" was really 77 written twice. Every derived-row
+    count in the product was 2x reality.
+
+    Stamping the id back is what makes the second write an ``ON CONFLICT`` UPDATE
+    of the row this one just inserted, instead of an INSERT of a twin. It relies
+    on the two writers sharing the same dict objects, which they do —
+    ``_write_signal_records_unlocked`` passes one ``records`` list to both.
+    """
+    row_id = str(record.get(id_field) or uuid.uuid4())
+    record[id_field] = row_id
+    return row_id
+
 
 logger = logging.getLogger("topos.enrichment.derived_tables")
 
@@ -317,7 +346,6 @@ class DerivedTablesManager(BaseObject):
         if not self.conn:
             return 0
         import json
-        import uuid
 
         cols = _table_columns(self.conn, "message_entities")
         if not cols:
@@ -331,7 +359,7 @@ class DerivedTablesManager(BaseObject):
                     entity_text = record.get("entity_text") or record.get("text")
                     if not record_id or not entity_text:
                         continue
-                    entity_id = str(record.get("entity_id") or uuid.uuid4())
+                    entity_id = _stable_row_id(record, "entity_id")
                     payload = json.dumps({**record, "record_id": record_id, "entity_id": entity_id})
                     if "payload_json" in cols:
                         _insert_matching_columns(
@@ -367,7 +395,6 @@ class DerivedTablesManager(BaseObject):
     ) -> int:
         if not self.conn:
             return 0
-        import uuid
 
         cols = _table_columns(self.conn, "user_goals")
         if not cols:
@@ -381,7 +408,7 @@ class DerivedTablesManager(BaseObject):
                     goal_text = record.get("goal_text") or record.get("text")
                     if not goal_text:
                         continue
-                    goal_id = str(record.get("goal_id") or uuid.uuid4())
+                    goal_id = _stable_row_id(record, "goal_id")
                     _insert_matching_columns(
                         self.conn,
                         "user_goals",
@@ -429,14 +456,13 @@ class DerivedTablesManager(BaseObject):
         records: List[Dict[str, Any]],
         batch_size: int,
     ) -> int:
-        import uuid
 
         def build_values(record: Dict[str, Any], cols: set[str]) -> Optional[Dict[str, Any]]:
             topic = record.get("topic") or record.get("label")
             if not topic:
                 return None
             record_id = record.get("record_id") or record.get("message_id")
-            topic_id = str(record.get("topic_id") or uuid.uuid4())
+            topic_id = _stable_row_id(record, "topic_id")
             values = {
                 "topic_id": topic_id,
                 "record_id": record_id,
@@ -458,14 +484,13 @@ class DerivedTablesManager(BaseObject):
         records: List[Dict[str, Any]],
         batch_size: int,
     ) -> int:
-        import uuid
 
         def build_values(record: Dict[str, Any], cols: set[str]) -> Optional[Dict[str, Any]]:
             label = record.get("label") or record.get("sentiment")
             if label is None and record.get("score") is None:
                 return None
             record_id = record.get("record_id") or record.get("message_id")
-            sentiment_id = str(record.get("sentiment_id") or uuid.uuid4())
+            sentiment_id = _stable_row_id(record, "sentiment_id")
             values = {
                 "sentiment_id": sentiment_id,
                 "record_id": record_id,

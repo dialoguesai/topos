@@ -819,14 +819,19 @@ async def run_post_canonical_pipeline(
     # Platform Privacy Layer — mandatory, not gated by enrichment_trigger
     try:
         from ..core.state import get_db_connection
-        from ..disclosure.field_registry import canonical_table_for_group
+        from ..disclosure.field_registry import (
+            canonical_table_for_group,
+            stamp_canonical_table,
+        )
         from ..disclosure.privacy_layer import run_privacy_disclosure_layer
 
         conn = get_db_connection()
-        canon_table = canonical_table_for_group(getattr(source_def, "canonical_group_id", None))
+        group_id = getattr(source_def, "canonical_group_id", None)
+        canon_table = canonical_table_for_group(group_id)
         if conn and canon_table and canonical_records:
-            for rec in canonical_records:
-                rec.setdefault("_table", canon_table)
+            # A record that declares its own canonical_table keeps it — the group
+            # default is a fallback, not an override. See stamp_canonical_table.
+            stamp_canonical_table(canonical_records, source_group=group_id)
             # conn is the availability check only — None is passed so the
             # layer's gated sections resolve their own connection on the worker
             # thread they run in, rather than borrowing this one.
@@ -846,12 +851,15 @@ async def run_post_canonical_pipeline(
         and records_for_enrichment
     ):
         try:
-            from ..disclosure.field_registry import canonical_table_for_group
+            from ..disclosure.field_registry import (
+                canonical_table_for_group,
+                stamp_canonical_table,
+            )
 
-            canon_table = canonical_table_for_group(getattr(source_def, "canonical_group_id", None))
+            group_id = getattr(source_def, "canonical_group_id", None)
+            canon_table = canonical_table_for_group(group_id)
             if canon_table:
-                for rec in records_for_enrichment:
-                    rec.setdefault("_table", canon_table)
+                stamp_canonical_table(records_for_enrichment, source_group=group_id)
             from ..engine import Engine
 
             enrichment_orchestrator = EnrichmentOrchestrator(tables_manager=derived, engine=Engine())

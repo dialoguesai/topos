@@ -1,4 +1,8 @@
-"""Ingest-time PII disclosure columns on canonical message tables."""
+"""Ingest-time PII disclosure columns on canonical tables.
+
+Additive and ``always_run``: the spec map below IS the declaration, so adding a
+table/column here applies on the next run without a new migration id.
+"""
 
 from __future__ import annotations
 
@@ -23,6 +27,21 @@ _DISCLOSURE_SPECS: dict[str, tuple[str, ...]] = {
         "content_disclosure",
         "content_disclosure_hash",
         "content_disclosure_model",
+    ),
+    # location_events is 100% fan-out children of journal rows, and its PII field
+    # is `place_name` (a home address as often as a cafe). It had NO disclosure
+    # columns and was absent from every registry map, so all 362 rows on the
+    # owner's node sat outside the ingest-time disclosure pipeline while the
+    # pipeline reported success — the writes were addressed to journal_entries by
+    # a location id and matched zero rows.
+    #
+    # These columns must exist BEFORE the `_table` stamp is corrected. The
+    # children are redacted today only *because* they are misfiled as journal
+    # entries, so fixing the stamp first would unredact 138 embeddings.
+    "location_events": (
+        "place_name_disclosure",
+        "place_name_disclosure_hash",
+        "place_name_disclosure_model",
     ),
 }
 

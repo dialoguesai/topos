@@ -6,7 +6,7 @@ import logging
 import sqlite3
 from typing import Any, Dict, Optional
 
-from .field_registry import CANONICAL_ID_COLUMN
+from .field_registry import CANONICAL_ID_COLUMN, fields_for_table
 
 logger = logging.getLogger("topos.disclosure.canonical_writer")
 
@@ -49,8 +49,15 @@ def upsert_disclosure_fields(
         if not _column_exists(conn, table, key):
             continue
         safe_patches[key] = value
-    if model_id and _column_exists(conn, table, "content_disclosure_model"):
-        safe_patches["content_disclosure_model"] = model_id
+    if model_id:
+        # Derive the model column from the table's DECLARED fields rather than
+        # hardcoding `content_`. Not every disclosed field is called content —
+        # location_events discloses `place_name` — and a hardcoded name silently
+        # drops the model provenance for any table that does not use it.
+        for field in fields_for_table(table) or ("content",):
+            column = f"{field}_disclosure_model"
+            if _column_exists(conn, table, column):
+                safe_patches[column] = model_id
     if not safe_patches:
         return False
 

@@ -96,6 +96,30 @@ class EnrichmentOrchestrator(BaseObject):
                 results["errors"].append({"job": job.get_job_name(), "error": str(exc)})
         return results
 
+    def _mark_processed(self, job_name: str, canonical_messages) -> None:
+        """Best-effort record-progress markers for the automatic lane."""
+        try:
+            from ..core.state import get_db_connection
+            from .models.mvp_defaults import job_spec_version
+            from .record_progress import mark_records_processed
+
+            conn = get_db_connection()
+            if conn is None or not canonical_messages:
+                return
+            by_source = {}
+            for msg in canonical_messages:
+                if not isinstance(msg, dict):
+                    continue
+                by_source.setdefault(str(msg.get("source_id") or ""), []).append(msg)
+            for source_id, batch in by_source.items():
+                if not source_id:
+                    continue
+                mark_records_processed(
+                    conn, source_id, job_name, batch, job_spec_version(job_name)
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("record-progress marking skipped for %s: %s", job_name, exc)
+
     async def run_canonical(
         self,
         canonical_messages: List[Dict[str, Any]],
@@ -170,7 +194,22 @@ class EnrichmentOrchestrator(BaseObject):
                     progress_callback(0, total_messages, job_name, jobs_percent, 0.0)
                 
                 records = await job.enrich(canonical_messages, progress_callback=job_progress_callback)
-                
+
+                # Mark the INPUT records as processed by this job — not the output.
+                # A record that ran and legitimately produced nothing still ran,
+                # and that is the whole distinction this table carries: coverage
+                # witnesses output, this witnesses the run.
+                #
+                # Only the manual /enrichment backfill used to do this, so on a
+                # node with 38,838 derived facts the table held 0 rows (measured
+                # 2026-08-27). Nothing was ever skippable, so every re-sync
+                # re-derived and appended — which is what multiplies derived rows
+                # 2x-4.3x and why a fabricated row is never one row to retract.
+                #
+                # Best-effort: the enrichment is already committed, so a failure
+                # here costs a future re-scan, never correctness.
+                self._mark_processed(job_name, canonical_messages)
+
                 derived_table = job.get_derived_table()
                 if records and derived_table:
 
