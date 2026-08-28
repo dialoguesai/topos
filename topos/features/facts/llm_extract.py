@@ -543,7 +543,7 @@ def _make_hosted_extractor(
     else:  # platform / openai — both run on the OpenAI adapter
         from ...engine.backends.openai import OpenAIAdapter
 
-        adapter = OpenAIAdapter()
+        adapter = OpenAIAdapter(wallet_gated=provider == "platform")
 
     usage_provider = engine_provider_for(provider)
 
@@ -1171,6 +1171,7 @@ _UNREACHABLE_MARKERS = (
     # Hosted extractors (_make_hosted_extractor): transport AND auth failures
     # both degrade the batch — retrying per row would fail identically.
     "openai-compatible request failed",
+    "insufficient_credits",
     "connection refused",
     "urlopen error",
     "max retries",

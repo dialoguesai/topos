@@ -8,7 +8,7 @@ from .openai_compatible import OpenAICompatibleAdapter
 class OpenAIAdapter(OpenAICompatibleAdapter):
     """Platform OpenAI or env-configured API key."""
 
-    def __init__(self) -> None:
+    def __init__(self, *, wallet_gated: bool = False) -> None:
         try:
             from ...config.settings import settings
 
@@ -24,4 +24,5 @@ class OpenAIAdapter(OpenAICompatibleAdapter):
             base_url=base_url,
             default_model=default_model,
             unavailable_error="openai_unreachable",
+            wallet_gated=wallet_gated,
         )

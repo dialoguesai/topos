@@ -24,11 +24,13 @@ class OpenAICompatibleAdapter:
         base_url: str = "https://api.openai.com/v1",
         default_model: str = "gpt-4o-mini",
         unavailable_error: str = "llm_unreachable",
+        wallet_gated: bool = False,
     ) -> None:
         self._api_key = str(api_key or "").strip()
         self._base_url = str(base_url or "https://api.openai.com/v1").rstrip("/")
         self._default_model = str(default_model or "gpt-4o-mini").strip()
         self._unavailable_error = unavailable_error
+        self._wallet_gated = bool(wallet_gated)
 
     def run_inference(self, payload: Dict[str, Any], config: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
         config = config or {}
@@ -36,6 +38,9 @@ class OpenAICompatibleAdapter:
         model = str(config.get("model") or self._default_model).strip() or self._default_model
         if not self._api_key:
             return {"status": "deferred", "error": self._unavailable_error, "model": model}
+        denied = self._wallet_deny(model)
+        if denied is not None:
+            return denied
         prompt = build_generative_prompt(subtype, payload)
         try:
             completed = self._chat_completion(model=model, prompt=prompt)
@@ -56,7 +61,22 @@ class OpenAICompatibleAdapter:
             logger.warning("OpenAI-compatible inference failed: %s", exc)
             return {"error": str(exc), "model": model}
 
+    def _wallet_deny(self, model: str) -> Optional[Dict[str, Any]]:
+        if not self._wallet_gated:
+            return None
+        try:
+            from ..hosted_llm_wallet import INSUFFICIENT_CREDITS, hosted_llm_wallet_allows
+
+            if hosted_llm_wallet_allows():
+                return None
+            return {"status": "deferred", "error": INSUFFICIENT_CREDITS, "model": model}
+        except Exception:  # noqa: BLE001 — a probe failure must not block BYOK-style calls
+            return None
+
     def _chat_completion(self, *, model: str, prompt: str) -> Dict[str, Any]:
+        denied = self._wallet_deny(model)
+        if denied is not None:
+            raise RuntimeError(str(denied.get("error") or "insufficient_credits"))
         url = f"{self._base_url}/chat/completions"
         body: Dict[str, Any] = {
             "model": model,

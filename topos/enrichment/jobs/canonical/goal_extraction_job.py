@@ -84,11 +84,12 @@ class GoalExtractionJob(BaseEnrichmentJob):
         total = len(work)
         results: List[Dict[str, Any]] = []
         deferrals = 0
+        deferred_error = "ollama_unreachable"
         sem = asyncio.Semaphore(GOAL_BATCH_CONCURRENCY)
         processed = 0
 
         async def _one(item: Dict[str, Any]) -> List[Dict[str, Any]]:
-            nonlocal deferrals
+            nonlocal deferrals, deferred_error
             async with sem:
                 engine_provider, extraction_model = get_signal_extraction_model_request()
                 result = await run_engine_task(
@@ -103,6 +104,11 @@ class GoalExtractionJob(BaseEnrichmentJob):
                 )
                 if result.status == "deferred":
                     deferrals += 1
+                    deferred_error = str(
+                        result.error
+                        or (result.output or {}).get("error")
+                        or "ollama_unreachable"
+                    )
                     return []
                 if result.status != "completed":
                     return []
@@ -140,7 +146,7 @@ class GoalExtractionJob(BaseEnrichmentJob):
                 progress_callback(min(processed, total), total)
 
         if deferrals == total and total > 0 and not results:
-            return [{"_deferred": True, "error": "ollama_unreachable"}]
+            return [{"_deferred": True, "error": deferred_error}]
         if deferrals:
             logger.warning(
                 "GoalExtractionJob skipped %d/%d messages (Ollama deferred)",

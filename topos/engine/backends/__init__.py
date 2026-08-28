@@ -15,10 +15,12 @@ from .stub import StubBackendAdapter, get_stub_adapter
 _huggingface_singleton: HuggingFaceAdapter | None = None
 _ollama_singleton: OllamaAdapter | None = None
 _openai_singleton: OpenAIAdapter | None = None
+_platform_openai_singleton: OpenAIAdapter | None = None
 _redpill_singleton: RedpillAdapter | None = None
 _huggingface_lock = threading.Lock()
 _ollama_lock = threading.Lock()
 _openai_lock = threading.Lock()
+_platform_openai_lock = threading.Lock()
 _redpill_lock = threading.Lock()
 
 __all__ = [
@@ -32,6 +34,7 @@ __all__ = [
     "get_huggingface_adapter",
     "get_ollama_adapter",
     "get_openai_adapter",
+    "get_platform_openai_adapter",
     "get_redpill_adapter",
 ]
 
@@ -64,8 +67,19 @@ def get_openai_adapter() -> OpenAIAdapter:
         return _openai_singleton
     with _openai_lock:
         if _openai_singleton is None:
-            _openai_singleton = OpenAIAdapter()
+            _openai_singleton = OpenAIAdapter(wallet_gated=False)
         return _openai_singleton
+
+
+def get_platform_openai_adapter() -> OpenAIAdapter:
+    """Topos-hosted OpenAI — same transport as BYOK, prepaid wallet gated."""
+    global _platform_openai_singleton
+    if _platform_openai_singleton is not None:
+        return _platform_openai_singleton
+    with _platform_openai_lock:
+        if _platform_openai_singleton is None:
+            _platform_openai_singleton = OpenAIAdapter(wallet_gated=True)
+        return _platform_openai_singleton
 
 
 def get_redpill_adapter() -> RedpillAdapter:

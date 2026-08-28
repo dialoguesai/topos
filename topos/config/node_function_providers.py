@@ -31,6 +31,10 @@ def hosted_default_model(settings: Any, provider: str) -> str:
 
 
 def engine_provider_for(provider: str) -> str:
-    """UI provider → engine backend provider ("platform" runs on the OpenAI
-    adapter, same mapping as signal extraction)."""
-    return "openai" if provider in ("platform", "openai") else provider
+    """UI provider → engine backend provider.
+
+    ``platform`` stays ``platform`` so Engine uses the wallet-gated Topos-hosted
+    OpenAI adapter rather than the BYOK one. ``openai`` (the owner's key) is
+    unbilled.
+    """
+    return provider

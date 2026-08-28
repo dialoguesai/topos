@@ -395,6 +395,7 @@ async def retry_pending_derivations(
 #: that sequence entirely, or — if a cold start counted as an edge — re-run
 #: every genuinely broken debt on every launch.
 PROVIDER_READY_KEY = "derivation_debt.provider_ready"
+WALLET_INGEST_KEY = "derivation_debt.wallet_ingest"
 
 
 def _read_last_ready(conn: sqlite3.Connection) -> Dict[str, bool]:
@@ -415,6 +416,89 @@ def _write_last_ready(conn: sqlite3.Connection, ready: Dict[str, bool]) -> None:
         set_engine_config_value(conn, PROVIDER_READY_KEY, json.dumps(ready, sort_keys=True))
     except Exception as exc:  # noqa: BLE001 — failing to remember must not break the sweep
         logger.debug("[DERIVE:RETRY] could not persist provider readiness: %s", exc)
+
+
+def _read_wallet_ingest_state(conn: sqlite3.Connection) -> Dict[str, bool]:
+    try:
+        from ..core.state import get_engine_config_value
+
+        raw = get_engine_config_value(conn, WALLET_INGEST_KEY)
+        parsed = json.loads(str(raw or "{}"))
+        return {
+            "wallet_positive": bool(parsed.get("wallet_positive")),
+            "ingest_hosted": bool(parsed.get("ingest_hosted")),
+        }
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[DERIVE:RETRY] could not read wallet ingest state: %s", exc)
+        return {"wallet_positive": False, "ingest_hosted": False}
+
+
+def _write_wallet_ingest_state(conn: sqlite3.Connection, state: Dict[str, bool]) -> None:
+    try:
+        from ..core.state import set_engine_config_value
+
+        set_engine_config_value(conn, WALLET_INGEST_KEY, json.dumps(state, sort_keys=True))
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[DERIVE:RETRY] could not persist wallet ingest state: %s", exc)
+
+
+def _error_is_insufficient_credits(error: str) -> bool:
+    return "insufficient_credits" in str(error or "").lower()
+
+
+def _revive_insufficient_credits_debts(
+    conn: sqlite3.Connection,
+    *,
+    limit: int = 200,
+) -> Dict[str, Any]:
+    """Re-queue credit-paused debts when the wallet fills or ingest goes local.
+
+    EDGE-triggered, same contract as provider revival: one attempt per
+    empty→positive wallet transition, or when the ingest model is no longer
+    Topos-hosted.
+    """
+    out: Dict[str, Any] = {"revived": 0, "job_ids": []}
+    try:
+        from ..engine.hosted_llm_wallet import hosted_llm_wallet_allows, ingest_uses_hosted_llm
+
+        wallet_positive = bool(hosted_llm_wallet_allows(force=True))
+        ingest_hosted = bool(ingest_uses_hosted_llm())
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("[DERIVE:RETRY] wallet ingest probe failed: %s", exc)
+        return out
+
+    last = _read_wallet_ingest_state(conn)
+    _write_wallet_ingest_state(
+        conn, {"wallet_positive": wallet_positive, "ingest_hosted": ingest_hosted}
+    )
+    wallet_filled = wallet_positive and not last.get("wallet_positive", False)
+    ingest_left_hosted = last.get("ingest_hosted", False) and not ingest_hosted
+    if not (wallet_filled or ingest_left_hosted):
+        return out
+
+    candidates = [
+        debt
+        for debt in list_pending_derivation_retries(conn, limit=limit)
+        if debt.get("status") == "failed" and _error_is_insufficient_credits(str(debt.get("error") or ""))
+    ]
+    if not candidates:
+        return out
+    try:
+        from ..pipeline.job_store import requeue_failed_jobs
+
+        job_ids = [str(d["job_id"]) for d in candidates]
+        moved = requeue_failed_jobs(conn, job_ids)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("[DERIVE:RETRY] reviving credit-paused debts failed: %s", exc)
+        return out
+    out["revived"] = int(moved)
+    out["job_ids"] = job_ids
+    if moved:
+        logger.info(
+            "[DERIVE:RETRY] credits/ingest recovered — re-queued %d parked derivation debt(s)",
+            moved,
+        )
+    return out
 
 
 def revive_capability_blocked_debts(
@@ -451,37 +535,38 @@ def revive_capability_blocked_debts(
     newly_ready = sorted(p for p, ready in current.items() if ready and not last.get(p, False))
     _write_last_ready(conn, {**last, **current})
     out["newly_ready"] = newly_ready
-    if not newly_ready:
-        return out
 
-    ready_set = set(newly_ready)
-    candidates = [
-        debt
-        for debt in list_pending_derivation_retries(conn, limit=limit)
-        if debt.get("status") == "failed"
-        and provider_for_job(str(debt.get("job_name") or "")) in ready_set
-    ]
-    if not candidates:
-        return out
+    if newly_ready:
+        ready_set = set(newly_ready)
+        candidates = [
+            debt
+            for debt in list_pending_derivation_retries(conn, limit=limit)
+            if debt.get("status") == "failed"
+            and provider_for_job(str(debt.get("job_name") or "")) in ready_set
+        ]
+        if candidates:
+            try:
+                from ..pipeline.job_store import requeue_failed_jobs
 
-    try:
-        from ..pipeline.job_store import requeue_failed_jobs
+                job_ids = [str(d["job_id"]) for d in candidates]
+                moved = requeue_failed_jobs(conn, job_ids)
+            except Exception as exc:  # noqa: BLE001 — a sweep must never break the worker
+                logger.warning("[DERIVE:RETRY] reviving blocked debts failed: %s", exc)
+            else:
+                out["revived"] = int(moved)
+                out["job_ids"] = job_ids
+                if moved:
+                    logger.info(
+                        "[DERIVE:RETRY] %s reachable again — re-queued %d parked derivation debt(s): %s",
+                        ", ".join(newly_ready),
+                        moved,
+                        ", ".join(sorted({str(d.get("job_name") or "?") for d in candidates})),
+                    )
 
-        job_ids = [str(d["job_id"]) for d in candidates]
-        moved = requeue_failed_jobs(conn, job_ids)
-    except Exception as exc:  # noqa: BLE001 — a sweep must never break the worker
-        logger.warning("[DERIVE:RETRY] reviving blocked debts failed: %s", exc)
-        return out
-
-    out["revived"] = int(moved)
-    out["job_ids"] = job_ids
-    if moved:
-        logger.info(
-            "[DERIVE:RETRY] %s reachable again — re-queued %d parked derivation debt(s): %s",
-            ", ".join(newly_ready),
-            moved,
-            ", ".join(sorted({str(d.get("job_name") or "?") for d in candidates})),
-        )
+    credit = _revive_insufficient_credits_debts(conn, limit=limit)
+    out["revived"] = int(out.get("revived") or 0) + int(credit.get("revived") or 0)
+    out["job_ids"] = list(out.get("job_ids") or []) + list(credit.get("job_ids") or [])
+    out["credits_revived"] = int(credit.get("revived") or 0)
     return out
 
 
@@ -592,16 +677,20 @@ def pending_derivation_summary(conn: Optional[sqlite3.Connection]) -> Dict[str, 
     by_job: Dict[str, int] = {}
     by_source: Dict[str, int] = {}
     records = 0
+    insufficient_credits = 0
     for item in pending:
         by_job[item["job_name"]] = by_job.get(item["job_name"], 0) + 1
         by_source[item["source_id"]] = by_source.get(item["source_id"], 0) + 1
         records += int(item.get("record_count") or 0)
+        if _error_is_insufficient_credits(str(item.get("error") or "")):
+            insufficient_credits += 1
     return {
         "pending_derivations": len(pending),
         "affected_records": records,
         "by_job": by_job,
         "by_source": by_source,
         "known_gaps": bool(pending),
+        "insufficient_credits": insufficient_credits,
         "recording_since": ensure_recording_since(conn),
         "covers": DEBT_COVERAGE,
     }

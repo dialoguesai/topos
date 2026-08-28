@@ -127,3 +127,15 @@ async def test_retry_that_defers_again_is_not_recovered(monkeypatch) -> None:
 
     assert outcome["outcome"] == "still_failing"
     assert "ollama_unreachable" in outcome["error"]
+
+
+@pytest.mark.asyncio
+async def test_insufficient_credits_deferral_records_that_reason() -> None:
+    job = _DeferringJob(error="insufficient_credits")
+    result = await _run_deferred_batch("batch-credits", job)
+
+    assert result["deferred_jobs"] == ["topics"]
+    pending = list_pending_derivation_retries(get_db_connection())
+    debts = [p for p in pending if p["sync_batch_id"] == "batch-credits"]
+    assert len(debts) == 1
+    assert "insufficient_credits" in debts[0]["error"]

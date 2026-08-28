@@ -94,7 +94,7 @@ def test_resolve_signal_extraction_model_request_platform(memory_settings: Setti
     )
     conn.commit()
     provider, model = resolve_signal_extraction_model_request(memory_settings, conn)
-    assert provider == "openai"
+    assert provider == "platform"
     assert model == "gpt-4o-mini"
 
 

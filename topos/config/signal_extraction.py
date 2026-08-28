@@ -135,7 +135,7 @@ def resolve_signal_extraction_model_request(
     provider = str(cfg.provider or "ollama").strip().lower()
     model = str(cfg.query_model or "").strip() or None
     if provider == "platform":
-        return "openai", model or settings.openai_model
+        return "platform", model or settings.openai_model
     if provider == "openai":
         return "openai", model or settings.openai_model
     if provider == "redpill":

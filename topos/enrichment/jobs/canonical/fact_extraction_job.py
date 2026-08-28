@@ -44,6 +44,16 @@ class FactExtractionJob(BaseEnrichmentJob):
         conn = get_db_connection()
         if conn is None:
             return [{"_deferred": True, "error": "database_unavailable"}]
+        try:
+            from ....config.facts_llm import resolve_facts_llm_request
+            from ....config.settings import settings as _settings
+            from ....engine.hosted_llm_wallet import INSUFFICIENT_CREDITS, hosted_llm_wallet_allows
+
+            facts_provider, _ = resolve_facts_llm_request(_settings, conn)
+            if facts_provider in {"platform", "redpill"} and not hosted_llm_wallet_allows():
+                return [{"_deferred": True, "error": INSUFFICIENT_CREDITS}]
+        except Exception:  # noqa: BLE001 — never block the rules floor on a probe
+            pass
         from ....features.facts.extract import extract_facts_from_batch
 
         # Cancellation is scoped to THIS batch. Cancelling the await does not

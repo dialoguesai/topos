@@ -54,11 +54,12 @@ class TopicsJob(BaseEnrichmentJob):
         total = len(work)
         results: List[Dict[str, Any]] = []
         deferred = False
+        deferred_error = "ollama_unreachable"
         sem = asyncio.Semaphore(TOPIC_BATCH_CONCURRENCY)
         processed = 0
 
         async def _one(item: Dict[str, Any]) -> Optional[List[Dict[str, Any]]]:
-            nonlocal deferred
+            nonlocal deferred, deferred_error
             async with sem:
                 if deferred:
                     return None
@@ -76,6 +77,11 @@ class TopicsJob(BaseEnrichmentJob):
                 )
                 if result.status == "deferred":
                     deferred = True
+                    deferred_error = str(
+                        result.error
+                        or (result.output or {}).get("error")
+                        or "ollama_unreachable"
+                    )
                     return None
                 if result.status != "completed":
                     return []
@@ -107,5 +113,5 @@ class TopicsJob(BaseEnrichmentJob):
             logger.info("TopicsJob progress %d/%d", min(processed, total), total)
 
         if deferred and not results:
-            return [{"_deferred": True, "error": "ollama_unreachable"}]
+            return [{"_deferred": True, "error": deferred_error}]
         return results

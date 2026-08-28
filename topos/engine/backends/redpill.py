@@ -42,4 +42,5 @@ class RedpillAdapter(OpenAICompatibleAdapter):
             base_url=base_url,
             default_model=default_model,
             unavailable_error="redpill_unreachable",
+            wallet_gated=True,
         )

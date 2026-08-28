@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .backends import BackendAdapter, get_huggingface_adapter, get_ollama_adapter, get_openai_adapter, get_redpill_adapter, get_stub_adapter
+from .backends import BackendAdapter, get_huggingface_adapter, get_ollama_adapter, get_openai_adapter, get_platform_openai_adapter, get_redpill_adapter, get_stub_adapter
 from .tasks import ProcessingTask
 
 
@@ -18,6 +18,8 @@ def get_adapter_for_task(task: ProcessingTask) -> BackendAdapter:
         return get_ollama_adapter()
     if provider == "openai":
         return get_openai_adapter()
+    if provider == "platform":
+        return get_platform_openai_adapter()
     if provider == "redpill":
         return get_redpill_adapter()
     return get_stub_adapter()

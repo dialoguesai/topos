@@ -35,6 +35,19 @@ def _clean_probe_cache() -> Iterator[None]:
     job_readiness.reset_probe_cache()
 
 
+@pytest.fixture(autouse=True)
+def _stub_hosted_wallet(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Credit revival probes CP; keep this suite on the provider-readiness path."""
+    monkeypatch.setattr(
+        "topos.engine.hosted_llm_wallet.hosted_llm_wallet_allows",
+        lambda force=False: False,
+    )
+    monkeypatch.setattr(
+        "topos.engine.hosted_llm_wallet.ingest_uses_hosted_llm",
+        lambda: False,
+    )
+
+
 @pytest.fixture
 def conn(tmp_path) -> Iterator[sqlite3.Connection]:
     db = sqlite3.connect(str(tmp_path / "debt.db"))
