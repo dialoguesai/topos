@@ -1133,6 +1133,25 @@ class TestWhatYouShareWithThisPerson:
         PG.attach_shared_with_owner(c, nodes)
         assert "shared_with_owner" not in nodes[0]
 
+    def test_a_second_mention_is_enough_to_recur(self):
+        """The recurrence gate was 3 and is 2, measured on a live node of 427 people.
+
+        The join reaches 34 of them at all, so the gate never bought reach — it only chose
+        how much of that 34 to keep. At 3 it kept 3 readings; at 2 it keeps 5, all still
+        places the owner and the person both wrote about. The next step down (total mentions
+        3) is where it breaks: it starts admitting cuisines typed as organisations and a
+        chatbot typed as a shared person. So 2 is the boundary, and this pins it.
+        """
+        c = self._conn_with_mentions()
+        self._seed(c,
+                   owner_ents=[("e0", "Austin", "place"), ("e1", "Dallas", "place")],
+                   peer_msgs=[(f"m{i}", "+1555") for i in range(4)],
+                   mention_rows=[("m0", "e0"), ("m1", "e0"), ("m2", "e1"), ("m3", "e1")])
+        nodes = [{"node_id": "p1", "label": "Peer", "messenger_keys": ["+1555"]}]
+        PG.attach_shared_with_owner(c, nodes)
+        assert nodes[0]["shared_with_owner"]["label"] == "Places"
+        assert nodes[0]["shared_with_owner"]["mention_count"] == 4
+
     def test_says_nothing_rather_than_something_thin(self):
         c = self._conn_with_mentions()
         nodes = [{"node_id": "p1", "label": "Peer", "messenger_keys": ["+nobody"]}]

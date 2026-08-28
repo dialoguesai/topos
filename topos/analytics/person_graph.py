@@ -1767,9 +1767,22 @@ SHARED_OWNER_MIN_ENTITIES = 2
 #: And it has to have been said more than in passing.
 SHARED_OWNER_MIN_MENTIONS = 4
 #: At least one of them has to RECUR. Measured, the two gates above still admitted a case of
-#: four entities at one mention each — four coincidences, not a shared interest. The strong
-#: case has its top entity mentioned eleven times; that is the difference worth marking.
-SHARED_OWNER_MIN_TOP_MENTIONS = 3
+#: four entities at one mention each — four coincidences, not a shared interest.
+#:
+#: Was 3, lowered to 2 after measuring the whole ladder on a live node (427 people). The join
+#: reaches 34 of them AT ALL, so no gate setting buys reach — the ceiling is how many people
+#: have entities extracted from what they sent. Within that ceiling the settings read:
+#:     (2,4,3) → 3 people, all place      (2,4,2) → 5, all place
+#:     (2,3,2) → 7, but two of them junk: "Asian, French" typed as orgs (they are cuisines),
+#:               and an AI assistant beside a musician, both typed as shared PEOPLE.
+#: So 2 is the last honest step: +2 real readings, nothing mis-typed admitted. A wider
+#: co-occurrence signal — other owner entities in any record that mentions this person —
+#: was measured too: 86 nodes reached, but its survivors are extraction artefacts. Three
+#: misspellings of one musician came back as three separate PEOPLE in common; a venue named
+#: after a second musician came back as a fourth; a wiki tool came back as a fifth. What it
+#: offered as shared ground for the rest was two employers everyone in the record works
+#: with. More reach, worse precision, so it is not the lane.
+SHARED_OWNER_MIN_TOP_MENTIONS = 2
 SHARED_OWNER_TOP = 3
 
 #: How each entity type reads on a card. The card answers "what do we have in common" and
