@@ -10,6 +10,56 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Fixed
+- **Half the iMessage corpus was stored as archive bytes, not text.**
+  `[E:ingestion]` An iMessage with no plain `text` keeps its body in
+  `attributedBody` as an `NSAttributedString` archive. The reader did not decode
+  those; it scraped the longest printable byte run out of the blob and stored
+  that. On the owner's node that had written **3,722 of 7,602 iMessage rows —
+  49%** — in three shapes:
+
+  - **1,283** rows whose entire body was the word `streamtyped`, the archive
+    format's own header.
+  - **459** rows holding a crumb of the keyed archive's class table
+    (`()*+Z$classnameX$classesWNSValue*,XNSObject…`), which is what
+    showed on the person card.
+  - **1,980** rows of *real text* with the archive's length byte still glued to
+    the front (`++can you send me that link again when you get a chance`). This is the
+    shape that mattered and the one nobody could see: it reads as text, so it
+    passed `is_derivable_content` and reached the vector index. **1,223 of 9,293
+    embeddings** were vectors of a message with two junk characters on the
+    front. Searching for blob-shaped bodies alone undercounts the damage by
+    more than half.
+
+  Both formats Apple emits are now decoded structurally rather than scraped: the
+  NSArchiver typedstream by reading its length-prefixed backing string, and the
+  NSKeyedArchiver bplist by resolving `$top.root → NSString → NS.string` instead
+  of walking `$objects` for the longest string in it. A blob in neither format
+  returns nothing, so the caller falls through to `[attachment]` or
+  `[reaction:N]` — there is deliberately no byte-scraping fallback, because
+  scraping is what produced every one of these rows. The decode is pinned by 48
+  tests against blobs Apple's own archivers produced (`tests/fixtures/imessage/`,
+  regenerate with the Swift script beside them), including the byte-length
+  boundaries either side of each of typedstream's integer widths.
+
+- **A re-ingest could not correct a message body.** `[S1]`
+  `conversation_messages` was the only canonical table whose upsert wrote
+  `content` on INSERT and never again — an existing row only had
+  `sync_batch_id` and `ingested_at` touched, while `ai_chat_messages`,
+  `activity_events` and the rest all carry content in their DO UPDATE set. That
+  asymmetry is what would have made the decode fix above unable to reach a
+  single row already on disk: a re-sync read the messages correctly and then
+  discarded the result at the write. Re-ingest now replaces a body that changed,
+  and clears `content_disclosure*` and `content_hash` with it, since those
+  describe text that no longer exists. An unchanged body is left alone, so a
+  routine sync does not invalidate the corpus nightly, and an empty incoming
+  body never blanks a stored one.
+
+  `scripts/audit_imessage_body_decode.py` counts the damage on a node
+  (read-only). Repair on an existing node is a history re-sync — mode `6m`/`1y`/
+  `5y`, which restarts from rowid 0 — followed by
+  `scripts/backfill_disclosure.py --source-id imessage` and a re-embed of the
+  affected rows.
+
 - **A short place name swallowed every longer place containing it.**
   `[E:entities]` `token_set_similarity` scores a contained token set as a
   perfect 1.0. For a person that is right — "Robin" abbreviates "Claire

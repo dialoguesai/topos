@@ -10,7 +10,6 @@ import errno
 import logging
 import os
 import plistlib
-import re
 import sqlite3
 import tempfile
 from pathlib import Path
@@ -25,6 +24,14 @@ DEFAULT_CHAT_DB_PATH = Path.home() / "Library" / "Messages" / "chat.db"
 
 # Chunk size for copy (avoids sendfile/stat overflow on files > ~2GB)
 COPY_CHUNK_SIZE = 8 * 1024 * 1024  # 8 MiB
+
+# NSArchiver typedstream header: streamer version 4, then the 11-byte
+# literal "streamtyped". Everything Messages writes to attributedBody is
+# either this or an NSKeyedArchiver bplist.
+TYPEDSTREAM_HEADER = b"\x04\x0bstreamtyped"
+# Begin-value marker, then a one-character type-encoding string "+":
+# typedstream's code for a length-prefixed byte array.
+TYPEDSTREAM_BYTE_ARRAY = b"\x84\x01\x2b"
 
 
 def get_chat_db_path() -> Path:
@@ -118,105 +125,148 @@ def _normalize_sender_id(value: Any) -> Optional[str]:
     return text or None
 
 
-def _extract_text_from_plist(obj: Any) -> list[str]:
-    """Recursively pull likely text values from parsed plist structures."""
-    out: list[str] = []
-    if isinstance(obj, str):
-        s = " ".join(obj.split()).strip()
-        if s and any(ch.isalpha() for ch in s):
-            out.append(s)
-    elif isinstance(obj, dict):
-        for k, v in obj.items():
-            # Skip obviously structural keys.
-            if isinstance(k, str) and k in {
-                "$archiver", "$version", "$objects", "$top", "$class",
-                "NS.keys", "NS.objects",
-            }:
-                continue
-            out.extend(_extract_text_from_plist(v))
-    elif isinstance(obj, (list, tuple, set)):
-        for item in obj:
-            out.extend(_extract_text_from_plist(item))
-    return out
+def _normalize_decoded_text(value: str) -> Optional[str]:
+    """Clean a decoded attributed-string body into storable message text.
+
+    U+FFFC (OBJECT REPLACEMENT CHARACTER) is the placeholder Messages writes
+    where an attachment, sticker or inline preview sits. It carries no text, so
+    it is stripped; a body that was *only* placeholders collapses to None and
+    lets the caller fall through to `[attachment]`.
+    """
+    text = value.replace("￼", "")
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = text.strip()
+    return text or None
 
 
-def _looks_like_archive_noise(s: str) -> bool:
-    low = s.lower()
-    return (
-        low.startswith("ns.")
-        or "nskeyedarchiver" in low
-        or "nsdictionary" in low
-        or "nsmutablestring" in low
-        or "nsnumber" in low
-        or "attribute" in low
-        or low in {"bplist00", "$objects", "$top", "$version", "$archiver"}
-    )
+def _read_typedstream_int(buf: bytes, pos: int) -> tuple[Optional[int], int]:
+    """Read one typedstream-encoded integer; return (value, next_pos).
+
+    Small values are a single signed byte. Larger ones carry a width tag:
+    0x81 -> 2 bytes, 0x82 -> 4 bytes, 0x83 -> 8 bytes, little-endian.
+    """
+    if pos >= len(buf):
+        return None, pos
+    tag = buf[pos]
+    if tag == 0x81:
+        width = 2
+    elif tag == 0x82:
+        width = 4
+    elif tag == 0x83:
+        width = 8
+    else:
+        return int.from_bytes(buf[pos:pos + 1], "little", signed=True), pos + 1
+    end = pos + 1 + width
+    if end > len(buf):
+        return None, pos
+    return int.from_bytes(buf[pos + 1:end], "little", signed=True), end
 
 
-def _extract_utf8_text_candidates(raw: bytes) -> list[str]:
-    """Extract likely human text from UTF-8 byte payloads only.
+def _decode_typedstream_attributed_string(raw: bytes) -> Optional[str]:
+    """Decode the backing string of an NSArchiver ("streamtyped") blob.
 
-    We intentionally avoid utf-16/latin blind decoding to prevent fake CJK
-    gibberish from archive bytes interpreted with wrong encodings.
+    Layout, confirmed against blobs produced by Apple's own NSArchiver:
+
+        04 0b "streamtyped" <version> ... <class chain ending in "NSString">
+        95 84 01 2b <length> <length bytes of UTF-8>
+
+    `84 01 2b` is a fresh type-encoding string of one character, "+", which is
+    the typedstream code for a byte array. The FIRST such value after the
+    NSString class chain is NSAttributedString's backing store; every later one
+    is an attribute key (`__kIMMessagePartAttributeName` and friends), which is
+    why "longest printable run" is the wrong rule and this one is not.
+    """
+    if not raw.startswith(TYPEDSTREAM_HEADER):
+        return None
+    class_at = raw.find(b"NSString")
+    if class_at < 0:
+        return None
+    anchor = raw.find(TYPEDSTREAM_BYTE_ARRAY, class_at)
+    if anchor < 0:
+        return None
+    length, pos = _read_typedstream_int(raw, anchor + len(TYPEDSTREAM_BYTE_ARRAY))
+    if length is None or length < 0 or pos + length > len(raw):
+        return None
+    payload = raw[pos:pos + length]
+    try:
+        # Strict, and UTF-8 only. typedstream's "+" byte array is always UTF-8,
+        # and a lenient or utf-16 fallback here manufactures plausible-looking
+        # CJK out of archive bytes -- garbage that reads as real text.
+        return _normalize_decoded_text(payload.decode("utf-8"))
+    except UnicodeDecodeError:
+        logger.debug("attributedBody: typedstream payload not valid UTF-8 (%d bytes)", length)
+        return None
+
+
+def _decode_keyed_archive_attributed_string(raw: bytes) -> Optional[str]:
+    """Decode the backing string of an NSKeyedArchiver ("bplist00") blob.
+
+    The graph is fully specified, so this resolves it rather than scraping it:
+    `$top.root` -> object -> its `NSString` UID -> that object's `NS.string`.
+    Scraping instead returns the class table ("Z$classnameX$classesWNSValue"),
+    which is what 459 rows on the owner's node were carrying.
     """
     try:
-        decoded = raw.decode("utf-8", errors="ignore")
+        plist = plistlib.loads(raw)
     except Exception:
-        return []
-    candidates: list[str] = []
-    for match in re.findall(r"[^\x00-\x1F]{4,}", decoded):
-        s = " ".join(match.split()).strip()
-        if not s:
-            continue
-        if _looks_like_archive_noise(s):
-            continue
-        # Keep likely natural-language strings; avoid purely symbolic fragments.
-        alpha = sum(1 for ch in s if ch.isalpha())
-        if alpha < 3:
-            continue
-        candidates.append(s)
-    return candidates
+        return None
+    if not isinstance(plist, dict):
+        return None
+    objects = plist.get("$objects")
+    top = plist.get("$top")
+    if not isinstance(objects, list) or not isinstance(top, dict):
+        return None
+
+    def deref(ref: Any) -> Any:
+        if isinstance(ref, plistlib.UID):
+            index = int(ref)
+            if 0 <= index < len(objects):
+                return objects[index]
+            return None
+        return ref
+
+    root = deref(top.get("root"))
+    if isinstance(root, str):
+        return _normalize_decoded_text(root)
+    if not isinstance(root, dict):
+        return None
+    # NSAttributedString stores its text under "NSString"; a bare archived
+    # NSString stores it under "NS.string".
+    for key in ("NSString", "NS.string"):
+        node = deref(root.get(key))
+        if isinstance(node, str):
+            return _normalize_decoded_text(node)
+        if isinstance(node, dict):
+            inner = deref(node.get("NS.string"))
+            if isinstance(inner, str):
+                return _normalize_decoded_text(inner)
+    return None
 
 
 def _extract_text_from_attributed_body(value: Any) -> Optional[str]:
-    """Best-effort extraction of human text from iMessage attributedBody blobs.
+    """Decode human text from an iMessage `attributedBody` blob.
 
-    Important: do NOT decode arbitrary bytes as plain text. That produces
-    garbage strings (often CJK-looking) when archive bytes are interpreted with
-    the wrong encoding.
+    Both shapes Apple emits are decoded structurally. Anything else returns
+    None so the caller can synthesize a body (`[attachment]`, `[reaction:N]`)
+    rather than storing bytes. This deliberately has no byte-scraping fallback:
+    scraping is what wrote `streamtyped` into 1,283 rows, class-table crumbs
+    into 459 more, and a stray length byte onto the front of 1,980 otherwise
+    intact messages -- 3,722 rows, 49% of the owner's iMessage corpus, on
+    2026-08-28. `scripts/audit_imessage_body_decode.py` is the count.
     """
     if value is None:
         return None
     if isinstance(value, str):
-        s = " ".join(value.split()).strip()
-        return s or None
+        return _normalize_decoded_text(value)
     if not isinstance(value, (bytes, bytearray, memoryview)):
         return None
     raw = bytes(value)
-    candidates: list[str] = []
-
-    # Many modern iMessage attributedBody fields are keyed archive plists.
     if raw.startswith(b"bplist00"):
-        try:
-            plist_obj = plistlib.loads(raw)
-            candidates.extend(_extract_text_from_plist(plist_obj))
-        except Exception:
-            pass
-
-    # Some attributedBody payloads are not bplist but still contain UTF-8 text.
-    if not candidates:
-        candidates.extend(_extract_utf8_text_candidates(raw))
-    if not candidates:
-        return None
-
-    # Filter out noisy/internal archive strings and pick best candidate.
-    filtered = [s for s in candidates if not _looks_like_archive_noise(s)]
-    if not filtered:
-        return None
-    best = max(filtered, key=len)
-    best = best.replace("\ufffc", "").strip()
-    return best or None
-
+        return _decode_keyed_archive_attributed_string(raw)
+    if raw.startswith(TYPEDSTREAM_HEADER):
+        return _decode_typedstream_attributed_string(raw)
+    logger.debug("attributedBody: unrecognized archive header %r", raw[:16])
+    return None
 
 def _build_content_from_row(row: Dict[str, Any]) -> Optional[str]:
     """Build content string for iMessage rows, including non-text message forms."""

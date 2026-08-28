@@ -627,7 +627,9 @@
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],
-      "notes": []
+      "notes": [
+        "iMessage bodies need a re-sync, not a reprocess. The attributedBody decode fix corrects the READER; rows already on disk hold archive bytes (3,722 of 7,602 on the node this was found on), and raw_chat_messages_imessage stores the reader's output, so reprocess-from-raw heals nothing here -- only re-reading chat.db can. No automatic step: that needs Full Disk Access and a full-history window (mode 6m/1y/5y, which restarts from rowid 0; 'all' resumes from the checkpoint and re-reads nothing). Count before and after with scripts/audit_imessage_body_decode.py, then run backfill_disclosure.py --source-id imessage; embeddings re-derive themselves on the changed content_hash."
+      ]
     }
   ]
 }

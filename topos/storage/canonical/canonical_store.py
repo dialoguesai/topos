@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 from ..db.write_gate import commit_connection, with_db_write
+
+logger = logging.getLogger("topos.storage.canonical.canonical_store")
 
 
 def _utc_now() -> str:
@@ -190,7 +193,7 @@ class SQLiteCanonicalStore(CanonicalStore):
         if not message_id:
             raise ValueError("conversation_messages upsert requires message_id")
         existing = self._conn.execute(
-            "SELECT message_id FROM conversation_messages WHERE message_id=?",
+            "SELECT message_id, content FROM conversation_messages WHERE message_id=?",
             (message_id,),
         ).fetchone()
         dataset_id = record.get("dataset_id") or ""
@@ -234,6 +237,35 @@ class SQLiteCanonicalStore(CanonicalStore):
                 """,
                 (sync_batch_id or record.get("sync_batch_id"), record.get("ingested_at"), message_id),
             )
+            # Re-ingest must be able to correct a body the reader got wrong.
+            # This was the only canonical table whose upsert left `content`
+            # frozen at whatever the first sync wrote -- ai_chat_messages,
+            # activity_events and the rest all carry content in their DO UPDATE
+            # set. That asymmetry meant the iMessage attributedBody decode fix
+            # could not reach the 3,722 rows (49% of the corpus) already
+            # holding archive bytes: re-syncing read them correctly and then
+            # discarded the result at the write.
+            incoming = record.get("content")
+            if incoming and str(incoming) != (existing[1] or ""):
+                self._conn.execute(
+                    """
+                    UPDATE conversation_messages
+                    SET content=?,
+                        content_hash=NULL,
+                        content_disclosure=NULL,
+                        content_disclosure_hash=NULL,
+                        content_disclosure_model=NULL
+                    WHERE message_id=?
+                    """,
+                    (str(incoming), message_id),
+                )
+                # The disclosure columns hold a scrub of the *old* body, so they
+                # are cleared rather than left to describe text that no longer
+                # exists. `scripts/backfill_disclosure.py --source-id <source>`
+                # refills them.
+                logger.debug(
+                    "[PIPELINE:CANONICAL] healed conversation_messages.content for %s", message_id
+                )
         return CanonicalRef(record_id=message_id, created=existing is None)
 
     def _upsert_activity_event(self, record: Dict[str, Any], *, sync_batch_id: Optional[str]) -> CanonicalRef:
