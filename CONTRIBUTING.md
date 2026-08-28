@@ -108,10 +108,13 @@ uv run python scripts/scan_repo_for_owner_data.py --all   # whole tree
 
 Two hooks enforce it at commit time — one on staged files, one on the message.
 They compare against the local node's black-holed entities, places and goal
-text, and skip cleanly where there is no local database, so CI and fresh clones
-are unaffected. That last point is the limit worth knowing: **the guard only
-runs where the data lives.** A contributor without a node is not protected by
-it, which is why the rule above matters more than the tooling.
+text, and skip cleanly where there is no local database.
+
+That skip is the design, not a gap: **the guard runs exactly where the risk is.**
+The only machine that can leak a node's data is the machine holding it, and that
+is the machine the hook runs on. A contributor without a node has nothing of the
+owner's to leak, and CI could only check by being handed the very data it would
+be checking for. Each person's hook covers each person's own node.
 
 Person names are deliberately out of scope — every person entity would collide
 with ordinary English ("Unknown", "Claude") and a noisy hook gets removed. Names
