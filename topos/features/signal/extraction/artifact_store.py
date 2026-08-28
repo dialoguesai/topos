@@ -16,9 +16,45 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
-def source_ref_hash(artifact_type: str, source_refs: List[Dict[str, Any]]) -> str:
-    payload = json.dumps({"artifact_type": artifact_type, "source_refs": source_refs}, sort_keys=True)
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()[:32]
+#: ``artifact_type -> payload fields that make two artifacts from ONE record
+#: distinct``. Empty (the default) means the record IS the identity.
+#:
+#: An Edge needs this and the others do not: a journal entry declaring
+#: ``people = "Rowan, Nadia"`` emits one Edge per person, and all of them carry
+#: the same `source_refs`, so on a record-only key the second silently UPDATEs
+#: the first out of existence. Measured on the live node 2026-08-28: the row
+#: naming Rowan and Nadia holds exactly ONE Edge artifact, for Nadia — Rowan's
+#: was overwritten — and 22 journal rows declare two or more people.
+#:
+#: An Interval or a Goal really is one-per-record, so they stay keyed as they
+#: were and their stored hashes do not move.
+ARTIFACT_IDENTITY_FIELDS: Dict[str, tuple] = {
+    "Edge": ("target_entity_key",),
+    "EntityRef": ("entity_key",),
+}
+
+
+def source_ref_hash(
+    artifact_type: str,
+    source_refs: List[Dict[str, Any]],
+    payload: Optional[Dict[str, Any]] = None,
+) -> str:
+    """Identity of an artifact: its type, its sources, and what it is ABOUT.
+
+    ``payload`` is optional so existing callers keep working; when a type
+    declares identity fields, omitting it produces the old record-scoped hash.
+    """
+    identity = [
+        str((payload or {}).get(field) or "")
+        for field in ARTIFACT_IDENTITY_FIELDS.get(str(artifact_type or ""), ())
+    ]
+    key: Dict[str, Any] = {"artifact_type": artifact_type, "source_refs": source_refs}
+    # Added only for the types that declare it, so every other type's stored
+    # hashes stay byte-identical and no existing row is orphaned.
+    if identity:
+        key["identity"] = identity
+    blob = json.dumps(key, sort_keys=True)
+    return hashlib.sha256(blob.encode("utf-8")).hexdigest()[:32]
 
 
 class ExtractionArtifactStore:
@@ -37,7 +73,7 @@ class ExtractionArtifactStore:
     ) -> Dict[str, Any]:
         atype = str(artifact_type or "").strip()
         refs = source_refs or []
-        ref_hash = source_ref_hash(atype, refs)
+        ref_hash = source_ref_hash(atype, refs, payload)
         payload_json = json.dumps(payload)
         affinity_json = json.dumps(dimension_affinity or [])
         refs_json = json.dumps(refs)

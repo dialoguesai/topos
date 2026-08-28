@@ -294,7 +294,12 @@ def render_relationship_edge(
     ranked_counts: Optional[List[int]] = None,
 ) -> Optional[DerivedRendering]:
     payload = obj.get("payload") or {}
-    object_key = str(obj.get("object_key") or payload.get("target_entity_key") or "")
+    # The PERSON, from the payload — not the store key, which is now
+    # `person|activity` so that one person's Topos edge and their Chill edge are
+    # two rows instead of one overwriting the other. Naming off the key would
+    # publish "<person>|<activity>" as a person's name; the activity has its own clause
+    # further down, which is where it belongs.
+    object_key = str(payload.get("target_entity_key") or obj.get("object_key") or "")
     name = resolver.display_name_for_key(object_key)
     if not name:
         return None

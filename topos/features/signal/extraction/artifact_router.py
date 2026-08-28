@@ -91,10 +91,25 @@ def _materialize_signal_objects(
         created += 1
     elif artifact_type == "Edge" and "relationships" in dimension_affinity:
         entity_key = str(payload.get("target_entity_key") or "unknown")
+        # Keyed on the person AND what they were doing, because those are two
+        # different facts about that person and this store keeps one row per key.
+        #
+        # On the person alone, every journal edge for someone collapses to one
+        # row and the last write decides what it says. Measured on the live node
+        # 2026-08-28: 16 artifacts said `mitch × Topos` and 2 said
+        # `mitch × Chill`; the surviving row said Chill, because a Chill entry
+        # happened to be written last. Six rows node-wide said Topos against 38
+        # saying Chill — a write-order artifact reading as a finding.
+        #
+        # The branches either side of this one already compose their keys
+        # (`start|end|kind`, `kind:label`); this was the only one that dropped
+        # the dimension that makes its rows distinct.
+        coactivity = str(payload.get("coactivity_band") or "").strip()
+        object_key = f"{entity_key}|{coactivity}" if coactivity else entity_key
         object_store.upsert_object(
             "relationships",
             "RelationshipEdge",
-            entity_key,
+            object_key,
             payload,
             source_refs=source_refs,
             confidence=confidence,
