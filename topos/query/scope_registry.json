@@ -299,7 +299,10 @@
       "scope_id": "relationship_context:read",
       "description": "Relationship signals derived from communications: who you interact with and how those connections evolve. No raw message text.",
       "example_questions": [
-        "Who have I been closest to lately?"
+        "Who have I been closest to lately?",
+        "Who is in my close circle?",
+        "Who works on this with me?",
+        "Who should I ask about this work?"
       ],
       "primary_dimensions": [
         "Relationships"

@@ -227,7 +227,27 @@ def compute_close_circle(
     if not agg:
         return []
 
-    ranked = sorted(agg.values(), key=lambda r: (-r["messages"], r["person"]))
+    # RECIPROCITY FIRST, where the person graph can supply it.
+    #
+    # Ranking by inbound volume alone put Whiskey Lima at the top on 1,388 messages
+    # while the graph screen led with Mike November — the same question answered two
+    # ways, and chat had the weaker one. The graph's closeness is reciprocity, then
+    # recency, then volume, and derived relationship facts can raise it where behaviour
+    # understates the tie; a broadcaster with thousands of messages is not close, and
+    # 98 of 151 ties on this corpus are one-way.
+    #
+    # Volume stays the fallback, not the answer: a node whose person graph has not been
+    # built yet still gets a ranked list rather than nothing.
+    graph_closeness = _person_graph_closeness(conn)
+    for row in agg.values():
+        row["closeness"] = graph_closeness.get(_normalised_person(row["person"]))
+    measured = any(r.get("closeness") is not None for r in agg.values())
+    ranked = sorted(
+        agg.values(),
+        key=lambda r: (-(r.get("closeness") if r.get("closeness") is not None else -1),
+                       -r["messages"], r["person"])
+        if measured else (-r["messages"], r["person"]),
+    )
     anchor = now or newest or datetime.now(timezone.utc)
     total = len(ranked)
     out: List[Dict[str, Any]] = []
@@ -239,16 +259,53 @@ def compute_close_circle(
                 "last_contact": row["last_at"].date().isoformat() if row["last_at"] else None,
                 "correspondence_band": _correspondence_band(idx, total),
                 "recency_band": _recency_band(row["last_at"], anchor),
+                # None means the graph has no measured tie for them — NOT distance zero.
+                "closeness": row.get("closeness"),
+                "ranked_by": "reciprocity" if measured else "inbound volume",
             }
         )
+    return out
+
+
+def _person_graph_closeness(conn: sqlite3.Connection) -> Dict[str, float]:
+    """Closeness per person, from the same computation the graph screen draws.
+
+    Keyed on the NORMALISED name because this lane resolves people through the address
+    book while the graph resolves them through messenger keys and entity ids; the name is
+    the only key both sides reliably hold. Returns {} on any failure — a node mid-upgrade,
+    or one with no messaging substrate, falls back to volume rather than to nothing.
+    """
+    try:
+        from ..analytics.dataset_resolution import resolve_messaging_dataset
+        from ..analytics.person_graph import attach_closeness, build_person_nodes
+
+        dataset_id, _ = resolve_messaging_dataset(conn, "")
+        nodes = build_person_nodes(conn, dataset_id)
+        attach_closeness(conn, dataset_id, nodes)
+    except Exception:  # noqa: BLE001 — this lane must never break a turn
+        return {}
+    out: Dict[str, float] = {}
+    for node in nodes:
+        if node.get("is_owner"):
+            continue
+        value = node.get("closeness")
+        key = _normalised_person(str(node.get("label") or ""))
+        if key and isinstance(value, (int, float)):
+            # A person can surface twice (messenger peer and extracted entity); keep the
+            # stronger reading rather than whichever the scan happened to reach last.
+            if key not in out or value > out[key]:
+                out[key] = float(value)
     return out
 
 
 def compose_close_circle_answer(people: List[Dict[str, Any]]) -> str:
     lines = []
     for p in people:
-        bits = [f"{p['correspondence_band']} correspondence",
-                f"{p['messages']} messages inbound"]
+        bits = []
+        if p.get("closeness") is not None:
+            bits.append(f"closeness {p['closeness']:.2f}")
+        bits += [f"{p['correspondence_band']} correspondence",
+                 f"{p['messages']} messages inbound"]
         if p.get("last_contact"):
             bits.append(f"last {p['last_contact']} ({p['recency_band']})")
         else:

@@ -805,6 +805,18 @@ class QueryPipelineOrchestrator:
                         db_conn, query_text, packet_resolution=_pr["effective"])
                 except Exception:  # noqa: BLE001 — this lane must never break a turn
                     direct = None
+            if direct is None:
+                # "Who works on this with me" reached nothing: relationships and work are
+                # separate scopes and nothing joined them, so the question fell through to
+                # the model with a packet holding goals and no people. AFTER closeness, so
+                # "who am I closest to" keeps its interaction ranking rather than being
+                # answered from the work region.
+                try:
+                    from .collaborators import try_collaborators
+                    direct = try_collaborators(
+                        db_conn, query_text, packet_resolution=_pr["effective"])
+                except Exception:  # noqa: BLE001 — this lane must never break a turn
+                    direct = None
             if direct is not None:
                 public.payload.update(direct)
         if (access_mode == "inference"
