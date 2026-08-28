@@ -655,8 +655,30 @@
     {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
-      "steps": [],
-      "notes": []
+      "steps": [
+        {
+          "id": "reextract-entities-structured-fields-retry",
+          "kind": "enrichment_reprocess",
+          "title": "Re-run the entities re-extraction that 1.3.34 recorded as done without doing",
+          "why": "1.3.34 declared reextract-entities-structured-fields as consent: prompt. On any node that approved it through the UI it did nothing: both consent entry points are async, the executor called asyncio.run inside the running loop, every source raised, and the runner ledgered the step done anyway -- which advanced the baseline, so it is never retried. A node that approved it has a ledger row saying done and none of the work. This step is the retry, under a new id because the old row is unreachable. Nodes that never approved it are unaffected: their 1.3.34 row is still pending_consent and this one supersedes it.",
+          "params": {
+            "job_names": [
+              "entities"
+            ],
+            "force_reprocess": false,
+            "include_signal": false,
+            "per_source": true
+          },
+          "progress": "TUI progress bar on the node + GET /v1/upgrade/status",
+          "idempotent": "Yes: message_entities rows are keyed on (record_id, entity_text, entity_type) since migration 72, so a re-run REPLACES rather than appends. Running it twice is a no-op on row count.",
+          "estimated_duration": "~10-20 min per 1.5k records (CPU-bound local NER, no API cost); node stays usable and serves the existing graph meanwhile",
+          "consent": "prompt",
+          "order": 1
+        }
+      ],
+      "notes": [
+        "The runner fix ships in the same release: _run_coro runs the coroutine on its own loop in a worker thread when one already owns the caller's, and a step whose sources ALL errored now fails instead of being ledgered done. Without both, approving the step above would fail the same silent way."
+      ]
     }
   ]
 }

@@ -26,6 +26,7 @@ engine internals (no HTTP self-calls).
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import os
@@ -321,6 +322,73 @@ def ledger_rows(conn: sqlite3.Connection) -> List[Dict[str, Any]]:
 # --- real executors ----------------------------------------------------------
 
 
+def _fail_if_every_source_errored(step_id: str, outcomes: Dict[str, Any]) -> None:
+    """Raise when a per-source step failed on ALL of them.
+
+    The runner ledgers ``done`` whenever an executor returns without raising, so
+    an executor that catches per-source exceptions and records them as strings
+    reports success no matter how badly it went -- and ``done`` advances the
+    baseline, so the step is never retried and nothing surfaces.
+
+    That is exactly how the 1.3.34 entities reprocess reported success: 11 of 11
+    sources returned ``asyncio.run() cannot be called from a running event
+    loop`` in 6 ms, and the ledger said done. A partial failure is still ``done``
+    (one dead source must not block an upgrade), but a total one is a failed
+    step -- which is retried, and which the status endpoint shows.
+    """
+    if not outcomes:
+        return
+    errored = [s for s, v in outcomes.items() if str(v).startswith("error:")]
+    if len(errored) != len(outcomes):
+        return
+    sample = str(outcomes[errored[0]])[:200]
+    raise RuntimeError(
+        f"{step_id}: every source failed ({len(errored)}/{len(outcomes)}) - {sample}"
+    )
+
+
+def _run_coro(coro: Any) -> Any:
+    """Run ``coro`` to completion whether or not an event loop already owns this thread.
+
+    The upgrade runner has two kinds of caller and only one of them was ever
+    exercised. Boot runs it on a worker thread (``topos-upgrade-stamp``), where
+    ``asyncio.run`` is fine. But BOTH consent entry points -- ``POST
+    /v1/upgrade/consent`` and the ``consent_upgrade_step`` websocket handler --
+    are ``async def``, so they call this from inside the running loop, where
+    ``asyncio.run`` raises ``RuntimeError: asyncio.run() cannot be called from a
+    running event loop``.
+
+    Measured on a live node 2026-08-28, approving the 1.3.34 entities reprocess:
+    all 11 sources returned that error in 6 ms and the step was still ledgered
+    ``done``. Every consent:prompt reprocess ever approved through the UI has
+    been a silent no-op -- the steps that ask permission are exactly the
+    expensive ones nobody wants to run twice, so nobody re-ran them.
+
+    When a loop is already running we cannot block on it, so the coroutine gets
+    its own loop on a worker thread and we join. The runner is already off the
+    request path conceptually; this makes it so in fact.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+
+    result: Dict[str, Any] = {}
+
+    def _worker() -> None:
+        try:
+            result["value"] = asyncio.run(coro)
+        except BaseException as exc:  # noqa: BLE001 — re-raised on the caller's thread
+            result["error"] = exc
+
+    thread = threading.Thread(target=_worker, name="topos-upgrade-coro", daemon=True)
+    thread.start()
+    thread.join()
+    if "error" in result:
+        raise result["error"]
+    return result.get("value")
+
+
 def _real_source_ids(conn: sqlite3.Connection) -> List[str]:
     skip = ("demo_", "enrichment_lab", "sanity", "test", "manual_enrichment")
     try:
@@ -404,7 +472,7 @@ def _exec_enrichment_reprocess(step: Dict[str, Any], conn: sqlite3.Connection) -
             if pbar is not None:
                 pbar.set_description(f"Upgrade {step_id} · {source_id}")
             try:
-                out = asyncio.run(
+                out = _run_coro(
                     _process_enrichment_core(
                         source_id=source_id,
                         job_names=(canonical_jobs if declared else None),
@@ -442,6 +510,7 @@ def _exec_enrichment_reprocess(step: Dict[str, Any], conn: sqlite3.Connection) -
             total=len(source_ids),
         )
     )
+    _fail_if_every_source_errored(step_id, detail["sources"])
     return detail
 
 
@@ -465,7 +534,7 @@ def _exec_engine_endpoint(step: Dict[str, Any], conn: sqlite3.Connection) -> Dic
 
         params = step.get("params") or {}
         return dict(
-            asyncio.run(
+            _run_coro(
                 retry_pending_derivations(
                     conn,
                     source_id=params.get("source_id"),
@@ -512,7 +581,7 @@ def _exec_canonical_reprocess(step: Dict[str, Any], conn: sqlite3.Connection) ->
     }
     for source_id in source_ids:
         try:
-            out = asyncio.run(
+            out = _run_coro(
                 reprocess_source(
                     source_id=str(source_id),
                     dataset_id=str(params.get("dataset_id") or "default"),
@@ -524,6 +593,9 @@ def _exec_canonical_reprocess(step: Dict[str, Any], conn: sqlite3.Connection) ->
             detail["sources"][source_id] = str(out.get("status") or "ok")
         except Exception as exc:  # noqa: BLE001
             detail["sources"][source_id] = f"error: {exc}"
+    _fail_if_every_source_errored(
+        str(step.get("id") or "canonical_reprocess"), detail["sources"]
+    )
     return detail
 
 

@@ -9,6 +9,34 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **An upgrade step approved from the UI never ran, and reported success.**
+  `[O]` `[E:enrichment]` Found by approving 1.3.34's own entities reprocess on a
+  live node: all 11 sources returned `asyncio.run() cannot be called from a
+  running event loop`, the step finished in **6 milliseconds**, and the ledger
+  said `done`.
+
+  Two defects, and they compound. Boot runs the upgrade runner on a worker
+  thread (`topos-upgrade-stamp`), where `asyncio.run` is fine — that is the only
+  path that was ever exercised. Both consent entry points, `POST
+  /v1/upgrade/consent` and the `consent_upgrade_step` websocket handler, are
+  `async def` and call it from inside the running loop, where `asyncio.run`
+  raises. So every `consent: prompt` reprocess ever approved through the UI has
+  been a silent no-op — and those are exactly the expensive steps nobody re-runs
+  to check.
+
+  The second defect is what made it invisible: the runner ledgers `done`
+  whenever an executor returns without raising, and these executors catch
+  per-source exceptions and record them as strings in `detail_json`. `done`
+  advances the baseline, so the work is never retried and `/v1/upgrade/status`
+  shows a clean upgrade. A partial failure is still `done` — one dead source
+  must not block an upgrade — but a total one now fails the step, which is
+  retried and surfaced.
+
+  `_run_coro` runs the coroutine on its own loop in a worker thread when a loop
+  already owns the caller's thread, and is used by all three reprocess
+  executors. Both halves are pinned by tests verified to fail when reverted.
+
 ## [1.3.34] — 2026-08-28
 
 ### Fixed
