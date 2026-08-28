@@ -221,7 +221,7 @@ def _scan_candidate_pairs(
     load a model, or drift into its own private name-similarity heuristic.
 
     Yields the FULL fuzzy range, not just the review band — a subset pair like
-    "jonny" ⊂ "jonny johnson" scores 1.0 and so is never queued for review, yet
+    "robin" ⊂ "robin ellery" scores 1.0 and so is never queued for review, yet
     it is exactly the alias an affinity edge must not be built on.
     """
     from ..signal.vector_math import cosine_similarity

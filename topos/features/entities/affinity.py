@@ -287,7 +287,7 @@ def _merge_candidate_pairs(conn: sqlite3.Connection) -> set:
     """Pairs consolidation would call one person (§3.1a defect B).
 
     On the live node BOTH surviving pairs at the shipped floor were this:
-    ``Jonny ↔ Jonny Johnson`` and ``Jonny Johnson ↔ draftin1`` — the owner and
+    ``Robin ↔ Robin Ellery`` and ``Robin Ellery ↔ draftin1`` — the owner and
     their own unconsolidated aliases, scoring high precisely because two names
     for one person are mentioned in one person's contexts. That is a
     consolidation finding wearing an affinity label.

@@ -21,8 +21,8 @@ import json
 import math
 import re
 import sqlite3
-from collections import Counter
-from typing import Any, Dict, List, Optional, Set
+from collections import Counter, defaultdict
+from typing import Any, Dict, List, Optional, Sequence, Set, Tuple
 
 #: Message traffic that is not a relationship. 29 of this node's 180 peers are SMS shortcodes
 #: (2FA codes, delivery notices); they are not people and must never occupy a social graph.
@@ -84,8 +84,8 @@ def resolve_owner_identity(conn: Any) -> Dict[str, Any]:
         return {"canonical_id": None, "ids": set(), "label": "You", "merge_candidates": []}
     ids = {str(r[0]) for r in rows if r and r[0]}
 
-    # `is_self` alone missed SIX owner entities on the live node — `Jonny Johnson` (29
-    # mentions), `Jonny` (20), `Delta Yankee` (13), and more — so the owner was drawn on
+    # `is_self` alone missed SIX owner entities on the live node — `Robin Ellery` (29
+    # mentions), `Robin` (20), `Jordan Ellery` (13), and more — so the owner was drawn on
     # their own social graph as up to six separate contacts. These three rules use what the
     # node actually KNOWS rather than what a name looks like.
     known = owner_identifiers(conn)
@@ -640,38 +640,640 @@ def merge_suggestions(nodes: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return out
 
 
-def person_provenance(conn: Any, node: Dict[str, Any], *, limit: int = 20) -> Dict[str, Any]:
-    """"Why is this person here?" — the records that produced the node.
+# --------------------------------------------------------------------------- appearances (C-6)
 
-    Nothing else makes an unfamiliar name judgeable, and without it band, merge and dismiss
-    are guesses. Returns the mentions with their surface text, source and date.
+#: Two ways a person shows up on a card — not the same thing.
+#:
+#: * mentioned — their name was extracted from a record body (`entity_mentions`).
+#:   Any connector that runs NER lands here with no further code.
+#: * participated — they were a party to the record even if unnamed in the body
+#:   (canonical `conversation_participants` / `conversation_messages`). Any
+#:   connector that writes those tables (today's messengers; Slack tomorrow)
+#:   lands here the same way. `source_id` is a column on the row, never a branch.
+#:
+#: Calendar attendees live in JSON metadata, not a person-keyed participant
+#: table, so they are not read here.
+APPEARANCE_MENTIONED = "mentioned"
+APPEARANCE_PARTICIPATED = "participated"
+APPEARANCE_SHOW = 6
+APPEARANCE_FETCH = 24
+APPEARANCE_EXCERPT = 220
+
+_IDENTIFIER_PHONE_RE = re.compile(r"(?:\+?\d[\d\s().-]{6,}\d)")
+_IDENTIFIER_EMAIL_RE = re.compile(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", re.I)
+
+
+def _appearance_table_exists(conn: Any, name: str) -> bool:
+    try:
+        return bool(conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+        ).fetchone())
+    except sqlite3.Error:
+        return False
+
+
+def _appearance_columns(conn: Any, name: str) -> Set[str]:
+    try:
+        return {str(r[1]) for r in conn.execute(f"PRAGMA table_info({name})").fetchall()}
+    except sqlite3.Error:
+        return set()
+
+
+def _appearance_chunks(items: Sequence[Any], size: int = 400) -> List[List[Any]]:
+    seq = [x for x in items if x is not None and str(x) != ""]
+    return [seq[i:i + size] for i in range(0, len(seq), size)]
+
+
+def _collapse_ws(text: Any) -> str:
+    return " ".join(str(text or "").split())
+
+
+def _scrub_identifier_shapes(text: str) -> str:
+    """Phones and emails out of snippets so they never land in the snapshot JSON."""
+    cleaned = _IDENTIFIER_PHONE_RE.sub("•••", text)
+    return _IDENTIFIER_EMAIL_RE.sub("•••", cleaned)
+
+
+def _excerpt_around(full: str, token: str, width: int = APPEARANCE_EXCERPT) -> str:
+    """A short window around a matched name — never a full thread."""
+    text = _collapse_ws(full)
+    if not text:
+        return ""
+    needle = _collapse_ws(token)
+    if needle and len(needle) >= 2:
+        idx = text.lower().find(needle.lower())
+        if idx >= 0:
+            start = max(0, idx - 50)
+            end = min(len(text), idx + len(needle) + 150)
+            snippet = text[start:end]
+            if start > 0:
+                snippet = "…" + snippet.lstrip()
+            if end < len(text):
+                snippet = snippet.rstrip() + "…"
+            return snippet[:width]
+    if len(text) <= width:
+        return text
+    return text[: width - 1].rstrip() + "…"
+
+
+def appearance_source_label(source_id: str) -> str:
+    """Human word for a source_id. Registry title if cheap, else the raw id."""
+    sid = str(source_id or "").strip()
+    if not sid:
+        return "unknown"
+    try:
+        from ..sources.registry import REGISTRY
+
+        src = REGISTRY.get(sid)
+        name = getattr(src, "display_name", None) if src is not None else None
+        if name:
+            return str(name)
+    except Exception:  # noqa: BLE001 — display is best-effort
+        pass
+    return re.sub(r"[_-]+", " ", sid).strip() or "unknown"
+
+
+def _load_appearance_record_texts(conn: Any, record_ids: Sequence[str]) -> Dict[str, str]:
+    """Original line for a mention record_id, from canonical tables. First hit wins.
+
+    Tables are discovered from the schema (id column + a body/title column), not
+    listed by connector. A new source that writes a canonical row with those
+    columns is picked up with no edit here.
     """
-    entity_id = str(node.get("entity_id") or "")
-    rows: List[Dict[str, Any]] = []
-    if entity_id:
+    out: Dict[str, str] = {}
+    ids = [str(rid) for rid in record_ids if rid]
+    if not ids:
+        return out
+
+    try:
+        tables = [
+            str(r[0]) for r in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        ]
+    except sqlite3.Error:
+        return out
+
+    ranked: List[Tuple[int, str, str, List[str]]] = []
+    id_cols = ("message_id", "entry_id", "event_id", "record_id")
+    text_cols = ("content", "title", "place_name", "project", "goal", "accomplished")
+    for table in tables:
+        if not re.match(r"^[A-Za-z_][A-Za-z0-9_]*$", table):
+            continue
+        cols = _appearance_columns(conn, table)
+        id_col = next((c for c in id_cols if c in cols), None)
+        fields = [c for c in text_cols if c in cols]
+        if not id_col or not fields:
+            continue
+        rank = 0 if "content" in fields else 1
+        ranked.append((rank, table, id_col, fields))
+    ranked.sort()
+
+    for _rank, table, id_col, fields in ranked:
+        missing = [rid for rid in ids if rid not in out]
+        select_text = ", ".join(fields)
+        for chunk in _appearance_chunks(missing):
+            placeholders = ",".join("?" for _ in chunk)
+            try:
+                rows = conn.execute(
+                    f"SELECT {id_col}, {select_text} FROM {table} "
+                    f"WHERE {id_col} IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+            except sqlite3.Error:
+                break
+            for rid, *parts in rows:
+                key = str(rid)
+                if key in out:
+                    continue
+                text = _collapse_ws(" ".join(str(p) for p in parts if p))
+                if text:
+                    out[key] = text
+    return out
+
+
+def _appearance_is_rich(text: str, surface: str) -> bool:
+    body = _collapse_ws(text)
+    token = _collapse_ws(surface)
+    if not body:
+        return False
+    if not token:
+        return len(body) > 12
+    return len(body) > len(token) + 8 or body.lower() != token.lower()
+
+
+def _finalize_appearance(
+    *,
+    source_id: Any,
+    text: str,
+    when: Any,
+    authored: Any,
+    kind: str,
+    record_id: Any = None,
+) -> Optional[Dict[str, Any]]:
+    snippet = _scrub_identifier_shapes(_collapse_ws(text))[:APPEARANCE_EXCERPT]
+    if not snippet:
+        return None
+    sid = str(source_id or "")
+    return {
+        "source_id": sid,
+        "source_label": appearance_source_label(sid),
+        "text": snippet,
+        "at": str(when or "")[:19],
+        "authored_by_owner": bool(authored),
+        "kind": kind,
+        "record_id": str(record_id or ""),
+    }
+
+
+def _appearance_mentions(
+    conn: Any,
+    nodes: Sequence[Dict[str, Any]],
+    *,
+    fetch: int,
+) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, int]]:
+    """Batched `entity_mentions` — every source_id, no connector filter."""
+    by_entity: Dict[str, List[str]] = defaultdict(list)
+    for node in nodes:
+        if node.get("is_owner"):
+            continue
+        nid = str(node.get("node_id") or "")
+        if not nid:
+            continue
+        eids = [str(node["entity_id"])] if node.get("entity_id") else []
+        eids.extend(str(a) for a in (node.get("entity_id_aliases") or []) if a)
+        for eid in eids:
+            if eid and nid not in by_entity[eid]:
+                by_entity[eid].append(nid)
+    mentions: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    totals: Dict[str, int] = defaultdict(int)
+    ids = list(by_entity)
+    if not ids or not _appearance_table_exists(conn, "entity_mentions"):
+        return mentions, totals
+
+    cols = _appearance_columns(conn, "entity_mentions")
+    has_surface = "surface_text" in cols
+    has_record = "record_id" in cols
+    has_event = "event_at" in cols
+    has_created = "created_at" in cols
+    has_authored = "authored_by_owner" in cols
+    when_sql = "NULL"
+    if has_event and has_created:
+        when_sql = "COALESCE(event_at, created_at)"
+    elif has_event:
+        when_sql = "event_at"
+    elif has_created:
+        when_sql = "created_at"
+    select = [
+        "entity_id",
+        "source_id",
+        "surface_text" if has_surface else "NULL",
+        "record_id" if has_record else "NULL",
+        when_sql,
+        "COALESCE(authored_by_owner, 0)" if has_authored else "0",
+    ]
+
+    raw: Dict[str, List[Tuple[Any, ...]]] = defaultdict(list)
+    for chunk in _appearance_chunks(ids):
+        placeholders = ",".join("?" for _ in chunk)
         try:
-            for source_id, surface, when, authored in conn.execute(
-                    "SELECT source_id, surface_text, COALESCE(event_at, created_at),"
-                    "       COALESCE(authored_by_owner,0)"
-                    "  FROM entity_mentions WHERE entity_id=?"
-                    " ORDER BY COALESCE(event_at, created_at) DESC LIMIT ?",
-                    (entity_id, int(limit))):
-                rows.append({
-                    "source_id": str(source_id or ""),
-                    "text": clean_label(surface)[:200],
-                    "at": str(when or ""),
-                    "authored_by_owner": bool(authored),
-                })
+            for entity_id, n in conn.execute(
+                f"SELECT entity_id, COUNT(*) FROM entity_mentions "
+                f"WHERE entity_id IN ({placeholders}) GROUP BY entity_id",
+                chunk,
+            ).fetchall():
+                for nid in by_entity.get(str(entity_id), ()):
+                    totals[nid] += int(n or 0)
         except sqlite3.Error:
-            rows = []
+            continue
+        try:
+            rows = conn.execute(
+                f"SELECT {', '.join(select)} FROM entity_mentions "
+                f"WHERE entity_id IN ({placeholders}) "
+                f"ORDER BY {when_sql} DESC",
+                chunk,
+            ).fetchall()
+        except sqlite3.Error:
+            continue
+        for entity_id, source_id, surface, record_id, when, authored in rows:
+            for nid in by_entity.get(str(entity_id), ()):
+                bucket = raw[nid]
+                if len(bucket) >= fetch:
+                    continue
+                bucket.append((source_id, surface, record_id, when, authored))
+
+    record_ids = [
+        str(record_id) for bucket in raw.values()
+        for _, _, record_id, _, _ in bucket if record_id
+    ]
+    texts = _load_appearance_record_texts(conn, record_ids)
+
+    for nid, bucket in raw.items():
+        built: List[Dict[str, Any]] = []
+        for source_id, surface, record_id, when, authored in bucket:
+            token = _collapse_ws(surface)
+            full = texts.get(str(record_id or ""), "")
+            text = _excerpt_around(full, token) if full else token
+            row = _finalize_appearance(
+                source_id=source_id, text=text, when=when, authored=authored,
+                kind=APPEARANCE_MENTIONED, record_id=record_id,
+            )
+            if not row:
+                continue
+            row["_rich"] = _appearance_is_rich(row["text"], token)
+            built.append(row)
+        mentions[nid] = built
+    return mentions, totals
+
+
+def _peer_handle_keys(node: Dict[str, Any]) -> List[str]:
+    keys: List[str] = []
+    seen = set()
+    for raw in list(node.get("messenger_keys") or []):
+        key = str(raw or "").strip()
+        if not key or key.lower() == "self" or key in seen:
+            continue
+        seen.add(key)
+        keys.append(key)
+    return keys
+
+
+def _appearance_participation(
+    conn: Any,
+    nodes: Sequence[Dict[str, Any]],
+    *,
+    fetch: int,
+) -> Tuple[Dict[str, List[Dict[str, Any]]], Dict[str, int]]:
+    """Batched participation from canonical conversation tables. No source_id filter.
+
+    A future messenger connector that writes `conversation_messages` /
+    `conversation_participants` appears here with zero edits. `source_id` on
+    the row is passed through as data.
+    """
+    rows_out: Dict[str, List[Dict[str, Any]]] = defaultdict(list)
+    totals: Dict[str, int] = defaultdict(int)
+    if not _appearance_table_exists(conn, "conversation_messages"):
+        return rows_out, totals
+
+    key_to_nid: Dict[str, str] = {}
+    cid_to_nid: Dict[str, str] = {}
+    nid_keys: Dict[str, Set[str]] = defaultdict(set)
+    for node in nodes:
+        if node.get("is_owner"):
+            continue
+        nid = str(node.get("node_id") or "")
+        if not nid:
+            continue
+        for key in _peer_handle_keys(node):
+            key_to_nid.setdefault(key, nid)
+            nid_keys[nid].add(key)
+        cid = str(node.get("contact_id") or "").strip()
+        if cid:
+            cid_to_nid.setdefault(cid, nid)
+
+    if cid_to_nid and _appearance_table_exists(conn, "contact_identifiers"):
+        for chunk in _appearance_chunks(list(cid_to_nid)):
+            placeholders = ",".join("?" for _ in chunk)
+            try:
+                idents = conn.execute(
+                    f"SELECT contact_id, identifier FROM contact_identifiers "
+                    f"WHERE contact_id IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+            except sqlite3.Error:
+                idents = []
+            for cid, ident in idents:
+                key = str(ident or "").strip()
+                nid = cid_to_nid.get(str(cid))
+                if key and nid:
+                    key_to_nid.setdefault(key, nid)
+                    nid_keys[nid].add(key)
+
+    if not key_to_nid and not cid_to_nid:
+        return rows_out, totals
+
+    conv_to_nids: Dict[str, Set[str]] = defaultdict(set)
+    if cid_to_nid and _appearance_table_exists(conn, "conversation_participants"):
+        for chunk in _appearance_chunks(list(cid_to_nid)):
+            placeholders = ",".join("?" for _ in chunk)
+            try:
+                for conv_id, cid in conn.execute(
+                    f"SELECT conversation_id, contact_id FROM conversation_participants "
+                    f"WHERE contact_id IN ({placeholders})",
+                    chunk,
+                ).fetchall():
+                    nid = cid_to_nid.get(str(cid))
+                    if nid and conv_id:
+                        conv_to_nids[str(conv_id)].add(nid)
+            except sqlite3.Error:
+                pass
+
+    cols = _appearance_columns(conn, "conversation_messages")
+    has_self = "is_from_self" in cols
+    has_event = "event_at" in cols
+    has_created = "created_at" in cols
+    has_content = "content" in cols
+    has_source = "source_id" in cols
+    has_sender = "sender_id" in cols
+    has_conv = "conversation_id" in cols
+    if not has_sender or not has_content:
+        return rows_out, totals
+    when_sql = "NULL"
+    if has_event and has_created:
+        when_sql = "COALESCE(event_at, created_at)"
+    elif has_event:
+        when_sql = "event_at"
+    elif has_created:
+        when_sql = "created_at"
+    self_sql = "COALESCE(is_from_self, 0)" if has_self else "0"
+    source_sql = "source_id" if has_source else "NULL"
+    conv_sql = "conversation_id" if has_conv else "NULL"
+    select_sql = (
+        f"message_id, {conv_sql}, sender_id, content, {when_sql}, {source_sql}, {self_sql}"
+    )
+
+    sent_ids: Dict[str, Set[str]] = defaultdict(set)
+    fetched: Dict[str, List[Tuple[Any, ...]]] = defaultdict(list)
+    collect_cap = max(fetch * 2, fetch)
+
+    def take(nid: str, row: Tuple[Any, ...]) -> None:
+        message_id = str(row[0] or "")
+        if message_id:
+            if message_id in sent_ids[nid]:
+                return
+            sent_ids[nid].add(message_id)
+        if len(fetched[nid]) < collect_cap:
+            fetched[nid].append(row)
+
+    if key_to_nid:
+        for chunk in _appearance_chunks(list(key_to_nid)):
+            placeholders = ",".join("?" for _ in chunk)
+            try:
+                for sender, n in conn.execute(
+                    f"SELECT sender_id, COUNT(*) FROM conversation_messages "
+                    f"WHERE sender_id IN ({placeholders}) GROUP BY sender_id",
+                    chunk,
+                ).fetchall():
+                    nid = key_to_nid.get(str(sender))
+                    if nid:
+                        totals[nid] += int(n or 0)
+            except sqlite3.Error:
+                pass
+            try:
+                msg_rows = conn.execute(
+                    f"SELECT {select_sql} FROM conversation_messages "
+                    f"WHERE sender_id IN ({placeholders}) "
+                    f"ORDER BY {when_sql} DESC",
+                    chunk,
+                ).fetchall()
+            except sqlite3.Error:
+                msg_rows = []
+            for row in msg_rows:
+                nid = key_to_nid.get(str(row[2] or ""))
+                if not nid:
+                    continue
+                if has_conv and row[1]:
+                    conv_to_nids[str(row[1])].add(nid)
+                take(nid, row)
+
+    # 1:1 threads: the owner is a party too, so their messages belong on the card.
+    dyadic: Set[str] = set()
+    if conv_to_nids and has_conv:
+        conv_ids = list(conv_to_nids)
+        participant_n: Dict[str, int] = {}
+        if _appearance_table_exists(conn, "conversation_participants"):
+            for chunk in _appearance_chunks(conv_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                try:
+                    for conv_id, n in conn.execute(
+                        f"SELECT conversation_id, COUNT(DISTINCT contact_id) "
+                        f"FROM conversation_participants "
+                        f"WHERE conversation_id IN ({placeholders}) "
+                        f"GROUP BY conversation_id",
+                        chunk,
+                    ).fetchall():
+                        participant_n[str(conv_id)] = int(n or 0)
+                except sqlite3.Error:
+                    pass
+        sender_n: Dict[str, int] = {}
+        if has_self:
+            for chunk in _appearance_chunks(conv_ids):
+                placeholders = ",".join("?" for _ in chunk)
+                try:
+                    for conv_id, n in conn.execute(
+                        f"SELECT conversation_id, COUNT(DISTINCT sender_id) "
+                        f"FROM conversation_messages "
+                        f"WHERE conversation_id IN ({placeholders}) "
+                        f"AND COALESCE(is_from_self, 0)=0 "
+                        f"AND sender_id IS NOT NULL AND sender_id != '' "
+                        f"AND lower(sender_id) != 'self' "
+                        f"GROUP BY conversation_id",
+                        chunk,
+                    ).fetchall():
+                        sender_n[str(conv_id)] = int(n or 0)
+                except sqlite3.Error:
+                    pass
+        for conv_id in conv_ids:
+            n_part = participant_n.get(conv_id)
+            n_send = sender_n.get(conv_id)
+            if n_part is not None:
+                if n_part <= 2:
+                    dyadic.add(conv_id)
+            elif n_send is not None and n_send <= 1:
+                dyadic.add(conv_id)
+
+    if dyadic and has_self:
+        for chunk in _appearance_chunks(list(dyadic)):
+            placeholders = ",".join("?" for _ in chunk)
+            try:
+                for conv_id, n in conn.execute(
+                    f"SELECT conversation_id, COUNT(*) FROM conversation_messages "
+                    f"WHERE conversation_id IN ({placeholders}) "
+                    f"AND COALESCE(is_from_self, 0)=1 "
+                    f"GROUP BY conversation_id",
+                    chunk,
+                ).fetchall():
+                    for nid in conv_to_nids.get(str(conv_id), ()):
+                        totals[nid] += int(n or 0)
+            except sqlite3.Error:
+                pass
+            try:
+                owner_rows = conn.execute(
+                    f"SELECT {select_sql} FROM conversation_messages "
+                    f"WHERE conversation_id IN ({placeholders}) "
+                    f"AND COALESCE(is_from_self, 0)=1 "
+                    f"ORDER BY {when_sql} DESC",
+                    chunk,
+                ).fetchall()
+            except sqlite3.Error:
+                owner_rows = []
+            for row in owner_rows:
+                conv_id = str(row[1] or "")
+                for nid in conv_to_nids.get(conv_id, ()):
+                    take(nid, row)
+
+    for nid, bucket in fetched.items():
+        bucket.sort(key=lambda r: str(r[4] or ""), reverse=True)
+        built: List[Dict[str, Any]] = []
+        for message_id, _conv, _sender, content, when, source_id, authored in bucket[:fetch]:
+            text = _excerpt_around(str(content or ""), "")
+            row = _finalize_appearance(
+                source_id=source_id, text=text, when=when, authored=authored,
+                kind=APPEARANCE_PARTICIPATED, record_id=message_id,
+            )
+            if row:
+                built.append(row)
+        rows_out[nid] = built
+    return rows_out, totals
+
+
+def _merge_appearances(
+    mentioned: List[Dict[str, Any]],
+    mention_total: int,
+    participated: List[Dict[str, Any]],
+    participation_total: int,
+    *,
+    show: int,
+) -> Tuple[List[Dict[str, Any]], int]:
+    merged: List[Dict[str, Any]] = []
+    seen: Set[Tuple[str, str, str]] = set()
+    seen_records: Set[str] = set()
+
+    def consider(row: Dict[str, Any]) -> None:
+        rid = str(row.get("record_id") or "")
+        if rid and rid in seen_records:
+            return
+        key = (
+            str(row.get("source_id") or ""),
+            str(row.get("at") or "")[:10],
+            str(row.get("text") or "")[:80].lower(),
+        )
+        if key in seen:
+            return
+        seen.add(key)
+        if rid:
+            seen_records.add(rid)
+        merged.append(row)
+
+    rich = [row for row in mentioned if row.get("_rich")]
+    thin = [row for row in mentioned if not row.get("_rich")]
+    for row in rich + participated + thin:
+        consider(row)
+    merged.sort(key=lambda row: str(row.get("at") or ""), reverse=True)
+    overlap = 0
+    mention_ids = {str(r.get("record_id") or "") for r in mentioned if r.get("record_id")}
+    part_ids = {str(r.get("record_id") or "") for r in participated if r.get("record_id")}
+    if mention_ids and part_ids:
+        overlap = len(mention_ids & part_ids)
+    total = int(mention_total or 0) + int(participation_total or 0) - overlap
+    chosen = merged[:show]
+    for row in chosen:
+        row.pop("_rich", None)
+        row.pop("record_id", None)
+    return chosen, max(total, len(merged))
+
+
+def batch_person_appearances(
+    conn: Any,
+    nodes: Sequence[Dict[str, Any]],
+    *,
+    show: int = APPEARANCE_SHOW,
+    fetch: int = APPEARANCE_FETCH,
+) -> Dict[str, Dict[str, Any]]:
+    """Connector-agnostic appearances for many people. Batched IN queries, never N+1.
+
+    A new connector that writes `entity_mentions` or the canonical conversation
+    tables shows up here with no call-site edits.
+    """
+    mentioned, mention_totals = _appearance_mentions(conn, nodes, fetch=fetch)
+    participated, part_totals = _appearance_participation(conn, nodes, fetch=fetch)
+    out: Dict[str, Dict[str, Any]] = {}
+    for node in nodes:
+        nid = str(node.get("node_id") or "")
+        if not nid:
+            continue
+        mentions, total = _merge_appearances(
+            mentioned.get(nid, []),
+            mention_totals.get(nid, 0),
+            participated.get(nid, []),
+            part_totals.get(nid, 0),
+            show=show,
+        )
+        out[nid] = {
+            "mentions": mentions,
+            "total": total,
+            "mention_total": int(mention_totals.get(nid, 0)),
+            "participation_total": int(part_totals.get(nid, 0)),
+        }
+    return out
+
+
+def person_provenance(conn: Any, node: Dict[str, Any], *, limit: int = 20) -> Dict[str, Any]:
+    """"Why is this person here?" — mentioned in text, or a party to a record.
+
+    Mentioned and participated are collected together so a DM peer with no NER
+    hit is not an empty card, and a journal-only name still shows the line they
+    were named in. `source_id` is data on each row, never a switch.
+    """
+    packed = batch_person_appearances(
+        conn, [node], show=int(limit), fetch=max(int(limit), APPEARANCE_FETCH),
+    )
+    item = packed.get(str(node.get("node_id") or ""), {}) or {}
     return {
         "node_id": node.get("node_id"),
         "label": node.get("label"),
         "band": node.get("band"),
         "band_reason": node.get("band_reason"),
         "messenger_keys": node.get("messenger_keys", []),
-        "mentions": rows,
-        "coverage": {"basis": "the records that named this person, most recent first"},
+        "mentions": item.get("mentions") or [],
+        "coverage": {
+            "basis": (
+                "records that named this person, or that they participated in, "
+                "most recent first"
+            ),
+            "mentioned": item.get("mention_total", 0),
+            "participated": item.get("participation_total", 0),
+        },
     }
 
 

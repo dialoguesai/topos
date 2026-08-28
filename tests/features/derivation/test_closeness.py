@@ -149,12 +149,12 @@ def test_a_blackholed_place_does_not_erase_a_person_sharing_a_token(db):
 
 
 def test_the_owner_is_not_in_their_own_close_circle(db):
-    db.execute("INSERT INTO contacts VALUES ('me','Jonny Johnson',1)")
+    db.execute("INSERT INTO contacts VALUES ('me','Robin Ellery',1)")
     db.execute("INSERT INTO contact_identifiers VALUES ('me','+15125551111','phone')")
     db.execute("INSERT INTO conversation_messages VALUES ('own1','+15125551111',0,?)",
                ("2026-08-25T09:00:00+00:00",))
     db.commit()
-    assert "Jonny Johnson" not in [p["person"] for p in compute_close_circle(db, now=NOW)]
+    assert "Robin Ellery" not in [p["person"] for p in compute_close_circle(db, now=NOW)]
 
 
 def test_a_capped_list_says_what_it_cut(db):

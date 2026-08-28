@@ -393,7 +393,7 @@ class TestLinkGate:
             "https://github.com/foo",
             "dialoguesai/control-plane",
             "www.nytimes.com",
-            "@jonnyjohnson1",
+            "@robinellery1",
             "example.com",
         ],
     )

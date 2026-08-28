@@ -118,7 +118,7 @@ class TestApprove:
     def test_approve_marks_overlapping_reviews_stale(self, conn) -> None:
         _mk_entity(conn, "Jon", mentions=10)
         _mk_entity(conn, "Jonathan", mentions=10)
-        _mk_entity(conn, "Jonny", mentions=10)
+        _mk_entity(conn, "Jonas", mentions=10)
         propose_merges(conn, use_embeddings=False)
         items = list_review(conn)
         assert len(items) >= 2
@@ -279,9 +279,9 @@ class TestOneRowPerDecision:
 
     def test_answered_decision_is_never_asked_again(self, conn) -> None:
         """The owner's answer lives in their Topos and binds the resolver."""
-        person = _mk_entity(conn, "Jonny Johnson", mentions=40)
+        person = _mk_entity(conn, "Robin Ellery", mentions=40)
         resolver = EntityResolver(conn)
-        resolver._queue_review("Jonny", person, 0.85, "rec-1")
+        resolver._queue_review("Robin", person, 0.85, "rec-1")
         conn.commit()
 
         review_id = list_review(conn)[0]["review_id"]
@@ -289,7 +289,7 @@ class TestOneRowPerDecision:
 
         # ingest keeps meeting the surface long after the owner ruled on it
         for _ in range(10):
-            resolver._queue_review("Jonny", person, 0.85, "rec-2")
+            resolver._queue_review("Robin", person, 0.85, "rec-2")
         conn.commit()
         assert list_review(conn) == [], "settled decision came back"
 
@@ -812,20 +812,20 @@ class TestDedupMigration:
         # a decision the owner already answered, still being re-asked
         conn.execute(
             "INSERT INTO entity_review (review_id, surface_text, candidate_entity_id,"
-            " score, status, kind) VALUES ('rev_done', 'Jonny', ?, 0.85, 'dismissed',"
+            " score, status, kind) VALUES ('rev_done', 'Robin', ?, 0.85, 'dismissed',"
             " 'resolution')",
             (northgate,),
         )
         conn.execute(
             "INSERT INTO entity_review (review_id, surface_text, candidate_entity_id,"
-            " score, status, kind) VALUES ('rev_again', 'Jonny', ?, 0.85, 'pending',"
+            " score, status, kind) VALUES ('rev_again', 'Robin', ?, 0.85, 'pending',"
             " 'resolution')",
             (northgate,),
         )
         # an owner guard, which is not a question and must survive untouched
         conn.execute(
             "INSERT INTO entity_review (review_id, surface_text, candidate_entity_id,"
-            " score, status, kind) VALUES ('rev_guard', 'jonny', 'ent_gone', 1.0,"
+            " score, status, kind) VALUES ('rev_guard', 'robin', 'ent_gone', 1.0,"
             " 'approved', 'no_bind')"
         )
         conn.commit()

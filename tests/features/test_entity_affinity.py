@@ -581,18 +581,18 @@ class TestAntiAliasRegression:
         """§3.1a defect B, in the live shape that exposed it.
 
         At the shipped floor BOTH surviving pairs on the node were this:
-        ``Jonny ↔ Jonny Johnson`` at 0.682 and ``Jonny Johnson ↔ draftin1`` at
+        ``Robin ↔ Robin Ellery`` at 0.682 and ``Robin Ellery ↔ draftin1`` at
         0.759 — the owner and their own unconsolidated aliases. Two names for
         one person are mentioned in one person's contexts, so their CENTROIDS
         agree, which is exactly why an orthogonal-context fixture cannot test
         this: the previous test passes on cosine alone. Here the alias pair is
         the single strongest pair in the graph and must still write nothing.
         """
-        _add_person(conn, "jonny", "Jonny")
-        _add_person(conn, "jonny_johnson", "Jonny Johnson")
+        _add_person(conn, "robin", "Robin")
+        _add_person(conn, "robin_ellery", "Robin Ellery")
         _add_person(conn, "other", "Devi Raman")
-        _add_centroid(conn, "jonny", _unit({0: 1.0}))
-        _add_centroid(conn, "jonny_johnson", _tilted(1, 0.99))
+        _add_centroid(conn, "robin", _unit({0: 1.0}))
+        _add_centroid(conn, "robin_ellery", _tilted(1, 0.99))
         _add_centroid(conn, "other", _tilted(2, 0.6))
         _seed_headroom(conn, 40)
         conn.commit()
@@ -600,7 +600,7 @@ class TestAntiAliasRegression:
         result = rebuild_affinity_edges(conn, percentile=0.0)
 
         active = _active_pairs(conn)
-        assert ("jonny", "jonny_johnson") not in active
+        assert ("robin", "robin_ellery") not in active
         assert result["suppressed_merge_candidates"] == 1
         # The graph is otherwise productive: suppression is targeted, not a
         # blanket refusal to write edges.

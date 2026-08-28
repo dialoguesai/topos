@@ -80,3 +80,27 @@ def test_the_reaper_can_now_see_them():
 
     src = inspect.getsource(gc.purge_junk_embeddings)
     assert "is_derivable_content" in src
+
+
+# ------------------------------------------------- the owner's own name
+
+def test_the_guard_covers_the_owner_name_and_handle():
+    """The one person whose name is both unambiguous and everywhere.
+
+    Not every person: 1,249 contacts would collide with ordinary English
+    ("Unknown", "Claude", "Porter") and a noisy hook gets deleted, which costs
+    more than it catches. The owner is the exception — and the leak is real: the
+    name was in ten tracked files and the login form in one, none of them
+    reachable by the place/goal/black-hole scans.
+
+    The floor keeps the FULL name and drops the bare first name, which is five
+    characters and appears in synthetic fixtures that are not a leak.
+    """
+    import inspect
+
+    from scripts import scan_repo_for_owner_data as scanner
+
+    src = inspect.getsource(scanner._protected_names)
+    assert "user_identity" in src, "the owner's own name is not covered"
+    assert "owner handle" in src, "the login form of the name is not covered"
+    assert 'len(full) < 8' in src, "a bare first name would be guarded and is too generic"

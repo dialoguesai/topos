@@ -386,13 +386,13 @@ class TestTheOwnerIsNotTheirOwnContact:
     their own social graph as up to six separate people."""
 
     def test_a_shared_surname_is_never_evidence(self):
-        """`Bravo Yankee` and `Charlie Yankee` are real other people on this corpus. A fuzzy
+        """`Peter Ellery` and `Jack Ellery` are real other people on this corpus. A fuzzy
         name rule would have swallowed them into the owner and deleted two humans."""
         c = _conn()
         _person(c, "e-owner", "Owner", is_self=1)
-        _person(c, "e-other", "Bravo Yankee")
+        _person(c, "e-other", "Peter Ellery")
         c.execute("CREATE TABLE user_identity (key TEXT, display_name TEXT, updated_at TEXT)")
-        c.execute("INSERT INTO user_identity VALUES ('k','Jonny Johnson','t')")
+        c.execute("INSERT INTO user_identity VALUES ('k','Robin Ellery','t')")
         owner = PG.resolve_owner_identity(c)
         assert "e-other" not in owner["ids"], "a surname match must not merge a stranger"
         assert any(x["entity_id"] == "e-other" for x in owner["merge_candidates"])
@@ -400,9 +400,9 @@ class TestTheOwnerIsNotTheirOwnContact:
     def test_the_name_the_owner_gave_the_node_does_merge(self):
         c = _conn()
         _person(c, "e-owner", "Owner", is_self=1)
-        _person(c, "e-me", "Jonny Johnson")
+        _person(c, "e-me", "Robin Ellery")
         c.execute("CREATE TABLE user_identity (key TEXT, display_name TEXT, updated_at TEXT)")
-        c.execute("INSERT INTO user_identity VALUES ('k','Jonny Johnson','t')")
+        c.execute("INSERT INTO user_identity VALUES ('k','Robin Ellery','t')")
         assert "e-me" in PG.resolve_owner_identity(c)["ids"]
 
     def test_messaging_yourself_is_not_a_relationship(self):
@@ -837,6 +837,125 @@ class TestAmbientPeopleGroupByWhatTheyAppearBeside:
         PG.group_ambient_people(c, nodes)
         core = [n for n in nodes if n["label"] == "Core Person"][0]
         assert core.get("ambient_group") is None
+
+
+class TestAppearancesAreConnectorAgnostic:
+    """C-6: mentioned-in-text vs participated-in-a-record, with no source_id switch."""
+
+    def _node(self, **kw):
+        row = {
+            "node_id": "p1", "entity_id": None, "contact_id": None,
+            "messenger_keys": [], "is_owner": False, "label": "Peer",
+            "band": "core", "band_reason": "you message them",
+        }
+        row.update(kw)
+        return row
+
+    def test_no_connector_name_in_the_appearance_path(self):
+        import inspect
+        from topos.analytics import person_graph as mod
+
+        src = "".join(inspect.getsource(fn) for fn in (
+            mod.batch_person_appearances,
+            mod.person_provenance,
+            mod._appearance_mentions,
+            mod._appearance_participation,
+            mod._load_appearance_record_texts,
+            mod._merge_appearances,
+        ))
+        for connector in ("grow_journal", "browser_visits", "imessage", "github_activity",
+                          "grow_data_file", "chatgpt", "slack", "gmail", "notion"):
+            assert connector not in src, f"{connector!r} hardcoded in the appearance path"
+        assert "source_id =" not in src.replace(" ", "")
+        assert "source_id IN" not in src
+
+    def test_a_mention_from_any_source_appears(self):
+        c = _conn()
+        c.execute("ALTER TABLE entity_mentions ADD COLUMN surface_text TEXT")
+        c.execute("ALTER TABLE entity_mentions ADD COLUMN event_at TEXT")
+        c.execute("ALTER TABLE entity_mentions ADD COLUMN created_at TEXT")
+        c.execute(
+            "INSERT INTO entity_mentions VALUES (?,?,?,?,?,?,?,?)",
+            ("m1", "e-wiki", "rec-j1", "custom_wiki", 1, "Wiki", "2026-08-01", "2026-08-01"),
+        )
+        c.execute("""CREATE TABLE journal_entries (entry_id TEXT PRIMARY KEY, content TEXT)""")
+        c.execute("INSERT INTO journal_entries VALUES ('rec-j1', 'Had lunch with Wiki at the cafe')")
+        node = self._node(node_id="ent:e-wiki", entity_id="e-wiki", label="Wiki")
+        out = PG.person_provenance(c, node, limit=6)
+        assert out["mentions"], "a named-in-text person must show the line"
+        assert out["mentions"][0]["kind"] == PG.APPEARANCE_MENTIONED
+        assert out["mentions"][0]["source_id"] == "custom_wiki"
+        assert "lunch" in out["mentions"][0]["text"].lower()
+        assert out["coverage"]["mentioned"] == 1
+        assert out["coverage"]["participated"] == 0
+
+    def test_a_messenger_peer_without_ner_still_shows_the_exchange(self):
+        """The bug: 89 DMs, zero entity_mentions, empty card. Participation fills it.
+
+        Source_id is 'slack' on purpose — a connector pull_live has never heard of.
+        """
+        c = _conn()
+        c.execute("""CREATE TABLE conversation_participants (
+            conversation_id TEXT, dataset_id TEXT, source_id TEXT, contact_id TEXT)""")
+        c.execute("INSERT INTO contacts VALUES ('c-mom','Mom')")
+        c.execute("INSERT INTO contact_identifiers VALUES ('c-mom','+15550001111','phone')")
+        c.execute(
+            "INSERT INTO conversation_participants VALUES ('conv-1','ds','slack','c-mom')"
+        )
+        c.execute(
+            "INSERT INTO conversation_messages VALUES (?,?,?,?,?,?,?,?,?)",
+            ("ds", "msg-1", "hi from the other side", 0, "conv-1", "+15550001111",
+             "2026-08-20", "slack", None),
+        )
+        c.execute(
+            "INSERT INTO conversation_messages VALUES (?,?,?,?,?,?,?,?,?)",
+            ("ds", "msg-2", "owner reply in the thread", 1, "conv-1", "self",
+             "2026-08-21", "slack", None),
+        )
+        node = self._node(
+            node_id="msg:+15550001111", contact_id="c-mom",
+            messenger_keys=["+15550001111"], label="Mom", message_count=2,
+        )
+        out = PG.person_provenance(c, node, limit=6)
+        kinds = {row["kind"] for row in out["mentions"]}
+        sources = {row["source_id"] for row in out["mentions"]}
+        assert out["mentions"], "a messaged peer with no NER must still have excerpts"
+        assert PG.APPEARANCE_PARTICIPATED in kinds
+        assert sources == {"slack"}
+        assert out["coverage"]["mentioned"] == 0
+        assert out["coverage"]["participated"] >= 1
+        assert any(row.get("authored_by_owner") for row in out["mentions"]), (
+            "1:1 owner messages belong on the card too"
+        )
+
+    def test_unknown_source_id_is_data_not_a_branch(self):
+        c = _conn()
+        c.execute("ALTER TABLE entity_mentions ADD COLUMN surface_text TEXT")
+        c.execute("ALTER TABLE entity_mentions ADD COLUMN event_at TEXT")
+        c.execute("ALTER TABLE entity_mentions ADD COLUMN created_at TEXT")
+        c.execute(
+            "INSERT INTO entity_mentions VALUES (?,?,?,?,?,?,?,?)",
+            ("m1", "e1", "r1", "future_connector_xz", 0, "Rousseau", "2026-07-01", None),
+        )
+        node = self._node(node_id="ent:e1", entity_id="e1", label="Rousseau")
+        out = PG.person_provenance(c, node)
+        assert out["mentions"][0]["source_id"] == "future_connector_xz"
+        assert out["mentions"][0]["source_label"]
+
+    def test_batch_is_keyed_by_node_not_entity(self):
+        """Mom has no entity_id. Provenance must still attach to the person node."""
+        c = _conn()
+        c.execute("""CREATE TABLE conversation_participants (
+            conversation_id TEXT, dataset_id TEXT, source_id TEXT, contact_id TEXT)""")
+        c.execute(
+            "INSERT INTO conversation_messages VALUES (?,?,?,?,?,?,?,?,?)",
+            ("ds", "msg-1", "ping", 0, "c1", "+1555", "2026-08-01", "signal", None),
+        )
+        node = self._node(node_id="msg:+1555", messenger_keys=["+1555"], contact_id=None)
+        packed = PG.batch_person_appearances(c, [node], show=6, fetch=8)
+        assert packed["msg:+1555"]["mentions"]
+        assert packed["msg:+1555"]["participation_total"] >= 1
+
 
 
 class TestAFactSaysWhenAndWhatFromV:

@@ -99,6 +99,35 @@ def _protected_names(db_path: str) -> list:
                     names.append(("goal text", t))
         except sqlite3.Error:
             pass
+        # The OWNER's own name. Not every person — 1,249 contacts would collide
+        # with ordinary English ("Unknown", "Claude", "Porter") and a noisy hook
+        # gets deleted, which costs more than it catches. The owner is the one
+        # person whose name is both unambiguous and everywhere.
+        #
+        # The floor keeps the FULL name and drops the bare first name: "Jonny"
+        # is 5 characters and appears in synthetic fixtures
+        # ("jonny@example.com") that are not a leak, while the full name is
+        # specific enough to mean only one person.
+        try:
+            for (display,) in conn.execute(
+                "SELECT DISTINCT display_name FROM user_identity"
+                " WHERE display_name IS NOT NULL"
+            ):
+                full = str(display or "").strip()
+                if len(full) < 8:
+                    continue
+                names.append(("owner name", full))
+                # Handle form: a display name is also how the owner's accounts
+                # are named, and a login is the same leak wearing different
+                # punctuation — no name scan would see it. Derived from the
+                # display name, never hardcoded. (Writing an example of one here
+                # is what this scanner caught on its own second run. Describe
+                # the shape, not the value, applies to the guard as well.)
+                squashed = "".join(full.split()).lower()
+                if len(squashed) >= 8:
+                    names.append(("owner handle", squashed))
+        except sqlite3.Error:
+            pass
         return names
     finally:
         conn.close()
