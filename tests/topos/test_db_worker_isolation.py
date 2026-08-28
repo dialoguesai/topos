@@ -136,3 +136,38 @@ async def test_routine_handlers_never_pass_a_connection_into_a_worker():
                 f"connection: {window!r}"
             )
             idx += len(call)
+
+
+def test_entity_write_handlers_offload_to_run_db_write():
+    """Merge/split/review-approve take the write gate; doing that on the
+    event loop stalls the control-plane keepalive (2026-08-28 Failed to fetch).
+    """
+    import inspect
+
+    from topos.core.handlers import signal_features
+
+    source = inspect.getsource(signal_features)
+    for name in (
+        "handle_signal_entity_merge",
+        "handle_signal_entity_split",
+        "handle_signal_entity_review_action",
+    ):
+        fn = getattr(signal_features, name)
+        body = inspect.getsource(fn)
+        assert "run_db_write(" in body, f"{name} must offload via run_db_write"
+        assert "hub.get_db_connection()" not in body, (
+            f"{name} must not resolve a connection on the event-loop thread"
+        )
+    # And none of those run_db_write calls may be handed a caller-resolved conn.
+    for call in ("run_db_read(", "run_db_write("):
+        idx = 0
+        while True:
+            idx = source.find(call, idx)
+            if idx == -1:
+                break
+            window = source[idx : source.find(")", idx)]
+            assert ", conn" not in window and "(conn" not in window, (
+                f"{call} in signal_features.py is being handed a caller-resolved "
+                f"connection: {window!r}"
+            )
+            idx += len(call)

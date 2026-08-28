@@ -190,6 +190,39 @@ def _upsert_dossier(
     return payload
 
 
+def refresh_dossier_for_entity(conn: sqlite3.Connection, entity_id: str) -> bool:
+    """Rewrite the dossier for one entity after a merge or split.
+
+    A full ``refresh_dossiers`` walk is a post-rebuild job, not a request-path
+    side effect: it takes a write-gate hold per significant entity and is what
+    made owner Link stall the control-plane keepalive.
+    """
+    eid = str(entity_id or "").strip()
+    if not eid:
+        return False
+    row = conn.execute(
+        """
+        SELECT entity_id, entity_type, canonical_name, mention_count, first_seen, last_seen
+        FROM entities WHERE entity_id=?
+        """,
+        (eid,),
+    ).fetchone()
+    if row is None:
+        return False
+    entity = {
+        "entity_id": row[0],
+        "entity_type": row[1],
+        "canonical_name": row[2],
+        "mention_count": row[3],
+        "first_seen": row[4],
+        "last_seen": row[5],
+    }
+    with with_db_write():
+        _upsert_dossier(conn, entity)
+    commit_connection(conn)
+    return True
+
+
 def refresh_dossiers(conn: sqlite3.Connection) -> int:
     """Upsert dossiers for significant entities. Stable object_key = entity_id.
 

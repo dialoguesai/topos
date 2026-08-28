@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+import time
 import uuid
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
@@ -512,7 +513,7 @@ def resolve_review(
     if not candidate_id:
         raise ValueError("review has no candidate entity to merge into")
 
-    from .dossier import refresh_dossiers
+    from .dossier import refresh_dossier_for_entity
     from .resolver import EntityResolver, normalize_name
 
     resolver = EntityResolver(conn)
@@ -552,7 +553,7 @@ def resolve_review(
                 _settle_siblings(conn, siblings, "approved")
                 commit_connection(conn)
             # Self-gating — must not run under this hold.
-            refresh_dossiers(conn)
+            refresh_dossier_for_entity(conn, str(candidate_id))
             return {
                 "review_id": review_id,
                 "status": "approved",
@@ -582,7 +583,7 @@ def resolve_review(
         )
         commit_connection(conn)
     # Self-gating — must not run under this hold.
-    refresh_dossiers(conn)
+    refresh_dossier_for_entity(conn, str(candidate_id))
     return {
         "review_id": review_id,
         "status": "approved",
@@ -707,6 +708,68 @@ def split_surface(conn: sqlite3.Connection, entity_id: str, surface: str) -> Dic
     }
 
 
+def _tombstone_survivor(conn: sqlite3.Connection, absorb_id: str) -> Optional[str]:
+    """Follow merge tombstones from ``absorb_id`` to the current survivor.
+
+    Returns None when no tombstone exists (or the table has not been created
+    yet). Used so a retry after a dropped response is a no-op success instead
+    of ``entity not found``.
+    """
+    try:
+        row = conn.execute(
+            "SELECT merged_into FROM entity_merge_tombstones WHERE absorbed_entity_id=?",
+            (absorb_id,),
+        ).fetchone()
+    except sqlite3.Error:
+        return None
+    if not row:
+        return None
+    survivor = str(row[0] or "").strip()
+    seen = {absorb_id}
+    while survivor and survivor not in seen:
+        seen.add(survivor)
+        try:
+            nxt = conn.execute(
+                "SELECT merged_into FROM entity_merge_tombstones WHERE absorbed_entity_id=?",
+                (survivor,),
+            ).fetchone()
+        except sqlite3.Error:
+            break
+        if not nxt:
+            break
+        survivor = str(nxt[0] or "").strip()
+    return survivor or None
+
+
+def _already_merged_payload(
+    conn: sqlite3.Connection, keep_id: str, absorb_id: str
+) -> Optional[Dict[str, Any]]:
+    """Return a success payload when absorb is already folded into keep."""
+    survivor = _tombstone_survivor(conn, absorb_id)
+    if survivor is None:
+        return None
+    if survivor != keep_id:
+        raise ValueError(
+            f"already merged into {survivor}, not {keep_id}"
+        )
+    name = ""
+    try:
+        row = conn.execute(
+            "SELECT canonical_name FROM entity_merge_tombstones WHERE absorbed_entity_id=?",
+            (absorb_id,),
+        ).fetchone()
+        name = str(row[0] or "") if row else ""
+    except sqlite3.Error:
+        name = ""
+    return {
+        "kept": keep_id,
+        "absorbed": absorb_id,
+        "absorbed_name": name,
+        "mentions_moved": 0,
+        "already_merged": True,
+    }
+
+
 def merge_entity_pair(
     conn: sqlite3.Connection, keep_id: str, absorb_id: str
 ) -> Dict[str, Any]:
@@ -715,8 +778,11 @@ def merge_entity_pair(
     Reuses EntityResolver.merge_entities for mentions/aliases/edges, then clears
     any no_bind guards between the pair so an explicit re-link after Unlink
     works. Pending reviews that touched the absorbed entity are marked stale.
+
+    Idempotent: a retry after the absorb row is gone (dropped response, double
+    click) returns success when the tombstone already points at keep.
     """
-    from .dossier import refresh_dossiers
+    from .dossier import refresh_dossier_for_entity
     from .resolver import EntityResolver
 
     keep_id = str(keep_id).strip()
@@ -725,6 +791,9 @@ def merge_entity_pair(
         raise ValueError("keep_id and absorb_id are required")
     if keep_id == absorb_id:
         raise ValueError("cannot merge an entity into itself")
+
+    started = time.monotonic()
+    logger.info("entity_merge start keep=%s absorb=%s", keep_id, absorb_id)
 
     keep_row = conn.execute(
         "SELECT entity_type, canonical_name FROM entities WHERE entity_id=?",
@@ -735,8 +804,19 @@ def merge_entity_pair(
         (absorb_id,),
     ).fetchone()
     if keep_row is None:
+        logger.warning("entity_merge keep_missing keep=%s absorb=%s", keep_id, absorb_id)
         raise LookupError(f"entity not found: {keep_id}")
     if absorb_row is None:
+        replay = _already_merged_payload(conn, keep_id, absorb_id)
+        if replay is not None:
+            logger.info(
+                "entity_merge already_merged keep=%s absorb=%s elapsed_ms=%.0f",
+                keep_id,
+                absorb_id,
+                (time.monotonic() - started) * 1000,
+            )
+            return replay
+        logger.warning("entity_merge absorb_missing keep=%s absorb=%s", keep_id, absorb_id)
         raise LookupError(f"entity not found: {absorb_id}")
     if str(keep_row[0]) != str(absorb_row[0]):
         raise ValueError(
@@ -785,14 +865,31 @@ def merge_entity_pair(
             (absorb_id,),
         )
         commit_connection(conn)
-    # Self-gating — must not run under this hold.
-    refresh_dossiers(conn)
+    # Refresh only the survivor. A full significant-entity walk is a rebuild
+    # job — doing it here held the write gate per dossier on the event loop
+    # (2026-08-28: keepalive drop → browser "Failed to fetch").
+    try:
+        refresh_dossier_for_entity(conn, keep_id)
+    except Exception:  # noqa: BLE001 — merge already committed
+        logger.exception(
+            "entity_merge dossier_refresh_failed keep=%s absorb=%s", keep_id, absorb_id
+        )
 
+    elapsed_ms = (time.monotonic() - started) * 1000
+    logger.info(
+        "entity_merge ok keep=%s absorb=%s mentions_moved=%s elapsed_ms=%.0f",
+        keep_id,
+        absorb_id,
+        mentions_moved,
+        elapsed_ms,
+    )
     return {
         "kept": keep_id,
         "absorbed": absorb_id,
         "absorbed_name": absorb_name,
         "mentions_moved": mentions_moved,
+        "already_merged": False,
+        "elapsed_ms": round(elapsed_ms),
     }
 
 

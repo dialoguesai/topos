@@ -55,6 +55,54 @@ def test_merge_moves_mentions_and_aliases(conn):
     )
     assert "Jon" in aliases
     assert "Johnny" in aliases
+    assert out["already_merged"] is False
+
+
+def test_merge_retry_after_success_is_idempotent(conn):
+    """A dropped response must not turn a completed merge into 'entity not found'."""
+    r = EntityResolver(conn)
+    keep = r._create_entity("Jonathan Smith", "person")
+    absorb = r._create_entity("Jon", "person")
+    _mention(conn, absorb, "m1", "Jon")
+    conn.commit()
+
+    first = merge_entity_pair(conn, keep, absorb)
+    assert first["already_merged"] is False
+    second = merge_entity_pair(conn, keep, absorb)
+    assert second["already_merged"] is True
+    assert second["kept"] == keep
+    assert second["absorbed"] == absorb
+    assert conn.execute(
+        "SELECT COUNT(*) FROM entities WHERE entity_id=?", (absorb,)
+    ).fetchone()[0] == 0
+
+
+def test_merge_refreshes_only_the_survivor_dossier(conn, monkeypatch):
+    """Full dossier walks belong on rebuild, not on the Link request path."""
+    from topos.features.entities import dossier as dossier_mod
+
+    r = EntityResolver(conn)
+    keep = r._create_entity("Keep", "person")
+    absorb = r._create_entity("Gone", "person")
+    _mention(conn, absorb, "m1", "Gone")
+    conn.commit()
+
+    calls = {"full": 0, "one": []}
+
+    def _full(_conn):
+        calls["full"] += 1
+        return 0
+
+    def _one(_conn, entity_id):
+        calls["one"].append(entity_id)
+        return True
+
+    monkeypatch.setattr(dossier_mod, "refresh_dossiers", _full)
+    monkeypatch.setattr(dossier_mod, "refresh_dossier_for_entity", _one)
+
+    merge_entity_pair(conn, keep, absorb)
+    assert calls["full"] == 0
+    assert calls["one"] == [keep]
 
 
 def test_merge_rejects_self(conn):

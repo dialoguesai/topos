@@ -1,6 +1,9 @@
 """Signal feature message handlers."""
 from __future__ import annotations
 
+import logging
+import time
+
 import topos.core.handlers as hub
 
 from .common import (
@@ -11,6 +14,8 @@ from .common import (
     run_db_write,
 )
 from .registry import handles
+
+logger = logging.getLogger("topos.core.handlers.signal_features")
 
 
 @handles("signal_list_vectors")
@@ -715,13 +720,35 @@ async def handle_signal_entity_review_action(message: Dict[str, Any]) -> Optiona
     try:
         from ...features.entities.consolidation import resolve_review
 
-        conn = hub.get_db_connection()
-        return {"id": req_id, "status": "ok", "payload": resolve_review(conn, review_id, action=action)}
+        started = time.monotonic()
+        result = await run_db_write(resolve_review, review_id, action=action)
+        logger.info(
+            "signal_entity_review_action ok review_id=%s action=%s elapsed_ms=%.0f",
+            review_id,
+            action,
+            (time.monotonic() - started) * 1000,
+        )
+        return {"id": req_id, "status": "ok", "payload": result}
     except LookupError as exc:
+        logger.warning(
+            "signal_entity_review_action not_found review_id=%s action=%s error=%s",
+            review_id,
+            action,
+            exc,
+        )
         return {"id": req_id, "status": "error", "error": str(exc), "code": 404}
     except ValueError as exc:
+        logger.warning(
+            "signal_entity_review_action rejected review_id=%s action=%s error=%s",
+            review_id,
+            action,
+            exc,
+        )
         return {"id": req_id, "status": "error", "error": str(exc), "code": 400}
     except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "signal_entity_review_action failed review_id=%s action=%s", review_id, action
+        )
         return {"id": req_id, "status": "error", "error": str(exc)}
 
 
@@ -855,13 +882,27 @@ async def handle_signal_entity_split(message: Dict[str, Any]) -> Optional[Dict[s
     try:
         from ...features.entities.consolidation import split_surface
 
-        conn = hub.get_db_connection()
-        return {"id": req_id, "status": "ok", "payload": split_surface(conn, entity_id, surface)}
+        started = time.monotonic()
+        result = await run_db_write(split_surface, entity_id, surface)
+        logger.info(
+            "signal_entity_split ok entity_id=%s mentions_moved=%s elapsed_ms=%.0f",
+            entity_id,
+            result.get("mentions_moved") if isinstance(result, dict) else None,
+            (time.monotonic() - started) * 1000,
+        )
+        return {"id": req_id, "status": "ok", "payload": result}
     except LookupError as exc:
+        logger.warning(
+            "signal_entity_split not_found entity_id=%s error=%s", entity_id, exc
+        )
         return {"id": req_id, "status": "error", "error": str(exc), "code": 404}
     except ValueError as exc:
+        logger.warning(
+            "signal_entity_split rejected entity_id=%s error=%s", entity_id, exc
+        )
         return {"id": req_id, "status": "error", "error": str(exc), "code": 400}
     except Exception as exc:  # noqa: BLE001
+        logger.exception("signal_entity_split failed entity_id=%s", entity_id)
         return {"id": req_id, "status": "error", "error": str(exc)}
 
 
@@ -883,17 +924,44 @@ async def handle_signal_entity_merge(message: Dict[str, Any]) -> Optional[Dict[s
     try:
         from ...features.entities.consolidation import merge_entity_pair
 
-        conn = hub.get_db_connection()
+        # Off the event loop: merge takes the write gate, and holding it here
+        # stalls every coroutine including the control-plane keepalive. Observed
+        # 2026-08-28 as a red engine indicator + browser "Failed to fetch".
+        started = time.monotonic()
+        result = await run_db_write(merge_entity_pair, entity_id, absorb_entity_id)
+        logger.info(
+            "signal_entity_merge ok keep=%s absorb=%s mentions_moved=%s already_merged=%s elapsed_ms=%.0f",
+            entity_id,
+            absorb_entity_id,
+            result.get("mentions_moved") if isinstance(result, dict) else None,
+            result.get("already_merged") if isinstance(result, dict) else None,
+            (time.monotonic() - started) * 1000,
+        )
         return {
             "id": req_id,
             "status": "ok",
-            "payload": merge_entity_pair(conn, entity_id, absorb_entity_id),
+            "payload": result,
         }
     except LookupError as exc:
+        logger.warning(
+            "signal_entity_merge not_found keep=%s absorb=%s error=%s",
+            entity_id,
+            absorb_entity_id,
+            exc,
+        )
         return {"id": req_id, "status": "error", "error": str(exc), "code": 404}
     except ValueError as exc:
+        logger.warning(
+            "signal_entity_merge rejected keep=%s absorb=%s error=%s",
+            entity_id,
+            absorb_entity_id,
+            exc,
+        )
         return {"id": req_id, "status": "error", "error": str(exc), "code": 400}
     except Exception as exc:  # noqa: BLE001
+        logger.exception(
+            "signal_entity_merge failed keep=%s absorb=%s", entity_id, absorb_entity_id
+        )
         return {"id": req_id, "status": "error", "error": str(exc)}
 
 

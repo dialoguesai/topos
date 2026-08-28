@@ -586,10 +586,22 @@ async def split_entity_surface(
     """Owner unbind: split a surface's mentions out of this entity into a
     fresh one, with a permanent no-bind guard so the resolver never re-merges
     the pair (accidental-merge reversal; see consolidation.split_surface)."""
+    import asyncio
+
+    from ..core.state import close_thread_db_connection
     from ..features.entities.consolidation import split_surface
 
+    _entities_conn()  # fail fast with 503 before spawning the worker
+    surface = body.surface
+
+    def _split():
+        try:
+            return split_surface(_entities_conn(), entity_id, surface)
+        finally:
+            close_thread_db_connection()
+
     try:
-        return split_surface(_entities_conn(), entity_id, body.surface)
+        return await asyncio.to_thread(_split)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
@@ -608,10 +620,22 @@ async def merge_entity_into(
 ):
     """Owner link: merge another entity into this one (drawer-driven inverse
     of split; see consolidation.merge_entity_pair)."""
+    import asyncio
+
+    from ..core.state import close_thread_db_connection
     from ..features.entities.consolidation import merge_entity_pair
 
+    _entities_conn()  # fail fast with 503 before spawning the worker
+    absorb_entity_id = body.absorb_entity_id
+
+    def _merge():
+        try:
+            return merge_entity_pair(_entities_conn(), entity_id, absorb_entity_id)
+        finally:
+            close_thread_db_connection()
+
     try:
-        return merge_entity_pair(_entities_conn(), entity_id, body.absorb_entity_id)
+        return await asyncio.to_thread(_merge)
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc))
     except ValueError as exc:
