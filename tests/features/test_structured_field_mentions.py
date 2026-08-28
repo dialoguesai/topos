@@ -215,3 +215,148 @@ def test_only_whole_cell_entity_columns_are_declared():
         if column in forbidden
     ]
     assert offenders == [], f"free-text columns declared as whole-cell entities: {offenders}"
+
+
+# ------------------------------------------------- the declared participant list
+#
+# `people` is the second declared column on this table, and the reason
+# MULTI_VALUE_FIELDS exists: the cell reads "Rowan", or "Rowan, Nadia", or the
+# sentinel "Solo" that names nobody.
+#
+# Measured on the live node 2026-08-28: 13 journal rows declare a participant by
+# name and the entity spine held TWO mentions for them, both recovered from prose.
+# The higher-confidence witness was the one being ignored.
+
+
+def test_a_declared_participant_gets_a_mention_on_the_record(conn):
+    resolver = EntityResolver(conn)
+
+    record_structured_mentions(conn, resolver, [_parent_msg(people="Rowan")])
+    conn.commit()
+
+    assert ("Rowan", "person") in _mentions(conn, "tl-1")
+
+
+def test_a_list_mints_one_person_per_name_not_one_for_the_cell(conn):
+    """Resolving the cell whole would mint a person called "Rowan, Nadia"."""
+    resolver = EntityResolver(conn)
+
+    record_structured_mentions(conn, resolver, [_parent_msg(people="Rowan, Nadia")])
+    conn.commit()
+
+    names = {n for n, t in _mentions(conn, "tl-1") if t == "person"}
+    assert names == {"Rowan", "Nadia"}
+
+
+@pytest.mark.parametrize("sentinel", ["Solo", "solo", "Group", "  "])
+def test_the_sentinels_name_nobody(conn, sentinel):
+    resolver = EntityResolver(conn)
+
+    record_structured_mentions(conn, resolver, [_parent_msg(people=sentinel)])
+    conn.commit()
+
+    assert not [n for n, t in _mentions(conn, "tl-1") if t == "person"]
+
+
+def test_the_participant_and_the_place_land_on_ONE_record(conn):
+    """The co-occurrence property, which is the whole point of attributing a
+    declared column to the record that carries it.
+
+    `entities_job` folds this return value into `entities_by_record` before the
+    co-occurrence pass, so two declared columns on one row become an edge. Before
+    this, a journal entry naming both a person and a project produced neither.
+    """
+    resolver = EntityResolver(conn)
+
+    by_record = record_structured_mentions(
+        conn, resolver, [_parent_msg(people="Rowan, Nadia")]
+    )
+    conn.commit()
+
+    ids = by_record["tl-1"]
+    assert len(ids) == 3, "one place + two people, all on tl-1"
+    assert len(set(ids)) == 3
+
+    from topos.features.entities.edges import record_cooccurrence_pairs
+
+    pairs = list(record_cooccurrence_pairs(ids))
+    assert pairs, "three entities on one record must produce co-occurrence pairs"
+
+
+def test_declared_participants_are_idempotent(conn):
+    resolver = EntityResolver(conn)
+
+    for _ in range(2):
+        record_structured_mentions(conn, resolver, [_parent_msg(people="Rowan, Nadia")])
+        conn.commit()
+
+    n = conn.execute(
+        "SELECT COUNT(*) FROM entity_mentions WHERE record_id='tl-1'"
+    ).fetchone()[0]
+    assert n == 3
+
+
+def test_the_two_lanes_agree_on_what_a_participant_list_means():
+    """The parser is imported, not reimplemented — a second copy is how one lane
+    starts minting a person called "Solo" while the other does not."""
+    from topos.features.entities.structured_fields import surfaces_for
+    from topos.features.signal.extraction import rule_extractors
+
+    for raw in ("Rowan", "Rowan, Nadia", "Solo", "Group", "", None):
+        assert surfaces_for("journal_entries", "people", raw) == (
+            rule_extractors.parse_participant_names(raw)
+        )
+
+
+def test_a_single_valued_column_is_still_taken_whole(conn):
+    """A place with a comma in it is one place, not two."""
+    from topos.features.entities.structured_fields import surfaces_for
+
+    assert surfaces_for("journal_entries", "place_name", "Austin, TX") == ["Austin, TX"]
+
+
+def test_a_declared_name_outranks_the_model_that_also_found_it(conn):
+    """`record_mention` is INSERT OR IGNORE, so where NER already found the name in the
+    prose the row kept the MODEL's confidence and the declaration was lost.
+
+    Measured on the live journal: 3 of the 10 entries naming Rowan as a participant AND
+    carrying category='Topos' were stuck at NER's 0.99, so a count of declared sessions
+    read 7 where the owner had logged 10.
+    """
+    from topos.features.entities.structured_fields import STRUCTURED_CONFIDENCE
+
+    resolver = EntityResolver(conn)
+    entity_id, _ = resolver.resolve("Rowan", entity_type="person", record_id="tl-1",
+                                    queue_review=False)
+    resolver.record_mention(entity_id, record_id="tl-1", surface_text="Rowan",
+                            source_id="grow_journal", canonical_table="journal_entries",
+                            confidence=0.99, event_at=None, authored_by_owner=1)
+    conn.commit()
+
+    record_structured_mentions(conn, resolver, [_parent_msg(people="Rowan")])
+    conn.commit()
+
+    rows = conn.execute(
+        "SELECT confidence FROM entity_mentions WHERE record_id='tl-1' AND entity_id=?",
+        (entity_id,),
+    ).fetchall()
+    assert rows, "the mention must still exist"
+    assert all(r[0] == STRUCTURED_CONFIDENCE for r in rows), (
+        "a column the owner filled in outranks a span a model found"
+    )
+
+
+def test_it_never_lowers_a_confidence(conn):
+    resolver = EntityResolver(conn)
+    record_structured_mentions(conn, resolver, [_parent_msg(people="Rowan")])
+    conn.commit()
+    conn.execute("UPDATE entity_mentions SET confidence=1.0 WHERE record_id='tl-1'")
+    conn.commit()
+
+    record_structured_mentions(conn, resolver, [_parent_msg(people="Rowan")])
+    conn.commit()
+
+    assert all(
+        r[0] == 1.0
+        for r in conn.execute("SELECT confidence FROM entity_mentions WHERE record_id='tl-1'")
+    )

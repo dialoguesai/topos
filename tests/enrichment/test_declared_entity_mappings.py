@@ -209,3 +209,66 @@ def test_reclassify_migration_fixes_repo_persons_only() -> None:
     assert types == {"e1": "project", "e2": "person", "e3": "person"}
     # Idempotent.
     assert reclassify_misdeclared_entities(conn) == 0
+
+
+# --------------------------------------------------------------- the journal
+#
+# A journal entry declares its project in `category` and its participants in
+# `people`. The project half is here; the participant half is a comma-separated
+# list and lives in STRUCTURED_ENTITY_FIELDS, which can split it.
+#
+# Measured on the live node 2026-08-28: 10 rows carry people='Rowan' AND
+# category='Topos' — the largest person×project cell in the journal — and
+# `entity_edges` held zero edges between the two.
+
+JOURNAL_ROW = {
+    "entry_id": "tl-bc220847",
+    "source_id": "grow_journal",
+    "entry_at": "2026-07-18T20:45:00",
+    "category": "Topos",
+    "people": "Rowan",
+    "content": "Accomplished: Shared all updates with Rowan.",
+    "_table": "journal_entries",
+}
+
+
+def test_a_journal_entry_mints_the_project_it_declares() -> None:
+    rows = extract_declared_entities(JOURNAL_ROW)
+
+    assert len(rows) == 1
+    project = rows[0]
+    assert project["entity_text"] == "Topos"
+    assert project["entity_type"] == "project"
+    assert project["record_id"] == "tl-bc220847"
+    assert project["event_at"] == "2026-07-18T20:45:00"
+    assert project["provider"] == "declared"
+    assert project["confidence"] == 1.0
+    assert project["self_edge"] == EDGE_WORKED_ON
+
+
+def test_the_file_imported_journal_is_not_exempt() -> None:
+    """171 of the owner's 369 journal rows arrive under the other source id."""
+    row = dict(JOURNAL_ROW, source_id="grow_data_file")
+    rows = extract_declared_entities(row)
+    assert [r["entity_text"] for r in rows] == ["Topos"]
+
+
+@pytest.mark.parametrize("category", ["Chill", "Run", "Weight-lifting", "Reading", ""])
+def test_a_pastime_is_not_a_project_and_earns_no_worked_on_edge(category) -> None:
+    """`Owner --worked_on--> Chill` is a sentence nobody wrote."""
+    rows = extract_declared_entities(dict(JOURNAL_ROW, category=category))
+    assert rows == []
+
+
+def test_an_unknown_category_is_minted_rather_than_dropped() -> None:
+    """The default direction: a new project works the day it is first typed."""
+    rows = extract_declared_entities(dict(JOURNAL_ROW, category="Horos"))
+    assert [r["entity_text"] for r in rows] == ["Horos"]
+    assert rows[0]["self_edge"] == EDGE_WORKED_ON
+
+
+def test_the_journal_does_not_suppress_ner() -> None:
+    """Unlike a commit message, journal prose is written for a human and carries
+    entities the columns do not."""
+    assert "grow_journal" not in ner_suppressed_source_ids()
+    assert "grow_data_file" not in ner_suppressed_source_ids()

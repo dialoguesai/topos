@@ -102,6 +102,17 @@ def _parse_journal_group_names(group: Any) -> List[str]:
     return names
 
 
+#: The same parser under a public name, for the entity lane.
+#:
+#: `journal_entries.people` and `grow_*_sessions.group` hold the owner's own
+#: participant list — "Rowan", "Rowan, Nadia", and the sentinels "Solo" and
+#: "Group" that name nobody. Two lanes now read that column (artifacts here,
+#: entity mentions in features/entities), and they must agree on what it means:
+#: a second copy of this rule is how one of them starts minting a person called
+#: "Solo".
+parse_participant_names = _parse_journal_group_names
+
+
 def _journal_place_name(record: Dict[str, Any], meta: Dict[str, Any]) -> str:
     place = str(record.get("place_name") or "").strip()
     if place:

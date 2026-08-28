@@ -49,6 +49,51 @@ def own_project_for_terms(text: str) -> Optional[str]:
     return None
 
 
+# Journal categories that name a way the owner spent an hour, not a project.
+#
+# `journal_entries.category` is one field doing two jobs: "Topos" and
+# "Dialogues" name work, "Chill" and "Run" name a mode of living. Minting the
+# second kind as a project would put `Owner --worked_on--> Chill` in the graph,
+# which is a sentence nobody wrote and nobody would agree with.
+#
+# THE DEFAULT IS DELIBERATE, and it is "mint": an unlisted category becomes a
+# project. A new project (Horos, a new deck) then works the day the owner first
+# types it, while a new leisure label costs one line here. The other default —
+# allowlisting the known projects — would make every new project invisible until
+# someone remembered to edit this file, which is the failure this whole lane
+# exists to fix.
+#
+# Seeded from the live node's own distribution, and a superset of
+# rule_extractors._PROFILE_SKILL_CATEGORIES: that set answers "is this a skill
+# claim", which is a narrower question than "is this work".
+NON_PROJECT_JOURNAL_CATEGORIES = frozenset(
+    {
+        "chill",
+        "fun",
+        "run",
+        "walk",
+        "bicycling",
+        "weight-lifting",
+        "practice",
+        "music",
+        "reading",
+        "writing",
+        "journal",
+        "maintenance",
+        "share",
+        "",
+    }
+)
+
+
+def journal_category_project(category: str) -> Optional[str]:
+    """The project a journal category names, or None when it names a pastime."""
+    label = str(category or "").strip()
+    if not label or label.lower() in NON_PROJECT_JOURNAL_CATEGORIES:
+        return None
+    return label
+
+
 def own_project_for_host(host: str) -> Optional[str]:
     """Project name when `host` (or a parent domain) is an own-product domain."""
     h = str(host or "").strip().lower().removeprefix("www.")
@@ -87,6 +132,50 @@ DECLARED_ENTITY_MAPPINGS: Dict[str, Dict[str, Any]] = {
         # self → worked_on → repo, positioned at the record's event time.
         "self_edges": [{"to_path": "metadata_json.repo", "edge_type": EDGE_WORKED_ON}],
     },
+    # A journal entry declares the project it belongs to in `category` —
+    # "Topos", "Dialogues", "Chill", "Practice". That is the owner naming their
+    # own work, and it is the other half of a fact the graph could not state.
+    #
+    # The participant half is NOT here: `people` is a comma-separated LIST and
+    # this registry's `_transform` is single-value, so it lives in
+    # STRUCTURED_ENTITY_FIELDS, which splits it and attributes each name to the
+    # record. Both lanes fold into `entities_by_record` before co-occurrence
+    # (entities_job), so declaring the project here is what makes
+    # person↔project fire on the record that names both.
+    #
+    # Measured on the live node 2026-08-28, before this: 10 journal rows carry
+    # people='Rowan' AND category='Topos' — the largest person×project cell in
+    # the journal — and `entity_edges` held ZERO edges between them.
+    #
+    # No `suppress_ner`: unlike a commit message, journal prose is written for a
+    # human and carries entities the columns do not.
+    "grow_journal": {
+        "entities": [
+            {"path": "category", "transform": "journal_project", "type": "project"}
+        ],
+        "self_edges": [
+            {
+                "to_path": "category",
+                "transform": "journal_project",
+                "edge_type": EDGE_WORKED_ON,
+            }
+        ],
+    },
+    # The same journal, imported from a file rather than the live UI stream.
+    # Two source ids, one shape — 171 of the owner's 369 journal rows arrived
+    # this way and would otherwise be silently exempt.
+    "grow_data_file": {
+        "entities": [
+            {"path": "category", "transform": "journal_project", "type": "project"}
+        ],
+        "self_edges": [
+            {
+                "to_path": "category",
+                "transform": "journal_project",
+                "edge_type": EDGE_WORKED_ON,
+            }
+        ],
+    },
 }
 
 
@@ -123,6 +212,9 @@ def _transform(value: str, transform: Optional[str]) -> str:
     if transform == "own_domain_project":
         # hostname → own project name, or "" (skipped) for third-party domains.
         return own_project_for_host(value) or ""
+    if transform == "journal_project":
+        # journal category → project name, or "" (skipped) for a pastime.
+        return journal_category_project(value) or ""
     return value
 
 
@@ -163,10 +255,17 @@ def extract_declared_entities(
         )
     if not record_id:
         return []
+    # Keyed on the TRANSFORMED surface, because that is what the entity rows below
+    # carry. Without this the two halves agree only while every self-edge target
+    # happens to be untransformed — true of github, and silently false the moment
+    # a mapping filters or rewrites the column it draws its edge from.
     edge_targets = {
-        _field(record, rule.get("to_path", "")): str(rule.get("edge_type") or EDGE_WORKED_ON)
+        _transform(_field(record, rule.get("to_path", "")), rule.get("transform")): str(
+            rule.get("edge_type") or EDGE_WORKED_ON
+        )
         for rule in mapping.get("self_edges", [])
     }
+    edge_targets.pop("", None)
     out: List[Dict[str, Any]] = []
     seen: set = set()
     for rule in mapping.get("entities", []):
