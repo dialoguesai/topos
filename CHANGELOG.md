@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.34] — 2026-08-28
+
 ### Fixed
 - **Re-deriving a record duplicated its rows instead of replacing them.**
   `[S2] [E:enrichment]` `[E:storage]` The derived-table writers keyed each row on
