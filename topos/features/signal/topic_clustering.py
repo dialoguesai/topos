@@ -988,6 +988,67 @@ def persist_topic_clusters(
     return result
 
 
+def retract_fanout_stub_clusters(
+    conn, *, dry_run: bool = True, min_child_share: float = 0.5
+) -> Dict[str, Any]:
+    """Delete topic clusters built mostly from fan-out children.
+
+    A fan-out child's whole document is a place name, so a cluster whose members
+    are mostly children is a cluster of place-name stubs — and until the table
+    stamp was corrected those children were misfiled into ``wellbeing``, so the
+    clusterer named them as trends. On the owner's node 2026-08-27, 11 of 186
+    clusters were majority-child and 4 were entirely so, presenting an apartment
+    name and a lake to the owner as "Wellbeing Trend".
+
+    The stamp fix stops new ones forming; it cannot unmake these. They are
+    DELETED rather than relabelled because the grouping itself is the artifact —
+    there is no honest label for "these records share a place name that was
+    mistaken for a mood". The underlying records are untouched and cluster
+    normally on the next real pass.
+
+    ``min_child_share`` is a majority by default: a cluster with a few child
+    members among real entries is a real cluster that happened to catch a stub.
+    """
+    rows = conn.execute(
+        """
+        SELECT m.cluster_id, COUNT(*) AS members,
+               SUM(CASE WHEN m.record_id LIKE '%-loc' THEN 1 ELSE 0 END) AS children
+        FROM topic_cluster_members m GROUP BY m.cluster_id
+        """
+    ).fetchall()
+    doomed = [
+        str(cid) for cid, members, children in rows
+        if members and (float(children) / float(members)) >= min_child_share
+    ]
+    out: Dict[str, Any] = {
+        "clusters_examined": len(rows),
+        "clusters_retracted": len(doomed),
+        "members_removed": 0,
+        "cluster_ids": doomed,
+    }
+    if not doomed:
+        return out
+    placeholders = ",".join("?" for _ in doomed)
+    out["members_removed"] = int(
+        conn.execute(
+            f"SELECT COUNT(*) FROM topic_cluster_members WHERE cluster_id IN ({placeholders})",
+            doomed,
+        ).fetchone()[0]
+    )
+    if dry_run:
+        return out
+    from ...storage.db.write_gate import batched_writes
+
+    with batched_writes(conn):
+        conn.execute(
+            f"DELETE FROM topic_cluster_members WHERE cluster_id IN ({placeholders})", doomed
+        )
+        conn.execute(
+            f"DELETE FROM topic_clusters WHERE cluster_id IN ({placeholders})", doomed
+        )
+    return out
+
+
 def _persist_topic_clusters_gated(
     conn,
     clusters: List[Dict[str, Any]],
