@@ -1319,6 +1319,34 @@ def _canonical_row_to_item(
     # canonical list adapter never selects — pull it in so the needle
     # ("copper still method") is retrievable. page_excerpt (the page
     # author's words) is deliberately never surfaced by the lookup.
+    # A place hit alone answers nothing. `location_events` is a fan-out CHILD of
+    # a journal entry, and its whole document is the place name — so "who did I
+    # eat with at X?" could only ever come back with the string "X". The parent
+    # carries the narrative, `source_record_id` has always pointed at it, and no
+    # reader had ever followed it.
+    #
+    # Gated on the parent's table being in the manifest, and that gate is the
+    # whole design. Pulling journal prose into a LOCATION-scoped grant is the
+    # exact inverse of the leak this workstream started from — a journal-only
+    # grant admitting location evidence — and it would be worse, because the
+    # journal is the richer surface.
+    if table == "location_events" and "journal_entries" in (manifest.canonical_tables or []):
+        parent_id = str(row.get("source_record_id") or "").strip()
+        if parent_id:
+            parent = conn.execute(
+                "SELECT * FROM journal_entries WHERE entry_id=?", (parent_id,)
+            ).fetchone()
+            if parent is not None:
+                parent_row = dict(parent)
+                parent_clean = _redact_row_for_scope(
+                    manifest.scope_id, "journal_entries", parent_row
+                )
+                parent_text = _row_summary_text(
+                    "journal_entries", parent_clean, scope_id=manifest.scope_id
+                )
+                if parent_text:
+                    text = f"{text} — {parent_text}".strip(" —") if text else parent_text
+
     if table == "activity_events":
         event_id = str(clean.get("record_id") or clean.get("event_id") or "")
         span = _activity_highlight_text(conn, event_id, clean, highlight_cache)

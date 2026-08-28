@@ -74,6 +74,12 @@ from .query_artifacts_duration_ms_v1 import (
     MIGRATION_ID as QUERY_ARTIFACTS_DURATION_MS_V1_ID,
     apply_query_artifacts_duration_ms_v1_up,
 )
+from .mention_table_stamp_backfill_v1 import (
+    MIGRATION_ID as MENTION_TABLE_STAMP_BACKFILL_V1_ID,
+)
+from .mention_table_stamp_backfill_v1 import (
+    apply_mention_table_stamp_backfill_v1_up,
+)
 from .fact_dimension_by_entity_type_v1 import (
     MIGRATION_ID as FACT_DIMENSION_BY_ENTITY_TYPE_V1_ID,
 )
@@ -386,6 +392,7 @@ MIGRATIONS: List[MigrationSpec] = [
     # node can name, for which the only lever was the blackhole.
     _spec(69, NET_SUBJECT_POLICY_V1_ID, apply_net_subject_policy_v1_up),
     _spec(70, FACT_DIMENSION_BY_ENTITY_TYPE_V1_ID, apply_fact_dimension_by_entity_type_v1_up),
+    _spec(71, MENTION_TABLE_STAMP_BACKFILL_V1_ID, apply_mention_table_stamp_backfill_v1_up),
 ]
 
 
