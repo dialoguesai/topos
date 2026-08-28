@@ -1048,6 +1048,118 @@ STATED_ALTITUDE = "stated"
 FACT_CAP_WITHOUT_INTERACTION = 0.66
 
 
+#: Bounded so a card showing six facts cannot ship six whole journal entries.
+EVIDENCE_TEXT_CHARS = 320
+
+#: The source tables a fact's ref can be resolved back to a READABLE record in, and how.
+#: Anything not listed here is a derived row, not a document — see `_attach_evidence`.
+_EVIDENCE_TABLES: Dict[str, Dict[str, str]] = {
+    "journal_entries": {
+        "pk": "entry_id", "at": "entry_at", "text": "content",
+        "where": "place_name", "label": "Journal entry",
+    },
+    "conversation_messages": {
+        "pk": "message_id", "at": "event_at", "text": "content",
+        "where": "", "label": "Message",
+    },
+}
+
+
+def _attach_evidence(
+    conn: Any, pending: List[Tuple[Dict[str, Any], List[Dict[str, Any]]]]
+) -> None:
+    """Resolve each fact's source refs into something the owner can actually read.
+
+    Two kinds arrive here and only one of them is a document.
+
+    A STATED fact points at a journal entry or a message — real text, worth opening, and the
+    thing that makes a fact checkable rather than merely asserted.
+
+    An INFERRED fact points at a DERIVED row, and its `record_id` is not that table's key.
+    Measured on the live node: 0 of 23 `entity_edges` refs resolve by `edge_id`, and
+    `messenger_dyad_stats` has a composite primary key with no single record id at all. Those
+    refs carry their evidence in the ref's own `note` ("550 msgs, balance -0.16, 5 reciprocal
+    periods"), which IS the statistic. It is shown as one, not dressed up as a quote — the
+    card already distinguishes "you wrote this" from "inferred from your data", and evidence
+    that looked like a source document would undo that distinction.
+
+    A ref that resolves to NOTHING is reported as missing rather than dropped. Silently
+    omitting it would leave the card showing fewer sources than the fact was built from,
+    which reads as a smaller claim instead of a broken link.
+    """
+    wanted: Dict[str, set] = {}
+    for _entry, refs in pending:
+        for ref in refs:
+            table = str(ref.get("table") or "")
+            if table in _EVIDENCE_TABLES and ref.get("record_id"):
+                wanted.setdefault(table, set()).add(str(ref["record_id"]))
+
+    found: Dict[Tuple[str, str], Dict[str, Any]] = {}
+    for table, ids in wanted.items():
+        spec = _EVIDENCE_TABLES[table]
+        cols = [spec["pk"], spec["at"], spec["text"]]
+        if spec["where"]:
+            cols.append(spec["where"])
+        id_list = list(ids)
+        # Chunked: SQLite's default variable limit is 999 and a busy node can carry more
+        # refs than that once several people are selected in one session.
+        for start in range(0, len(id_list), 500):
+            chunk = id_list[start:start + 500]
+            placeholders = ",".join("?" * len(chunk))
+            try:
+                rows = conn.execute(
+                    f"SELECT {', '.join(cols)} FROM {table} "  # noqa: S608 - names are ours
+                    f"WHERE {spec['pk']} IN ({placeholders})",
+                    chunk,
+                ).fetchall()
+            except sqlite3.Error:
+                continue
+            for row in rows:
+                found[(table, str(row[0]))] = {
+                    "at": row[1],
+                    "text": row[2],
+                    "where": row[3] if spec["where"] and len(row) > 3 else None,
+                }
+
+    for entry, refs in pending:
+        sources: List[Dict[str, Any]] = []
+        for ref in refs:
+            table = str(ref.get("table") or "")
+            record_id = str(ref.get("record_id") or "")
+            note = ref.get("note")
+            spec = _EVIDENCE_TABLES.get(table)
+            hit = found.get((table, record_id)) if spec else None
+            if hit:
+                text = str(hit.get("text") or "").strip()
+                sources.append({
+                    "kind": "record",
+                    "label": spec["label"],
+                    "at": hit.get("at"),
+                    "text": text[:EVIDENCE_TEXT_CHARS],
+                    "truncated": len(text) > EVIDENCE_TEXT_CHARS,
+                    "where": hit.get("where") or None,
+                    "table": table,
+                    "record_id": record_id,
+                })
+            elif note:
+                sources.append({
+                    "kind": "measure",
+                    "label": "Measured from your messages",
+                    "detail": str(note),
+                    "table": table,
+                })
+            else:
+                # Named, and honestly unavailable. 3 of 21 journal refs and 1 of 9 message
+                # refs on the live node point at records that are no longer there.
+                sources.append({
+                    "kind": "missing",
+                    "label": "Source no longer in your database",
+                    "table": table,
+                    "record_id": record_id,
+                })
+        entry["sources"] = sources
+
+
 def person_relationship_facts(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[str, int]:
     """Attach the owner's relationship facts to the people they are about.
 
@@ -1061,14 +1173,33 @@ def person_relationship_facts(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[st
         key = _normalized_name(n.get("label"))
         if key and not n.get("is_owner"):
             by_name.setdefault(key, n)
+    # Degrades to UNDATED facts rather than to none. The `except sqlite3.Error` below used to
+    # swallow the whole read, so adding `valid_from` to the SELECT silently dropped every
+    # relationship fact anywhere the column was absent — the fixture caught it here, but on a
+    # node it would have emptied the card with nothing logged. A fact without its date is
+    # still the fact; losing all 83 of them to one missing column is not a trade worth making.
+    rows: List[Any] = []
+    dated = True
     try:
         rows = conn.execute(
-            "SELECT payload_json, confidence, source_refs_json FROM signal_objects").fetchall()
+            "SELECT payload_json, confidence, source_refs_json, valid_from "
+            "FROM signal_objects").fetchall()
     except sqlite3.Error:
-        return {"attached": 0}
+        dated = False
+        try:
+            rows = [
+                (payload, confidence, refs, None)
+                for payload, confidence, refs in conn.execute(
+                    "SELECT payload_json, confidence, source_refs_json FROM signal_objects")
+            ]
+        except sqlite3.Error:
+            return {"attached": 0}
 
     attached = 0
-    for payload, confidence, refs in rows:
+    #: (fact, its refs) — resolved in ONE batched pass after the scan rather than a query
+    #: per fact, which would put ~60 lookups on a read that answers in single-digit ms.
+    pending: List[Tuple[Dict[str, Any], List[Dict[str, Any]]]] = []
+    for payload, confidence, refs, valid_from in rows:
         try:
             fact = json.loads(payload or "{}")
         except (TypeError, ValueError):
@@ -1084,14 +1215,17 @@ def person_relationship_facts(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[st
             node = by_name.get(_normalized_name(struct.get("person")))
         if node is None or node.get("is_owner"):
             continue
-        note = None
+        parsed: List[Dict[str, Any]] = []
         try:
-            parsed = json.loads(refs or "[]")
-            if parsed:
-                note = parsed[0].get("note") or parsed[0].get("table")
+            loaded = json.loads(refs or "[]")
+            if isinstance(loaded, list):
+                parsed = [r for r in loaded if isinstance(r, dict)]
         except (TypeError, ValueError):
-            pass
-        node.setdefault("facts", []).append({
+            parsed = []
+        note = None
+        if parsed:
+            note = parsed[0].get("note") or parsed[0].get("table")
+        entry = {
             "predicate": predicate,
             "tier": struct.get("tier"),
             "event": struct.get("event"),
@@ -1101,14 +1235,23 @@ def person_relationship_facts(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[st
             "stated_by_owner": str(fact.get("asserted_by") or "") == "owner",
             "pack": fact.get("pack"),
             "evidence": note,
-        })
+            # WHEN the fact is about, not when the row was written. `valid_from` is populated
+            # on all 83 rel.* facts on the live node with 76 distinct values, so it carries
+            # real signal; `created_at` is extraction time and would date every fact to the
+            # day the pack last ran.
+            "at": valid_from,
+            "sources": [],
+        }
+        node.setdefault("facts", []).append(entry)
+        pending.append((entry, parsed))
         attached += 1
+    _attach_evidence(conn, pending)
     for node in nodes:
         for fact in node.get("facts", []):
             if fact.get("tier"):
                 node["relationship_tier"] = fact["tier"]
                 break
-    return {"attached": attached}
+    return {"attached": attached, "dated": dated}
 
 
 def attach_fact_closeness(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[str, int]:

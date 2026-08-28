@@ -30,7 +30,7 @@ def _conn():
       CREATE TABLE contacts (contact_id TEXT PRIMARY KEY, display_name TEXT);
       CREATE TABLE contact_identifiers (contact_id TEXT, identifier TEXT, identifier_type TEXT);
       CREATE TABLE signal_objects (object_id TEXT PRIMARY KEY, payload_json TEXT,
-        confidence REAL, source_refs_json TEXT);
+        confidence REAL, source_refs_json TEXT, valid_from TEXT);
       CREATE TABLE conversation_messages (dataset_id TEXT, message_id TEXT, content TEXT,
         is_from_self INTEGER, conversation_id TEXT, sender_id TEXT, event_at TEXT,
         source_id TEXT, reply_to_message_id TEXT);
@@ -837,3 +837,109 @@ class TestAmbientPeopleGroupByWhatTheyAppearBeside:
         PG.group_ambient_people(c, nodes)
         core = [n for n in nodes if n["label"] == "Core Person"][0]
         assert core.get("ambient_group") is None
+
+
+class TestAFactSaysWhenAndWhatFromV:
+    """A fact the owner cannot date or trace back is an assertion, not a record.
+
+    The card shows a sentence about a relationship. Without a date it floats free of the
+    life it describes, and without its sources it cannot be checked — which is the whole
+    difference between "the record says this" and "trust me".
+    """
+
+    def _facts_conn(self):
+        c = _conn()
+        c.execute("""CREATE TABLE journal_entries (entry_id TEXT PRIMARY KEY, entry_at TEXT,
+                     content TEXT, place_name TEXT)""")
+        c.execute(
+            "INSERT INTO journal_entries VALUES (?,?,?,?)",
+            ("tl-8", "2026-05-02T17:00:00", "Dasha stayed over last night.", "Williamsburg"))
+        return c
+
+    def _fact(self, c, *, refs, valid_from="2026-05-02", object_id="s1"):
+        payload = json.dumps({
+            "predicate": "rel.relationship_event", "asserted_by": "owner",
+            "altitude": "stated", "quote": "Dasha stayed over last night.",
+            "value_struct": {"person": "Dasha", "event": "met"},
+        })
+        c.execute("INSERT INTO signal_objects VALUES (?,?,?,?,?)",
+                  (object_id, payload, 0.9, json.dumps(refs), valid_from))
+
+    def test_a_fact_carries_the_day_it_is_about(self):
+        c = self._facts_conn()
+        self._fact(c, refs=[{"table": "journal_entries", "record_id": "tl-8"}])
+        nodes = [{"entity_id": "e1", "label": "Dasha", "is_owner": False}]
+        PG.person_relationship_facts(c, nodes)
+        assert nodes[0]["facts"][0]["at"] == "2026-05-02"
+
+    def test_a_journal_ref_resolves_to_the_text_the_owner_can_read(self):
+        c = self._facts_conn()
+        self._fact(c, refs=[{"table": "journal_entries", "record_id": "tl-8"}])
+        nodes = [{"entity_id": "e1", "label": "Dasha", "is_owner": False}]
+        PG.person_relationship_facts(c, nodes)
+        src = nodes[0]["facts"][0]["sources"][0]
+        assert src["kind"] == "record"
+        assert "Dasha stayed over" in src["text"]
+        assert src["where"] == "Williamsburg"
+        assert src["at"] == "2026-05-02T17:00:00"
+
+    def test_a_derived_ref_is_shown_as_the_statistic_it_is(self):
+        """`entity_edges`/`messenger_dyad_stats` refs carry an entity id, not that table's
+        key — 0 of 23 resolve by `edge_id` on the live node. Their evidence is the note."""
+        c = self._facts_conn()
+        self._fact(c, refs=[{"table": "messenger_dyad_stats", "record_id": "ent_x",
+                             "note": "550 msgs, balance -0.16"}])
+        nodes = [{"entity_id": "e1", "label": "Dasha", "is_owner": False}]
+        PG.person_relationship_facts(c, nodes)
+        src = nodes[0]["facts"][0]["sources"][0]
+        assert src["kind"] == "measure"
+        assert src["detail"] == "550 msgs, balance -0.16"
+        assert "text" not in src, "a statistic must not be dressed up as a quoted document"
+
+    def test_a_dead_ref_is_reported_not_dropped(self):
+        """Silently omitting it leaves the card showing fewer sources than the fact was
+        built from, which reads as a smaller claim rather than a broken link."""
+        c = self._facts_conn()
+        self._fact(c, refs=[{"table": "journal_entries", "record_id": "tl-gone"}])
+        nodes = [{"entity_id": "e1", "label": "Dasha", "is_owner": False}]
+        PG.person_relationship_facts(c, nodes)
+        sources = nodes[0]["facts"][0]["sources"]
+        assert len(sources) == 1
+        assert sources[0]["kind"] == "missing"
+
+    def test_every_ref_gets_a_source_so_the_numbering_is_stable(self):
+        c = self._facts_conn()
+        self._fact(c, refs=[
+            {"table": "journal_entries", "record_id": "tl-8"},
+            {"table": "messenger_dyad_stats", "record_id": "ent_x", "note": "550 msgs"},
+            {"table": "journal_entries", "record_id": "tl-gone"},
+        ])
+        nodes = [{"entity_id": "e1", "label": "Dasha", "is_owner": False}]
+        PG.person_relationship_facts(c, nodes)
+        kinds = [s["kind"] for s in nodes[0]["facts"][0]["sources"]]
+        assert kinds == ["record", "measure", "missing"]
+
+    def test_long_evidence_is_bounded_and_says_so(self):
+        c = self._facts_conn()
+        c.execute("INSERT INTO journal_entries VALUES (?,?,?,?)",
+                  ("tl-long", "2026-05-02", "x" * 900, None))
+        self._fact(c, refs=[{"table": "journal_entries", "record_id": "tl-long"}])
+        nodes = [{"entity_id": "e1", "label": "Dasha", "is_owner": False}]
+        PG.person_relationship_facts(c, nodes)
+        src = nodes[0]["facts"][0]["sources"][0]
+        assert len(src["text"]) == PG.EVIDENCE_TEXT_CHARS
+        assert src["truncated"] is True
+
+    def test_a_missing_valid_from_column_loses_the_DATE_not_the_FACTS(self):
+        """The `except sqlite3.Error` here swallows the whole read. Adding a column to the
+        SELECT therefore emptied every person's card with nothing logged — a fact without
+        its date is still the fact, and losing all of them to one column is not a trade."""
+        c = self._facts_conn()
+        self._fact(c, refs=[{"table": "journal_entries", "record_id": "tl-8"}])
+        c.execute("ALTER TABLE signal_objects DROP COLUMN valid_from")
+        nodes = [{"entity_id": "e1", "label": "Dasha", "is_owner": False}]
+        stats = PG.person_relationship_facts(c, nodes)
+        assert stats["attached"] == 1
+        assert stats["dated"] is False
+        assert nodes[0]["facts"][0]["at"] is None
+        assert nodes[0]["facts"][0]["sources"][0]["kind"] == "record"
