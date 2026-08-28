@@ -116,6 +116,30 @@ is the machine the hook runs on. A contributor without a node has nothing of the
 owner's to leak, and CI could only check by being handed the very data it would
 be checking for. Each person's hook covers each person's own node.
 
-Person names are deliberately out of scope — every person entity would collide
-with ordinary English ("Unknown", "Claude") and a noisy hook gets removed. Names
-are on you.
+Person names are covered as FULL names only — a first name and a surname
+together. Single first names are most of a contact book and collide with
+ordinary English ("Unknown", "May", "Porter"); a hook that fires on those gets
+removed, and a removed hook protects nobody.
+
+### Names the database does not know
+
+The scans read your local node, so they only cover people it has seen. A
+landlord, a doctor, a child's school, a relative you have never messaged from
+this machine — none of those are in any table, and they are exactly what someone
+pastes into a docstring while debugging.
+
+Put those in an on-device file, one term per line, `#` for comments:
+
+```
+~/.topos/private-terms.txt
+```
+
+It lives **outside the repository on purpose**, and the scanner refuses a path
+inside the working tree. A list of the names you are hiding is the worst thing
+to commit by accident, and `.gitignore` is one `git add -f` away from failing.
+Terms you write by hand bypass the length floor — a short name you chose
+deliberately is not the hook's business to second-guess.
+
+Override the location with `TOPOS_PRIVATE_TERMS` if you keep it elsewhere. The
+scanner's summary line says whether a local list was loaded, so an inactive
+guard is visible rather than silent.

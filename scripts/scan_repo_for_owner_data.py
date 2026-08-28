@@ -45,6 +45,20 @@ GENERIC = {
     "speaker 1", "speaker 2", "speaker 3", "speaker one", "speaker two",
 }
 SKIP_DIRS = (".git/", "node_modules/", ".venv/", "dist/", "build/", "__pycache__/")
+
+# An on-device list of extra terms to protect, deliberately OUTSIDE the repo.
+#
+# The database can only tell us about people the node has already seen. It knows
+# nothing about a landlord, a doctor, a child's school, a family member never
+# messaged from this machine — and those are exactly the names someone would
+# paste into a docstring while debugging. This is where they go.
+#
+# It lives outside the working tree on purpose. A .gitignore entry is one
+# `git add -f`, one `git add -A` from a different directory, or one contributor
+# who removes the line, away from being committed — and a list of protected
+# names is the single worst file to commit by accident. A path that is not in
+# the tree cannot be added to it.
+DEFAULT_LOCAL_TERMS = os.path.expanduser("~/.topos/private-terms.txt")
 # Data fixtures count. A CSV or JSONL sample carrying real rows is the same
 # leak as a docstring, and the first version of this scanner missed exactly that
 # — a test asserting on a home address read it from an out-of-tree export while
@@ -65,6 +79,42 @@ def _tracked_and_untracked() -> list:
 def _all_files() -> list:
     out = subprocess.run(["git", "ls-files"], capture_output=True, text=True).stdout
     return out.splitlines()
+
+
+def _load_local_terms(path: str) -> list:
+    """Extra protected terms from an on-device file.
+
+    Refuses a path inside the repository. A list of the names you are hiding is
+    the worst possible thing to commit, and the mistake is easy: put it in the
+    tree "just for now", gitignore it, and it survives until someone runs
+    `git add -f` or clones and re-adds it. Making it un-committable by location
+    is stronger than making it ignored by convention.
+    """
+    if not path:
+        return []
+    resolved = os.path.realpath(os.path.expanduser(path))
+    repo_root = os.path.realpath(
+        subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"], capture_output=True, text=True
+        ).stdout.strip() or "."
+    )
+    if resolved.startswith(repo_root + os.sep):
+        raise SystemExit(
+            f"refusing to read protected terms from inside the repository:\n"
+            f"  {resolved}\n"
+            f"Move it outside the working tree — {DEFAULT_LOCAL_TERMS} is the default.\n"
+            f"A gitignored file is one `git add -f` away from being committed."
+        )
+    try:
+        lines = open(resolved, encoding="utf-8").read().splitlines()
+    except OSError:
+        return []
+    out = []
+    for raw in lines:
+        term = raw.split("#", 1)[0].strip()
+        if term:
+            out.append(("local list", term))
+    return out
 
 
 def _protected_names(db_path: str) -> list:
@@ -241,6 +291,10 @@ def main() -> int:
     ap.add_argument("--all", action="store_true", help="scan every tracked file, not just changed ones")
     ap.add_argument("--min-length", type=int, default=8)
     ap.add_argument(
+        "--local-terms", default=os.environ.get("TOPOS_PRIVATE_TERMS", DEFAULT_LOCAL_TERMS),
+        help="on-device file of extra terms to protect; never inside the repo.",
+    )
+    ap.add_argument(
         "--text", help="scan a literal string — for checking a DRAFT message before writing it.",
     )
     ap.add_argument(
@@ -259,18 +313,25 @@ def main() -> int:
     )
     args = ap.parse_args()
 
-    if not os.path.exists(args.database):
-        # No database is the CI and fresh-clone case. Failing here would fail
-        # every commit on any machine without a live node, and a hook that
-        # always fails gets removed — which costs more than it saves. The check
-        # is real where the data is.
-        print(f"SKIPPED — no database at {args.database}, nothing to compare against")
+    if not os.path.exists(args.database) and not _load_local_terms(args.local_terms):
+        # No database AND no local list is the CI and fresh-clone case. Failing
+        # here would fail every commit on any machine without a live node, and a
+        # hook that always fails gets removed — which costs more than it saves.
+        # The check is real where the data is.
+        print(f"SKIPPED — no database at {args.database} and no local terms file")
         return 0
 
+    from_db = _protected_names(args.database) if os.path.exists(args.database) else []
     names = [
-        (kind, n) for kind, n in _protected_names(args.database)
+        (kind, n) for kind, n in from_db
         if len(n.strip()) >= args.min_length and n.strip().lower() not in GENERIC
     ]
+    # Local terms bypass the length floor and the GENERIC list. Those exist to
+    # keep DATABASE-derived names from flooding the hook; a term you typed by
+    # hand is already a deliberate choice, and second-guessing it would silently
+    # drop exactly the short name someone went out of their way to protect.
+    local = _load_local_terms(args.local_terms)
+    names.extend(local)
     if args.verify_install:
         return _verify_commit_msg_hook()
 
@@ -305,7 +366,9 @@ def main() -> int:
                 hits.append((kind, name, path, line))
 
     if not hits:
-        print(f"clean — {len(files)} files checked against {len(names)} protected names")
+        src = f"{len(names)} protected names"
+        src += f" ({len(local)} from {args.local_terms})" if local else " (no local terms file)"
+        print(f"clean — {len(files)} files checked against {src}")
         return 0
 
     print(f"{len(hits)} leak(s) of the owner's own data:\n", file=sys.stderr)
