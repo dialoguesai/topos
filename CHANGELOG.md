@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.36] — 2026-08-29
+
 ### Fixed
 - **Graph nodes rendered in the wrong time frame: three writers stamped the
   clock that ran the job where the time the thing happened belongs.**
@@ -47,6 +49,13 @@ The machine-readable twin of each release is
   row of a type is the actual signal.
 
 ### Added
+- **iMessage sync skips Apple-filtered spam.** `[E:ingestion]` Unknown Senders
+  (`chat.is_filtered = 2`) and junk-flagged messages (`message.is_spam = 1`) are
+  omitted from `conversation_messages` by default, so marketing SMS never mints
+  contacts, embeddings, or graph nodes. The skip is an owner toggle (`exclude_spam`
+  on source settings, default on; `sync_options.exclude_spam` overrides one run).
+  Checkpoint still advances past skipped ROWIDs. Older `chat.db` files without
+  those columns ingest unchanged.
 - **Hover highlights three hops, graded by ring.** `[S1]` Hover lifted exactly
   one hop, which on a graph whose median node degree is 2–3 lit a couple of
   neighbours and said no more than the edges already drew. The highlighted
