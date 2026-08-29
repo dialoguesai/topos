@@ -704,9 +704,12 @@
     },
     {
       "version": "unreleased",
-      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "summary": "A localhost request starts Ollama when :11434 is down; iMessage sync skips Apple-filtered spam.",
       "steps": [],
-      "notes": []
+      "notes": [
+        "Ollama auto-start is code-only ([O]): a generate/stream/list against a localhost base URL opens Ollama.app or runs `ollama serve`. Remote URLs and heartbeat are left alone. Nothing already on disk is affected.",
+        "iMessage spam skip is a reader filter ([E:ingestion]). Already-ingested marketing SMS stay on disk; no automatic re-sync -- that needs Full Disk Access and a full-history window."
+      ]
     }
   ]
 }

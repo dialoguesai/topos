@@ -9,6 +9,24 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **A chat against localhost starts Ollama when :11434 is down.** `[O]`
+  Reachability was probed everywhere; nothing on the product path spawned the
+  server. A generate, stream, or list against a localhost base URL now opens
+  `Ollama.app` when it is installed, or runs `ollama serve`, then waits for
+  `/api/tags`. Remote `ENGINE_OLLAMA_BASE_URL` values are left alone so a
+  request never launches a daemon against someone else's host. Heartbeat and
+  registration still do not start anything — those are not a request, and
+  would restart a server the owner had stopped.
+- **iMessage sync skips Apple-filtered spam.** `[E:ingestion]` Unknown Senders
+  (`chat.is_filtered = 2`) and junk-flagged messages (`message.is_spam = 1`) are
+  omitted from `conversation_messages` by default, so marketing SMS never mints
+  contacts, embeddings, or graph nodes. The skip is an owner toggle
+  (`exclude_spam` on source settings, default on; `sync_options.exclude_spam`
+  overrides one run). Checkpoint still advances past skipped ROWIDs. Older
+  `chat.db` files without those columns ingest unchanged. Rows already on disk
+  stay until the owner re-reads `chat.db` — no automatic re-sync.
+
 ## [1.3.36] — 2026-08-29
 
 ### Fixed
