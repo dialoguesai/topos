@@ -444,24 +444,60 @@ def _allocate_edge_budget(type_counts, window: int) -> Dict[str, int]:
 _BIRTH_FLOOR = "2000-01-01"
 
 
-def _stored_birth(value: Optional[str]) -> Optional[str]:
-    """`entities.first_seen` as a node birth date, or None if it is not usable.
+def _edge_birth(conn: sqlite3.Connection, node_ids: List[str]) -> Dict[str, str]:
+    """Earliest EVENT stamp on each node's edges.
 
-    The mention scan above is the preferred source -- an actual sighting with an
-    event time. But a node minted as a VERTEX rather than a sighting (goal /
-    topic / conversation hubs, and anything `fact_materializer` resolves) has no
-    `entity_mentions` row by nature, so that scan returns nothing for it and the
-    node arrives at a temporal UI undatable. The enrichers already compute the
-    span from the source records' event times and store it here; this is the
-    read side of that write, which had no reader.
+    The mention scan is the preferred source, but a node minted as a VERTEX
+    rather than a sighting (goal / topic / conversation hubs, and anything
+    `fact_materializer` resolves) has no `entity_mentions` row by nature, so
+    that scan returns nothing and the node reaches a temporal UI undatable.
 
-    Same epoch-junk floor as the mention query, so a zero date cannot pull a
-    node back to 1970 on the timeline.
+    `entities.first_seen` is NOT the answer here, though it is the obvious one.
+    `_create_entity` stamps it with the mint clock, and only entities that later
+    receive a mention get it recomputed from evidence -- so for address-book
+    people it stays the IMPORT time forever. On the owner's node two import
+    batches accounted for 1,190 of 1,599 people sharing exactly two timestamps,
+    and dating nodes from that column put everyone in the address book on the
+    day their contacts were read.
+
+    Each edge carries two stamps and they mean different things: `valid_from` is
+    when the belief was recorded, `last_event_at` when the thing happened. An
+    ingest stamp is always LATER than the event it records, so the earlier of
+    the two is the one grounded in the world -- true for a goal edge (where
+    valid_from is the real first occurrence) and for a messaging edge (where it
+    is ingest lag) alike, without either needing a special case.
     """
-    text = str(value or "").strip()
-    if not text or text <= _BIRTH_FLOOR:
-        return None
-    return text
+    out: Dict[str, str] = {}
+    if not node_ids:
+        return out
+    try:
+        for chunk_start in range(0, len(node_ids), 400):
+            chunk = node_ids[chunk_start : chunk_start + 400]
+            marks = ",".join("?" * len(chunk))
+            for entity_id, birth in conn.execute(
+                f"""
+                SELECT node_id, MIN(stamp) FROM (
+                    SELECT src_entity_id AS node_id,
+                           MIN(NULLIF(COALESCE(valid_from, last_event_at), ''),
+                               NULLIF(COALESCE(last_event_at, valid_from), '')) AS stamp
+                      FROM entity_edges
+                     WHERE valid_to IS NULL AND src_entity_id IN ({marks})
+                    UNION ALL
+                    SELECT dst_entity_id AS node_id,
+                           MIN(NULLIF(COALESCE(valid_from, last_event_at), ''),
+                               NULLIF(COALESCE(last_event_at, valid_from), '')) AS stamp
+                      FROM entity_edges
+                     WHERE valid_to IS NULL AND dst_entity_id IN ({marks})
+                ) WHERE stamp IS NOT NULL AND stamp > ?
+                GROUP BY node_id
+                """,
+                (*chunk, *chunk, _BIRTH_FLOOR),
+            ):
+                if birth:
+                    out[str(entity_id)] = str(birth)
+    except sqlite3.OperationalError:
+        return {}
+    return out
 
 
 def graph_snapshot(
@@ -655,11 +691,12 @@ def graph_snapshot(
                         first_seen[str(fs_row[0])] = str(fs_row[1])
         except sqlite3.OperationalError:
             first_seen = {}
+    edge_birth = _edge_birth(conn, node_ids)
     nodes = []
     for entity_id in node_ids:
         row = conn.execute(
-            "SELECT canonical_name, entity_type, mention_count, metadata_json, is_self, "
-            "first_seen FROM entities WHERE entity_id=?",
+            "SELECT canonical_name, entity_type, mention_count, metadata_json, is_self "
+            "FROM entities WHERE entity_id=?",
             (entity_id,),
         ).fetchone()
         if row:
@@ -680,7 +717,7 @@ def graph_snapshot(
                     "node_id": entity_id,
                     "node_type": row[1],
                     "label": row[0],
-                    "first_event_at": first_seen.get(entity_id) or _stored_birth(row[5]),
+                    "first_event_at": first_seen.get(entity_id) or edge_birth.get(entity_id),
                     "metadata_json": json.dumps(meta),
                 }
             )

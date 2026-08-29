@@ -471,9 +471,17 @@ def _materialize_conversations(
                 ).fetchone()
                 if not ent:
                     continue
+                # The conversation's own span dates this edge. It used to pass
+                # valid_from=None with no last_event_at, which left all 181 of
+                # these edges with no time at all -- a participation that cannot
+                # be placed on a timeline is invisible to every temporal view.
+                # `spans` is already read above for the conversation NODE; the
+                # edge just never used it.
+                conv_first, conv_last = spans.get(str(conv_id), (None, None))
                 _record_touched(_upsert_materialized_edge(
                     conn, src=str(ent[0]), dst=f"conv_{conv_id}", edge_type=EDGE_PARTICIPATES,
-                    weight=_MZ_WEIGHT_FLOOR, valid_from=None, valid_to=None,
+                    weight=_MZ_WEIGHT_FLOOR, valid_from=conv_first, valid_to=None,
+                    last_event_at=conv_last,
                     statement="participated in conversation",
                     source_object_id=f"conv:{conv_id}", actor_role="participated",
                 ))

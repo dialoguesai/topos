@@ -10,7 +10,7 @@ import math
 import re
 import sqlite3
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 from .packs import Pack
@@ -83,6 +83,23 @@ def synthesize_rhythm(conn: sqlite3.Connection, w: DerivationWriter, pack: Pack,
     return results
 
 
+def _date_from_gap(gap_days, now=None) -> Optional[str]:
+    """Days-since-last-contact -> an ISO date, for rails without `last_ts`."""
+    try:
+        days = float(gap_days)
+    except (TypeError, ValueError):
+        return None
+    if days < 0 or days > 36500:
+        return None
+    base = now or datetime.now(timezone.utc)
+    if isinstance(base, str):
+        try:
+            base = datetime.fromisoformat(base.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+    return (base - timedelta(days=days)).date().isoformat()
+
+
 def synthesize_closeness(conn: sqlite3.Connection, w: DerivationWriter, pack: Pack, owner: str,
                          *, window_days: Optional[int] = 90, now=None) -> List[Dict[str, Any]]:
     """`rel.closeness_tier` — the pack's declared graph_labeling lens.
@@ -104,10 +121,21 @@ def synthesize_closeness(conn: sqlite3.Connection, w: DerivationWriter, pack: Pa
 
     by_handle = handle_to_entity(conn)
     blocked = _blackholed(conn)
+    # `last_ts` is probed rather than selected outright. The except below turns any
+    # SQL error into "the rail has not run yet" and returns NO facts, so naming a
+    # column an older rail lacks would not degrade the lens -- it would silently
+    # delete it, on exactly the nodes least likely to notice.
+    try:
+        cols = {str(r[1]) for r in conn.execute(
+            "PRAGMA table_info(messenger_dyad_stats)").fetchall()}
+    except sqlite3.Error:
+        cols = set()
+    has_last_ts = "last_ts" in cols
     try:
         rows = conn.execute(
             "SELECT a_key, b_key, total_msgs, balance, reciprocal_periods,"
-            "       longest_reciprocal_streak_months, recent_gap_days, tie_state"
+            "       longest_reciprocal_streak_months, recent_gap_days, tie_state,"
+            f"      {'last_ts' if has_last_ts else 'NULL'}"
             "  FROM messenger_dyad_stats"
             " WHERE involves_self=1 AND peer_class='human'").fetchall()
     except sqlite3.Error:
@@ -115,7 +143,7 @@ def synthesize_closeness(conn: sqlite3.Connection, w: DerivationWriter, pack: Pa
 
     scored = []
     per_entity: Dict[str, Dict[str, Any]] = {}
-    for a_key, b_key, total, balance, recip_periods, streak, gap, tie_state in rows:
+    for a_key, b_key, total, balance, recip_periods, streak, gap, tie_state, last_ts in rows:
         # One side of an owner dyad is the owner; the other is the partner.
         partner_key = b_key if str(a_key).strip().lower() in _SELF_KEYS else a_key
         if str(partner_key).strip().lower() in _SELF_KEYS:
@@ -141,7 +169,8 @@ def synthesize_closeness(conn: sqlite3.Connection, w: DerivationWriter, pack: Pa
         # which both split her traffic and listed her twice in the same answer.
         acc = per_entity.setdefault(entity_id, {
             "name": name, "total": 0, "bal_weighted": 0.0,
-            "recip_periods": 0, "streak": 0, "gap": None, "tie": None})
+            "recip_periods": 0, "streak": 0, "gap": None, "tie": None,
+            "last_ts": None})
         acc["total"] += total
         acc["bal_weighted"] += float(balance or 0.0) * total
         acc["recip_periods"] = max(acc["recip_periods"], int(recip_periods or 0))
@@ -149,6 +178,14 @@ def synthesize_closeness(conn: sqlite3.Connection, w: DerivationWriter, pack: Pa
         g_here = float(gap) if gap is not None else None
         if g_here is not None and (acc["gap"] is None or g_here < acc["gap"]):
             acc["gap"] = g_here        # most recent contact across her channels
+        lt = str(last_ts or "").strip()
+        if not lt and gap is not None:
+            # An older rail has no `last_ts`. The gap is days-since-last-contact,
+            # so the date is recoverable -- approximate, but anchoring to a real
+            # position in the past beats anchoring every person to the run clock.
+            lt = _date_from_gap(gap, now)
+        if lt and (acc["last_ts"] is None or lt > acc["last_ts"]):
+            acc["last_ts"] = lt      # newest contact across her channels
         if _TIE_RANK.get(str(tie_state or ""), 9) < _TIE_RANK.get(str(acc["tie"] or ""), 9):
             acc["tie"] = tie_state     # the liveliest channel describes the tie
         continue
@@ -158,6 +195,7 @@ def synthesize_closeness(conn: sqlite3.Connection, w: DerivationWriter, pack: Pa
         balance = acc["bal_weighted"] / total if total else 0.0
         recip_periods, streak = acc["recip_periods"], acc["streak"]
         gap, tie_state = acc["gap"], acc["tie"]
+        last_contact = acc["last_ts"]
 
         # `balance` is -1..1 and 0 is an even exchange, so |balance| IS the
         # one-sidedness the old cut had to derive from raw counts.
@@ -170,12 +208,13 @@ def synthesize_closeness(conn: sqlite3.Connection, w: DerivationWriter, pack: Pa
         score = (math.log1p(total) * (0.4 + 0.6 * reciprocity)
                  * (0.6 + 0.4 * persistence) * recency * tie_mult)
         scored.append((entity_id, name, total, balance, recip_periods, streak,
-                       gap, tie_state, score))
+                       gap, tie_state, score, last_contact))
 
     scored.sort(key=lambda r: (-r[8], r[1]))
     n = len(scored)
     results: List[Dict[str, Any]] = []
-    for i, (entity_id, name, total, balance, recip_periods, streak, gap, tie_state, score) in enumerate(scored):
+    for i, (entity_id, name, total, balance, recip_periods, streak, gap, tie_state,
+            score, last_contact) in enumerate(scored):
         pct = (i + 1) / n if n else 1.0
         tier = ("inner_circle" if pct <= 0.10 else
                 "close" if pct <= 0.35 else
@@ -189,7 +228,16 @@ def synthesize_closeness(conn: sqlite3.Connection, w: DerivationWriter, pack: Pa
                                    f"{recip_periods} reciprocal periods, "
                                    f"{streak}mo reciprocal streak, "
                                    f"last contact {gap}d ago, tie {tie_state}")}],
-            confidence=confidence, object_entity_id=entity_id)
+            confidence=confidence, object_entity_id=entity_id,
+            # A closeness tier is a STANDING RANK, not an event, so it has no
+            # occurrence of its own -- and without an evidence date every tier
+            # anchored to the synthesis clock instead. That put all 26 of them on
+            # one instant, and the graph then showed every ranked person as active
+            # that second: people last spoken to in May and June rendered inside
+            # the most recent few days. The dyad's last message is the newest
+            # evidence that completed the rank, which is what the writer asks
+            # accumulation facts to anchor to.
+            event_date=last_contact)
         results.append({"predicate": "rel.closeness_tier", "person": name, "tier": tier,
                         "msgs": total, "balance": balance, "tie_state": tie_state,
                         "score": round(score, 2), "outcome": r["outcome"]})

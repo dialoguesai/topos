@@ -278,6 +278,54 @@ def test_conversation_node_links_mentions_and_participants(conn):
     assert len(conv_nodes) == 1
 
 
+def test_participation_edge_carries_the_conversations_span(conn):
+    """A participation with no time cannot be placed on any temporal view.
+
+    This edge passed valid_from=None and no last_event_at, so all 181 of them on
+    a live node had no time at all -- while the conversation NODE beside them was
+    dated from the very span this edge ignored.
+    """
+    _owner(conn)
+    r = EntityResolver(conn)
+    topic = r._create_entity("Provenance", "topic")
+    conn.commit()
+    _seed_conversation(conn)
+    # The conversation only materializes once something is mentioned inside it:
+    # `conv_ids` comes from the mentions join, so a thread nobody was named in
+    # is skipped entirely, participants and all.
+    conn.execute(
+        "INSERT INTO entity_mentions (mention_id, entity_id, record_id, source_id,"
+        " surface_text, confidence, created_at)"
+        " VALUES ('m9', ?, 'cm1', 'voxterm_transcripts', 'Provenance', 0.9, '2026-07-01')",
+        (topic,),
+    )
+    # A second message widens the thread: the edge should span both, not sit on one.
+    conn.execute(
+        "INSERT INTO conversation_messages (message_id, conversation_id, event_at) "
+        "VALUES ('cm2', 'conv1', '2026-07-20T00:00:00Z')"
+    )
+    conn.execute(
+        "INSERT INTO contacts (contact_id, dataset_id, source_id, display_name, is_self) "
+        "VALUES ('c-nick', 'ds', 'src', 'Nick', 0)"
+    )
+    nick = r._create_entity("Nick", "person")
+    conn.execute("UPDATE entities SET contact_id='c-nick' WHERE entity_id=?", (nick,))
+    conn.execute(
+        "INSERT INTO conversation_participants (conversation_id, contact_id) VALUES ('conv1', 'c-nick')"
+    )
+    conn.commit()
+
+    materialize_graph_enrichments(conn)
+    row = conn.execute(
+        "SELECT valid_from, last_event_at FROM entity_edges"
+        " WHERE edge_type='participates_in' AND valid_to IS NULL"
+    ).fetchone()
+    assert row is not None, "the participation edge was not created"
+    valid_from, last_event_at = row
+    assert valid_from == "2026-07-01T00:00:00Z"      # first message
+    assert last_event_at == "2026-07-20T00:00:00Z"   # last message, not the first
+
+
 def test_enrichers_skip_missing_tables_and_are_idempotent(conn):
     _owner(conn)
     conn.execute(
