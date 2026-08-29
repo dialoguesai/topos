@@ -95,11 +95,11 @@ def _materialize_signal_objects(
         # different facts about that person and this store keeps one row per key.
         #
         # On the person alone, every journal edge for someone collapses to one
-        # row and the last write decides what it says. Measured on the live node
-        # 2026-08-28: 16 artifacts said `mitch × Topos` and 2 said
-        # `mitch × Chill`; the surviving row said Chill, because a Chill entry
-        # happened to be written last. Six rows node-wide said Topos against 38
-        # saying Chill — a write-order artifact reading as a finding.
+        # row and the last write decides what it says. Measured on a live node
+        # 2026-08-28: one collaborator had 16 artifacts naming the shared project
+        # and 2 naming a leisure category; the surviving row said leisure, because
+        # such an entry happened to be written last. Node-wide the same inversion
+        # ran 6 against 38 — a write-order artifact reading as a finding.
         #
         # The branches either side of this one already compose their keys
         # (`start|end|kind`, `kind:label`); this was the only one that dropped

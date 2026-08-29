@@ -22,12 +22,12 @@ def wired(monkeypatch):
     apply_all_migrations(conn)
     resolver = EntityResolver(conn)
     ada = resolver._create_entity("Ada", "person")
-    cass = resolver._create_entity("Cass", "person")
+    juliet = resolver._create_entity("Juliet", "person")
     conn.commit()
     update_edge(
         conn,
         src_entity_id=ada,
-        dst_entity_id=cass,
+        dst_entity_id=juliet,
         edge_type=EDGE_SEMANTIC_AFFINITY,
         increment=0.7,
     )
@@ -59,7 +59,7 @@ async def test_affinity_traversal_over_ws_bridge(wired):
     names = {
         (row["a.canonical_name"], row["b.canonical_name"]) for row in reply["payload"]["rows"]
     }
-    assert ("Ada", "Cass") in names and ("Cass", "Ada") in names
+    assert ("Ada", "Juliet") in names and ("Juliet", "Ada") in names
 
 
 @pytest.mark.asyncio

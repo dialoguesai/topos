@@ -42,7 +42,7 @@ def test_person_blocklist():
 
 def test_person_garble_rejected():
     assert not person_field_ok("4ish…eliza os, tiny cloud, teesql")   # measured garble
-    assert not person_field_ok("cann or will mitch / brian")
+    assert not person_field_ok("cann or will juliet / romeo")
     assert not person_field_ok("a" * 41)
 
 def test_person_kin_and_names_pass():

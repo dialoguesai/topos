@@ -27,9 +27,9 @@ def _seed(conn):
     r = EntityResolver(conn)
     a = r._create_entity("Ada", "person")
     b = r._create_entity("Bram", "person")
-    d = r._create_entity("Cass", "person")
+    d = r._create_entity("Juliet", "person")
     conn.commit()
-    # A—B relationship held 2025 then ENDED 2026-03; A—Cass started 2026-04.
+    # A—B relationship held 2025 then ENDED 2026-03; A—Juliet started 2026-04.
     update_edge(conn, src_entity_id=a, dst_entity_id=b, edge_type="communicates_with",
                 event_at="2025-06-01T00:00:00Z")
     supersede_edge(conn, src_entity_id=a, dst_entity_id=b, edge_type="communicates_with",
@@ -38,7 +38,7 @@ def _seed(conn):
                 event_at="2026-04-01T00:00:00Z")
     # update_edge stamps valid_from at ingest-now (belief-validity); rewrite to
     # realistic historical starts so the point-in-time windows are coherent
-    # (A-B held 2025-06..2026-03; A-Cass active since 2026-04).
+    # (A-B held 2025-06..2026-03; A-Juliet active since 2026-04).
     conn.execute("UPDATE entity_edges SET valid_from='2025-06-01T00:00:00Z' WHERE valid_to='2026-03-01T00:00:00Z'")
     conn.execute("UPDATE entity_edges SET valid_from='2026-04-01T00:00:00Z' WHERE valid_to IS NULL AND edge_type='communicates_with'")
     conn.commit()
@@ -70,11 +70,11 @@ def test_include_closed_adds_history(conn):
 
 def test_as_of_returns_point_in_time_graph(conn):
     a, b, d = _seed(conn)
-    # In 2025-12 the A-B edge was active and A-Cass did not yet exist.
+    # In 2025-12 the A-B edge was active and A-Juliet did not yet exist.
     past = graph_snapshot(conn, as_of="2025-12-01T00:00:00Z")
     ppairs = _edge_pairs(past)
     assert ({(a, b), (b, a)} & ppairs)          # A-B held then
-    assert (a, d) not in ppairs and (d, a) not in ppairs  # A-Cass not yet started
+    assert (a, d) not in ppairs and (d, a) not in ppairs  # A-Juliet not yet started
     # After 2026-04 the reverse holds
     now = graph_snapshot(conn, as_of="2026-05-01T00:00:00Z")
     npairs = _edge_pairs(now)

@@ -36,16 +36,16 @@ def conn(tmp_path):
 
 @pytest.fixture()
 def graph_ids(conn):
-    """Owner -> Ada -> Bram co-occurrence chain, plus Ada ~ Cass affinity.
+    """Owner -> Ada -> Bram co-occurrence chain, plus Ada ~ Juliet affinity.
 
-    Cass never co-occurs with anyone: she is only reachable through the
+    Juliet never co-occurs with anyone: she is only reachable through the
     semantic_affinity edge, which is the traversal §4 exists to make possible.
     """
     resolver = EntityResolver(conn)
     owner = resolver._create_entity("Owner", "person")
     ada = resolver._create_entity("Ada", "person")
     bram = resolver._create_entity("Bram", "person")
-    cass = resolver._create_entity("Cass", "person")
+    juliet = resolver._create_entity("Juliet", "person")
     acme = resolver._create_entity("Acme", "org")
     conn.execute("UPDATE entities SET is_self=1 WHERE entity_id=?", (owner,))
     conn.commit()
@@ -58,12 +58,12 @@ def graph_ids(conn):
     update_edge(
         conn,
         src_entity_id=ada,
-        dst_entity_id=cass,
+        dst_entity_id=juliet,
         edge_type=EDGE_SEMANTIC_AFFINITY,
         increment=0.82,
     )
     conn.commit()
-    return {"owner": owner, "ada": ada, "bram": bram, "cass": cass, "acme": acme}
+    return {"owner": owner, "ada": ada, "bram": bram, "juliet": juliet, "acme": acme}
 
 
 def _column(result, name):
@@ -88,8 +88,8 @@ class TestGraphMaterialisation:
     def test_symmetric_edges_are_traversable_both_ways(self, conn, graph_ids):
         """Storage keeps one canonically-ordered row; a traversal must not care."""
         graph = build_entity_graph(conn)
-        assert graph.has_edge(graph_ids["ada"], graph_ids["cass"])
-        assert graph.has_edge(graph_ids["cass"], graph_ids["ada"])
+        assert graph.has_edge(graph_ids["ada"], graph_ids["juliet"])
+        assert graph.has_edge(graph_ids["juliet"], graph_ids["ada"])
         # part_of is directed and must stay that way.
         assert graph.has_edge(graph_ids["bram"], graph_ids["acme"])
         assert not graph.has_edge(graph_ids["acme"], graph_ids["bram"])
@@ -132,7 +132,7 @@ class TestMultiHopMatch:
         assert {"Ada", "Bram"} <= set(_column(result, "b.canonical_name"))
 
     def test_affinity_hop_reaches_a_non_co_occurring_entity(self, conn, graph_ids):
-        """The §4 payoff: Cass is unreachable except through semantic_affinity."""
+        """The §4 payoff: Juliet is unreachable except through semantic_affinity."""
         result = run_cypher(
             conn,
             """
@@ -144,7 +144,7 @@ class TestMultiHopMatch:
         assert result["row_count"] == 1
         row = result["rows"][0]
         assert row["known.canonical_name"] == "Ada"
-        assert row["unknown.canonical_name"] == "Cass"
+        assert row["unknown.canonical_name"] == "Juliet"
         assert row["aff.weight"] == pytest.approx(0.82)
 
     def test_result_is_json_serialisable(self, conn, graph_ids):
@@ -154,7 +154,7 @@ class TestMultiHopMatch:
         )
         json.dumps(result)  # edge buckets and __labels__ sets would both blow up here
         row = result["rows"][0]
-        assert row["a"] in (graph_ids["ada"], graph_ids["cass"])
+        assert row["a"] in (graph_ids["ada"], graph_ids["juliet"])
         assert row["r"]["edge_type"] == "semantic_affinity"
         assert row["r"]["labels"] == ["semantic_affinity"]
 

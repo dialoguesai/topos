@@ -209,7 +209,7 @@ def test_communities_detected_and_exposed(conn):
     from topos.features.entities.maintenance import compute_communities
 
     r = EntityResolver(conn)
-    clique_a = [r._create_entity(n, "person") for n in ("Ada", "Bram", "Cass")]
+    clique_a = [r._create_entity(n, "person") for n in ("Ada", "Bram", "Juliet")]
     clique_b = [r._create_entity(n, "org") for n in ("Xen", "Yara", "Zed")]
     conn.commit()
     from topos.features.entities.edges import update_edge
@@ -321,7 +321,7 @@ def _star_and_triangle(conn):
 
     r = EntityResolver(conn)
     ada = r._create_entity("Ada", "person")
-    leaves = [r._create_entity(n, "person") for n in ("Bram", "Cass", "Dana")]
+    leaves = [r._create_entity(n, "person") for n in ("Bram", "Juliet", "Dana")]
     triangle = [r._create_entity(n, "org") for n in ("Xen", "Yara", "Zed")]
     conn.commit()
     for leaf in leaves:

@@ -81,7 +81,7 @@ def test_excludes_speaker_labels_unknown_handles_and_own_messages(db):
     names = {p["person"] for p in compute_close_circle(db, now=NOW)}
     assert not names & {"Speaker 1", "Speaker 2", "sys", "rec"}
     assert len(names) == 4          # the unknown handle contributed nobody
-    # the owner's outbound message must not inflate Mitch
+    # the owner's outbound message must not inflate the partner's count
     assert next(p for p in compute_close_circle(db, now=NOW)
                 if p["person"] == "Mike November")["messages"] == 206
 
@@ -140,10 +140,12 @@ def test_a_blackholed_person_is_never_returned(db):
 
 
 def test_a_blackholed_place_does_not_erase_a_person_sharing_a_token(db):
-    # "Old Saybrook - Jeff's Place" must not take out a person named Jeff:
-    # whole-name matching, never token overlap.
+    # "Riverbend - Mike's Place" must not take out a person named Mike:
+    # whole-name matching, never token overlap. The place now SHARES a token
+    # with a person in the circle, which is the case the test name describes
+    # -- the previous fixture overlapped nobody, so it could not have failed.
     db.execute("INSERT INTO entity_blackholes VALUES "
-               "('b2','e2','mitch place','Mitch Place','[]')")
+               "('b2','e2','mike place','Mike Place','[]')")
     db.commit()
     assert "Mike November" in [p["person"] for p in compute_close_circle(db, now=NOW)]
 

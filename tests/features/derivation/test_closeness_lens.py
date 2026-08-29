@@ -198,7 +198,7 @@ def test_the_known_item_aliases_cover_how_people_actually_ask():
     assert "rel.relationship" in preds("Do I have any siblings?")
     assert "rel.relationship" in preds("Who are my parents?")
     # person-scoped and comparative, not only owner-scoped list questions
-    for q in ("How close am I to Mitch?",
+    for q in ("How close am I to Mike November?",
               "Am I closer to Mike November or Alpha Xray?",
               "Who should I reconnect with?",
               "Who have I drifted away from?",

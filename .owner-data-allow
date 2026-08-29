@@ -1,0 +1,14 @@
+# Hits the owner-data scanner reports that are NOT leaks. One hash per line,
+# reason required. Hashes cover the matched content, so editing the line
+# re-arms the check.
+#
+# All five below are SUBSTRING collisions from the short-name local terms list:
+# a protected name that happens to sit inside an ordinary word or a synthetic
+# fixture name. The local list has no word-boundary rule by design -- a leak
+# hiding inside a compound is exactly what it exists to catch -- so genuine
+# collisions are allowed here rather than by weakening the matcher.
+c3f8ddb4ff81aad4  bench_embedders.py: "strangely" contains a protected surname; ordinary English word in benchmark prose
+8812d42ca235b92f  test_b2_temporal_storage.py: synthetic fixture name "Brindle Cassavetes" contains a protected 4-letter name
+633520dc4afdfd28  composition_seed_corpus.py: same synthetic fixture name "Brindle Cassavetes"
+6ee505b0795d4d8d  prv_probe_corpus.py: "casserole" contains a protected 4-letter name; ordinary English word
+f46164a890b58e8e  test_en_qq_temporal_corpus.py: same synthetic fixture name "Brindle Cassavetes"

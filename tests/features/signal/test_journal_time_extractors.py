@@ -52,7 +52,7 @@ def test_time_log_journal_group_emits_relationship_edges() -> None:
         "entry_at": "2026-05-01T10:00:00",
         "category": "Topos",
         "content": "Project: Topos",
-        "people": "Mitch, Claire",
+        "people": "Juliet, Romeo",
         "metadata_json": json.dumps(
             {
                 "ends_at": "2026-05-01T11:00:00",
@@ -66,7 +66,7 @@ def test_time_log_journal_group_emits_relationship_edges() -> None:
     assert len(edges) == 2
     assert all("relationships" in d[2] for d in edges)
     edge_keys = {d[1]["target_entity_key"] for d in edges}
-    assert edge_keys == {"mitch", "claire"}
+    assert edge_keys == {"juliet", "romeo"}
 
 
 def test_time_log_journal_place_emits_places_artifact() -> None:
