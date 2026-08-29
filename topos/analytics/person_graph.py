@@ -1333,6 +1333,41 @@ def context_layer_weight() -> float:
 #: reported as unclustered rather than each being called a community of one.
 MIN_COMMUNITY_SIZE = 3
 
+
+def _graph_for_louvain(graph: Any) -> Any:
+    """Copy with sorted edges so Louvain+seed partitions the same graph the same way.
+
+    NetworkX walks nodes in insertion order. SQL without ORDER BY can add the same
+    edges in a different sequence on every request, which reshuffles community ids
+    even with a fixed seed — and the social graph paints colour from those ids.
+    """
+    import networkx as nx
+
+    ordered = nx.Graph()
+    for u, v, data in sorted(graph.edges(data=True), key=lambda e: (str(e[0]), str(e[1]))):
+        ordered.add_edge(u, v, **data)
+    return ordered
+
+
+def _community_ids_by_size(
+    groups: Any, *, min_size: int = MIN_COMMUNITY_SIZE
+) -> Tuple[Dict[str, int], int]:
+    """Rank communities by size, then by the smallest member id.
+
+    Size-only ranking swapped colours whenever two groups tied — Louvain's list
+    order is not a stable identity, so the same people painted differently on
+    the next load of the same graph.
+    """
+    ranked = sorted(
+        (set(group) for group in groups if len(group) >= min_size),
+        key=lambda group: (-len(group), min(str(member) for member in group) if group else ""),
+    )
+    assigned: Dict[str, int] = {}
+    for index, group in enumerate(ranked, start=1):
+        for member in group:
+            assigned[str(member)] = index
+    return assigned, len(ranked)
+
 #: Betweenness in a component this small is arithmetic, not insight: the middle node of a
 #: three-person path scores a perfect 1.0. Measured here, that let November Romeo and a head of state top
 #: the broker list ahead of every real contact. Below this the score is computed but not
@@ -1471,23 +1506,20 @@ def structural_metrics(conn: Any, dataset_id: str, nodes: List[Dict[str, Any]], 
 
     # Communities from greedy modularity, falling back to connected components — the point
     # is a stable grouping to lay out by, not a claim about social clubs.
-    communities: Dict[str, int] = {}
     try:
         # Louvain, not greedy modularity: it honours edge WEIGHT, which is the whole point
         # once a second layer is present, and it is what the layer weight was measured on.
-        groups = list(nx.community.louvain_communities(graph, weight="weight", seed=7))
+        # The ordered copy is what keeps the seed's partition (and therefore colours)
+        # identical across loads of the same edges.
+        groups = list(nx.community.louvain_communities(
+            _graph_for_louvain(graph), weight="weight", seed=7
+        ))
     except Exception:  # noqa: BLE001
         try:
-            groups = list(nx.community.greedy_modularity_communities(graph))
+            groups = list(nx.community.greedy_modularity_communities(_graph_for_louvain(graph)))
         except Exception:  # noqa: BLE001
             groups = [set(component) for component in nx.connected_components(graph)]
-    kept = 0
-    for group in sorted(groups, key=len, reverse=True):
-        if len(group) < MIN_COMMUNITY_SIZE:
-            continue  # a pair is not a community, and calling it one crowds the legend
-        kept += 1
-        for member in group:
-            communities[str(member)] = kept
+    communities, kept = _community_ids_by_size(groups)
 
     # LAYER 2 MAY ONLY ADD, NEVER SUBTRACT — the same rule `attach_fact_closeness` states
     # for a stated fact: a second signal can pull a person IN, and its absence is silence
@@ -1503,7 +1535,9 @@ def structural_metrics(conn: Any, dataset_id: str, nodes: List[Dict[str, Any]], 
     # rejoins the surviving group holding most of the people they would have been with.
     if context_added:
         try:
-            tie_groups = list(nx.community.louvain_communities(ties, weight="weight", seed=7))
+            tie_groups = list(nx.community.louvain_communities(
+                _graph_for_louvain(ties), weight="weight", seed=7
+            ))
         except Exception:  # noqa: BLE001
             tie_groups = []
         for group in tie_groups:

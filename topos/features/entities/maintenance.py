@@ -705,8 +705,8 @@ def compute_communities(conn: sqlite3.Connection) -> Dict[str, int]:
     graph (the witcher-network recipe: community_louvain.best_partition on the
     weighted co-occurrence graph, plus degree / eigenvector / betweenness).
 
-    Community ids are re-ranked by size (0 = largest neighborhood) so colors
-    stay reasonably stable across rebuilds, and stamped into
+    Community ids are re-ranked by size then by the smallest member id
+    (0 = largest neighborhood) so colors stay put across rebuilds, and stamped into
     entities.metadata_json.community_id. The same pass stamps
     ``centrality`` = {degree, eigen, betweenness} per node and
     ``community_label`` (the highest-eigenvector member's canonical name) so
@@ -737,16 +737,25 @@ def compute_communities(conn: sqlite3.Connection) -> Dict[str, int]:
 
     # Louvain is pure CPU over the in-memory graph — no reason to hold the
     # write gate (or even a transaction) while it runs.
-    community_sets = nx.community.louvain_communities(G, weight="weight", seed=42)
+    # Sorted edges pin insertion order so seed=42 cannot reshuffle ranks (and
+    # therefore colours) just because SQL returned rows in a different sequence.
+    ordered = nx.Graph()
+    for u, v, data in sorted(G.edges(data=True), key=lambda e: (str(e[0]), str(e[1]))):
+        ordered.add_edge(u, v, **data)
+    community_sets = nx.community.louvain_communities(ordered, weight="weight", seed=42)
     partition: Dict[str, int] = {}
     sizes: Dict[int, int] = {}
+    min_member: Dict[int, str] = {}
     for comm, members in enumerate(community_sets):
         sizes[comm] = len(members)
+        min_member[comm] = min(str(m) for m in members) if members else ""
         for entity_id in members:
             partition[str(entity_id)] = comm
     rank = {
         comm: i
-        for i, (comm, _n) in enumerate(sorted(sizes.items(), key=lambda kv: (-kv[1], kv[0])))
+        for i, (comm, _n) in enumerate(
+            sorted(sizes.items(), key=lambda kv: (-kv[1], min_member[kv[0]], kv[0]))
+        )
     }
 
     # Structural analytics over the same in-memory graph: degree (connections),

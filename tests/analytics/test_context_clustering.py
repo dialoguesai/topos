@@ -170,6 +170,44 @@ class TestTheSecondLayerIsNotATie:
         assert "never drawn" in out["coverage"]["communities_from"]
 
 
+class TestCommunityIdsStayPut:
+    """The social graph paints `community_id % palette`. If the rank twitches
+    on the next load of the same edges, people change colour."""
+
+    def test_equal_size_groups_keep_the_same_id_when_listed_backwards(self):
+        a = [{"ann", "ben", "cam"}, {"dot", "ed", "fay"}]
+        b = [{"fay", "ed", "dot"}, {"cam", "ben", "ann"}]
+        first, kept_a = PG._community_ids_by_size(a)
+        second, kept_b = PG._community_ids_by_size(b)
+        assert kept_a == kept_b == 2
+        assert first == second
+        assert first["ann"] == 1  # same size; "ann" < "dot"
+        assert first["dot"] == 2
+
+    def test_edge_insert_order_does_not_reassign_anyone(self, conn):
+        people = ("ann", "ben", "cam", "dot", "ed", "fay")
+        cliques = (("ann", "ben", "cam"), ("dot", "ed", "fay"))
+
+        def clique_edges(clique):
+            return [(clique[i], clique[j])
+                    for i in range(len(clique))
+                    for j in range(i + 1, len(clique))]
+
+        forward = [edge for clique in cliques for edge in clique_edges(clique)]
+        reverse = list(reversed(forward))
+
+        def run(order):
+            conn.execute("DELETE FROM entity_edges")
+            for src, dst in order:
+                _edge(conn, src, dst, 5)
+            conn.commit()
+            return PG.structural_metrics(
+                conn, "d", _nodes(*people), context_pairs=[]
+            )["communities"]
+
+        assert run(forward) == run(reverse)
+
+
 class TestDeclaredWorkOutranksAnInferredSubject:
     def _seed(self, conn, rows):
         for i, (person, subject, kind, conf) in enumerate(rows):
