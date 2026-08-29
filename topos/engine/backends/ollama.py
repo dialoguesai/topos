@@ -110,6 +110,12 @@ class OllamaAdapter:
         except Exception:
             return False
 
+    def _ensure_server(self) -> None:
+        """Start a local Ollama if this request needs one and :11434 is down."""
+        from ..ollama_runtime import ensure_running
+
+        ensure_running(base_url=self._base_url)
+
     def model_supports_thinking(self, model: str) -> bool:
         """True when /api/show lists the 'thinking' capability for ``model``.
 
@@ -172,6 +178,7 @@ class OllamaAdapter:
         curated table — Ollama has no size for a tag that is not on disk
         (PLAN_LOCAL_MODEL_QUICKSTART D4).
         """
+        self._ensure_server()
         req = urllib.request.Request(f"{self._base_url}/api/tags", method="GET")
         try:
             with urllib.request.urlopen(req, timeout=10) as resp:
@@ -211,6 +218,7 @@ class OllamaAdapter:
         show the download to a human. A callback that raises must not abort a
         multi-gigabyte transfer that is otherwise healthy.
         """
+        self._ensure_server()
         body = {"model": model_name, "stream": stream}
         req = urllib.request.Request(
             f"{self._base_url}/api/pull",
@@ -361,6 +369,7 @@ class OllamaAdapter:
         # rejected think=false before keep thinking but get a wider output
         # budget so the CoT cannot starve the answer (Ollama returns thinking
         # in a separate field, so 'response' stays clean either way).
+        self._ensure_server()
         requested_think = think
         think = self.resolve_think(model, think)
         if (

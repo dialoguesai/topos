@@ -55,6 +55,7 @@ def captured(monkeypatch):
     monkeypatch.setattr(llm_openai.httpx, "AsyncClient", _Client)
     monkeypatch.setattr(llm_openai.settings, "engine_ollama_base_url", "http://localhost:11434")
     monkeypatch.setattr(llm_openai.settings, "sanitization_ollama_default_model", "llama3.2")
+    monkeypatch.setattr(llm_openai, "_ensure_ollama_running", lambda _base=None: None)
     return seen
 
 
