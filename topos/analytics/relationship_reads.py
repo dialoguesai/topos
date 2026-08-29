@@ -339,7 +339,13 @@ def read_person_graph(conn: Any, *, dataset_id: str,
     # Structure: communities, degree and betweenness on the EGO-REMOVED network. The owner is
     # connected to everybody here, so leaving them in makes them the only broker and flattens
     # every community into one blob — which is exactly what the ego-star layout looked like.
+    # Computed BEFORE the structure, because the clustering now takes it as a second
+    # layer: people who share a subject are pulled together in the grouping even when the
+    # messaging record never connected them. It is still never drawn and never counted as a
+    # tie — see structural_metrics for where the two layers separate.
+    context = shared_context_affinity(conn, dataset_id, nodes)
     structure = structural_metrics(conn, dataset_id, nodes,
+                                   context_pairs=context.get("pairs") or [],
                                    include_third_party=include_third_party)
     for n in nodes:
         nid = str(n["node_id"])
@@ -353,7 +359,7 @@ def read_person_graph(conn: Any, *, dataset_id: str,
     # notices that two of them are in the same band or the same company unless they happen
     # to have texted each other. Measured live, that is nearly all of it — of 1,718 pairs
     # who share a subject, 12 already had an edge.
-    context = shared_context_affinity(conn, dataset_id, nodes)
+
     owner = resolve_owner_identity(conn)
     people = [n for n in nodes if not n.get("is_owner")]
     return {

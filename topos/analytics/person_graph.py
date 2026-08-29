@@ -1297,6 +1297,38 @@ def person_provenance(conn: Any, node: Dict[str, Any], *, limit: int = 20) -> Di
 #: with relationships nobody has.
 STRUCTURAL_EDGE_TYPES = ("communicates_with", "co_occurrence")
 
+#: How much say shared context gets in the clustering, against who-knows-whom.
+#:
+#: The two layers are NOT comparable as stored: layer 1 is message counts, median 3 and max
+#: 2772; layer 2 is a cosine, median 0.03 and max 1. Combined raw, sweeping this from 1.0 to
+#: 0.1 produced byte-identical clusters — layer 2 was numerically invisible and the merge
+#: silently made things worse, one 105-person blob where the graph had had 70. So each layer
+#: is RANK-normalised to (0,1] first, and only then is this weight meaningful.
+#:
+#: Measured on the live node, ego-removed, non-ambient: modularity 0.601 for layer 1 alone,
+#: 0.715 at 1.0, 0.686 at 0.5, 0.662 at 0.25. Set at 1.0 because the layers are already
+#: normalised and because the evidence says they agree — of the pairs present in BOTH, 91%
+#: were in the same layer-1 community before layer 2 was consulted.
+CONTEXT_LAYER_WEIGHT = 1.0
+
+
+def context_layer_weight() -> float:
+    """The layer weight, overridable at runtime for A/B.
+
+    Read per call rather than at import so the node can be flipped between the two
+    behaviours by restarting with an env var, and the same build compared against itself.
+    `TOPOS_CONTEXT_LAYER_WEIGHT=0` is the old one-layer clustering exactly.
+    """
+    import os
+
+    raw = os.environ.get("TOPOS_CONTEXT_LAYER_WEIGHT")
+    if raw is None or not str(raw).strip():
+        return CONTEXT_LAYER_WEIGHT
+    try:
+        return max(0.0, float(raw))
+    except ValueError:
+        return CONTEXT_LAYER_WEIGHT
+
 #: Below this, a component is too small for "community" to mean anything; its members are
 #: reported as unclustered rather than each being called a community of one.
 MIN_COMMUNITY_SIZE = 3
@@ -1314,8 +1346,23 @@ MIN_COMPONENT_FOR_BROKERAGE = 6
 STRUCTURAL_BANDS = (BAND_CORE, BAND_NAMED, BAND_DISCUSSED)
 
 
+def _rank_normalised(pairs: List[Tuple[str, str, float]]) -> Dict[Tuple[str, str], float]:
+    """Weights replaced by their RANK, scaled to (0,1].
+
+    Two layers measured in different units cannot be added. Message counts reach 2772 and a
+    cosine reaches 1, so the sum is the message count with rounding error — which is what
+    made a weight sweep produce identical clusters. Rank keeps each layer's ordering, which
+    is the part that carries meaning, and discards a scale that never meant anything across
+    layers.
+    """
+    ordered = sorted(pairs, key=lambda e: e[2])
+    n = len(ordered) or 1
+    return {(a, b): (i + 1) / n for i, (a, b, _w) in enumerate(ordered)}
+
+
 def structural_metrics(conn: Any, dataset_id: str, nodes: List[Dict[str, Any]], *,
-                       include_third_party: bool = False) -> Dict[str, Any]:
+                       include_third_party: bool = False,
+                       context_pairs: Optional[List[Dict[str, Any]]] = None) -> Dict[str, Any]:
     """Communities, degree and betweenness on the EGO-REMOVED person network.
 
     Ego removal is what makes any of this mean something. The owner is connected to
@@ -1366,22 +1413,58 @@ def structural_metrics(conn: Any, dataset_id: str, nodes: List[Dict[str, Any]], 
             continue
         graph.add_edge(a, b, weight=float(weight or 1))
 
+    # LAYER 1 is now complete; rank-normalise it before anything else joins it.
+    layer1 = [(u, v, float(d.get("weight") or 1)) for u, v, d in graph.edges(data=True)]
+    normalised = _rank_normalised(layer1)
+    for (u, v), w in normalised.items():
+        graph[u][v]["weight"] = w
+
+    # LAYER 2 — shared context. Stored nowhere and drawn nowhere: it enters here, as a
+    # second opinion about who belongs with whom, and leaves as a community id.
+    #
+    # It is NOT a claim that these people know each other, which is why it must never be a
+    # `co_occurrence` edge: on the live node a naive shared-attribute projection asserted
+    # 1,085 new ties, most of them "both were at the owner's flat". The IDF-cosine upstream
+    # cuts that to 57 pairs, and of the ones testable against layer 1, 91% were already in
+    # the same community — so what this mostly does is agree, and occasionally join two
+    # groups the messaging record kept apart.
+    context_added = 0
+    weight_of_layer2 = context_layer_weight()
+    if context_pairs and weight_of_layer2 > 0:
+        pairs = [(str(p["source"]), str(p["target"]), float(p.get("weight") or 0))
+                 for p in context_pairs
+                 if str(p.get("source")) in eligible and str(p.get("target")) in eligible]
+        for (u, v), w in _rank_normalised(pairs).items():
+            weighted = weight_of_layer2 * w
+            if graph.has_edge(u, v):
+                graph[u][v]["weight"] += weighted
+            else:
+                graph.add_edge(u, v, weight=weighted)
+                context_added += 1
+
     if graph.number_of_edges() == 0:
         return {"communities": {}, "degree": {}, "betweenness": {},
                 "coverage": {"reason": "no measured connections between your people yet"}}
 
-    degree = nx.degree_centrality(graph)
+    # Centrality is computed on layer 1 ALONE. Degree and betweenness answer "who connects
+    # parts of my world", and a shared subject does not connect anybody — counting it would
+    # make a broker out of someone who merely has interests in common with two groups.
+    # Only the COMMUNITY assignment below is allowed to hear layer 2.
+    ties = nx.Graph()
+    for u, v in normalised:
+        ties.add_edge(u, v, weight=graph[u][v]["weight"])
+    degree = nx.degree_centrality(ties)
     # Per-component: betweenness compares how much of the traffic INSIDE a person's own
     # corner of the network flows through them. Normalising across disconnected components
     # would let a large component's ordinary member outrank a small component's linchpin.
     betweenness: Dict[str, float] = {}
     brokerage_ok: Dict[str, bool] = {}
-    for component in nx.connected_components(graph):
+    for component in nx.connected_components(ties):
         big_enough = len(component) >= MIN_COMPONENT_FOR_BROKERAGE
         if len(component) < 3:
             scores = {str(x): 0.0 for x in component}
         else:
-            scores = nx.betweenness_centrality(graph.subgraph(component), weight=None)
+            scores = nx.betweenness_centrality(ties.subgraph(component), weight=None)
         betweenness.update(scores)
         for member in component:
             brokerage_ok[str(member)] = big_enough
@@ -1390,9 +1473,14 @@ def structural_metrics(conn: Any, dataset_id: str, nodes: List[Dict[str, Any]], 
     # is a stable grouping to lay out by, not a claim about social clubs.
     communities: Dict[str, int] = {}
     try:
-        groups = list(nx.community.greedy_modularity_communities(graph))
+        # Louvain, not greedy modularity: it honours edge WEIGHT, which is the whole point
+        # once a second layer is present, and it is what the layer weight was measured on.
+        groups = list(nx.community.louvain_communities(graph, weight="weight", seed=7))
     except Exception:  # noqa: BLE001
-        groups = [set(component) for component in nx.connected_components(graph)]
+        try:
+            groups = list(nx.community.greedy_modularity_communities(graph))
+        except Exception:  # noqa: BLE001
+            groups = [set(component) for component in nx.connected_components(graph)]
     kept = 0
     for group in sorted(groups, key=len, reverse=True):
         if len(group) < MIN_COMMUNITY_SIZE:
@@ -1400,6 +1488,38 @@ def structural_metrics(conn: Any, dataset_id: str, nodes: List[Dict[str, Any]], 
         kept += 1
         for member in group:
             communities[str(member)] = kept
+
+    # LAYER 2 MAY ONLY ADD, NEVER SUBTRACT — the same rule `attach_fact_closeness` states
+    # for a stated fact: a second signal can pull a person IN, and its absence is silence
+    # rather than evidence of distance.
+    #
+    # Without this the shared-context layer can DETACH someone: measured on the live node,
+    # one person sat in a ten-strong group on the messaging graph alone, and adding their
+    # shared subjects moved them into a sub-threshold group that was then dropped — so they
+    # lost their placement entirely while the group they belonged to kept theirs. One of
+    # 115, and the wrong one: they were that group's highest-volume member.
+    #
+    # So: anyone the tie graph alone would have placed, but the combined graph would not,
+    # rejoins the surviving group holding most of the people they would have been with.
+    if context_added:
+        try:
+            tie_groups = list(nx.community.louvain_communities(ties, weight="weight", seed=7))
+        except Exception:  # noqa: BLE001
+            tie_groups = []
+        for group in tie_groups:
+            if len(group) < MIN_COMMUNITY_SIZE:
+                continue
+            orphans = [m for m in group if str(m) not in communities]
+            if not orphans:
+                continue
+            placed = Counter(
+                communities[str(m)] for m in group if str(m) in communities
+            )
+            if not placed:
+                continue
+            home = placed.most_common(1)[0][0]
+            for member in orphans:
+                communities[str(member)] = home
     return {
         "communities": communities,
         "degree": {k: round(v, 5) for k, v in degree.items()},
@@ -1411,6 +1531,12 @@ def structural_metrics(conn: Any, dataset_id: str, nodes: List[Dict[str, Any]], 
             "basis": ("connections BETWEEN your people, with you removed — you are connected "
                       "to everyone here, so leaving you in makes you the only broker and "
                       "flattens every community"),
+            # Said out loud because the communities and the centralities now come from two
+            # different graphs, and a reader comparing them deserves to know which is which.
+            "communities_from": ("who you know, plus what people have in common — the second "
+                                 "is never drawn and never counted as a connection"),
+            "centrality_from": "who you know only",
+            "context_pairs_joined": context_added,
             "excluded": ("semantic similarity between two people is not evidence they know "
                          "each other"),
             "nodes": graph.number_of_nodes(),
@@ -1880,10 +2006,12 @@ def attach_coactivity(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[str, int]:
     # None of those is a session anybody logged, and the word "sessions" made the number a
     # claim rather than a count.
     #
-    # So: both ends must be mentioned in the SAME journal entry, and the person must be
-    # there because the owner DECLARED them — STRUCTURED_CONFIDENCE, the participant column
-    # — not because a model found a name in the prose. That is what makes "10 sessions"
-    # mean the thing a reader assumes it means.
+    # So: both ends must be mentioned in the SAME journal entry, and BOTH must be there
+    # because the owner DECLARED them — the participant column and the category column, not
+    # a model finding a name in the prose. Requiring it on the person side alone still let
+    # prose in on the other: an entry naming a project in passing while somebody else was in
+    # the room would count as a session with them. That is what makes "10 sessions" mean the
+    # thing a reader assumes it means.
     kinds = ",".join("?" * len(COACTIVITY_KINDS))
     try:
         rows = conn.execute(
@@ -1892,13 +2020,14 @@ def attach_coactivity(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[str, int]:
             "  FROM entity_mentions pm"
             "  JOIN entity_mentions om ON om.record_id = pm.record_id"
             "                         AND om.canonical_table = 'journal_entries'"
+            "                         AND om.confidence >= ?"
             "  JOIN entities oe ON oe.entity_id = om.entity_id"
             " WHERE pm.canonical_table = 'journal_entries'"
             "   AND pm.confidence >= ?"
             "   AND pm.entity_id <> om.entity_id"
             f"   AND oe.entity_type IN ({kinds})"
             " GROUP BY 1, 2, 3, 4",
-            (STRUCTURED_CONFIDENCE, *COACTIVITY_KINDS),
+            (STRUCTURED_CONFIDENCE, STRUCTURED_CONFIDENCE, *COACTIVITY_KINDS),
         ).fetchall()
     except sqlite3.Error:
         return {"attached": 0}
@@ -2065,8 +2194,8 @@ def attach_shared_with_owner(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[str
         #
         # Raising the gate instead was measured and rejected: MIN_TOP_MENTIONS 2→3 halves
         # the feature, 12 people to 6, to fix a presentation problem. This keeps every
-        # reading and drops only the names that were never evidence — Kim's "Arlington×1",
-        # Mom's "the Statue of Liberty park×1", Rowan's Halden Vry.
+        # reading and drops only the names that were never evidence: a city seen once, a
+        # park seen once, a musician seen once.
         evidenced = [(name, n) for name, n in entries if n >= SHARED_OWNER_MIN_TOP_MENTIONS]
         node["shared_with_owner"] = {
             "kind": kind,
@@ -2416,6 +2545,72 @@ def _context_label_key(label: Any) -> str:
     return " ".join(w[:-1] if len(w) > 3 and w.endswith("s") else w for w in text.split())
 
 
+def _journal_context_members(
+    conn: Any, people: Dict[str, Dict[str, Any]]
+) -> Tuple[Dict[str, Set[str]], Set[str]]:
+    """Subject -> the people the OWNER put in a journal entry with it.
+
+    Two columns of one row: `people` names who was there and `category` names the project.
+    Both are declared, so this is the owner stating a shared context rather than a model
+    inferring one — which is why it can carry a subject the conversation lane never sees.
+
+    DECLARED on BOTH sides, which is the whole difference. Taking any co-mention was
+    tried first and is far too loose: a record reading "worked on the project, read about a
+    public figure" links that figure to the project, and the subject for the owner's own
+    main project came out holding 29 people — an AI assistant, a novelist, a grandparent,
+    and the project entity itself. Requiring the participant column on the person side cut
+    that to 16, and requiring the CATEGORY column on the subject side too is what makes it
+    mean "entries the owner filed under this project": prose naming a project while
+    somebody else was in the room is not evidence those two are connected.
+
+    Places are included and are NOT the interesting half: the broadest subjects here are the
+    owner's own home and their main project, both dropped upstream by the stopword cutoff
+    for covering too much of the graph. What survives is the narrow shared ground — a
+    client, a trip, a venue two people were both at.
+    """
+    from ..features.entities.structured_fields import STRUCTURED_CONFIDENCE
+
+    by_entity = {
+        str(n["entity_id"]): node_id
+        for node_id, n in people.items()
+        if n.get("entity_id")
+    }
+    if not by_entity:
+        return {}, set()
+    out: Dict[str, Set[str]] = {}
+    #: The subjects that are WORK the owner declared, as opposed to a place two people
+    #: both happened to be. A shared project is a stronger claim than a shared venue and
+    #: is allowed to stand alone below; a shared venue is not.
+    declared_work: Set[str] = set()
+    try:
+        rows = conn.execute(
+            "SELECT pm.entity_id, oe.entity_id, oe.canonical_name, oe.entity_type"
+            "  FROM entity_mentions pm"
+            "  JOIN entity_mentions om ON om.record_id = pm.record_id"
+            "                         AND om.canonical_table = 'journal_entries'"
+            "                         AND om.confidence >= ?"
+            "  JOIN entities oe ON oe.entity_id = om.entity_id"
+            " WHERE pm.canonical_table = 'journal_entries'"
+            "   AND pm.confidence >= ?"
+            "   AND pm.entity_id <> om.entity_id"
+            "   AND oe.entity_type IN ('project', 'org', 'place', 'topic')",
+            (STRUCTURED_CONFIDENCE, STRUCTURED_CONFIDENCE),
+        ).fetchall()
+    except sqlite3.Error:
+        return {}, set()
+    for person_entity, _subject_id, subject_name, subject_type in rows:
+        node_id = by_entity.get(str(person_entity))
+        if not node_id:
+            continue
+        key = _context_label_key(str(subject_name or "")) or ""
+        if not key:
+            continue
+        out.setdefault(key, set()).add(node_id)
+        if str(subject_type) in ("project", "org"):
+            declared_work.add(key)
+    return out, declared_work
+
+
 def shared_context_affinity(conn: Any, dataset_id: str,
                             nodes: List[Dict[str, Any]]) -> Dict[str, Any]:
     """People who turn up in the same subjects, as a pull on the LAYOUT only.
@@ -2510,6 +2705,24 @@ def shared_context_affinity(conn: Any, dataset_id: str,
             members.setdefault(key, set()).update(folks)
             label_of.setdefault(key, raw)
 
+    # SECOND SUBSTRATE: what the owner wrote down, not what they messaged about.
+    #
+    # The lane above reaches a person only through conversations they took part in, so it
+    # can relate two people who message and is blind to everyone the owner knows offline.
+    # The journal is the other half: it names participants and a project in two columns of
+    # one row, which is the owner stating the shared context rather than a model inferring
+    # it. Measured on the live node, this adds subjects for people the conversation lane
+    # never reaches at all.
+    #
+    # Folded into the SAME `members` map on purpose, so both substrates pass through one
+    # IDF, one stopword cutoff and one mutual-top-K. Scoring them separately and merging
+    # afterwards would let a subject be rare in one lane and universal in the other, and the
+    # pair would inherit whichever flattered it.
+    journal_members, declared_work = _journal_context_members(conn, people)
+    for key, folks in journal_members.items():
+        members.setdefault(key, set()).update(folks)
+        label_of.setdefault(key, key)
+
     covered = {p for folks in members.values() for p in folks}
     if len(covered) < 2:
         return {"pairs": [], "coverage": {"reason": "no subject reaches two people"}}
@@ -2540,7 +2753,16 @@ def shared_context_affinity(conn: Any, dataset_id: str,
     for i, a in enumerate(ordered):
         for b in ordered[i + 1:]:
             shared = of_person[a] & of_person[b]
-            if len(shared) < CONTEXT_MIN_SHARED:
+            # A DECLARED shared project stands alone; anything else needs two.
+            #
+            # `CONTEXT_MIN_SHARED` exists because one shared topic cluster is a coincidence
+            # — two people who each turn up in "Family" have shown you nothing. A project
+            # the owner NAMED, in the column where they name projects, is a different kind
+            # of evidence and the same floor buries it: measured on the live node, the five
+            # people with a declared reading for one project sat in THREE communities,
+            # because none of them shares a second subject with any of the others. Two
+            # people who work on the same thing belong together on the strength of that.
+            if len(shared) < CONTEXT_MIN_SHARED and not (shared & declared_work):
                 continue
             denominator = magnitude[a] * magnitude[b]
             if not denominator:
