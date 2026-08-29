@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.37] — 2026-08-29
+
 ### Added
 - **A chat against localhost starts Ollama when :11434 is down.** `[O]`
   Reachability was probed everywhere; nothing on the product path spawned the
