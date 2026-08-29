@@ -48,6 +48,7 @@ class TestSourceSettingsPostureStorage:
     def test_ensure_table_has_posture_column(self, conn):
         cols = {r[1] for r in conn.execute("PRAGMA table_info(user_ingestion_sources)").fetchall()}
         assert "posture" in cols
+        assert "exclude_spam" in cols
 
     def test_default_is_none_inherit(self, conn):
         # No row yet -> posture None (inherit registry default).
@@ -116,8 +117,44 @@ class TestSourceSettingsPostureStorage:
         ss.ensure_table(c)  # second call must be a no-op, not an error
         cols = {r[1] for r in c.execute("PRAGMA table_info(user_ingestion_sources)").fetchall()}
         assert "posture" in cols
+        assert "exclude_spam" in cols
         ss.put_source_settings(c, DS, "imessage", posture="personal")
         assert ss.get_source_settings(c, DS, "imessage")["posture"] == "personal"
+        assert ss.get_source_settings(c, DS, "imessage")["exclude_spam"] is True
+
+    def test_exclude_spam_defaults_true(self, conn):
+        settings = ss.get_source_settings(conn, DS, "imessage")
+        assert settings["exclude_spam"] is True
+
+    def test_exclude_spam_roundtrip(self, conn):
+        ss.put_source_settings(conn, DS, "imessage", exclude_spam=False)
+        assert ss.get_source_settings(conn, DS, "imessage")["exclude_spam"] is False
+        ss.put_source_settings(conn, DS, "imessage", exclude_spam=True)
+        assert ss.get_source_settings(conn, DS, "imessage")["exclude_spam"] is True
+
+    def test_exclude_spam_independent_of_posture(self, conn):
+        ss.put_source_settings(conn, DS, "imessage", posture="ambient")
+        ss.put_source_settings(conn, DS, "imessage", exclude_spam=False)
+        settings = ss.get_source_settings(conn, DS, "imessage")
+        assert settings["posture"] == "ambient"
+        assert settings["exclude_spam"] is False
+
+    def test_add_exclude_spam_column_on_posture_only_table(self):
+        c = sqlite3.connect(":memory:")
+        c.execute(
+            """CREATE TABLE user_ingestion_sources (
+                   dataset_id TEXT NOT NULL, source_id TEXT NOT NULL,
+                   enabled INTEGER NOT NULL DEFAULT 1, last_sync_at TEXT,
+                   last_error TEXT, posture TEXT, updated_at TEXT,
+                   PRIMARY KEY (dataset_id, source_id))"""
+        )
+        c.commit()
+        ss.ensure_table(c)
+        cols = {r[1] for r in c.execute("PRAGMA table_info(user_ingestion_sources)").fetchall()}
+        assert "exclude_spam" in cols
+        ss.put_source_settings(c, DS, "imessage", exclude_spam=False)
+        assert ss.get_source_settings(c, DS, "imessage")["exclude_spam"] is False
+        c.close()
         c.close()
 
 
@@ -335,6 +372,51 @@ class TestPutSourceSettingsHandler:
         )
         assert res["status"] == "ok"
         assert res["payload"]["posture"] == "ambient"
+
+    def test_put_persists_exclude_spam_on_imessage(self, conn):
+        from topos.core.handlers.sources import (
+            handle_put_source_settings,
+            handle_get_source_settings,
+        )
+
+        put = self._run(
+            handle_put_source_settings(
+                {
+                    "id": "r6",
+                    "payload": {
+                        "source_id": "imessage",
+                        "dataset_id": DS,
+                        "exclude_spam": False,
+                    },
+                }
+            )
+        )
+        assert put["status"] == "ok"
+        assert put["payload"]["exclude_spam"] is False
+
+        got = self._run(
+            handle_get_source_settings(
+                {"id": "r7", "payload": {"source_id": "imessage", "dataset_id": DS}}
+            )
+        )
+        assert got["payload"]["exclude_spam"] is False
+
+    def test_put_rejects_exclude_spam_on_non_local_sync(self, conn):
+        from topos.core.handlers.sources import handle_put_source_settings
+
+        res = self._run(
+            handle_put_source_settings(
+                {
+                    "id": "r8",
+                    "payload": {
+                        "source_id": "browser_visits",
+                        "dataset_id": DS,
+                        "exclude_spam": False,
+                    },
+                }
+            )
+        )
+        assert res["status"] == "error"
 
 
 # --------------------------------------------------------------------------- #

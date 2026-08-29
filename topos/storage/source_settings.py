@@ -18,6 +18,14 @@ TABLE = "user_ingestion_sources"
 # sources/definitions.POSTURE_VALUES (personal|mixed|ambient) — imported lazily
 # to keep this storage module import-light.
 _VALID_POSTURES = frozenset({"personal", "mixed", "ambient"})
+_REQUIRED_COLUMNS = frozenset({"posture", "exclude_spam"})
+_DEFAULT_SETTINGS = {
+    "enabled": True,
+    "last_sync_at": None,
+    "last_error": None,
+    "posture": None,
+    "exclude_spam": True,
+}
 
 
 def _normalize_posture(posture) -> Optional[str]:
@@ -44,12 +52,21 @@ def _has_posture_column(conn) -> bool:
     the connection is broken and the DDL below would only take the write gate to
     discover that.
     """
+    return _schema_ready(conn)
+
+
+def _schema_ready(conn) -> bool:
+    """True once the table exists and carries every required settings column."""
 
     def _read() -> bool:
-        cols = {r[1] for r in conn.execute(f"PRAGMA table_info({TABLE})").fetchall()}
-        return "posture" in cols
+        cols = {str(r[1]) for r in conn.execute(f"PRAGMA table_info({TABLE})").fetchall() if r[1]}
+        return _REQUIRED_COLUMNS <= cols
 
-    return probe_bool(_read, what=f"{TABLE}.posture")
+    return probe_bool(_read, what=f"{TABLE}.schema")
+
+
+def _column_names(conn) -> set[str]:
+    return {str(r[1]) for r in conn.execute(f"PRAGMA table_info({TABLE})").fetchall() if r[1]}
 
 
 def ensure_table(conn) -> None:
@@ -58,7 +75,7 @@ def ensure_table(conn) -> None:
     Every read and write here calls this first, so re-running idempotent DDL put
     a plain settings lookup behind the write gate — a blocking OS lock — on
     whatever thread asked, the event loop included. The probe is a PRAGMA read,
-    and it doubles as the posture-column check, so a fully-migrated table costs
+    and it doubles as the required-column check, so a fully-migrated table costs
     no gate at all.
 
     A probe that cannot RUN is not a missing table. Falling through to the DDL
@@ -66,7 +83,7 @@ def ensure_table(conn) -> None:
     is who asked — to reach a failure that was already certain.
     """
     try:
-        if _has_posture_column(conn):
+        if _schema_ready(conn):
             return
     except UnusableConnection as exc:
         logger.warning("source settings DDL skipped: %s", describe_unusable(exc))
@@ -81,44 +98,54 @@ def ensure_table(conn) -> None:
                 last_sync_at TEXT,
                 last_error TEXT,
                 posture TEXT,
+                exclude_spam INTEGER NOT NULL DEFAULT 1,
                 updated_at TEXT DEFAULT (datetime('now')),
                 PRIMARY KEY (dataset_id, source_id)
             )
         """)
-        # Idempotent, PRAGMA-guarded add for tables created before P1.4.
-        if not _has_posture_column(conn):
+        cols = _column_names(conn)
+        if "posture" not in cols:
             try:
                 conn.execute(f"ALTER TABLE {TABLE} ADD COLUMN posture TEXT")
             except Exception as e:  # noqa: BLE001
                 logger.warning("posture column add skipped: %s", e)
+        if "exclude_spam" not in cols:
+            try:
+                conn.execute(
+                    f"ALTER TABLE {TABLE} ADD COLUMN exclude_spam INTEGER NOT NULL DEFAULT 1"
+                )
+            except Exception as e:  # noqa: BLE001
+                logger.warning("exclude_spam column add skipped: %s", e)
         commit_connection(conn)
 
 
 def get_source_settings(conn, dataset_id: str, source_id: str) -> Optional[dict]:
-    """Return { enabled, last_sync_at, last_error, posture } or None.
+    """Return { enabled, last_sync_at, last_error, posture, exclude_spam } or None.
 
-    Defaults when no row exists: enabled true, no last_*, posture None
-    (posture None => inherit the registry DataSourceDefinition default; see
-    sources.registry.effective_posture)."""
+    Defaults when no row exists: enabled true, exclude_spam true, no last_*,
+    posture None (posture None => inherit the registry DataSourceDefinition
+    default; see sources.registry.effective_posture)."""
     if not conn or not dataset_id or not source_id:
         return None
     try:
         ensure_table(conn)
         row = conn.execute(
-            f"SELECT enabled, last_sync_at, last_error, posture FROM {TABLE} WHERE dataset_id = ? AND source_id = ?",
+            f"SELECT enabled, last_sync_at, last_error, posture, exclude_spam "
+            f"FROM {TABLE} WHERE dataset_id = ? AND source_id = ?",
             (dataset_id, source_id),
         ).fetchone()
         if not row:
-            return {"enabled": True, "last_sync_at": None, "last_error": None, "posture": None}
+            return dict(_DEFAULT_SETTINGS)
         return {
             "enabled": bool(row[0]),
             "last_sync_at": row[1],
             "last_error": row[2],
             "posture": row[3],
+            "exclude_spam": bool(row[4]) if row[4] is not None else True,
         }
     except Exception as e:
         logger.warning("get_source_settings failed: %s", e)
-        return {"enabled": True, "last_sync_at": None, "last_error": None, "posture": None}
+        return dict(_DEFAULT_SETTINGS)
 
 
 # Sentinel so callers can distinguish "leave posture unchanged" (default) from
@@ -133,18 +160,20 @@ def put_source_settings(
     *,
     enabled: Optional[bool] = None,
     posture=_UNSET,
+    exclude_spam=_UNSET,
 ) -> None:
-    """Update enabled and/or posture; leave last_sync_at/last_error unchanged.
+    """Update enabled, posture, and/or exclude_spam; leave last_sync_at/last_error unchanged.
 
     ``posture`` is validated to {personal,mixed,ambient} or None (None clears
-    the override so the row inherits the registry default). Passing neither
-    ``enabled`` nor ``posture`` is a no-op. Raises ValueError on an invalid
-    posture value."""
+    the override so the row inherits the registry default). Passing none of
+    ``enabled``, ``posture``, or ``exclude_spam`` is a no-op. Raises ValueError
+    on an invalid posture value."""
     if not conn or not dataset_id or not source_id:
         return
     posture_provided = posture is not _UNSET
+    exclude_spam_provided = exclude_spam is not _UNSET
     normalized_posture = _normalize_posture(posture) if posture_provided else None
-    if enabled is None and not posture_provided:
+    if enabled is None and not posture_provided and not exclude_spam_provided:
         return
     try:
         ensure_table(conn)
@@ -160,6 +189,9 @@ def put_source_settings(
         if posture_provided:
             set_clauses.append("posture = ?")
             params.append(normalized_posture)
+        if exclude_spam_provided:
+            set_clauses.append("exclude_spam = ?")
+            params.append(1 if bool(exclude_spam) else 0)
         with with_db_write():
             if cur:
                 set_clauses.append("updated_at = datetime('now')")
@@ -169,15 +201,17 @@ def put_source_settings(
                     params,
                 )
             else:
-                # New row: default enabled=1 when only posture was set.
+                # New row: default enabled=1 and exclude_spam=1 when only
+                # posture/exclude_spam was set.
                 conn.execute(
-                    f"INSERT INTO {TABLE} (dataset_id, source_id, enabled, posture, updated_at) "
-                    f"VALUES (?, ?, ?, ?, datetime('now'))",
+                    f"INSERT INTO {TABLE} (dataset_id, source_id, enabled, posture, exclude_spam, updated_at) "
+                    f"VALUES (?, ?, ?, ?, ?, datetime('now'))",
                     (
                         dataset_id,
                         source_id,
                         1 if (enabled is None or enabled) else 0,
                         normalized_posture if posture_provided else None,
+                        1 if (not exclude_spam_provided or bool(exclude_spam)) else 0,
                     ),
                 )
             commit_connection(conn)

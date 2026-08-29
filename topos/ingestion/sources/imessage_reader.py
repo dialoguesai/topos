@@ -12,8 +12,14 @@ import os
 import plistlib
 import sqlite3
 import tempfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional
+
+# Apple Messages "Filter Unknown Senders" lands chats in a separate inbox.
+# chat.is_filtered = 2 is that bucket; message.is_spam = 1 is Apple's junk flag.
+UNKNOWN_SENDER_FILTERED = 2
+APPLE_SPAM_FLAG = 1
 
 logger = logging.getLogger("topos.ingestion.sources.imessage_reader")
 
@@ -115,6 +121,43 @@ def _copy_large_file(src: Path, dst: str, show_progress: bool = True) -> None:
                 pass
         if pbar is not None:
             pbar.close()
+
+
+@dataclass(frozen=True)
+class ImessageReadBatch:
+    """One checkpoint-sized scan of chat.db.
+
+    ``rows`` are messages to ingest. ``max_scanned_rowid`` is the highest
+    ROWID looked at, including spam and empty bodies, so the sync checkpoint
+    can advance past skipped junk instead of stalling on an all-spam page.
+    """
+
+    rows: list[Dict[str, Any]]
+    max_scanned_rowid: Optional[int]
+    records_skipped: int
+    scanned_count: int
+
+
+def _as_int_flag(value: Any) -> Optional[int]:
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def row_is_imessage_spam(row: Dict[str, Any]) -> bool:
+    """True when Apple has already labelled the message or its chat as junk.
+
+    ``chat.is_filtered = 2`` is the Unknown Senders inbox. ``message.is_spam = 1``
+    is Apple's per-message junk flag. Missing columns (older chat.db) are not spam.
+    """
+    if _as_int_flag(row.get("is_spam")) == APPLE_SPAM_FLAG:
+        return True
+    if _as_int_flag(row.get("is_filtered")) == UNKNOWN_SENDER_FILTERED:
+        return True
+    return False
 
 
 def _normalize_sender_id(value: Any) -> Optional[str]:
@@ -349,15 +392,18 @@ def _extract_imessage_context(row: Dict[str, Any]) -> Dict[str, Any]:
     return result
 
 
-def read_imessage_rows(
+def read_imessage_batch(
     last_rowid: Optional[str] = None,
     chat_db_path: Optional[Path] = None,
     batch_size: int = 5000,
     start_unix: Optional[float] = None,
-) -> Iterator[Dict[str, Any]]:
-    """
-    Copy chat.db to a temp file (chunked to support >2GB), query messages with ROWID > last_rowid, yield rows as dicts.
-    Each row has: id (imessage:ROWID), thread_id (str chat_id), content (text), created_at (Unix ts), role (user/other from is_from_me).
+    exclude_spam: bool = True,
+) -> ImessageReadBatch:
+    """Copy chat.db, scan up to ``batch_size`` messages with ROWID > last_rowid.
+
+    When ``exclude_spam`` is true (the default), Apple-filtered unknown-sender
+    chats and junk-flagged messages are counted in ``records_skipped`` and not
+    returned in ``rows``.
     """
     path = chat_db_path or get_chat_db_path()
     if not path.exists():
@@ -376,7 +422,7 @@ def read_imessage_rows(
                     raise PermissionError(f"Cannot copy chat.db: {retry_e}. Full Disk Access may be required.") from retry_e
             else:
                 raise PermissionError(f"Cannot copy chat.db: {e}. Full Disk Access may be required.") from e
-        except PermissionError as e:
+        except PermissionError:
             raise
     except Exception:
         if copy_path and os.path.exists(copy_path):
@@ -385,6 +431,11 @@ def read_imessage_rows(
             except OSError:
                 pass
         raise
+
+    kept: list[Dict[str, Any]] = []
+    skipped = 0
+    scanned = 0
+    max_scanned_rowid: Optional[int] = None
     try:
         try:
             conn = sqlite3.connect(copy_path)
@@ -420,7 +471,6 @@ def read_imessage_rows(
 
             last = 0
             if last_rowid:
-                # last_record_id may be "imessage:12345" or "12345"
                 raw = last_rowid.split(":")[-1]
                 try:
                     last = int(raw)
@@ -429,7 +479,6 @@ def read_imessage_rows(
             mac_start_seconds = None
             if start_unix is not None:
                 mac_start_seconds = float(start_unix) - MAC_EPOCH_OFFSET
-            # Include non-text message forms too; content is synthesized when text is absent.
             query = f"""
                 SELECT message.ROWID AS rowid,
                        message.text AS text,
@@ -443,13 +492,15 @@ def read_imessage_rows(
                        {_message_col_or_null("thread_originator_guid", "thread_originator_guid")},
                        {_message_col_or_null("thread_originator_part", "thread_originator_part")},
                        {_message_col_or_null("guid", "message_guid")},
+                       {_message_col_or_null("is_spam", "is_spam")},
                        message.date AS date,
                        message.handle_id AS handle_id,
                        message.is_from_me AS is_from_me,
                        handle.id AS sender_id,
                        chat.ROWID AS chat_id,
                        {_chat_col_or_null("guid", "chat_guid")},
-                       {_chat_col_or_null("chat_identifier", "chat_identifier")}
+                       {_chat_col_or_null("chat_identifier", "chat_identifier")},
+                       {_chat_col_or_null("is_filtered", "is_filtered")}
                 FROM message
                 JOIN chat_message_join ON message.ROWID = chat_message_join.message_id
                 JOIN chat ON chat.ROWID = chat_message_join.chat_id
@@ -473,6 +524,12 @@ def read_imessage_rows(
             for row in cursor:
                 r = dict(row)
                 rowid = r["rowid"]
+                scanned += 1
+                if rowid is not None and (max_scanned_rowid is None or rowid > max_scanned_rowid):
+                    max_scanned_rowid = rowid
+                if exclude_spam and row_is_imessage_spam(r):
+                    skipped += 1
+                    continue
                 content = _build_content_from_row(r)
                 if not content:
                     continue
@@ -502,7 +559,7 @@ def read_imessage_rows(
                     out["event_type"] = context["event_type"]
                 if context.get("_metadata"):
                     out["_metadata"] = context["_metadata"]
-                yield out
+                kept.append(out)
         finally:
             conn.close()
     finally:
@@ -510,6 +567,33 @@ def read_imessage_rows(
             os.unlink(copy_path)
         except OSError:
             pass
+    return ImessageReadBatch(
+        rows=kept,
+        max_scanned_rowid=max_scanned_rowid,
+        records_skipped=skipped,
+        scanned_count=scanned,
+    )
+
+
+def read_imessage_rows(
+    last_rowid: Optional[str] = None,
+    chat_db_path: Optional[Path] = None,
+    batch_size: int = 5000,
+    start_unix: Optional[float] = None,
+    exclude_spam: bool = True,
+) -> Iterator[Dict[str, Any]]:
+    """
+    Copy chat.db to a temp file (chunked to support >2GB), query messages with ROWID > last_rowid, yield rows as dicts.
+    Each row has: id (imessage:ROWID), thread_id (str chat_id), content (text), created_at (Unix ts), role (user/other from is_from_me).
+    Apple-filtered spam is omitted unless ``exclude_spam`` is false.
+    """
+    yield from read_imessage_batch(
+        last_rowid=last_rowid,
+        chat_db_path=chat_db_path,
+        batch_size=batch_size,
+        start_unix=start_unix,
+        exclude_spam=exclude_spam,
+    ).rows
 
 
 def read_imessage_rows_list(
@@ -517,6 +601,7 @@ def read_imessage_rows_list(
     chat_db_path: Optional[Path] = None,
     batch_size: int = 5000,
     start_unix: Optional[float] = None,
+    exclude_spam: bool = True,
 ) -> list[Dict[str, Any]]:
     """Convenience: consume iterator into a list."""
     return list(
@@ -525,5 +610,6 @@ def read_imessage_rows_list(
             chat_db_path=chat_db_path,
             batch_size=batch_size,
             start_unix=start_unix,
+            exclude_spam=exclude_spam,
         )
     )

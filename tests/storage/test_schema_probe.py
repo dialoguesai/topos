@@ -113,7 +113,13 @@ def test_source_settings_reads_degrade_without_taking_the_gate():
     result = source_settings.get_source_settings(conn, "ds", "src")
 
     # Same defaults as before — the caller's contract is unchanged.
-    assert result == {"enabled": True, "last_sync_at": None, "last_error": None, "posture": None}
+    assert result == {
+        "enabled": True,
+        "last_sync_at": None,
+        "last_error": None,
+        "posture": None,
+        "exclude_spam": True,
+    }
     # And only the PRAGMA probe ran: no CREATE TABLE, so no write gate.
     assert len(conn.executed) == 1
     assert conn.executed[0].startswith("PRAGMA table_info")

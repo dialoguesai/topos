@@ -158,7 +158,7 @@ async def put_source_settings_endpoint(
     dataset_id: Optional[str] = Query(default=None),
     body: Optional[dict] = Body(default=None),
 ):
-    """Set source settings (e.g. enabled). Valid for local_sync sources (imessage, signal)."""
+    """Set source settings (e.g. enabled, exclude_spam). Valid for local_sync sources (imessage, signal)."""
     source = REGISTRY.get(source_id)
     if not source:
         return {"status": "error", "error": "unknown source_id"}
@@ -167,14 +167,26 @@ async def put_source_settings_endpoint(
     dataset_id = dataset_id or (body.get("dataset_id") if body else None)
     if not dataset_id:
         return {"status": "error", "error": "dataset_id required"}
-    enabled = body.get("enabled") if body else None
-    if enabled is None:
-        return {"status": "error", "error": "enabled required in body"}
+    body = body or {}
+    enabled = body.get("enabled")
+    posture_provided = "posture" in body
+    exclude_spam_provided = "exclude_spam" in body
+    if enabled is None and not posture_provided and not exclude_spam_provided:
+        return {"status": "error", "error": "enabled, posture, or exclude_spam required in body"}
     conn = get_db_connection()
     if not conn:
         return {"status": "error", "error": "Database not available"}
-    put_source_settings(conn, dataset_id, source_id, enabled=enabled)
-    return {"status": "ok", "dataset_id": dataset_id, "source_id": source_id, "enabled": bool(enabled)}
+    put_kwargs: dict = {"enabled": enabled}
+    if posture_provided:
+        put_kwargs["posture"] = body.get("posture")
+    if exclude_spam_provided:
+        put_kwargs["exclude_spam"] = bool(body.get("exclude_spam"))
+    try:
+        put_source_settings(conn, dataset_id, source_id, **put_kwargs)
+    except ValueError as exc:
+        return {"status": "error", "error": str(exc)}
+    settings = get_source_settings(conn, dataset_id, source_id) or {}
+    return {"status": "ok", "dataset_id": dataset_id, "source_id": source_id, **settings}
 
 
 @router.post("/sources/{source_id}/sync", dependencies=[Depends(require_api_key)])

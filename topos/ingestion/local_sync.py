@@ -64,6 +64,41 @@ def _run_local_sync_enrichment_if_enabled(
         )
 
 
+def _as_bool(value: Any, *, default: bool = True) -> bool:
+    if value is None:
+        return default
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return bool(value)
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "on"}:
+        return True
+    if text in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
+def _resolve_exclude_spam(
+    options: Optional[Dict[str, Any]],
+    *,
+    db_conn: Any,
+    dataset_id: str,
+) -> bool:
+    """Default on. sync_options.exclude_spam wins over the stored source setting."""
+    if isinstance(options, dict) and "exclude_spam" in options:
+        return _as_bool(options.get("exclude_spam"), default=True)
+    try:
+        from ..storage.source_settings import get_source_settings
+
+        settings = get_source_settings(db_conn, dataset_id, SOURCE_ID_IMESSAGE) or {}
+        if "exclude_spam" in settings:
+            return _as_bool(settings.get("exclude_spam"), default=True)
+    except Exception:
+        logger.debug("exclude_spam setting lookup failed; defaulting to skip spam", exc_info=True)
+    return True
+
+
 def _resolve_sync_start_unix(options: Optional[Dict[str, Any]]) -> tuple[Optional[float], Optional[str]]:
     """Resolve sync start timestamp from sync options."""
     if not options:
@@ -318,16 +353,16 @@ def run_imessage_sync(
 ) -> Dict[str, Any]:
     """
     Run iMessage sync: load checkpoint → read from chat.db → parse → write to conversation_messages → save checkpoint.
-    Returns dict with status, records_processed, last_record_id, error (if any).
+    Returns dict with status, records_processed, records_skipped, last_record_id, error (if any).
     """
     if not dataset_id:
-        return {"status": "error", "error": "dataset_id required", "records_processed": 0}
+        return {"status": "error", "error": "dataset_id required", "records_processed": 0, "records_skipped": 0}
 
     if db_conn is None:
         from ..core.state import get_db_connection
         db_conn = get_db_connection()
     if db_conn is None:
-        return {"status": "error", "error": "Database connection not available", "records_processed": 0}
+        return {"status": "error", "error": "Database connection not available", "records_processed": 0, "records_skipped": 0}
 
     store = checkpoint_store if checkpoint_store is not None else SqliteCheckpointStore(db_conn)
     checkpoint = store.get_checkpoint(dataset_id, IMESSAGE_SCHEMA_ID)
@@ -355,7 +390,7 @@ def run_imessage_sync(
             e,
             exc_info=True,
         )
-        return {"status": "error", "error": str(e), "records_processed": 0}
+        return {"status": "error", "error": str(e), "records_processed": 0, "records_skipped": 0}
 
 
 def _run_imessage_sync_impl(
@@ -371,36 +406,39 @@ def _run_imessage_sync_impl(
     """Implementation of run_imessage_sync (called inside try so we never raise)."""
     start_unix, start_error = _resolve_sync_start_unix(sync_options)
     if start_error:
-        return {"status": "error", "error": start_error, "records_processed": 0}
+        return {"status": "error", "error": start_error, "records_processed": 0, "records_skipped": 0}
 
     parser_cls = PARSER_REGISTRY.get(IMESSAGE_SCHEMA_ID)
     if not parser_cls:
-        return {"status": "error", "error": "No parser for imessage.messages.v1", "records_processed": 0}
+        return {"status": "error", "error": "No parser for imessage.messages.v1", "records_processed": 0, "records_skipped": 0}
     parser = parser_cls(dataset_id=dataset_id, _schema_id=IMESSAGE_SCHEMA_ID)
     from ..storage.canonical import ConversationsTablesManager
     manager = ConversationsTablesManager(db_conn)
-    from .sources.imessage_reader import read_imessage_rows_list, get_chat_db_path
+    from .sources.imessage_reader import read_imessage_batch, get_chat_db_path
     path = chat_db_path or get_chat_db_path()
+    exclude_spam = _resolve_exclude_spam(sync_options, db_conn=db_conn, dataset_id=dataset_id)
 
     # For bounded history sync, restart from row 0 and apply time filter.
     current_last_record_id = "0" if start_unix is not None else last_record_id
     final_last_record_id = last_record_id
     total_processed = 0
+    total_skipped = 0
     batch_num = 0
 
     while True:
         batch_num += 1
         try:
-            rows = read_imessage_rows_list(
+            batch = read_imessage_batch(
                 last_rowid=current_last_record_id if current_last_record_id != "0" else None,
                 chat_db_path=path,
                 batch_size=batch_size,
                 start_unix=start_unix,
+                exclude_spam=exclude_spam,
             )
         except FileNotFoundError as e:
-            return {"status": "error", "error": str(e), "records_processed": total_processed}
+            return {"status": "error", "error": str(e), "records_processed": total_processed, "records_skipped": total_skipped}
         except PermissionError as e:
-            return {"status": "error", "error": str(e), "records_processed": total_processed}
+            return {"status": "error", "error": str(e), "records_processed": total_processed, "records_skipped": total_skipped}
         except OSError as e:
             logger.warning(
                 "imessage read failed (OSError errno=%s) on batch %d: %s",
@@ -409,7 +447,7 @@ def _run_imessage_sync_impl(
                 e,
                 exc_info=True,
             )
-            return {"status": "error", "error": str(e), "records_processed": total_processed}
+            return {"status": "error", "error": str(e), "records_processed": total_processed, "records_skipped": total_skipped}
         except sqlite3.Error as e:
             logger.warning(
                 "imessage read failed (sqlite3.Error) on batch %d: %s",
@@ -417,12 +455,14 @@ def _run_imessage_sync_impl(
                 e,
                 exc_info=True,
             )
-            return {"status": "error", "error": str(e), "records_processed": total_processed}
+            return {"status": "error", "error": str(e), "records_processed": total_processed, "records_skipped": total_skipped}
         except Exception as e:
             logger.warning("imessage read failed on batch %d: %s", batch_num, e, exc_info=True)
-            return {"status": "error", "error": str(e), "records_processed": total_processed}
+            return {"status": "error", "error": str(e), "records_processed": total_processed, "records_skipped": total_skipped}
 
-        if not rows:
+        rows = batch.rows
+        total_skipped += batch.records_skipped
+        if batch.scanned_count == 0:
             break
 
         # Persist raw iMessage payloads for traceability and debugging (non-fatal on failure).
@@ -440,7 +480,6 @@ def _run_imessage_sync_impl(
             logger.warning("[PIPELINE:RAW] iMessage raw write failed (non-fatal): %s", e)
 
         normalized_records: List[Any] = []
-        max_rowid: Optional[int] = None
         for row in rows:
             raw = RawRecord(record_id=row["id"], payload=row)
             validation = parser.validate(raw)
@@ -449,9 +488,6 @@ def _run_imessage_sync_impl(
                 continue
             norm = parser.parse(raw)
             normalized_records.append(norm)
-            rid = row.get("ROWID")
-            if rid is not None and (max_rowid is None or rid > max_rowid):
-                max_rowid = rid
 
         if normalized_records:
             mapped_records = _map_normalized_records_with_canonical_mapper(
@@ -484,7 +520,12 @@ def _run_imessage_sync_impl(
                 manager.upsert_message_batch(staging_records, dataset_id, SOURCE_ID_IMESSAGE)
             except Exception as e:
                 logger.exception("ConversationsTablesManager.upsert_message_batch failed")
-                return {"status": "error", "error": str(e), "records_processed": total_processed}
+                return {
+                    "status": "error",
+                    "error": str(e),
+                    "records_processed": total_processed,
+                    "records_skipped": total_skipped,
+                }
 
             canonical_messages = [
                 {
@@ -509,25 +550,27 @@ def _run_imessage_sync_impl(
 
             total_processed += len(normalized_records)
 
-        if max_rowid is None:
+        if batch.max_scanned_rowid is None:
             # Defensive: avoid infinite loops if no valid rowid in batch.
             break
 
-        final_last_record_id = f"imessage:{max_rowid}"
+        final_last_record_id = f"imessage:{batch.max_scanned_rowid}"
         store.save_checkpoint(IngestionCheckpoint(
             dataset_id=dataset_id,
             schema_id=IMESSAGE_SCHEMA_ID,
             last_record_id=final_last_record_id,
-            metadata={},
+            metadata={"exclude_spam": exclude_spam},
         ))
         current_last_record_id = final_last_record_id
 
-        if len(rows) < batch_size:
+        if batch.scanned_count < batch_size:
             break
 
     return {
         "status": "ok",
         "records_processed": total_processed,
+        "records_skipped": total_skipped,
+        "exclude_spam": exclude_spam,
         "last_record_id": final_last_record_id,
     }
 

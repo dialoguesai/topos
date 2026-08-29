@@ -198,6 +198,8 @@ async def handle_put_source_settings(message: Dict[str, Any]) -> Optional[Dict[s
     # present in the body — absent means "leave unchanged".
     posture_provided = "posture" in payload
     posture = payload.get("posture")
+    exclude_spam_provided = "exclude_spam" in payload
+    exclude_spam = payload.get("exclude_spam")
     if not source_id or not dataset_id:
         return {"id": req_id, "status": "error", "error": "source_id and dataset_id required"}
     source = REGISTRY.get(source_id)
@@ -208,16 +210,20 @@ async def handle_put_source_settings(message: Dict[str, Any]) -> Optional[Dict[s
     # enabled toggle is being set.
     if enabled is not None and getattr(source, "source_type", None) != "local_sync":
         return {"id": req_id, "status": "error", "error": "enabled only applies to local_sync sources"}
-    if enabled is None and not posture_provided:
-        return {"id": req_id, "status": "error", "error": "enabled or posture required in body"}
+    if exclude_spam_provided and getattr(source, "source_type", None) != "local_sync":
+        return {"id": req_id, "status": "error", "error": "exclude_spam only applies to local_sync sources"}
+    if enabled is None and not posture_provided and not exclude_spam_provided:
+        return {"id": req_id, "status": "error", "error": "enabled, posture, or exclude_spam required in body"}
     conn = hub.get_db_connection()
     if not conn:
         return {"id": req_id, "status": "error", "error": "Database not available"}
     try:
+        put_kwargs: Dict[str, Any] = {"enabled": enabled}
         if posture_provided:
-            put_source_settings(conn, dataset_id, source_id, enabled=enabled, posture=posture)
-        else:
-            put_source_settings(conn, dataset_id, source_id, enabled=enabled)
+            put_kwargs["posture"] = posture
+        if exclude_spam_provided:
+            put_kwargs["exclude_spam"] = bool(exclude_spam)
+        put_source_settings(conn, dataset_id, source_id, **put_kwargs)
     except ValueError as exc:
         return {"id": req_id, "status": "error", "error": str(exc)}
     # Echo the effective settings back (posture reflects what was persisted /
@@ -229,6 +235,7 @@ async def handle_put_source_settings(message: Dict[str, Any]) -> Optional[Dict[s
     else:
         result_payload["enabled"] = bool(settings_data.get("enabled", True))
     result_payload["posture"] = settings_data.get("posture")
+    result_payload["exclude_spam"] = bool(settings_data.get("exclude_spam", True))
     return {"id": req_id, "status": "ok", "payload": result_payload}
 
 @handles("get_source_contacts")
