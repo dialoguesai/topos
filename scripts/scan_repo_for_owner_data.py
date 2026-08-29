@@ -222,6 +222,28 @@ def _find(haystack: str, needle: str) -> int:
     return 0
 
 
+def _hit_line(folded: str, needle: str, kind: str) -> int:
+    """1-indexed line of the first hit, or 0.
+
+    Local-list terms are typed by hand, often a short first name the database
+    floor would drop. Substring match then fires on English: a six-letter
+    surname inside ``rangeLabel`` and ``strangely``, a four-letter first name
+    inside ``casserole``. A word boundary keeps those short names useful.
+
+    Database-derived names stay a substring: they are full phrases (a person
+    with a space, a goal of 15+ characters) and matching the phrase is the
+    point.
+    """
+    if not needle:
+        return 0
+    if kind == "local list":
+        match = re.search(r"\b" + re.escape(needle) + r"\b", folded)
+        if not match:
+            return 0
+        return folded[: match.start()].count("\n") + 1
+    return _find(folded, needle)
+
+
 def _git(*args: str) -> str:
     """Stripped stdout of a git command, or "" if git fails or is not installed."""
     try:
@@ -315,8 +337,9 @@ def _scan_text(body: str, names: list, *, where: str) -> int:
     hits = []
     for kind, name in names:
         needle = name.strip().lower().replace("\u2019", "'")
-        if needle and needle in folded:
-            hits.append((kind, name, _find(folded, needle)))
+        line = _hit_line(folded, needle, kind)
+        if line:
+            hits.append((kind, name, line))
     if not hits:
         print(f"clean — {where} checked against {len(names)} protected names")
         return 0
@@ -473,10 +496,8 @@ def main() -> int:
         folded = body.lower().replace("’", "'")
         for kind, name in names:
             needle = name.strip().lower().replace("’", "'")
-            if needle and needle in folded:
-                line = next(
-                    (i + 1 for i, ln in enumerate(folded.splitlines()) if needle in ln), 0
-                )
+            line = _hit_line(folded, needle, kind)
+            if line:
                 hits.append((kind, name, path, line))
 
     # Allowlisted hits are dropped here, at the REPORT, never at the scan: the scan still

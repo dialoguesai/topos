@@ -134,6 +134,32 @@ def test_a_missing_allow_file_allows_nothing(repo):
     assert _scan(repo).returncode == 1
 
 
+def test_a_short_local_term_does_not_fire_inside_a_longer_word(tmp_path):
+    """Short names exist on the local list because the database floor drops
+    first names. Substring match then fires on English, which is how a
+    six-letter surname blocked every push that mentioned rangeLabel."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    terms = tmp_path / "terms.txt"
+    terms.write_text("Zorp\n", encoding="utf-8")
+    (root / "notes.md").write_text("the zorpidly quiet commute\n", encoding="utf-8")
+    out = _run("--database", "/nonexistent.db", "--local-terms", str(terms),
+               "notes.md", cwd=str(root))
+    assert out.returncode == 0, out.stderr
+
+
+def test_a_short_local_term_still_fires_as_its_own_word(tmp_path):
+    root = tmp_path / "repo"
+    root.mkdir()
+    terms = tmp_path / "terms.txt"
+    terms.write_text("Zorp\n", encoding="utf-8")
+    (root / "notes.md").write_text('name = "Zorp"\n', encoding="utf-8")
+    out = _run("--database", "/nonexistent.db", "--local-terms", str(terms),
+               "notes.md", cwd=str(root))
+    assert out.returncode == 1
+    assert "notes.md" in out.stderr
+
+
 def test_comments_and_blank_lines_are_ignored(repo):
     root, _ = repo
     key = [ln for ln in _scan(repo, "--emit-allow").stdout.splitlines()
