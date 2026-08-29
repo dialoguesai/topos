@@ -150,3 +150,63 @@ def test_an_edge_type_dated_entirely_within_one_second_is_a_defect(conn):
     assert _distinct_days(conn, "rel.closeness_tier") > 1, (
         "a closeness edge per person should spread across their real last contacts"
     )
+
+def _seed_closeness_fact(conn, *, entity_id, handle, last_ts, valid_from):
+    conn.executescript("""
+      CREATE TABLE IF NOT EXISTS signal_objects (object_id TEXT PRIMARY KEY,
+        object_type TEXT, payload_json TEXT, valid_from TEXT, valid_to TEXT,
+        confidence REAL);
+    """)
+    conn.execute(
+        "INSERT INTO messenger_dyad_stats VALUES"
+        " ('ds',?,'self',1,'human',60,0,0,0.05,3,5,2.0,'active',?)", (handle, last_ts))
+    conn.execute(
+        "INSERT INTO signal_objects VALUES (?,'fact',?,?,NULL,0.8)",
+        (f"so-{entity_id}",
+         '{"predicate":"rel.closeness_tier","object_entity_id":"%s",'
+         '"value":{"tier":"close"}}' % entity_id,
+         valid_from))
+    conn.commit()
+
+
+def test_repair_re_dates_facts_the_lens_cannot_touch(rail):
+    """Re-running the lens returns noop on an unchanged value, so the stored
+    anchor would keep the run clock forever without this."""
+    from topos.features.derivation.synthesize import reanchor_closeness_facts
+
+    _seed_closeness_fact(rail, entity_id="e1", handle="+15125550001",
+                         last_ts="2026-08-25T10:00:00Z",
+                         valid_from="2026-08-26T22:40:40Z")
+    report = reanchor_closeness_facts(rail)
+    assert report["reanchored"] == 1
+    got = rail.execute("SELECT valid_from FROM signal_objects").fetchone()[0]
+    assert got == "2026-08-25T10:00:00Z"
+
+    # Idempotent: a second pass has nothing left to correct.
+    assert reanchor_closeness_facts(rail)["reanchored"] == 0
+
+
+def test_repair_leaves_a_fact_it_cannot_match_alone(rail):
+    """A wrong date is worse than the honest one already stored."""
+    from topos.features.derivation.synthesize import reanchor_closeness_facts
+
+    _seed_closeness_fact(rail, entity_id="e-unknown", handle="+15125559999",
+                         last_ts="2026-08-25T10:00:00Z",
+                         valid_from="2026-08-26T22:40:40Z")
+    report = reanchor_closeness_facts(rail)
+    assert report["unmatched"] == 1 and report["reanchored"] == 0
+    got = rail.execute("SELECT valid_from FROM signal_objects").fetchone()[0]
+    assert got == "2026-08-26T22:40:40Z"
+
+
+def test_repair_is_a_no_op_on_a_rail_without_last_ts(rail):
+    """Older rails have nothing better to offer; the repair must not guess."""
+    from topos.features.derivation.synthesize import reanchor_closeness_facts
+
+    _seed_closeness_fact(rail, entity_id="e1", handle="+15125550001",
+                         last_ts="2026-08-25T10:00:00Z",
+                         valid_from="2026-08-26T22:40:40Z")
+    rail.execute("ALTER TABLE messenger_dyad_stats RENAME COLUMN last_ts TO last_ts_old")
+    rail.commit()
+    assert reanchor_closeness_facts(rail) == {"examined": 0, "reanchored": 0, "unmatched": 0}
+

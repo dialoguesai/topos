@@ -683,8 +683,24 @@
     {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
-      "steps": [],
-      "notes": []
+      "steps": [
+        {
+          "id": "reanchor-closeness-and-redate-graph-edges",
+          "kind": "derived_rebuild",
+          "title": "Re-date relationship facts and graph edges that took the run clock as their event time",
+          "why": "Three writers stamped the time the job ran where the time the thing happened belongs, and the graph placed people accordingly -- people last messaged in May rendered inside the last five days. (1) rel.closeness_tier passed no event_date, so every tier anchored to the synthesis instant: on the node this was found on, all 26 landed inside ONE SECOND. Re-running the lens cannot repair them -- the value is unchanged, so assert_pack_fact returns noop/corroborated and neither path touches valid_from -- so the anchors are corrected in place from the dyad rail's last_ts, the same evidence the fixed lens now reads. (2) participates_in edges passed no time at all (181 undated on that node) while the conversation node beside them was dated from the very span the edge ignored. The graph rebuild is what turns both into dated edges, which is why it runs second. Nodes whose rail predates last_ts, or whose people cannot be matched back to a dyad, keep what they have rather than being given a guessed date.",
+          "params": {
+            "targets": [
+              "closeness_fact_anchors",
+              "entity_graph"
+            ]
+          },
+          "consent": "auto"
+        }
+      ],
+      "notes": [
+        "Node birth dates need no step: the graph payload now derives them from edge evidence at read time, so the fix applies as soon as the engine restarts."
+      ]
     }
   ]
 }

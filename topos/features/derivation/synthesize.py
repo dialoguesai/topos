@@ -6,6 +6,7 @@ signal_objects refs), so `how did this become a fact` is answerable by walking r
 """
 from __future__ import annotations
 
+import json
 import math
 import re
 import sqlite3
@@ -81,6 +82,76 @@ def synthesize_rhythm(conn: sqlite3.Connection, w: DerivationWriter, pack: Pack,
         results.append({"predicate": "behavior.routine_block", "value": label,
                         "evidence": {"distinct_weeks": len(weeks)}, "outcome": r["outcome"]})
     return results
+
+
+def reanchor_closeness_facts(conn: sqlite3.Connection) -> Dict[str, int]:
+    """Re-date `rel.closeness_tier` facts that anchored to the synthesis clock.
+
+    Before the lens passed `event_date`, every tier it wrote took the run time
+    as its anchor -- on the node this was found on, all 26 landed inside ONE
+    SECOND, and the graph then showed every ranked person as active that moment.
+
+    Re-running the lens does NOT fix them. The VALUE is unchanged, so
+    `assert_pack_fact` returns noop/corroborated, and neither path touches
+    `valid_from`. Only the anchor was ever wrong, so this corrects it in place
+    from the same evidence the lens now reads -- the dyad's last message.
+
+    Facts whose person cannot be matched back to a dyad are left alone rather
+    than guessed at: a wrong date is worse than the honest one already stored.
+    Edges pick the new anchors up on the next graph rebuild, which is why the
+    manifest runs this BEFORE `entity_graph`.
+    """
+    report = {"examined": 0, "reanchored": 0, "unmatched": 0}
+    try:
+        cols = {str(r[1]) for r in conn.execute(
+            "PRAGMA table_info(messenger_dyad_stats)").fetchall()}
+    except sqlite3.Error:
+        return report                  # no rail on this node
+    if "last_ts" not in cols:
+        return report                  # nothing better than what is stored
+
+    from .person_bridge import handle_to_entity, normalise_handle
+
+    by_handle = handle_to_entity(conn)
+    newest: Dict[str, str] = {}
+    for a_key, b_key, last_ts in conn.execute(
+        "SELECT a_key, b_key, last_ts FROM messenger_dyad_stats"
+        " WHERE involves_self=1 AND peer_class='human' AND last_ts IS NOT NULL"
+    ).fetchall():
+        stamp = str(last_ts or "").strip()
+        if not stamp:
+            continue
+        for key in (a_key, b_key):
+            entity_id = by_handle.get(normalise_handle(str(key or "")))
+            if entity_id and stamp > newest.get(entity_id, ""):
+                newest[entity_id] = stamp
+
+    rows = conn.execute(
+        "SELECT object_id, payload_json, valid_from FROM signal_objects"
+        " WHERE object_type='fact' AND valid_to IS NULL"
+        " AND json_extract(payload_json,'$.predicate')='rel.closeness_tier'"
+    ).fetchall()
+    updates = []
+    for object_id, payload_json, valid_from in rows:
+        report["examined"] += 1
+        try:
+            subject = json.loads(payload_json or "{}").get("object_entity_id") or ""
+        except (TypeError, ValueError):
+            subject = ""
+        stamp = newest.get(str(subject))
+        if not stamp:
+            report["unmatched"] += 1
+            continue
+        if str(valid_from or "")[:19] == stamp[:19]:
+            continue                   # already anchored to the evidence
+        updates.append((stamp, object_id))
+    for stamp, object_id in updates:
+        conn.execute(
+            "UPDATE signal_objects SET valid_from=? WHERE object_id=?", (stamp, object_id))
+        report["reanchored"] += 1
+    if updates:
+        conn.commit()
+    return report
 
 
 def _date_from_gap(gap_days, now=None) -> Optional[str]:

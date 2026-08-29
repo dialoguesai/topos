@@ -9,6 +9,60 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **Graph nodes rendered in the wrong time frame: three writers stamped the
+  clock that ran the job where the time the thing happened belongs.**
+  `[E:entities]` `[D]` Reported as people last messaged in May and June showing
+  up in the last five days.
+
+  `rel.closeness_tier` passed no `event_date`, though `assert_pack_fact` takes
+  one and documents it as "a fact's time is its EVIDENCE time, never extraction
+  time". Every tier therefore anchored to the synthesis instant — all 26 on the
+  node this was found on landed **inside one second**, which put every ranked
+  person on the graph as active that moment. The dyad rail already stored
+  `last_ts`; the lens never selected it. Now 18 distinct days across
+  April–August. The column is PROBED rather than named outright: the
+  surrounding `except sqlite3.Error` turns any SQL error into "the rail has not
+  run yet" and returns no facts, so naming a column an older rail lacks would
+  not degrade the lens, it would silently delete it.
+
+  `participates_in` passed `valid_from=None` and no `last_event_at`, leaving
+  **181 edges with no time at all** while the conversation node beside them was
+  dated from the very span the edge ignored. Undated edges on that node:
+  213 → 32.
+
+  Node birth dates came only from `entity_mentions`, a sighting log — so goal,
+  topic and conversation hubs, which are minted as vertices rather than
+  sightings, had no date at all (goals 0/1020, conversations 0/127). The
+  obvious fallback, `entities.first_seen`, is the wrong column: it is stamped
+  with the mint clock and only recomputed for entities that later receive a
+  mention, so two address-book import batches left **1,190 of 1,599 people
+  sharing exactly two timestamps**. Birth now comes from edge evidence — each
+  edge carries a belief stamp and an event stamp, and an ingest stamp is always
+  later than the event it records, so the earlier of the pair is the grounded
+  one. Live payload: 40/100 nodes dated → 100/100, across 45 distinct days.
+
+  Guards assert on the DISTRIBUTION across an edge type, not on single rows:
+  one edge dated "now" looks correct on its own, and zero variance across every
+  row of a type is the actual signal.
+
+### Added
+- **Hover highlights three hops, graded by ring.** `[S1]` Hover lifted exactly
+  one hop, which on a graph whose median node degree is 2–3 lit a couple of
+  neighbours and said no more than the edges already drew. The highlighted
+  neighbourhood goes from a median of 2 nodes to 92 on a rendered view. Opacity
+  falls per ring so "how close is this?" stays readable; stroke emphasis and
+  label reveal deliberately stay at one hop, because a 2px stroke on a third of
+  the graph stops reading as emphasis.
+- **Person-typed pack fields bind to people.** `[E:derivation]` `entity_ref` /
+  `entity_refs` were declared in 12 packs with no implementation behind them,
+  and `template.py` renders an unknown value type as "(free text)" — so the
+  extraction prompt actively told the model to write prose for the one field
+  meant to name a person. Adds the `person_ref` family, renders those fields as
+  bind-instructions, and binds parsed values to entities at write time. A pack
+  declaring a value type nothing implements now fails AT LOAD rather than
+  silently degrading its prompt.
+
 ## [1.3.35] — 2026-08-28
 
 ### Fixed

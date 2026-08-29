@@ -655,6 +655,13 @@ def _exec_derived_rebuild(step: Dict[str, Any], conn: sqlite3.Connection) -> Dic
                 from ..features.signal.derived_index import index_derived_objects
 
                 detail["targets"][name] = dict(index_derived_objects(conn) or {})
+            elif name in ("closeness_fact_anchors", "closeness_anchors"):
+                # Must run BEFORE entity_graph in the same step: the repair
+                # rewrites the facts, the rebuild is what turns them into
+                # dated edges.
+                from ..features.derivation.synthesize import reanchor_closeness_facts
+
+                detail["targets"][name] = dict(reanchor_closeness_facts(conn) or {})
             elif name in ("timeline",):
                 from ..features.timeline_projection import repair_timeline_for_source
 
