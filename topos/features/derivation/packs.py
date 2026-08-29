@@ -320,6 +320,40 @@ def _load_lenses(entries: Any, pid: str, preds: Dict[str, Predicate],
     return out
 
 
+#: Value-schema types the extraction layer knows how to render, parse and resolve.
+#: A pack declaring anything else fails to LOAD, so an unhonoured type is a startup error
+#: rather than a silently worse fact. Two were found the moment this went in —
+#: `recurring_date` and `date_range_or_approx` — both genuinely prose, both classified
+#: below rather than waved through, because "we decided this is prose" and "nobody has
+#: looked at this" must not read the same in the source.
+#: PROSE types — the extractor writes them as text and nothing resolves them. Correct for
+#: a date the owner phrased loosely; the pipeline has nowhere better to put it.
+PROSE_VALUE_TYPES = frozenset({
+    "string", "text", "number", "boolean",
+    "date", "date_or_approx", "date_range_or_approx", "recurring_date",
+})
+#: PERSON reference types. Separate from the generic ones because the extraction layer
+#: does something DIFFERENT with them: it offers the model the archive's known people,
+#: applies a pronoun blocklist and a kin whitelist, requires the name to appear in the
+#: record, and resolves the result against the person spine.
+#:
+#: `entity_ref` alone could not carry that. The same type declares `person`, `venue`,
+#: `pet` and `org`, so honouring it as a person meant asserting a venue can be a pronoun,
+#: and the first cut narrowed it by FIELD NAME — which works until a pack names a person
+#: field something new. The type says it now.
+#:
+#: Deliberately NOT converted: `provider` (a vet or a clinic), `counterparty` (a person or
+#: a company). Those are genuinely either, and guessing would be worse than generic.
+PERSON_REF_VALUE_TYPES = frozenset({"person_ref", "person_refs", "person_ref_or_self"})
+#: Plural — the value is a LIST of people.
+PERSON_REF_LIST_TYPES = frozenset({"person_refs"})
+#: REFERENCE types that are NOT people: an org, a venue, a project, a pet.
+ENTITY_REF_VALUE_TYPES = frozenset({
+    "entity_ref", "entity_refs", "entity_ref_or_self", "entity_ref_or_string",
+})
+KNOWN_VALUE_TYPES = PROSE_VALUE_TYPES | ENTITY_REF_VALUE_TYPES | PERSON_REF_VALUE_TYPES
+
+
 def load_pack(path: Path, known_namespaces: Optional[set] = None,
               *, trusted: bool = False) -> Pack:
     """Load and validate one pack.
@@ -360,6 +394,22 @@ def load_pack(path: Path, known_namespaces: Optional[set] = None,
         _require(p.get("altitude") in ALTITUDES, pid, f"{name}: bad altitude")
         sens = p.get("sensitivity")
         _require(sens is None or sens in SENSITIVITY, pid, f"{name}: bad sensitivity override")
+        # A declared field TYPE must be one the extraction layer can honour.
+        #
+        # This validator checked cardinality, temporal, altitude and event_identity and
+        # said nothing about types, which is how `entity_ref` — 48 declarations across 12
+        # packs — sat with no implementation and produced no error anywhere. The prompt
+        # builder recognised only enum notations, so every one of those fields was
+        # advertised to the model as free text and silently degraded to prose.
+        #
+        # A pack asking for something the pipeline cannot do should fail at LOAD, where a
+        # human is reading the message, rather than at extraction time where the only
+        # symptom is a slightly worse fact.
+        for _field, _spec in (p.get("value_schema") or {}).items():
+            if isinstance(_spec, str):
+                _require(_spec.strip() in KNOWN_VALUE_TYPES, pid,
+                         f"{name}.{_field}: unknown value type {_spec!r} — "
+                         f"the extraction layer would silently treat it as free text")
         preds[name] = Predicate(
             name=name, value_type=str(p.get("value_type")), cardinality=p["cardinality"],
             temporal=p["temporal"], altitude=p["altitude"], sensitivity=sens,

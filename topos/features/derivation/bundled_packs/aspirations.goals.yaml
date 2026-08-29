@@ -34,7 +34,7 @@ predicates:
      value_schema: {aspiration: string, kind: [become, learn, visit, create, own, experience]},
      note: "someday-grade wants without a horizon — kept distinct so goals stay actionable"}
   - {name: asp.commitment, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
-     value_schema: {commitment: string, to_whom: entity_ref_or_self, due: date_or_approx},
+     value_schema: {commitment: string, to_whom: person_ref_or_self, due: date_or_approx},
      note: "promises with a counterparty/date — feeds the EXISTING Commitment time-signal lane"}
   - name: asp.milestone
     value_type: structured

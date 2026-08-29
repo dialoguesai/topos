@@ -38,7 +38,49 @@ def clean_record_text(text: str) -> str:
 # comma/ellipsis strings are garbled lists. Kin terms are legitimate person
 # references (the owner's own word for them). Everything else passes — semantic
 # attribution is A4's job, not a blocklist's.
+#: Person-reference value types, and the plural among them. Imported from the pack loader
+#: so the vocabulary is declared in ONE place — the loader is what refuses a pack using a
+#: type nothing honours, so it has to be the same set.
+from .packs import PERSON_REF_LIST_TYPES, PERSON_REF_VALUE_TYPES  # noqa: E402
+
+ENTITY_REF_TYPES = PERSON_REF_VALUE_TYPES
+ENTITY_REF_LIST_TYPES = PERSON_REF_LIST_TYPES
+
+#: Fields that are person-valued NO MATTER WHAT THEY ARE CALLED. Was a hardcoded pair,
+#: which is why a project's `collaborators` — declared `entity_refs`, and the one field
+#: that could say who the owner works with — got none of the person handling below: not
+#: the bind instruction, not the pronoun blocklist, not the grounding check. Kept as a
+#: floor under the schema-derived set, for a pack that names a person field without
+#: declaring a type for it.
 _PERSON_FIELDS = {"person", "member"}
+
+
+def person_fields_for(pack: Any) -> set:
+    """Every person-valued field this pack declares, from its TYPE.
+
+    The first cut of this narrowed by field NAME, because `entity_ref` said "a thing the
+    archive knows" and not which kind — the same type declared `person`, `venue`, `pet` and
+    `org`, so honouring it as a person meant asserting a venue can be a pronoun. A name list
+    works until a pack calls a person field something the list has never seen, which is the
+    same shape of failure this milestone exists to fix.
+
+    The packs now say `person_ref`. `_PERSON_FIELDS` stays as a floor beneath it, for a
+    pack that names a person field without declaring a type.
+    """
+    out = set(_PERSON_FIELDS)
+    for predicate in getattr(pack, "predicates", {}).values():
+        for field, spec in (getattr(predicate, "value_schema", None) or {}).items():
+            if is_entity_ref(spec):
+                out.add(str(field))
+    return out
+
+
+def is_entity_ref(spec: Any) -> bool:
+    return isinstance(spec, str) and spec.strip() in ENTITY_REF_TYPES
+
+
+def is_entity_ref_list(spec: Any) -> bool:
+    return isinstance(spec, str) and spec.strip() in ENTITY_REF_LIST_TYPES
 _PERSON_BLOCKLIST = {
     "him", "her", "he", "she", "they", "them", "we", "us", "me", "myself", "you",
     "another", "other", "others", "someone", "somebody", "anyone", "everybody",
@@ -167,6 +209,7 @@ def _enum_of(spec: Any) -> Optional[List[Any]]:
 
 
 def _predicate_menu(pack: Pack) -> str:
+    person_names = person_fields_for(pack)
     lines = []
     for p in pack.predicates.values():
         if p.altitude != "stated":
@@ -180,6 +223,22 @@ def _predicate_menu(pack: Pack) -> str:
                 req = ""  # required_fields retired from the contract (W2.2): forced fields make models fabricate — measured 4x
                 if allowed:
                     keys.append(f"{k}{req} MUST BE one of [{', '.join(str(x) for x in allowed[:12])}]")
+                elif k not in person_names:
+                    # An entity_ref that is NOT a person — an org, a venue, a project. The
+                    # known-people list above cannot help it, and pointing it there would
+                    # instruct the model to answer a project field with somebody's name.
+                    keys.append(f"{k}{req}(free text)")
+                elif is_entity_ref_list(v):
+                    # A LIST of people. Rendered as free text it came back as one string —
+                    # "A, B" stored as a single name that resolves to nobody.
+                    keys.append(f"{k}{req}(JSON array of person names from the list above; "
+                                f"NEW:<name> for one not on it)")
+                elif is_entity_ref(v):
+                    # The whole point of the type. Rendered as free text, the model was
+                    # TOLD the field was prose and duly wrote prose, which then resolved
+                    # as a topic rather than a person.
+                    keys.append(f"{k}{req}(a person's name from the list above; "
+                                f"NEW:<name> for one not on it)")
                 else:
                     keys.append(f"{k}{req}(free text)")
             shape = "object with: " + "; ".join(keys)
@@ -270,6 +329,7 @@ def parse_output(raw: str, pack: Pack, record_text: str = None) -> Tuple[List[Di
         data = json.loads(m.group(0))
     except json.JSONDecodeError:
         return [], 1
+    person_names = person_fields_for(pack)
     valid, rejects = [], 0
     for a in data.get("assertions") or []:
         if not isinstance(a, dict):
@@ -304,7 +364,40 @@ def parse_output(raw: str, pack: Pack, record_text: str = None) -> Tuple[List[Di
                 continue
         person_bad = False
         if isinstance(val, dict):
-            for pf in _PERSON_FIELDS & set(val):
+            for pf in person_names & set(val):
+                spec = (pred.value_schema or {}).get(pf)
+                # A LIST field. It arrives as a JSON array when the model obeys the menu
+                # and as "A, B" when it does not — and the string form is why the one live
+                # collaborator value naming two people was stored as a single name that
+                # resolved to nobody. Both are split here, then every element gets the same
+                # checks a singular person field gets.
+                if is_entity_ref_list(spec):
+                    raw_list = val.get(pf)
+                    if isinstance(raw_list, str):
+                        raw_list = [x.strip() for x in raw_list.split(",")]
+                    if not isinstance(raw_list, list):
+                        raw_list = [raw_list] if raw_list is not None else []
+                    cleaned = []
+                    for item in raw_list:
+                        if not isinstance(item, str) or not item.strip():
+                            continue
+                        if item.startswith("NEW:"):
+                            item = item[4:].strip()
+                            a["new_person"] = True
+                        if not person_field_ok(item):
+                            person_bad = True
+                            continue
+                        if record_text is not None and not person_grounded(item, record_text):
+                            person_bad = True
+                            continue
+                        cleaned.append(item)
+                    # A list that lost every element is not a list, it is an absence — and
+                    # keeping the field empty would key an assertion on nobody.
+                    if cleaned:
+                        val[pf] = cleaned
+                    else:
+                        val.pop(pf, None)
+                    continue
                 pv = val.get(pf)
                 if isinstance(pv, str) and pv.startswith("NEW:"):
                     # A5 discovery escape hatch: strip the marker, flag the assertion

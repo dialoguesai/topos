@@ -441,6 +441,29 @@ def _allocate_edge_budget(type_counts, window: int) -> Dict[str, int]:
     return budgets
 
 
+_BIRTH_FLOOR = "2000-01-01"
+
+
+def _stored_birth(value: Optional[str]) -> Optional[str]:
+    """`entities.first_seen` as a node birth date, or None if it is not usable.
+
+    The mention scan above is the preferred source -- an actual sighting with an
+    event time. But a node minted as a VERTEX rather than a sighting (goal /
+    topic / conversation hubs, and anything `fact_materializer` resolves) has no
+    `entity_mentions` row by nature, so that scan returns nothing for it and the
+    node arrives at a temporal UI undatable. The enrichers already compute the
+    span from the source records' event times and store it here; this is the
+    read side of that write, which had no reader.
+
+    Same epoch-junk floor as the mention query, so a zero date cannot pull a
+    node back to 1970 on the timeline.
+    """
+    text = str(value or "").strip()
+    if not text or text <= _BIRTH_FLOOR:
+        return None
+    return text
+
+
 def graph_snapshot(
     conn: sqlite3.Connection,
     *,
@@ -635,8 +658,8 @@ def graph_snapshot(
     nodes = []
     for entity_id in node_ids:
         row = conn.execute(
-            "SELECT canonical_name, entity_type, mention_count, metadata_json, is_self "
-            "FROM entities WHERE entity_id=?",
+            "SELECT canonical_name, entity_type, mention_count, metadata_json, is_self, "
+            "first_seen FROM entities WHERE entity_id=?",
             (entity_id,),
         ).fetchone()
         if row:
@@ -657,7 +680,7 @@ def graph_snapshot(
                     "node_id": entity_id,
                     "node_type": row[1],
                     "label": row[0],
-                    "first_event_at": first_seen.get(entity_id),
+                    "first_event_at": first_seen.get(entity_id) or _stored_birth(row[5]),
                     "metadata_json": json.dumps(meta),
                 }
             )

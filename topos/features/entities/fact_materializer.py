@@ -210,18 +210,44 @@ def _entity_exists(conn: sqlite3.Connection, entity_id: str) -> bool:
     ).fetchone() is not None
 
 
-def _ensure_topic_node(conn: sqlite3.Connection, topic_id: str, label: str) -> None:
+def _ensure_topic_node(conn: sqlite3.Connection, topic_id: str, label: str,
+                       first_at: Optional[str] = None,
+                       last_at: Optional[str] = None) -> None:
+    """Mint a topic hub, WITH the window its members were active in.
+
+    `first_seen`/`last_seen` were missing from this insert, and this path writes entities
+    directly rather than through the resolver — so nothing ever dated them. Measured on
+    the live node 2026-08-29: 104 of 257 topics carried no timestamp, and a node with no
+    date cannot be placed on a temporal view.
+
+    The caller already computes the right window (`_cluster_activity_window` — when the
+    MEMBERS were active, not when the row was inserted); it simply was not being passed
+    down. MIN/MAX on re-run, because a rebuild re-asserts the hub and the window widens
+    as members join.
+    """
     from .resolver import normalize_name
 
     conn.execute(
         """
         INSERT OR IGNORE INTO entities
             (entity_id, entity_type, canonical_name, normalized_name, is_self,
-             mention_count, metadata_json, created_at, updated_at)
-        VALUES (?, 'topic', ?, ?, 0, 0, '{"mz":1}', ?, ?)
+             mention_count, metadata_json, first_seen, last_seen, created_at, updated_at)
+        VALUES (?, 'topic', ?, ?, 0, 0, '{"mz":1}', ?, ?, ?, ?)
         """,
-        (topic_id, label, normalize_name(label), _now_iso(), _now_iso()),
+        (topic_id, label, normalize_name(label), first_at or None,
+         last_at or first_at or None, _now_iso(), _now_iso()),
     )
+    if first_at or last_at:
+        conn.execute(
+            """
+            UPDATE entities SET
+                first_seen = MIN(COALESCE(NULLIF(first_seen,''), ?), COALESCE(?, first_seen)),
+                last_seen  = MAX(COALESCE(NULLIF(last_seen,''),  ?), COALESCE(?, last_seen))
+            WHERE entity_id = ?
+            """,
+            (first_at or last_at, first_at or last_at,
+             last_at or first_at, last_at or first_at, topic_id),
+        )
 
 
 def _upsert_materialized_edge(
@@ -448,11 +474,12 @@ def materialize_signal_objects_to_graph(
         if not tag or not isinstance(related, list) or not related:
             continue
         topic_id = f"topic_{object_key}"
-        _ensure_topic_node(conn, topic_id, tag)
         # Date by WHEN members were active, not when the signal_object row was
         # first inserted — otherwise Active-in drops live topics (or keeps
         # stale ones) while goals (event-dated) flip the other way.
+        # Computed BEFORE the mint so the NODE carries it too, not only the edges.
         first_at, last_at = _cluster_activity_window(conn, str(object_key))
+        _ensure_topic_node(conn, topic_id, tag, first_at=first_at, last_at=last_at)
         edge_from = first_at or valid_from
         edge_last = last_at or first_at
         cluster_role = _cluster_actor_role(conn, str(object_key))

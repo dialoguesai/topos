@@ -29,16 +29,16 @@ predicates:
     altitude: stated
     key_fields: [person]        # v0.2.1: the person IS the relationship's identity; role/status are state
     value_schema:
-      person: entity_ref
+      person: person_ref
       role: {enum: [partner, spouse, ex_partner, parent, child, sibling, extended_family, close_friend, friend, roommate, colleague, manager, report, mentor, mentee, neighbor, acquaintance, professional_provider]}
       status: [active, strained, estranged, ended, lost]
   - {name: rel.relationship_event, value_type: structured, cardinality: multi, temporal: episodic, altitude: stated,
      key_fields: [person, event], event_identity: "windowed:60",
-     value_schema: {person: entity_ref, event: {enum: [met, became_close, conflict, reconciled, drifted, reconnected, ended, loss]}, description: string}}
+     value_schema: {person: person_ref, event: {enum: [met, became_close, conflict, reconciled, drifted, reconnected, ended, loss]}, description: string}}
   - {name: rel.caregiving, value_type: structured, cardinality: multi, temporal: interval, altitude: stated, key_fields: [person],
-     value_schema: {person: entity_ref, kind: [child_care, elder_care, illness_support, other]}}
+     value_schema: {person: person_ref, kind: [child_care, elder_care, illness_support, other]}}
   - {name: rel.closeness_tier, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred, key_fields: [person],
-     value_schema: {person: entity_ref, tier: [inner_circle, close, regular, peripheral]},
+     value_schema: {person: person_ref, tier: [inner_circle, close, regular, peripheral]},
      note: "no-LLM synthesizer over comms stats (frequency, initiation balance, recency, channels); labels the EXISTING communicates_with edges"}
   - {name: rel.social_pattern, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
      value_schema: {pattern: {enum: [group_vs_one_on_one, initiator_vs_responder, maintainer_vs_drifter]}, position: {scale: position_5}}}
@@ -46,10 +46,10 @@ predicates:
      note: "STATED-ONLY ('I'm anxious-avoidant, classic') — attachment inference is out of scope in v1 by design"}
   # --- v0.2 additions ---
   - {name: rel.support_exchange, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred, key_fields: [person, kind],
-     value_schema: {person: entity_ref, direction: [gives, receives, mutual], kind: [practical, emotional, professional, financial]},
+     value_schema: {person: person_ref, direction: [gives, receives, mutual], kind: [practical, emotional, professional, financial]},
      note: "v0.2 — who the owner leans on and who leans on them; from stated support acts, never from message volume"}
   - {name: rel.household_member, value_type: structured, cardinality: multi, temporal: interval, altitude: stated, key_fields: [member],
-     value_schema: {member: entity_ref, kind: [partner, child, parent, sibling, roommate, other]},
+     value_schema: {member: person_ref, kind: [partner, child, parent, sibling, roommate, other]},
      note: "v0.2 — resolves identity.household_size into named people; pets are household.pets, not this predicate"}
 
 cross_refs:

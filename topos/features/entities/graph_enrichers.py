@@ -70,7 +70,27 @@ def _ensure_node(
     label: str,
     entity_type: str,
     metadata: Optional[Dict] = None,
+    first_at: Optional[str] = None,
+    last_at: Optional[str] = None,
 ) -> None:
+    """Mint a derived node, WITH the time it belongs to.
+
+    `first_seen`/`last_seen` were absent from the insert and this path never calls
+    `record_mention`, so the resolver's date logic — which derives them from
+    `entity_mentions` — never ran for a node minted here. Measured on the live node
+    2026-08-29: **1,650 of 4,167 entities carried no timestamp, and the two kinds
+    minted by this module were 100% of them** — every goal (1,417) and every
+    conversation (129). People, orgs, places and projects, which come through the
+    resolver, were fully dated.
+
+    The consequence is not cosmetic: a node with no `first_event_at` cannot be placed
+    on a temporal view, so it either vanishes from the timeline or inherits a date from
+    whichever edge happens to touch it first.
+
+    MIN/MAX rather than overwrite, because a rebuild re-asserts these nodes and a goal
+    clusters several records: the node's span is the span of its evidence, and the
+    second run must not narrow it to whatever it saw last.
+    """
     import json
 
     from .resolver import normalize_name
@@ -80,11 +100,23 @@ def _ensure_node(
         """
         INSERT OR IGNORE INTO entities
             (entity_id, entity_type, canonical_name, normalized_name, is_self,
-             mention_count, metadata_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, 0, 0, ?, datetime('now'), datetime('now'))
+             mention_count, metadata_json, first_seen, last_seen, created_at, updated_at)
+        VALUES (?, ?, ?, ?, 0, 0, ?, ?, ?, datetime('now'), datetime('now'))
         """,
-        (node_id, entity_type, label, normalize_name(label), json.dumps(meta)),
+        (node_id, entity_type, label, normalize_name(label), json.dumps(meta),
+         first_at or None, last_at or first_at or None),
     )
+    if first_at or last_at:
+        conn.execute(
+            """
+            UPDATE entities SET
+                first_seen = MIN(COALESCE(NULLIF(first_seen,''), ?), COALESCE(?, first_seen)),
+                last_seen  = MAX(COALESCE(NULLIF(last_seen,''),  ?), COALESCE(?, last_seen))
+            WHERE entity_id = ?
+            """,
+            (first_at or last_at, first_at or last_at,
+             last_at or first_at, last_at or first_at, node_id),
+        )
     # Refresh label + metadata on re-runs (variant lists evolve).
     conn.execute(
         "UPDATE entities SET canonical_name=?, normalized_name=?, metadata_json=?, "
@@ -234,6 +266,9 @@ def _materialize_goals(
             occurrences = max(len(records), 1)
             variants = [m["text"] for m in members]
 
+            # The span comes first now: the node carries it, not just the edge.
+            first_at = events[0] if events else None
+            last_at = events[-1] if events else None
             _ensure_node(
                 conn, node_id, rep["text"], "goal",
                 metadata={
@@ -241,9 +276,8 @@ def _materialize_goals(
                     "variant_count": len(variants),
                     "occurrences": occurrences,
                 } if len(variants) > 1 else {"occurrences": occurrences},
+                first_at=first_at, last_at=last_at,
             )
-            first_at = events[0] if events else None
-            last_at = events[-1] if events else None
             if owner:
                 _record_touched(_upsert_materialized_edge(
                     conn, src=owner, dst=node_id, edge_type=EDGE_PURSUES,
@@ -397,10 +431,24 @@ def _materialize_conversations(
         """
     ).fetchall()
     conv_ids = {str(r[0]) for r in rows}
+    # A conversation's span is its messages', not its mentions': the mention query above
+    # groups by entity and only carries a MAX, so a thread that ran for months would be
+    # born on the day of its last mention. Read the real bounds from the messages.
+    spans: Dict[str, tuple] = {}
+    try:
+        for cid, first_at, last_at in conn.execute(
+            "SELECT conversation_id, MIN(NULLIF(event_at,'')), MAX(NULLIF(event_at,''))"
+            "  FROM conversation_messages GROUP BY conversation_id"
+        ).fetchall():
+            spans[str(cid)] = (first_at, last_at)
+    except sqlite3.Error:
+        spans = {}
     with with_db_write():
         for conv_id in conv_ids:
             label = conv_id if len(conv_id) <= 40 else conv_id[:37] + "…"
-            _ensure_node(conn, f"conv_{conv_id}", label, "conversation")
+            first_at, last_at = spans.get(str(conv_id), (None, None))
+            _ensure_node(conn, f"conv_{conv_id}", label, "conversation",
+                         first_at=first_at, last_at=last_at)
         for conv_id, entity_id, count, last_at in rows:
             _record_touched(_upsert_materialized_edge(
                 conn, src=f"conv_{conv_id}", dst=str(entity_id), edge_type=EDGE_MENTIONS,

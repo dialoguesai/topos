@@ -175,19 +175,91 @@ class DerivationWriter:
     # ---------------------------------------------------------------- ladder
 
     def _resolve_person(self, name: str):
+        """A name from an extraction -> the person entity it means, or None.
+
+        Exact name and alias are ONE pool, ranked, rather than two tiers tried in order.
+        Trying the exact name first looks obviously right and is wrong wherever extraction
+        has split a human in two: the owner's most-messaged collaborator exists twice on
+        the live node, once as a full name carrying the short form as an alias and linked
+        to an address-book contact, and once as the bare short form with no contact. An
+        exact-first ladder binds every fact to the second one — the half with no messages
+        and no card — while the alias branch that would have found the real person is never
+        reached.
+
+        ADDRESS-BOOK LINKAGE decides, not evidence volume. The tempting tiebreak is "more
+        mentions wins", and on this node that picks the wrong one every time: the prose
+        duplicate has 21 mentions to the contact-linked person's 2, because prose is where
+        the extractor works and the address book is where the owner told us who is real.
+        Mentions only break a tie between two entities the address book cannot separate.
+        """
         if not name or not isinstance(name, str):
             return None
         n = " ".join(name.strip().lower().split())
-        row = self.conn.execute(
-            "SELECT entity_id FROM entities WHERE entity_type='person' AND normalized_name=?", (n,)
-        ).fetchone()
-        if row:
-            return row[0]
-        row = self.conn.execute(
-            "SELECT entity_id FROM entities WHERE entity_type='person' AND aliases_json LIKE ? LIMIT 1",
-            (f'%"{n}"%',),
-        ).fetchone()
-        return row[0] if row else None
+        try:
+            rows = self.conn.execute(
+                "SELECT entity_id, COALESCE(contact_id,''), COALESCE(mention_count,0)"
+                "  FROM entities"
+                " WHERE entity_type='person' AND (normalized_name=? OR aliases_json LIKE ?)",
+                (n, f'%"{n}"%'),
+            ).fetchall()
+        except sqlite3.OperationalError:
+            # A minimal `entities` table — fixtures and older schemas carry neither
+            # `contact_id` nor `mention_count`. Rank on what exists rather than failing
+            # the whole assertion: resolution is this function's job, and the preference
+            # is a refinement of it, not a precondition for it.
+            rows = [
+                (r[0], "", 0)
+                for r in self.conn.execute(
+                    "SELECT entity_id FROM entities"
+                    " WHERE entity_type='person' AND (normalized_name=? OR aliases_json LIKE ?)",
+                    (n, f'%"{n}"%'),
+                ).fetchall()
+            ]
+        if not rows:
+            return None
+        rows.sort(key=lambda r: (1 if str(r[1]).strip() else 0, int(r[2] or 0), str(r[0])),
+                  reverse=True)
+        return rows[0][0]
+
+    def _bind_entity_refs(self, pack, pred, value):
+        """Resolve the person NAMES in a value to entity ids, in place.
+
+        The packs declare these fields as `entity_ref`, which was a type with no
+        implementation: 48 declarations across 12 packs, no code matching the token, so the
+        extractor was told the field was prose, wrote prose, and the materialiser resolved
+        that prose as a TOPIC. Every relationship fact on the live node points at a topic
+        rather than at a person.
+
+        Names are KEPT alongside the ids. They are what the key is computed from, what the
+        card shows when resolution fails, and what a reviewer reads in the quarantine queue
+        — replacing them with ids would make an unresolved fact unreadable.
+
+        Returns the id for the singular person field, which is what `object_entity_id`
+        holds. A list field cannot fit one column, so its ids ride in the value where a
+        reader can join them.
+        """
+        from .template import ENTITY_REF_LIST_TYPES, person_fields_for
+
+        if not isinstance(value, dict):
+            return None
+        schema = getattr(pred, "value_schema", None) or {}
+        single_id = None
+        for field in person_fields_for(pack):
+            if field not in value or value.get(field) in (None, "", []):
+                continue
+            spec = schema.get(field)
+            if isinstance(spec, str) and spec.strip() in ENTITY_REF_LIST_TYPES:
+                raw = value.get(field)
+                names = raw if isinstance(raw, list) else [raw]
+                ids = [i for i in (self._resolve_person(str(x)) for x in names) if i]
+                if ids:
+                    value[f"{field}_entity_ids"] = ids
+            else:
+                resolved = self._resolve_person(str(value.get(field)))
+                if resolved and single_id is None:
+                    single_id = resolved
+                    value[f"{field}_entity_id"] = resolved
+        return single_id
 
     def _quarantine(self, subject_entity_id: str, predicate: str, value, confidence: float,
                     reason: str, *, pack=None, source_refs=None, quote: str = "", about: str = ""):
@@ -238,6 +310,12 @@ class DerivationWriter:
         pred = pack.predicates.get(predicate)
         if pred is None:
             return {"outcome": "schema_reject", "reason": f"unknown predicate {predicate}"}
+        # Bind the person NAMES in the value to entity ids. Done here rather than at each
+        # call site so every producer gets it — the synthesiser already passed an id, the
+        # LLM path never did, and that asymmetry is why exactly one predicate on the live
+        # node has a resolved object.
+        if object_entity_id is None:
+            object_entity_id = self._bind_entity_refs(pack, pred, value)
         # --- A3 (attribution ladder): route by subject BEFORE any owner-assert ---
         about = (about or "owner").strip()
         if about != "owner":

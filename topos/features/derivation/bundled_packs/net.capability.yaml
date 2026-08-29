@@ -35,7 +35,7 @@ predicates:
     altitude: inferred
     key_fields: [person, skill]
     value_schema:
-      person: entity_ref
+      person: person_ref
       skill: string
       basis: {enum: [shipped_artifact, reviewed_work, taught_others, was_consulted, stated_by_them]}
     note: >
@@ -44,18 +44,18 @@ predicates:
       distinguish those. A skill with no basis is not an instance of this predicate.
   - {name: net.role_held, value_type: structured, cardinality: multi, temporal: interval,
      altitude: stated, key_fields: [person],
-     value_schema: {person: entity_ref, role: string, org: string}}
+     value_schema: {person: person_ref, role: string, org: string}}
   - {name: net.domain, value_type: structured, cardinality: multi, temporal: interval,
      altitude: inferred, key_fields: [person, domain],
-     value_schema: {person: entity_ref, domain: string}}
+     value_schema: {person: person_ref, domain: string}}
   - {name: net.opportunity_sent, value_type: structured, cardinality: multi, temporal: episodic,
      altitude: stated, key_fields: [person, kind], event_identity: "windowed:30",
-     value_schema: {person: entity_ref, kind: {enum: [referral, introduction, job_lead, client_lead, invitation]},
+     value_schema: {person: person_ref, kind: {enum: [referral, introduction, job_lead, client_lead, invitation]},
                     description: string},
      note: "catalog #54 — who has actually sent work or opportunities the owner's way"}
   - {name: net.collaboration, value_type: structured, cardinality: multi, temporal: interval,
      altitude: inferred, key_fields: [person, artifact],
-     value_schema: {person: entity_ref, artifact: string, outcome: {enum: [shipped, abandoned, ongoing, unknown]}},
+     value_schema: {person: person_ref, artifact: string, outcome: {enum: [shipped, abandoned, ongoing, unknown]}},
      note: "catalog #56 — who the owner has done their best work with, and on what"}
 
 cross_refs:

@@ -32,7 +32,7 @@ predicates:
   - {name: work.arrangement, value_type: structured, cardinality: multi, temporal: interval, altitude: stated,
      value_schema: {schedule: [nine_to_five, flexible, shift, on_call, irregular], location_mode: [office, hybrid, remote]}}
   - {name: work.project, value_type: structured, cardinality: multi, temporal: interval, altitude: stated, key_fields: [project],
-     value_schema: {project: entity_ref_or_string, status: [active, shipped, paused, abandoned], collaborators: entity_refs},
+     value_schema: {project: entity_ref_or_string, status: [active, shipped, paused, abandoned], collaborators: person_refs},
      note: "absorbs works_on; project entities join the graph (pursues/works_on edges exist)"}
   - name: work.career_event
     value_type: structured

@@ -1745,6 +1745,20 @@ def auto_link_duplicates(nodes: List[Dict[str, Any]], *, split_ids=()) -> List[D
                 continue
             keep["mention_count"] = int(keep.get("mention_count", 0)) + int(other.get("mention_count", 0))
             keep["evidence"]["mentioned"] = True
+            # The absorbed node's ALIASES come too. Without this the fold quietly narrows
+            # the surviving person: the names live on the mention-side entity, the messaged
+            # node keeps its own, and anything matching a person by name afterwards — a
+            # relationship fact naming the short form — misses the very node the fold just
+            # built. Measured: the owner's closest collaborator kept a work fact off their
+            # card for exactly this reason, after the fold had already joined him up.
+            merged_aliases = list(keep.get("aliases") or [])
+            for alias in (other.get("aliases") or []):
+                if alias not in merged_aliases:
+                    merged_aliases.append(alias)
+            if other.get("label") and other["label"] not in merged_aliases:
+                merged_aliases.append(other["label"])
+            if merged_aliases:
+                keep["aliases"] = merged_aliases
             if not keep.get("entity_id") and other.get("entity_id"):
                 keep["entity_id"] = other["entity_id"]
             keep["sources"] = sorted(set(keep.get("sources", [])) | set(other.get("sources", [])))
@@ -2212,6 +2226,12 @@ def attach_shared_with_owner(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[str
     return {"attached": attached}
 
 
+#: Non-`rel.` predicates whose OBJECT is a person, and which therefore belong on that
+#: person's card. Named individually: the reader's job is facts ABOUT this person, and most
+#: of what the packs produce is about the owner.
+PERSON_OBJECT_PREDICATES = frozenset({"work.project"})
+
+
 def person_relationship_facts(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[str, int]:
     """Attach the owner's relationship facts to the people they are about.
 
@@ -2222,9 +2242,16 @@ def person_relationship_facts(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[st
     by_entity = {str(n["entity_id"]): n for n in nodes if n.get("entity_id")}
     by_name: Dict[str, Dict[str, Any]] = {}
     for n in nodes:
-        key = _normalized_name(n.get("label"))
-        if key and not n.get("is_owner"):
-            by_name.setdefault(key, n)
+        if n.get("is_owner"):
+            continue
+        # Display name AND the spine's aliases. On the name alone a fact saying the short
+        # form never reaches the person the graph knows by their full name — the third
+        # place in this file where that split has had to be handled, after the duplicate
+        # fold and the co-activity attach.
+        for candidate in [n.get("label"), *(n.get("aliases") or [])]:
+            key = _normalized_name(candidate)
+            if key:
+                by_name.setdefault(key, n)
     # Degrades to UNDATED facts rather than to none. The `except sqlite3.Error` below used to
     # swallow the whole read, so adding `valid_from` to the SELECT silently dropped every
     # relationship fact anywhere the column was absent — the fixture caught it here, but on a
@@ -2257,15 +2284,38 @@ def person_relationship_facts(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[st
         except (TypeError, ValueError):
             continue
         predicate = str(fact.get("predicate") or "")
-        if not predicate.startswith("rel."):
+        # An ALLOWLIST, not a prefix drop. Widening this to every predicate would put the
+        # owner's own medication and self-reported states on other people's cards: 156 of
+        # the 239 facts here are about the owner and belong nowhere near a contact. What
+        # belongs is a fact whose OBJECT is this person — the relationship predicates, and
+        # a project the owner named them a collaborator on.
+        if not (predicate.startswith("rel.") or predicate in PERSON_OBJECT_PREDICATES):
             continue
         struct = fact.get("value_struct") or {}
-        # The fact names its person. `object_entity_id` is often absent, and where present it
-        # suffers the same duplicate-entity split the graph already folds.
+        # The fact names its person three ways, strongest first. `object_entity_id` is now
+        # populated by the writer's entity_ref binding; before that only one predicate on
+        # the whole node had it, which is why the name fallback exists and stays.
         node = by_entity.get(str(fact.get("object_entity_id") or ""))
         if node is None:
             node = by_name.get(_normalized_name(struct.get("person")))
-        if node is None or node.get("is_owner"):
+        # A LIST field — a project's collaborators — is a fact about EVERY person it
+        # names, not just the first one that resolves. Two people on one project each
+        # worked on it.
+        targets = [node] if node is not None else []
+        if not targets:
+            for entity_id in (struct.get("collaborators_entity_ids") or []):
+                found = by_entity.get(str(entity_id))
+                if found is not None and found not in targets:
+                    targets.append(found)
+            if not targets:
+                raw = struct.get("collaborators")
+                names = raw if isinstance(raw, list) else str(raw or "").split(",")
+                for candidate in names:
+                    found = by_name.get(_normalized_name(candidate))
+                    if found is not None and found not in targets:
+                        targets.append(found)
+        targets = [t for t in targets if not t.get("is_owner")]
+        if not targets:
             continue
         parsed: List[Dict[str, Any]] = []
         try:
@@ -2294,9 +2344,13 @@ def person_relationship_facts(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[st
             "at": valid_from,
             "sources": [],
         }
-        node.setdefault("facts", []).append(entry)
-        pending.append((entry, parsed))
-        attached += 1
+        for target in targets:
+            # One entry per person, so a card can be re-ordered or filtered without
+            # reaching into a shared object.
+            own = dict(entry)
+            target.setdefault("facts", []).append(own)
+            pending.append((own, parsed))
+            attached += 1
     _attach_evidence(conn, pending)
     for node in nodes:
         for fact in node.get("facts", []):
