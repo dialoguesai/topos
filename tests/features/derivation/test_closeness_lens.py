@@ -80,13 +80,13 @@ def _run(db, **kw):
 
 
 def test_handles_normalise_across_both_sides_of_the_join():
-    assert normalise_handle("+1 (512) 740-0415") == normalise_handle("+15127400415")
+    assert normalise_handle("+1 (555) 555-0105") == normalise_handle("+15555550105")
     assert normalise_handle("Camille@Example.com") == "camille@example.com"
 
 
 def test_an_identifier_is_never_a_person_name():
     assert looks_like_a_person_name("Mike November")
-    assert not looks_like_a_person_name("+17184834576")   # unnamed contact carries its handle
+    assert not looks_like_a_person_name("+15555550106")   # unnamed contact carries its handle
     assert not looks_like_a_person_name("self")           # the owner's own entity
     assert not looks_like_a_person_name("unknown:0")      # has letters, still an id
     assert not looks_like_a_person_name("apple.com@forgotten.name")

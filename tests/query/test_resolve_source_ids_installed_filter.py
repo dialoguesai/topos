@@ -119,7 +119,7 @@ def test_contacts_resolve_raw_surfaces_identifier_under_installed_filter(conn) -
     from topos.query.types import RetrievalRequest
     from topos.storage.adapters.factory import AdapterFactory
 
-    phone = "2108786568"
+    phone = "5555550108"
     conn.execute(
         """
         INSERT INTO contacts (

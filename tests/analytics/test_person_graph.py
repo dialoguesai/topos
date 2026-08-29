@@ -412,8 +412,8 @@ class TestTheOwnerIsNotTheirOwnContact:
         _person(c, "e-owner", "Owner", is_self=1)
         c.execute("CREATE TABLE signal_identity (dataset_id TEXT, my_phone_number TEXT,"
                   " my_signal_id TEXT, updated_at TEXT)")
-        c.execute("INSERT INTO signal_identity VALUES ('ds','+15125084318',NULL,'t')")
-        _dyad(c, "+15125084318", msgs=25)
+        c.execute("INSERT INTO signal_identity VALUES ('ds','+15555550104',NULL,'t')")
+        _dyad(c, "+15555550104", msgs=25)
         assert [n for n in PG.build_person_nodes(c, "ds") if not n["is_owner"]] == []
 
 

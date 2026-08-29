@@ -24,7 +24,7 @@ def db(tmp_path):
     """)
     people = [
         # (contact_id, name, identifier, inbound messages, last contact)
-        ("c1", "Mike November", "+1 (512) 740-0415", 206, "2026-08-24T10:00:00+00:00"),
+        ("c1", "Mike November", "+1 (555) 555-0105", 206, "2026-08-24T10:00:00+00:00"),
         ("c2", "Alpha Xray", "+15125550164", 164, "2026-08-24T09:00:00+00:00"),
         ("c3", "Alpine Xray", "camille@example.com", 28, "2026-08-19T09:00:00+00:00"),
         ("c4", "Old Colleague", "+15125559999", 12, "2026-01-02T09:00:00+00:00"),
@@ -51,7 +51,7 @@ def db(tmp_path):
     conn.execute("INSERT INTO conversation_messages VALUES ('u1','+15125550000',0,?)",
                  ("2026-08-25T09:00:00+00:00",))
     # the owner's own messages are not evidence of closeness to themselves
-    conn.execute("INSERT INTO conversation_messages VALUES ('s1','+15127400415',1,?)",
+    conn.execute("INSERT INTO conversation_messages VALUES ('s1','+15555550105',1,?)",
                  ("2026-08-25T09:00:00+00:00",))
     conn.commit()
     return conn
@@ -73,7 +73,7 @@ def test_ranks_by_interaction_and_joins_through_identifiers(db):
     assert [p["person"] for p in got] == [
         "Mike November", "Alpha Xray", "Alpine Xray", "Old Colleague"]
     assert got[0]["messages"] == 206
-    # the join had to normalise "+1 (512) 740-0415" against a raw "+15127400415"
+    # the join had to normalise "+1 (555) 555-0105" against a raw "+15555550105"
     assert got[0]["last_contact"] == "2026-08-24"
 
 

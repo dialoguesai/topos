@@ -629,7 +629,7 @@ def _dedupe_renderings(renderings: List[DerivedRendering]) -> List[DerivedRender
     """One row per person, not one per key that reaches them.
 
     The same person arrives twice — once keyed by name from a journal entry
-    ("camille") and once by phone from a message thread ("15126500198" ->
+    ("camille") and once by phone from a message thread ("15555550109" ->
     "Alpine Xray"). Two near-identical vectors for one person is a wasted ANN
     neighbor and a duplicated answer; the richer rendering wins.
     """

@@ -49,8 +49,8 @@ def _identities(c):
     c.execute("CREATE TABLE contacts (contact_id TEXT PRIMARY KEY, display_name TEXT)")
     c.executemany("INSERT INTO entities VALUES (?,?,?)", [
         ("ent_nora", "Nora Whitfield", None),
-        ("ent_unnamed", "+15126331615", "c_bare"),
-        ("ent_via_contact", "+13109275698", "c_named"),
+        ("ent_unnamed", "+15555550103", "c_bare"),
+        ("ent_via_contact", "+15555550107", "c_named"),
     ])
     c.executemany("INSERT INTO contacts VALUES (?,?)",
                   [("c_bare", None), ("c_named", "Lima Mike")])

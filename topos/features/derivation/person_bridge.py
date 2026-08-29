@@ -2,7 +2,7 @@
 
 Every lane that says something about a PERSON has to cross the same seam:
 `conversation_messages.sender_id` and the L1 analytics' `a_key`/`b_key` both hold
-a RAW handle ("+15127400415", an email), while names live in `contacts` and the
+a RAW handle ("+15555550105", an email), while names live in `contacts` and the
 graph keys on `entities`. `contact_identifiers` is the only bridge, and
 `entities.contact_id` carries it the last hop (57/57 of the owner's comms
 partners are linked on the live node).
@@ -24,7 +24,7 @@ from typing import Any, Dict
 def normalise_handle(raw: Any) -> str:
     """One key shape for both sides of the identifier join.
 
-    Phones arrive as "+1 (512) 740-0415" in the address book and "+15127400415"
+    Phones arrive as "+1 (555) 555-0105" in the address book and "+15555550105"
     on a message or a dyad key; digits-only/last-ten collapses both. Anything
     containing a letter (email, @handle) folds to lowercase instead.
     """
@@ -42,7 +42,7 @@ def looks_like_a_person_name(name: str) -> bool:
 
     Unnamed contacts carry their handle as `entities.canonical_name`, and the
     owner's own entity is literally named "self". A fact reading
-    `{person: "+17184834576", tier: "inner_circle"}` names nobody, and one reading
+    `{person: "+15555550106", tier: "inner_circle"}` names nobody, and one reading
     `{person: "self"}` makes the owner their own inner circle — both were in the
     top three of the live edge ranking before these guards existed.
     """

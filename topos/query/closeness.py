@@ -13,7 +13,7 @@ The `RelationshipEdge` store looked like the right source and is not: its
 "recent"), so it can enumerate contacts but cannot rank them.
 
 The signal was never missing, only unjoined. `conversation_messages.sender_id`
-holds the RAW handle — "+15127400415", an email, a transcript speaker label —
+holds the RAW handle — "+15555550105", an email, a transcript speaker label —
 while names live in `contacts`, reachable only through `contact_identifiers`.
 Nothing in the query path performed that hop, so all 4,866 inbound messages
 resolved to zero named people. Normalising both sides and joining recovers the
@@ -72,7 +72,7 @@ def _normalise(raw: Any) -> str:
     """One key shape for both sides of the join.
 
     Phone numbers arrive as "+1 (512) 740-0415" in the address book and
-    "+15127400415" on the message, so digits-only, last ten, drops the country
+    "+15555550105" on the message, so digits-only, last ten, drops the country
     code and every separator. Everything else (email, handle) folds to lowercase.
     """
     s = str(raw or "").strip()

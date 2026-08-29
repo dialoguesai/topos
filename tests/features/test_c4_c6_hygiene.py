@@ -34,10 +34,10 @@ def test_c4_allowlist_and_codes_survive() -> None:
 
 
 def test_c6_identifier_lookup_keys_cover_phone_variants() -> None:
-    keys = _identifier_lookup_keys("+17184834576")
-    assert "+17184834576" in keys
-    assert "17184834576" in keys
-    assert "7184834576" in keys
+    keys = _identifier_lookup_keys("+15555550106")
+    assert "+15555550106" in keys
+    assert "15555550106" in keys
+    assert "5555550106" in keys
 
 
 def test_c6_group_label_resolves_phone_variants(tmp_path) -> None:
@@ -52,13 +52,13 @@ def test_c6_group_label_resolves_phone_variants(tmp_path) -> None:
         "INSERT INTO contact_identifiers "
         "(dataset_id, source_id, identifier, identifier_type, contact_id) "
         "VALUES (?, ?, ?, ?, ?)",
-        ("default", "imessage", "+17184834576", "phone", "c1"),
+        ("default", "imessage", "+15555550106", "phone", "c1"),
     )
     conn.commit()
     label_map = _contact_label_map(conn)
-    assert _group_label("+17184834576", label_map) == "Maya Chen (+17184834576)"
+    assert _group_label("+15555550106", label_map) == "Maya Chen (+15555550106)"
     # Stat group keys sometimes omit '+' — still resolve via digit variants.
-    assert _group_label("17184834576", label_map).startswith("Maya Chen")
+    assert _group_label("15555550106", label_map).startswith("Maya Chen")
     assert _group_label("self", label_map) == "myself"
     assert _group_label("unknown-handle", label_map) == "unknown-handle"
     conn.close()

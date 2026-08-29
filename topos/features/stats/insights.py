@@ -104,7 +104,7 @@ def _identifier_lookup_keys(ident: str) -> List[str]:
 
 def _contact_label_map(conn) -> Dict[str, str]:
     """identifier -> display name for message/cadence stat groups (plan C6). Stat tags
-    read 'Messages with +17184834576'; a name is both more useful and closes an
+    read 'Messages with +15555550106'; a name is both more useful and closes an
     oracle↔human agreement class. Best-effort: returns {} if the tables are absent."""
     try:
         rows = conn.execute(
