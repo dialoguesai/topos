@@ -510,6 +510,8 @@ def graph_snapshot(
     as_of: Optional[str] = None,
     selection: str = "weight",
     offset: int = 0,
+    event_after: Optional[str] = None,
+    event_before: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Entity graph in the legacy list_graph shape (nodes/edges dicts).
 
@@ -520,6 +522,11 @@ def graph_snapshot(
     — edges whose validity window covers it (valid_from <= as_of < valid_to) —
     driving a temporal scrubber. It supersedes include_closed (a point-in-time
     view is neither "active now" nor "all history").
+
+    ``event_after`` / ``event_before`` keep edges whose activity stamp
+    (last_event_at, else valid_from) falls in that range — a wider *time*
+    window for playback, not a farther point-in-time snapshot. An activity
+    range includes ended edges (their last event is the point).
 
     ``selection``:
       - ``weight`` (default): ORDER BY weight DESC — MCP / firewall-safe slice.
@@ -540,16 +547,27 @@ def graph_snapshot(
     # same floor would hide every latent edge. Quality is already gated at write
     # time (AFFINITY_FLOOR_ABS), so semantic_affinity is exempt from this filter.
     where_params: List[Any] = [EDGE_SEMANTIC_AFFINITY, min_weight]
+    after = (str(event_after).strip() or None) if event_after else None
+    before = (str(event_before).strip() or None) if event_before else None
     if as_of:
         clause = (
             " AND (valid_from IS NULL OR valid_from <= ?)"
             " AND (valid_to IS NULL OR valid_to > ?)"
         )
         where_params.extend([as_of, as_of])
+    elif after or before:
+        # Activity window: ended edges with a last event in-range belong here.
+        clause = ""
     elif include_closed:
         clause = ""
     else:
         clause = " AND valid_to IS NULL"
+    if after:
+        clause += " AND COALESCE(last_event_at, valid_from) >= ?"
+        where_params.append(after)
+    if before:
+        clause += " AND COALESCE(last_event_at, valid_from) <= ?"
+        where_params.append(before)
 
     where_sql = (
         f"FROM entity_edges WHERE (edge_type = ? OR weight >= ?){clause}"

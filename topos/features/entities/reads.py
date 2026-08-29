@@ -213,6 +213,8 @@ def entity_graph(
     as_of: Optional[str] = None,
     selection: str = "weight",
     offset: int = 0,
+    event_after: Optional[str] = None,
+    event_before: Optional[str] = None,
 ) -> Dict[str, Any]:
     snapshot = graph_snapshot(
         conn,
@@ -223,6 +225,8 @@ def entity_graph(
         as_of=(str(as_of).strip() or None) if as_of else None,
         selection=str(selection or "weight"),
         offset=max(0, int(offset or 0)),
+        event_after=(str(event_after).strip() or None) if event_after else None,
+        event_before=(str(event_before).strip() or None) if event_before else None,
     )
     if guard.sees_everything or not isinstance(snapshot, dict):
         return snapshot

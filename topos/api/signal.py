@@ -297,6 +297,8 @@ async def get_entity_graph(
     as_of: Optional[str] = Query(default=None),
     selection: str = Query(default="weight"),
     offset: int = Query(default=0, ge=0),
+    event_after: Optional[str] = Query(default=None),
+    event_before: Optional[str] = Query(default=None),
     _api_key: str = Depends(require_api_key),
 ):
     """Entity-spine graph (decayed typed edges) in list_graph node/edge shape.
@@ -304,6 +306,8 @@ async def get_entity_graph(
     Each edge carries valid_from/valid_to/last_event_at. ``as_of`` (ISO date)
     returns the graph as it stood at that instant (temporal scrubber);
     ``include_closed`` adds ended edges to the present view.
+    ``event_after`` / ``event_before`` keep edges whose last activity falls
+    in that range (playback loads a wide time window in one request).
 
     ``selection=weight`` (default) ranks by weight for MCP/minimal slices;
     ``selection=all`` ranks by recency for the owner knowledge-graph UI.
@@ -325,6 +329,8 @@ async def get_entity_graph(
         as_of=as_of,
         selection=selection,
         offset=offset,
+        event_after=event_after,
+        event_before=event_before,
     )
 
 

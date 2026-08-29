@@ -511,6 +511,8 @@ async def handle_signal_entity_graph(message: Dict[str, Any]) -> Optional[Dict[s
         as_of = payload.get("as_of") or None
         selection = str(payload.get("selection") or "weight")
         offset = max(0, int(payload.get("offset") or 0))
+        event_after = payload.get("event_after") or None
+        event_before = payload.get("event_before") or None
 
         def _read(conn):
             # Guard built here, not on the loop: it retains this connection.
@@ -524,6 +526,8 @@ async def handle_signal_entity_graph(message: Dict[str, Any]) -> Optional[Dict[s
                 as_of=as_of,
                 selection=selection,
                 offset=offset,
+                event_after=event_after,
+                event_before=event_before,
             )
 
         result = await run_db_read(_read)

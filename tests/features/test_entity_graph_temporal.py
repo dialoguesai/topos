@@ -80,3 +80,28 @@ def test_as_of_returns_point_in_time_graph(conn):
     npairs = _edge_pairs(now)
     assert ({(a, d), (d, a)} & npairs)
     assert (a, b) not in npairs and (b, a) not in npairs
+
+
+def test_event_range_returns_activity_in_window(conn):
+    a, b, d = _seed(conn)
+    # A-B last event 2025-06; A-Juliet last event 2026-04. A 2026 window
+    # should keep Juliet and drop the ended 2025 relationship.
+    win = graph_snapshot(
+        conn,
+        event_after="2026-01-01T00:00:00Z",
+        event_before="2026-06-01T00:00:00Z",
+        selection="all",
+    )
+    pairs = _edge_pairs(win)
+    assert ({(a, d), (d, a)} & pairs)
+    assert (a, b) not in pairs and (b, a) not in pairs
+
+    past = graph_snapshot(
+        conn,
+        event_after="2025-01-01T00:00:00Z",
+        event_before="2025-12-31T00:00:00Z",
+        selection="all",
+    )
+    ppairs = _edge_pairs(past)
+    assert ({(a, b), (b, a)} & ppairs)
+    assert (a, d) not in ppairs and (d, a) not in ppairs
