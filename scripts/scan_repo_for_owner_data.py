@@ -209,9 +209,73 @@ def _protected_names(db_path: str) -> list:
                         names.append(("person name", full))
         except sqlite3.Error:
             pass
+        # Contact IDENTIFIERS: phone numbers and email addresses.
+        #
+        # These were outside the threat model entirely until 2026-08-29, when
+        # nine of the owner's own numbers were found in tracked files -- four in
+        # shipped source, illustrating handle normalisation and an identity join
+        # with a real person's number. Every one of those files scanned clean
+        # for the whole time they sat there, because a phone number is not a
+        # name and nothing here looked for one.
+        #
+        # Phones are stored as the last ten digits and matched punctuation-blind
+        # (see `_phones_in`): the same number appears as +1XXXXXXXXXX, as
+        # eleven bare digits, as ten, and parenthesised, and a scrub that
+        # replaces three of those four leaves the fourth behind.
+        try:
+            for identifier, kind in conn.execute(
+                "SELECT DISTINCT identifier, identifier_type FROM contact_identifiers"
+                " WHERE identifier IS NOT NULL"
+            ):
+                raw = str(identifier or "").strip()
+                if not raw:
+                    continue
+                if "@" in raw:
+                    if len(raw) >= 6:
+                        names.append(("contact email", raw.lower()))
+                    continue
+                digits = "".join(ch for ch in raw if ch.isdigit())
+                # Ten digits is a North American number without its country
+                # code. Shorter runs are short codes and extensions, which
+                # collide with ordinary numerals.
+                if len(digits) >= 10:
+                    names.append(("contact phone", digits[-10:]))
+        except sqlite3.Error:
+            pass
         return names
     finally:
         conn.close()
+
+
+#: One pass finds every phone-SHAPED run in a body; membership does the rest.
+#: Compiling 714 per-number patterns and running each over every file took 8m46s
+#: on this repo -- a pre-commit hook nobody would keep. Extracting candidates
+#: once per file and testing a set is the same answer in one pass.
+_PHONE_SHAPED = re.compile(
+    r"(?<![0-9A-Za-z])\+?1?[\s\-().]*(?:[0-9][\s\-().]*){10}(?![0-9A-Za-z])")
+
+
+def _phones_in(body: str) -> Dict[str, int]:
+    """Last-ten-digits of every phone-shaped run -> 1-indexed line of the first.
+
+    A number is written +1 (512) 555-0100, +15125550100, 15125550100 and
+    5125550100 in different files, so matching a literal finds whichever form
+    the scrubber happened to think of and leaves the rest. Normalising the
+    candidate instead makes all four the same key.
+
+    The alphanumeric guards either side keep a ten-digit window inside a hex
+    checksum -- lockfiles are full of them -- from reading as a phone number.
+    A gate that fires on every lockfile is a gate somebody turns off.
+    """
+    found: Dict[str, int] = {}
+    for match in _PHONE_SHAPED.finditer(body):
+        digits = "".join(ch for ch in match.group(0) if ch.isdigit())
+        if len(digits) < 10:
+            continue
+        key = digits[-10:]
+        if key not in found:
+            found[key] = body[: match.start()].count("\n") + 1
+    return found
 
 
 def _find(haystack: str, needle: str) -> int:
@@ -335,9 +399,14 @@ def _scan_text(body: str, names: list, *, where: str) -> int:
     folded = body.lower().replace("\u2019", "'")
 
     hits = []
+    # Built once per body, not once per protected number.
+    phones = _phones_in(folded) if any(k == "contact phone" for k, _ in names) else {}
     for kind, name in names:
         needle = name.strip().lower().replace("\u2019", "'")
-        line = _hit_line(folded, needle, kind)
+        if kind == "contact phone":
+            line = phones.get(needle, 0)
+        else:
+            line = _hit_line(folded, needle, kind)
         if line:
             hits.append((kind, name, line))
     if not hits:
@@ -486,6 +555,7 @@ def main() -> int:
     ]
 
     hits = []
+    has_phones = any(k == "contact phone" for k, _ in names)
     for path in files:
         try:
             body = open(path, encoding="utf-8", errors="ignore").read()
@@ -494,9 +564,15 @@ def main() -> int:
         # Curly and straight apostrophes are the same name to a reader and
         # different strings to a grep, which is how one of these got through.
         folded = body.lower().replace("’", "'")
+        # One extraction pass per FILE, then set membership per number. Running a
+        # compiled pattern per protected number over every file took 8m46s here.
+        phones = _phones_in(folded) if has_phones else {}
         for kind, name in names:
             needle = name.strip().lower().replace("’", "'")
-            line = _hit_line(folded, needle, kind)
+            if kind == "contact phone":
+                line = phones.get(needle, 0)
+            else:
+                line = _hit_line(folded, needle, kind)
             if line:
                 hits.append((kind, name, path, line))
 

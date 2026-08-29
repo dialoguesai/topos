@@ -89,7 +89,7 @@ def test_an_identifier_is_never_a_person_name():
     assert not looks_like_a_person_name("+15555550106")   # unnamed contact carries its handle
     assert not looks_like_a_person_name("self")           # the owner's own entity
     assert not looks_like_a_person_name("unknown:0")      # has letters, still an id
-    assert not looks_like_a_person_name("apple.com@forgotten.name")
+    assert not looks_like_a_person_name("shop.example@forgotten.invalid")
 
 
 def test_the_bridge_maps_every_handle_a_person_holds(db):

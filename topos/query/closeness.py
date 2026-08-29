@@ -71,7 +71,7 @@ def matches_closeness(query_text: str) -> bool:
 def _normalise(raw: Any) -> str:
     """One key shape for both sides of the join.
 
-    Phone numbers arrive as "+1 (512) 740-0415" in the address book and
+    Phone numbers arrive as "+1 (555) 555-0105" in the address book and
     "+15555550105" on the message, so digits-only, last ten, drops the country
     code and every separator. Everything else (email, handle) folds to lowercase.
     """

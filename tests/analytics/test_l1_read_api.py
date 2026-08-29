@@ -321,6 +321,6 @@ def test_a_phone_with_a_telephony_crumb_is_not_a_name():
     from topos.features.derivation.net_subject_policy import _looks_named
 
     assert not _looks_named("+15555550103 ext")
-    assert not _looks_named("512-436-3842 x2")
+    assert not _looks_named("555-555-0110 x2")
     assert _looks_named("Bo Xu 512")  # a real name with a number attached survives
     assert _looks_named("Tango Uniform")

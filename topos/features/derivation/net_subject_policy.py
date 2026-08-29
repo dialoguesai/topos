@@ -103,7 +103,7 @@ def subject_policy(conn: sqlite3.Connection, subject_entity_id: str) -> Optional
 
 
 #: Two or more consecutive letters — enough to tell "Tango Uniform" or a handle from
-#: "+1 (512) 633-1615". Deliberately loose: the rule is meant to exclude the unnameable,
+#: "+1 (555) 555-0103". Deliberately loose: the rule is meant to exclude the unnameable,
 #: not to adjudicate what counts as a real name.
 _LETTERS = re.compile(r"[A-Za-z]{2,}")
 _PHONE_ONLY = re.compile(r"^[\s+()\-.\d]+$")
