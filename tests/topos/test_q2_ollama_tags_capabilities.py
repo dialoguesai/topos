@@ -91,6 +91,7 @@ async def test_ollama_list_models_payload_includes_capabilities_and_modified_at(
     monkeypatch.setattr(openai_llm.httpx, "AsyncClient", lambda **kwargs: _Client())
     monkeypatch.setattr(openai_llm.settings, "engine_ollama_base_url", "http://ollama.test")
     monkeypatch.setattr(openai_llm.settings, "ollama_list_timeout_sec", 5.0)
+    monkeypatch.setattr(openai_llm, "_ensure_ollama_running", lambda _base=None: None)
 
     payload = await openai_llm._ollama_list_models()
     assert payload["models"] == ["llama3.2:latest"]

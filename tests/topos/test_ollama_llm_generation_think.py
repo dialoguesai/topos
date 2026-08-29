@@ -59,6 +59,7 @@ async def test_nonstream_ollama_generate_sends_think_false(monkeypatch):
     monkeypatch.setattr(llm_openai.settings, "engine_ollama_base_url", "http://localhost:11434")
     monkeypatch.setattr(llm_openai.settings, "engine_ollama_generate_timeout_sec", 300.0)
     monkeypatch.setattr(llm_openai.settings, "sanitization_ollama_default_model", "llama3.2")
+    monkeypatch.setattr(llm_openai, "_ensure_ollama_running", lambda _base=None: None)
 
     out = await llm_openai._ollama_generate(
         {"prompt": "write digest", "model": "qwen3.5:9b-mlx", "max_tokens": 400}
@@ -95,6 +96,7 @@ async def test_nonstream_retries_when_model_rejects_think_false(monkeypatch):
     monkeypatch.setattr(llm_openai.httpx, "AsyncClient", _Client)
     monkeypatch.setattr(llm_openai.settings, "engine_ollama_base_url", "http://localhost:11434")
     monkeypatch.setattr(llm_openai.settings, "sanitization_ollama_default_model", "llama3.2")
+    monkeypatch.setattr(llm_openai, "_ensure_ollama_running", lambda _base=None: None)
 
     out = await llm_openai._ollama_generate({"prompt": "hi", "model": "gpt-oss"})
     assert out["output"] == "ok"

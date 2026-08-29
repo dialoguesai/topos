@@ -76,6 +76,7 @@ def _patch_stream(monkeypatch, captured: Dict[str, Any], lines: List[dict]) -> N
     monkeypatch.setattr(llm_openai.settings, "engine_ollama_base_url", "http://localhost:11434")
     monkeypatch.setattr(llm_openai.settings, "engine_ollama_generate_timeout_sec", 300.0)
     monkeypatch.setattr(llm_openai.settings, "sanitization_ollama_default_model", "llama3.2")
+    monkeypatch.setattr(llm_openai, "_ensure_ollama_running", lambda _base=None: None)
 
 
 _DONE = {"done": True, "prompt_eval_count": 10, "eval_count": 5, "done_reason": "stop"}

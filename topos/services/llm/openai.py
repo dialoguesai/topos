@@ -74,6 +74,16 @@ def _ollama_generate_timeout() -> httpx.Timeout:
     )
 
 
+def _ensure_ollama_running(base_url: str) -> None:
+    """Start a local Ollama if this request needs one and :11434 is down.
+
+    Blocking (open + poll). Async callers run it via ``asyncio.to_thread``.
+    """
+    from ...engine.ollama_runtime import ensure_running
+
+    ensure_running(base_url=base_url)
+
+
 def _resolve_payload_think(payload: Dict[str, Any], *, default: Optional[bool]) -> Optional[bool]:
     """Honor an explicit payload.think; otherwise use ``default``.
 
@@ -102,6 +112,7 @@ async def _ollama_generate(payload: Dict[str, Any]) -> Dict[str, Any]:
     temperature = payload.get("temperature")
     num_ctx = payload.get("num_ctx")
     base = settings.engine_ollama_base_url.rstrip("/")
+    await asyncio.to_thread(_ensure_ollama_running, base)
     # Routines / non-stream API: suppress CoT so the visible answer is not
     # starved. Models that reject think=false still get a request without it
     # (Ollama returns 400); we retry once without the flag below.
@@ -199,6 +210,7 @@ async def _ollama_stream_generate(
     temperature = payload.get("temperature")
     num_ctx = payload.get("num_ctx")
     base = settings.engine_ollama_base_url.rstrip("/")
+    await asyncio.to_thread(_ensure_ollama_running, base)
     body: Dict[str, Any] = {"model": model, "prompt": prompt, "stream": True}
     # Same default as the non-stream sibling, adapted through the capability
     # probe: models without the thinking capability (or that 400 on
@@ -353,6 +365,7 @@ async def _ollama_list_models() -> Dict[str, Any]:
     not on the machine.
     """
     base = settings.engine_ollama_base_url.rstrip("/")
+    await asyncio.to_thread(_ensure_ollama_running, base)
     timeout = httpx.Timeout(settings.ollama_list_timeout_sec, connect=10.0)
     logger.info("Ollama list models: base=%s timeout_sec=%s", base, settings.ollama_list_timeout_sec)
     try:
