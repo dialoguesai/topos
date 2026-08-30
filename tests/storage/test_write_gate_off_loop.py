@@ -106,3 +106,23 @@ async def test_guard_still_fires_when_work_stays_on_the_loop(loop_gate_warnings)
         pass
 
     assert _loop_sites(loop_gate_warnings), "write_gate stopped reporting loop acquisitions"
+
+
+async def test_reapplying_pipeline_jobs_schema_does_not_gate_on_the_loop(
+    tmp_path, loop_gate_warnings
+) -> None:
+    """job_store.ensure_pipeline_jobs_schema used to take the write gate on
+    every enqueue, including from the event loop. After the first apply it
+    must be a read."""
+    import asyncio
+
+    from topos.storage.db.migrations.pipeline_jobs_v1 import apply_pipeline_jobs_v1_up
+
+    conn = sqlite3.connect(str(tmp_path / "jobs.db"), check_same_thread=False)
+    try:
+        await asyncio.to_thread(apply_pipeline_jobs_v1_up, conn)
+        write_gate.reset_loop_warning_state()
+        apply_pipeline_jobs_v1_up(conn)
+        assert _loop_sites(loop_gate_warnings) == []
+    finally:
+        conn.close()

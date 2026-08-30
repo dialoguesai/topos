@@ -2,8 +2,9 @@
 
 Port of the original open-source topos-cli ``menu_bar_app`` (pystray + PIL):
 the Topos glyph with a status dot composited in the corner — yellow while
-starting, green while the node answers ``/healthcheck``, red while it does
-not, orange when a newer topos-node is published on PyPI. The menu offers
+starting, green while the node answers ``/healthcheck``, red only after
+repeated misses (a single late probe is a busy node, not a dead one),
+orange when a newer topos-node is published on PyPI. The menu offers
 API docs, the hosted Topos app, a one-click update when one is available,
 and Quit.
 
@@ -33,8 +34,34 @@ STATUS_COLORS = {
 }
 
 HEALTH_POLL_SECONDS = 5.0
+#: Must sit above ``probe_db_health``'s 2s budget. A 3s client deadline raced
+#: the probe under ingest load and painted the tray red for a live node.
+HEALTH_TIMEOUT_SECONDS = 10.0
+#: One missed probe is a stalled event loop, not a down node. Two in a row
+#: is enough to go red; a single success clears the count (same shape as
+#: the web app's ``HEALTH_FAILURE_THRESHOLD``).
+HEALTH_FAILURE_THRESHOLD = 2
 TOPOS_APP_URL = "https://topos.dialogues.ai"
 TOPOS_DOCS_URL = "https://topos.dialogues.ai/docs/welcome"
+
+
+def resolve_tray_health_status(
+    *,
+    probe_ok: bool,
+    consecutive_failures: int,
+    current_status: str,
+    failure_threshold: int = HEALTH_FAILURE_THRESHOLD,
+) -> tuple[str, int]:
+    """Map one ``/healthcheck`` result to (next_status, next_failure_count).
+
+    A single timeout must not flip a green (or still-starting) icon to red.
+    """
+    if probe_ok:
+        return "healthy", 0
+    failures = consecutive_failures + 1
+    if failures >= failure_threshold:
+        return "down", failures
+    return current_status, failures
 
 
 def tray_available() -> bool:
@@ -214,16 +241,24 @@ class ToposTray:
     def _poll_health(self) -> None:
         import httpx
 
+        consecutive_failures = 0
         while self._icon is not None and self._icon.visible:
             try:
                 # 401/403 = health auth enabled; the node answered, so it's up.
-                healthy = httpx.get(self.health_url, timeout=3.0).status_code in (200, 401, 403)
+                healthy = httpx.get(
+                    self.health_url, timeout=HEALTH_TIMEOUT_SECONDS
+                ).status_code in (200, 401, 403)
             except Exception:
                 healthy = False
             if healthy:
                 self._fetch_shell_status()
                 self._maybe_fetch_topos_name()
-            self._set_status("healthy" if healthy else "down")
+            next_status, consecutive_failures = resolve_tray_health_status(
+                probe_ok=healthy,
+                consecutive_failures=consecutive_failures,
+                current_status=self.status,
+            )
+            self._set_status(next_status)
             time.sleep(HEALTH_POLL_SECONDS)
 
     def _fetch_shell_status(self) -> None:

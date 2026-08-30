@@ -81,6 +81,50 @@ class TestStatusImage:
         assert a == 255 and r < 40 and g < 40 and b < 40
 
 
+class TestTrayHealthHysteresis:
+    """A busy node that answers /healthcheck late must not paint the tray red."""
+
+    def test_single_miss_keeps_green(self):
+        status, failures = tray.resolve_tray_health_status(
+            probe_ok=False, consecutive_failures=0, current_status="healthy"
+        )
+        assert status == "healthy"
+        assert failures == 1
+
+    def test_second_consecutive_miss_goes_red(self):
+        status, failures = tray.resolve_tray_health_status(
+            probe_ok=False, consecutive_failures=1, current_status="healthy"
+        )
+        assert status == "down"
+        assert failures == 2
+
+    def test_success_clears_the_count_and_goes_green(self):
+        status, failures = tray.resolve_tray_health_status(
+            probe_ok=True, consecutive_failures=1, current_status="down"
+        )
+        assert status == "healthy"
+        assert failures == 0
+
+    def test_starting_does_not_flip_red_on_the_first_miss(self):
+        status, failures = tray.resolve_tray_health_status(
+            probe_ok=False, consecutive_failures=0, current_status="starting"
+        )
+        assert status == "starting"
+        assert failures == 1
+
+    def test_client_timeout_sits_above_the_database_probe(self):
+        assert tray.HEALTH_TIMEOUT_SECONDS > 2.0
+        assert tray.HEALTH_FAILURE_THRESHOLD == 2
+
+    def test_poller_uses_hysteresis_and_the_raised_timeout(self):
+        import inspect
+
+        body = inspect.getsource(tray.ToposTray._poll_health)
+        assert "resolve_tray_health_status(" in body
+        assert "HEALTH_TIMEOUT_SECONDS" in body
+        assert "timeout=3.0" not in body
+
+
 class TestToposTray:
     def test_poll_host_rewrites_wildcard_bind(self):
         t = tray.ToposTray(

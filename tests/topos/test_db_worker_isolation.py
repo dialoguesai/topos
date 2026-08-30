@@ -139,7 +139,7 @@ async def test_routine_handlers_never_pass_a_connection_into_a_worker():
 
 
 def test_entity_write_handlers_offload_to_run_db_write():
-    """Merge/split/review-approve take the write gate; doing that on the
+    """Merge/split/review-approve/blackhole take the write gate; doing that on the
     event loop stalls the control-plane keepalive (2026-08-28 Failed to fetch).
     """
     import inspect
@@ -151,6 +151,8 @@ def test_entity_write_handlers_offload_to_run_db_write():
         "handle_signal_entity_merge",
         "handle_signal_entity_split",
         "handle_signal_entity_review_action",
+        "handle_signal_blackhole_entity",
+        "handle_signal_unblackhole_entity",
     ):
         fn = getattr(signal_features, name)
         body = inspect.getsource(fn)
@@ -171,3 +173,18 @@ def test_entity_write_handlers_offload_to_run_db_write():
                 f"connection: {window!r}"
             )
             idx += len(call)
+
+
+def test_http_blackhole_routes_offload_to_thread():
+    """The HTTP blackhole write path took the write gate on the event loop
+    and stalled the tray /healthcheck (2026-08-30)."""
+    import inspect
+
+    from topos.api import signal as signal_api
+
+    for name in ("blackhole_entity", "unblackhole_entity"):
+        body = inspect.getsource(getattr(signal_api, name))
+        assert "asyncio.to_thread(" in body, f"{name} must offload via asyncio.to_thread"
+        assert "close_thread_db_connection()" in body, (
+            f"{name} must not leak a worker-thread connection"
+        )

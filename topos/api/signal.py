@@ -682,27 +682,36 @@ async def blackhole_entity(
     """
     import asyncio
 
+    from ..core.state import close_thread_db_connection
     from ..features.lifecycle.blackhole import BlackholeStore
     from ..features.lifecycle.blackhole_rebuild import rebuild_for_blackhole
 
-    conn = _entities_conn()
+    _entities_conn()  # fail fast with 503 before spawning the worker
+    processing_tier = body.processing_tier
+    note = body.note
+
+    def _blackhole():
+        try:
+            conn = _entities_conn()
+            result = BlackholeStore(conn).blackhole_entity(
+                entity_ref=entity_id,
+                processing_tier=processing_tier,
+                note=note,
+            )
+            # D4: the notification above was raised first, so the owner already
+            # knows the hide is incomplete; now do the rebuild that makes it
+            # true. Same worker / same connection — do not hop back to the loop
+            # with a write-gate hold still possible.
+            if not result.get("already_blackholed"):
+                result["rebuild"] = rebuild_for_blackhole(conn, entity_id).as_dict()
+            return result
+        finally:
+            close_thread_db_connection()
+
     try:
-        result = BlackholeStore(conn).blackhole_entity(
-            entity_ref=entity_id,
-            processing_tier=body.processing_tier,
-            note=body.note,
-        )
+        return await asyncio.to_thread(_blackhole)
     except ValueError as exc:
         raise HTTPException(status_code=400, detail=str(exc))
-
-    # D4: the notification above was raised first, so the owner already knows the
-    # hide is incomplete; now do the rebuild that makes it true. Non-owners are
-    # withheld the prose artifacts for the duration, so this running late is safe
-    # while it running silently would not be.
-    if not result.get("already_blackholed"):
-        result["rebuild"] = await asyncio.to_thread(rebuild_for_blackhole, conn, entity_id)
-        result["rebuild"] = result["rebuild"].as_dict()
-    return result
 
 
 @router.delete("/entities/{entity_id}/blackhole")
@@ -711,9 +720,20 @@ async def unblackhole_entity(
     _api_key: str = Depends(require_api_key),
 ):
     """Lift a black hole. Existing grants are not restored — normal permissions resume."""
+    import asyncio
+
+    from ..core.state import close_thread_db_connection
     from ..features.lifecycle.blackhole import BlackholeStore
 
-    return BlackholeStore(_entities_conn()).unblackhole_entity(entity_ref=entity_id)
+    _entities_conn()  # fail fast with 503 before spawning the worker
+
+    def _unblackhole():
+        try:
+            return BlackholeStore(_entities_conn()).unblackhole_entity(entity_ref=entity_id)
+        finally:
+            close_thread_db_connection()
+
+    return await asyncio.to_thread(_unblackhole)
 
 
 @router.get("/blackholes")

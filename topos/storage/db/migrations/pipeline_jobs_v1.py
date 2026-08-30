@@ -7,13 +7,36 @@ import sqlite3
 MIGRATION_ID = "pipeline_jobs_v1"
 
 
+def _pipeline_jobs_already_applied(conn: sqlite3.Connection) -> bool:
+    """True when this connection already has the migration ledger row.
+
+    ``ensure_pipeline_jobs_schema`` is called on every enqueue/claim. Re-running
+    the CREATE / INSERT OR IGNORE under the write gate on those calls is what
+    stalled the event loop (and the tray healthcheck) on a live node.
+    """
+    try:
+        row = conn.execute(
+            "SELECT 1 FROM wiki_schema_migrations WHERE migration_id=?",
+            (MIGRATION_ID,),
+        ).fetchone()
+    except sqlite3.OperationalError:
+        return False
+    return row is not None
+
+
 def apply_pipeline_jobs_v1_up(conn: sqlite3.Connection) -> None:
     # Callers invoke this ahead of their own gated sections; the INSERT OR
     # IGNORE below takes SQLite's write lock every call, so gate it here with
-    # its commit (write_gate lock-order inversion).
+    # its commit (write_gate lock-order inversion). Skip the gate entirely
+    # when the ledger already records this migration — a read does not need
+    # it, and taking it on the event-loop thread blocks /healthcheck.
+    if _pipeline_jobs_already_applied(conn):
+        return
     from ..write_gate import commit_connection, with_db_write
 
     with with_db_write():
+        if _pipeline_jobs_already_applied(conn):
+            return
         _apply_pipeline_jobs_v1_up_locked(conn)
         commit_connection(conn)
 

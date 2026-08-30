@@ -116,6 +116,48 @@ def test_sqlite_retry_busy_gives_up() -> None:
         sqlite_retry_busy(always_busy, attempts=2)
 
 
+def test_pipeline_jobs_v1_first_apply_takes_the_write_gate(file_conn: sqlite3.Connection) -> None:
+    """The skip is only for a recorded migration — a fresh database must still write."""
+    holds: list[str] = []
+    original = write_gate.with_db_write
+
+    def _count_holds():
+        holds.append("enter")
+        return original()
+
+    with patch("topos.storage.db.write_gate.with_db_write", _count_holds):
+        apply_pipeline_jobs_v1_up(file_conn)
+
+    assert holds
+    tables = {
+        row[0]
+        for row in file_conn.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
+    }
+    assert "pipeline_jobs" in tables
+
+
+def test_pipeline_jobs_v1_skips_write_gate_when_already_applied(file_conn: sqlite3.Connection) -> None:
+    """Re-ensure must not take the write gate — that path ran on the event loop
+    and stalled /healthcheck (2026-08-30 tray flicker)."""
+    apply_pipeline_jobs_v1_up(file_conn)
+    holds: list[str] = []
+
+    original = write_gate.with_db_write
+
+    def _count_holds():
+        holds.append("enter")
+        return original()
+
+    with patch("topos.storage.db.write_gate.with_db_write", _count_holds):
+        apply_pipeline_jobs_v1_up(file_conn)
+
+    assert holds == []
+    row = file_conn.execute(
+        "SELECT 1 FROM wiki_schema_migrations WHERE migration_id='pipeline_jobs_v1'"
+    ).fetchone()
+    assert row is not None
+
+
 @pytest.mark.asyncio
 async def test_process_job_fails_without_derivation_completion(tmp_path) -> None:
     conn = sqlite3.connect(str(tmp_path / "pipeline.db"), check_same_thread=False)

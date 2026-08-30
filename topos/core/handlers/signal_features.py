@@ -1031,7 +1031,10 @@ async def handle_signal_unblackhole_entity(message: Dict[str, Any]) -> Optional[
     try:
         from ...features.lifecycle.blackhole import BlackholeStore
 
-        result = BlackholeStore(hub.get_db_connection()).unblackhole_entity(entity_ref=entity_id)
+        def _unblackhole(conn):
+            return BlackholeStore(conn).unblackhole_entity(entity_ref=entity_id)
+
+        result = await run_db_write(_unblackhole)
         return {"id": req_id, "status": "ok", "payload": result}
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}
