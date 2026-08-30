@@ -106,6 +106,123 @@ def list_entities(
     }
 
 
+def entity_card_aggregates(
+    conn: sqlite3.Connection,
+    entity_id: str,
+    *,
+    guard: BlackholeGuard,
+) -> Dict[str, Any]:
+    """Full-population counts a type-specific entity card reads.
+
+    Separate from ``recent_mentions`` because they answer a different question.
+    ``recent_mentions`` is a SAMPLE — twenty rows, newest first — and a card that
+    derived "83% of this came from browsing" by counting a sample would be
+    stating a measurement it had not made. Every count here is over the whole
+    mention set.
+
+    Two aggregates, because the card designs turn on two distinctions the spine
+    already records and nothing has ever read:
+
+    ``mention_sources``
+        Mentions grouped by canonical table, with the owner-authored share. This
+        is what separates an organization the owner *writes about* from one whose
+        name appeared in a page title, a place they have *been* (``location_events``)
+        from one they only ever talked about, and a project they *work on*
+        (``activity_events``) from one they have only planned. The whole judgement
+        line of six of the ten cards rests on it.
+
+    ``neighbor_counts``
+        Edges grouped by ``(edge_type, direction, neighbour type)``. The card needs
+        "6 people around this" and "14 goals point at it", and ``connections`` is
+        capped at twelve rows ordered by weight — a cap is the right answer for a
+        list and the wrong one for a count.
+
+    Direction is kept because it is load-bearing for at least one type: a
+    conversation's ``participates_in`` (inbound, someone was there) and its
+    ``mentions`` (outbound, someone was named) are different claims about a
+    person, and a card that merged them would say a person who was discussed was
+    in the room.
+    """
+    eid = str(entity_id)
+
+    # A record that names a protected entity is withheld whole, so its mentions
+    # of THIS entity cannot be counted either — otherwise the total silently
+    # disagrees with the records the reader is allowed to open, and the size of
+    # the disagreement is a signal about what was hidden. Inert for the owner UI,
+    # where `sees_everything` short-circuits `blocked_record_ids` to an empty set.
+    blocked_records = guard.blocked_record_ids()
+
+    mention_rows = conn.execute(
+        """
+        SELECT record_id, COALESCE(canonical_table, ''), COALESCE(authored_by_owner, 0)
+        FROM entity_mentions WHERE entity_id = ?
+        """,
+        (eid,),
+    ).fetchall()
+
+    by_table: Dict[str, Dict[str, int]] = {}
+    for record_id, table, authored in mention_rows:
+        if blocked_records and str(record_id) in blocked_records:
+            continue
+        # An unattributed mention is its own fact — bucketed under "" rather than
+        # dropped, so the card's percentages are over the same denominator as its
+        # total and cannot quietly exceed 100%.
+        slot = by_table.setdefault(str(table), {"count": 0, "owner_authored": 0})
+        slot["count"] += 1
+        if int(authored or 0) == 1:
+            slot["owner_authored"] += 1
+
+    mention_sources = sorted(
+        (
+            {"table": table, "count": v["count"], "owner_authored": v["owner_authored"]}
+            for table, v in by_table.items()
+        ),
+        key=lambda r: (-int(r["count"]), str(r["table"])),
+    )
+
+    # Counted in Python rather than pushed into a GROUP BY so the guard applies
+    # per neighbour: a protected entity must not be counted, and a SQL count
+    # would include it while the neighbour LIST beside it does not.
+    edge_rows = conn.execute(
+        """
+        SELECT e.src_entity_id, e.dst_entity_id, e.edge_type,
+               COALESCE(s.entity_type, ''), COALESCE(t.entity_type, ''),
+               s.canonical_name, t.canonical_name
+        FROM entity_edges e
+        LEFT JOIN entities s ON s.entity_id = e.src_entity_id
+        LEFT JOIN entities t ON t.entity_id = e.dst_entity_id
+        WHERE (e.src_entity_id = ? OR e.dst_entity_id = ?) AND e.valid_to IS NULL
+        """,
+        (eid, eid),
+    ).fetchall()
+
+    tally: Dict[tuple, int] = {}
+    for src, dst, edge_type, src_type, dst_type, src_name, dst_name in edge_rows:
+        outbound = str(src) == eid
+        other_id = dst if outbound else src
+        other_type = dst_type if outbound else src_type
+        other_name = dst_name if outbound else src_name
+        if guard.blocks_entity_id(other_id) or guard.blocks_name(other_name):
+            continue
+        key = (str(edge_type), "out" if outbound else "in", str(other_type))
+        tally[key] = tally.get(key, 0) + 1
+
+    neighbor_counts = sorted(
+        (
+            {
+                "edge_type": edge_type,
+                "direction": direction,
+                "entity_type": other_type,
+                "count": count,
+            }
+            for (edge_type, direction, other_type), count in tally.items()
+        ),
+        key=lambda r: (-int(r["count"]), str(r["edge_type"]), str(r["entity_type"])),
+    )
+
+    return {"mention_sources": mention_sources, "neighbor_counts": neighbor_counts}
+
+
 def get_entity_detail(
     conn: sqlite3.Connection,
     entity_id: str,
@@ -175,6 +292,12 @@ def get_entity_detail(
     entity["affinity_connections"] = guard.filter_rows(
         affinity, id_keys=id_keys, name_keys=name_keys
     )
+    # Full-population counts for the type-specific cards. Attached to every
+    # entity rather than branching on type here: the card layer decides what a
+    # place does with `location_events` and what an org does with the
+    # owner-authored share, and a read that guessed for it would have to be
+    # changed every time a card learns a new question.
+    entity.update(entity_card_aggregates(conn, str(entity_id), guard=guard))
     dossier = load_dossier_for_entity(conn, str(entity_id))
     if isinstance(dossier, dict) and not guard.sees_everything:
         dossier = dict(dossier)
