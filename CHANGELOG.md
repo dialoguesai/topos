@@ -9,6 +9,20 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **`GET /v1/signal/entities/{id}` carries full-population source and neighbour
+  counts.** `[E:entities]` `mention_sources` groups every mention by canonical
+  table with the owner-authored share; `neighbor_counts` groups active edges by
+  `(edge_type, direction, neighbour type)`. Both are aggregates over the whole
+  set, not over the twenty-row `recent_mentions` sample — the type-specific
+  entity cards state proportions ("991 of 993 encounters came from browsing",
+  "3 visits and 2 entries you wrote"), and a share computed from a sample is a
+  measurement nobody made. Direction is kept because `participates_in` (someone
+  was there) and `mentions` (someone was named) are different claims. Both
+  respect the black-hole guard: a protected neighbour is not counted, and
+  mentions inside a withheld record are not counted, so a tally beside a filtered
+  list cannot be subtracted from it.
+
 ## [1.3.37] — 2026-08-29
 
 ### Added
