@@ -117,7 +117,7 @@ def test_sqlite_retry_busy_gives_up() -> None:
 
 
 def test_pipeline_jobs_v1_first_apply_takes_the_write_gate(file_conn: sqlite3.Connection) -> None:
-    """The skip is only for a recorded migration — a fresh database must still write."""
+    """The skip is only when the tables exist — a fresh database must still write."""
     holds: list[str] = []
     original = write_gate.with_db_write
 
@@ -156,6 +156,24 @@ def test_pipeline_jobs_v1_skips_write_gate_when_already_applied(file_conn: sqlit
         "SELECT 1 FROM wiki_schema_migrations WHERE migration_id='pipeline_jobs_v1'"
     ).fetchone()
     assert row is not None
+
+
+def test_pipeline_jobs_v1_recreates_dropped_table_even_when_ledgered(
+    file_conn: sqlite3.Connection,
+) -> None:
+    """always_run must still CREATE a missing table; the ledger row is not the schema."""
+    apply_pipeline_jobs_v1_up(file_conn)
+    file_conn.execute("DROP TABLE pipeline_jobs")
+    file_conn.commit()
+
+    apply_pipeline_jobs_v1_up(file_conn)
+
+    assert (
+        file_conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='pipeline_jobs'"
+        ).fetchone()
+        is not None
+    )
 
 
 @pytest.mark.asyncio

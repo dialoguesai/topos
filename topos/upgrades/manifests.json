@@ -712,6 +712,15 @@
       ]
     },
     {
+      "version": "1.3.38",
+      "summary": "Entity cards carry full-population source and neighbour counts; one late healthcheck must not paint a live node red.",
+      "steps": [],
+      "notes": [
+        "Entity-card counts are a read-path aggregate ([E:entities]): mention_sources and neighbor_counts are computed over the whole set, not the twenty-row sample. Nothing already on disk is rewritten.",
+        "Tray flicker is code-only ([O]): hysteresis on the menu-bar probe, skip the write gate when the pipeline_jobs tables already exist, and move blackhole/unblackhole off the event loop. No derived rebuild."
+      ]
+    },
+    {
       "version": "unreleased",
       "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
       "steps": [],

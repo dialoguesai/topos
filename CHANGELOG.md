@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.38] — 2026-08-30
+
 ### Added
 - **`GET /v1/signal/entities/{id}` carries full-population source and neighbour
   counts.** `[E:entities]` `mention_sources` groups every mention by canonical
@@ -22,6 +24,19 @@ The machine-readable twin of each release is
   respect the black-hole guard: a protected neighbour is not counted, and
   mentions inside a withheld record are not counted, so a tally beside a filtered
   list cannot be subtracted from it.
+
+### Fixed
+- **The menu-bar light flickered red on a live node.** `[O]` The tray polls
+  `/healthcheck` every five seconds and treated one late answer as down. The
+  probe's own database budget is two seconds; the tray waited three, so a busy
+  event loop — a write-gate held on the loop by `pipeline_jobs_v1` re-applying a
+  schema that already existed, or by blackhole / unblackhole — painted the node
+  red and green again five seconds later.
+
+  The tray now waits ten seconds and needs two consecutive misses before it
+  goes red. Schema ensure skips the write gate when the tables already exist
+  (a missing table still CREATE — the step is always_run). HTTP and websocket
+  blackhole writes run off the loop, the same way merge and split already did.
 
 ## [1.3.37] — 2026-08-29
 
