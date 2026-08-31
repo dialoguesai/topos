@@ -9,6 +9,27 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **Import an export the node can already see.** `[P]` `list_local_exports` looks
+  in the platform's Downloads, Desktop and Documents for something that *is* an
+  export — matching on shape, never on a filename — and answers with opaque
+  handles plus labels a person can recognise, so no path reaches the browser.
+  `start_ingestion` and `/ingestion/upload-local-path` accept one of those
+  handles and resolve it locally. The point is that the bytes never move: when
+  the file and the node are on the same machine, an import costs an `open()`
+  and no network at all.
+
+### Changed
+- **A container is opened where it sits.** `[P]` Pointing ingestion at a folder
+  or a `.zip` now reads the conversations file out of it. Nothing else in the
+  container is read, copied or stored, and the archive is not modified — an
+  export is overwhelmingly images by weight, and none of that is ingestible.
+- **Local files stream instead of being read whole.** `[P]` The reader called
+  `read_bytes()`, which was safe only while the control plane had already lifted
+  a small JSON file out of the archive. Pointed at a real export it would have
+  put the entire archive in memory; measured on a 1.4 GB one, peak growth is now
+  5 MB.
+
 ## [1.3.39] — 2026-08-31
 
 ### Added

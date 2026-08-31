@@ -66,12 +66,56 @@ async def upload_ingestion_file(request: Request) -> dict:
     return await ingest_source("chatgpt_file_ingestion", request)
 
 
+@router.get("/ingestion/local-exports", dependencies=[Depends(require_api_key)])
+async def list_local_exports() -> dict:
+    """Exports sitting on this machine, for the import screen to offer.
+
+    The node is the only party that can answer this: a browser cannot read a
+    filesystem, and cannot produce an absolute path even for a file the user
+    picks. So the node looks, and hands back opaque handles plus labels a person
+    can recognise -- never the paths themselves.
+
+    Bounded and stateless by construction (see ``local_exports``): a few known
+    folders, shallow, symlinks skipped, time-boxed, nothing written down.
+    """
+    import asyncio
+
+    from ..ingestion.local_exports import find_exports
+
+    result = await asyncio.to_thread(find_exports)
+    return result.as_payload()
+
+
 @router.post("/ingestion/upload-local-path", dependencies=[Depends(require_api_key)])
 async def upload_ingestion_local_path(
     request: Request, payload: dict = Body(default_factory=dict)
 ) -> dict:
+    """Ingest a file that is already on this machine. No bytes cross a network.
+
+    Accepts either a ``handle`` from ``/ingestion/local-exports`` -- the path
+    never leaves the node -- or an explicit ``file_path``, which is still how
+    someone points at an export outside the searched folders.
+    """
+    from ..ingestion.local_exports import resolve
+
     dataset_id = payload.get("dataset_id")
     file_path = payload.get("file_path")
+    handle = str(payload.get("handle") or "").strip()
+
+    if handle and not file_path:
+        resolved = resolve(handle)
+        if resolved is None:
+            # Handles are re-found rather than remembered, so a stale one means
+            # the file moved or went away -- not that the user did anything odd.
+            raise HTTPException(
+                status_code=404,
+                detail="That export is no longer where we found it. Scan again and pick it.",
+            )
+        file_path = str(resolved)
+
+    if not file_path:
+        raise HTTPException(status_code=400, detail="Provide a handle or a file_path.")
+
     return await ingest_source(
         "chatgpt_file_ingestion",
         request,

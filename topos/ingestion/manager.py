@@ -247,13 +247,32 @@ def _filter_unenriched_messages(
 
 
 async def _read_file_bytes(file_path: Path) -> AsyncIterator[bytes]:
-    def read_all() -> bytes:
-        return file_path.read_bytes()
+    """Stream the ingestible content of a local file.
 
-    file_data = await asyncio.to_thread(read_all)
-    chunk_size = 8192
-    for i in range(0, len(file_data), chunk_size):
-        yield file_data[i : i + chunk_size]
+    Two things happen here that used to not.
+
+    It **streams**. This read whole files into memory, which was fine while the
+    only thing pointed at it was a JSON file the control plane had already
+    lifted out of an archive. A local import points it straight at whatever the
+    user has on disk, and an export archive runs to gigabytes.
+
+    It **lifts**. A folder or an archive resolves to the conversations file
+    inside it, so the path can be the thing the export site handed the user
+    rather than one member they had to go extract by hand. Nothing else in the
+    container is read, copied, or stored.
+    """
+    from .local_exports import open_ingestible
+
+    stream = await asyncio.to_thread(open_ingestible, file_path)
+    chunk_size = 1 << 20
+    try:
+        while True:
+            chunk = await asyncio.to_thread(stream.read, chunk_size)
+            if not chunk:
+                break
+            yield chunk
+    finally:
+        await asyncio.to_thread(stream.close)
 
 
 _SQL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")

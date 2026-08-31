@@ -365,6 +365,22 @@ async def handle_start_ingestion(message: Dict[str, Any]) -> Optional[Dict[str, 
     file_url = payload.get("file_url")
     file_base64 = payload.get("file_base64")
     file_path = payload.get("file_path")
+    local_handle = str(payload.get("local_export_handle") or "").strip()
+    if local_handle and not file_path:
+        # A handle from `list_local_exports`. The path was never sent to the
+        # browser, so it is resolved here — and only ever to something still
+        # inside a searched folder, which is what makes a handle safe to accept
+        # back over the relay.
+        from ...ingestion.local_exports import resolve as _resolve_local_export
+
+        resolved = _resolve_local_export(local_handle)
+        if resolved is None:
+            return {
+                "id": req_id,
+                "status": "error",
+                "error": "That export is no longer where we found it. Scan again and pick it.",
+            }
+        file_path = str(resolved)
     job_id = payload.get("job_id")
     source_id = payload.get("source_id")  # Optional source_id from control plane
     source_definition = payload.get("source_definition")
@@ -480,6 +496,32 @@ async def handle_ingestion_reprocess(message: Dict[str, Any]) -> Optional[Dict[s
         return {"id": req_id, "status": "error", "error": str(exc)}
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}
+
+@handles("list_local_exports")
+async def handle_list_local_exports(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Exports sitting on this machine, for the import screen to offer.
+
+    Only the node can answer this. A browser cannot read a filesystem, and
+    cannot produce an absolute path even for a file the user picks — so without
+    this the only way to reach the free import path was to type one out by hand.
+
+    What comes back is opaque handles and labels a person can recognise, never
+    paths: the reply travels to the browser over the relay, and a home-directory
+    path carries the account name and whatever else lives beside it.
+    """
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    try:
+        import asyncio
+
+        from ...ingestion.local_exports import find_exports
+
+        result = await asyncio.to_thread(find_exports)
+        return {"id": req_id, "status": "ok", "payload": result.as_payload()}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
 
 @handles("get_ingestion_audit")
 async def handle_get_ingestion_audit(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
