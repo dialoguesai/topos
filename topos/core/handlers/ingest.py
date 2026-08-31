@@ -408,10 +408,13 @@ async def handle_start_ingestion(message: Dict[str, Any]) -> Optional[Dict[str, 
                 "payload": {"job_id": job_id, "status": "completed", "deduplicated": True},
             }
 
+        # Import-time policy chosen in the UI (date window, inclusion flags).
+        ingest_options = payload.get("ingest_options")
         job_payload: Dict[str, Any] = {
             "dataset_id": dataset_id or "",
             "schema_id": schema_id,
             "file_format": file_format,
+            "ingest_options": ingest_options if isinstance(ingest_options, dict) else None,
             "job_id": job_id,
             "source_id": source_id,
             "source_definition": source_definition,

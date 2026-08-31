@@ -110,7 +110,10 @@ class Canonicalizer:
             conversation = CanonicalAIChatConversation(
                 conversation_id=conversation_id,
                 owner_user_id=owner_user_id,
-                title=None,
+                # The export's own title. It is a declared topic label — the
+                # cheapest classification the corpus carries — and it had been
+                # discarded here since the table was written.
+                title=_declared_title(messages),
                 source=conv_source,
                 created_at=created_at,
                 updated_at=updated_at,
@@ -154,3 +157,19 @@ class Canonicalizer:
             "canonical_messages": canonical_messages_dicts,
             "errors": errors,
         }
+
+
+def _declared_title(messages: List[Any]) -> Optional[str]:
+    """Conversation title carried on the turns' metadata, if the source set one.
+
+    Every turn of a conversation carries the same title, so the first non-empty
+    one wins; sources that declare no title still write NULL.
+    """
+    for message in messages:
+        metadata = getattr(message, "metadata_json", None)
+        if not isinstance(metadata, dict):
+            continue
+        title = metadata.get("conversation_title")
+        if isinstance(title, str) and title.strip():
+            return title.strip()
+    return None

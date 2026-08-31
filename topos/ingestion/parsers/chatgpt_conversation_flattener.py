@@ -1,6 +1,14 @@
-"""ChatGPT conversation flattener.
+"""ChatGPT conversation flattener — SUPERSEDED, kept only for measurement.
 
-Converts nested conversation objects from ChatGPT export format into flat message records.
+Replaced by ``chatgpt_export.py`` (PLAN_CHATGPT_IMPORT.md Sprint 1). On the real
+export this reader emits 35% blank rows, loses every code block, stores the
+model's chain-of-thought as speech, and keeps abandoned regenerations beside the
+turns that replaced them.
+
+Nothing in the ingestion path calls it any more. It stays so
+``scripts/chatgpt_import_report.py --compare`` can show the before/after on a
+user's own export, and it should be deleted once that comparison stops being
+interesting.
 """
 
 from __future__ import annotations

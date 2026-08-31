@@ -797,7 +797,14 @@ class IngestionManager(BaseObject):
             pbar = ProgressBar(total=1000, desc=f"{self}: Parsing")  # Placeholder, will adjust
 
         try:
-            async for raw_payload in parse_file(_read_file_bytes(file_path), job.metadata.get("file_format", "jsonl")):
+            # Import-time policy (date window, inclusion flags) travels on the
+            # job so a re-run of the same job reproduces the same corpus.
+            ingest_options = job.metadata.get("ingest_options")
+            async for raw_payload in parse_file(
+                _read_file_bytes(file_path),
+                job.metadata.get("file_format", "jsonl"),
+                ingest_options if isinstance(ingest_options, dict) else None,
+            ):
                 expanded_payloads = _expand_file_records(raw_payload, source_def)
                 if not expanded_payloads:
                     expanded_payloads = [raw_payload] if isinstance(raw_payload, dict) else []

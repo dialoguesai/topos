@@ -5,11 +5,13 @@ from __future__ import annotations
 import csv
 import json
 import logging
-from typing import Any, AsyncIterator, Dict
+from typing import Any, AsyncIterator, Dict, Optional
 
-from .parsers.chatgpt_conversation_flattener import (
-    flatten_conversation_array,
-    is_conversation_format,
+from .parsers.chatgpt_export import (
+    DropLedger,
+    ExportOptions,
+    is_conversation,
+    iter_export,
 )
 
 logger = logging.getLogger("topos.ingestion.parser")
@@ -110,7 +112,10 @@ async def parse_jsonl_stream(file_stream: AsyncIterator[bytes]) -> AsyncIterator
             logger.warning("Failed to parse JSONL line %d: %s", line_num, exc)
 
 
-async def parse_json_stream(file_stream: AsyncIterator[bytes]) -> AsyncIterator[Dict[str, Any]]:
+async def parse_json_stream(
+    file_stream: AsyncIterator[bytes],
+    options: Optional[Dict[str, Any]] = None,
+) -> AsyncIterator[Dict[str, Any]]:
     chunks = []
     async for chunk in file_stream:
         chunks.append(chunk)
@@ -118,10 +123,8 @@ async def parse_json_stream(file_stream: AsyncIterator[bytes]) -> AsyncIterator[
     data = _load_json_with_optional_comments(content)
     if isinstance(data, list):
         # Check if this is a ChatGPT conversation array
-        if data and is_conversation_format(data[0]):
-            logger.info("Detected ChatGPT conversation format, flattening conversations")
-            # Flatten conversation array to individual message records
-            for record in flatten_conversation_array(data, include_system=False):
+        if data and is_conversation(data[0]):
+            for record in _read_chatgpt_export(data, options):
                 yield record
         else:
             # Regular array - yield records as-is
@@ -129,10 +132,8 @@ async def parse_json_stream(file_stream: AsyncIterator[bytes]) -> AsyncIterator[
                 yield record
     elif isinstance(data, dict):
         # Check if single conversation object
-        if is_conversation_format(data):
-            logger.info("Detected ChatGPT conversation format (single object), flattening")
-            from .parsers.chatgpt_conversation_flattener import flatten_conversation
-            for record in flatten_conversation(data, include_system=False):
+        if is_conversation(data):
+            for record in _read_chatgpt_export(data, options):
                 yield record
         elif isinstance(data.get("browsing_history"), list):
             # Demo browser-history payloads wrap visit rows under a top-level key.
@@ -149,6 +150,26 @@ async def parse_json_stream(file_stream: AsyncIterator[bytes]) -> AsyncIterator[
         raise ValueError(f"JSON must be array or object, got {type(data)}")
 
 
+def _read_chatgpt_export(data: Any, options: Optional[Dict[str, Any]]):
+    """Read a ChatGPT export with the import's own policy, and say what it left.
+
+    The ledger is logged rather than returned because ``parse_file`` yields
+    records; the job report reads the same counters from the manager.
+    """
+    export_options = ExportOptions.from_payload(options)
+    ledger = DropLedger()
+    yield from iter_export(data, export_options, ledger)
+    stats = ledger.as_dict()
+    logger.info(
+        "[PIPELINE:PARSER] ChatGPT export read: %s/%s conversations, %s turns from %s nodes; dropped %s",
+        stats["conversations_kept"],
+        stats["conversations_seen"],
+        stats["turns_emitted"],
+        stats["message_nodes"],
+        stats["dropped"],
+    )
+
+
 async def parse_csv_stream(file_stream: AsyncIterator[bytes], delimiter: str = ",") -> AsyncIterator[Dict[str, Any]]:
     chunks = []
     async for chunk in file_stream:
@@ -159,13 +180,20 @@ async def parse_csv_stream(file_stream: AsyncIterator[bytes], delimiter: str = "
         yield row
 
 
-async def parse_file(file_stream: AsyncIterator[bytes], file_format: str) -> AsyncIterator[Dict[str, Any]]:
+async def parse_file(
+    file_stream: AsyncIterator[bytes],
+    file_format: str,
+    options: Optional[Dict[str, Any]] = None,
+) -> AsyncIterator[Dict[str, Any]]:
+    """``options`` is the job's ``ingest_options`` blob: date window and
+    inclusion policy chosen at import time. Formats that have no policy ignore
+    it."""
     format_lower = file_format.lower()
     if format_lower in {"jsonl", "ndjson"}:
         async for record in parse_jsonl_stream(file_stream):
             yield record
     elif format_lower == "json":
-        async for record in parse_json_stream(file_stream):
+        async for record in parse_json_stream(file_stream, options):
             yield record
     elif format_lower == "csv":
         async for record in parse_csv_stream(file_stream):

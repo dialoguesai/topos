@@ -60,6 +60,9 @@ async def _execute_file_ingestion(payload: Dict[str, Any]) -> Dict[str, Any]:
     dataset_id = str(payload.get("dataset_id") or "")
     owner_user_id = payload.get("owner_user_id")
 
+    ingest_options = payload.get("ingest_options")
+    ingest_options = ingest_options if isinstance(ingest_options, dict) else None
+
     file_bytes = payload.get("file_bytes")
     if not file_bytes and payload.get("file_base64"):
         file_bytes = base64.b64decode(str(payload["file_base64"]))
@@ -79,6 +82,7 @@ async def _execute_file_ingestion(payload: Dict[str, Any]) -> Dict[str, Any]:
             source_definition=payload.get("source_definition"),
             progress_api_url=progress_api_url,
             progress_api_key=progress_api_key,
+            ingest_options=ingest_options,
         )
     else:
         result = await ingest_file_payload(
@@ -91,6 +95,7 @@ async def _execute_file_ingestion(payload: Dict[str, Any]) -> Dict[str, Any]:
             source_definition=payload.get("source_definition"),
             progress_api_url=progress_api_url,
             progress_api_key=progress_api_key,
+            ingest_options=ingest_options,
         )
 
     if progress_api_url and progress_api_key:

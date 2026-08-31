@@ -266,7 +266,9 @@ class EntitiesJob(BaseEnrichmentJob):
                 resolver.record_mention(
                     entity_id,
                     record_id=record_id,
-                    surface_text=surface,
+                    # A declared row may resolve on one string and be evidenced by
+                    # another: a cited host is the node, the full URL is the proof.
+                    surface_text=str(rec.get("surface_detail") or surface),
                     source_id=rec.get("source_id"),
                     canonical_table=rec.get("canonical_table"),
                     confidence=confidence,

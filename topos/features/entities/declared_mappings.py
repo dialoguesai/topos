@@ -183,6 +183,44 @@ def mapping_for(source_id: Optional[str]) -> Optional[Dict[str, Any]]:
     return DECLARED_ENTITY_MAPPINGS.get(str(source_id or "").strip())
 
 
+# Sources whose declared entities need code, not a path-and-transform rule: a
+# ChatGPT turn declares a *list* of cited URLs and a filename that has to be
+# judged before it is minted. The declaration DSL maps one path to one surface,
+# so these register a producer with the same output shape instead of bending it.
+def _chatgpt_declared(record, *, record_id, event_at):
+    from .chatgpt_declared import declared_rows
+
+    return declared_rows(record, record_id=record_id, event_at=event_at)
+
+
+DECLARED_ROW_PRODUCERS: Dict[str, Any] = {
+    "chatgpt_file_ingestion": _chatgpt_declared,
+    "chatgpt_ui_conversation": _chatgpt_declared,
+}
+
+
+def declared_producers_enabled() -> bool:
+    """``TOPOS_DECLARED_PRODUCERS=off`` turns the code-backed declared lanes off.
+
+    Exists so a before/after measurement is one variable on one build, instead of
+    two builds someone has to trust are otherwise identical.
+    """
+    import os
+
+    return os.environ.get("TOPOS_DECLARED_PRODUCERS", "on").strip().lower() not in (
+        "0",
+        "off",
+        "false",
+        "no",
+    )
+
+
+def producer_for(source_id: Optional[str]):
+    if not declared_producers_enabled():
+        return None
+    return DECLARED_ROW_PRODUCERS.get(str(source_id or "").strip())
+
+
 def ner_suppressed_source_ids() -> set:
     return {sid for sid, m in DECLARED_ENTITY_MAPPINGS.items() if m.get("suppress_ner")}
 
@@ -234,7 +272,8 @@ def extract_declared_entities(
     should pass record_id/event_at explicitly so the two never drift.
     """
     mapping = mapping_for(record.get("source_id"))
-    if not mapping:
+    producer = producer_for(record.get("source_id"))
+    if not mapping and not producer:
         return []
     if record_id is None:
         record_id = str(
@@ -255,6 +294,12 @@ def extract_declared_entities(
         )
     if not record_id:
         return []
+    if producer is not None:
+        rows = list(producer(record, record_id=record_id, event_at=event_at))
+        if not mapping:
+            return rows
+    else:
+        rows = []
     # Keyed on the TRANSFORMED surface, because that is what the entity rows below
     # carry. Without this the two halves agree only while every self-edge target
     # happens to be untransformed — true of github, and silently false the moment
@@ -266,8 +311,8 @@ def extract_declared_entities(
         for rule in mapping.get("self_edges", [])
     }
     edge_targets.pop("", None)
-    out: List[Dict[str, Any]] = []
-    seen: set = set()
+    out: List[Dict[str, Any]] = list(rows)
+    seen: set = {(str(r.get("entity_text") or "").lower(), str(r.get("entity_type") or "")) for r in out}
     for rule in mapping.get("entities", []):
         raw = _field(record, str(rule.get("path") or ""))
         surface = _transform(raw, rule.get("transform"))

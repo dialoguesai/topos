@@ -157,6 +157,17 @@ def _verify(conn: sqlite3.Connection, *, dataset_id: str, require_embeddings: bo
 
     msg_count = conn.execute("SELECT COUNT(*) FROM ai_chat_messages").fetchone()[0]
     conv_count = conn.execute("SELECT COUNT(*) FROM ai_chat_conversations").fetchone()[0]
+    # Sprint-2 gates: no blank turns reach canonical, and the declared
+    # conversation title is stored rather than dropped at the mapper.
+    empty_count = conn.execute(
+        "SELECT COUNT(*) FROM ai_chat_messages WHERE TRIM(COALESCE(content,'')) = ''"
+    ).fetchone()[0]
+    titled_count = conn.execute(
+        "SELECT COUNT(*) FROM ai_chat_conversations WHERE TRIM(COALESCE(title,'')) <> ''"
+    ).fetchone()[0]
+    sender_counts = dict(
+        conn.execute("SELECT sender_type, COUNT(*) FROM ai_chat_messages GROUP BY 1").fetchall()
+    )
 
     vector_page = bundle.vector.list_metadata(source_id=SOURCE_ID, limit=5)
     if vector_page.total == 0:
@@ -175,6 +186,9 @@ def _verify(conn: sqlite3.Connection, *, dataset_id: str, require_embeddings: bo
         "schema_id": SCHEMA_ID,
         "ai_chat_messages": int(msg_count),
         "ai_chat_conversations": int(conv_count),
+        "empty_content_messages": int(empty_count),
+        "conversations_with_title": int(titled_count),
+        "messages_by_sender_type": {str(k): int(v) for k, v in sender_counts.items()},
         "embedding_metadata_total": int(vector_page.total),
         "embedding_sample": vector_page.items[:2],
         "graph_nodes": len(graph.get("nodes") or []),
@@ -189,6 +203,10 @@ def _verify(conn: sqlite3.Connection, *, dataset_id: str, require_embeddings: bo
     failures: List[str] = []
     if msg_count <= 0:
         failures.append("no rows in ai_chat_messages")
+    if empty_count > 0:
+        failures.append(f"{empty_count} canonical messages have empty content")
+    if conv_count > 0 and titled_count < conv_count:
+        failures.append(f"only {titled_count}/{conv_count} conversations carry the declared title")
     if require_embeddings and vector_page.total <= 0:
         failures.append("no embedding metadata in signal_embeddings (HF model may be unavailable)")
     if report["graph_edges"] <= 0 and report["graph_nodes"] <= 0:
@@ -207,6 +225,7 @@ async def run_e2e(
     db_path: Optional[Path],
     require_embeddings: bool,
     embedding_fallback: str,
+    ingest_options: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     ingest_path, conv_count = _slice_conversations(input_path, max_conversations)
 
@@ -235,6 +254,7 @@ async def run_e2e(
             file_path=str(ingest_path),
             file_format="json",
             source_id=SOURCE_ID,
+            ingest_options=ingest_options,
         )
 
         from topos.core.state import get_db_connection
@@ -286,12 +306,29 @@ def main() -> int:
         action="store_true",
         help="Do not fail when no embedding metadata is present",
     )
+    parser.add_argument("--months", type=float, default=None, help="Only conversations active in the last N months")
+    parser.add_argument("--date-from", default=None, help="ISO lower bound (overrides --months)")
+    parser.add_argument("--date-to", default=None, help="ISO upper bound")
+    parser.add_argument("--include-alternate-branches", action="store_true")
+    parser.add_argument("--include-tool-output", action="store_true")
     parser.add_argument("--json", action="store_true", help="Print JSON report")
     args = parser.parse_args()
 
     if not args.input.is_file():
         print(f"Input not found: {args.input}", file=sys.stderr)
         return 2
+
+    date_from = args.date_from
+    if date_from is None and args.months:
+        from datetime import datetime, timedelta, timezone
+
+        date_from = (datetime.now(tz=timezone.utc) - timedelta(days=args.months * 30.44)).isoformat()
+    ingest_options: Dict[str, Any] = {
+        "date_from": date_from,
+        "date_to": args.date_to,
+        "include_alternate_branches": args.include_alternate_branches,
+        "include_tool_output": args.include_tool_output,
+    }
 
     max_conv = None if args.max_conversations == 0 else args.max_conversations
     report = asyncio.run(
@@ -302,6 +339,7 @@ def main() -> int:
             db_path=args.db_path,
             require_embeddings=not args.skip_embedding_check,
             embedding_fallback=args.embedding_fallback,
+            ingest_options=ingest_options,
         )
     )
 
@@ -312,7 +350,9 @@ def main() -> int:
         print(f"Source: {SOURCE_ID} ({SCHEMA_ID})")
         print(f"Conversations processed: {report['conversations_in_file']}")
         print(f"Records ingested: {report['ingest'].get('records_processed')}")
-        print(f"ai_chat_messages: {v['ai_chat_messages']}")
+        print(f"ai_chat_messages: {v['ai_chat_messages']}  ({v['messages_by_sender_type']})")
+        print(f"empty-content messages: {v['empty_content_messages']}")
+        print(f"conversations with title: {v['conversations_with_title']}/{v['ai_chat_conversations']}")
         print(f"Embeddings (metadata): {v['embedding_metadata_total']} ({v.get('embedding_source', 'unknown')})")
         print(f"Graph nodes/edges: {v['graph_nodes']}/{v['graph_edges']}")
         if v["failures"]:

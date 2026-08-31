@@ -65,6 +65,7 @@ async def ingest_file_payload(
     source_definition: Optional[Dict[str, Any]] = None,
     progress_api_url: Optional[str] = None,
     progress_api_key: Optional[str] = None,
+    ingest_options: Optional[Dict[str, Any]] = None,
 ) -> dict:
     if not dataset_id:
         return {"status": "error", "error": "dataset_id required"}
@@ -112,10 +113,17 @@ async def ingest_file_payload(
         len(file_bytes) if file_bytes else None,
     )
     if file_path:
-        job = trigger.create_job(job_id, dataset_id, schema_id, file_path, file_format=file_format)
+        job = trigger.create_job(
+            job_id, dataset_id, schema_id, file_path, file_format=file_format, ingest_options=ingest_options
+        )
     else:
         job = trigger.create_job_from_bytes(
-            job_id, dataset_id, schema_id, file_bytes or b"", file_format=file_format
+            job_id,
+            dataset_id,
+            schema_id,
+            file_bytes or b"",
+            file_format=file_format,
+            ingest_options=ingest_options,
         )
     manager = IngestionManager(file_store=file_store)
     result = await manager.process_job(

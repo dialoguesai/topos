@@ -9,6 +9,41 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **Import-time options for file ingestion.** `[P]` `start_ingestion` accepts an
+  `ingest_options` object, carried to the parser through the job payload. For
+  ChatGPT exports it takes `date_from` / `date_to` plus
+  `include_alternate_branches`, `include_tool_output` and `include_system`, so an
+  import can be limited to a date range as it is read rather than after it is
+  stored.
+- **Declared columns in a ChatGPT turn mint entities.** `[E:entities]` A cited
+  page mints a `web_source` entity keyed on its host, and a canvas document or a
+  human-named attachment mints a `document` entity — through the existing
+  declared lane, so they carry declared confidence and their type verbatim. The
+  full URL and the search that produced it are kept as the mention's evidence.
+  Search queries are read but deliberately not minted: a sentence is not an
+  entity. Set `TOPOS_DECLARED_PRODUCERS=off` to disable.
+
+### Fixed
+- **ChatGPT export import read the edit history instead of the conversation.**
+  `[C]` The reader walked every node of the `mapping` tree, so regenerated
+  answers and superseded prompts arrived as near-duplicate rows; it now follows
+  the `current_node` path. Three content types were read from a field the export
+  does not write (`code` and `execution_output` use `text`, `reasoning_recap`
+  uses `content`), which stored them as empty rows and lost every code block.
+  Model scaffolding (`thoughts`, `reasoning_recap`) and tool output are no longer
+  stored as assistant speech, a row with empty content is never written, and
+  conversations the user marked "do not remember" are skipped. Every exclusion is
+  counted by reason and logged. **Material imported by the previous reader is not
+  rewritten — re-import the export to replace it.**
+- **Conversation titles were never stored.** `[C]` The canonicalizer passed
+  `title=None` for every AI-chat conversation; it now stores the title the source
+  declares.
+- **Declared facets on a non-turn node were dropped with it.** `[C]` A web search
+  declares its query and citations on the tool-call node, which is not a turn — so
+  the declaration was lost when the node was. Those facets now carry forward to
+  the turn they belong to.
+
 ### Changed
 - **Default local node port is 8676.** `[O]` `topos-node` now binds
   `127.0.0.1:8676` (TOPO on a phone keypad) instead of `:9000`. Restart the
