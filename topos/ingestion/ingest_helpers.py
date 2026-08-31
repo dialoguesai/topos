@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
@@ -43,13 +44,27 @@ def resolve_file_format(
             fmt = str(shape.get("format") or "").strip().lower()
             if fmt:
                 return fmt
-    path = str(file_path or "").strip().lower()
+    raw_path = str(file_path or "").strip()
+    path = raw_path.lower()
     if path.endswith(".csv"):
         return "csv"
     if path.endswith(".json"):
         return "json"
     if path.endswith((".jsonl", ".ndjson")):
         return "jsonl"
+    # A container is not a format: an archive or an export folder resolves to
+    # the conversations.json inside it (see ``ingestion.local_exports``), so the
+    # format is that member's, not the container's. Without this the extension
+    # matches nothing, the default wins, and a JSON array gets parsed as JSONL —
+    # which fails deep in the parser rather than here.
+    if path.endswith(".zip"):
+        return "json"
+    if raw_path:
+        try:
+            if os.path.isdir(raw_path):
+                return "json"
+        except OSError:
+            pass
     return default
 
 

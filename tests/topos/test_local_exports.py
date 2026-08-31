@@ -335,3 +335,49 @@ def test_counts_ignored_files_at_every_depth_of_a_folder(tmp_path):
     candidate = find_exports([tmp_path]).candidates[0]
     assert candidate.ignored_files == 13  # 12 nested images + chat.html
     assert candidate.ignored_bytes > 12 * 1024
+
+
+# --------------------------------------------------------------------------
+# a container is not a format
+# --------------------------------------------------------------------------
+
+
+def test_an_archive_path_resolves_to_the_format_of_what_is_inside(tmp_path):
+    """The bug this closes: .zip matched no extension branch, so the default
+    won — and the node route passes no default, so an export archive resolved
+    to "jsonl". A JSON array parsed as JSONL fails deep in the parser, long
+    after the point where the cause is visible.
+    """
+    from topos.ingestion.ingest_helpers import resolve_file_format
+
+    archive = write_export_zip(tmp_path)
+    assert resolve_file_format(file_path=str(archive)) == "json"
+
+
+def test_an_export_folder_resolves_to_json_too(tmp_path):
+    from topos.ingestion.ingest_helpers import resolve_file_format
+
+    folder = write_export_folder(tmp_path)
+    assert resolve_file_format(file_path=str(folder)) == "json"
+
+
+def test_ordinary_extensions_are_unchanged(tmp_path):
+    from topos.ingestion.ingest_helpers import resolve_file_format
+
+    assert resolve_file_format(file_path="/a/conversations.json") == "json"
+    assert resolve_file_format(file_path="/a/rows.jsonl") == "jsonl"
+    assert resolve_file_format(file_path="/a/rows.ndjson") == "jsonl"
+    assert resolve_file_format(file_path="/a/rows.csv") == "csv"
+    assert resolve_file_format(file_path="/a/mystery") == "jsonl"
+    assert resolve_file_format(file_path=None) == "jsonl"
+
+
+def test_a_declared_shape_still_wins(tmp_path):
+    # A source that states its format is not second-guessed by a filename.
+    from topos.ingestion.ingest_helpers import resolve_file_format
+
+    class _Def:
+        file_ingest_shape = {"format": "csv"}
+
+    archive = write_export_zip(tmp_path)
+    assert resolve_file_format(source_definition=_Def(), file_path=str(archive)) == "csv"
