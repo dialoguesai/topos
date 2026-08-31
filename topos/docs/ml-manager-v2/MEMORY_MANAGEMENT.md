@@ -37,7 +37,7 @@ Run `topos-node` in an external terminal (iTerm, Terminal.app) when running full
 ## Verification
 
 1. Monitor Python RSS while ingesting: `ps -o rss= -p $(pgrep -f topos-node | head -1)`
-2. Check resident slots: `curl -H "Authorization: Bearer $TOPOS_KEY" http://localhost:9000/v1/engine/memory`
+2. Check resident slots: `curl -H "Authorization: Bearer $TOPOS_KEY" http://localhost:8676/v1/engine/memory`
 3. After a pipeline completes, resident slot count should drop.
 
 ## Split deployment

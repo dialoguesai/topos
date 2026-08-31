@@ -96,13 +96,13 @@ Optional:
 ### 3) Run
 
 ```bash
-topos-node --host 0.0.0.0 --port 9000
+topos-node --host 0.0.0.0 --port 8676
 ```
 
 ### 4) Verify
 
 ```bash
-curl http://localhost:9000/health
+curl http://localhost:8676/health
 ```
 
 ## Common Commands

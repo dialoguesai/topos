@@ -38,7 +38,7 @@ upgrade), `--local` (install the working tree instead of PyPI), `--reset`,
 production `NEXT_PUBLIC_TOPOS_API_BASE_URL=https://cp.logu3s.com`: the browser
 talks to the control plane, and the control plane reaches your node over the
 node's own outbound sync socket. The sandbox node's port 9100 is never dialed by
-a browser. (`NEXT_PUBLIC_ENGINE_HTTP_URL=http://127.0.0.1:9000` is a local-dev
+a browser. (`NEXT_PUBLIC_ENGINE_HTTP_URL=http://127.0.0.1:8676` is a local-dev
 direct path only.)
 
 One account owns a **fleet** of nodes — `getFleetStatus()` returns a row per

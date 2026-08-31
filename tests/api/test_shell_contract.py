@@ -12,6 +12,7 @@ pytestmark = pytest.mark.public
 
 from topos.api import shell as shell_module
 from topos.cli import commands, tray
+from topos.defaults import DEFAULT_NODE_PORT
 from topos.runtime_update import UpdateInfo
 
 
@@ -111,27 +112,27 @@ class TestProbeRunningNode:
             raise httpx.ConnectError("refused")
 
         monkeypatch.setattr(httpx, "get", raise_connect)
-        assert commands._probe_running_node("0.0.0.0", 9000) is None
+        assert commands._probe_running_node("0.0.0.0", DEFAULT_NODE_PORT) is None
 
     def test_running_node_returns_shell_status(self, monkeypatch):
         import httpx
 
         payload = {"name": "topos-node", "version": "1.3.1", "log_file": "/tmp/node.log"}
         monkeypatch.setattr(httpx, "get", lambda url, timeout: self._Resp(200, payload))
-        assert commands._probe_running_node("0.0.0.0", 9000) == payload
+        assert commands._probe_running_node("0.0.0.0", DEFAULT_NODE_PORT) == payload
 
     def test_foreign_server_returns_none(self, monkeypatch):
         import httpx
 
         monkeypatch.setattr(httpx, "get", lambda url, timeout: self._Resp(200, {"hello": "web"}))
-        assert commands._probe_running_node("0.0.0.0", 9000) is None
+        assert commands._probe_running_node("0.0.0.0", DEFAULT_NODE_PORT) is None
 
 
 class TestTrayConsumesContract:
     def _tray(self, **kwargs):
         return tray.ToposTray(
             host="0.0.0.0",
-            port=9000,
+            port=DEFAULT_NODE_PORT,
             version="1.0.0",
             package_name="topos-node",
             on_quit=lambda: None,

@@ -17,6 +17,7 @@ from click.testing import CliRunner
 
 from topos import profiles
 from topos.cli.profile_cmd import profile_group
+from topos.defaults import DEFAULT_NODE_PORT
 
 pytestmark = [pytest.mark.public]
 
@@ -45,7 +46,7 @@ def _seed_profile(base: Path, slug: str, *, name: str | None = None, key: str = 
 
 @pytest.fixture(autouse=True)
 def _no_running_node(monkeypatch):
-    monkeypatch.setattr(profiles, "node_is_running", lambda port=9000: False)
+    monkeypatch.setattr(profiles, "node_is_running", lambda port=DEFAULT_NODE_PORT: False)
 
 
 class TestNewProfile:
@@ -128,7 +129,7 @@ class TestSwitchProfile:
     def test_refuses_while_node_running(self, tmp_path, monkeypatch):
         _seed_active(tmp_path)
         _seed_profile(tmp_path, "work")
-        monkeypatch.setattr(profiles, "node_is_running", lambda port=9000: True)
+        monkeypatch.setattr(profiles, "node_is_running", lambda port=DEFAULT_NODE_PORT: True)
         with pytest.raises(profiles.ProfileError, match="running"):
             profiles.switch_profile("work", tmp_path)
         # Nothing moved.
@@ -328,7 +329,7 @@ class TestRemoveProfile:
     def test_does_not_require_the_node_to_be_stopped(self, tmp_path, monkeypatch):
         # An archived Topos is not the one a running engine has open, so unlike
         # new/switch this must work without asking anyone to quit Topos.
-        monkeypatch.setattr(profiles, "node_is_running", lambda port=9000: True)
+        monkeypatch.setattr(profiles, "node_is_running", lambda port=DEFAULT_NODE_PORT: True)
         _seed_profile(tmp_path, "work")
 
         profiles.remove_profile("work", tmp_path)

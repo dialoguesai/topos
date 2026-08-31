@@ -1,4 +1,4 @@
-"""Iteration 4 — Live engine smoke against running localhost:9000."""
+"""Iteration 4 — Live engine smoke against running localhost:8676."""
 
 from __future__ import annotations
 
@@ -7,9 +7,11 @@ import pathlib
 
 import pytest
 
+from topos.defaults import DEFAULT_NODE_LOCALHOST_URL
+
 pytestmark = [pytest.mark.release_pressure, pytest.mark.p0, pytest.mark.live]
 
-LOCAL_ENGINE = os.environ.get("TOPOS_ENGINE_URL", "http://localhost:9000")
+LOCAL_ENGINE = os.environ.get("TOPOS_ENGINE_URL", DEFAULT_NODE_LOCALHOST_URL)
 
 # tests/conftest.py sets TOPOS_KEY="test-key" so Settings validation passes for
 # the whole suite. This module is the one that talks to a REAL node, and that

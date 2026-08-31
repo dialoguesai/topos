@@ -6,12 +6,12 @@ to the engine's /api/local/* HTTP endpoints. Use when the engine and Claude run 
 the same machine.
 
 Usage:
-  ENGINE_URL=http://localhost:9000 BEARER_TOKEN=your_key python -m topos.mcp_stdio_proxy
+  ENGINE_URL=http://localhost:8676 BEARER_TOKEN=your_key python -m topos.mcp_stdio_proxy
   # or with args:
-  python -m topos.mcp_stdio_proxy --url http://localhost:9000
+  python -m topos.mcp_stdio_proxy --url http://localhost:8676
 
 Claude Desktop config (direct to local engine): use scripts/run_local_mcp_proxy.sh
-with full path, args ["--url", "http://localhost:9000"], and env BEARER_TOKEN.
+with full path, args ["--url", "http://localhost:8676"], and env BEARER_TOKEN.
 
 Only list_database_tables and get_table_schema are exposed (engine's /api/local/*).
 For full tools (get_analytics, get_messages, get_oplog) use the Control Plane.
@@ -25,6 +25,8 @@ import sys
 
 import httpx
 from mcp.server.fastmcp import FastMCP
+
+from topos.defaults import DEFAULT_NODE_LOCALHOST_URL
 
 # Engine URL and token; set in main() before FastMCP runs.
 _engine_url: str = ""
@@ -53,8 +55,8 @@ def main() -> int:
     )
     parser.add_argument(
         "--url",
-        default=os.environ.get("ENGINE_URL", "http://localhost:9000"),
-        help="Engine base URL (default: ENGINE_URL or http://localhost:9000)",
+        default=os.environ.get("ENGINE_URL", DEFAULT_NODE_LOCALHOST_URL),
+        help=f"Engine base URL (default: ENGINE_URL or {DEFAULT_NODE_LOCALHOST_URL})",
     )
     args = parser.parse_args()
     _engine_url = args.url.rstrip("/")

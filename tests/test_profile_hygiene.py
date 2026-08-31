@@ -22,6 +22,7 @@ from pathlib import Path
 import pytest
 
 from topos import profiles
+from topos.defaults import DEFAULT_NODE_PORT
 from topos.storage.db.migrations import backup as backup_mod
 
 pytestmark = [pytest.mark.public]
@@ -70,7 +71,7 @@ def _seed_active(base: Path, *, key: str = "KEYAAA", real_db: bool = True) -> No
 
 @pytest.fixture(autouse=True)
 def _no_running_node(monkeypatch):
-    monkeypatch.setattr(profiles, "node_is_running", lambda port=9000: False)
+    monkeypatch.setattr(profiles, "node_is_running", lambda port=DEFAULT_NODE_PORT: False)
 
 
 class TestArchiveIsSelfContained:

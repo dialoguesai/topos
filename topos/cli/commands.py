@@ -12,6 +12,7 @@ import uvicorn
 # Add parent directory to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent.parent))
 
+from topos.defaults import DEFAULT_NODE_PORT
 from topos.runtime_update import (
     DEFAULT_PACKAGE_NAME,
     apply_package_update,
@@ -232,8 +233,8 @@ def _maybe_offer_self_update(
 )
 @click.option(
     "--port",
-    default=9000,
-    help="Server port (default: 9000)",
+    default=DEFAULT_NODE_PORT,
+    help=f"Server port (default: {DEFAULT_NODE_PORT})",
 )
 @click.option(
     "--host",

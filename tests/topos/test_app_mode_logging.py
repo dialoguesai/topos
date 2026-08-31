@@ -13,6 +13,7 @@ pytestmark = pytest.mark.public
 
 from topos.cli import tray
 from topos.core import logging as topos_logging
+from topos.defaults import DEFAULT_NODE_PORT
 
 
 @pytest.fixture
@@ -94,7 +95,7 @@ class TestShowLogsMenu:
     def _tray(self, log_path):
         return tray.ToposTray(
             host="0.0.0.0",
-            port=9000,
+            port=DEFAULT_NODE_PORT,
             version="1.0.0",
             package_name="topos-node",
             on_quit=lambda: None,

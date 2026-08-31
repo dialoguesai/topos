@@ -9,6 +9,7 @@ import pytest
 pytestmark = pytest.mark.public
 
 from topos.cli import tray
+from topos.defaults import DEFAULT_NODE_HTTP_URL, DEFAULT_NODE_PORT
 
 
 class TestShouldEnableTray:
@@ -128,9 +129,9 @@ class TestTrayHealthHysteresis:
 class TestToposTray:
     def test_poll_host_rewrites_wildcard_bind(self):
         t = tray.ToposTray(
-            host="0.0.0.0", port=9000, version="1.0.0", package_name="topos-node", on_quit=lambda: None
+            host="0.0.0.0", port=DEFAULT_NODE_PORT, version="1.0.0", package_name="topos-node", on_quit=lambda: None
         )
-        assert t.health_url == "http://127.0.0.1:9000/healthcheck"
+        assert t.health_url == f"{DEFAULT_NODE_HTTP_URL}/healthcheck"
         assert t.docs_url == tray.TOPOS_DOCS_URL  # product docs, not the local API docs
 
     def test_specific_host_kept(self):
@@ -148,7 +149,7 @@ class TestQuitSemantics:
     def _tray(self, *, attached: bool) -> tray.ToposTray:
         return tray.ToposTray(
             host="127.0.0.1",
-            port=9000,
+            port=DEFAULT_NODE_PORT,
             version="1.0.0",
             package_name="topos-node",
             on_quit=lambda: None,
@@ -194,7 +195,7 @@ class TestQuitSemantics:
 class TestToposNameRow:
     def test_named_topos_gets_its_row(self):
         t = tray.ToposTray(
-            host="127.0.0.1", port=9000, version="1.0.0", package_name="topos-node", on_quit=lambda: None
+            host="127.0.0.1", port=DEFAULT_NODE_PORT, version="1.0.0", package_name="topos-node", on_quit=lambda: None
         )
         assert not any(l.startswith("Topos: ") for l in t._menu_labels())
         t.topos_name = "PersonalDB"
@@ -220,7 +221,7 @@ class TestFailedUpdateIsVisible:
 
     def _tray(self) -> tray.ToposTray:
         return tray.ToposTray(
-            host="127.0.0.1", port=9000, version="1.3.6", package_name="topos-node", on_quit=lambda: None
+            host="127.0.0.1", port=DEFAULT_NODE_PORT, version="1.3.6", package_name="topos-node", on_quit=lambda: None
         )
 
     def test_failure_is_named(self):
@@ -249,7 +250,7 @@ class TestSelectToposMenu:
     def _tray(self, *, attached: bool = False) -> tray.ToposTray:
         return tray.ToposTray(
             host="127.0.0.1",
-            port=9000,
+            port=DEFAULT_NODE_PORT,
             version="1.3.15",
             package_name="topos-node",
             on_quit=lambda: None,

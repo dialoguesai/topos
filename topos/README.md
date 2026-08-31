@@ -64,6 +64,6 @@ You can use Claude Desktop (or Claude Code) with Topos so Claude can call tools 
 
 **Prerequisites:** Node.js (for `npx`). The config uses the [stdio → Streamable HTTP adapter](https://www.npmjs.com/package/@pyroprompts/mcp-stdio-to-streamable-http-adapter) so Claude can talk to the Control Plane at `https://cp.logu3s.com/mcp/`.
 
-**Direct to local node (no Control Plane):** If the node and Claude run on the same machine, you can use the repo’s stdio proxy so Claude talks straight to the node. In Claude config, set `command` to the full path to `scripts/run_local_mcp_proxy.sh` (uses repo **.venv**; run `uv sync --extra engine` at repo root), `args` to `["--url", "http://localhost:9000"]`, and `env.BEARER_TOKEN` to your node API key. Only **list_database_tables** and **get_table_schema** are available this way; for all tools use the remote Control Plane URL above.
+**Direct to local node (no Control Plane):** If the node and Claude run on the same machine, you can use the repo’s stdio proxy so Claude talks straight to the node. In Claude config, set `command` to the full path to `scripts/run_local_mcp_proxy.sh` (uses repo **.venv**; run `uv sync --extra engine` at repo root), `args` to `["--url", "http://localhost:8676"]`, and `env.BEARER_TOKEN` to your node API key. Only **list_database_tables** and **get_table_schema** are available this way; for all tools use the remote Control Plane URL above.
 
 **Full guide and troubleshooting:** [docs/SETUP_CLAUDE_DESKTOP.md](../docs/SETUP_CLAUDE_DESKTOP.md)

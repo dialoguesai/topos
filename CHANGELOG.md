@@ -9,6 +9,13 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Changed
+- **Default local node port is 8676.** `[O]` `topos-node` now binds
+  `127.0.0.1:8676` (TOPO on a phone keypad) instead of `:9000`. Restart the
+  node after upgrading. Point `NEXT_PUBLIC_ENGINE_HTTP_URL` and any Claude
+  Desktop MCP `--url` at `http://127.0.0.1:8676` (or `http://localhost:8676`).
+  `--port` still overrides.
+
 ## [1.3.38] — 2026-08-30
 
 ### Added

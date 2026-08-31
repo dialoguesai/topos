@@ -17,6 +17,7 @@ from typing import Optional
 import click
 
 from topos import profiles
+from topos.defaults import DEFAULT_NODE_PORT
 
 
 def _echo(payload: dict, as_json: bool, human: str) -> None:
@@ -41,7 +42,7 @@ _BASE_OPTION = click.option(
 )
 _JSON_OPTION = click.option("--json", "as_json", is_flag=True, help="Machine-readable output.")
 _PORT_OPTION = click.option(
-    "--port", default=9000, show_default=True, help="Port probed for a running node."
+    "--port", default=DEFAULT_NODE_PORT, show_default=True, help="Port probed for a running node."
 )
 
 

@@ -37,6 +37,7 @@ from typing import Optional
 
 logger = logging.getLogger("topos.profiles")
 
+from .defaults import DEFAULT_NODE_PORT
 from .storage.db.paths import (  # one spelling of the layout, shared with the resolver
     ACTIVE_MARKER_FILENAME,
     DATABASE_FILENAME,
@@ -185,7 +186,7 @@ def _unique_slug(base: Path, wanted: str) -> str:
     return slug
 
 
-def node_is_running(port: int = 9000) -> bool:
+def node_is_running(port: int = DEFAULT_NODE_PORT) -> bool:
     """True when something answers the node healthcheck on localhost.
 
     401/403 count as running — health auth being enabled means the node
@@ -608,7 +609,7 @@ def new_profile(
     base: Optional[Path] = None,
     *,
     name: Optional[str] = None,
-    port: int = 9000,
+    port: int = DEFAULT_NODE_PORT,
     skip_node_check: bool = False,
 ) -> dict:
     """Archive the active Topos (if any) and leave ~/.topos fresh and unbound.
@@ -635,7 +636,7 @@ def switch_profile(
     profile_id: str,
     base: Optional[Path] = None,
     *,
-    port: int = 9000,
+    port: int = DEFAULT_NODE_PORT,
     skip_node_check: bool = False,
 ) -> dict:
     """Archive the active Topos and activate profiles/<profile_id>/.

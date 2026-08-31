@@ -51,7 +51,7 @@ pytest tests -m "public and not e2e and not live and not qq_eval" -q
     database. Run it against a disposable copy with `just test-owner-db-eval`,
     never against `~/.topos` directly.
   - `@pytest.mark.live` — needs a real database, and for
-    `tests/release/iteration4` a node running on `:9000` (`just test-live-node`).
+    `tests/release/iteration4` a node running on `:8676` (`just test-live-node`).
   - `@pytest.mark.e2e` — requires external services and explicit environment setup.
 
   Naming a file or test id does **not** opt you in; only `-m` does. A test that

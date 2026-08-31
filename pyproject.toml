@@ -112,7 +112,7 @@ tmp_path_retention_count = 1
 tmp_path_retention_policy = "failed"
 # The DEFAULT lane is hermetic. Without this, a plain `pytest tests/` selects
 # every marker, and the three lanes below are the ones that read and WRITE the
-# developer's own ~/.topos/database.db or drive the node running on :9000 —
+# developer's own ~/.topos/database.db or drive the node running on :8676 —
 # `tests/conftest.py::_no_live_db_guard` waives its protection for exactly these
 # markers, which only makes sense if the ordinary gate never selects them.
 # On 2026-08-19 it did: one `pytest tests/ -q` run inserted 71 rows into the
@@ -137,7 +137,7 @@ markers = [
   "public: public-safe test lane for OSS CI",
   "private: internal architecture or fixtures; excluded from public CI",
   "e2e: end-to-end tests (live Keycloak + Control Plane; require config and running CP)",
-  "live: requires a running local engine (localhost:9000) and a real TOPOS_KEY; excluded from deterministic lanes",
+  "live: requires a running local engine (localhost:8676) and a real TOPOS_KEY; excluded from deterministic lanes",
   "release_pressure: iteration-4 live pressure smoke; run explicitly before releases",
   "p0: priority marker on release pressure tests",
   "retrieval_eval: dense-intelligence retrieval eval (loads local embedding model; run explicitly)",

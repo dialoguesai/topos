@@ -4,7 +4,7 @@
 by marker.**
 
 ```bash
-pytest tests -q          # safe: temp databases only, no network to :9000
+pytest tests -q          # safe: temp databases only, no network to :8676
 ```
 
 You cannot reach your own data by naming a file or a test id — only by naming a
@@ -19,7 +19,7 @@ marker. That is deliberate; see [Why the marker is the only key](#why-the-marker
 | Privacy battery | `just test-privacy-battery` | temp databases only |
 | Release gate | `just gate` | temp databases only |
 | Owner-database eval | `just test-owner-db-eval` | a **snapshot** of `~/.topos/database.db` |
-| Live node | `just test-live-node` | the node running on `:9000`, and whatever database it has open |
+| Live node | `just test-live-node` | the node running on `:8676`, and whatever database it has open |
 | End-to-end | `pytest tests -m e2e -q` | live Keycloak + Control Plane |
 
 `pyproject.toml` sets `addopts = ["-m", "not live and not e2e and not qq_eval"]`,
@@ -49,7 +49,7 @@ target in `ci.yml` stops being reachable from `just test` or `just gate`.
 | Marker | Means | Redirectable with `TOPOS_DATABASE_PATH`? |
 | --- | --- | --- |
 | `qq_eval` | query quality/latency eval against the owner database | yes |
-| `live` | needs a real database, and for `tests/release/iteration4` a node on `:9000` | yes, except the `:9000` module |
+| `live` | needs a real database, and for `tests/release/iteration4` a node on `:8676` | yes, except the `:8676` module |
 | `e2e` | needs live Keycloak + Control Plane | n/a |
 
 `live` currently spans two different needs — in-process modules that resolve the
@@ -202,7 +202,7 @@ It watches `sqlite3.connect` **in this process**. Two things are therefore out o
 its reach:
 
 - **Writes made by the node.** `tests/release/iteration4` drives the engine on
-  `:9000` over HTTP; that process opens its own database, and no env var set in
+  `:8676` over HTTP; that process opens its own database, and no env var set in
   the pytest process redirects it. `just test-live-node` is the only way in, and
   deselection is the only handling.
 - **Writes made by a subprocess.** Anything that shells out carries its own

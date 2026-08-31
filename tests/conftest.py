@@ -285,7 +285,7 @@ def _hint_if_everything_was_deselected(terminalreporter, config) -> None:
         "  just test-owner-db-eval    # against a snapshot of ~/.topos, never the original"
     )
     terminalreporter.write_line(
-        "  just test-live-node        # against the node running on :9000"
+        "  just test-live-node        # against the node running on :8676"
     )
     terminalreporter.write_line(
         "  pytest <path> -m qq_eval   # your own -m replaces the filter entirely"

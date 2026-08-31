@@ -20,6 +20,7 @@ from pathlib import Path
 
 import pytest
 
+from topos.defaults import DEFAULT_NODE_PORT
 from topos.storage.db import paths
 
 pytestmark = [pytest.mark.public]
@@ -381,7 +382,7 @@ class TestSwitchPreflight:
     def _no_running_node(self, monkeypatch):
         from topos import profiles
 
-        monkeypatch.setattr(profiles, "node_is_running", lambda port=9000: False)
+        monkeypatch.setattr(profiles, "node_is_running", lambda port=DEFAULT_NODE_PORT: False)
 
     def test_refuses_a_topos_from_a_newer_engine(self, tmp_path):
         from topos import profiles

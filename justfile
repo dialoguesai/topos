@@ -26,7 +26,7 @@ run *args:
     set -eu
     log_level=INFO
     host="0.0.0.0"
-    port="9000"
+    port="8676"
     read -r -a rest <<< "{{args}}"
     idx=0
     if [[ ${#rest[@]} -gt 0 && "${rest[0]}" == "dev" ]]; then
@@ -51,7 +51,7 @@ run-bare *args:
     set -eu
     log_level=INFO
     host="0.0.0.0"
-    port="9000"
+    port="8676"
     read -r -a rest <<< "{{args}}"
     idx=0
     if [[ ${#rest[@]} -gt 0 && "${rest[0]}" == "dev" ]]; then
@@ -63,7 +63,7 @@ run-bare *args:
     LOG_LEVEL="${log_level}" uv run uvicorn topos.app:app --host "${host}" --port "${port}" --log-config topos/config/uvicorn_logging.json
 
 # Run colocated node with Ollama runtime and auto-install missing engine deps.
-run-local host="127.0.0.1" port="9000":
+run-local host="127.0.0.1" port="8676":
     HOST="{{host}}" PORT="{{port}}" bash scripts/local/run-local-engine-with-ollama.sh
 
 # Fresh-install a node in an isolated HOME (never touches ~/.topos). See
@@ -118,7 +118,7 @@ test-privacy-battery *args:
 # corrupt or pollute the thing it measures.
 # --ignore, because `live` currently spans two different needs: these modules
 # resolve the database from TOPOS_DATABASE_PATH and so follow the snapshot,
-# while tests/release/iteration4 talks HTTP to the node on :9000 and would
+# while tests/release/iteration4 talks HTTP to the node on :8676 and would
 # ignore it — see `just test-live-node`.
 test-owner-db-eval *args:
     #!/usr/bin/env bash
@@ -129,7 +129,7 @@ test-owner-db-eval *args:
     TOPOS_DATABASE_PATH="$snap" uv run pytest tests -m "qq_eval or live" \
         --ignore=tests/release/iteration4 -q {{args}}
 
-# Live-node lane: drives the engine actually running on :9000 with a real key.
+# Live-node lane: drives the engine actually running on :8676 with a real key.
 #
 # Deselected from every other lane on purpose. It is environment-dependent by
 # construction — a 500 here is a statement about this machine's node, not about
@@ -180,7 +180,7 @@ gate:
 #
 # "never touches ~/.topos" was NOT true until 2026-08-21: evaluate_harness.py
 # scored brief quality over HTTP against --engine-url, default
-# http://127.0.0.1:9000 — the operator's live node on their real data. Every
+# http://127.0.0.1:8676 — the operator's live node on their real data. Every
 # other number came from the seeded DB, so the gate went red as real life
 # drifted and printed the owner's brief text into /tmp/query-catalog.out. It now
 # reads the briefs the seed writes, out of the same DB. One live-DB read

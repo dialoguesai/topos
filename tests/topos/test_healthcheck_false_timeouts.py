@@ -28,6 +28,7 @@ from topos.core.handlers.signal_features import (
     handle_signal_blackhole_entity,
     handle_signal_unblackhole_entity,
 )
+from topos.defaults import DEFAULT_NODE_PORT
 from topos.features.lifecycle.blackhole import BlackholeStore
 from topos.storage.db import write_gate
 from topos.storage.db.migrations import apply_all_migrations
@@ -77,7 +78,7 @@ def _loop_sites(records) -> list[str]:
 def _tray() -> tray.ToposTray:
     t = tray.ToposTray(
         host="127.0.0.1",
-        port=9000,
+        port=DEFAULT_NODE_PORT,
         version="1.0.0",
         package_name="topos-node",
         on_quit=lambda: None,
