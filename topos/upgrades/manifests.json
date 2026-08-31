@@ -721,7 +721,7 @@
       ]
     },
     {
-      "version": "unreleased",
+      "version": "1.3.39",
       "summary": "A ChatGPT export is read as the conversation it was, not the edit history; its declared columns mint sources and documents.",
       "steps": [],
       "notes": [
@@ -729,6 +729,12 @@
         "Declared entity minting for ChatGPT turns ([E:entities]): cited hosts and canvas/attachment documents are minted from message metadata through the declared lane. Additive \u2014 it produces entities that were never produced before and invalidates no existing extraction, so no spec_version bump and no enrichment_reprocess. Nodes with no ChatGPT source do no work.",
         "Import-time ingest options ([P]): an additive, optional field on the start_ingestion payload. Older control planes omit it and the reader falls back to source defaults."
       ]
+    },
+    {
+      "version": "unreleased",
+      "summary": "Staging entry for in-flight PRs. cut_release.py stamps this with the next version at release cut. Never executed by steps_between.",
+      "steps": [],
+      "notes": []
     }
   ]
 }

@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.39] — 2026-08-31
+
 ### Added
 - **Import-time options for file ingestion.** `[P]` `start_ingestion` accepts an
   `ingest_options` object, carried to the parser through the job payload. For
