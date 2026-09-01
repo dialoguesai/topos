@@ -155,3 +155,37 @@ def test_the_stage_names_match_what_the_orchestrator_reports():
     effective = effective_canonical_enrichment_jobs(source) or []
     assert effective, "no enrichment jobs resolved for the file source"
     assert set(effective) <= catalogue, set(effective) - catalogue
+
+
+def test_signal_derivation_reports_too():
+    """The third place in this chain that ACCEPTED a progress callback and was
+    handed none — and the most expensive. A live import sat on
+    "emo 27, 275 of 275" for 37 minutes while this phase ran topics over 726
+    records underneath it, with the node at work the whole time."""
+    src = inspect.getsource(canonical_pipeline.run_post_canonical_pipeline)
+    assert "progress_callback=_signal_progress" in src
+
+
+def test_the_stage_list_covers_signal_derivation():
+    """It is the larger half: 5 canonical jobs against 13 signal ones on a file
+    import. Leaving it out made the bar reach "7 of 7" and stop."""
+    src = inspect.getsource(manager.IngestionManager.process_job)
+    assert "resolved_signal_derivation_jobs(source_def)" in src
+    assert 'f"deriving_{name}"' in src
+
+
+def test_signal_stages_are_named_apart_from_the_canonical_ones():
+    """Four job names run in BOTH phases over different populations. Sharing a
+    name means a position lookup finds the canonical entry, and the bar walks
+    backwards into a stage that already finished."""
+    from topos.enrichment.source_overrides import effective_canonical_enrichment_jobs
+    from topos.sources.canonical_signal_defaults import resolved_signal_derivation_jobs
+    from topos.sources.registry import REGISTRY
+
+    source = REGISTRY.get("chatgpt_file_ingestion")
+    canon = list(effective_canonical_enrichment_jobs(source) or [])
+    signal = list(resolved_signal_derivation_jobs(source) or [])
+    assert set(canon) & set(signal), "no overlap left — this guard is now moot, re-check the naming"
+
+    order = ["a", "b"] + canon + [f"deriving_{n}" for n in signal]
+    assert len(order) == len(set(order)), "duplicate stage names would break position lookup"

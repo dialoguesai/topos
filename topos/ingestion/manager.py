@@ -1114,12 +1114,32 @@ class IngestionManager(BaseObject):
                 from ..enrichment.source_overrides import (
                     effective_canonical_enrichment_jobs,
                 )
+                from ..sources.canonical_signal_defaults import (
+                    resolved_signal_derivation_jobs,
+                )
 
                 try:
                     _effective_jobs = list(effective_canonical_enrichment_jobs(source_def) or [])
                 except Exception:  # noqa: BLE001 — never fail an import over a label
                     _effective_jobs = [j.get_job_name() for j in CANONICAL_JOBS]
-                _stage_order = [PRIVACY_STAGE_REDACT, PRIVACY_STAGE_NSFW] + _effective_jobs
+                try:
+                    _signal_jobs = list(resolved_signal_derivation_jobs(source_def) or [])
+                except Exception:  # noqa: BLE001
+                    _signal_jobs = []
+                # Signal derivation runs AFTER enrichment and is the larger half:
+                # measured on a file import, 5 canonical jobs against 13 signal
+                # ones. Leaving it out of the list made the bar reach "7 of 7"
+                # and then sit there through the longest phase of the import.
+                #
+                # Four job names appear in BOTH phases (embeddings, emo_27,
+                # entities, topics) over different populations, so the signal
+                # ones are named apart. Without that, a position lookup finds
+                # the canonical entry and the bar walks backwards.
+                _stage_order = (
+                    [PRIVACY_STAGE_REDACT, PRIVACY_STAGE_NSFW]
+                    + _effective_jobs
+                    + [f"deriving_{name}" for name in _signal_jobs]
+                )
                 _stage_count = max(1, len(_stage_order))
                 _loop = asyncio.get_running_loop()
                 _last_post = [0.0]

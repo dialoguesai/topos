@@ -915,11 +915,35 @@ async def run_post_canonical_pipeline(
     elif run_signal and signal_jobs:
         try:
             orchestrator = SignalDerivationOrchestrator(tables_manager=derived)
+            # Same wiring as enrichment, one phase later. This was the third
+            # place in the chain that ACCEPTED a progress callback and was
+            # handed none -- and the most costly, because it is the longest
+            # phase: a live import sat on "emo 27, 275 of 275" for 37 minutes
+            # while this ran topics over 726 records underneath it.
+            def _signal_progress(
+                processed_count: int,
+                total_count: int,
+                job_name: str = "",
+                job_percent: float = 0.0,
+                current_job_progress: float = 0.0,
+            ) -> None:
+                if enrichment_progress is None:
+                    return
+                # Named apart from the canonical job of the same name.
+                enrichment_progress(
+                    processed_count,
+                    total_count,
+                    f"deriving_{job_name}" if job_name else "deriving",
+                    job_percent,
+                    current_job_progress,
+                )
+
             outcome["signal_derivation"] = await orchestrator.run_signal_derivation(
                 records_for_signal,
                 source_id=source_id,
                 sync_batch_id=sync_batch_id,
                 job_names=job_names,
+                progress_callback=_signal_progress,
             )
         except Exception as exc:
             logger.error("[PIPELINE:SIGNAL_DERIVE] post-canonical failed: %s", exc, exc_info=True)
