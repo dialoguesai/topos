@@ -408,6 +408,20 @@ def _conversations_member(archive: zipfile.ZipFile) -> Optional[str]:
     return min(members, key=lambda name: name.count("/"))
 
 
+def is_container(path: Path) -> bool:
+    """True when the ingestible content lives *inside* ``path``.
+
+    A container must never be copied as-is: it is the archive or the folder the
+    export site produced, and only one member of it can be read.
+    """
+    try:
+        if path.is_dir():
+            return True
+    except OSError:
+        return False
+    return path.suffix.lower() in _ARCHIVE_SUFFIXES
+
+
 def open_ingestible(path: Path) -> BinaryIO:
     """Open the part of ``path`` we can actually read.
 

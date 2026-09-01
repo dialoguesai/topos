@@ -6,7 +6,7 @@ import json
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
+from typing import Optional, Any
 
 from .raw_store import RawFile, RawFileRef
 
@@ -60,6 +60,26 @@ class RawFileStore:
         destination.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(raw_file.file_path, destination)
         logger.info("Saved raw file: %s", destination)
+        return RawFileRef(file_id=destination.stem, file_path=str(destination))
+
+    def write_stream(self, dataset_id: str, schema_id: str, stream: Any) -> RawFileRef:
+        """Write raw content from a stream, without holding it all in memory.
+
+        Used when the source is a container: the ingestible member is streamed
+        out of it rather than the container being copied. Copying instead put a
+        1.4GB archive in this store under a .jsonl name, which then failed to
+        decode as text — the size was the real defect and the decode error was
+        how it announced itself.
+        """
+        destination = self.get_file_path(dataset_id, schema_id)
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        with open(destination, "wb") as out:
+            while True:
+                chunk = stream.read(1 << 20)
+                if not chunk:
+                    break
+                out.write(chunk)
+        logger.info("Saved raw file from stream: %s", destination)
         return RawFileRef(file_id=destination.stem, file_path=str(destination))
 
     def write_bytes(self, dataset_id: str, schema_id: str, payload: bytes) -> RawFileRef:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
@@ -29,8 +31,27 @@ class FileTrigger:
         file_format: str = "jsonl",
         ingest_options: Optional[Dict[str, Any]] = None,
     ) -> IngestionJob:
-        raw_file = RawFile(file_path=file_path, metadata={"dataset_id": dataset_id, "schema_id": schema_id})
-        self.file_store.write_file(raw_file)
+        # A container is never copied. `write_file` does a verbatim shutil.copy2
+        # into the raw store under a .jsonl name, which for an export archive
+        # meant a 1.4GB duplicate on disk that then failed to decode as text —
+        # the copy was the defect, the UnicodeDecodeError was just how it
+        # surfaced. Stream the one member we can read instead, so the store
+        # holds the conversations file and the archive stays where it is.
+        from ..local_exports import is_container, open_ingestible
+
+        source = Path(file_path)
+        if is_container(source):
+            stream = open_ingestible(source)
+            try:
+                self.file_store.write_stream(dataset_id, schema_id, stream)
+            finally:
+                stream.close()
+        else:
+            raw_file = RawFile(
+                file_path=file_path,
+                metadata={"dataset_id": dataset_id, "schema_id": schema_id},
+            )
+            self.file_store.write_file(raw_file)
         return IngestionJob(
             job_id=job_id,
             dataset_id=dataset_id,
