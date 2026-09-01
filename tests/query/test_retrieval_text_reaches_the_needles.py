@@ -265,3 +265,45 @@ async def test_a_request_without_parts_gates_on_one_whole_request_group(
     _, parts_at_gate, groups = watched.group_call
     assert parts_at_gate == []
     assert len(groups) == 1
+
+
+# ---------------------------------------------------------------------------
+# The goals vocabulary must not delete content from tables with no goals surface
+# ---------------------------------------------------------------------------
+
+
+def test_goals_words_stay_content_on_a_table_without_a_goals_surface():
+    """The bug this closes, measured on a real ChatGPT import.
+
+    `_EXTRA_SURFACE_TERMS` is the goals vocabulary — goal, objective, project,
+    roadmap, working on. Stripping those is right when the ask should route to
+    the goals surface. It was applied to every table, and no canonical table
+    owns those terms, so on a table without a goals surface they could only
+    delete content and never authorise the browse that compensates.
+
+    "What have I been working on?" against a chat corpus therefore lost every
+    content token, matched nothing, and returned silence — while the FTS index
+    held 106 rows for "working". In a chat message these are simply words.
+    """
+    from topos.query.retrieval import _query_tokens, _residual_content_tokens
+
+    for query in ("project", "working", "What have I been working on?"):
+        residual = _residual_content_tokens(_query_tokens(query), tables=["ai_chat_messages"])
+        assert residual, f"{query!r} lost every content token on ai_chat_messages"
+
+
+def test_the_goals_vocabulary_is_still_surface_when_unscoped():
+    """The unscoped callers route the goals ask; they must keep stripping."""
+    from topos.query.retrieval import _query_tokens, _residual_content_tokens
+
+    assert _residual_content_tokens(_query_tokens("what are my goals")) == []
+    assert _residual_content_tokens(_query_tokens("working on")) == []
+
+
+def test_a_word_owned_by_no_surface_was_never_stripped():
+    """Control: 'build' was always content, and stays content. If this ever
+    fails the change went far wider than the goals vocabulary."""
+    from topos.query.retrieval import _query_tokens, _residual_content_tokens
+
+    assert _residual_content_tokens(_query_tokens("build"), tables=["ai_chat_messages"]) == ["build"]
+    assert _residual_content_tokens(_query_tokens("build")) == ["build"]

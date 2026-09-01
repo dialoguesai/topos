@@ -171,7 +171,22 @@ def _residual_content_tokens(tokens: List[str], tables: Optional[List[str]] = No
         for tbl, terms in _SURFACE_INTENT_TERMS.items()
         if tables is None or tbl in tables
     ]
-    blobs.append(" ".join(_EXTRA_SURFACE_TERMS))
+    # The extra terms are the goals vocabulary — goal, objective, project,
+    # roadmap, working on. They name the goals surface, and stripping them is
+    # right when that surface is what the ask should route to.
+    #
+    # They were applied to every table, and no canonical table owns them, so on
+    # a table without a goals surface they could only ever delete content and
+    # never authorise the browse that compensates for deleting it. "What have I
+    # been working on?" against a chat corpus lost every content token, matched
+    # nothing, and returned silence — with 106 rows sitting in the FTS index.
+    # In a chat message "project" and "working on" are simply words.
+    owns_extra_surface = tables is None or any(
+        set(_EXTRA_SURFACE_TERMS) & set(_SURFACE_INTENT_TERMS.get(tbl, ()))
+        for tbl in tables
+    )
+    if owns_extra_surface:
+        blobs.append(" ".join(_EXTRA_SURFACE_TERMS))
     surface_blob = " ".join(blobs)
     # Date-scoped asks: a month name or a year means the bare small integers are day
     # numbers the date parser already consumed, and the range words are framing. Judged
