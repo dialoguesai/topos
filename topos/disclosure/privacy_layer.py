@@ -175,6 +175,16 @@ class PrivacyLayerClient:
 PRIVACY_STAGE_REDACT = "checking for private details"
 PRIVACY_STAGE_NSFW = "checking for sensitive content"
 
+# How many records to send per call. NOT a throughput choice: both engine
+# backends (redact_privacy_batch, classify_nsfw_batch) loop over `items` one at
+# a time, so grouping 32 records buys no batched inference -- it is purely
+# transport. The only thing the group size decides is how often progress can
+# move. Measured on a live import: ~3.75s per record on CPU, so a group of 32
+# meant the bar stepped once every two minutes and read as frozen; at 4 it
+# moves about every fifteen seconds. The per-call overhead is a dict and a
+# thread hop against ~15s of model work.
+PRIVACY_PROGRESS_CHUNK = 4
+
 
 async def run_privacy_disclosure_layer(
     conn,
@@ -297,13 +307,18 @@ async def run_privacy_disclosure_layer(
         # reported nothing at all, for its entire duration.
         _redact_total = len(flat_pending)
         _redact_done = 0
-        for i in range(0, len(flat_pending), PRIVACY_DISCLOSE_MAX_BATCH):
-            batch = flat_pending[i : i + PRIVACY_DISCLOSE_MAX_BATCH]
+        _redact_chunk = min(PRIVACY_DISCLOSE_MAX_BATCH, PRIVACY_PROGRESS_CHUNK)
+        for i in range(0, len(flat_pending), _redact_chunk):
+            batch = flat_pending[i : i + _redact_chunk]
             items = [{"id": e["batch_key"], "text": e["raw"]} for e in batch]
             if progress_callback:
                 progress_callback(_redact_done, _redact_total, PRIVACY_STAGE_REDACT)
             result = await privacy_client.redact_batch(items)
             _redact_done += len(batch)
+            # Also after: without this the final group never reports, and the
+            # stage appears to stop one group short of its own total.
+            if progress_callback:
+                progress_callback(_redact_done, _redact_total, PRIVACY_STAGE_REDACT)
             if result.get("status") in ("unavailable", "failed"):
                 failed_batches += 1
                 logger.warning(
@@ -367,13 +382,16 @@ async def run_privacy_disclosure_layer(
         nsfw_items = list(nsfw_pending.items())
         _nsfw_total = len(nsfw_items)
         _nsfw_done = 0
-        for i in range(0, len(nsfw_items), NSFW_CLASSIFY_MAX_BATCH):
-            batch = nsfw_items[i : i + NSFW_CLASSIFY_MAX_BATCH]
+        _nsfw_chunk = min(NSFW_CLASSIFY_MAX_BATCH, PRIVACY_PROGRESS_CHUNK)
+        for i in range(0, len(nsfw_items), _nsfw_chunk):
+            batch = nsfw_items[i : i + _nsfw_chunk]
             items = [{"id": key, "text": entry["text"]} for key, entry in batch]
             if progress_callback:
                 progress_callback(_nsfw_done, _nsfw_total, PRIVACY_STAGE_NSFW)
             nsfw_result = await privacy_client.classify_nsfw_batch(items)
             _nsfw_done += len(batch)
+            if progress_callback:
+                progress_callback(_nsfw_done, _nsfw_total, PRIVACY_STAGE_NSFW)
             if nsfw_result.get("status") in ("failed",):
                 nsfw_failed_batches += 1
                 continue

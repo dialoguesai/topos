@@ -40,10 +40,9 @@ def test_the_pipeline_hands_the_privacy_layer_a_reporter():
 def test_the_expensive_batches_report_not_just_the_skips():
     """Both model passes must report from the loop that does the work."""
     src = inspect.getsource(run_privacy_disclosure_layer)
-    redact = src.split("PRIVACY_DISCLOSE_MAX_BATCH)", 1)[1].split("NSFW_CLASSIFY_MAX_BATCH", 1)[0]
-    assert f"progress_callback(_redact_done, _redact_total, {'PRIVACY_STAGE_REDACT'})" in redact
-    nsfw = src.split("NSFW_CLASSIFY_MAX_BATCH)", 1)[1]
-    assert f"progress_callback(_nsfw_done, _nsfw_total, {'PRIVACY_STAGE_NSFW'})" in nsfw
+    redact, nsfw = src.split("_nsfw_chunk =", 1)
+    assert "progress_callback(_redact_done, _redact_total, PRIVACY_STAGE_REDACT)" in redact
+    assert "progress_callback(_nsfw_done, _nsfw_total, PRIVACY_STAGE_NSFW)" in nsfw
 
 
 def test_the_two_passes_are_named_apart():
@@ -89,3 +88,25 @@ def test_the_final_job_slot_is_not_double_counted():
 def test_the_privacy_layer_signature_carries_the_stage():
     params = inspect.signature(run_privacy_disclosure_layer).parameters
     assert "progress_callback" in params
+
+
+def test_progress_groups_are_sized_for_the_bar_not_for_throughput():
+    """Both engine backends loop over `items` one at a time, so a group of 32
+    bought no batched inference -- only a bar that moved once every two
+    minutes and read as frozen. Measured: ~3.75s per record on CPU."""
+    from topos.disclosure.privacy_layer import PRIVACY_PROGRESS_CHUNK
+    from topos.sanitization.privacy_filter import PRIVACY_DISCLOSE_MAX_BATCH
+
+    assert PRIVACY_PROGRESS_CHUNK < PRIVACY_DISCLOSE_MAX_BATCH
+
+
+def test_the_backends_really_do_loop_per_item():
+    """The premise of the group size above. If either ever batches for real,
+    shrinking the group starts costing throughput and this should be revisited."""
+    import inspect
+
+    from topos.sanitization.nsfw_classifier import classify_nsfw_batch
+    from topos.sanitization.privacy_filter import redact_privacy_batch
+
+    for fn in (redact_privacy_batch, classify_nsfw_batch):
+        assert "for item in items:" in inspect.getsource(fn), fn.__name__
