@@ -760,6 +760,11 @@ async def run_post_canonical_pipeline(
     run_signal: bool = True,
     run_enrichment: bool = True,
     force_signal: bool = False,
+    # Reports progress THROUGH the enrichment stage. Every layer below already
+    # accepted one — the orchestrator, and each job — and this was the single
+    # link that dropped it, which is why an import sat at 0% through the one
+    # phase that actually takes the time.
+    enrichment_progress: Optional[Any] = None,
     enrichment_records: Optional[List[Dict[str, Any]]] = None,
 ) -> Dict[str, Any]:
     """Run privacy disclosure, canonical enrichment, then signal derivation.
@@ -866,6 +871,7 @@ async def run_post_canonical_pipeline(
             outcome["canonical_enrichment"] = await enrichment_orchestrator.run_canonical(
                 records_for_enrichment,
                 job_names=canonical_jobs,
+                progress_callback=enrichment_progress,
             )
         except Exception as exc:
             logger.error("[PIPELINE:ENRICHMENT] post-canonical failed: %s", exc, exc_info=True)

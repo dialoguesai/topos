@@ -5,6 +5,7 @@ import json
 import logging
 import re
 import sqlite3
+import time
 from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -1085,6 +1086,66 @@ class IngestionManager(BaseObject):
                         len(canonical_messages),
                     )
 
+                # Report progress through enrichment — the stage that actually
+                # takes the time. Storing is seconds; the per-record model work
+                # afterwards is most of an import, and it was the part the
+                # screen could say nothing about, so a healthy job read 0%
+                # indefinitely and looked identical to a dead one.
+                #
+                # Posted from a thread via the running loop, throttled, and
+                # never allowed to fail the import: this is telemetry.
+                _loop = asyncio.get_running_loop()
+                _last_post = [0.0]
+
+                def _on_enrichment_progress(
+                    processed_count: int,
+                    total_count: int,
+                    job_name: str = "",
+                    job_percent: float = 0.0,
+                    current_job_progress: float = 0.0,
+                ) -> None:
+                    if not (progress_api_url and progress_api_key):
+                        return
+                    now = time.monotonic()
+                    finished = current_job_progress >= 100.0
+                    # Two seconds between posts, except the end of a job, which
+                    # is the transition a watcher most wants to see.
+                    if not finished and (now - _last_post[0]) < 2.0:
+                        return
+                    _last_post[0] = now
+                    # Overall = jobs already done, plus this job's share of one slot.
+                    jobs_total = max(1, len(CANONICAL_JOBS))
+                    overall = min(
+                        99.0, float(job_percent) + (float(current_job_progress) / jobs_total)
+                    )
+                    body = {
+                        "job_id": job.job_id,
+                        **progress_context,
+                        "status": "processing",
+                        "current_step": (job_name or "enriching").replace("_", " "),
+                        "progress_percent": round(overall, 1),
+                        "records_processed": int(processed_count or 0),
+                        "records_total": int(total_count or 0),
+                    }
+
+                    async def _post() -> None:
+                        try:
+                            import httpx
+
+                            async with httpx.AsyncClient(timeout=10.0) as client:
+                                await client.post(
+                                    f"{progress_api_url}/v1/ingestion/progress",
+                                    json=body,
+                                    headers={"Authorization": f"Bearer {progress_api_key}"},
+                                )
+                        except Exception as exc:  # noqa: BLE001 — telemetry only
+                            logger.debug("enrichment progress post failed: %s", exc)
+
+                    try:
+                        asyncio.run_coroutine_threadsafe(_post(), _loop)
+                    except Exception as exc:  # noqa: BLE001
+                        logger.debug("could not schedule progress post: %s", exc)
+
                 pipeline_outcome = await run_post_canonical_pipeline(
                     source_def=source_def,
                     canonical_records=canonical_messages,
@@ -1092,6 +1153,7 @@ class IngestionManager(BaseObject):
                     sync_batch_id=sync_batch_id,
                     tables_manager=tables_manager,
                     run_enrichment=enrichment_trigger == "automatic",
+                    enrichment_progress=_on_enrichment_progress,
                 )
 
                 enrich_result = pipeline_outcome.get("canonical_enrichment") or {}
