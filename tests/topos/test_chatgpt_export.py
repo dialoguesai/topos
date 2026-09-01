@@ -559,3 +559,67 @@ def test_is_conversation_needs_a_mapping_and_an_id():
     assert is_conversation({"mapping": {}}) is False
     assert is_conversation({"id": "x"}) is False
     assert is_conversation([]) is False
+
+
+# ---------------------------------------------------------------------------
+# Sample imports
+# ---------------------------------------------------------------------------
+
+
+def _dated_conversation(idx: int, when: float):
+    """A real linear conversation, stamped, so ordering is unambiguous."""
+    payload = linear_conversation()
+    payload["id"] = f"conv-{idx}"
+    payload["conversation_id"] = f"conv-{idx}"
+    payload["title"] = f"conversation {idx}"
+    payload["create_time"] = when
+    payload["update_time"] = when
+    return payload
+
+
+def test_a_sample_takes_the_newest_conversations():
+    """A sample import that finishes in a minute proves the whole pipeline; a
+    complete one nobody waits for proves nothing. Newest first, so the sample is
+    recent work rather than whatever order the export happened to use."""
+    from topos.ingestion.parsers.chatgpt_export import ExportOptions, iter_export
+
+    export = [_dated_conversation(i, 1_700_000_000 + i * 86_400) for i in range(10)]
+    records = list(iter_export(export, ExportOptions(max_conversations=3)))
+    assert {r["thread_id"] for r in records} == {"conv-9", "conv-8", "conv-7"}
+
+
+def test_no_cap_takes_everything():
+    from topos.ingestion.parsers.chatgpt_export import ExportOptions, iter_export
+
+    export = [_dated_conversation(i, 1_700_000_000 + i * 86_400) for i in range(5)]
+    assert len({r["thread_id"] for r in iter_export(export, ExportOptions())}) == 5
+
+
+def test_what_the_cap_skipped_is_counted_not_silent():
+    """An import that quietly stops at 100 looks identical to one that found
+    only 100. The ledger is what tells them apart."""
+    from topos.ingestion.parsers.chatgpt_export import (
+        DROP_OVER_SAMPLE_LIMIT,
+        DropLedger,
+        ExportOptions,
+        iter_export,
+    )
+
+    export = [_dated_conversation(i, 1_700_000_000 + i * 86_400) for i in range(10)]
+    ledger = DropLedger()
+    list(iter_export(export, ExportOptions(max_conversations=4), ledger=ledger))
+    summary = ledger.as_dict()
+    assert summary["conversations_kept"] == 4
+    assert summary["dropped_conversations"].get(DROP_OVER_SAMPLE_LIMIT) == 6
+    # Conversation-scoped, not node-scoped: mixing the units is what made an
+    # earlier report say "dropped 77 nodes" for 77 skipped conversations.
+    assert DROP_OVER_SAMPLE_LIMIT not in summary["dropped_nodes"]
+
+
+def test_a_zero_or_negative_cap_means_no_cap_not_nothing():
+    from topos.ingestion.parsers.chatgpt_export import ExportOptions
+
+    assert ExportOptions.from_payload({"max_conversations": 0}).max_conversations is None
+    assert ExportOptions.from_payload({"max_conversations": -5}).max_conversations is None
+    assert ExportOptions.from_payload({"max_conversations": "junk"}).max_conversations is None
+    assert ExportOptions.from_payload({"max_conversations": "100"}).max_conversations == 100

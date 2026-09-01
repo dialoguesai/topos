@@ -59,12 +59,17 @@ DROP_SCAFFOLD = "model_scaffolding"
 DROP_TOOL_OUTPUT = "tool_output"
 DROP_EMPTY = "empty_content"
 DROP_OUT_OF_WINDOW = "outside_date_window"
+# Past the sample cap. Counted, not silent: an import that quietly stops at 100
+# looks identical to one that found only 100.
+DROP_OVER_SAMPLE_LIMIT = "over_sample_limit"
 DROP_DO_NOT_REMEMBER = "marked_do_not_remember"
 
 # Drops decided for a whole conversation before any node is read. Counted apart
 # from node drops so ``message_nodes == turns_emitted + dropped_nodes`` stays a
 # checkable invariant rather than mixing two units in one total.
-CONVERSATION_DROP_REASONS = frozenset({DROP_OUT_OF_WINDOW, DROP_DO_NOT_REMEMBER})
+CONVERSATION_DROP_REASONS = frozenset(
+    {DROP_OUT_OF_WINDOW, DROP_DO_NOT_REMEMBER, DROP_OVER_SAMPLE_LIMIT}
+)
 DROP_UNKNOWN_ROLE = "unknown_role"
 
 
@@ -87,6 +92,11 @@ class ExportOptions:
     # declaration is the default; it is the user's own instruction about their
     # own data, and it costs nothing to read.
     respect_do_not_remember: bool = True
+    # Take at most this many conversations, newest first. A sample import that
+    # finishes in a minute is worth more than a complete one nobody waits for:
+    # the whole pipeline can be proven, and the enrichment that follows scales
+    # with what came in. None means everything the window allows.
+    max_conversations: Optional[int] = None
 
     @classmethod
     def from_payload(cls, payload: Optional[Dict[str, Any]]) -> "ExportOptions":
@@ -98,6 +108,7 @@ class ExportOptions:
             date_to=_as_epoch(payload.get("date_to")),
             include_alternate_branches=bool(payload.get("include_alternate_branches")),
             include_tool_output=bool(payload.get("include_tool_output")),
+            max_conversations=_as_positive_int(payload.get("max_conversations")),
             include_system=bool(payload.get("include_system")),
             respect_do_not_remember=bool(payload.get("respect_do_not_remember", True)),
         )
@@ -151,6 +162,25 @@ def _as_epoch(value: Any) -> Optional[float]:
         logger.warning("Unparseable date bound in ingest options: %r", value)
         return None
 
+
+
+
+def _as_positive_int(value: Any) -> Optional[int]:
+    """A sample size, or None. Zero and negatives mean "no cap", not "nothing"."""
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        return None
+    return n if n > 0 else None
+
+
+def _conversation_sort_key(conversation: Dict[str, Any]) -> float:
+    """Newest activity, for ordering a sample. Undated sorts oldest."""
+    for key in ("update_time", "create_time"):
+        stamp = _as_epoch(conversation.get(key))
+        if stamp is not None:
+            return stamp
+    return 0.0
 
 def _iso_to_epoch(text: str) -> float:
     from datetime import datetime, timezone
@@ -621,8 +651,22 @@ def iter_export(
     else:
         return
 
+    if options.max_conversations is not None:
+        # Newest first, so a sample is the recent work rather than an arbitrary
+        # slice of whatever order the export happened to use.
+        conversations = sorted(
+            (c for c in conversations if is_conversation(c)),
+            key=_conversation_sort_key,
+            reverse=True,
+        )
+
+    taken = 0
     for conversation in conversations:
         if not is_conversation(conversation):
+            continue
+        if options.max_conversations is not None and taken >= options.max_conversations:
+            ledger.conversations_seen += 1
+            ledger.drop(DROP_OVER_SAMPLE_LIMIT)
             continue
         ledger.conversations_seen += 1
         if options.respect_do_not_remember and conversation.get("is_do_not_remember") is True:
@@ -632,6 +676,7 @@ def iter_export(
             ledger.drop(DROP_OUT_OF_WINDOW)
             continue
         ledger.conversations_kept += 1
+        taken += 1
         try:
             yield from iter_turns(conversation, options, ledger)
         except Exception as exc:  # noqa: BLE001 — one bad thread must not end the import
