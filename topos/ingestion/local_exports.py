@@ -26,15 +26,98 @@ from __future__ import annotations
 import hashlib
 import math
 import os
+import re
 import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, BinaryIO, Dict, Iterable, List, Optional, Sequence
 
-# The one member of an export we can read. Everything else in the archive --
-# the rendered chat.html, the images, the small metadata files -- is ignored.
+# The member of an export we can read. Everything else in the archive -- the
+# rendered chat.html, the images, the small metadata files -- is ignored.
 CONVERSATIONS_MEMBER = "conversations.json"
+
+# Newer exports ship the conversations SHARDED: conversations-000.json through
+# conversations-020.json, a hundred conversations each, with no combined file at
+# all. An export taken 2026-08-31 had twenty-one of them and no
+# conversations.json, so a reader looking only for the single name found nothing
+# and refused an export that was perfectly good. Both layouts are read; the
+# single file wins when a export somehow carries both.
+CONVERSATION_SHARD_RE = re.compile(r"^conversations-(\d+)\.json$")
+
+
+# The export's own description of itself. Newer exports carry it and it is
+# authoritative: it names a *logical* file ("conversations.json") and lists the
+# physical files that make it up, with a `sharded` flag and a manifest version.
+EXPORT_MANIFEST_MEMBER = "export_manifest.json"
+LOGICAL_CONVERSATIONS = "conversations.json"
+
+
+def _members_from_manifest(read_member: Any, names: Sequence[str]) -> Optional[List[str]]:
+    """Conversation files as the export itself declares them, or None.
+
+    Preferred over filename convention because it is a statement rather than a
+    guess: when the layout changed from one file to twenty-one shards, the
+    manifest said so explicitly while every name-based rule had to be rewritten.
+    A manifest we cannot parse, or one that names files the archive does not
+    contain, falls through to convention rather than failing the import.
+    """
+    candidates = [n for n in names if n.rsplit("/", 1)[-1] == EXPORT_MANIFEST_MEMBER]
+    if not candidates:
+        return None
+    manifest_name = min(candidates, key=lambda n: n.count("/"))
+    prefix = manifest_name[: -len(EXPORT_MANIFEST_MEMBER)]
+    try:
+        import json
+
+        manifest = json.loads(read_member(manifest_name).decode("utf-8"))
+        logical = (manifest.get("logical_files") or {}).get(LOGICAL_CONVERSATIONS) or {}
+        declared = [str(f) for f in (logical.get("files") or []) if str(f).strip()]
+    except Exception:  # noqa: BLE001 — a bad manifest is not a bad export
+        return None
+
+    present = set(names)
+    resolved = [f if f in present else f"{prefix}{f}" for f in declared]
+    resolved = [f for f in resolved if f in present]
+    return resolved or None
+
+
+def _is_conversation_member(name: str) -> bool:
+    leaf = name.rsplit("/", 1)[-1]
+    return leaf == CONVERSATIONS_MEMBER or bool(CONVERSATION_SHARD_RE.match(leaf))
+
+
+def _conversation_members(
+    names: Iterable[str], read_member: Optional[Any] = None
+) -> List[str]:
+    """The member(s) holding conversations, in order.
+
+    Three strategies, most authoritative first: what the export's own manifest
+    declares, then the single well-known filename, then the sharded naming
+    convention. Returns [] when none match, which is how a zip of holiday photos
+    fails to look like an export.
+    """
+    names = list(names)
+    if read_member is not None:
+        declared = _members_from_manifest(read_member, names)
+        if declared:
+            return declared
+
+    singles = [n for n in names if n.rsplit("/", 1)[-1] == CONVERSATIONS_MEMBER]
+    if singles:
+        # The export puts it at the archive root; a nested one is someone's backup.
+        return [min(singles, key=lambda n: n.count("/"))]
+
+    shards = [n for n in names if CONVERSATION_SHARD_RE.match(n.rsplit("/", 1)[-1])]
+    if not shards:
+        return []
+    depth = min(n.count("/") for n in shards)
+    # Numeric order, not lexical: conversations-9 must not follow -10 if the
+    # producer ever drops the zero padding.
+    return sorted(
+        (n for n in shards if n.count("/") == depth),
+        key=lambda n: int(CONVERSATION_SHARD_RE.match(n.rsplit("/", 1)[-1]).group(1)),
+    )
 
 # Folder names to look in, relative to the user's home. Present on macOS and
 # Windows alike; a missing one is skipped rather than being an error.
@@ -157,16 +240,18 @@ def _archive_summary(path: Path) -> Optional[tuple[int, int, int]]:
     """
     try:
         with zipfile.ZipFile(path) as archive:
-            payload_bytes = None
+            members = set(_conversation_members(archive.namelist(), archive.read))
+            if not members:
+                return None
+            payload_bytes = 0
             ignored_files = 0
             ignored_bytes = 0
             for info in archive.infolist():
                 if info.is_dir():
                     continue
-                if info.filename.rsplit("/", 1)[-1] == CONVERSATIONS_MEMBER:
-                    # Shallowest wins: the export puts it at the archive root.
-                    if payload_bytes is None or info.filename.count("/") == 0:
-                        payload_bytes = info.file_size
+                if info.filename in members:
+                    # Every shard counts toward what we will read.
+                    payload_bytes += info.file_size
                     continue
                 ignored_files += 1
                 ignored_bytes += info.file_size
@@ -186,15 +271,20 @@ def _folder_summary(path: Path) -> Optional[tuple[int, int, int]]:
     and the receipt built on that number would have understated, by a factor of
     four, what the user was being told we leave behind.
     """
-    member = path / CONVERSATIONS_MEMBER
     try:
-        if not member.is_file():
-            return None
-        payload_bytes = member.stat().st_size
-        if payload_bytes < MIN_PAYLOAD_BYTES:
-            return None
+        names = [e.name for e in os.scandir(path) if e.is_file(follow_symlinks=False)]
     except OSError:
         return None
+    members = _conversation_members(names, lambda n: (path / n).read_bytes())
+    if not members:
+        return None
+    try:
+        payload_bytes = sum((path / m).stat().st_size for m in members)
+    except OSError:
+        return None
+    if payload_bytes < MIN_PAYLOAD_BYTES:
+        return None
+    member_set = set(members)
 
     ignored_files = 0
     ignored_bytes = 0
@@ -206,7 +296,7 @@ def _folder_summary(path: Path) -> Optional[tuple[int, int, int]]:
                 # Stop counting rather than stop offering: an approximate
                 # "ignoring at least N" beats refusing a usable export.
                 return payload_bytes, ignored_files, ignored_bytes
-            if directory == str(path) and filename == CONVERSATIONS_MEMBER:
+            if directory == str(path) and filename in member_set:
                 continue
             try:
                 ignored_bytes += os.stat(
@@ -243,7 +333,7 @@ def _candidate_for(path: Path, root: Path) -> Optional[ExportCandidate]:
         summary = _archive_summary(path)
         kind = "archive"
         size_bytes = stat.st_size
-    elif path.name == CONVERSATIONS_MEMBER:
+    elif _is_conversation_member(path.name):
         if stat.st_size < MIN_PAYLOAD_BYTES:
             return None
         summary = (stat.st_size, 0, 0)
@@ -394,6 +484,79 @@ class _ArchiveMemberStream:
         self.close()
 
 
+class _SplicedArrayStream:
+    """Several JSON arrays presented as one, without holding them all at once.
+
+    A sharded export is twenty-one files each holding a list of conversations.
+    The parser upstream wants a single array, and a byte concatenation of
+    ``[a,b]`` and ``[c,d]`` is not valid JSON — so the outer brackets are
+    stripped from each shard and one pair is written around the whole sequence.
+
+    Shards are opened one at a time. The alternative, parsing all of them into
+    memory to re-serialise, would undo the streaming that exists so an import
+    costs a buffer rather than a copy of the corpus.
+    """
+
+    def __init__(self, parts: List[Any]) -> None:
+        #: callables returning bytes, one per shard, called on demand
+        self._parts = parts
+        self._index = 0
+        self._buffer = b"["
+        self._emitted_any = False
+        self._done = False
+
+    def _fill(self) -> None:
+        """Append at least one shard, then more while the buffer is small.
+
+        The "at least one" is load-bearing: an earlier version only appended
+        while the buffer was under a megabyte, so read(-1) — which drains
+        nothing until the end — looped forever the moment the buffer passed
+        that mark. A small-chunk test never saw it, because draining kept the
+        buffer under the threshold and every call made progress.
+        """
+        first = True
+        while not self._done and (first or len(self._buffer) < (1 << 20)):
+            first = False
+            if self._index >= len(self._parts):
+                self._buffer += b"]"
+                self._done = True
+                return
+            raw = self._parts[self._index]().strip()
+            self._index += 1
+            if raw.startswith(b"[") and raw.endswith(b"]"):
+                inner = raw[1:-1].strip()
+            else:
+                # Not an array: a shard holding a bare object still belongs in
+                # the sequence rather than aborting the whole import.
+                inner = raw
+            if not inner:
+                continue
+            if self._emitted_any:
+                self._buffer += b","
+            self._buffer += inner
+            self._emitted_any = True
+
+    def read(self, size: int = -1) -> bytes:
+        if size is None or size < 0:
+            while not self._done:
+                self._fill()
+            out, self._buffer = self._buffer, b""
+            return out
+        while len(self._buffer) < size and not self._done:
+            self._fill()
+        out, self._buffer = self._buffer[:size], self._buffer[size:]
+        return out
+
+    def close(self) -> None:
+        self._parts = []
+
+    def __enter__(self) -> "_SplicedArrayStream":
+        return self
+
+    def __exit__(self, *exc_info) -> None:
+        self.close()
+
+
 class LocalExportError(Exception):
     """The path is not something we can read conversations out of."""
 
@@ -432,13 +595,21 @@ def open_ingestible(path: Path) -> BinaryIO:
     being asked to go find one file in it.
     """
     if path.is_dir():
-        member = path / CONVERSATIONS_MEMBER
-        if not member.is_file():
+        try:
+            names = [e.name for e in os.scandir(path) if e.is_file(follow_symlinks=False)]
+        except OSError:
+            names = []
+        members = _conversation_members(names, lambda n: (path / n).read_bytes())
+        if not members:
             raise LocalExportError(
                 f"No {CONVERSATIONS_MEMBER} in that folder. "
                 f"Choose the folder from the export, or the {CONVERSATIONS_MEMBER} inside it."
             )
-        return open(member, "rb")
+        if len(members) == 1:
+            return open(path / members[0], "rb")
+        return _SplicedArrayStream(
+            [(lambda m=m: (path / m).read_bytes()) for m in members]
+        )  # type: ignore[return-value]
 
     if path.suffix.lower() in _ARCHIVE_SUFFIXES:
         try:
@@ -447,14 +618,30 @@ def open_ingestible(path: Path) -> BinaryIO:
             raise LocalExportError(
                 "That .zip could not be opened. Re-download the export and try again."
             ) from exc
-        member = _conversations_member(archive)
-        if not member:
+        members = _conversation_members(archive.namelist(), archive.read)
+        if not members:
             archive.close()
+            top = sorted({n.split("/")[0] for n in archive.namelist() if n.strip()})[:8]
             raise LocalExportError(
-                f"No {CONVERSATIONS_MEMBER} inside that archive. "
-                f"Use the export .zip, or the {CONVERSATIONS_MEMBER} from inside it."
+                f"No conversations found inside that archive. It contains: "
+                f"{', '.join(top) or 'nothing readable'}. "
+                f"Use the export .zip from ChatGPT, or the {CONVERSATIONS_MEMBER} inside it."
             )
-        return _ArchiveMemberStream(archive, member)  # type: ignore[return-value]
+        if len(members) == 1:
+            return _ArchiveMemberStream(archive, members[0])  # type: ignore[return-value]
+        # Sharded export: one logical array across many members. The archive is
+        # closed by the stream, which is why the readers capture it.
+        stream = _SplicedArrayStream([(lambda m=m: archive.read(m)) for m in members])
+        original_close = stream.close
+
+        def _close_all() -> None:
+            try:
+                original_close()
+            finally:
+                archive.close()
+
+        stream.close = _close_all  # type: ignore[method-assign]
+        return stream  # type: ignore[return-value]
 
     return open(path, "rb")
 

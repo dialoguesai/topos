@@ -458,3 +458,158 @@ def test_describe_reads_a_folder_too(tmp_path):
     folder.mkdir()
     (folder / CONVERSATIONS_MEMBER).write_text(json.dumps([_conversation_at(1, 1_700_000_000.0)]))
     assert describe_export(folder)["newest_at"] == 1_700_000_000.0
+
+
+# --------------------------------------------------------------------------
+# Export layouts: declared first, conventional second, diagnostic on neither
+# --------------------------------------------------------------------------
+
+
+def _sharded_zip(root, shards=3, per=2, manifest=True, name="export.zip"):
+    """An export in the newer layout: no conversations.json, N shards, manifest."""
+    path = root / name
+    files = [f"conversations-{i:03d}.json" for i in range(shards)]
+    with zipfile.ZipFile(path, "w") as z:
+        for idx, f in enumerate(files):
+            z.writestr(f, json.dumps([
+                {"id": f"c{idx}-{k}", "conversation_id": f"c{idx}-{k}",
+                 "title": f"conv {idx}-{k}", "mapping": {}, "padding": "x" * 400,
+                 "create_time": 1_700_000_000.0 + idx, "update_time": 1_700_000_000.0 + idx}
+                for k in range(per)
+            ]))
+        z.writestr("chat.html", "<html></html>" * 100)
+        if manifest:
+            z.writestr("export_manifest.json", json.dumps({
+                "version": 1,
+                "manifest_file": "export_manifest.json",
+                "logical_files": {"conversations.json": {"files": files, "sharded": True}},
+            }))
+    return path
+
+
+def test_a_sharded_export_is_recognised(tmp_path):
+    """The format changed under us: an export taken 2026-08-31 had twenty-one
+    conversations-NNN.json files and no conversations.json at all. A reader
+    looking only for the single name refused a perfectly good export."""
+    from topos.ingestion.local_exports import find_exports
+
+    _sharded_zip(tmp_path, shards=3, per=2)
+    found = find_exports([tmp_path]).candidates
+    assert len(found) == 1
+    assert found[0].kind == "archive"
+
+
+def test_shards_read_as_one_conversation_list(tmp_path):
+    from topos.ingestion.local_exports import open_ingestible
+
+    path = _sharded_zip(tmp_path, shards=4, per=3)
+    with open_ingestible(path) as stream:
+        loaded = json.loads(stream.read().decode("utf-8"))
+    assert len(loaded) == 12
+    assert loaded[0]["conversation_id"] == "c0-0"
+    assert loaded[-1]["conversation_id"] == "c3-2"
+
+
+def test_the_manifest_is_believed_over_the_filenames(tmp_path):
+    """The manifest is a statement; a filename rule is a guess. When they
+    disagree the statement wins — that is the whole reason to read it."""
+    from topos.ingestion.local_exports import _conversation_members
+
+    names = ["conversations-000.json", "conversations-001.json", "export_manifest.json"]
+    manifest = json.dumps({
+        "version": 1,
+        "logical_files": {"conversations.json": {"files": ["conversations-001.json"], "sharded": True}},
+    }).encode()
+    members = _conversation_members(names, lambda n: manifest)
+    assert members == ["conversations-001.json"]
+
+
+def test_convention_still_works_without_a_manifest(tmp_path):
+    """Exports predating the manifest must keep importing."""
+    from topos.ingestion.local_exports import open_ingestible
+
+    path = _sharded_zip(tmp_path, shards=2, per=2, manifest=False, name="no-manifest.zip")
+    with open_ingestible(path) as stream:
+        assert len(json.loads(stream.read().decode("utf-8"))) == 4
+
+
+def test_an_unreadable_manifest_falls_back_rather_than_failing(tmp_path):
+    from topos.ingestion.local_exports import _conversation_members
+
+    names = ["conversations-000.json", "export_manifest.json"]
+    members = _conversation_members(names, lambda n: b"{ this is not json")
+    assert members == ["conversations-000.json"]
+
+
+def test_a_manifest_naming_absent_files_falls_back(tmp_path):
+    # A manifest that points at files the archive does not carry is worse than
+    # no manifest; convention is the safer answer.
+    from topos.ingestion.local_exports import _conversation_members
+
+    names = ["conversations-000.json", "export_manifest.json"]
+    manifest = json.dumps({
+        "logical_files": {"conversations.json": {"files": ["conversations-999.json"]}}
+    }).encode()
+    assert _conversation_members(names, lambda n: manifest) == ["conversations-000.json"]
+
+
+def test_shards_are_ordered_numerically_not_lexically():
+    from topos.ingestion.local_exports import _conversation_members
+
+    names = [f"conversations-{i}.json" for i in (10, 2, 1)]
+    assert _conversation_members(names) == [
+        "conversations-1.json", "conversations-2.json", "conversations-10.json",
+    ]
+
+
+def test_a_failure_names_what_it_actually_found(tmp_path):
+    """The error said "No conversations.json inside that archive" and stopped.
+    Saying what IS there turns a format change from a user report into a
+    thirty-second diagnosis."""
+    from topos.ingestion.local_exports import LocalExportError, open_ingestible
+
+    path = tmp_path / "photos.zip"
+    with zipfile.ZipFile(path, "w") as z:
+        z.writestr("beach.png", b"\x89PNG")
+        z.writestr("holiday.mov", b"\x00" * 10)
+    with pytest.raises(LocalExportError) as excinfo:
+        open_ingestible(path)
+    message = str(excinfo.value)
+    assert "beach.png" in message and "holiday.mov" in message
+
+
+def test_reading_a_large_sharded_export_in_one_call_terminates():
+    """The bug this pins: `_fill` only appended while the buffer was under a
+    megabyte, so `read(-1)` — which drains nothing until the end — stopped
+    making progress past that mark and looped forever. A 482 MB export hung for
+    fifteen minutes before a timeout killed it.
+
+    Small-chunk tests could never catch it: draining kept the buffer under the
+    threshold, so every call made progress. The payload here must exceed 1 MB
+    and be read in a single call, or this passes against the broken version.
+    """
+    from topos.ingestion.local_exports import _SplicedArrayStream
+
+    parts = [(lambda i=i: json.dumps([{"pad": "x" * 60_000}] * 4).encode()) for i in range(6)]
+    with _SplicedArrayStream(parts) as stream:
+        raw = stream.read()
+    assert len(raw) > (1 << 20)
+    assert len(json.loads(raw.decode("utf-8"))) == 24
+
+
+def test_chunked_reads_of_a_large_export_agree_with_one_call():
+    from topos.ingestion.local_exports import _SplicedArrayStream
+
+    def parts():
+        return [(lambda i=i: json.dumps([{"pad": "y" * 60_000}] * 4).encode()) for i in range(6)]
+
+    with _SplicedArrayStream(parts()) as whole:
+        one_call = whole.read()
+    chunked = b""
+    with _SplicedArrayStream(parts()) as stream:
+        while True:
+            chunk = stream.read(1 << 16)
+            if not chunk:
+                break
+            chunked += chunk
+    assert one_call == chunked
