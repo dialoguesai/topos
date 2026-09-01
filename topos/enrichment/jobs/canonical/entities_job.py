@@ -317,7 +317,20 @@ class EntitiesJob(BaseEnrichmentJob):
             from ....features.entities.edges import record_cooccurrence_pairs
 
             for record_id, ids in entities_by_record.items():
-                event_at = (msg_by_id.get(record_id) or {}).get("event_at")
+                # Tolerant lookup, like every other read of a record's time in
+                # this file. `msg_by_id` holds RAW canonical messages, and the
+                # canonical groups disagree on the column (see
+                # _EVENT_AT_FIELDS) — reading only "event_at" left every
+                # co-occurrence edge undated for any group that names it
+                # otherwise. Measured on a real import: 9,242 of 9,242
+                # co-occurrence edges had no time, while the declared lane
+                # beside them, which already used this lookup, was fully dated.
+                # Undated edges cannot be placed in a temporal view at all.
+                msg_for_event = msg_by_id.get(record_id) or {}
+                event_at = next(
+                    (msg_for_event.get(f) for f in _EVENT_AT_FIELDS if msg_for_event.get(f)),
+                    None,
+                )
                 for src, dst in record_cooccurrence_pairs(ids):
                     update_edge(
                         conn,
