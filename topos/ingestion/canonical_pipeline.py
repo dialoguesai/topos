@@ -840,10 +840,26 @@ async def run_post_canonical_pipeline(
             # conn is the availability check only — None is passed so the
             # layer's gated sections resolve their own connection on the worker
             # thread they run in, rather than borrowing this one.
+            # This stage is per-message model work on CPU and routinely runs
+            # longer than everything after it, so it is the one a watcher is
+            # most likely to be staring at. It took no callback here, which
+            # left the screen holding whatever label the ingest set before it
+            # -- "parsing" -- for the entire time. Same gap as enrichment had,
+            # one stage earlier.
+            def _privacy_progress(done: int, total_msgs: int, stage: str) -> None:
+                if enrichment_progress is None:
+                    return
+                # Adapt to the reporter's shape. The stage carries its own name
+                # rather than a CANONICAL_JOBS name; the reporter recognises it
+                # and seats it in the slot ahead of the jobs.
+                frac = (done / total_msgs * 100.0) if total_msgs else 0.0
+                enrichment_progress(done, total_msgs, stage, 0.0, frac)
+
             outcome["privacy_disclosure_layer"] = await run_privacy_disclosure_layer(
                 None,
                 canonical_records,
                 source_group=getattr(source_def, "canonical_group_id", None),
+                progress_callback=_privacy_progress,
             )
     except Exception as exc:
         logger.error("[PIPELINE:PRIVACY] privacy_disclosure_layer failed: %s", exc, exc_info=True)

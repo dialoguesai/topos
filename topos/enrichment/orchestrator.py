@@ -181,7 +181,11 @@ class EnrichmentOrchestrator(BaseObject):
                         jobs_percent = ((job_idx - 1) / total_jobs * 100) if total_jobs > 0 else 0
                         # Call orchestrator progress callback with job-level info
                         progress_callback(
-                            processed_count=0,  # Not used for job-level tracking
+                            # The real within-job position. This was pinned to 0
+                            # with a note that it was unused -- true when the only
+                            # consumer was a percentage, but a caller showing
+                            # "N of M" then reads zero for a whole job.
+                            processed_count=current_count,
                             total_count=total_count,
                             job_name=job_name,
                             job_percent=jobs_percent,
@@ -279,7 +283,11 @@ class EnrichmentOrchestrator(BaseObject):
                     job_progress_percent = (job_idx / total_jobs * 100) if total_jobs > 0 else 100
                     # Update with messages processed so far (cumulative across jobs)
                     # Job is 100% complete
-                    progress_callback(messages_processed_so_far, total_messages, job_name, job_progress_percent, 100.0)
+                    # Within-job counts, matching the mid-job callback above.
+                    # This passed a CUMULATIVE total against a per-job
+                    # denominator, so the fourth job of ten reported
+                    # "2,904 of 726" to anyone rendering the pair.
+                    progress_callback(total_messages, total_messages, job_name, job_progress_percent, 100.0)
                 
                 results["jobs_run"] += 1
             except Exception as exc:
@@ -297,7 +305,10 @@ class EnrichmentOrchestrator(BaseObject):
                 if progress_callback:
                     job_progress_percent = (job_idx / total_jobs * 100) if total_jobs > 0 else 100
                     # Mark job as 100% complete (even if failed, we've moved past it)
-                    progress_callback(messages_processed_so_far, total_messages, job.get_job_name(), job_progress_percent, 100.0)
+                    # Within-job counts, as above: a failed job has still
+                    # been moved past, but it did not process more messages
+                    # than it was given.
+                    progress_callback(total_messages, total_messages, job.get_job_name(), job_progress_percent, 100.0)
         
         logger.debug(
             "[PIPELINE:ENRICHMENT] %s: Enrichment complete: %d jobs run, %d total records created",

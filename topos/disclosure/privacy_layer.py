@@ -169,13 +169,20 @@ class PrivacyLayerClient:
         return {"status": "failed", "error": str(last_exc), "items": []}
 
 
+# Names for the two model passes below. They are reported to the caller's
+# progress callback and surface verbatim in the UI, so they are written for a
+# person watching an import rather than for a log grep.
+PRIVACY_STAGE_REDACT = "checking for private details"
+PRIVACY_STAGE_NSFW = "checking for sensitive content"
+
+
 async def run_privacy_disclosure_layer(
     conn,
     canonical_messages: List[Dict[str, Any]],
     *,
     source_group: Optional[str] = None,
     client: Optional[PrivacyLayerClient] = None,
-    progress_callback: Optional[Callable[[int, int], None]] = None,
+    progress_callback: Optional[Callable[[int, int, str], None]] = None,
     nsfw_only: bool = False,
 ) -> Dict[str, Any]:
     """Mandatory post-canonical Platform Privacy Layer: PII disclosure + NSFW tags.
@@ -242,7 +249,7 @@ async def run_privacy_disclosure_layer(
             table = canonical_table_for_message(msg, source_group=source_group)
             if not table:
                 if progress_callback:
-                    progress_callback(idx + 1, total)
+                    progress_callback(idx + 1, total, PRIVACY_STAGE_REDACT)
                 continue
             record_id = (
                 msg.get("message_id")
@@ -252,7 +259,7 @@ async def run_privacy_disclosure_layer(
             )
             if not record_id:
                 if progress_callback:
-                    progress_callback(idx + 1, total)
+                    progress_callback(idx + 1, total, PRIVACY_STAGE_REDACT)
                 continue
             record_id = str(record_id)
             for field in fields_for_table(table):
@@ -284,10 +291,19 @@ async def run_privacy_disclosure_layer(
 
         from ..sanitization.privacy_filter import PRIVACY_DISCLOSE_MAX_BATCH
 
+        # Report against the batched work, not the message list: this loop is
+        # where the model time goes, and the old callback fired only on the
+        # branches that SKIP a message -- so a run with nothing to skip
+        # reported nothing at all, for its entire duration.
+        _redact_total = len(flat_pending)
+        _redact_done = 0
         for i in range(0, len(flat_pending), PRIVACY_DISCLOSE_MAX_BATCH):
             batch = flat_pending[i : i + PRIVACY_DISCLOSE_MAX_BATCH]
             items = [{"id": e["batch_key"], "text": e["raw"]} for e in batch]
+            if progress_callback:
+                progress_callback(_redact_done, _redact_total, PRIVACY_STAGE_REDACT)
             result = await privacy_client.redact_batch(items)
+            _redact_done += len(batch)
             if result.get("status") in ("unavailable", "failed"):
                 failed_batches += 1
                 logger.warning(
@@ -349,10 +365,15 @@ async def run_privacy_disclosure_layer(
         from ..sanitization.nsfw_classifier import NSFW_CLASSIFY_MAX_BATCH
 
         nsfw_items = list(nsfw_pending.items())
+        _nsfw_total = len(nsfw_items)
+        _nsfw_done = 0
         for i in range(0, len(nsfw_items), NSFW_CLASSIFY_MAX_BATCH):
             batch = nsfw_items[i : i + NSFW_CLASSIFY_MAX_BATCH]
             items = [{"id": key, "text": entry["text"]} for key, entry in batch]
+            if progress_callback:
+                progress_callback(_nsfw_done, _nsfw_total, PRIVACY_STAGE_NSFW)
             nsfw_result = await privacy_client.classify_nsfw_batch(items)
+            _nsfw_done += len(batch)
             if nsfw_result.get("status") in ("failed",):
                 nsfw_failed_batches += 1
                 continue

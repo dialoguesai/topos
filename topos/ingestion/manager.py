@@ -1094,6 +1094,12 @@ class IngestionManager(BaseObject):
                 #
                 # Posted from a thread via the running loop, throttled, and
                 # never allowed to fail the import: this is telemetry.
+                from ..disclosure.privacy_layer import (
+                    PRIVACY_STAGE_NSFW,
+                    PRIVACY_STAGE_REDACT,
+                )
+
+                _PRE_ENRICHMENT_STAGES = {PRIVACY_STAGE_REDACT, PRIVACY_STAGE_NSFW}
                 _loop = asyncio.get_running_loop()
                 _last_post = [0.0]
 
@@ -1113,11 +1119,27 @@ class IngestionManager(BaseObject):
                     if not finished and (now - _last_post[0]) < 2.0:
                         return
                     _last_post[0] = now
-                    # Overall = jobs already done, plus this job's share of one slot.
+                    # The privacy layer runs BEFORE the enrichment jobs and is a
+                    # stage in its own right -- routinely the longest one, since
+                    # it is per-message model work on CPU. So the bar has
+                    # jobs + 1 slots, and this stage owns the first. Reporting it
+                    # at a flat 0% (its own share of the JOB band) is what left a
+                    # working import reading 0.0% for its slowest stretch.
                     jobs_total = max(1, len(CANONICAL_JOBS))
-                    overall = min(
-                        99.0, float(job_percent) + (float(current_job_progress) / jobs_total)
-                    )
+                    slots = jobs_total + 1
+                    if job_name in _PRE_ENRICHMENT_STAGES:
+                        overall = (float(current_job_progress) / 100.0) * (100.0 / slots)
+                    else:
+                        # Clamp before scaling: at a job's completion callback the
+                        # job counts as done AND reports 100%, so the two terms
+                        # double-count the final slot.
+                        jobs_frac = min(
+                            1.0,
+                            float(job_percent) / 100.0
+                            + (float(current_job_progress) / 100.0) / jobs_total,
+                        )
+                        overall = (1.0 / slots + jobs_frac * (jobs_total / slots)) * 100.0
+                    overall = min(99.0, overall)
                     body = {
                         "job_id": job.job_id,
                         **progress_context,
