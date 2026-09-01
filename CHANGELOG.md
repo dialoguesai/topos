@@ -18,6 +18,43 @@ The machine-readable twin of each release is
   handles and resolve it locally. The point is that the bytes never move: when
   the file and the node are on the same machine, an import costs an `open()`
   and no network at all.
+- **An export can say what window would reach it.** `[P]` `describe_local_export`
+  returns the conversation count, date range and the number of months a window
+  needs to reach the newest conversation. A six-month window against a
+  fourteen-month-old export imported nothing and reported success; the screen
+  now sees the gap before the import starts.
+- **The sharded export layout is read as the export declares it.** `[O]` OpenAI's
+  export moved from one `conversations.json` to `conversations-000.json …
+  -020.json` plus an `export_manifest.json` describing the split. The reader
+  follows the manifest first, then the single-file name, then the shard
+  convention, and presents the shards as one array without loading them
+  together — measured: 482 MB of shards read as 66.5 MB in 0.7 s.
+- **A sample import.** `[O]` `max_conversations` on the import options takes the
+  newest N conversations inside the chosen window, so a first look at a large
+  export is a hundred conversations rather than eleven thousand.
+- **The import reports every stage that takes time.** `[P]` Three places in the
+  post-canonical chain accepted a progress callback and were handed none: the
+  privacy layer, canonical enrichment, and signal derivation. Each was found by
+  a live import reading a frozen label — "parsing · 0.0%" for the whole privacy
+  pass, then "emo 27, 275 of 275" for 37 minutes of signal work. All three now
+  report the running job by name, the count within it, and a whole-import
+  percentage built from one ordered list of every stage the import will pass
+  through. That position also rides on the control plane's `pipeline_stage`
+  field as `N/M`, so a screen can say "step 7 of 20" from the node's own count.
+- **The graph fills before the long phase, not after it.** `[O]` Entity data
+  lands at the third of twenty stages; the graph a person looks at was only
+  marked for rebuild after signal derivation, hours later. One mark now lands
+  after canonical enrichment — two rebuilds per import, deliberately not one per
+  job, since `graph_refresh` is single-flight and per-job marking would chain
+  rebuilds back to back.
+- **`graph_summary`.** `[P]` Node, edge and entity counts behind one message
+  type, so a screen can show the graph growing during an import without
+  fetching capped node lists or adding a column to the control plane.
+- **Chat windowed into units worth embedding.** `[O]` `conversation_windows`
+  groups an AI exchange (a user turn and its replies) or a human burst (thirty
+  minutes of quiet closes one) into a unit of 80–6,000 characters. Measured on
+  1,086 messages: 555 windows, and under-200-character units fall from 282 to
+  4. Built and tested; not yet wired into the embeddings job.
 
 ### Changed
 - **A container is opened where it sits.** `[P]` Pointing ingestion at a folder
@@ -29,6 +66,45 @@ The machine-readable twin of each release is
   a small JSON file out of the archive. Pointed at a real export it would have
   put the entire archive in memory; measured on a 1.4 GB one, peak growth is now
   5 MB.
+- **The privacy pass is named for what it does.** `[O]` "Checking for private
+  details" described an inspection; the pass detects PII spans and redacts them
+  into the disclosure copy. It now reports as "filtering private information".
+- **Privacy progress groups are sized for the bar.** `[O]` Both sanitisation
+  backends loop over items one at a time, so a group of 32 bought no batched
+  inference — only a bar that stepped once every two minutes. At 4 it moves
+  about every fifteen seconds for the same total work.
+
+### Fixed
+- **Co-occurrence edges carry the record's time.** `[D]` `entities_job` read
+  `.get("event_at")` on raw canonical messages instead of the tolerant field
+  lookup the rest of the job uses, so 9,242 of 9,242 co-occurrence edges were
+  undated while the declared-entity lane beside them was fully dated. A graph
+  rebuild recomputes these edges from `entity_mentions`; the release manifest
+  runs one. Mentions with no timestamp of their own (379 of 14,440 on the
+  reference node) stay undated — that is the honest ceiling.
+- **The goals vocabulary no longer deletes content from tables that have no
+  goals.** `[O]` Retrieval stripped goal/objective/priority/project/roadmap
+  terms from content tokens on every table, and no table owned those terms, so
+  "what have I been working on" matched 106 rows by FTS and returned none. The
+  terms are now stripped only where a table owns that surface. Measured on the
+  reference node: 0 rows became 43, 56, 10 and 100 across four queries.
+- **A job that dies says so where someone can see it.** `[P]` `job_runner`
+  wrote failures only to the node's own database, so a dead import read
+  "processing · 0.0%" on the control plane indefinitely. Terminal failures now
+  post `status: failed` and the error to the same progress channel.
+- **A container is never copied into the raw store.** `[O]` `file_trigger`
+  `shutil.copy2`'d the whole archive — 1.4 GB of `PK…` bytes stored as
+  `.jsonl`, surfacing as a `UnicodeDecodeError` deep in the parser. The
+  ingestible member is streamed into the store instead; a test pins store size
+  far below archive size.
+- **Progress counts are the step's own.** `[O]` The orchestrator pinned
+  `processed_count=0` mid-job and passed a cumulative total against a per-job
+  denominator at completion, so a screen showing "N of M" read zero for a
+  whole job and then "2,904 of 726". Both callbacks now report within-job
+  counts.
+- **The handler snapshot in `test_handler_registry` is current.** `[P]` It
+  drifted when the local-export handlers landed; the control-plane-facing
+  snapshot was updated and this second, independent copy was not.
 
 ## [1.3.39] — 2026-08-31
 
