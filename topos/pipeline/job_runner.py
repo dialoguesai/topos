@@ -9,7 +9,7 @@ import socket
 import threading
 import time
 import uuid
-from typing import Any, Awaitable, Callable, Dict, Optional
+from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from ..storage.db.write_gate import is_busy_error
 # Safe at import time: derivation_recovery has no module-level heavy imports.
@@ -253,6 +253,44 @@ async def _run_db(conn_factory: Callable[[], Any], fn: Callable[..., Any], *args
     return await asyncio.to_thread(_call)
 
 
+async def report_terminal_failure(
+    payload: Dict[str, Any], job_ids: List[str], error: str
+) -> None:
+    """Tell the control plane a job died. Best-effort, never raises.
+
+    Without this a crash is written only to the node's own database, so the last
+    thing the control plane ever hears is the ``processing / 0%`` the run posts
+    before it starts. The job then reads as *working* forever — a failed import
+    and a slow one look identical, which is the worst state a progress display
+    can be in, because there is nothing the user can do to tell them apart.
+
+    Uses the same channel and credentials the progress updates already use, so
+    a job that could report progress can always report its own death.
+    """
+    url = str(payload.get("progress_api_url") or "").strip()
+    key = str(payload.get("progress_api_key") or "").strip()
+    if not url or not key or not job_ids:
+        return
+    try:
+        import httpx
+
+        async with httpx.AsyncClient(timeout=10.0) as client:
+            for job_id in job_ids:
+                await client.post(
+                    f"{url.rstrip('/')}/v1/ingestion/progress",
+                    json={
+                        "job_id": str(job_id),
+                        "dataset_id": str(payload.get("dataset_id") or ""),
+                        "status": "failed",
+                        "current_step": "failed",
+                        "error_message": error[:2000],
+                    },
+                    headers={"Authorization": f"Bearer {key}"},
+                )
+    except Exception as exc:  # noqa: BLE001 — reporting must never mask the failure
+        logger.warning("could not report job failure upstream job_ids=%s: %s", job_ids, exc)
+
+
 async def process_job(conn_factory: Callable[[], Any], job: Dict[str, Any]) -> None:
     """Run one claimed job (plus any coalesced siblings) to completion."""
     job_id = str(job["job_id"])
@@ -299,6 +337,10 @@ async def process_job(conn_factory: Callable[[], Any], job: Dict[str, Any]) -> N
                 update_job_progress(own, str(entry["job_id"]), {"status": "failed", "error": error})
 
         await _run_db(conn_factory, _mark_crashed)
+        # The local write above is invisible to the person watching. Tell the
+        # control plane too, or the job reads as "processing" until someone
+        # reads a log file.
+        await report_terminal_failure(payload, [str(e["job_id"]) for e in jobs], str(exc))
         return
 
     if str(result.get("status") or "ok") == "requeue":
