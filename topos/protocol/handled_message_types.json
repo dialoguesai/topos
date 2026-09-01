@@ -29,6 +29,7 @@
   "delete_sanitization_ollama_config",
   "delete_signal_extraction_config",
   "delete_source_install",
+  "describe_local_export",
   "enrichment_catalog",
   "enrichment_coverage",
   "enrichment_preview",

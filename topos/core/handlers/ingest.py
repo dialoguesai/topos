@@ -523,6 +523,36 @@ async def handle_list_local_exports(message: Dict[str, Any]) -> Optional[Dict[st
         return {"id": req_id, "status": "error", "error": str(exc)}
 
 
+@handles("describe_local_export")
+async def handle_describe_local_export(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Conversation count and date range for one discovered export.
+
+    The window a person picks is measured from today; the export is fixed in
+    the past. Nothing in the UI could see that gap, so a six-month window
+    against a fourteen-month-old file imported nothing and said it succeeded.
+    This is the number that closes it, read where the dates are.
+    """
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    handle = str(payload.get("handle") or "").strip()
+    if not handle:
+        return {"id": req_id, "status": "error", "error": "handle required"}
+    try:
+        import asyncio
+
+        from ...ingestion.local_exports import describe_export, resolve
+
+        path = await asyncio.to_thread(resolve, handle)
+        if path is None:
+            return {"id": req_id, "status": "error", "error": "export no longer found"}
+        described = await asyncio.to_thread(describe_export, path)
+        return {"id": req_id, "status": "ok", "payload": described}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
 @handles("get_ingestion_audit")
 async def handle_get_ingestion_audit(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")

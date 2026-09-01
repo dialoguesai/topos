@@ -86,6 +86,37 @@ async def list_local_exports() -> dict:
     return result.as_payload()
 
 
+@router.get("/ingestion/local-exports/{handle}/describe", dependencies=[Depends(require_api_key)])
+async def describe_local_export(handle: str) -> dict:
+    """What is inside one discovered export: conversation count and date range.
+
+    Separate from discovery on purpose. Listing candidates reads only an
+    archive's central directory and stays in the low hundreds of milliseconds;
+    this opens the conversations file and parses it, which is about a second on
+    a 52 MB export. Paying that for every row of a scan to inform a choice about
+    one of them would be the wrong trade.
+
+    It exists because a window is measured against today while an export is
+    fixed in the past, and nothing in the UI could see the gap: a six-month
+    window against a fourteen-month-old export drops every conversation and
+    completes successfully with nothing imported.
+    """
+    import asyncio
+
+    from ..ingestion.local_exports import describe_export, resolve
+
+    path = await asyncio.to_thread(resolve, handle)
+    if path is None:
+        raise HTTPException(
+            status_code=404,
+            detail="That export is no longer where we found it. Scan again and pick it.",
+        )
+    try:
+        return await asyncio.to_thread(describe_export, path)
+    except Exception as exc:  # noqa: BLE001 — a describe failure must not block the import
+        raise HTTPException(status_code=422, detail=f"Could not read that export: {exc}") from exc
+
+
 @router.post("/ingestion/upload-local-path", dependencies=[Depends(require_api_key)])
 async def upload_ingestion_local_path(
     request: Request, payload: dict = Body(default_factory=dict)

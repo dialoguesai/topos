@@ -381,3 +381,80 @@ def test_a_declared_shape_still_wins(tmp_path):
 
     archive = write_export_zip(tmp_path)
     assert resolve_file_format(source_definition=_Def(), file_path=str(archive)) == "csv"
+
+
+# --------------------------------------------------------------------------
+# describing an export: the window is measured from today, the file is not
+# --------------------------------------------------------------------------
+
+
+def _conversation_at(idx: int, epoch: float):
+    return {
+        "id": f"c{idx}",
+        "conversation_id": f"c{idx}",
+        "title": f"conversation {idx}",
+        "create_time": epoch,
+        "update_time": epoch,
+        "mapping": {"n1": {"id": "n1", "parent": None, "children": []}},
+    }
+
+
+def _export_zip_with(root, conversations):
+    path = root / "export.zip"
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr(CONVERSATIONS_MEMBER, json.dumps(conversations))
+    return path
+
+
+def test_describe_reports_the_span_and_count(tmp_path):
+    """The numbers the window control needs, read where the dates are."""
+    from topos.ingestion.local_exports import describe_export
+
+    old, new = 1_600_000_000.0, 1_700_000_000.0
+    path = _export_zip_with(tmp_path, [_conversation_at(1, old), _conversation_at(2, new)])
+    d = describe_export(path)
+    assert d["conversations"] == 2
+    assert d["oldest_at"] == old
+    assert d["newest_at"] == new
+
+
+def test_it_says_how_many_months_a_window_must_reach_back(tmp_path):
+    """The whole point. A user picked six months against an export whose newest
+    conversation was fourteen months old, imported nothing, and was told the
+    job completed. This is the number that would have prevented it."""
+    import time
+
+    from topos.ingestion.local_exports import describe_export
+
+    ten_months_ago = time.time() - (10 * 30.44 * 86400)
+    path = _export_zip_with(tmp_path, [_conversation_at(1, ten_months_ago)])
+    assert describe_export(path)["months_to_reach_newest"] in (10, 11)
+
+
+def test_a_fresh_export_needs_only_one_month(tmp_path):
+    import time
+
+    from topos.ingestion.local_exports import describe_export
+
+    path = _export_zip_with(tmp_path, [_conversation_at(1, time.time() - 3600)])
+    assert describe_export(path)["months_to_reach_newest"] == 1
+
+
+def test_an_export_with_no_stamps_reports_no_range(tmp_path):
+    # Honest nulls: a fabricated range would drive a confident wrong warning.
+    from topos.ingestion.local_exports import describe_export
+
+    path = _export_zip_with(tmp_path, [{"id": "c1", "conversation_id": "c1", "mapping": {}}])
+    d = describe_export(path)
+    assert d["conversations"] == 1
+    assert d["newest_at"] is None
+    assert d["months_to_reach_newest"] is None
+
+
+def test_describe_reads_a_folder_too(tmp_path):
+    from topos.ingestion.local_exports import describe_export
+
+    folder = tmp_path / "chatgpt-export"
+    folder.mkdir()
+    (folder / CONVERSATIONS_MEMBER).write_text(json.dumps([_conversation_at(1, 1_700_000_000.0)]))
+    assert describe_export(folder)["newest_at"] == 1_700_000_000.0

@@ -24,12 +24,13 @@ is a digest, not an encoding: it cannot be turned back into a path, and
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import time
 import zipfile
 from dataclasses import dataclass
 from pathlib import Path
-from typing import BinaryIO, Iterable, List, Optional, Sequence
+from typing import Any, BinaryIO, Dict, Iterable, List, Optional, Sequence
 
 # The one member of an export we can read. Everything else in the archive --
 # the rendered chat.html, the images, the small metadata files -- is ignored.
@@ -456,6 +457,55 @@ def open_ingestible(path: Path) -> BinaryIO:
         return _ArchiveMemberStream(archive, member)  # type: ignore[return-value]
 
     return open(path, "rb")
+
+
+def describe_export(path: Path) -> Dict[str, Any]:
+    """What is actually inside an export: how many conversations, and when.
+
+    Discovery deliberately stops at the archive's central directory, which is
+    cheap and says nothing about content. That left the window control unable
+    to warn about the one mismatch that silently imports nothing: an export
+    older than the window it is measured against. Seen twice on the same file —
+    a July 2025 export against a six-month window drops all 1,543 conversations
+    and completes successfully with zero records.
+
+    So this opens the thing and reads the envelope stamps. It costs a parse of
+    the conversations file (about a second for 52 MB), which is why it is
+    called for ONE chosen candidate rather than for every row of a scan.
+    """
+    import json
+
+    from .parsers.chatgpt_export import conversation_activity
+
+    with open_ingestible(path) as stream:
+        payload = json.loads(stream.read().decode("utf-8"))
+
+    conversations = payload if isinstance(payload, list) else [payload]
+    newest: Optional[float] = None
+    oldest: Optional[float] = None
+    counted = 0
+    for conversation in conversations:
+        if not isinstance(conversation, dict) or not isinstance(conversation.get("mapping"), dict):
+            continue
+        counted += 1
+        created, last_active = conversation_activity(conversation)
+        for stamp in (created, last_active):
+            if stamp is None:
+                continue
+            newest = stamp if newest is None else max(newest, stamp)
+            oldest = stamp if oldest is None else min(oldest, stamp)
+
+    return {
+        "conversations": counted,
+        "oldest_at": oldest,
+        "newest_at": newest,
+        # The smallest window, in whole months from now, that reaches the most
+        # recent conversation. The number the user actually needs, computed
+        # where the dates are, rather than left as arithmetic on two timestamps.
+        "months_to_reach_newest": (
+            max(1, math.ceil((time.time() - newest) / (30.44 * 86400))) if newest else None
+        ),
+    }
 
 
 def iter_ingestible_chunks(path: Path, chunk_size: int = 1 << 20) -> Iterable[bytes]:
