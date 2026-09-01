@@ -1099,9 +1099,32 @@ class IngestionManager(BaseObject):
                     PRIVACY_STAGE_REDACT,
                 )
 
-                _PRE_ENRICHMENT_STAGES = {PRIVACY_STAGE_REDACT, PRIVACY_STAGE_NSFW}
+                # Every stage this import will pass through, in order.
+                #
+                # The overall percentage used to be built from a slot model that
+                # gave BOTH privacy passes the same leading slot, so the bar ran
+                # 0 -> 9% during redaction and then started again from 0 during
+                # the NSFW pass: a bar that goes backwards while the work only
+                # goes forwards. One ordered list removes the special cases --
+                # position in it is the only thing the percentage needs.
+                #
+                # The job list is the EFFECTIVE one for this source, not the
+                # full catalogue, so "step 7 of 12" counts the steps that will
+                # actually run rather than the ones that could.
+                from ..enrichment.source_overrides import (
+                    effective_canonical_enrichment_jobs,
+                )
+
+                try:
+                    _effective_jobs = list(effective_canonical_enrichment_jobs(source_def) or [])
+                except Exception:  # noqa: BLE001 — never fail an import over a label
+                    _effective_jobs = [j.get_job_name() for j in CANONICAL_JOBS]
+                _stage_order = [PRIVACY_STAGE_REDACT, PRIVACY_STAGE_NSFW] + _effective_jobs
+                _stage_count = max(1, len(_stage_order))
                 _loop = asyncio.get_running_loop()
                 _last_post = [0.0]
+                # Never let a late post from a finished stage drag the bar back.
+                _high_water = [0.0]
 
                 def _on_enrichment_progress(
                     processed_count: int,
@@ -1125,27 +1148,40 @@ class IngestionManager(BaseObject):
                     # jobs + 1 slots, and this stage owns the first. Reporting it
                     # at a flat 0% (its own share of the JOB band) is what left a
                     # working import reading 0.0% for its slowest stretch.
-                    jobs_total = max(1, len(CANONICAL_JOBS))
-                    slots = jobs_total + 1
-                    if job_name in _PRE_ENRICHMENT_STAGES:
-                        overall = (float(current_job_progress) / 100.0) * (100.0 / slots)
+                    # Position in the ordered list, plus how far through this
+                    # stage we are. `job_percent` is deliberately unused: it is
+                    # the orchestrator's view of the JOB list, which does not
+                    # know the privacy passes exist, and mixing the two scales
+                    # is what produced the backwards jump.
+                    try:
+                        stage_idx = _stage_order.index(job_name)
+                    except ValueError:
+                        stage_idx = -1
+                    stage_frac = min(1.0, max(0.0, float(current_job_progress) / 100.0))
+                    if stage_idx >= 0:
+                        overall = ((stage_idx + stage_frac) / _stage_count) * 100.0
                     else:
-                        # Clamp before scaling: at a job's completion callback the
-                        # job counts as done AND reports 100%, so the two terms
-                        # double-count the final slot.
-                        jobs_frac = min(
-                            1.0,
-                            float(job_percent) / 100.0
-                            + (float(current_job_progress) / 100.0) / jobs_total,
-                        )
-                        overall = (1.0 / slots + jobs_frac * (jobs_total / slots)) * 100.0
+                        # An unnamed stage: hold the bar rather than guess at a
+                        # position for it.
+                        overall = _high_water[0]
                     overall = min(99.0, overall)
+                    if overall < _high_water[0]:
+                        overall = _high_water[0]
+                    _high_water[0] = overall
                     body = {
                         "job_id": job.job_id,
                         **progress_context,
                         "status": "processing",
                         "current_step": (job_name or "enriching").replace("_", " "),
                         "progress_percent": round(overall, 1),
+                        # Which of how many. `pipeline_stage` is an existing
+                        # control-plane field that nothing was filling, and this
+                        # is literally what it means -- so the screen can say
+                        # "step 7 of 12" from the node's own count instead of
+                        # inferring one from a list it hopes matches.
+                        "pipeline_stage": (
+                            f"{stage_idx + 1}/{_stage_count}" if stage_idx >= 0 else None
+                        ),
                         "records_processed": int(processed_count or 0),
                         "records_total": int(total_count or 0),
                     }

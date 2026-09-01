@@ -70,19 +70,10 @@ def test_a_completed_job_never_reports_more_than_its_own_total():
     assert "progress_callback(total_messages, total_messages" in src
 
 
-def test_the_privacy_stage_owns_the_slot_ahead_of_the_jobs():
-    """It runs before them and is a stage in its own right, so the bar has
-    jobs + 1 slots. Left in the job band it reported a flat zero."""
-    src = inspect.getsource(manager.IngestionManager.process_job)
-    assert "slots = jobs_total + 1" in src
-    assert "_PRE_ENRICHMENT_STAGES" in src
-
-
-def test_the_final_job_slot_is_not_double_counted():
-    """At completion a job counts as done AND reports 100%, so the two terms
-    both claim the last slot unless the fraction is clamped first."""
-    src = inspect.getsource(manager.IngestionManager.process_job)
-    assert "jobs_frac = min(" in src
+# The two tests that pinned the slot model are gone rather than patched: the
+# model itself was the defect. It gave both privacy passes one leading slot, so
+# a correct implementation of it still produced a bar that ran backwards.
+# test_the_bar_is_built_from_one_ordered_stage_list below covers what replaced it.
 
 
 def test_the_privacy_layer_signature_carries_the_stage():
@@ -110,3 +101,57 @@ def test_the_backends_really_do_loop_per_item():
 
     for fn in (redact_privacy_batch, classify_nsfw_batch):
         assert "for item in items:" in inspect.getsource(fn), fn.__name__
+
+
+def test_the_bar_is_built_from_one_ordered_stage_list():
+    """The backwards jump, at its source.
+
+    The percentage was built from a slot model that gave BOTH privacy passes the
+    same leading slot, so it ran 0 -> 9% through redaction and then started
+    again from 0 through the NSFW pass. Observed live as a bar going backwards
+    while the work only went forwards.
+    """
+    src = inspect.getsource(manager.IngestionManager.process_job)
+    assert "_stage_order" in src
+    assert "_stage_order.index(job_name)" in src
+    # The old two-scale arithmetic must be gone, not merely bypassed.
+    assert "slots = jobs_total + 1" not in src
+    assert "jobs_frac" not in src
+
+
+def test_the_percentage_never_goes_down():
+    """Even a late post from a finished stage must not drag the bar back."""
+    src = inspect.getsource(manager.IngestionManager.process_job)
+    assert "_high_water" in src
+    assert "if overall < _high_water[0]:" in src
+
+
+def test_job_percent_is_no_longer_mixed_into_the_bar():
+    """It is the orchestrator's view of the JOB list, which does not know the
+    privacy passes exist. Mixing the two scales is what broke this."""
+    src = inspect.getsource(manager.IngestionManager.process_job)
+    calc = src.split("stage_frac =", 1)[1].split("body = {", 1)[0]
+    assert "job_percent" not in calc
+
+
+def test_the_step_count_uses_the_jobs_this_source_actually_runs():
+    """A ChatGPT export runs five enrichment jobs, not the full ten. Counting
+    the catalogue would tell the user "step 3 of 12" for a 7-step import, and
+    name stages that never run."""
+    src = inspect.getsource(manager.IngestionManager.process_job)
+    assert "effective_canonical_enrichment_jobs(source_def)" in src
+    assert '"pipeline_stage"' in src
+
+
+def test_the_stage_names_match_what_the_orchestrator_reports():
+    """The order list is keyed by job name; if these drifted, every stage would
+    fall into the unknown branch and the bar would freeze."""
+    from topos.enrichment.jobs import CANONICAL_JOBS
+    from topos.enrichment.source_overrides import effective_canonical_enrichment_jobs
+    from topos.sources.registry import REGISTRY
+
+    catalogue = {j.get_job_name() for j in CANONICAL_JOBS}
+    source = REGISTRY.get("chatgpt_file_ingestion")
+    effective = effective_canonical_enrichment_jobs(source) or []
+    assert effective, "no enrichment jobs resolved for the file source"
+    assert set(effective) <= catalogue, set(effective) - catalogue
