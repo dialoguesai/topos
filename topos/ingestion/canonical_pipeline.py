@@ -892,6 +892,31 @@ async def run_post_canonical_pipeline(
         except Exception as exc:
             logger.error("[PIPELINE:ENRICHMENT] post-canonical failed: %s", exc, exc_info=True)
             outcome["canonical_enrichment"] = {"errors": [str(exc)]}
+
+        # Materialise the graph HERE, not only at the end of the pipeline.
+        #
+        # The entity data lands early -- the entities job writes entities,
+        # message_entities and entity_mentions batch by batch -- but the graph
+        # a person actually looks at is derived by rebuild_entity_graph, and
+        # the only mark was after signal derivation. On a file import that is
+        # 13 more stages and hours of model work, so everything landed in the
+        # database with no visible change to the graph until the very end.
+        #
+        # One mark here, one at the end: two rebuilds per import. Deliberately
+        # NOT one per job. graph_refresh is single-flight and a mark landing
+        # mid-rebuild schedules exactly one follow-up, so marking per job would
+        # chain rebuilds back to back for the whole import and take CPU from
+        # the model work that is already the slow part.
+        try:
+            from ..features.entities.graph_refresh import mark_graph_dirty
+
+            mark_graph_dirty()
+            logger.info(
+                "[PIPELINE:ENRICHMENT] graph marked dirty after canonical enrichment "
+                "so the graph fills before signal derivation runs"
+            )
+        except Exception as exc:  # noqa: BLE001 — refresh must never break ingest
+            logger.debug("mid-import graph refresh mark skipped: %s", exc)
     elif canonical_jobs and enrichment_trigger == "manual":
         logger.debug(
             "[PIPELINE:ENRICHMENT] Skipping canonical enrichment (manual trigger): source_id=%s records=%d",

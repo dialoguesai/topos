@@ -172,7 +172,13 @@ class PrivacyLayerClient:
 # Names for the two model passes below. They are reported to the caller's
 # progress callback and surface verbatim in the UI, so they are written for a
 # person watching an import rather than for a log grep.
-PRIVACY_STAGE_REDACT = "checking for private details"
+#
+# "Filtering private information" rather than "checking for private details":
+# this pass does not merely look. It detects PII spans and REDACTS them into
+# the disclosure copy, which is the whole point of the layer — the node is
+# preparing what it can safely show. A name that says "checking" describes an
+# inspection and undersells the thing the product actually does for you.
+PRIVACY_STAGE_REDACT = "filtering private information"
 PRIVACY_STAGE_NSFW = "checking for sensitive content"
 
 # How many records to send per call. NOT a throughput choice: both engine

@@ -189,3 +189,31 @@ def test_signal_stages_are_named_apart_from_the_canonical_ones():
 
     order = ["a", "b"] + canon + [f"deriving_{n}" for n in signal]
     assert len(order) == len(set(order)), "duplicate stage names would break position lookup"
+
+
+def test_the_graph_fills_before_the_long_phase_not_after_it():
+    """The entity data lands at step 3; the graph a person looks at was only
+    marked dirty after signal derivation — 13 stages and hours of model work
+    later. So an import wrote thousands of entities with no visible change to
+    the graph until the very end.
+
+    One mark after canonical enrichment, one at the end. Deliberately not one
+    per job: graph_refresh is single-flight and a mark landing mid-rebuild
+    schedules exactly one follow-up, so per-job marking would chain rebuilds
+    back to back and take CPU from the model work that is already the slow
+    part.
+    """
+    src = inspect.getsource(canonical_pipeline.run_post_canonical_pipeline)
+    assert src.count("mark_graph_dirty()") == 2, "expected exactly two marks"
+    # The new one must sit before signal derivation, or it buys nothing.
+    first = src.index("mark_graph_dirty()")
+    signal = src.index("run_signal_derivation(")
+    assert first < signal
+
+
+def test_the_privacy_stage_says_what_it_does():
+    """It detects PII spans and REDACTS them into the disclosure copy. A name
+    that says "checking" describes an inspection and undersells it."""
+    from topos.disclosure.privacy_layer import PRIVACY_STAGE_REDACT
+
+    assert PRIVACY_STAGE_REDACT == "filtering private information"
