@@ -1143,6 +1143,14 @@ class IngestionManager(BaseObject):
                 _stage_count = max(1, len(_stage_order))
                 _loop = asyncio.get_running_loop()
                 _last_post = [0.0]
+                # A post that failed must be retried on the next callback, not
+                # forgotten: the loop this posts through is starved for seconds
+                # at a time by writers that take the write gate on the loop
+                # thread, and one lost post left a stage label stale for 34
+                # minutes on a live import. WARN when it happens (once a minute)
+                # -- this was logged at DEBUG, so the drop was invisible.
+                _last_failed = [False]
+                _last_warn = [0.0]
                 # Never let a late post from a finished stage drag the bar back.
                 _high_water = [0.0]
 
@@ -1159,7 +1167,7 @@ class IngestionManager(BaseObject):
                     finished = current_job_progress >= 100.0
                     # Two seconds between posts, except the end of a job, which
                     # is the transition a watcher most wants to see.
-                    if not finished and (now - _last_post[0]) < 2.0:
+                    if not finished and not _last_failed[0] and (now - _last_post[0]) < 2.0:
                         return
                     _last_post[0] = now
                     # The privacy layer runs BEFORE the enrichment jobs and is a
@@ -1217,7 +1225,14 @@ class IngestionManager(BaseObject):
                                     headers={"Authorization": f"Bearer {progress_api_key}"},
                                 )
                         except Exception as exc:  # noqa: BLE001 — telemetry only
-                            logger.debug("enrichment progress post failed: %s", exc)
+                            _last_failed[0] = True
+                            if time.monotonic() - _last_warn[0] > 60.0:
+                                _last_warn[0] = time.monotonic()
+                                logger.warning(
+                                    "enrichment progress post failed (will resend on next callback): %s", exc
+                                )
+                            return
+                        _last_failed[0] = False
 
                     try:
                         asyncio.run_coroutine_threadsafe(_post(), _loop)

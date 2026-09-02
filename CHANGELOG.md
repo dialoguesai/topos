@@ -102,6 +102,15 @@ The machine-readable twin of each release is
   denominator at completion, so a screen showing "N of M" read zero for a
   whole job and then "2,904 of 726". Both callbacks now report within-job
   counts.
+- **Signal derivation reports per record, and a dropped post is resent.** `[O]`
+  The signal lane made one progress call per job, after the job, with
+  `processed=0` and `progress=100` — so every signal stage read "0 of N" for
+  its whole duration. Observed live: "deriving emo 27, 0/726" on screen for
+  34 minutes while the topics job logged 264/726 underneath it, because the
+  one post for the next stage was lost to a starved event loop and nothing
+  resent it. The lane now posts at start, per record and at completion like
+  the canonical lane; the reporter retries a failed post on the next callback
+  and logs the drop at WARNING instead of DEBUG.
 - **The handler snapshot in `test_handler_registry` is current.** `[P]` It
   drifted when the local-export handlers landed; the control-plane-facing
   snapshot was updated and this second, independent copy was not.

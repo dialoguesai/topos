@@ -41,7 +41,9 @@ class _DeferringJob:
     def should_run(self, _messages: List[Dict[str, Any]]) -> bool:
         return True
 
-    async def enrich(self, _messages: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    # Accepts the per-record callback the way every real job does: the signal
+    # lane now passes it, as the canonical lane always has.
+    async def enrich(self, _messages: List[Dict[str, Any]], progress_callback=None) -> List[Dict[str, Any]]:
         self.enrich_calls += 1
         return [{"_deferred": True, "error": self._error}]
 

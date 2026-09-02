@@ -26,7 +26,7 @@ from topos.disclosure.privacy_layer import (
     PRIVACY_STAGE_REDACT,
     run_privacy_disclosure_layer,
 )
-from topos.enrichment.orchestrator import EnrichmentOrchestrator
+from topos.enrichment.orchestrator import EnrichmentOrchestrator, SignalDerivationOrchestrator
 from topos.ingestion import canonical_pipeline, manager
 
 
@@ -217,3 +217,34 @@ def test_the_privacy_stage_says_what_it_does():
     from topos.disclosure.privacy_layer import PRIVACY_STAGE_REDACT
 
     assert PRIVACY_STAGE_REDACT == "filtering private information"
+
+
+def test_signal_lane_reports_per_record_like_the_canonical_lane():
+    """The lane made ONE progress call per job, after the job, with
+    processed=0 and progress=100 -- so every signal stage read "0 of N" for
+    its whole duration and the bar jumped to the stage's end the moment it
+    began. Observed live: "deriving emo 27, 0/726" on screen for 34 minutes
+    while TopicsJob logged 264/726 underneath it."""
+    # The signal lane lives on the subclass, not the base.
+    src = inspect.getsource(SignalDerivationOrchestrator._run_signal_derivation_inner)
+    assert "def _signal_job_progress(" in src
+    assert "job.enrich(canonical_messages, progress_callback=_signal_job_progress)" in src
+    # The old single post-hoc call must be gone, not merely joined by new ones.
+    assert "progress_callback(0, len(canonical_messages)" not in src
+    # Start and completion posts bracket the per-record ones.
+    assert "progress_callback(0, _total_msgs, job_name, _jobs_pct_before, 0.0)" in src
+    assert "progress_callback(_total_msgs, _total_msgs, job_name" in src
+
+
+def test_a_dropped_progress_post_is_resent_and_visible():
+    """The loop the reporter posts through is starved for seconds at a time by
+    writers taking the write gate on the loop thread. One lost post left a
+    stage label stale for 34 minutes, and the drop was logged at DEBUG, which
+    on a node running at INFO is the same as not logged."""
+    src = inspect.getsource(manager.IngestionManager.process_job)
+    assert "_last_failed = [False]" in src
+    # The throttle must yield to a pending resend.
+    assert "if not finished and not _last_failed[0] and (now - _last_post[0]) < 2.0:" in src
+    assert 'logger.warning(' in src and "enrichment progress post failed (will resend on next callback)" in src
+    # And a successful send clears the flag, or every later post skips the throttle.
+    assert "_last_failed[0] = False" in src

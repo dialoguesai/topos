@@ -509,7 +509,25 @@ class SignalDerivationOrchestrator(EnrichmentOrchestrator):
                 continue
             job_name = job.get_job_name()
             try:
-                records = await job.enrich(canonical_messages)
+                # Report like the canonical lane: a start post, a per-record
+                # callback, and a completion post. This lane used to make ONE
+                # call per job, after the job, with processed=0 and progress=100
+                # -- so every signal stage read "0 of 726" for its whole
+                # duration and the bar jumped to the end of the stage the moment
+                # it began. Observed live: "deriving emo 27, 0/726" on screen for
+                # 34 minutes while TopicsJob logged 264/726 underneath it.
+                _total_msgs = len(canonical_messages)
+                _jobs_pct_before = ((job_idx - 1) / total_jobs * 100) if total_jobs > 0 else 0.0
+
+                def _signal_job_progress(current_count: int, total_count: int, *, _name: str = job_name, _before: float = _jobs_pct_before) -> None:
+                    if not progress_callback:
+                        return
+                    pct = (current_count / total_count * 100) if total_count > 0 else 0.0
+                    progress_callback(current_count, total_count, _name, _before, pct)
+
+                if progress_callback:
+                    progress_callback(0, _total_msgs, job_name, _jobs_pct_before, 0.0)
+                records = await job.enrich(canonical_messages, progress_callback=_signal_job_progress)
                 if records and records[0].get("_deferred"):
                     deferral_error = str(records[0].get("error"))
                     results["deferred_jobs"].append(job_name)
@@ -583,7 +601,8 @@ class SignalDerivationOrchestrator(EnrichmentOrchestrator):
 
                 await _offload_write(_settle_debt)
                 if progress_callback:
-                    progress_callback(0, len(canonical_messages), job_name, (job_idx / total_jobs) * 100, 100.0)
+                    # Within-job counts at completion, matching the canonical lane.
+                    progress_callback(_total_msgs, _total_msgs, job_name, (job_idx / total_jobs) * 100, 100.0)
             except Exception as exc:
                 logger.error("[PIPELINE:SIGNAL_DERIVE] job %s failed: %s", job_name, exc)
                 results["errors"].append({"job": job_name, "error": str(exc)})
