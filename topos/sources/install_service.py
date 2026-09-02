@@ -929,6 +929,15 @@ def _is_rehydratable_source_definition(source_def: Dict[str, Any]) -> bool:
 # proves a legacy-scope gdrive_files row is retired, not merely missing.
 _LEGACY_SOURCE_SUCCESSORS: Dict[str, str] = {"gdrive_files": "drive_files"}
 
+# Going forward the Drive connector converges back on the bundled id: the CP
+# registry republish (2026-09-02) made gdrive_files the installable card, so a
+# fresh connect leaves a node with BOTH ids active under the same canonical
+# scope. Not a contradiction with _LEGACY_SOURCE_SUCCESSORS: that map proves
+# LEGACY-scope rows dead against the July replacement that was live at the
+# time; this one retires a canonical-scope row once a healthy canonical-scope
+# install of its successor exists for the same user+topos.
+_CANONICAL_SOURCE_SUCCESSORS: Dict[str, str] = {"drive_files": "gdrive_files"}
+
 _LEGACY_DATASET_SEGMENT = "default"
 _CANONICAL_DATASET_SEGMENT = "topos"
 
@@ -938,9 +947,16 @@ def _dataset_scope_segment(scope: Dict[str, str]) -> str:
     return parts[1] if len(parts) == 3 else ""
 
 
-def _canonical_active_index(records: List[InstallRecord]) -> Set[Tuple[str, str, str]]:
+def _canonical_active_index(
+    records: List[InstallRecord], *, healthy_only: bool = False
+) -> Set[Tuple[str, str, str]]:
     """(user_id, topos_id, source_id) for active installs under the canonical
-    {owner}:topos:{topos_id} dataset scope."""
+    {owner}:topos:{topos_id} dataset scope.
+
+    healthy_only drops rows this same pass would retire (lane conflict or
+    schema drift): a row being demoted must never count as the proof that
+    demotes its predecessor, or one pass could unwire a connector entirely.
+    """
     index: Set[Tuple[str, str, str]] = set()
     for rec in records:
         scope = _normalize_scope(rec.scope)
@@ -948,6 +964,10 @@ def _canonical_active_index(records: List[InstallRecord]) -> Set[Tuple[str, str,
             continue
         if scope["user_id"] == "*" or scope["topos_id"] == "*":
             continue
+        if healthy_only:
+            source_def = rec.source_definition_json if isinstance(rec.source_definition_json, dict) else {}
+            if bundled_lane_conflict(source_def) or bundled_schema_drift(source_def):
+                continue
         index.add((scope["user_id"], scope["topos_id"], rec.source_id))
     return index
 
@@ -986,6 +1006,28 @@ def _legacy_scope_superseded_reason(
     return None
 
 
+def _canonical_successor_superseded_reason(
+    rec: InstallRecord, healthy_canonical: Set[Tuple[str, str, str]]
+) -> Optional[str]:
+    """Reason to retire a canonical-scope row whose declared successor is live.
+
+    Only fires for source_ids in _CANONICAL_SOURCE_SUCCESSORS, and only when
+    the successor's canonical-scope row is healthy — a successor this pass is
+    itself retiring proves nothing.
+    """
+    successor = _CANONICAL_SOURCE_SUCCESSORS.get(rec.source_id)
+    if not successor:
+        return None
+    scope = _normalize_scope(rec.scope)
+    if _dataset_scope_segment(scope) != _CANONICAL_DATASET_SEGMENT:
+        return None
+    if scope["user_id"] == "*" or scope["topos_id"] == "*":
+        return None
+    if (scope["user_id"], scope["topos_id"], successor) in healthy_canonical:
+        return f"superseded by active canonical-scope install of successor source_id={successor}"
+    return None
+
+
 def _supersede_install(*, scope_key: str, source_id: str, reason: str) -> None:
     """Retire an active install row that can never install again.
 
@@ -1021,6 +1063,7 @@ def rehydrate_active_installs_runtime(*, source_id: Optional[str] = None) -> Dic
     # source_id-filtered listing excludes.
     peers = records if source_id is None else [rec for rec in list_installs() if rec.is_active]
     canonical_active = _canonical_active_index(peers)
+    healthy_canonical = _canonical_active_index(peers, healthy_only=True)
     rehydrated = 0
     failed = 0
     # (scope_key, source_id, reason) for rows retired after the locked pass.
@@ -1032,6 +1075,12 @@ def rehydrate_active_installs_runtime(*, source_id: Optional[str] = None) -> Dic
             legacy_reason = _legacy_scope_superseded_reason(rec, canonical_active)
             if legacy_reason:
                 superseded.append((_scope_key(rec.scope), rec.source_id, legacy_reason))
+                continue
+            # A canonical-scope duplicate left behind by an id convergence
+            # (drive_files -> gdrive_files) retires once the successor is live.
+            successor_reason = _canonical_successor_superseded_reason(rec, healthy_canonical)
+            if successor_reason:
+                superseded.append((_scope_key(rec.scope), rec.source_id, successor_reason))
                 continue
             source_def = rec.source_definition_json if isinstance(rec.source_definition_json, dict) else {}
             if not source_def:

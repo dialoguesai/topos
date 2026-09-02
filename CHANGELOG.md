@@ -58,6 +58,17 @@ The machine-readable twin of each release is
   strict paths (`bundled_lane_conflict`, `normalize_canonical_source_payload`)
   deliberately ignore aliases, so reinstalling the published payload still
   works; tests pin all three behaviors.
+- **An id convergence no longer leaves two canonical-scope rows for one
+  connector.** `[O]` The Drive card converged back on the bundled
+  `gdrive_files` id (CP registry republish), so a reconnect leaves a node with
+  both `gdrive_files` and the old `drive_files` install active under the same
+  canonical scope — one connector, two supply rows. Rehydrate now retires the
+  predecessor (`_CANONICAL_SOURCE_SUCCESSORS`) when a **healthy**
+  canonical-scope row of its successor exists for the same user+topos. The
+  healthy requirement is load-bearing: a successor row the same pass is
+  retiring (lane conflict, schema drift) proves nothing, so one pass can never
+  unwire both rows of a connector; without a live successor the predecessor
+  stays untouched.
 - **The world-knowledge veto's ledger reason survives disclosure.** `[O]` The
   home-chat router has emitted `world_knowledge_no_retrieval` since the
   world-knowledge veto landed, but the literal was missing from the narrowing
