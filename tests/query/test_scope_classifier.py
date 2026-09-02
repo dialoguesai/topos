@@ -46,7 +46,7 @@ def _embed_as(vector: list[float]):
 def test_prototypes_come_from_the_live_registry_only() -> None:
     texts = prototype_texts()
     assert set(texts) == set(live_scope_ids())
-    assert len(texts) == 14
+    assert len(texts) == 15  # S6: graph:read live — its S5 example questions become prototypes
     for scope, entries in texts.items():
         assert entries, f"{scope} has no prototype text"
         assert all(isinstance(t, str) and t.strip() for t in entries)
