@@ -10,7 +10,7 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Added
-- **The graph answers "who works on X with me".** `[S1]` A graph retrieval
+- **The graph answers "who works on X with me".** `[O]` A graph retrieval
   lane (`topos/query/graph_lane.py`) walks 1-hop `entity_edges`
   neighborhoods around the turn's linked entities and fuses templated edge
   sentences into the context packet — owner_raw turns only, silent for
