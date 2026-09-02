@@ -37,6 +37,10 @@ The machine-readable twin of each release is
   vocabulary, so `as_public()` collapsed the honest "we skipped retrieval on
   purpose" entry to the `unrecognized` sentinel. Admitted to `REASONS` and
   `protocol/narrowing_vocabulary.json`; drift tests green in all three repos.
+
+## [1.3.41] — 2026-09-02
+
+### Fixed
 - **The mid-import graph fill actually runs.** `[O]` 1.3.40 marked the graph
   dirty after canonical enrichment; on a file import that never produced a
   rebuild. The mark sat inside the enrichment guard, so a re-import with
