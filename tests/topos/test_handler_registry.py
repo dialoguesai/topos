@@ -13,6 +13,7 @@ from topos.core.handlers.registry import handles
 
 SUPPORTED_MESSAGE_TYPES = [
     "advance_routine_next_run_at",
+    "aggregate",
     "app_ingest",
     "auto_resolve_source_contacts",
     "blackhole_check_text",

@@ -59,6 +59,53 @@ _ALIASES: List[tuple] = [
 ]
 
 
+#: (pattern, predicate, special) triples derived from the LOADED pack registry —
+#: every declared predicate gets a deterministic question shape from its own
+#: name, so a pack derivation is reachable the day it ships instead of waiting
+#: for a hand-written alias. Built once per process; failure to load packs
+#: leaves the curated aliases as the whole surface (never raises).
+_generic_index_cache: Optional[List[tuple]] = None
+
+
+def _leaf_pattern(leaf: str) -> Optional[str]:
+    """`provider_relationship` -> a word-boundary phrase regex, plural-tolerant.
+
+    Conservative by construction: ALL leaf tokens must appear as an ordered
+    phrase. Precision beats recall here for the same reason as the curated
+    aliases — a false fire replaces a good LLM answer with a wrong
+    deterministic one. Richer shapes come from curation, not generation.
+    """
+    tokens = [t for t in re.split(r"[._]+", leaf.strip().lower()) if t]
+    if not tokens:
+        return None
+    return r"\b" + r"[\s_-]+".join(re.escape(t) + r"s?" for t in tokens) + r"\b"
+
+
+def _generic_predicate_index() -> List[tuple]:
+    global _generic_index_cache
+    if _generic_index_cache is not None:
+        return _generic_index_cache
+    index: List[tuple] = []
+    try:
+        from topos.features.derivation.packs import load_packs
+        from topos.features.derivation.registry import bundled_pack_dir
+
+        packs = load_packs(bundled_pack_dir())
+        pack_iter = packs.values() if isinstance(packs, dict) else packs
+        for pack in pack_iter:
+            for name in pack.predicates:
+                leaf = name.split(".", 1)[1] if "." in name else name
+                pattern = _leaf_pattern(leaf)
+                if not pattern:
+                    continue
+                special = pack.effective_sensitivity(name) == "special"
+                index.append((re.compile(pattern), name, special))
+    except Exception:  # noqa: BLE001 — packs unloadable => curated aliases only
+        index = []
+    _generic_index_cache = index
+    return index
+
+
 def match_known_item(query_text: str) -> Optional[Dict[str, Any]]:
     q = (query_text or "").lower()
     # known-item asks are about the OWNER; a question about someone else must
@@ -83,6 +130,16 @@ def match_known_item(query_text: str) -> Optional[Dict[str, Any]]:
         for pred in preds:
             if pred not in predicates:
                 predicates.append(pred)
+    # The generic layer: every pack-declared predicate is addressable by its
+    # own leaf phrase. Special-class here comes from the pack's declared
+    # sensitivity (max of pack and predicate), not a hand-kept boolean — which
+    # also closes the old asymmetry where beliefs.* and admin.legal special
+    # packs had no alias and hence no special gate on the direct lane.
+    for pattern, pred, is_special in _generic_predicate_index():
+        if pred in predicates or not pattern.search(q):
+            continue
+        special = special or is_special
+        predicates.append(pred)
     return {"predicates": predicates, "special": special} if predicates else None
 
 

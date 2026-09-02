@@ -44,6 +44,10 @@
     "windowed"
   ],
   "reasons": [
+    "aggregate_lane",
+    "aggregate_param_invalid",
+    "aggregate_principal_denied",
+    "aggregate_scope_unsupported",
     "access_mode_above_ceiling",
     "access_mode_invalid",
     "approval_required",

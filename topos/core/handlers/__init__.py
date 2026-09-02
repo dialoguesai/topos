@@ -147,6 +147,7 @@ from .contacts_import import (  # noqa: F401
 from .common import logger
 from .registry import HANDLERS, OWNER_ONLY_MESSAGE_TYPES, handles  # noqa: F401
 from . import (  # noqa: F401  (imported for handler registration side effects)
+    aggregate,
     config,
     derivation,
     sources,

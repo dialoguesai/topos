@@ -9,6 +9,36 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **The third verb: `aggregate` counts what `query` retrieves.** `[O]` A new
+  ws verb serves deterministic numbers over curated scope surfaces
+  (`topos/query/aggregate.py`: count/sum/avg/min/max × curated group_bys ×
+  day/week/month/hour-of-day/day-of-week buckets, seven scopes) — no model
+  writes SQL. `group_by=person` folds message senders through the NANP-aware
+  contact multimap, so one human imported as `+1512…` and `512…` is ONE
+  group (the alias-trap battery pins 17-not-14+3); black holes exclude
+  inside the same pass for every caller class but the owner's own UI, and
+  totals move with the exclusion (no count side-channel). The handler owns
+  its envelope: validate_public_result walk, narrowing ledger, scalar zero
+  is an answer (`rows=[{value: 0}]`) while a missing store names
+  `store_empty`. Grantee requests and THIRD_PARTY principals are denied with
+  a shape that carries no scope information; owner_automation is served —
+  routine lanes may count (group labels are entity-name-level, within the
+  automation `facts` cap). Narrowing vocabulary grows `aggregate_lane`,
+  `aggregate_param_invalid`, `aggregate_scope_unsupported`,
+  `aggregate_principal_denied` (all three contract links updated).
+- **Every declared pack predicate is now askable.** `[O]` The facts-direct
+  lane grew a generic layer: each of the 231 predicates across 27 packs
+  resolves from its own leaf phrase (`what is my provider relationship?` →
+  `health.provider_relationship`), with special-class carried from the
+  pack's declared sensitivity instead of a hand-kept boolean — closing the
+  asymmetry where beliefs.* and admin.legal special packs had no alias and
+  hence no special gate. The 12 curated aliases survive as richer synonyms;
+  the owner frame still gates everything. A coverage tripwire
+  (`tests/query/test_predicate_coverage.py`) reds the day a future predicate
+  arrives unreachable: a derivation is shipped only when something can ask
+  for it.
+
 ## [1.3.43] — 2026-09-02
 
 ### Added

@@ -191,6 +191,10 @@ ACTIONS = frozenset(
 REASONS = frozenset(
     {
         # --- engine: retrieval lanes, gates and caps
+        "aggregate_lane",
+        "aggregate_param_invalid",
+        "aggregate_principal_denied",
+        "aggregate_scope_unsupported",
         "blackhole_policy",
         "embedded_subject_not_instruction",
         "entity_thread_is_self",
