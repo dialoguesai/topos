@@ -44,8 +44,12 @@ def _counts() -> Dict[str, Any]:
         except Exception:  # noqa: BLE001
             out[key] = None
     try:
+        # The column is `last_run_at` -- what _mark_materialized writes. This read
+        # `materialized_at`, which does not exist, and the per-field try/except
+        # turned that into a permanent null rather than an error: shipped in
+        # 1.3.40 and noticed only because the live reply carried the null.
         row = conn.execute(
-            "SELECT MAX(materialized_at) FROM graph_materialization_state"
+            "SELECT MAX(last_run_at) FROM graph_materialization_state"
         ).fetchone()
         out["materialized_at"] = row[0] if row else None
     except Exception:  # noqa: BLE001
