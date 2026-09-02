@@ -187,6 +187,110 @@
       ]
     },
     {
+      "scope_id": "facts:read",
+      "description": "Derived facts about the owner from standard packs (work, interests, preferences, places, behavior): predicate/value pairs with validity windows. Excludes special-class packs \u2014 health, inner-state and finances live behind facts_sensitive:read.",
+      "example_questions": [
+        "What do the derivation packs know about my work?",
+        "Which projects am I recorded as pursuing?",
+        "What are my stated preferences?"
+      ],
+      "primary_dimensions": [
+        "Profile"
+      ],
+      "raw_tables": [],
+      "canonical_tables": [],
+      "signal_objects": [
+        "fact"
+      ],
+      "summary_objects": [
+        "fact"
+      ],
+      "inference_objects": [
+        "fact"
+      ],
+      "default_mode_ceiling": "inference",
+      "implementation_status": "stub",
+      "fact_classes": [
+        "standard"
+      ]
+    },
+    {
+      "scope_id": "facts_sensitive:read",
+      "description": "Derived facts from special-class packs: health, inner state (mind.*), and finances (money.*). Split from facts:read so a grant can carry everyday facts without carrying these; mirrors the engine's facts vs facts_all packet distinction.",
+      "example_questions": [
+        "What medications am I recorded as taking?",
+        "What does the pack record about my reported state?"
+      ],
+      "primary_dimensions": [
+        "Profile"
+      ],
+      "raw_tables": [],
+      "canonical_tables": [],
+      "signal_objects": [
+        "fact"
+      ],
+      "summary_objects": [
+        "fact"
+      ],
+      "inference_objects": [
+        "fact"
+      ],
+      "default_mode_ceiling": "inference",
+      "implementation_status": "stub",
+      "fact_classes": [
+        "special"
+      ]
+    },
+    {
+      "scope_id": "goals:read",
+      "description": "Stated and derived goals: the user_goals store and Goal signal objects, with their dates and status. Aspirations are sensitive; answers are summaries and bands, not raw dumps.",
+      "example_questions": [
+        "What goals have I set this quarter?",
+        "Which goals went quiet?"
+      ],
+      "primary_dimensions": [
+        "Profile"
+      ],
+      "raw_tables": [],
+      "canonical_tables": [
+        "user_goals"
+      ],
+      "signal_objects": [
+        "Goal",
+        "user_goals"
+      ],
+      "summary_objects": [
+        "Goal"
+      ],
+      "inference_objects": [
+        "Goal"
+      ],
+      "default_mode_ceiling": "inference",
+      "implementation_status": "stub"
+    },
+    {
+      "scope_id": "graph:read",
+      "description": "The entity graph: people, projects, places and topics as nodes, and the derived relations between them (communicates_with, co_occurrence, pursues, participates_in, located_at). Structure and strength, resolved through aliases; not message text.",
+      "example_questions": [
+        "Who is connected to this project?",
+        "What links me to this person?",
+        "Which people bridge my communities?"
+      ],
+      "primary_dimensions": [
+        "Relationships"
+      ],
+      "raw_tables": [
+        "entities",
+        "entity_edges"
+      ],
+      "canonical_tables": [],
+      "signal_objects": [],
+      "summary_objects": [],
+      "inference_objects": [],
+      "default_mode_ceiling": "raw",
+      "implementation_status": "stub"
+    },
+    {
       "scope_id": "health:read",
       "description": "Wellbeing signals from journal entries and role-filtered message emotions: moods, wellness summaries, and wellness scores.",
       "example_questions": [
@@ -380,6 +484,31 @@
         "demo_calendar_file",
         "calendar_stub"
       ]
+    },
+    {
+      "scope_id": "topics:read",
+      "description": "Derived topic clusters and their membership: what themes the owner's activity organizes into, by dimension. Labels and counts; member pointers stay on the node.",
+      "example_questions": [
+        "What themes does my work cluster into?",
+        "How big is each interest cluster?"
+      ],
+      "primary_dimensions": [
+        "Interests"
+      ],
+      "raw_tables": [],
+      "canonical_tables": [
+        "topic_clusters",
+        "topic_cluster_members"
+      ],
+      "signal_objects": [
+        "message_topics"
+      ],
+      "summary_objects": [
+        "message_topics"
+      ],
+      "inference_objects": [],
+      "default_mode_ceiling": "summary",
+      "implementation_status": "stub"
     },
     {
       "scope_id": "work_context:read",

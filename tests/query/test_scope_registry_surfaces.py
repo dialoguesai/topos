@@ -52,15 +52,30 @@ def test_live_scope_declares_a_readable_lane(scope_id: str) -> None:
     )
 
 
+# S5 (PLAN_QUERY_LOOP.md): the derived layer gained grant vocabulary 2026-09-02.
+# These tables are real schema tables with no generic retrieval reader YET —
+# their readers arrive with the graph lane, fact projection, and derived index.
+# Named here explicitly so the typo guard below keeps working: a misspelled
+# table is still an error; only these exact names are the sanctioned expansion.
+DERIVED_LAYER_TABLES = frozenset(
+    {"entities", "entity_edges", "user_goals", "topic_clusters", "topic_cluster_members"}
+)
+
+
 def test_registry_tables_are_real_canonical_tables() -> None:
     """Every table a scope declares must name a table the canonical schema
-    defines; a name outside it can never return rows. Both keys count —
-    `raw_tables` also raises the scope's mode ceiling to `raw`, `canonical_tables`
-    supplies the same lane without claiming raw support."""
+    defines — or a sanctioned derived-layer table (S5); a name outside both
+    can never return rows. Both keys count — `raw_tables` also raises the
+    scope's mode ceiling to `raw`, `canonical_tables` supplies the same lane
+    without claiming raw support."""
     unknown = {}
     for entry in _scopes():
         declared = list(entry.get("raw_tables") or []) + list(entry.get("canonical_tables") or [])
-        missing = [table for table in declared if table not in CANONICAL_SCHEMA_TABLES]
+        missing = [
+            table
+            for table in declared
+            if table not in CANONICAL_SCHEMA_TABLES and table not in DERIVED_LAYER_TABLES
+        ]
         if missing:
             unknown[str(entry["scope_id"])] = missing
     assert not unknown, f"scopes naming non-canonical tables: {unknown}"
