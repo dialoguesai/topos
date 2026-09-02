@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.40] — 2026-09-01
+
 ### Added
 - **Import an export the node can already see.** `[P]` `list_local_exports` looks
   in the platform's Downloads, Desktop and Documents for something that *is* an
