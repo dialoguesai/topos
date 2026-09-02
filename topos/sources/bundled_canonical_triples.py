@@ -32,6 +32,17 @@ BUNDLED_CANONICAL_TRIPLES: Dict[str, Tuple[str, str]] = {
     "gcal.events.v1": ("google_calendar", "schedule"),
 }
 
+# Known drift variants of bundled schema ids, seen in the wild: a 2026-07
+# operator install template invented "gdrive.files.v1" (the bundled id is
+# "gdrive.file.v1"). Deliberately NOT keys of BUNDLED_CANONICAL_TRIPLES: an
+# exact key makes normalize_canonical_source_payload raise and rehydrate
+# demote, and the live drive_files install carries this schema with no bundled
+# replacement to fall back to — enforcement would orphan a working connector.
+# Callers use bundled_schema_drift() and decide per source_id.
+BUNDLED_SCHEMA_ALIASES: Dict[str, str] = {
+    "gdrive.files.v1": "gdrive.file.v1",
+}
+
 VALID_CANONICAL_GROUP_IDS = frozenset(
     {
         "ai_messages",
@@ -95,6 +106,32 @@ def bundled_lane_conflict(payload: Dict[str, Any]) -> Optional[str]:
         f"canonical_group_id {group_id!r} does not match bundled lane "
         f"{inferred[1]!r} for schema {schema_id or parser_id!r}"
     )
+
+
+def bundled_schema_drift(payload: Dict[str, Any]) -> Optional[str]:
+    """Reason when the payload's schema is a drift variant of a bundled id and
+    its declared lane contradicts the bundled triple, else None.
+
+    Advisory, unlike bundled_lane_conflict: the caller decides whether the row
+    can be retired (its source_id has a bundled replacement) or only reported.
+    """
+    group_id = str(payload.get("canonical_group_id") or "").strip()
+    if not group_id:
+        return None
+    for key in (
+        str(payload.get("schema_id") or "").strip(),
+        str(payload.get("parser_id") or "").strip(),
+    ):
+        bundled_key = BUNDLED_SCHEMA_ALIASES.get(key)
+        if not bundled_key:
+            continue
+        _, bundled_lane = BUNDLED_CANONICAL_TRIPLES[bundled_key]
+        if group_id != bundled_lane:
+            return (
+                f"schema {key!r} is a drift variant of bundled {bundled_key!r} and "
+                f"canonical_group_id {group_id!r} contradicts bundled lane {bundled_lane!r}"
+            )
+    return None
 
 
 def normalize_canonical_source_payload(payload: Dict[str, Any]) -> Dict[str, Any]:

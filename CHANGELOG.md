@@ -31,6 +31,21 @@ The machine-readable twin of each release is
   same source_id, or its declared successor (`gdrive_files` → `drive_files`,
   a republish under a new id — the definitions are identical except
   `source_id`). Rows without canonical proof are left alone.
+- **The bundled lane guard sees drift variants of its schema ids.** `[O]` A
+  2026-07 operator install template invented `gdrive.files.v1` (the bundled id
+  is `gdrive.file.v1`, lane `documents`) and declared the `conversations`
+  lane; because the guard keys on exact ids, it never fired, and the rows
+  installed silently for six weeks. Known variants now live in
+  `BUNDLED_SCHEMA_ALIASES`, and rehydrate retires a drifted row **only when
+  the engine bundles a replacement for its source_id** — otherwise it keeps
+  the row and logs the drift once per boot, because the live `drive_files`
+  install carries this exact drift, is the node's only supply row for Google
+  Drive, and has nothing to fall back to (its definition is a conversations
+  template through and through: `messages:read` scopes, conversation-shaped
+  extract map — not mechanically repairable to the documents lane). The
+  strict paths (`bundled_lane_conflict`, `normalize_canonical_source_payload`)
+  deliberately ignore aliases, so reinstalling the published payload still
+  works; tests pin all three behaviors.
 - **The world-knowledge veto's ledger reason survives disclosure.** `[O]` The
   home-chat router has emitted `world_knowledge_no_retrieval` since the
   world-knowledge veto landed, but the literal was missing from the narrowing

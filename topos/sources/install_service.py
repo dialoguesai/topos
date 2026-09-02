@@ -16,7 +16,7 @@ from ..enrichment.jobs import CANONICAL_JOBS, RAW_JOBS
 from ..ingestion.parsers import PARSER_REGISTRY
 from ..storage.db.postgres import connect_postgres, execute_query, fetch_all, fetch_one
 from ..storage.db.write_gate import commit_connection, with_db_write
-from .bundled_canonical_triples import bundled_lane_conflict
+from .bundled_canonical_triples import bundled_lane_conflict, bundled_schema_drift
 from .runtime_install import RuntimeInstallHandle, install_source_definition
 from .scrub_attribution import scrub_attributed_rows
 
@@ -952,6 +952,14 @@ def _canonical_active_index(records: List[InstallRecord]) -> Set[Tuple[str, str,
     return index
 
 
+def _has_bundled_replacement(source_id: str) -> bool:
+    """True when the engine ships a bundled definition for this source_id, so
+    retiring its runtime install row leaves the source available."""
+    from .registry import BUNDLED_REGISTRY
+
+    return str(source_id or "").strip() in BUNDLED_REGISTRY
+
+
 def _legacy_scope_superseded_reason(
     rec: InstallRecord, canonical_active: Set[Tuple[str, str, str]]
 ) -> Optional[str]:
@@ -1038,9 +1046,13 @@ def rehydrate_active_installs_runtime(*, source_id: Optional[str] = None) -> Dic
             # A runtime install predating the bundled source keeps a lane the
             # bundled triple contradicts. Retrying it warns on every sources
             # list; the bundled definition wins, so retire the row instead.
+            # A drift-variant schema (BUNDLED_SCHEMA_ALIASES) retires the same
+            # way only when the engine bundles a replacement for the source_id;
+            # otherwise retiring would orphan a live connector.
             conflict = bundled_lane_conflict(source_def)
-            if conflict:
-                superseded.append((_scope_key(rec.scope), rec.source_id, conflict))
+            drift = None if conflict else bundled_schema_drift(source_def)
+            if conflict or (drift and _has_bundled_replacement(rec.source_id)):
+                superseded.append((_scope_key(rec.scope), rec.source_id, conflict or drift))
                 continue
             try:
                 scope_key = _scope_key(rec.scope)
@@ -1056,6 +1068,12 @@ def rehydrate_active_installs_runtime(*, source_id: Optional[str] = None) -> Dic
                 runtime_missing = runtime_key not in _ACTIVE_HANDLES or any(parser_id not in PARSER_REGISTRY for parser_id in parser_ids)
                 if not runtime_missing:
                     continue
+                if drift:
+                    logger.warning(
+                        "Tolerating bundled-schema drift on active install (no bundled replacement): source_id=%s %s",
+                        rec.source_id,
+                        drift,
+                    )
                 _ACTIVE_HANDLES[runtime_key] = install_source_definition(source_def)
                 rehydrated += 1
             except Exception as exc:  # noqa: BLE001
