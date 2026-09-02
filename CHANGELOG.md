@@ -9,6 +9,19 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **An id convergence no longer leaves two canonical-scope rows for one
+  connector.** `[O]` The Drive card converged back on the bundled
+  `gdrive_files` id (CP registry republish), so a reconnect leaves a node with
+  both `gdrive_files` and the old `drive_files` install active under the same
+  canonical scope — one connector, two supply rows. Rehydrate now retires the
+  predecessor (`_CANONICAL_SOURCE_SUCCESSORS`) when a **healthy**
+  canonical-scope row of its successor exists for the same user+topos. The
+  healthy requirement is load-bearing: a successor row the same pass is
+  retiring (lane conflict, schema drift) proves nothing, so one pass can never
+  unwire both rows of a connector; without a live successor the predecessor
+  stays untouched.
+
 ## [1.3.42] — 2026-09-02
 
 ### Changed
