@@ -9,6 +9,21 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **The graph answers "who works on X with me".** `[S1]` A graph retrieval
+  lane (`topos/query/graph_lane.py`) walks 1-hop `entity_edges`
+  neighborhoods around the turn's linked entities and fuses templated edge
+  sentences into the context packet — owner_raw turns only, silent for
+  grantees, blackholed neighbors stamped out before render. Fusion holds a
+  `min_per_source` floor of 2 for graph items (measured: 8 lane items, 0
+  RRF survivors without it), `stores_touched` gains `"graph"`, and the
+  narrowing ledger vocabulary gains `graph_lane`. `graph:read` flips
+  stub → live in the scope registry with this reader; the four remaining
+  S5 derived-layer scopes stay grant-blocked stubs. Relationship queries
+  that answered from fragments (0.7% of edges readable) now consult the
+  39,340-edge graph directly (qq-catalog-18 cases G1/G2 green on the
+  owner corpus).
+
 ### Changed
 - **The privacy scorecard prints bounds, not bare zeros.** `[O]` UAR and CER
   now report `0.0 of N (95% UB X.X%)` — 0/N only bounds the true rate to

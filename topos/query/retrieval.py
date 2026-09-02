@@ -4716,7 +4716,10 @@ _NO_DECAY_FUSION_SOURCES = frozenset(
     # a RelationshipEdge or a dossier is a statement about how things ARE, not
     # an event that happened at a time. Decaying it would rank the owner's
     # mother below last night's chatter.
-    {"stat_insights", "facts_store", "entities", "briefs", "goals", "derived_objects"}
+    # S6 "graph": an edge is a statement about how things stand between two
+    # entities, not an event — decayed by created_at, the owner's closest
+    # collaborator would rank below last night's chatter.
+    {"stat_insights", "facts_store", "entities", "briefs", "goals", "derived_objects", "graph"}
 )
 
 
@@ -5634,6 +5637,7 @@ def _build_summary_items_unfiltered(
     entity_items: List[Dict[str, Any]] = []
     entity_thread_items: List[Dict[str, Any]] = []
     fact_store_items: List[Dict[str, Any]] = []
+    graph_items: List[Dict[str, Any]] = []
     if query_text:
         try:
             from ..core.state import get_db_connection
@@ -5688,6 +5692,32 @@ def _build_summary_items_unfiltered(
                     ledger=ledger,
                     thread_sink=thread_sink,
                 )
+                # S6: the graph lane — the same resolution, one join outward.
+                # `entity_context_items` says what the graph KNOWS about the
+                # entity; the thread lane fetches its RECORDS; this contributes
+                # its RELATIONS — the edges no lane could previously read. Own
+                # try/except: a graph failure must not also kill the thread
+                # lane (this block's outer except swallows everything).
+                try:
+                    from .graph_lane import graph_neighborhood_items
+
+                    anchor_ids, _skipped = _entity_thread_entities(
+                        conn, linked, manifest=manifest
+                    )
+                    graph_items = graph_neighborhood_items(
+                        conn,
+                        anchor_ids=anchor_ids,
+                        anchor_names={
+                            str(e.get("entity_id")): str(e.get("canonical_name") or "")
+                            for e in linked
+                        },
+                        scope_id=str(getattr(manifest, "scope_id", "") or ""),
+                        manifest=manifest,
+                        disclosure_tier=disclosure_tier,
+                        ledger=ledger,
+                    )
+                except Exception as graph_exc:  # noqa: BLE001
+                    logger.debug("graph lane skipped: %s", graph_exc)
         except Exception as exc:
             logger.debug("entity linking skipped: %s", exc)
 
@@ -5803,6 +5833,15 @@ def _build_summary_items_unfiltered(
         if ai_scope and canonical_items:
             min_per = dict(min_per or {})
             min_per["canonical"] = max(int(min_per.get("canonical") or 0), 3)
+        # S6: the graph lane only produces items under the scopes that
+        # advertise relationship STRUCTURE (relationship_context:read,
+        # graph:read) — and on a rich corpus its RRF share at canonical
+        # weight loses the top-25 to sixteen content lanes (measured on the
+        # owner snapshot: 8 lane items, 0 survivors). Structure is the
+        # product there, so it keeps a two-slot spine, same as goals.
+        if graph_items:
+            min_per = dict(min_per or {})
+            min_per["graph"] = max(int(min_per.get("graph") or 0), 2)
         # NOTE: cosine similarity must NOT waive the zero-df gate — a strong hit
         # on the generic half of a query ("compiler rewrite") cannot evidence a
         # name the corpus does not contain ("Threnody-7"). The N-lane found
@@ -5822,6 +5861,11 @@ def _build_summary_items_unfiltered(
                 # ordinary canonical evidence that arrived by a different key, so
                 # it fuses at the canonical lane's own weight.
                 ("entity_thread", 1.0, entity_thread_items),
+                # S6: edges are ordinary evidence that arrived by the entity
+                # key instead of a content key — the same argument as the
+                # thread lane, so the same weight: beside the scope routes,
+                # never above them.
+                ("graph", 1.0, graph_items),
                 # Q1. Same argument, same weight: evidence for a stated goal is
                 # ordinary canonical evidence that arrived keyed to that goal's ids.
                 # It is a joined minority lane beside the scope routes, never above
@@ -5858,6 +5902,7 @@ def _build_summary_items_unfiltered(
         + entity_items
         + derived_items
         + entity_thread_items
+        + graph_items
         + commitment_items
         + goal_items
         + emotion_items
@@ -6638,6 +6683,16 @@ class DefaultSignalRetrievalAdapter:
                 )
                 if summaries:
                     touched.append("signal")
+                # S6: the graph store is declared touched when the graph lane
+                # actually contributed — the Shortfall probe's assertion target
+                # ("Who works on this with me?" must consult the graph, not
+                # topic-cluster noise). Checked on items rather than threaded
+                # through a sink: the lane's provenance prefix IS the signal.
+                if any(
+                    str(item.get("retrieval_source") or "").startswith("graph:")
+                    for item in summaries
+                ):
+                    touched.append("graph")
                 # Surface the planner's parsed window so synthesis can state
                 # which dates were searched ("nothing from 2026-07-16") instead
                 # of inferring it from per-item timestamps. Summary mode only:

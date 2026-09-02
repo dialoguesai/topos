@@ -80,7 +80,15 @@ def test_stub_scopes_stay_out_of_the_classifier() -> None:
         }
     else:
         live_ids = {str(e.get("scope_id")) for e in entries}
+    # S6: graph:read flipped live with its reader (the graph retrieval lane).
+    # A registry demotion would silently starve the lane's scope gate, so pin
+    # it into the live set; the four remaining S5 stubs stay out.
+    assert "graph:read" in live_ids, (
+        "graph:read demoted from the live set while its reader (graph lane) ships"
+    )
     for scope_id in S5_SCOPES:
+        if scope_id == "graph:read":
+            continue
         assert scope_id not in live_ids, (
             f"{scope_id} reached the live/classifier set while still a stub"
         )

@@ -195,6 +195,7 @@ REASONS = frozenset(
         "embedded_subject_not_instruction",
         "entity_thread_is_self",
         "entity_thread_lane",
+        "graph_lane",
         "entity_thread_selector_not_accessible",
         "entity_thread_self_check_unavailable",
         "entity_thread_unresolved",

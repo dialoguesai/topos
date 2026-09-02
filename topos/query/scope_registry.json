@@ -288,7 +288,7 @@
       "summary_objects": [],
       "inference_objects": [],
       "default_mode_ceiling": "raw",
-      "implementation_status": "stub"
+      "implementation_status": "live"
     },
     {
       "scope_id": "health:read",

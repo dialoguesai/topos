@@ -88,6 +88,7 @@
     "expand_boundary",
     "expand_boundary_downgrade",
     "first_source_ref_only",
+    "graph_lane",
     "gate_vetoed",
     "grantee_scrub_facts",
     "grantee_scrub_scores",

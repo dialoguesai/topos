@@ -78,7 +78,12 @@ EvalFn = Callable[[Dict[str, Any]], Tuple[bool, str]]
 # on the IMB scratch corpus; attribution IdealBadPair + poison-in-answer checks.
 # qq-catalog-17 (Wave B11): +D3M messenger authored-goals path (messages:read + user_goal).
 # Existing lane composites comparable to qq-catalog-15 via shared case_ids.
-QUERY_CATALOG_VERSION = "qq-catalog-17"
+# qq-catalog-18 (S6 graph lane): +G1 Shortfall probe ("Who works on this with me?"
+# must consult the GRAPH — stores_touched carries "graph", answers name entities via
+# graph:* items, not topic-cluster fragments) and +G2 direct graph:read structure ask
+# (optional_seed: depends on live edge density). Existing lanes untouched — composites
+# comparable to qq-catalog-17 via shared case_ids.
+QUERY_CATALOG_VERSION = "qq-catalog-18"
 
 _DEFAULT_LATENCY_MS = {
     "summary": int(os.environ.get("TOPOS_QQ_LATENCY_SUMMARY_MS", "10000")),
@@ -200,6 +205,58 @@ def _sources(items: List[Dict[str, Any]]) -> Dict[str, int]:
         src = str(item.get("retrieval_source") or "?")
         counts[src] = counts.get(src, 0) + 1
     return counts
+
+
+def _stores(response: Dict[str, Any]) -> List[str]:
+    """stores_touched, always a list (audit.py defaults it)."""
+    audit = response.get("audit") if isinstance(response.get("audit"), dict) else {}
+    stores = audit.get("stores_touched")
+    return [str(s) for s in stores] if isinstance(stores, list) else []
+
+
+def eval_g1_graph_consulted(response: Dict[str, Any]) -> Tuple[bool, str]:
+    """S6 Shortfall probe: the graph must be CONSULTED, and the answer must
+    carry relation items naming entities — not topic-cluster fragments. The
+    2026-08-31 audit's live finding: this exact ask returned two plausible
+    names mixed with three fragments while 19 declared project entities and a
+    528-degree hub sat unread one table away."""
+    ok, msg = _not_denied(response)
+    if not ok:
+        return ok, msg
+    stores = _stores(response)
+    if "graph" not in stores:
+        return False, f"graph store not consulted (stores_touched: {stores})"
+    items = _summary_items(response)
+    graph_items = [
+        i
+        for i in items
+        if str(i.get("retrieval_source") or "").startswith("graph:")
+    ]
+    if not graph_items:
+        return False, f"no graph:* items in the packet (sources: {_sources(items)})"
+    named = [i for i in graph_items if i.get("entity_id") and i.get("topic")]
+    if not named:
+        return False, "graph items carry no entity identities"
+    edge_types = sorted(
+        {str(i.get("edge_type") or "") for i in graph_items if i.get("edge_type")}
+    )
+    return True, f"{len(graph_items)} graph items via {edge_types}"
+
+
+def eval_g2_graph_direct(response: Dict[str, Any]) -> Tuple[bool, str]:
+    """Direct graph:read ask: structure comes back as graph relations."""
+    ok, msg = _not_denied(response)
+    if not ok:
+        return ok, msg
+    if "graph" not in _stores(response):
+        return False, f"graph store not consulted ({_stores(response)})"
+    items = _summary_items(response)
+    graph_items = [
+        i for i in items if str(i.get("retrieval_source") or "").startswith("graph:")
+    ]
+    if not graph_items:
+        return False, f"no graph:* items (sources: {_sources(items)})"
+    return True, f"{len(graph_items)} relations returned"
 
 
 def eval_d1_entity_dossier(response: Dict[str, Any]) -> Tuple[bool, str]:
@@ -360,6 +417,14 @@ class EvalRunResult:
 
 
 QUALITY_CASES: List[QueryQualityCase] = [
+    # S6 (qq-catalog-18): SUITE-GRAPH — protects: relations that exist in the
+    # graph are consulted at query time. G1 is the Shortfall probe verbatim.
+    QueryQualityCase("G1", "Who works on Topos with me?", "relationship_context:read", "summary",
+                     eval_g1_graph_consulted,
+                     description="Graph lane consulted; relation items name entities, not fragments"),
+    QueryQualityCase("G2", "What is connected to Topos?", "graph:read", "summary",
+                     eval_g2_graph_direct, optional_seed=True,
+                     description="Direct graph:read structure ask returns edge relations"),
     QueryQualityCase("Q1", "UMA scopes and signal extraction", "ai_conversations:read", "summary", eval_q1_scopes,
                      description="Query-aware summary ranks scope/signal-extraction topics first"),
     # qq-catalog-5: Q2 re-scoped ai_conversations→messages. The owner's keycloak
