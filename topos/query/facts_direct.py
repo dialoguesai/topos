@@ -102,6 +102,22 @@ def _generic_predicate_index() -> List[tuple]:
                 index.append((re.compile(pattern), name, special))
     except Exception:  # noqa: BLE001 — packs unloadable => curated aliases only
         index = []
+    # Legacy FactStore vocabulary (pre-pack, no dot, e.g. lives_in / grew_up_in):
+    # real stored facts on live nodes that no pack declares. Measured live
+    # 2026-09-02: 5 legacy predicates holding facts had no deterministic path.
+    # Never special — the legacy writers predate the sensitivity key entirely.
+    try:
+        from topos.features.facts.store import KNOWN_PREDICATES
+
+        seen = {name for _p, name, _s in index}
+        for name in KNOWN_PREDICATES:
+            if name in seen:
+                continue
+            pattern = _leaf_pattern(name)
+            if pattern:
+                index.append((re.compile(pattern), name, False))
+    except Exception:  # noqa: BLE001
+        pass
     _generic_index_cache = index
     return index
 

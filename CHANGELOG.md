@@ -34,7 +34,10 @@ The machine-readable twin of each release is
   pack's declared sensitivity instead of a hand-kept boolean — closing the
   asymmetry where beliefs.* and admin.legal special packs had no alias and
   hence no special gate. The 12 curated aliases survive as richer synonyms;
-  the owner frame still gates everything. A coverage tripwire
+  the owner frame still gates everything; the legacy FactStore vocabulary
+  (lives_in, practices, …) rides the same index. Measured on the live store:
+  deterministically reachable facts went 66 -> 146 of 149 (the residue is
+  three orphan-vocabulary rows no surface declares). A coverage tripwire
   (`tests/query/test_predicate_coverage.py`) reds the day a future predicate
   arrives unreachable: a derivation is shipped only when something can ask
   for it.
