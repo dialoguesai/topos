@@ -176,7 +176,10 @@ async def run_mcp_eval(mcp_url: str, topos_key: str) -> List[EvalRunResult]:
     ) as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()
-            for case in QUALITY_CASES:
+            # engine_only cases grade owner_raw-only surfaces (the graph lane):
+            # a third-party-classed MCP harness is CORRECTLY silent there, and
+            # running them here would grade the privacy invariant as a defect.
+            for case in [c for c in QUALITY_CASES if not c.engine_only]:
                 t0 = time.perf_counter()
                 raw = await session.call_tool(
                     "query_scope",
@@ -211,6 +214,87 @@ async def run_mcp_eval(mcp_url: str, topos_key: str) -> List[EvalRunResult]:
     return results
 
 
+async def run_aggregate_eval(db_path: Path, *, necessity: bool = True) -> List[Dict[str, Any]]:
+    """SUITE-P: the aggregate verb vs today's inference lane, same corpus.
+
+    The verb leg drives real dispatch; the necessity leg sends each case's
+    natural phrasing through the retrieval+inference stack and grades it with
+    the most charitable rubric (any exact expected number anywhere in the
+    response). The old lane's failure rate is the verb's justification — if it
+    passes at scale, S7's kill-switch says the verb was unnecessary.
+    """
+    import topos.core.handlers as hub
+    from topos.core.handlers import handle_control_plane_request
+    from topos.principal import OWNER_APP, Principal
+
+    from query_eval_cases import (
+        AGGREGATE_CASES,
+        evaluate_aggregate_result,
+        necessity_answer_contains,
+    )
+
+    import sqlite3
+
+    conn = sqlite3.connect(str(db_path))
+    hub.get_db_connection = lambda: conn  # script-scoped; this process only evals
+    owner = Principal(cls=OWNER_APP, channel="cp_relay")
+
+    adapters = AdapterFactory.create("local_database", db_path=db_path)
+    orch = QueryPipelineOrchestrator(adapters=adapters)
+
+    rows: List[Dict[str, Any]] = []
+    for case in AGGREGATE_CASES:
+        t0 = time.perf_counter()
+        resp = await handle_control_plane_request(
+            {
+                "id": f"suitep-{case.id}",
+                "type": "aggregate",
+                "payload": {**case.payload, "dataset_id": "u1:default"},
+                "caller": {"mcp_source": "topos_home_chat"},
+            },
+            principal=owner,
+        )
+        verb_ms = (time.perf_counter() - t0) * 1000
+        payload = (resp or {}).get("payload") or {}
+        ok, reason = (
+            evaluate_aggregate_result(case, payload.get("public_result") or {})
+            if payload.get("turn_outcome") == "live_query"
+            else (False, str(payload.get("deny_reason") or "no live_query"))
+        )
+
+        old_ok, old_reason, old_ms = None, "necessity leg skipped", None
+        if necessity:
+            manifest = manifest_for_scope(case.necessity_scope)
+            t1 = time.perf_counter()
+            try:
+                out = await orch.execute(
+                    query_text=case.necessity_query,
+                    scope_id=case.necessity_scope,
+                    access_mode="inference",
+                    manifest=manifest,
+                    query_session_id=f"suitep-old-{case.id}-{uuid.uuid4().hex[:8]}",
+                )
+                old_ok, old_reason = necessity_answer_contains(case, out)
+            except Exception as exc:  # noqa: BLE001
+                old_ok, old_reason = False, f"old lane errored: {exc}"
+            old_ms = (time.perf_counter() - t1) * 1000
+
+        rows.append(
+            {
+                "case_id": case.id,
+                "verb_pass": ok,
+                "verb_reason": reason,
+                "verb_ms": round(verb_ms, 1),
+                "verb_budget_ok": verb_ms <= case.max_latency_ms,
+                "old_lane_pass": old_ok,
+                "old_lane_reason": old_reason,
+                "old_lane_ms": round(old_ms, 1) if old_ms is not None else None,
+                "description": case.description,
+            }
+        )
+    return rows
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description="Topos query quality eval runner")
     parser.add_argument("--db", default=str(LIVE_DB_PATH), help="SQLite database path")
@@ -218,7 +302,60 @@ def main() -> int:
     parser.add_argument("--mcp-url", default=os.environ.get("MCP_BASE_URL", "https://cp.logu3s.com"))
     parser.add_argument("--seed", action="store_true", help="Apply minimal Q5/Q6 seed rows before eval")
     parser.add_argument("--json", action="store_true", help="Emit JSON report")
+    parser.add_argument(
+        "--aggregate",
+        action="store_true",
+        help="SUITE-P: seed a THROWAWAY corpus and run the aggregate verb vs "
+        "the old inference lane (the necessity leg; needs the local model)",
+    )
+    parser.add_argument(
+        "--no-necessity", action="store_true", help="Skip the old-lane leg of --aggregate"
+    )
     args = parser.parse_args()
+
+    if args.aggregate:
+        import sqlite3
+        import tempfile
+
+        sys.path.insert(0, str(ROOT / "tests"))
+        from fixtures.query_eval_seed.apply_aggregate_seed import apply_aggregate_seed
+        from topos.storage.db.migrations import apply_all_migrations
+
+        tmp = Path(tempfile.mkdtemp(prefix="suitep-")) / "suitep.db"
+        conn = sqlite3.connect(str(tmp))
+        apply_all_migrations(conn)
+        apply_aggregate_seed(conn)
+        conn.close()
+        print(f"SUITE-P corpus seeded at {tmp}")
+        rows = asyncio.run(run_aggregate_eval(tmp, necessity=not args.no_necessity))
+        if args.json:
+            print(json.dumps(rows, indent=2))
+        else:
+            for r in rows:
+                verb = "PASS" if r["verb_pass"] else "FAIL"
+                old = (
+                    "-" if r["old_lane_pass"] is None
+                    else "PASS" if r["old_lane_pass"] else "FAIL"
+                )
+                old_ms = f"{r['old_lane_ms']:.0f}ms" if r["old_lane_ms"] is not None else "-"
+                print(
+                    f"{r['case_id']:>5}  verb={verb} {r['verb_ms']:>7.0f}ms   "
+                    f"old_lane={old} {old_ms:>9}   {r['description'][:52]}"
+                )
+                if not r["verb_pass"]:
+                    print(f"       verb: {r['verb_reason'][:100]}")
+                if r["old_lane_pass"] is False:
+                    print(f"       old:  {r['old_lane_reason'][:100]}")
+            verb_rate = sum(1 for r in rows if r["verb_pass"])
+            measured = [r for r in rows if r["old_lane_pass"] is not None]
+            old_rate = sum(1 for r in measured if r["old_lane_pass"])
+            print(f"\nSUITE-P: verb {verb_rate}/{len(rows)} exact")
+            if measured:
+                print(
+                    f"necessity leg: old lane {old_rate}/{len(measured)} "
+                    f"(the gap is the verb's justification; old==verb => kill-switch)"
+                )
+        return 0 if all(r["verb_pass"] for r in rows) else 1
 
     db_path = Path(args.db)
     if not db_path.exists():

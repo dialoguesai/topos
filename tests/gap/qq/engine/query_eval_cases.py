@@ -83,7 +83,15 @@ EvalFn = Callable[[Dict[str, Any]], Tuple[bool, str]]
 # graph:* items, not topic-cluster fragments) and +G2 direct graph:read structure ask
 # (optional_seed: depends on live edge density). Existing lanes untouched — composites
 # comparable to qq-catalog-17 via shared case_ids.
-QUERY_CATALOG_VERSION = "qq-catalog-18"
+# qq-catalog-19 (S7 SUITE-P): +AGGREGATE_CASES P-01..P-09 — the aggregate verb
+# graded on EXACT numbers over the constructed 7,500-row corpus
+# (tests/fixtures/query_eval_seed/apply_aggregate_seed.py); each case carries a
+# necessity_query for the old-lane baseline (the kill-switch leg). QueryQualityCase
+# gains engine_only (default False): G1/G2 no longer run on the MCP lane, where a
+# third-party-classed harness gets graph silence BY DESIGN and a red there would
+# grade the privacy invariant as a defect. Existing lanes untouched — composites
+# comparable to qq-catalog-18 via shared case_ids.
+QUERY_CATALOG_VERSION = "qq-catalog-19"
 
 _DEFAULT_LATENCY_MS = {
     "summary": int(os.environ.get("TOPOS_QQ_LATENCY_SUMMARY_MS", "10000")),
@@ -374,6 +382,10 @@ class QueryQualityCase:
     max_latency_ms: int = 0
     description: str = ""
     optional_seed: bool = False
+    # True: the case grades an owner_raw-only surface (e.g. the graph lane) that a
+    # third-party-classed MCP harness is CORRECTLY silent on — running it over MCP
+    # would grade the privacy invariant as a failure.
+    engine_only: bool = False
 
     def __post_init__(self) -> None:
         if self.max_latency_ms <= 0:
@@ -420,10 +432,10 @@ QUALITY_CASES: List[QueryQualityCase] = [
     # S6 (qq-catalog-18): SUITE-GRAPH — protects: relations that exist in the
     # graph are consulted at query time. G1 is the Shortfall probe verbatim.
     QueryQualityCase("G1", "Who works on Topos with me?", "relationship_context:read", "summary",
-                     eval_g1_graph_consulted,
+                     eval_g1_graph_consulted, engine_only=True,
                      description="Graph lane consulted; relation items name entities, not fragments"),
     QueryQualityCase("G2", "What is connected to Topos?", "graph:read", "summary",
-                     eval_g2_graph_direct, optional_seed=True,
+                     eval_g2_graph_direct, optional_seed=True, engine_only=True,
                      description="Direct graph:read structure ask returns edge relations"),
     QueryQualityCase("Q1", "UMA scopes and signal extraction", "ai_conversations:read", "summary", eval_q1_scopes,
                      description="Query-aware summary ranks scope/signal-extraction topics first"),
@@ -514,3 +526,113 @@ def latency_budget_ms(access_mode: str, *, denied: bool = False) -> int:
     if denied:
         return _DEFAULT_LATENCY_MS["deny"]
     return _DEFAULT_LATENCY_MS.get(access_mode, 8000)
+
+
+# --------------------------------------------------------------------------
+# S7 SUITE-P — the aggregate verb, graded on EXACT numbers.
+#
+# protects: counting-class questions get exact answers the retrieval stack
+# structurally cannot produce, and the claim is measured, not assumed: each
+# case carries a `necessity_query` — the same question phrased naturally —
+# that the runner sends through TODAY'S inference lane on the SAME corpus.
+# The old lane's failure rate on these is the verb's justification; if it
+# somehow passes at scale, the verb was unnecessary and the plan says so
+# (the S7 kill-switch).
+#
+# Every expected number is a constructed fact of apply_aggregate_seed.py.
+
+
+@dataclass(frozen=True)
+class AggregateCase:
+    id: str
+    payload: Dict[str, Any]          # aggregate-verb arguments
+    expect: Dict[str, float]         # group/bucket key -> exact value ("" = scalar)
+    necessity_query: str             # the natural phrasing for the old-lane leg
+    necessity_scope: str
+    description: str = ""
+    max_latency_ms: int = 2000       # deterministic SQL — an order faster than retrieval
+
+
+def evaluate_aggregate_result(case: "AggregateCase", public_result: Dict[str, Any]) -> Tuple[bool, str]:
+    rows = public_result.get("rows")
+    if not isinstance(rows, list):
+        return False, "no rows in public_result"
+    got: Dict[str, float] = {}
+    for row in rows:
+        key = str(row.get("label") or row.get("bucket") or row.get("group") or "")
+        got[key] = row.get("value")
+    for key, want in case.expect.items():
+        if key not in got:
+            return False, f"missing key {key!r} (got {sorted(got)[:6]})"
+        if abs(float(got[key]) - float(want)) > 1e-6:
+            return False, f"{key!r}: expected {want}, got {got[key]}"
+    return True, f"{len(case.expect)} exact value(s) matched"
+
+
+def necessity_answer_contains(case: "AggregateCase", response: Dict[str, Any]) -> Tuple[bool, str]:
+    """Old-lane rubric: does the answer state ANY of the exact expected numbers?
+
+    Deliberately generous to the old lane (comma-tolerant, any expected value
+    counts, confidence ignored) — the necessity claim must survive the most
+    charitable reading of the incumbent.
+    """
+    blob = json.dumps(response, ensure_ascii=False, default=str)
+    for want in case.expect.values():
+        variants = {f"{want:g}", f"{int(want):,}" if float(want).is_integer() else f"{want:g}"}
+        if any(v in blob for v in variants):
+            return True, f"answer contains {want:g}"
+    return False, "no expected number appears anywhere in the response"
+
+
+AGGREGATE_CASES: List[AggregateCase] = [
+    AggregateCase(
+        "P-01", {"scope_id": "messages:read", "measure": "count"}, {"": 5200},
+        "How many messages did I send in total?", "messages:read",
+        description="Scalar count over 5,200 seeded rows"),
+    AggregateCase(
+        "P-02", {"scope_id": "messages:read", "measure": "count", "group_by": "person"},
+        {"Casey Verano": 3000, "Ana Torres": 1700, "+15125550199": 500},
+        "How many messages did I exchange with Casey Verano?", "messages:read",
+        description="The alias trap at scale: two contact rows fold to one human"),
+    AggregateCase(
+        "P-03", {"scope_id": "messages:read", "measure": "count", "bucket": "hour_of_day"},
+        {"23": 400},
+        "How many late-night messages did I send?", "messages:read",
+        description="Late-nights: the hour-23 block"),
+    AggregateCase(
+        "P-04", {"scope_id": "resources:read", "measure": "sum", "field": "amount",
+                 "group_by": "category",
+                 "since": "2026-03-01T00:00:00", "until": "2026-03-31T23:59:59"},
+        {"groceries": 1000.0, "utilities": 800.0, "dining": 600.0},
+        "How much did I spend on groceries in March?", "resources:read",
+        description="Jordan F-02: March spending by category"),
+    AggregateCase(
+        "P-05", {"scope_id": "resources:read", "measure": "sum", "field": "amount",
+                 "group_by": "category"},
+        {"savings": 2000.0},
+        "How much did I transfer to savings?", "resources:read",
+        description="Jordan F-04: savings transfers sum to 2000"),
+    AggregateCase(
+        "P-06", {"scope_id": "resources:read", "measure": "avg", "field": "amount",
+                 "group_by": "category"},
+        {"income": 12000.0},
+        "What is my approximate monthly income?", "resources:read",
+        description="Jordan F-05: income rows average 12000"),
+    AggregateCase(
+        "P-07", {"scope_id": "health:read", "measure": "count", "group_by": "mood_tag"},
+        {"calm": 25, "anxious": 15, "hopeful": 12, "energized": 8},
+        "How many of my journal entries were calm?", "health:read",
+        description="Jordan B-01's mood distribution, as exact counts"),
+    AggregateCase(
+        "P-08", {"scope_id": "schedule:read", "measure": "count",
+                 "since": "2026-08-24T00:00:00", "until": "2026-08-28T23:59:59"},
+        {"": 30},
+        "How many calendar events did I have the week of August 24?", "schedule:read",
+        description="OS-03's count skeleton on an absolute window"),
+    AggregateCase(
+        "P-09", {"scope_id": "activity:read", "measure": "count", "bucket": "day",
+                 "since": "2026-07-01T00:00:00", "until": "2026-07-01T23:59:59"},
+        {"2026-07-01": 40},
+        "How many browsing events did I log on July 1st?", "activity:read",
+        description="Load: a constructed 40-events day"),
+]

@@ -10,6 +10,18 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Added
+- **SUITE-P: the aggregate verb is graded on exact numbers, and its necessity
+  is measured, not assumed.** `[O]` qq-catalog-19 adds nine aggregate cases
+  (the alias trap at scale, Jordan F-02/F-04/F-05, B-01's mood counts,
+  OS-03's count skeleton, late-nights, load) over a constructed 7,500-row
+  corpus — every expected value a fact of the seed. Verdict on first run:
+  **verb 9/9 exact at 0–9ms; today's inference lane 1/9** under the most
+  charitable rubric (any expected number anywhere in the response). The
+  hermetic leg rides `just test` forever; the necessity leg reruns via
+  `scripts/run_query_eval.py --aggregate`. QueryQualityCase gains
+  `engine_only` — G1/G2 leave the MCP lane, where a third-party-classed
+  harness gets graph silence BY DESIGN and a red there graded the privacy
+  invariant as a defect.
 - **The third verb: `aggregate` counts what `query` retrieves.** `[O]` A new
   ws verb serves deterministic numbers over curated scope surfaces
   (`topos/query/aggregate.py`: count/sum/avg/min/max × curated group_bys ×

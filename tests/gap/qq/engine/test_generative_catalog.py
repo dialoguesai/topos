@@ -24,7 +24,7 @@ pytestmark = [pytest.mark.check("C-quality-gen-calibration")]
 
 def test_generative_catalog_version() -> None:
     assert GENERATIVE_CATALOG_VERSION == "qq-gen-2"
-    assert QUERY_CATALOG_VERSION == "qq-catalog-18"
+    assert QUERY_CATALOG_VERSION == "qq-catalog-19"
 
 
 def test_calibration_lane_is_15_plus_15() -> None:
