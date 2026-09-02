@@ -256,6 +256,9 @@ def test_uar_is_zero():
     assert scorecard["uar"] == 0.0, scorecard["leaked_probes"]
     assert scorecard["leaks"] == 0
     assert scorecard["total_probes"] == len(ALL_PROBES)
+    # §E1: the rate travels with its sample size and one-sided 95% Wilson bound.
+    assert scorecard["n"] == scorecard["total_probes"]
+    assert 0.0 < scorecard["upper_bound_95"] < 3.0 / scorecard["n"]
 
 
 @pytest.mark.parametrize("probe", ALL_PROBES, ids=lambda p: p.__name__)

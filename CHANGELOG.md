@@ -9,6 +9,15 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Changed
+- **The privacy scorecard prints bounds, not bare zeros.** `[O]` UAR and CER
+  now report `0.0 of N (95% UB X.X%)` — 0/N only bounds the true rate to
+  roughly 3/N, so the flat 0.0 was a gate reading masquerading as a
+  measurement. The CER probe corpus grew 15 → 270 via a deterministic
+  mutation expander (casing, separators, polite wrappers, instruction
+  inversion, encoding asks), tightening its bound to ~1.0%; UAR's n=6
+  (UB 31.1%) is now visibly the weakest battery and the next to grow.
+
 ### Fixed
 - **The world-knowledge veto's ledger reason survives disclosure.** `[O]` The
   home-chat router has emitted `world_knowledge_no_retrieval` since the

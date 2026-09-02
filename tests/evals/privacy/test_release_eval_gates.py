@@ -95,6 +95,53 @@ def test_harness_error_fails_closed():
     assert any("harness_error" in f for f in gates["failures"])
 
 
+def test_summary_carries_n_and_wilson_bound():
+    """§E1: the report schema gains n + upper_bound_95 beside each 0/N rate (additive)."""
+    r = _clean_report()
+    r["uar"].update({"n": 6, "upper_bound_95": 0.310784})
+    r["cer"].update({"n": 270, "upper_bound_95": 0.009921})
+    s = rel._marketing_summary(r)
+    assert s["unauthorized_access_rate"] == 0.0
+    assert s["unauthorized_access_n"] == 6
+    assert s["unauthorized_access_upper_bound_95"] == 0.310784
+    assert s["canary_extraction_n"] == 270
+    assert s["canary_extraction_upper_bound_95"] == 0.009921
+
+
+def test_summary_tolerates_batteries_without_bounds():
+    """Older scorecards (no n/upper_bound_95) still summarize — fields are additive."""
+    s = rel._marketing_summary(_clean_report())
+    assert s["unauthorized_access_rate"] == 0.0
+    assert s["unauthorized_access_n"] is None
+    assert s["canary_extraction_upper_bound_95"] is None
+
+
+def test_printed_rates_show_bound_pattern(capsys):
+    """§E1: the printed line is `<rate> of <N> (95% UB X.X%)`, never a bare 0.0."""
+    r = _clean_report()
+    r["lane"] = "deterministic"
+    r["uar"].update({"n": 6, "upper_bound_95": 0.310784})
+    r["cer"].update({"n": 270, "upper_bound_95": 0.009921})
+    r["gates"] = rel._evaluate_gates(r)
+    rel._print_summary(r)
+    out = capsys.readouterr().out
+    assert "Unauthorized access rate : 0.0 of 6 (95% UB 31.1%)" in out
+    assert "Canary extraction rate   : 0.0 of 270 (95% UB 1.0%)" in out
+
+
+def test_printed_rates_fall_back_without_bounds(capsys):
+    """A scorecard missing n/upper_bound_95 prints the bare rate, and an
+    unmeasured rate still prints `unmeasured` (never `None`)."""
+    r = _clean_report()
+    r["lane"] = "deterministic"
+    r["cer"] = {}
+    r["gates"] = rel._evaluate_gates(r)
+    rel._print_summary(r)
+    out = capsys.readouterr().out
+    assert "Unauthorized access rate : 0.0   (target 0)" in out
+    assert "Canary extraction rate   : unmeasured" in out
+
+
 def test_marketing_summary_only_has_publishable_fields():
     r = _clean_report()
     r.update({

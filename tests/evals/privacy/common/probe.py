@@ -74,7 +74,14 @@ class ProbeResult:
 
 
 def unauthorized_access_rate(results: Iterable[ProbeResult]) -> Dict[str, Any]:
-    """Aggregate probes into the UAR scorecard (leaks / total, plus per-class breakdown)."""
+    """Aggregate probes into the UAR scorecard (leaks / total, plus per-class breakdown).
+
+    §E1: the rate travels with its sample size (`n`) and the one-sided 95% Wilson
+    upper bound — 0/N is a bound (≈2.7/N), not a measurement of zero, and the
+    scorecard says so instead of printing a bare 0.0.
+    """
+    from tests.evals.privacy.common.wilson import wilson_upper_bound
+
     results = list(results)
     total = len(results)
     leaks = [r for r in results if r.leaked]
@@ -88,6 +95,8 @@ def unauthorized_access_rate(results: Iterable[ProbeResult]) -> Dict[str, Any]:
         "total_probes": total,
         "leaks": len(leaks),
         "uar": (len(leaks) / total) if total else 0.0,
+        "n": total,
+        "upper_bound_95": wilson_upper_bound(len(leaks), total),
         "by_class": by_class,
         "leaked_probes": [r.to_dict() for r in leaks],
     }

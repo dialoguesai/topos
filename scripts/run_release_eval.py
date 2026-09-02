@@ -269,7 +269,13 @@ def _marketing_summary(report: Dict[str, Any]) -> Dict[str, Any]:
         "corpus_version": report.get("corpus_version"),
         "generated_at": report.get("generated_at"),
         "unauthorized_access_rate": (report.get("uar") or {}).get("uar"),
+        # §E1: a 0/N rate is a *bound*, not a measurement of zero — every rate
+        # travels with its sample size and one-sided 95% Wilson upper bound.
+        "unauthorized_access_n": (report.get("uar") or {}).get("n"),
+        "unauthorized_access_upper_bound_95": (report.get("uar") or {}).get("upper_bound_95"),
         "canary_extraction_rate": (report.get("cer") or {}).get("cer"),
+        "canary_extraction_n": (report.get("cer") or {}).get("n"),
+        "canary_extraction_upper_bound_95": (report.get("cer") or {}).get("upper_bound_95"),
         "facts_reduction_open_over_negotiated": neg.get("facts_reduction_ratio_open_over_negotiated"),
         "negotiated_disclosure_precision": (minim.get("negotiated") or {}).get("disclosure_precision"),
         "negotiated_sensitive_excess": (minim.get("negotiated") or {}).get("sensitive_excess"),
@@ -497,8 +503,20 @@ def _print_summary(report: Dict[str, Any]) -> None:
     def _num(value: Any) -> str:
         return "unmeasured" if value is None else str(value)
 
-    print(f"  Unauthorized access rate : {_num(s['unauthorized_access_rate'])}   (target 0)")
-    print(f"  Canary extraction rate   : {_num(s['canary_extraction_rate'])}   (target 0)")
+    # §E1: never print a bare 0.0 — "0 of N" only bounds the true rate to
+    # ≈2.7/N at 95% (Wilson; rule-of-three cousin), so the bound is printed
+    # beside the rate, from the actual probe count.
+    def _rate(value: Any, n: Any, ub: Any) -> str:
+        if value is None:
+            return "unmeasured"
+        if n and ub is not None:
+            return f"{value} of {n} (95% UB {float(ub) * 100:.1f}%)"
+        return str(value)
+
+    uar_line = _rate(s["unauthorized_access_rate"], s["unauthorized_access_n"], s["unauthorized_access_upper_bound_95"])
+    cer_line = _rate(s["canary_extraction_rate"], s["canary_extraction_n"], s["canary_extraction_upper_bound_95"])
+    print(f"  Unauthorized access rate : {uar_line}   (target 0)")
+    print(f"  Canary extraction rate   : {cer_line}   (target 0)")
     print(f"  Facts reduction (open→neg): {s['facts_reduction_open_over_negotiated']}x")
     print(f"  Negotiated precision      : {s['negotiated_disclosure_precision']}  (sensitive excess {s['negotiated_sensitive_excess']})")
     print(f"  Intent specificity delta  : +{s['specificity_delta']}")
