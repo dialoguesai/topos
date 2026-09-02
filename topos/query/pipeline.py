@@ -16,7 +16,11 @@ from .ddr import StageTimings, build_disclosure_decision_record, now_ms
 from .disclosure import DisclosureFilterPipeline
 from .fingerprint import compute_retrieval_fingerprint
 from .packet_resolution import effective_packet_resolution
-from .game_layer import DefaultGameLayer
+from .game_layer import (
+    DefaultGameLayer,
+    enforce_availability_inference_contract,
+    is_availability_scope,
+)
 from .inference import run_query_inference
 from .intent import compute_intent_hash
 from .manifest import ScopeResolutionManifest
@@ -779,7 +783,17 @@ class QueryPipelineOrchestrator:
             query_text=query_text,
         )
         timings.game_layer_ms = now_ms() - _t0
-        if access_mode == "inference" and public.payload.get("answer_type") != "band":
+        # availability:read licenses free/busy only, so the game layer's output
+        # (band, or the who-guard's refusal) is FINAL for this scope — same
+        # contract as `band`/`facts` below: deterministic answer_types are
+        # final. The lanes below `update()` the payload in place, and on
+        # 2026-09-02 the LLM lane overwrote the who-guard's "unknown" with a
+        # contact's full name at confidence 1 — the refusal has answer_type
+        # "list", which both lanes treated as an invitation.
+        availability_final = access_mode == "inference" and is_availability_scope(scope_id)
+        if (access_mode == "inference"
+                and not availability_final
+                and public.payload.get("answer_type") != "band"):
             # C7 facts-direct (W3.1): a known-item ask with live facts gets its
             # exact values, validity dates and evidence counts with ZERO LLM —
             # same contract as `band`: deterministic answer_types are final.
@@ -820,6 +834,7 @@ class QueryPipelineOrchestrator:
             if direct is not None:
                 public.payload.update(direct)
         if (access_mode == "inference"
+                and not availability_final
                 and public.payload.get("answer_type") not in ("band", "facts")):
             _t0 = now_ms()
             inf = await asyncio.to_thread(
@@ -831,6 +846,11 @@ class QueryPipelineOrchestrator:
             )
             public.payload.update(inf)
             timings.inference_ms = now_ms() - _t0
+        if availability_final:
+            # Closed-set egress scrub, applied even though the lanes above are
+            # gated off: the payload has one last owner before serialization,
+            # and a lane added later must hit this wall, not the wire.
+            public.payload = enforce_availability_inference_contract(public.payload)
 
         public_dict = public.to_dict()
         # Declared, never silent: every turn says what resolution actually applied and

@@ -106,6 +106,75 @@ def _extract_entity_labels(context_packet: Dict[str, Any]) -> List[str]:
     return labels[:10]
 
 
+#: availability:read licenses free/busy ONLY. The three sets below are the
+#: ENTIRE licensed vocabulary of an availability inference answer — a person
+#: name or a meeting title has no slot in it, so enforcement is a closed-set
+#: membership check, never a redaction pattern that has to recognize names.
+_AVAILABILITY_ANSWERS = frozenset({"yes", "conditional", "no", "unknown"})
+_AVAILABILITY_BANDS = frozenset(
+    {"overlap_found", "negotiable_overlap", "no_overlap", "unknown"}
+)
+#: Free text can only leave through a key, so unknown keys are dropped rather
+#: than inspected. Everything listed is either closed-set or pipeline-stamped
+#: metadata (exclusion/truncated/empty_cause carry slugs and integers only).
+_AVAILABILITY_ALLOWED_KEYS = frozenset(
+    {
+        "access_mode",
+        "scope_id",
+        "answer_type",
+        "band",
+        "answer",
+        "confidence",
+        "items",
+        "deferred",
+        "redaction",
+        "exclusion",
+        "truncated",
+        "empty_cause",
+        "packet_resolution",
+        "packet_resolution_reason",
+        "principal_cls",
+    }
+)
+
+
+def is_availability_scope(scope_id: str) -> bool:
+    return "availability" in (scope_id or "")
+
+
+def enforce_availability_inference_contract(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """Free/busy-only egress gate for availability inference payloads.
+
+    The branches in ``DefaultGameLayer.apply`` already emit only closed-set
+    values for this scope — but the pipeline lanes that run AFTER the game
+    layer ``update()`` the payload in place, and any of them can re-open what
+    the game layer refused. Live 2026-09-02 the LLM inference lane did exactly
+    that: the who-guard's ``answer: "unknown"`` left the engine as a contact's
+    full name at confidence 1. This function is the last owner of the payload
+    before it is serialized, so a violation here is scrubbed to "unknown"
+    rather than trusted, and the scrub is declared via ``redaction`` (a
+    closed-set slug) instead of happening silently.
+    """
+    out = {k: v for k, v in payload.items() if k in _AVAILABILITY_ALLOWED_KEYS}
+    scrubbed = len(out) != len(payload)
+    if out.get("answer_type") not in ("band", "list"):
+        out["answer_type"] = "band"
+        scrubbed = True
+    if str(out.get("band") or "unknown") not in _AVAILABILITY_BANDS:
+        out.pop("band", None)
+        scrubbed = True
+    if str(out.get("answer")) not in _AVAILABILITY_ANSWERS:
+        out["answer"] = "unknown"
+        out["confidence"] = 0.0
+        scrubbed = True
+    if out.get("items"):
+        out["items"] = []
+        scrubbed = True
+    if scrubbed:
+        out["redaction"] = "availability_free_busy_only"
+    return out
+
+
 class DefaultGameLayer:
     reveal_strategy: RevealStrategy = RevealStrategy.DIRECT
 

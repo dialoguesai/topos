@@ -19,6 +19,18 @@ The machine-readable twin of each release is
   (UB 31.1%) is now visibly the weakest battery and the next to grow.
 
 ### Fixed
+- **availability:read inference answers are free/busy only, end to end.**
+  `[S1]` The game layer's who-guard refused identity asks on this scope with
+  `answer: "unknown"` — but its refusal carries `answer_type: "list"`, and
+  the pipeline lanes that run after it (facts-direct, LLM inference) treated
+  anything that is not `band`/`facts` as theirs to `update()`. Live
+  2026-09-02 the LLM lane overwrote the refusal with a contact's full name
+  at confidence 1 in `public_result.answer`. Both lanes are now gated off
+  for availability inference turns, and a closed-set egress scrub
+  (`enforce_availability_inference_contract`) is the payload's last owner
+  before serialization: keys outside the licensed vocabulary are dropped, a
+  free-text answer reverts to "unknown", and the scrub declares itself via
+  `redaction: availability_free_busy_only` instead of happening silently.
 - **Stale legacy-scope install rows retire themselves.** `[O]` Rows in
   `source_runtime_installs` keyed under the legacy `{owner}:default:{key-hash}`
   dataset scope stayed active after the same install was re-created under the
