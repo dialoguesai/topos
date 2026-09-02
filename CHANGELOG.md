@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.43] — 2026-09-02
+
 ### Added
 - **The graph answers "who works on X with me".** `[O]` A graph retrieval
   lane (`topos/query/graph_lane.py`) walks 1-hop `entity_edges`
