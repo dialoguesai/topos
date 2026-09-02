@@ -285,7 +285,9 @@
       ],
       "canonical_tables": [],
       "signal_objects": [],
-      "summary_objects": [],
+      "summary_objects": [
+        "entity_edge_summary"
+      ],
       "inference_objects": [],
       "default_mode_ceiling": "raw",
       "implementation_status": "live"
