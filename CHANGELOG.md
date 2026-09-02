@@ -19,6 +19,18 @@ The machine-readable twin of each release is
   (UB 31.1%) is now visibly the weakest battery and the next to grow.
 
 ### Fixed
+- **Stale legacy-scope install rows retire themselves.** `[O]` Rows in
+  `source_runtime_installs` keyed under the legacy `{owner}:default:{key-hash}`
+  dataset scope stayed active after the same install was re-created under the
+  canonical `{owner}:topos:{topos_id}` scope. Readers query the canonical scope
+  only, so the rows were dead weight — but any reader that ever matched the
+  legacy scope would get a partial install list, and a partial list makes
+  `routing_supply_states` mark live scopes `no_source_connected` (false
+  absence). Rehydrate now demotes an active legacy-scope row to `superseded`
+  when an active canonical-scope row exists for the same user+topos and the
+  same source_id, or its declared successor (`gdrive_files` → `drive_files`,
+  a republish under a new id — the definitions are identical except
+  `source_id`). Rows without canonical proof are left alone.
 - **The world-knowledge veto's ledger reason survives disclosure.** `[O]` The
   home-chat router has emitted `world_knowledge_no_retrieval` since the
   world-knowledge veto landed, but the literal was missing from the narrowing

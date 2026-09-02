@@ -8,7 +8,7 @@ import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from typing import Any, Dict, Iterator, List, Optional, Tuple
+from typing import Any, Dict, Iterator, List, Optional, Set, Tuple
 
 from ..config.settings import settings
 from ..core.state import get_db_connection
@@ -924,6 +924,60 @@ def _is_rehydratable_source_definition(source_def: Dict[str, Any]) -> bool:
     return source_kind_from_payload(source_def) == SOURCE_KIND_INGESTION
 
 
+# drive_files is gdrive_files republished under a new source id — the runtime
+# definitions are identical except source_id — so an active drive_files install
+# proves a legacy-scope gdrive_files row is retired, not merely missing.
+_LEGACY_SOURCE_SUCCESSORS: Dict[str, str] = {"gdrive_files": "drive_files"}
+
+_LEGACY_DATASET_SEGMENT = "default"
+_CANONICAL_DATASET_SEGMENT = "topos"
+
+
+def _dataset_scope_segment(scope: Dict[str, str]) -> str:
+    parts = str(scope.get("dataset_id") or "").split(":")
+    return parts[1] if len(parts) == 3 else ""
+
+
+def _canonical_active_index(records: List[InstallRecord]) -> Set[Tuple[str, str, str]]:
+    """(user_id, topos_id, source_id) for active installs under the canonical
+    {owner}:topos:{topos_id} dataset scope."""
+    index: Set[Tuple[str, str, str]] = set()
+    for rec in records:
+        scope = _normalize_scope(rec.scope)
+        if _dataset_scope_segment(scope) != _CANONICAL_DATASET_SEGMENT:
+            continue
+        if scope["user_id"] == "*" or scope["topos_id"] == "*":
+            continue
+        index.add((scope["user_id"], scope["topos_id"], rec.source_id))
+    return index
+
+
+def _legacy_scope_superseded_reason(
+    rec: InstallRecord, canonical_active: Set[Tuple[str, str, str]]
+) -> Optional[str]:
+    """Reason to retire an active legacy {owner}:default:{key-hash} scope row, or None.
+
+    Readers query the canonical {owner}:topos:{topos_id} scope only, so a legacy
+    row duplicated there is dead weight — and poison for any reader that ever
+    matches the legacy scope, which would see a partial install list. Demote only
+    when an active canonical row proves the same install is live for the same
+    user+topos, under the same source_id or its declared successor.
+    """
+    scope = _normalize_scope(rec.scope)
+    if _dataset_scope_segment(scope) != _LEGACY_DATASET_SEGMENT:
+        return None
+    if scope["user_id"] == "*" or scope["topos_id"] == "*":
+        return None
+    candidates = [rec.source_id]
+    successor = _LEGACY_SOURCE_SUCCESSORS.get(rec.source_id)
+    if successor:
+        candidates.append(successor)
+    for sid in candidates:
+        if (scope["user_id"], scope["topos_id"], sid) in canonical_active:
+            return f"legacy dataset scope superseded by active canonical-scope install source_id={sid}"
+    return None
+
+
 def _supersede_install(*, scope_key: str, source_id: str, reason: str) -> None:
     """Retire an active install row that can never install again.
 
@@ -955,12 +1009,22 @@ def rehydrate_active_installs_runtime(*, source_id: Optional[str] = None) -> Dic
     """
     ensure_install_schema()
     records = [rec for rec in list_installs(source_id=source_id) if rec.is_active]
+    # Successor demotion (gdrive_files -> drive_files) must see peers that a
+    # source_id-filtered listing excludes.
+    peers = records if source_id is None else [rec for rec in list_installs() if rec.is_active]
+    canonical_active = _canonical_active_index(peers)
     rehydrated = 0
     failed = 0
     # (scope_key, source_id, reason) for rows retired after the locked pass.
     superseded: List[Tuple[str, str, str]] = []
     with _LOCK:
         for rec in records:
+            # Before contract checks: a legacy-scope duplicate retires even if
+            # its stored definition is stale or incomplete.
+            legacy_reason = _legacy_scope_superseded_reason(rec, canonical_active)
+            if legacy_reason:
+                superseded.append((_scope_key(rec.scope), rec.source_id, legacy_reason))
+                continue
             source_def = rec.source_definition_json if isinstance(rec.source_definition_json, dict) else {}
             if not source_def:
                 continue
