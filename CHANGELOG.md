@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.42] — 2026-09-02
+
 ### Changed
 - **The privacy scorecard prints bounds, not bare zeros.** `[O]` UAR and CER
   now report `0.0 of N (95% UB X.X%)` — 0/N only bounds the true rate to
@@ -20,7 +22,7 @@ The machine-readable twin of each release is
 
 ### Fixed
 - **availability:read inference answers are free/busy only, end to end.**
-  `[S1]` The game layer's who-guard refused identity asks on this scope with
+  `[O]` The game layer's who-guard refused identity asks on this scope with
   `answer: "unknown"` — but its refusal carries `answer_type: "list"`, and
   the pipeline lanes that run after it (facts-direct, LLM inference) treated
   anything that is not `band`/`facts` as theirs to `update()`. Live
