@@ -299,6 +299,7 @@ REASONS = frozenset(
         "source_has_live_tools",
         "source_ref",
         "summary_enrichment",
+        "world_knowledge_no_retrieval",
         # --- control plane: refusals that never reach the node. The human-readable
         # sentence stays on the response's own `deny_reason`; the ledger carries the code.
         "access_mode_above_ceiling",

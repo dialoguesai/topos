@@ -10,6 +10,12 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Fixed
+- **The world-knowledge veto's ledger reason survives disclosure.** `[O]` The
+  home-chat router has emitted `world_knowledge_no_retrieval` since the
+  world-knowledge veto landed, but the literal was missing from the narrowing
+  vocabulary, so `as_public()` collapsed the honest "we skipped retrieval on
+  purpose" entry to the `unrecognized` sentinel. Admitted to `REASONS` and
+  `protocol/narrowing_vocabulary.json`; drift tests green in all three repos.
 - **The mid-import graph fill actually runs.** `[O]` 1.3.40 marked the graph
   dirty after canonical enrichment; on a file import that never produced a
   rebuild. The mark sat inside the enrichment guard, so a re-import with

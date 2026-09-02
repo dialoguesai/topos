@@ -154,7 +154,8 @@
     "topic_thread_single_store",
     "unknown_scope",
     "unmatched_route",
-    "unrecognized"
+    "unrecognized",
+    "world_knowledge_no_retrieval"
   ],
   "empty_causes": [
     "gate_vetoed",
