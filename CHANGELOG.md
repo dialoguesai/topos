@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.41] — 2026-09-02
+
 ### Fixed
 - **The mid-import graph fill actually runs.** `[O]` 1.3.40 marked the graph
   dirty after canonical enrichment; on a file import that never produced a
