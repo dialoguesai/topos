@@ -424,3 +424,37 @@ def test_each_known_type_is_individually_readable(edge_type):
     _add_edge(conn, "e1", "p1", "c1", edge_type)
     conn.commit()
     assert [edge.edge_type for edge in _projection(conn).edges()] == [edge_type]
+
+
+
+def test_an_undated_edge_contributes_weight_but_no_date(tmp_path):
+    """part_of edges are written with no event -- last_event_at NULL, valid_from
+    the recompute's clock. The projection read COALESCE(last_event_at,
+    valid_from, created_at), so a rebuild tonight gave every such edge tonight
+    as its activity date. Weight is real; the date was not."""
+    import sqlite3
+    from topos.storage.db.migrations import apply_all_migrations
+    from topos.features.entities.resolver import EntityResolver
+
+    conn = sqlite3.connect(str(tmp_path / "c.db"))
+    apply_all_migrations(conn)
+    r = EntityResolver(conn)
+    a = r._create_entity("Org A", "organization")
+    b = r._create_entity("Unit B", "organization")
+    conn.commit()
+    conn.execute(
+        """
+        INSERT INTO entity_edges (edge_id, src_entity_id, dst_entity_id, edge_type,
+                                  weight, evidence_count, valid_from, metadata_json)
+        VALUES ('e1', ?, ?, 'part_of', 1.0, 1, '2026-08-30T00:00:00Z', '{}')
+        """,
+        (b, a),
+    )
+    conn.commit()
+    rows = list(conn.execute(
+        "SELECT last_event_at AS event_at FROM entity_edges WHERE edge_id='e1'"
+    ))
+    assert rows and rows[0][0] is None, "the edge has no event; the read must not invent one"
+    src = projection_mod.__file__
+    text = open(src, encoding="utf-8").read()
+    assert "COALESCE(last_event_at, valid_from, created_at)" not in text

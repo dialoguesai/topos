@@ -401,7 +401,15 @@ class EvidenceCache:
             for row in conn.execute(
                 f"""
                 SELECT src_entity_id, dst_entity_id, edge_type, weight, evidence_count,
-                       COALESCE(last_event_at, valid_from, created_at) AS event_at
+                       -- last_event_at ONLY. valid_from is when the node started
+                       -- believing the relation (a recompute's clock for part_of
+                       -- and other structural edges) and created_at is the row's
+                       -- own birth; neither is an event. The fallback made an
+                       -- undated edge report activity at rebuild time, which is
+                       -- the defect fixed for the graph window in edges.py.
+                       -- EvidenceCache.add tolerates None: weight still counts,
+                       -- no date is invented.
+                       last_event_at AS event_at
                 FROM entity_edges
                 WHERE valid_to IS NULL
                   AND LOWER(TRIM(edge_type)) IN ({placeholders})

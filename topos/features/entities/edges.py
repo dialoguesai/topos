@@ -562,11 +562,21 @@ def graph_snapshot(
         clause = ""
     else:
         clause = " AND valid_to IS NULL"
+    # A TIME window asks "did anything happen between these dates". Only
+    # last_event_at answers that. valid_from is when the node started BELIEVING
+    # the relation -- for a structural edge written by a recompute (semantic
+    # affinity, part_of) that is the recompute's clock, and it carries no event
+    # at all. The old COALESCE fallback read that clock as activity, so every
+    # entity touched by a rebuild appeared in "the last 11 days" no matter when
+    # it was last mentioned: 69 of 4,602 dormant entities on the reference node,
+    # 60 of them through exactly these undated edges. An undated edge is no
+    # evidence of activity in any window; it stays in the unwindowed views,
+    # where valid_from remains the right recency key for ORDER BY.
     if after:
-        clause += " AND COALESCE(last_event_at, valid_from) >= ?"
+        clause += " AND last_event_at IS NOT NULL AND last_event_at >= ?"
         where_params.append(after)
     if before:
-        clause += " AND COALESCE(last_event_at, valid_from) <= ?"
+        clause += " AND last_event_at IS NOT NULL AND last_event_at <= ?"
         where_params.append(before)
 
     where_sql = (

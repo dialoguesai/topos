@@ -105,3 +105,39 @@ def test_event_range_returns_activity_in_window(conn):
     ppairs = _edge_pairs(past)
     assert ({(a, b), (b, a)} & ppairs)
     assert (a, d) not in ppairs and (d, a) not in ppairs
+
+
+def test_undated_structural_edge_does_not_enter_a_time_window(conn):
+    """A semantic-affinity edge carries no event: it is written by a recompute
+    with valid_from = the recompute's clock and last_event_at NULL. The window
+    filter used COALESCE(last_event_at, valid_from), so a rebuild tonight put a
+    person last mentioned fifteen months ago into "the last 11 days" -- 69 of
+    4,602 dormant entities on the reference node, 60 of them through edges
+    exactly like this one. Belief-start is not activity."""
+    import uuid
+
+    a, b, d = _seed(conn)
+    r = EntityResolver(conn)
+    ghost = r._create_entity("Zed", "person")
+    conn.commit()
+    conn.execute(
+        """
+        INSERT INTO entity_edges (edge_id, src_entity_id, dst_entity_id, edge_type,
+                                  weight, evidence_count, valid_from, metadata_json)
+        VALUES (?, ?, ?, 'semantic_affinity', 0.7, 1, '2026-05-15T00:00:00Z', '{}')
+        """,
+        (uuid.uuid4().hex, a, ghost),
+    )
+    conn.commit()
+
+    win = graph_snapshot(
+        conn,
+        event_after="2026-05-01T00:00:00Z",
+        event_before="2026-06-01T00:00:00Z",
+        selection="all",
+    )
+    pairs = _edge_pairs(win)
+    assert (a, ghost) not in pairs and (ghost, a) not in pairs, "an undated edge is not activity"
+    # But it is still a real relation: the unwindowed graph keeps it.
+    full = graph_snapshot(conn, selection="all", include_closed=True)
+    assert ({(a, ghost), (ghost, a)} & _edge_pairs(full))
