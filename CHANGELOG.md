@@ -9,6 +9,23 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **An undated edge no longer counts as activity in a time window.** `[O]`
+  The graph window filtered on `COALESCE(last_event_at, valid_from)`, and
+  structural edges — semantic affinity, `part_of` — are written by recomputes
+  with no event and `valid_from` set to the recompute's clock. So every rebuild
+  pulled every entity it touched into "the last N days" regardless of when it
+  was last mentioned: measured through the graph endpoint on the reference
+  node with an 11-day window, 87 of 670 nodes had no mention inside it and 390
+  of 2,453 edges carried no date at all. The window now reads `last_event_at`
+  alone; same data after the fix, 10 nodes and 0 undated edges, the 10 being
+  real activity through lanes that do not write mentions. The complexity
+  projection had the same fallback and gets the same treatment. Undated edges
+  stay in the unwindowed views.
+- **`graph_summary` reads the column the refresh writes.** `[O]` It selected
+  `materialized_at`, which does not exist (`last_run_at` does), and the
+  per-field guard turned that into a permanent null on every node.
+
 ## [1.3.40] — 2026-09-01
 
 ### Added
