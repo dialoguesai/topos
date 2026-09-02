@@ -28,6 +28,7 @@ import asyncio
 import logging
 import os
 import threading
+from typing import Any, Dict
 from datetime import datetime, timezone
 from typing import Any, Callable, Dict, Optional
 
@@ -251,6 +252,60 @@ def gc_status() -> Dict[str, Any]:
     """What the last sweep did, so an unrun sweep is visible rather than silent."""
     with _GC_LOCK:
         return {"enabled": _gc_enabled(), "pending": _GC_TIMER is not None, **_GC_LAST}
+
+
+def refresh_now_if_dirty() -> Dict[str, Any]:
+    """Rebuild the graph inline, right now, if it is dirty and nothing is deriving.
+
+    Written for one caller: the post-canonical pipeline, at the point between
+    canonical enrichment and signal derivation. The debounced mark cannot do
+    this job there -- its timer fires ~90s later, by which time signal
+    derivation has raised the in-flight counter and _fire re-arms the timer
+    instead of rebuilding (DEBUG-logged). It keeps re-arming until derivation
+    ends, so the mid-import refresh collapses into the end-of-pipeline one. On
+    a file import that phase runs for hours, so "the graph fills before the
+    long phase" never happened. Measured on a 20-stage import: zero mid-import
+    rebuilds.
+
+    Costs a rebuild (~7-9 minutes on a 17k-edge node) inside the import, which
+    is the point. Skipped when the graph is not dirty, so a re-import that
+    changed nothing pays nothing.
+    """
+    from ...core.state import get_db_connection
+    from ...enrichment.pipeline_activity import is_derivation_in_flight
+
+    if not _enabled():
+        return {"skipped": "disabled"}
+    if is_derivation_in_flight():
+        return {"skipped": "derivation in flight"}
+    conn = get_db_connection()
+    if conn is None:
+        return {"skipped": "no database"}
+    try:
+        row = conn.execute(
+            "SELECT dirty_generation, materialized_generation FROM graph_materialization_state WHERE id=1"
+        ).fetchone()
+    except Exception as exc:  # noqa: BLE001
+        return {"skipped": f"state unreadable: {exc}"}
+    if not row or int(row[0]) <= int(row[1]):
+        return {"skipped": "not dirty"}
+    logger.info("graph refresh: inline, before signal derivation")
+    try:
+        _refresher._rebuild_fn()
+        return {"ran": True}
+    except WriteGateDeferred as exc:
+        _refresher.mark()
+        return {"skipped": f"deferred: {exc}"}
+    finally:
+        # This runs on an asyncio.to_thread worker. Pooled threads are reused;
+        # the rebuild route closes its thread-local connection for the same
+        # reason, or every call leaks one.
+        try:
+            from ...core.state import close_thread_db_connection
+
+            close_thread_db_connection()
+        except Exception:  # noqa: BLE001 — cleanup must not mask the result
+            pass
 
 
 def mark_graph_dirty() -> None:

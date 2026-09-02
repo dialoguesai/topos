@@ -205,10 +205,31 @@ def test_the_graph_fills_before_the_long_phase_not_after_it():
     """
     src = inspect.getsource(canonical_pipeline.run_post_canonical_pipeline)
     assert src.count("mark_graph_dirty()") == 2, "expected exactly two marks"
-    # The new one must sit before signal derivation, or it buys nothing.
+    # The mid-import one must sit before signal derivation, or it buys nothing.
     first = src.index("mark_graph_dirty()")
     signal = src.index("run_signal_derivation(")
     assert first < signal
+    # ...and it must REBUILD there, not just mark: the debounced refresher
+    # fires ~90s later, by which time derivation is in flight and the refresh
+    # re-arms until derivation ends. Measured: zero mid-import rebuilds.
+    fill = src.index("refresh_now_if_dirty)")
+    assert first < fill < signal
+    # ...and it must not live inside the enrichment guard, or an import with
+    # nothing left to enrich (a re-import) never fills at all.
+    guard_end = src.index("records_for_enrichment\n    ):")
+    assert fill > guard_end
+    assert "if canonical_records:" in src[fill - 1500:fill]
+
+
+def test_refresh_now_skips_when_not_dirty_or_deriving():
+    """The inline rebuild is ~9 minutes inside an import. It must not run for
+    nothing: a clean graph, or a derivation already holding the write gate."""
+    from topos.features.entities import graph_refresh
+
+    src = inspect.getsource(graph_refresh.refresh_now_if_dirty)
+    assert "is_derivation_in_flight()" in src
+    assert "dirty_generation, materialized_generation" in src
+    assert '"skipped": "not dirty"' in src
 
 
 def test_the_privacy_stage_says_what_it_does():

@@ -10,6 +10,15 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Fixed
+- **The mid-import graph fill actually runs.** `[O]` 1.3.40 marked the graph
+  dirty after canonical enrichment; on a file import that never produced a
+  rebuild. The mark sat inside the enrichment guard, so a re-import with
+  nothing left to enrich never marked at all, and the debounced refresher
+  re-arms itself while signal derivation is in flight, so the refresh collapsed
+  into the final rebuild — measured as zero mid-import rebuilds on a live
+  20-stage import. The pipeline now rebuilds inline between canonical
+  enrichment and signal derivation (~7–9 minutes on a 17k-edge node), skipped
+  when the graph is not dirty.
 - **An undated edge no longer counts as activity in a time window.** `[O]`
   The graph window filtered on `COALESCE(last_event_at, valid_from)`, and
   structural edges — semantic affinity, `part_of` — are written by recomputes
