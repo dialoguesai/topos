@@ -10,6 +10,29 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Fixed
+- **The hosted-binding floor now reaches the answer, not just the packet.**
+  `[O]` `effective_packet_resolution` drops to `scores_only` when the
+  query-answering model is bound to a hosted provider — and it gates the
+  INFERENCE PACKET, which is the thing the engine's own model reads. Summary
+  prose does not stop there: it rides `public_result` to whatever model
+  writes the reply, and on a hosted pack that model is the hosted one.
+  Measured on an owner snapshot 2026-09-03, a turn reporting
+  `packet_resolution: scores_only` / `reason: hosted_binding` still carried
+  **60,151 characters** of the owner's conversation text — byte-identical to
+  the same query on a local binding. The protection read as active on the
+  turn that carried the content out. A floored turn now keeps its shape and
+  withholds its words: identity, provenance, rank and dates survive so the
+  caller can still see WHAT matched and how strongly, the prose does not
+  travel, and the turn declares it (`hosted_binding_text_withheld`) rather
+  than shortening in silence — a quietly emptied summary is
+  indistinguishable from a corpus that held nothing. Band and yes/no answers
+  are untouched: those are shapes, not content. Pinned hermetically (7,
+  including a non-vacuity check that every declared container is really
+  walked and a source pin that the cap fires on this reason alone) and
+  end-to-end on the owner snapshot, where the local leg must serve >1,000
+  characters or the hosted leg would be asserting nothing.
+
+### Fixed
 - **An upgrade step's targets now land where its executor reads them.** `[O]`
   1.3.47's `index-goals-into-derived-index` declared
   `targets: ["derived_object_index"]` at the top level of the step, but

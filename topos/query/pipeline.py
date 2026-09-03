@@ -25,7 +25,7 @@ from .inference import run_query_inference
 from .intent import compute_intent_hash
 from .manifest import ScopeResolutionManifest
 from .minimizer import DisclosureMinimizer
-from .narrowing import NarrowingLedger, result_is_empty
+from .narrowing import STAGE_DISCLOSURE, NarrowingLedger, result_is_empty
 from . import narrowing as _N
 from .negotiation import DEFAULT_MAX_ROUNDS, build_narrow_request_response, qualify_intent
 from .retrieval import DefaultSignalRetrievalAdapter, resolve_retrieval_source_ids
@@ -46,6 +46,57 @@ _NOT_QUERIED_OUTCOMES = frozenset(
         TurnOutcome.NARROW_REQUEST.value,
     }
 )
+
+
+#: Item containers in `public_result` that carry generated or quoted prose.
+#: Declared rather than recursed, the same choice `disclosure._GRANTEE_DICT_ARTIFACTS`
+#: makes and for the same reason: a new artifact has to be listed here, and the
+#: listing is the review.
+_HOSTED_FLOOR_ITEM_KEYS = ("summaries", "scores", "semantic_hits", "items", "facts")
+
+
+def withhold_text_for_hosted_binding(
+    public_dict: Dict[str, Any], *, ledger: Optional[NarrowingLedger] = None
+) -> int:
+    """Strip prose from a floored turn's payload, keeping its shape.
+
+    Identity, provenance, rank and dates survive: a caller can still see THAT
+    something matched and how strongly, and the turn stays legible. The words
+    do not travel. Emptying the lists instead would be worse than useless —
+    an empty result is indistinguishable from a corpus that held nothing,
+    which is the false-absence failure this whole plan exists to end, so the
+    withholding is declared in the ledger rather than performed in silence.
+
+    Returns the number of text fields removed, so a caller can assert the cap
+    actually did something (a severed-wire lever, and the reason this is a
+    module-level function rather than an inline loop).
+    """
+    from .disclosure import _GRANTEE_TEXT_KEYS
+
+    removed = 0
+    for container in _HOSTED_FLOOR_ITEM_KEYS:
+        items = public_dict.get(container)
+        if not isinstance(items, list):
+            continue
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            for key in _GRANTEE_TEXT_KEYS:
+                if item.get(key):
+                    item[key] = ""
+                    removed += 1
+    # The free-text answer is the same content in one field.
+    if public_dict.get("answer") and public_dict.get("answer_type") not in ("band", "yes_no"):
+        public_dict["answer"] = ""
+        removed += 1
+    if removed and ledger is not None:
+        ledger.record(
+            STAGE_DISCLOSURE,
+            "excluded",
+            "hosted_binding_text_withheld",
+            dropped=removed,
+        )
+    return removed
 
 
 def _attach_narrowing(result: Dict[str, Any], ledger: NarrowingLedger) -> Dict[str, Any]:
@@ -853,6 +904,17 @@ class QueryPipelineOrchestrator:
             public.payload = enforce_availability_inference_contract(public.payload)
 
         public_dict = public.to_dict()
+        # The hosted-binding floor reaches the ANSWER, not only the packet.
+        # `effective_packet_resolution` gates what the engine's own model reads;
+        # summary prose does not stop there — it rides `public_result` to
+        # whatever model writes the reply, and on a hosted pack that model is
+        # the hosted one. Measured on an owner snapshot 2026-09-03: a turn
+        # reporting `scores_only`/`hosted_binding` still carried 60,151
+        # characters of the owner's conversation text, byte-identical to the
+        # same query on a local binding. The protection read as active on the
+        # turn that carried the content out.
+        if _pr["effective"] == "scores_only" and _pr["reason"] == "hosted_binding":
+            withhold_text_for_hosted_binding(public_dict, ledger=ledger)
         # Declared, never silent: every turn says what resolution actually applied and
         # why (active / non_owner_floor / hosted_binding). Same post-hoc pattern as
         # `empty_cause` below.

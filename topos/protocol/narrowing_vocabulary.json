@@ -95,6 +95,7 @@
     "graph_lane",
     "gate_vetoed",
     "grantee_scrub_facts",
+    "hosted_binding_text_withheld",
     "grantee_scrub_scores",
     "grantee_scrub_semantic_hits",
     "grantee_scrub_summaries",
