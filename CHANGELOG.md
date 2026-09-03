@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.45] — 2026-09-02
+
 ### Fixed
 - **Aggregate dataset fallback reaches the real messenger rows.** `[O]` The
   verb's `{user}:default` fallback matched zero of the live node's 7,667
