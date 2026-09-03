@@ -74,3 +74,13 @@ def test_curated_aliases_survive_unchanged():
     assert m is not None
     assert "health.medication" in m["predicates"]
     assert m["special"] is True
+
+
+def test_natural_singular_phrasing_reaches_plural_predicates():
+    """Live 2026-09-03: 'What do I work on?' missed works_on (the pattern
+    demanded the literal 'works') and the turn answered 'yes' with zero
+    facts. Plural tolerance must run both ways."""
+    m = match_known_item("What do I work on?")
+    assert m is not None and "works_on" in m["predicates"]
+    m2 = match_known_item("What is my behavior habit?")
+    assert m2 is not None  # habits-pack singular phrasing still resolves

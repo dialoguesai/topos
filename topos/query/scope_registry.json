@@ -209,7 +209,7 @@
         "fact"
       ],
       "default_mode_ceiling": "inference",
-      "implementation_status": "stub",
+      "implementation_status": "live",
       "fact_classes": [
         "standard"
       ]
@@ -236,7 +236,7 @@
         "fact"
       ],
       "default_mode_ceiling": "inference",
-      "implementation_status": "stub",
+      "implementation_status": "live",
       "fact_classes": [
         "special"
       ]

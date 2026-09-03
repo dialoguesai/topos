@@ -91,7 +91,12 @@ EvalFn = Callable[[Dict[str, Any]], Tuple[bool, str]]
 # third-party-classed harness gets graph silence BY DESIGN and a red there would
 # grade the privacy invariant as a defect. Existing lanes untouched — composites
 # comparable to qq-catalog-18 via shared case_ids.
-QUERY_CATALOG_VERSION = "qq-catalog-19"
+# qq-catalog-20 (S7 facts flip): +F1/F2 — facts:read / facts_sensitive:read
+# answer deterministically from the fact store (the flip's live green case;
+# hermetic twin = tests/query/test_facts_scope_reader.py). engine_only: the
+# MCP harness is third-party-classed and packet resolution floors it to
+# scores_only — silence there is the invariant.
+QUERY_CATALOG_VERSION = "qq-catalog-20"
 
 _DEFAULT_LATENCY_MS = {
     "summary": int(os.environ.get("TOPOS_QQ_LATENCY_SUMMARY_MS", "10000")),
@@ -220,6 +225,32 @@ def _stores(response: Dict[str, Any]) -> List[str]:
     audit = response.get("audit") if isinstance(response.get("audit"), dict) else {}
     stores = audit.get("stores_touched")
     return [str(s) for s in stores] if isinstance(stores, list) else []
+
+
+def eval_f1_facts_direct(response: Dict[str, Any]) -> Tuple[bool, str]:
+    ok, why = _not_denied(response)
+    if not ok:
+        return False, why
+    pr = _public_result(response)
+    if pr.get("answer_type") != "facts":
+        return False, f"answer_type={pr.get('answer_type')} (facts_direct did not fire)"
+    preds = {str(f.get("predicate")) for f in pr.get("facts") or [] if isinstance(f, dict)}
+    if "works_on" not in preds:
+        return False, f"works_on absent from {sorted(preds)[:5]}"
+    return True, f"{len(preds)} predicate(s) incl. works_on, deterministic"
+
+
+def eval_f2_sensitive_facts(response: Dict[str, Any]) -> Tuple[bool, str]:
+    ok, why = _not_denied(response)
+    if not ok:
+        return False, why
+    pr = _public_result(response)
+    if pr.get("answer_type") != "facts":
+        return False, f"answer_type={pr.get('answer_type')} (facts_direct did not fire)"
+    preds = {str(f.get("predicate")) for f in pr.get("facts") or [] if isinstance(f, dict)}
+    if "mind.self_reported_state" not in preds:
+        return False, f"mind.self_reported_state absent from {sorted(preds)[:5]}"
+    return True, "special-class facts served on the sensitive scope"
 
 
 def eval_g1_graph_consulted(response: Dict[str, Any]) -> Tuple[bool, str]:
@@ -437,6 +468,14 @@ QUALITY_CASES: List[QueryQualityCase] = [
     QueryQualityCase("G2", "What is connected to Topos?", "graph:read", "summary",
                      eval_g2_graph_direct, optional_seed=True, engine_only=True,
                      description="Direct graph:read structure ask returns edge relations"),
+    # S7 facts flip (qq-catalog-20): protects: a live facts scope answers
+    # facts end-to-end on the real store.
+    QueryQualityCase("F1", "What do I work on?", "facts:read", "inference",
+                     eval_f1_facts_direct, engine_only=True,
+                     description="facts:read serves works_on facts deterministically"),
+    QueryQualityCase("F2", "What is my self reported state?", "facts_sensitive:read", "inference",
+                     eval_f2_sensitive_facts, engine_only=True,
+                     description="facts_sensitive:read serves special-class facts deterministically"),
     QueryQualityCase("Q1", "UMA scopes and signal extraction", "ai_conversations:read", "summary", eval_q1_scopes,
                      description="Query-aware summary ranks scope/signal-extraction topics first"),
     # qq-catalog-5: Q2 re-scoped ai_conversations→messages. The owner's keycloak

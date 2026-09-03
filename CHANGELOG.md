@@ -9,6 +9,29 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **facts:read and facts_sensitive:read are live — the derived layer's facts
+  have grant words AND a reader.** `[O]` Flipped stub -> live with the
+  predicate-generic facts_direct lane as their reader, per the S5 rule
+  (registry + three mirrors; goals:read and topics:read remain the last
+  stubs). Green cases both hermetic (tests/query/test_facts_scope_reader.py
+  — 4, driving the real pipeline over seeded facts incl. a dict-valued
+  special-class row) and live (qq-catalog-20 F1/F2 on the owner store:
+  works_on and mind.self_reported_state answered deterministically,
+  engine_only — the MCP harness is third-party-classed and packet
+  resolution floors it by design).
+
+### Fixed
+- **A dict-valued fact can no longer crash an inference turn.** `[O]` The
+  game layer coerced the top score's value with a bare float(); a
+  mind.self_reported_state value_struct (a JSON report) killed the whole
+  turn live 2026-09-03. Confidence is telemetry — coercion is now
+  best-effort (_coerce_confidence) and can never cost the answer.
+- **Singular phrasing reaches plural predicates.** `[O]` "What do I work
+  on?" missed works_on (the leaf pattern demanded the literal "works") and
+  the turn answered "yes" with zero facts. Leaf tokens are now
+  plural-tolerant both ways.
+
 ## [1.3.45] — 2026-09-02
 
 ### Fixed

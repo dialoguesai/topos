@@ -78,7 +78,18 @@ def _leaf_pattern(leaf: str) -> Optional[str]:
     tokens = [t for t in re.split(r"[._]+", leaf.strip().lower()) if t]
     if not tokens:
         return None
-    return r"\b" + r"[\s_-]+".join(re.escape(t) + r"s?" for t in tokens) + r"\b"
+
+    # Plural-tolerant both ways: "works_on" must match "work on" as well as
+    # "works on" (live 2026-09-03: "What do I work on?" missed works_on and
+    # the turn answered "yes" with zero facts), and "habit" must match
+    # "habits". A trailing s on a token becomes optional; a bare token accepts
+    # an optional s.
+    def piece(t: str) -> str:
+        if t.endswith("s") and len(t) > 3:
+            return re.escape(t[:-1]) + r"s?"
+        return re.escape(t) + r"s?"
+
+    return r"\b" + r"[\s_-]+".join(piece(t) for t in tokens) + r"\b"
 
 
 def _generic_predicate_index() -> List[tuple]:

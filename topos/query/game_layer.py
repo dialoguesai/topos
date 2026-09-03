@@ -23,6 +23,18 @@ _WHO_QUERY_RE = re.compile(r"\bwho\b", re.I)
 _WHAT_QUERY_RE = re.compile(r"\bwhat\b", re.I)
 
 
+def _coerce_confidence(*candidates: Any) -> float:
+    """First candidate that parses as a float, else 0.0 — never raises."""
+    for value in candidates:
+        if value is None:
+            continue
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            continue
+    return 0.0
+
+
 def _is_list_query(query_text: str) -> bool:
     return bool(_LIST_QUERY_RE.search(query_text or ""))
 
@@ -246,9 +258,16 @@ class DefaultGameLayer:
                 yes_no = bool(scores or semantic)
                 confidence = 0.0
                 if semantic and isinstance(semantic[0], dict):
-                    confidence = float(semantic[0].get("similarity") or 0.0)
+                    confidence = _coerce_confidence(semantic[0].get("similarity"))
                 elif scores and isinstance(scores[0], dict):
-                    confidence = float(scores[0].get("value") or scores[0].get("confidence") or 0.0)
+                    # A score item's "value" is not always numeric: fact items
+                    # carry value_struct dicts (live 2026-09-03 a
+                    # mind.self_reported_state JSON crashed the whole turn
+                    # here). Confidence is best-effort telemetry — never let
+                    # its coercion cost the answer.
+                    confidence = _coerce_confidence(
+                        scores[0].get("value"), scores[0].get("confidence")
+                    )
                 evidence = _extract_inference_evidence(context_packet)
                 payload.update(
                     {

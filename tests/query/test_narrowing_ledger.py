@@ -321,3 +321,15 @@ class TestTheResponseCarriesIt:
         blob = repr(narrowing)
         for word in ("journal", "Threnody", "last week"):
             assert word.lower() not in blob.lower()
+
+
+def test_inference_confidence_survives_dict_valued_scores():
+    """Live 2026-09-03: a fact item whose value is a value_struct dict crashed
+    the whole inference turn at the game layer's float() coercion. Confidence
+    is telemetry; its coercion must never cost the answer."""
+    from topos.query.game_layer import _coerce_confidence
+
+    assert _coerce_confidence({"dimension": "stress"}, None) == 0.0
+    assert _coerce_confidence("not-a-number", 0.7) == 0.7
+    assert _coerce_confidence(None, "0.5") == 0.5
+    assert _coerce_confidence() == 0.0
