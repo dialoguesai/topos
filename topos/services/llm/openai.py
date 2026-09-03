@@ -181,7 +181,70 @@ async def _ollama_generate(payload: Dict[str, Any]) -> Dict[str, Any]:
             "completion_tokens": completion_tokens,
             "total_tokens": total_tokens,
         }
-    return {"output": text, "model": resp_model, "usage": usage}
+    timings = _ollama_timings(data)
+    if timings:
+        usage = {**usage, "timings": timings}
+    return {"output": text, "model": resp_model, "usage": usage, "timings": timings}
+
+
+#: Nanoseconds-to-milliseconds, rounded to whole ms — the resolution anyone
+#: reasons about latency in. Ollama reports every duration in ns.
+def _ms(value: Any) -> int:
+    try:
+        return int(round(float(value) / 1e6))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _ollama_timings(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Split a generation into load, prefill and decode.
+
+    Ollama puts ``total_duration``, ``load_duration``, ``prompt_eval_duration``
+    and ``eval_duration`` on the SAME terminating JSON object we already read
+    token counts from, and every one of them was being thrown away — at four
+    parse sites, for the whole life of this codebase. A repo-wide search for
+    ``load_duration`` found two hits, both prose in a plan document: it was
+    specified and never built.
+
+    Without the split, "the model was slow" is unanswerable. With it the three
+    causes separate cleanly. Measured on this machine 2026-09-03:
+
+    * ``load`` — weights into memory. Cold 5,695 ms on a 27B, warm 4.7 ms. The
+      544x separation is why ``cold`` below is a threshold and not a guess.
+    * ``prefill`` — reading the prompt. THE one that matters: it IS
+      time-to-first-token, ~65-90 tok/s, and 78 s of a real turn.
+    * ``decode`` — writing the answer, 3.4-10.1 tok/s. Caching cannot touch it.
+
+    ``prefill_cached`` is a prefix-cache hit, and it is deliberately NOT
+    ``prompt_eval_duration == 0``: measured hits ran 74-191 ms on a 3B and
+    ~6,300 ms on a 27B, and ``prompt_eval_count`` still reports the FULL prompt
+    on a hit, so the duration is the only signal there is.
+    """
+    load_ms = _ms(data.get("load_duration"))
+    prefill_ms = _ms(data.get("prompt_eval_duration"))
+    decode_ms = _ms(data.get("eval_duration"))
+    prompt_toks = int(data.get("prompt_eval_count") or 0)
+    completion_toks = int(data.get("eval_count") or 0)
+    timings: Dict[str, Any] = {
+        "load_ms": load_ms,
+        "prefill_ms": prefill_ms,
+        "decode_ms": decode_ms,
+        "total_ms": _ms(data.get("total_duration")),
+        # A cold load is 3 orders of magnitude from a warm one; 1s sits in the
+        # empty middle of that gap rather than near either edge.
+        "cold": load_ms >= 1000,
+    }
+    if prompt_toks and prefill_ms > 0:
+        timings["prefill_tok_s"] = round(prompt_toks * 1000.0 / prefill_ms, 1)
+    if completion_toks and decode_ms > 0:
+        timings["decode_tok_s"] = round(completion_toks * 1000.0 / decode_ms, 1)
+    # A hit still reports the full prompt_eval_count, so infer from the RATE:
+    # anything an order of magnitude above the machine's real prefill speed is
+    # cache reuse, not arithmetic.
+    rate = timings.get("prefill_tok_s")
+    if isinstance(rate, float) and rate > 500.0:
+        timings["prefill_cached"] = True
+    return timings
 
 
 async def _ollama_stream_generate(
@@ -245,6 +308,9 @@ async def _ollama_stream_generate(
     prompt_tokens = 0
     completion_tokens = 0
     done_reason = ""
+    # Stays empty when the stream ends without a terminating frame — a dropped
+    # connection must not raise a NameError on the way out.
+    timings: Dict[str, Any] = {}
     # Liveness (plan §2): phase-aware heartbeats whenever nothing else flows —
     # 10s pre-first-token (load + prefill are silent), 30s mid-stream. Emitted
     # frames of any kind reset the clock.
@@ -306,6 +372,7 @@ async def _ollama_stream_generate(
                         prompt_tokens = int(data.get("prompt_eval_count") or prompt_tokens)
                         completion_tokens = int(data.get("eval_count") or completion_tokens)
                         done_reason = str(data.get("done_reason") or "")
+                        timings = _ollama_timings(data)
     except httpx.RequestError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -335,6 +402,13 @@ async def _ollama_stream_generate(
             "total_tokens": total_tokens,
         }
     result: Dict[str, Any] = {"output": text, "model": resp_model, "usage": usage}
+    # Nested under usage on purpose: the browser whitelists exactly
+    # output/model/usage (homeLlmStream.ts:415), and the control plane passes
+    # the payload through verbatim (_final_payload, llm_generation_sse.py:353),
+    # so timings reach the UI with NO control-plane change.
+    if timings:
+        result["usage"] = {**usage, "timings": timings}
+        result["timings"] = timings
     if thinking_chars:
         result["thinking_chars"] = thinking_chars
     if done_reason:

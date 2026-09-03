@@ -370,9 +370,16 @@ def emit_engine_llm_usage_observation(
         "provider": provider_key,
         "model": model_key,
     }
-    # Non-streaming Engine.run: first token/body arrives with the completed response.
+    # ttfb_ms is RECORDED OR ABSENT — never inferred from duration.
+    #
+    # It used to default to `resolved_duration`, and the result was that 120 of
+    # 135 home-chat rows carried ttfb_ms == duration_ms. Every percentile anyone
+    # computed from that column was a duration percentile wearing a TTFB label,
+    # and the one metric this system is now being tuned for was, in effect, not
+    # measured at all. An honest NULL is a gap you can see; a plausible wrong
+    # number is one you cannot.
     resolved_duration = int(duration_ms) if duration_ms is not None else None
-    resolved_ttfb = int(ttfb_ms) if ttfb_ms is not None else resolved_duration
+    resolved_ttfb = int(ttfb_ms) if ttfb_ms is not None else None
     metadata: Dict[str, Any] = {
         "purpose": purpose,
         "provider": provider_key,

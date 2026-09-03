@@ -455,13 +455,23 @@ class OllamaAdapter:
                 prompt_tokens = int(data.get("prompt_eval_count") or 0)
                 completion_tokens = int(data.get("eval_count") or 0)
                 total_tokens = prompt_tokens + completion_tokens
+                # This is the DERIVATION lane, and it had no timing signal at
+                # all — no streaming, no heartbeats, no usage rows. It also
+                # alternates models with chat, which evicts weights and pays a
+                # cold load the chat lane then blames on itself. Capture the
+                # same split here so the two lanes are comparable.
+                from topos.services.llm.openai import _ollama_timings
+
+                timings = _ollama_timings(data)
                 return {
                     "text": data.get("response", ""),
                     "usage": {
                         "prompt_tokens": max(0, prompt_tokens),
                         "completion_tokens": max(0, completion_tokens),
                         "total_tokens": max(0, total_tokens),
+                        **({"timings": timings} if timings else {}),
                     },
+                    **({"timings": timings} if timings else {}),
                 }
         except urllib.error.HTTPError as e:
             # Include the response body: Ollama puts the actionable message

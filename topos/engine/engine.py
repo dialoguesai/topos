@@ -273,7 +273,12 @@ class Engine:
                     origin=origin,
                     source_id=normalized.source_id,
                     duration_ms=duration_ms,
-                    ttfb_ms=duration_ms,
+                    # Engine.run is NON-STREAMING: the whole body arrives at
+                    # once, so there is no first-token moment to measure here.
+                    # Passing duration as ttfb manufactured the sentinel that
+                    # poisoned the column — leave it unset and let the absence
+                    # be visible.
+                    ttfb_ms=None,
                 )
             except Exception:
                 logger.debug("Failed to emit engine llm usage observation", exc_info=True)
