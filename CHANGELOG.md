@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.47] — 2026-09-03
+
 ### Added
 - **Stated goals join the derived index — the last uncovered derived type.**
   `[D]` Measured on a live node 2026-09-03: dossiers and facts were already
