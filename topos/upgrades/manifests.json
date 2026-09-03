@@ -795,12 +795,14 @@
           "id": "index-goals-into-derived-index",
           "kind": "derived_rebuild",
           "title": "Embed stated goals into the derived index",
-          "targets": [
-            "derived_object_index"
-          ],
           "why": "Goals were the last uncovered derived type: measured on a live node 2026-09-03, 1,548 user_goals + 68 Goal objects carried the owner's own prose and NONE were embedded, so 'what am I trying to achieve commercially?' reached a GitHub dossier and a stray fact while the goals sat one table away. The index pass is incremental by content hash, so this embeds only the newly-renderable goal objects; dossiers, facts and edges are unchanged.",
           "cost": "seconds",
-          "consent": "auto"
+          "consent": "auto",
+          "params": {
+            "targets": [
+              "derived_object_index"
+            ]
+          }
         }
       ],
       "notes": []

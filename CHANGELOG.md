@@ -9,6 +9,22 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **An upgrade step's targets now land where its executor reads them.** `[O]`
+  1.3.47's `index-goals-into-derived-index` declared
+  `targets: ["derived_object_index"]` at the top level of the step, but
+  `_exec_derived_rebuild` reads `params.targets` — so the list was invisible,
+  the executor fell back to its default (`entity_graph`), and the step ran a
+  graph rebuild that lost the rebuild lock and recorded `failed` while the
+  goal index it named stayed untouched. Nothing was malformed; it asked for
+  the wrong work, silently. (The goals were indexed anyway, by the enrichment
+  job that keeps the derived index current — which is exactly why that job
+  exists rather than a one-shot ladder step.) A new battery
+  (`tests/upgrades/test_manifest_step_shapes.py`) pins every staged and
+  shipped step against its executor: kind must have an executor, targets must
+  sit where that executor reads them, and each target must be a name its
+  dispatch recognizes.
+
 ## [1.3.47] — 2026-09-03
 
 ### Added
