@@ -9,6 +9,16 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **Aggregate dataset fallback reaches the real messenger rows.** `[O]` The
+  verb's `{user}:default` fallback matched zero of the live node's 7,667
+  messenger rows (import runs name datasets, e.g. `…:default:<device>`), so
+  a real count answered 0. The sanctioned `resolve_messaging_dataset`
+  fallback now applies to the messages scope, and per its contract the
+  substitution is SURFACED (`dataset_resolved: true` in public_result) —
+  silent substitution shows one dataset's numbers under another's name. A
+  named dataset with rows is still honored verbatim.
+
 ## [1.3.44] — 2026-09-02
 
 ### Added

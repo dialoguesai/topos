@@ -118,19 +118,26 @@ async def handle_aggregate(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
             return {"id": req_id, "status": "error", "error": "no database"}
 
         dataset_id = str(payload.get("dataset_id") or "")
-        if not dataset_id:
+        dataset_resolved = False
+        if spec.scope.has_dataset_col:
+            # Messenger datasets are named by import runs, not {user}:default —
+            # live 2026-09-02 the naive fallback matched ZERO of 7,667 rows and
+            # a real count answered 0. resolve_messaging_dataset is the
+            # sanctioned fallback, and its contract requires surfacing the
+            # substitution: a silent one shows one dataset's numbers under
+            # another's name.
             try:
-                from .common import get_user_id, settings
+                from topos.analytics.dataset_resolution import resolve_messaging_dataset
 
-                user_id = get_user_id(conn)
-                if user_id:
-                    dataset_id = f"{user_id}:{settings.topos_default_dataset_id}"
+                dataset_id, dataset_resolved = resolve_messaging_dataset(conn, dataset_id)
             except Exception:  # noqa: BLE001
-                dataset_id = ""
+                pass
 
         guard = guard_from_message(conn, message)
         ledger = NarrowingLedger()
         core = run_aggregate(conn, spec, guard=guard, dataset_id=dataset_id)
+        if dataset_resolved:
+            core["dataset_resolved"] = True
 
         store_empty = bool(core.pop("store_empty", False))
         if store_empty:

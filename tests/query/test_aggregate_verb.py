@@ -171,3 +171,29 @@ async def test_forbidden_keys_never_in_public_result(conn):
         agg_handler.run_aggregate = real
     assert resp["status"] == "error"
     assert "evidence" not in str(resp.get("payload") or "")
+
+
+async def test_dataset_fallback_resolves_to_the_row_bearing_dataset(conn):
+    """Live 2026-09-02: the naive {user}:default fallback matched zero of the
+    messenger dataset's rows and a real count answered 0. The sanctioned
+    resolver substitutes the row-bearing dataset AND stamps the substitution —
+    a silent one shows one dataset's numbers under another's name."""
+    resp = await handle_control_plane_request(
+        _msg({"scope_id": "messages:read", "measure": "count"},
+             caller={"mcp_source": "topos_home_chat"}),
+        principal=OWNER,
+    )
+    pr = resp["payload"]["public_result"]
+    assert pr["rows"] == [{"value": 6}]
+    assert pr.get("dataset_resolved") is True
+
+
+async def test_named_dataset_with_rows_is_honored_verbatim(conn):
+    resp = await handle_control_plane_request(
+        _msg({"scope_id": "messages:read", "measure": "count", "dataset_id": "u1:default"},
+             caller={"mcp_source": "topos_home_chat"}),
+        principal=OWNER,
+    )
+    pr = resp["payload"]["public_result"]
+    assert pr["rows"] == [{"value": 6}]
+    assert "dataset_resolved" not in pr
