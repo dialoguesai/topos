@@ -232,6 +232,27 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500) 
         conn.commit()
     conn.commit()
     stats["quarantined"] = writer.stats.get("quarantined", 0) - stats.pop("quarantined0")
+
+    # A backfill IS a run. Without this the registry keeps last_run_at NULL and
+    # the lens card reads "never run" over a pack that just wrote facts —
+    # observed 2026-09-03 on values.motivation, 73 records in, 11 facts out,
+    # card still blank. mark_pack_run is otherwise only called at the end of an
+    # ingest batch (derivation_job.py:292), which a quiet node may never have.
+    from .registry import mark_pack_run
+    mark_pack_run(conn, pack_id, pack.version)
+
+    # Embed what we just wrote, or the owner can see these facts on the Facts
+    # page and cannot ask about them: the semantic lane reads signal_embeddings,
+    # and the embedding job runs only when an ingest batch happens. Idempotent
+    # and incremental by content hash, so this is cheap when there is nothing
+    # new. Never fatal — the facts are already committed, and a missing
+    # embedding is a degraded answer, not a lost fact.
+    try:
+        from ...features.signal.derived_index import index_derived_objects
+        stats["indexed"] = int(index_derived_objects(conn).get("embedded", 0) or 0)
+    except Exception:  # noqa: BLE001 — see comment above: never fatal
+        stats["indexed"] = -1
+    conn.commit()
     return stats
 
 
