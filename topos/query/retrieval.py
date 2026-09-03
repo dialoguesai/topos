@@ -4208,6 +4208,13 @@ def _semantic_hits(
                 {
                     "record_id": item.get("record_id"),
                     "text_preview": item.get("text_preview"),
+                    # The indexed body, which is longer than the 200-char
+                    # preview. This rebuild is an explicit allow-list, and
+                    # omitting the key silently capped every vector and derived
+                    # summary at the preview length — measured 2026-09-03: 45
+                    # of 462 derived rows carried up to 850 characters of
+                    # rendering that no answer could ever show.
+                    "search_text": item.get("search_text"),
                     "similarity": item.get("similarity"),
                     "source_id": item.get("source_id"),
                     "signal_dimension": item.get("signal_dimension"),
@@ -5527,7 +5534,10 @@ def _build_summary_items_unfiltered(
     # people that never surfaces a name answers nothing.
     derived_items: List[Dict[str, Any]] = []
     for hit in derived_hits or []:
-        text = str(hit.get("text_preview") or "").strip()
+        # The full rendering, not its 200-char preview: `index_derived_objects`
+        # writes both, and a rendering cut mid-clause reads as a truncated
+        # thought rather than the sentence the lane exists to hand back.
+        text = str(hit.get("search_text") or hit.get("text_preview") or "").strip()
         if not text:
             continue
         object_type = str(hit.get("object_type") or "")

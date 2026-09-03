@@ -96,7 +96,15 @@ EvalFn = Callable[[Dict[str, Any]], Tuple[bool, str]]
 # hermetic twin = tests/query/test_facts_scope_reader.py). engine_only: the
 # MCP harness is third-party-classed and packet resolution floors it to
 # scores_only — silence there is the invariant.
-QUERY_CATALOG_VERSION = "qq-catalog-20"
+# qq-catalog-21 (S8 SUITE-SIM): +SIM1/SIM2 — paraphrase findability over the
+# derived index. SIM1 asserts a goal question reaches GOAL renderings (the
+# measured gap: 1,616 goal objects, 0 embedded, so the question reached a
+# dossier); SIM2 is the anti-crowding pin — a people/project question must
+# still be answered by dossiers/edges, not displaced by the new lane members.
+# Both engine_only (the owner-snapshot lane; a third-party MCP harness is
+# floored to scores_only) and optional_seed (they measure what the corpus
+# holds — a node whose derivation has not run yet has nothing to find).
+QUERY_CATALOG_VERSION = "qq-catalog-21"
 
 _DEFAULT_LATENCY_MS = {
     "summary": int(os.environ.get("TOPOS_QQ_LATENCY_SUMMARY_MS", "10000")),
@@ -225,6 +233,53 @@ def _stores(response: Dict[str, Any]) -> List[str]:
     audit = response.get("audit") if isinstance(response.get("audit"), dict) else {}
     stores = audit.get("stores_touched")
     return [str(s) for s in stores] if isinstance(stores, list) else []
+
+
+def _derived_items(response: Dict[str, Any]) -> List[Dict[str, Any]]:
+    pr = _public_result(response)
+    out = []
+    for item in pr.get("summaries") or []:
+        if isinstance(item, dict) and str(item.get("retrieval_source") or "").startswith("derived"):
+            out.append(item)
+    return out
+
+
+def eval_sim1_goal_paraphrase(response: Dict[str, Any]) -> Tuple[bool, str]:
+    """protects: similarity reaches the derived layer — a stated intention is
+    findable by paraphrase, not only by naming it."""
+    ok, why = _not_denied(response)
+    if not ok:
+        return False, why
+    derived = _derived_items(response)
+    goals = [d for d in derived if "goal" in str(d.get("object_type") or "").lower()]
+    if not goals:
+        kinds = sorted({str(d.get("object_type") or "?") for d in derived})
+        return False, f"no goal renderings among {len(derived)} derived items {kinds}"
+    return True, f"{len(goals)} goal rendering(s) reached by paraphrase"
+
+
+def eval_sim2_no_goal_crowding(response: Dict[str, Any]) -> Tuple[bool, str]:
+    """protects: a new lane member does not displace the lane's older answers.
+
+    Measured 2026-09-03 while landing goals: with a real subject noun the mix
+    stayed dossier-dominated (3:1, 7:2, 14:6), but a subject-less phrasing
+    ("things like this") let goals carrying the literal token take the lane.
+    This case pins the healthy direction on a question with a real subject.
+    """
+    ok, why = _not_denied(response)
+    if not ok:
+        return False, why
+    derived = _derived_items(response)
+    if not derived:
+        return False, "derived lane returned nothing at all"
+    goals = [d for d in derived if "goal" in str(d.get("object_type") or "").lower()]
+    others = [d for d in derived if d not in goals]
+    if len(goals) > len(others):
+        return False, (
+            f"goals displaced the lane: {len(goals)} goal vs {len(others)} other "
+            "derived items on a named-subject question"
+        )
+    return True, f"{len(others)} entity/fact item(s) vs {len(goals)} goal item(s)"
 
 
 def eval_f1_facts_direct(response: Dict[str, Any]) -> Tuple[bool, str]:
@@ -470,6 +525,15 @@ QUALITY_CASES: List[QueryQualityCase] = [
                      description="Direct graph:read structure ask returns edge relations"),
     # S7 facts flip (qq-catalog-20): protects: a live facts scope answers
     # facts end-to-end on the real store.
+    # S8 SUITE-SIM (qq-catalog-21): the derived index answers by similarity.
+    QueryQualityCase("SIM1", "What am I trying to achieve commercially?",
+                     "ai_conversations:read", "summary",
+                     eval_sim1_goal_paraphrase, engine_only=True, optional_seed=True,
+                     description="A goal question reaches goal renderings, not dossier noise"),
+    QueryQualityCase("SIM2", "Who else works on Topos with me?",
+                     "relationship_context:read", "summary",
+                     eval_sim2_no_goal_crowding, engine_only=True, optional_seed=True,
+                     description="Named-subject question stays entity-answered; goals do not crowd"),
     QueryQualityCase("F1", "What do I work on?", "facts:read", "inference",
                      eval_f1_facts_direct, engine_only=True,
                      description="facts:read serves works_on facts deterministically"),

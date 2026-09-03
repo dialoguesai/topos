@@ -9,6 +9,40 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **Stated goals join the derived index — the last uncovered derived type.**
+  `[D]` Measured on a live node 2026-09-03: dossiers and facts were already
+  100% embedded, edges 58%, and **goals were 0 of 1,616** — so "what am I
+  trying to achieve commercially?" reached a connector dossier and a stray
+  fact while the goals themselves sat one table away. `user_goals` and
+  `Goal` now render through the same lane
+  (one renderer; they differ only in producer), with `status`/`horizon` as
+  retrieval handles and a deliberately thin frame — the topical nouns come
+  from the owner's own text, never the template, the same rule `_TIER_PHRASE`
+  carries. After the backfill: that question returns 11 goal renderings, and
+  "what did I want to get done that is still unfinished?" returns 3, all
+  in-progress. Textless goal rows are skipped, never rendered as their key.
+  Staged as an automatic upgrade step (`derived_object_index`); the
+  enrichment job keeps it current from there.
+
+### Fixed
+- **A derived row about a black-holed person is withdrawn by identity, not by
+  wording.** `[O]` `_withdraw_embeddings` scanned every embedding's TEXT for a
+  protected term, which covers renderings that lead with the name — but a
+  generated sentence refers to people by pronoun, by role, and by aliases the
+  term set never learned, and a derived row is about its subject whether or
+  not it says the name. A seeded dossier keyed to a protected entity whose
+  sentence read "My brother — someone I see weekly" survived withdrawal
+  entirely. The sweep now also deletes by subject entity id (the write-side
+  half of the rule `retrieval._BLACKHOLE_ENTITY_ID_KEYS` already enforces at
+  read time); term matching stays for rows that name someone without being
+  keyed to them. Pinned with a severed-wire leg.
+- **Derived renderings are no longer truncated to 200 characters in answers.**
+  `[O]` The vector-hit rebuild is an explicit allow-list and omitted
+  `search_text`, so every derived summary fell back to `text_preview` — 45 of
+  462 derived rows carried up to 850 characters of rendering that no answer
+  could show.
+
 ## [1.3.46] — 2026-09-02
 
 ### Added

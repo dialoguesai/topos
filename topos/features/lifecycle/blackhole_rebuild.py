@@ -269,11 +269,20 @@ def _withdraw_embeddings(conn: sqlite3.Connection, terms: Set[str]) -> int:
         ).fetchall()
     except sqlite3.OperationalError:
         return 0
-    doomed = [
+    doomed_set = {
         str(embedding_id)
         for embedding_id, preview, search_text in rows
         if _mentions(preview, terms) or _mentions(search_text, terms)
-    ]
+    }
+    # The identity leg: a derived row keyed to a protected entity goes whether
+    # or not its generated sentence happens to name them.
+    try:
+        doomed_set |= _derived_embedding_ids_for_entities(
+            conn, BlackholeStore(conn).blackholed_entity_ids()
+        )
+    except Exception as exc:  # noqa: BLE001 — never let it cost the term leg
+        logger.warning("blackhole: derived identity sweep failed (%s); term leg stands", exc)
+    doomed = sorted(doomed_set)
     if not doomed:
         return 0
 
@@ -290,6 +299,57 @@ def _withdraw_embeddings(conn: sqlite3.Connection, terms: Set[str]) -> int:
         f"DELETE FROM signal_embeddings WHERE embedding_id IN ({placeholders})", doomed
     )
     return len(doomed)
+
+
+#: Payload keys that name the entity a derived object is ABOUT. The read side
+#: already filters on exactly these (`retrieval._BLACKHOLE_ENTITY_ID_KEYS`);
+#: the withdrawal sweep is the write-side half of the same rule.
+_DERIVED_SUBJECT_KEYS = (
+    "entity_id",
+    "subject_entity_id",
+    "object_entity_id",
+    "source_entity_id",
+    "target_entity_id",
+)
+
+
+def _derived_embedding_ids_for_entities(
+    conn: sqlite3.Connection, entity_ids: Set[str]
+) -> Set[str]:
+    """Embedding ids whose derived object is KEYED to a protected entity.
+
+    The term scan beside this one can only catch a row that says the name, and
+    a rendered sentence is generated text: it refers to people by pronoun, by
+    role, and by aliases the term set never learned ("my brother", "the founder
+    I met"). A derived row is about its subject whether or not it names them,
+    and the subject is recorded — so identity, not wording, is what decides
+    here. Term matching stays, for rows that name someone without being keyed
+    to them.
+    """
+    if not entity_ids:
+        return set()
+    try:
+        rows = conn.execute(
+            "SELECT e.embedding_id, o.payload_json"
+            " FROM signal_embeddings e"
+            " JOIN signal_objects o ON o.object_id = e.record_id"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return set()
+    doomed: Set[str] = set()
+    for embedding_id, payload_json in rows:
+        try:
+            payload = json.loads(payload_json or "{}") or {}
+        except (TypeError, ValueError):
+            continue
+        if not isinstance(payload, dict):
+            continue
+        for key in _DERIVED_SUBJECT_KEYS:
+            value = str(payload.get(key) or "").strip()
+            if value and value in entity_ids:
+                doomed.add(str(embedding_id))
+                break
+    return doomed
 
 
 def _withdraw_goals(conn: sqlite3.Connection, terms: Set[str]) -> int:

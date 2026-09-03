@@ -64,6 +64,12 @@ DERIVED_RECORD_TYPES: Dict[str, str] = {
     "RelationshipEdge": "derived_relationship_edge",
     "entity_dossier": "derived_entity_dossier",
     "fact": "derived_fact",
+    # S8: the measured hole. 1,548 user_goals + 68 Goal objects carried the
+    # owner's own prose and none were embedded, so a goal question reached
+    # dossiers and facts instead of goals. Both types share one renderer —
+    # they differ only in producer, not in shape.
+    "user_goals": "derived_goal",
+    "Goal": "derived_goal",
 }
 
 DERIVED_RECORD_TYPE_SET = frozenset(DERIVED_RECORD_TYPES.values())
@@ -504,10 +510,75 @@ def render_fact(obj: Dict[str, Any], resolver: _NameResolver) -> Optional[Derive
     )
 
 
+#: Goal text over this many characters is a journal entry that happens to be
+#: stored as a goal; embedding the whole thing dilutes the vector toward the
+#: day's narrative and away from the intent. The head is where the intent is.
+_GOAL_TEXT_CAP = 400
+
+
+def render_goal(obj: Dict[str, Any], resolver: _NameResolver) -> Optional[DerivedRendering]:
+    """A stated intention as the sentence someone would ask it back with.
+
+    Measured on the owner store 2026-09-03: 1,548 ``user_goals`` + 68 ``Goal``
+    objects held real prose and NONE were embedded, so "what am I trying to
+    achieve commercially?" reached a GitHub dossier and a stray fact while
+    "Aim the pitch at the segments that actually convert"
+    sat one table away. Dossiers and facts were already at full coverage;
+    goals were the whole remaining hole in the derived index.
+
+    The vocabulary is deliberately thin. ``_TIER_PHRASE``'s lesson applies
+    here in the same direction: the topical nouns must come from the owner's
+    own goal text, never from this template, or every goal becomes a match for
+    every question about whatever noun the template chose. So the frame says
+    only that this is something the owner is trying to do, and ``status`` and
+    ``horizon`` ride along ONLY when the object declares them — they are the
+    handles for "what am I working on right now" versus "what did I want to
+    get to eventually".
+    """
+    payload = obj.get("payload") or {}
+    text = str(payload.get("goal_text") or payload.get("text") or "").strip()
+    if not text:
+        # A goal with no prose is an identity row: a key and a timestamp. There
+        # is no question it could answer, and rendering it as its key would put
+        # an id in a retrieval preview.
+        return None
+    if len(text) > _GOAL_TEXT_CAP:
+        text = text[:_GOAL_TEXT_CAP].rsplit(" ", 1)[0] + "…"
+
+    status = str(payload.get("status") or "").strip().replace("_", " ")
+    horizon = str(payload.get("horizon") or "").strip().replace("_", " ")
+    qualifiers = [q for q in (horizon, status) if q]
+    frame = "a goal I set"
+    if qualifiers:
+        frame = f"a {' '.join(qualifiers[:1])} goal I set"
+        if len(qualifiers) > 1:
+            frame = f"{frame}, {qualifiers[1]}"
+
+    body = f"{text.rstrip(' .;')} — {frame}"
+    return DerivedRendering(
+        object_id=str(obj["object_id"]),
+        object_type=str(obj.get("object_type") or "user_goals"),
+        object_key=str(obj.get("object_key") or ""),
+        record_type=DERIVED_RECORD_TYPES.get(
+            str(obj.get("object_type") or ""), "derived_goal"
+        ),
+        signal_dimension=str(obj.get("signal_dimension") or "goals"),
+        text=f"{body}.",
+        header="goal | something I am trying to do",
+        title=text[:80],
+        # A goal is the owner's own statement of intent. The index never widens
+        # what the producer decided; absent a declaration, owner_only.
+        disclosure=str(payload.get("disclosure") or "owner_only"),
+        extra={"status": status or None, "horizon": horizon or None},
+    )
+
+
 _RENDERERS = {
     "RelationshipEdge": render_relationship_edge,
     "entity_dossier": render_entity_dossier,
     "fact": render_fact,
+    "user_goals": render_goal,
+    "Goal": render_goal,
 }
 
 
