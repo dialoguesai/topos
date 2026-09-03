@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.46] — 2026-09-02
+
 ### Added
 - **facts:read and facts_sensitive:read are live — the derived layer's facts
   have grant words AND a reader.** `[O]` Flipped stub -> live with the
