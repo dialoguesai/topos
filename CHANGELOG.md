@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.48] — 2026-09-03
+
 ### Fixed
 - **The hosted-binding floor now reaches the answer, not just the packet.**
   `[O]` `effective_packet_resolution` drops to `scores_only` when the
