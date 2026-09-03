@@ -10,6 +10,47 @@ pytest tests -q          # safe: temp databases only, no network to :8676
 You cannot reach your own data by naming a file or a test id — only by naming a
 marker. That is deliberate; see [Why the marker is the only key](#why-the-marker-is-the-only-key).
 
+## What each lane is evidence FOR
+
+Two kinds of test live in this repo, and confusing them shipped a broken
+product on 2026-09-03 with every suite green.
+
+**Layer suites** — the default lane, the privacy battery, the qq catalog, the
+router and receipt tests — prove that ONE layer behaves, with the layer above
+it supplied by hand. The qq catalog passes `scope_id="ai_conversations:read"`
+straight to the engine; it is a fine test of retrieval and it never asks how a
+scope gets chosen. Keep them, and keep adding them: when the chain breaks, a
+layer suite is what tells you *where*. They localize.
+
+**Chain suites** — `just test-app-path` in the react-app, `just test-live-node`
+here — prove that a person can do the thing. They start from a natural sentence
+with no scope named and run the same code path the product runs.
+
+The rule that was missing:
+
+> A layer suite is evidence about a layer. Only a chain suite is evidence about
+> a claim. "This works now" requires a green chain suite, not a green board.
+
+What it cost to learn: the engine gate, 3,479 control-plane tests, 4,550
+front-end tests, the qq catalog and live MCP probes were all green while the
+owner's own app answered five ordinary questions with an **invented permissions
+refusal** — pointing at Sharing settings that were never wrong. The node had
+granted 21 scopes including the one the model claimed was missing, and its
+request log showed no request had ever been made. Nothing was broken in any
+layer. The chain between them had no test.
+
+Two corollaries worth keeping:
+
+- **Evaluate per principal, not only per layer.** The same question asked by
+  the owner's own app, by a third-party client holding the owner's token, and
+  by a grantee should return three different things — and a suite that runs as
+  one principal cannot see the difference that IS the product. See the control
+  plane's `tests/adversarial/test_principal_answer_matrix.py`.
+- **A catalog authored to pass is not a corpus.** The eval catalogs were
+  written with phrasings that route by construction, which is why they never
+  caught a router that declines on natural ones. Real questions, in the owner's
+  words, are the only corpus that measures reach.
+
 ## The lanes
 
 | Lane | Command | Touches |
@@ -21,6 +62,7 @@ marker. That is deliberate; see [Why the marker is the only key](#why-the-marker
 | Owner-database eval | `just test-owner-db-eval` | a **snapshot** of `~/.topos/database.db` |
 | Live node | `just test-live-node` | the node running on `:8676`, and whatever database it has open |
 | End-to-end | `pytest tests -m e2e -q` | live Keycloak + Control Plane |
+| **App path (chain)** | `just test-app-path` *(in topos-react-app)* | the deployed CP + the running node, from a natural question |
 
 `pyproject.toml` sets `addopts = ["-m", "not live and not e2e and not qq_eval"]`,
 so the three data-touching markers are deselected unless you ask for them.

@@ -256,6 +256,7 @@ REASONS = frozenset(
         # --- engine: the grantee content filter, one per scrubbed artifact list
         "grantee_scrub_facts",
         "hosted_binding_text_withheld",
+        "owner_permission_claim_replaced",
         "grantee_scrub_scores",
         "grantee_scrub_semantic_hits",
         "grantee_scrub_summaries",
