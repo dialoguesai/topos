@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.44] — 2026-09-02
+
 ### Added
 - **SUITE-P: the aggregate verb is graded on exact numbers, and its necessity
   is measured, not assumed.** `[O]` qq-catalog-19 adds nine aggregate cases
