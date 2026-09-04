@@ -9,6 +9,21 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.50] — 2026-09-03
+
+### Fixed
+- **`prefill_cached` no longer fires on short prompts or small models.** `[O]`
+  Caught in live data an hour after 1.3.49 shipped: a 32-token prompt to a 3B
+  model computed 561 tok/s purely from fixed per-request overhead and was
+  flagged as a cache hit when nothing was cached. The threshold had been
+  calibrated on a 27B, whose genuine prefill runs 65-90 tok/s — but a 3B
+  genuinely runs 684-1,045 tok/s, so the old 500 tok/s bar called every small
+  model's ordinary work a hit. Two guards now: a prompt must be at least 512
+  tokens for the rate to mean anything, and the bar sits at 3,000 tok/s, in
+  the empty band between the fastest observed real prefill and the slowest
+  observed hit (17,565 tok/s on a 27B, 33,275 on a 3B). A "Cached" column that
+  reads ~100% for every small model is worse than no column.
+
 ## [1.3.49] — 2026-09-03
 
 ### Added

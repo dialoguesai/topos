@@ -196,6 +196,15 @@ def _ms(value: Any) -> int:
         return 0
 
 
+#: Below this, the computed prefill rate is dominated by fixed overhead and
+#: says nothing about caching. Live false positive at 32 tokens.
+_CACHE_SIGNAL_MIN_PROMPT_TOKENS = 512
+
+#: Sits in the empty band between the fastest observed REAL prefill (~1,045
+#: tok/s on a 3B) and the slowest observed cache HIT (~17,565 tok/s on a 27B).
+_CACHE_HIT_TOK_S = 3000.0
+
+
 def _ollama_timings(data: Dict[str, Any]) -> Dict[str, Any]:
     """Split a generation into load, prefill and decode.
 
@@ -238,12 +247,23 @@ def _ollama_timings(data: Dict[str, Any]) -> Dict[str, Any]:
         timings["prefill_tok_s"] = round(prompt_toks * 1000.0 / prefill_ms, 1)
     if completion_toks and decode_ms > 0:
         timings["decode_tok_s"] = round(completion_toks * 1000.0 / decode_ms, 1)
-    # A hit still reports the full prompt_eval_count, so infer from the RATE:
-    # anything an order of magnitude above the machine's real prefill speed is
-    # cache reuse, not arithmetic.
+    # A hit still reports the full prompt_eval_count, so it has to be inferred
+    # from the RATE. Two guards, both learned from a false positive in live
+    # data: a 32-token prompt to a 3B model reported 561 tok/s and was flagged
+    # as cached when nothing was cached at all.
+    #
+    # 1. Short prompts carry no signal. Below a few hundred tokens the fixed
+    #    per-request overhead dominates and the computed rate is noise.
+    # 2. The threshold has to clear a SMALL model's genuine speed, not just a
+    #    large one's. Measured real prefill: 65-90 tok/s on a 27B, but
+    #    684-1,045 tok/s on a 3B. Measured cache hits: 17,565 tok/s (27B) and
+    #    33,275 tok/s (3B). 3,000 sits in the empty band between the fastest
+    #    real prefill and the slowest hit, rather than just above the one
+    #    model it was first calibrated on.
     rate = timings.get("prefill_tok_s")
-    if isinstance(rate, float) and rate > 500.0:
-        timings["prefill_cached"] = True
+    if prompt_toks >= _CACHE_SIGNAL_MIN_PROMPT_TOKENS and isinstance(rate, float):
+        if rate > _CACHE_HIT_TOK_S:
+            timings["prefill_cached"] = True
     return timings
 
 

@@ -114,6 +114,48 @@ class TestCacheHitDetection:
         assert "prefill_cached" not in _ollama_timings(WARM_LONG_PROMPT)
         assert "prefill_cached" not in _ollama_timings(COLD_27B)
 
+    def test_a_short_prompt_never_claims_a_hit(self):
+        # THE LIVE FALSE POSITIVE, 2026-09-03: a 32-token prompt to llama3.2
+        # computed 561 tok/s purely from fixed overhead and was flagged cached
+        # when nothing was. A "Cached" column that reads ~100% for every small
+        # model is worse than no column.
+        assert "prefill_cached" not in _ollama_timings(
+            {
+                "done": True,
+                "load_duration": 6_070_000_000,
+                "prompt_eval_count": 32,
+                "prompt_eval_duration": 57_000_000,
+                "eval_count": 2,
+                "eval_duration": 22_000_000,
+            }
+        )
+
+    def test_a_small_models_genuine_prefill_is_not_a_hit(self):
+        # llama3.2 really does prefill at ~684-1,045 tok/s. The old 500 tok/s
+        # threshold was calibrated on a 27B and called all of that "cached".
+        assert "prefill_cached" not in _ollama_timings(
+            {
+                "done": True,
+                "prompt_eval_count": 6_349,
+                "prompt_eval_duration": 9_286_000_000,  # 684 tok/s, genuine
+                "eval_count": 8,
+                "eval_duration": 100_000_000,
+            }
+        )
+
+    def test_a_small_models_real_hit_is_still_detected(self):
+        # 6,349 tokens in 190.8ms = 33,275 tok/s — measured, a true hit.
+        t = _ollama_timings(
+            {
+                "done": True,
+                "prompt_eval_count": 6_349,
+                "prompt_eval_duration": 190_800_000,
+                "eval_count": 8,
+                "eval_duration": 100_000_000,
+            }
+        )
+        assert t["prefill_cached"] is True
+
 
 class TestReversionGate:
     """If these fail, someone removed the measurement. Do not delete them."""
