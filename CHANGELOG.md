@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.49] — 2026-09-03
+
 ### Added
 - **Every generation now reports where its time went.** `[O]` Ollama returns
   `total_duration`, `load_duration`, `prompt_eval_duration` and
