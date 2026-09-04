@@ -16,6 +16,40 @@ from ..storage.raw.file_store import RawFileStore
 logger = logging.getLogger("topos.ingestion.ingest_helpers")
 
 
+def chat_ui_raw_payload(payload: dict, *, job_id: str, dataset_id: str) -> dict:
+    """Map a chat UI-stream record to the v1 raw shape {id, thread_id, role, content, created_at}.
+
+    The v1 chat vocabulary — {id, thread_id, role} — is what the file importer,
+    the schema registry, and the browser extension all send. Older store_message
+    callers used {message_id, conversation_id, sender_type}. Read v1 first and
+    fall back to the legacy names, so a client on either vocabulary lands
+    correctly. Reading ONLY the legacy names (the prior behaviour) mislabelled
+    every extension message role=user (sender_type absent), merged every chat
+    under the dataset id (conversation_id absent), and minted a fresh id per
+    record (message_id absent), defeating message-id idempotency.
+    """
+    role = str(payload.get("role") or "").strip()
+    if not role:
+        sender_type = payload.get("sender_type", "human")
+        role = "user" if sender_type == "human" else str(sender_type)
+    created_at = payload.get("created_at")
+    if created_at is None:
+        ts = payload.get("ts")
+        if isinstance(ts, (int, float)):
+            created_at = ts
+        elif isinstance(ts, str):
+            created_at = ts
+        else:
+            created_at = datetime.now(timezone.utc).timestamp()
+    return {
+        "id": str(payload.get("id") or payload.get("message_id") or job_id),
+        "thread_id": payload.get("thread_id") or payload.get("conversation_id") or dataset_id,
+        "role": role,
+        "content": payload.get("content", ""),
+        "created_at": created_at,
+    }
+
+
 def _ui_stream_passes_payload_through(source: Any, source_id: str) -> bool:
     """True when ui_stream ingest should forward the client payload to the source parser."""
     if source_id.startswith("browser_"):
@@ -207,25 +241,7 @@ async def ingest_ui_payload(
     # Legacy path: ChatGPT UI only (backward compatibility when source_id omitted or chatgpt default)
     file_store = RawFileStore()
     job_id = job_id or str(uuid.uuid4())
-    sender_type = payload.get("sender_type", "human")
-    role = "user" if sender_type == "human" else sender_type
-    content = payload.get("content", "")
-    created_at = payload.get("created_at")
-    if created_at is None:
-        ts = payload.get("ts")
-        if isinstance(ts, (int, float)):
-            created_at = ts
-        elif isinstance(ts, str):
-            created_at = ts
-        else:
-            created_at = datetime.now(timezone.utc).timestamp()
-    record = {
-        "id": payload.get("message_id") or job_id,
-        "thread_id": payload.get("conversation_id") or dataset_id,
-        "role": role,
-        "content": content,
-        "created_at": created_at,
-    }
+    record = chat_ui_raw_payload(payload, job_id=job_id, dataset_id=dataset_id)
     logger.info(
         "[PIPELINE:RAW] Appending UI message to raw store: job_id=%s, dataset_id=%s, message_id=%s, content_preview=%s",
         job_id,
@@ -382,25 +398,7 @@ async def _ingest_ui_payload_direct(
             )
         raw_payload.setdefault("record_id", record_id)
     else:
-        sender_type = payload.get("sender_type", "human")
-        role = "user" if sender_type == "human" else sender_type
-        content = payload.get("content", "")
-        created_at = payload.get("created_at")
-        if created_at is None:
-            ts = payload.get("ts")
-            if isinstance(ts, (int, float)):
-                created_at = ts
-            elif isinstance(ts, str):
-                created_at = ts
-            else:
-                created_at = datetime.now(timezone.utc).timestamp()
-        raw_payload = {
-            "id": payload.get("message_id") or job_id,
-            "thread_id": payload.get("conversation_id") or dataset_id,
-            "role": role,
-            "content": content,
-            "created_at": created_at,
-        }
+        raw_payload = chat_ui_raw_payload(payload, job_id=job_id, dataset_id=dataset_id)
         record_id = raw_payload["id"]
     raw_record = RawRecord(record_id=record_id, payload=raw_payload)
 
