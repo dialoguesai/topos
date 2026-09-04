@@ -9,6 +9,35 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **Every generation now reports where its time went.** `[O]` Ollama returns
+  `total_duration`, `load_duration`, `prompt_eval_duration` and
+  `eval_duration` on the same terminating object we already read token counts
+  from, and all four were discarded at every parse site for the life of this
+  codebase — a repo-wide search for `load_duration` found two hits, both prose
+  in a plan document. `_ollama_timings()` now splits a call into **load**
+  (weights into memory), **prefill** (reading the prompt) and **decode**
+  (writing the answer), because "the model was slow" has three
+  indistinguishable causes and only one of them is the model. Measured on a
+  27B: cold load 5,695 ms against a warm 4.7 ms — a 544x gap, which is why
+  `cold` can be a threshold rather than a guess; prefill 65-90 tok/s, and it
+  IS time-to-first-token; decode 3.4-10.1 tok/s, which caching cannot touch.
+  `prefill_cached` is deliberately not `prompt_eval_duration == 0`: measured
+  hits ran 74-191 ms on a 3B and ~6,300 ms on a 27B, and `prompt_eval_count`
+  still reports the FULL prompt on a hit, so the rate is the only signal.
+  Timings ride under `usage`, which the browser already whitelists, so they
+  reach the UI with no control-plane change.
+
+### Fixed
+- **`ttfb_ms` is recorded or absent, never inferred.** `[O]` It used to
+  default to `duration_ms`, and the result was that **120 of 135** live
+  home-chat rows carried the two as exactly equal: every percentile drawn from
+  that column was a duration percentile wearing a time-to-first-token label,
+  and the one metric the system is being tuned for was, in effect, not
+  measured at all. `Engine.run` is non-streaming and has no first-token
+  moment, so it now passes `None`. An honest gap is one you can see; a
+  plausible wrong number is one you cannot.
+
 ## [1.3.48] — 2026-09-03
 
 ### Fixed
