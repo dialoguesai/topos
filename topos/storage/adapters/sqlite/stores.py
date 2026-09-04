@@ -26,6 +26,7 @@ _NATIVE_TABLES = frozenset(
         "journal_entries",
         "contacts",
         "contact_identifiers",
+        "transcript_segments",
     }
 )
 _NATIVE_ID_COL = {
@@ -39,6 +40,7 @@ _NATIVE_ID_COL = {
     "journal_entries": "entry_id",
     "contacts": "contact_id",
     "contact_identifiers": "contact_id",
+    "transcript_segments": "segment_id",
 }
 _NATIVE_LIST_SPECS: Dict[str, tuple[str, List[str]]] = {
     "ai_chat_messages": (
@@ -319,6 +321,22 @@ _NATIVE_LIST_SPECS: Dict[str, tuple[str, List[str]]] = {
         """,
         ["record_id", "identifier", "identifier_type", "source_id"],
     ),
+    "transcript_segments": (
+        """
+        SELECT segment_id AS record_id, transcript_id, content, event_at,
+               actor_role, source_id, source_record_id
+        FROM transcript_segments
+        """,
+        [
+            "record_id",
+            "transcript_id",
+            "content",
+            "event_at",
+            "actor_role",
+            "source_id",
+            "source_record_id",
+        ],
+    ),
 }
 
 
@@ -340,6 +358,7 @@ _NATIVE_FILTER_COLS: Dict[str, tuple] = {
     "journal_entries": ("content", "mood_tag", "category", "people", "place_name"),
     "contacts": ("display_name",),
     "contact_identifiers": ("identifier", "identifier_type", "record_id"),
+    "transcript_segments": ("content",),
 }
 
 # List ordering: recency for event-shaped tables (a "recent rows" page must
@@ -356,6 +375,7 @@ _NATIVE_ORDER_COL: Dict[str, tuple] = {
     "profile_records": ("record_id", "ASC"),
     "contacts": ("record_id", "ASC"),
     "contact_identifiers": ("record_id", "ASC"),
+    "transcript_segments": ("event_at", "DESC"),
 }
 
 

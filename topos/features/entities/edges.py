@@ -40,7 +40,7 @@ EDGE_SEMANTIC_AFFINITY = "semantic_affinity"
 #: ``semantic_affinity`` belongs here because cosine is symmetric: without a
 #: canonical order one rebuild would write A->B where the last wrote B->A, so
 #: the earlier row would never be superseded and duplicate pairs would pile up.
-_SYMMETRIC_EDGE_TYPES = (EDGE_CO_OCCURRENCE, EDGE_COMMUNICATES, EDGE_SEMANTIC_AFFINITY)
+_SYMMETRIC_EDGE_TYPES = (EDGE_CO_OCCURRENCE, EDGE_COMMUNICATES, EDGE_SEMANTIC_AFFINITY, "windowed_with")
 
 #: Upper bound on entities folded into co-occurrence for ONE record.
 #:
@@ -720,6 +720,25 @@ def graph_snapshot(
         except sqlite3.OperationalError:
             first_seen = {}
     edge_birth = _edge_birth(conn, node_ids)
+    mention_sources: Dict[str, List[str]] = {}
+    if node_ids:
+        try:
+            for chunk_start in range(0, len(node_ids), 400):
+                chunk = node_ids[chunk_start : chunk_start + 400]
+                for ms_row in conn.execute(
+                    "SELECT entity_id, source_id FROM entity_mentions "
+                    "WHERE source_id IS NOT NULL AND TRIM(source_id) != '' "
+                    f"AND entity_id IN ({','.join('?' * len(chunk))})",
+                    chunk,
+                ):
+                    eid, sid = str(ms_row[0]), str(ms_row[1] or "").strip()
+                    if not sid:
+                        continue
+                    bucket = mention_sources.setdefault(eid, [])
+                    if sid not in bucket:
+                        bucket.append(sid)
+        except sqlite3.OperationalError:
+            mention_sources = {}
     nodes = []
     for entity_id in node_ids:
         row = conn.execute(
@@ -740,6 +759,14 @@ def graph_snapshot(
             # Owner marker so graph UIs can pin/label the self node.
             if row[4]:
                 meta["is_self"] = True
+            # Mention provenance so the graph can mute a source without
+            # dropping a person who also appears in a journal.
+            stamped = str(meta.get("source_id") or "").strip()
+            ids = list(mention_sources.get(entity_id) or [])
+            if stamped and stamped not in ids:
+                ids.insert(0, stamped)
+            if ids:
+                meta["source_ids"] = ids
             nodes.append(
                 {
                     "node_id": entity_id,

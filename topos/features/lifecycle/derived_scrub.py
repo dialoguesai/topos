@@ -357,10 +357,13 @@ def _delete_orphan_entities(conn: sqlite3.Connection) -> List[str]:
     """
     # Synthetic / enrichment-only nodes — never mention-backed.
     keep_clause = (
-        "AND entity_type NOT IN ('goal', 'conversation') "
+        "AND entity_type NOT IN ('goal', 'conversation', 'claim', 'program', 'document') "
         "AND entity_id NOT LIKE 'goal_%' "
         "AND entity_id NOT LIKE 'topic_%' "
         "AND entity_id NOT LIKE 'conv_%' "
+        "AND entity_id NOT LIKE 'claim:%' "
+        "AND entity_id NOT LIKE 'program:%' "
+        "AND entity_id NOT LIKE 'transcript:%' "
         "AND NOT EXISTS (SELECT 1 FROM entity_edges g"
         "                WHERE g.src_entity_id = e.entity_id"
         "                   OR g.dst_entity_id = e.entity_id)"

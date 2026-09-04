@@ -322,6 +322,9 @@ def _iter_history(conn, limit=2000):
             f" ORDER BY event_at DESC LIMIT {int(limit)}"):
         out.append({"table": tbl, "record_id": rid, "text": (text or "")[:6000],
                     "date": str(at or "")[:10], "role": role or "observed", "source_id": ""})
+    # Ambient captions are not taste/habit evidence. any_with_label catchup
+    # must not mint owner-subject facts from overheard speech. A gated
+    # overheard reader is the only path that may surface captions.
     return out
 
 
@@ -424,6 +427,10 @@ def _self_gate(conn, *, all_packs, enabled, filters, llm, judge, model, vmodel, 
             """SELECT 'journal_entries', entry_id, content, entry_at, 'authored'
                FROM journal_entries WHERE content IS NOT NULL AND LENGTH(content)>15
                AND entry_at >= datetime('now','-14 day') ORDER BY entry_at DESC LIMIT 100""")
+        recent += _rows(
+            """SELECT 'transcript_segments', segment_id, content, event_at, actor_role
+               FROM transcript_segments WHERE content IS NOT NULL AND LENGTH(content)>15
+               AND event_at >= datetime('now','-14 day') ORDER BY event_at DESC LIMIT 200""")
         for tbl, rid, text, at, role in recent:
             role = role or "observed"
             if role in pack.allowed_roles() and filters[pid].passes(text):

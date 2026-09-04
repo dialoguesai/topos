@@ -68,6 +68,10 @@ _SURFACE_INTENT_TERMS: Dict[str, Tuple[str, ...]] = {
         "agenda", "busy", "free", "availability",
     ),
     "journal_entries": ("journal", "diary", "mood", "wrote", "writing"),
+    "transcript_segments": (
+        "podcast", "recording", "transcript", "caption", "youtube",
+        "video", "episode", "lecture",
+    ),
     "location_events": (
         "place", "where", "location", "visit", "went", "travel", "city", "cities",
     ),
@@ -208,6 +212,10 @@ def _residual_content_tokens(tokens: List[str], tables: Optional[List[str]] = No
         if token in surface_blob or token.rstrip("s") in surface_blob:
             continue
         out.append(token)
+    if tables and any(tbl == "transcript_segments" for tbl in tables):
+        from .overheard import OVERHEARD_SHAPE_TOKENS
+
+        out = [token for token in out if token not in OVERHEARD_SHAPE_TOKENS]
     return out
 
 
@@ -1323,6 +1331,8 @@ def _canonical_row_to_item(
     It changes provenance only — never what survives.
     """
     owner: Optional[bool] = None
+    if table == "transcript_segments" and belief_intent:
+        return None  # overheard captions never answer a first-person belief ask
     if first_person and table in _MESSAGE_TABLES:
         owner = _message_row_owner(table, row, conn, role_cache)
         if belief_intent and owner is not True:
@@ -1393,7 +1403,8 @@ def _canonical_row_to_item(
         "record_id": clean.get("record_id")
         or clean.get("event_id")
         or clean.get("contact_id")
-        or clean.get("message_id"),
+        or clean.get("message_id")
+        or clean.get("segment_id"),
         "source_id": clean.get("source_id"),
         "relevance_score": round(_canonical_relevance(text, query_text), 4),
         "retrieval_source": retrieval_source or f"canonical:{table}",
@@ -1418,6 +1429,9 @@ def _canonical_row_to_item(
             break
     if owner is not None:
         item["owner_authored"] = owner
+    if table == "transcript_segments":
+        item["actor_role"] = str(clean.get("actor_role") or row.get("actor_role") or "ambient")
+        item.setdefault("source_id", clean.get("source_id") or "youtube_transcripts")
     return item
 
 
@@ -1536,6 +1550,81 @@ def _load_canonical_summary_items(
         # Strong downweight, not a drop: owner-authored rows first, exempt
         # (non-message) rows keep relative order, other-authored rows last.
         items.sort(key=lambda item: _owner_rank(item.get("owner_authored")))
+    return items[:_SUMMARY_ITEM_CAP]
+
+
+def _load_overheard_caption_items(
+    *,
+    manifest: ScopeResolutionManifest,
+    adapters: AdapterBundle,
+    query_text: str,
+    source_ids: List[str],
+    disclosure_tier: str = "owner_raw",
+    rare_query_tokens: Optional[List[str]] = None,
+    rare_query_token_groups: Optional[List[Dict[str, int]]] = None,
+    plan=None,
+    conn: Optional[Any] = None,
+    exposure_visible: bool = True,
+    ledger: Optional[Any] = None,
+) -> List[Dict[str, Any]]:
+    """Query-gated caption reader. Only called when ``query_admits_overheard``."""
+    from .overheard import OVERHEARD_SOURCE_ID, OVERHEARD_TABLE
+
+    if _canonical_table_absent(adapters, OVERHEARD_TABLE):
+        return []
+    first_person = bool(getattr(plan, "first_person_intent", False)) if plan else False
+    belief_intent = bool(getattr(plan, "first_person_belief", False)) if plan else False
+    if belief_intent:
+        return []
+    role_cache: Dict[str, Optional[bool]] = {}
+    display_cache: Dict[str, str] = {}
+    highlight_cache: Dict[str, str] = {}
+    sid_filter = [OVERHEARD_SOURCE_ID] if OVERHEARD_SOURCE_ID in (source_ids or []) else (
+        [s for s in (source_ids or []) if s] or [OVERHEARD_SOURCE_ID]
+    )
+    rows = _route_canonical_rows(
+        adapters,
+        OVERHEARD_TABLE,
+        manifest=manifest,
+        query_text=query_text,
+        source_ids=sid_filter,
+        limit=50,
+        disclosure_tier=disclosure_tier,
+        rare_query_tokens=rare_query_tokens,
+        rare_query_token_groups=rare_query_token_groups,
+    )
+    items: List[Dict[str, Any]] = []
+    for row in rows:
+        item = _canonical_row_to_item(
+            OVERHEARD_TABLE,
+            row,
+            manifest=manifest,
+            query_text=query_text,
+            conn=conn,
+            first_person=first_person,
+            belief_intent=belief_intent,
+            exposure_visible=exposure_visible,
+            role_cache=role_cache,
+            display_cache=display_cache,
+            highlight_cache=highlight_cache,
+            retrieval_source="overheard:transcript_segments",
+        )
+        if item is None:
+            continue
+        item["actor_role"] = "ambient"
+        item.setdefault("source_id", OVERHEARD_SOURCE_ID)
+        items.append(item)
+    items.sort(key=lambda i: float(i.get("relevance_score") or 0.0), reverse=True)
+    if items and ledger is not None:
+        try:
+            ledger.record(
+                _N.STAGE_RETRIEVAL,
+                "contributed",
+                "overheard_captions",
+                detail={"contributed": len(items)},
+            )
+        except Exception:  # noqa: BLE001
+            pass
     return items[:_SUMMARY_ITEM_CAP]
 
 
@@ -5248,6 +5337,18 @@ def _build_summary_items_unfiltered(
     work_scope = manifest.scope_id == "work_context:read"
     ai_scope = manifest.scope_id == "ai_conversations:read"
     source_ids = _resolve_source_ids(manifest, installed_source_ids)
+    from .overheard import (
+        OVERHEARD_SOURCE_ID,
+        OVERHEARD_TABLE,
+        is_overheard_scope,
+        query_admits_overheard,
+    )
+
+    overheard_ok = query_admits_overheard(
+        query_text, str(getattr(manifest, "scope_id", "") or ""), plan
+    )
+    if overheard_ok and OVERHEARD_SOURCE_ID not in source_ids:
+        source_ids = [*source_ids, OVERHEARD_SOURCE_ID]
 
     first_person = bool(getattr(plan, "first_person_intent", False)) if plan else False
     belief_intent = bool(getattr(plan, "first_person_belief", False)) if plan else False
@@ -5288,6 +5389,14 @@ def _build_summary_items_unfiltered(
             for t, df in rare_query_tokens.items()
             if t not in _FIRST_PERSON_SHAPE_TOKENS
         }
+    if overheard_ok and rare_query_tokens:
+        from .overheard import OVERHEARD_SHAPE_TOKENS
+
+        rare_query_tokens = {
+            t: df
+            for t, df in rare_query_tokens.items()
+            if t not in OVERHEARD_SHAPE_TOKENS
+        }
     # The same needles, split per part, for the gates below. One df pass over the
     # union — the flat set above stays exactly what it was, so a single-part request
     # produces one group holding the identical tokens.
@@ -5297,6 +5406,13 @@ def _build_summary_items_unfiltered(
     if first_person and rare_groups:
         rare_groups = [
             {t: df for t, df in group.items() if t not in _FIRST_PERSON_SHAPE_TOKENS}
+            for group in rare_groups
+        ]
+    if overheard_ok and rare_groups:
+        from .overheard import OVERHEARD_SHAPE_TOKENS
+
+        rare_groups = [
+            {t: df for t, df in group.items() if t not in OVERHEARD_SHAPE_TOKENS}
             for group in rare_groups
         ]
 
@@ -5335,6 +5451,30 @@ def _build_summary_items_unfiltered(
         exposure_visible=exposure_visible,
         ledger=ledger,
     )
+    overheard_items: List[Dict[str, Any]] = []
+    if overheard_ok:
+        overheard_items = _load_overheard_caption_items(
+            manifest=manifest,
+            adapters=adapters,
+            query_text=query_text,
+            source_ids=source_ids,
+            disclosure_tier=disclosure_tier,
+            rare_query_tokens=rare_query_tokens,
+            rare_query_token_groups=rare_groups,
+            plan=plan,
+            conn=bundle_conn,
+            exposure_visible=exposure_visible,
+            ledger=ledger,
+        )
+        # Captions belong on the overheard lane (fusion floor + ambient
+        # stamps). Leaving them in `canonical` on transcripts:read let
+        # owner "research" browse stats (weight 2.0, no floor) occupy
+        # the packet and drop the needle (TX-L2).
+        canonical_items = [
+            item
+            for item in canonical_items
+            if "transcript_segments" not in str(item.get("retrieval_source") or "")
+        ]
     _canonical_before_window = len(canonical_items)
     canonical_items = _prefer_time_window(
         canonical_items, getattr(plan, "time_range", None) if plan else None
@@ -5348,6 +5488,18 @@ def _build_summary_items_unfiltered(
             "prefer_time_window",
             dropped=_canonical_before_window - len(canonical_items),
         )
+
+    # transcripts:read is caption evidence only. Owner browse stats, goals,
+    # and ChatGPT facts must not occupy the packet — "research" in a
+    # transcript ask is the caption needle, not Research.gov visits.
+    if is_overheard_scope(str(getattr(manifest, "scope_id", "") or "")):
+        overheard_items = _prefer_time_window(
+            overheard_items, getattr(plan, "time_range", None) if plan else None
+        )
+        overheard_items.sort(
+            key=lambda item: float(item.get("relevance_score") or 0.0), reverse=True
+        )
+        return overheard_items[:_SUMMARY_ITEM_CAP]
 
     # Interaction browse ("who do I talk to"): contacts + co-participation
     # edges. Contacts alone greened IMB7 as a workaround (mention-only names
@@ -5725,6 +5877,8 @@ def _build_summary_items_unfiltered(
                         manifest=manifest,
                         disclosure_tier=disclosure_tier,
                         ledger=ledger,
+                        query_text=query_text,
+                        plan=plan,
                     )
                 except Exception as graph_exc:  # noqa: BLE001
                     logger.debug("graph lane skipped: %s", graph_exc)
@@ -5852,6 +6006,9 @@ def _build_summary_items_unfiltered(
         if graph_items:
             min_per = dict(min_per or {})
             min_per["graph"] = max(int(min_per.get("graph") or 0), 2)
+        if overheard_items:
+            min_per = dict(min_per or {})
+            min_per["overheard"] = max(int(min_per.get("overheard") or 0), 2)
         # NOTE: cosine similarity must NOT waive the zero-df gate — a strong hit
         # on the generic half of a query ("compiler rewrite") cannot evidence a
         # name the corpus does not contain ("Threnody-7"). The N-lane found
@@ -5876,6 +6033,7 @@ def _build_summary_items_unfiltered(
                 # thread lane, so the same weight: beside the scope routes,
                 # never above them.
                 ("graph", 1.0, graph_items),
+                ("overheard", 1.2, overheard_items),
                 # Q1. Same argument, same weight: evidence for a stated goal is
                 # ordinary canonical evidence that arrived keyed to that goal's ids.
                 # It is a joined minority lane beside the scope routes, never above
@@ -6377,6 +6535,13 @@ class DefaultSignalRetrievalAdapter:
                         )
             except Exception as exc:
                 logger.debug("query planner skipped: %s", exc)
+
+        from .overheard import OVERHEARD_SOURCE_ID, query_admits_overheard
+
+        if query_admits_overheard(
+            query_text, str(getattr(manifest, "scope_id", "") or ""), plan
+        ) and OVERHEARD_SOURCE_ID not in source_ids:
+            source_ids = [*source_ids, OVERHEARD_SOURCE_ID]
 
         # Q3: the window the sentence did not name. Only when the planner found no
         # anchor of its own — an explicit range, a relative phrase, a differenced pair

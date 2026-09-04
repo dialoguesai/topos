@@ -99,6 +99,9 @@ _DIMENSION_BY_RECORD_KIND = {
     # AI chat is genuinely cross-cutting; it stays in the default dimension.
     "ai_chat_message": "memory",
     "ai_chat_messages": "memory",
+    "transcript_segment": "memory",
+    "transcript_segments": "memory",
+    "transcripts": "memory",
 }
 
 

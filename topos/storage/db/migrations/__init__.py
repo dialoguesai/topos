@@ -25,6 +25,7 @@ from .entity_blackhole_v1 import apply_entity_blackhole_v1_up  # noqa: F401
 from .attention_triage_v1 import apply_attention_triage_v1_up  # noqa: F401
 from .attention_triage_v2 import apply_attention_triage_v2_up  # noqa: F401
 from .documents_v1 import apply_documents_v1_up  # noqa: F401
+from .transcripts_v1 import apply_transcripts_v1_up  # noqa: F401
 from .canonical_address_book_v1 import apply_canonical_address_book_v1_up  # noqa: F401
 
 logger = logging.getLogger("topos.storage.db.migrations")

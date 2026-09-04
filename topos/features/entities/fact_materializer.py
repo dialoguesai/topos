@@ -37,7 +37,7 @@ import json
 import logging
 import sqlite3
 import uuid
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple
 
 logger = logging.getLogger("topos.features.entities.fact_materializer")
 
@@ -57,6 +57,25 @@ def _now_iso() -> str:
     from .edges import _now_iso as edges_now
 
     return edges_now()
+
+
+def _existing_non_topic(conn: sqlite3.Connection, name: str) -> Optional[str]:
+    """Spine id for a related name that is already a typed entity, if any."""
+    from .resolver import normalize_name
+
+    norm = normalize_name(name)
+    if not norm:
+        return None
+    row = conn.execute(
+        """
+        SELECT entity_id FROM entities
+        WHERE normalized_name=? AND entity_type != 'topic'
+        ORDER BY mention_count DESC, entity_id
+        LIMIT 1
+        """,
+        (norm,),
+    ).fetchone()
+    return str(row[0]) if row else None
 
 
 def _plausible_event_at(value: object) -> Optional[str]:
@@ -265,6 +284,8 @@ def _upsert_materialized_edge(
     actor_role: Optional[str] = None,
     last_event_at: Optional[str] = None,
     evidence_count: int = 1,
+    source_id: Optional[str] = None,
+    source_mix: Optional[Dict[str, int]] = None,
 ) -> Optional[str]:
     """Idempotent directed edge with a materialized marker + carried validity.
 
@@ -293,17 +314,21 @@ def _upsert_materialized_edge(
     """
     if not src or not dst or src == dst:
         return None
-    meta = json.dumps(
-        {
-            "mz": 1,
-            "statement": statement,
-            "source_object_id": source_object_id,
-            **({"asserted_by": asserted_by} if asserted_by else {}),
-            # Provenance tier for the attribution overlay: who asserted the
-            # fact maps onto the personal→ambient spectrum.
-            "actor_role": actor_role or _asserted_by_role(asserted_by),
-        }
-    )
+    payload: Dict[str, Any] = {
+        "mz": 1,
+        "statement": statement,
+        "source_object_id": source_object_id,
+        **({"asserted_by": asserted_by} if asserted_by else {}),
+        # Provenance tier for the attribution overlay: who asserted the
+        # fact maps onto the personal→ambient spectrum.
+        "actor_role": actor_role or _asserted_by_role(asserted_by),
+    }
+    sid = str(source_id or "").strip()
+    if sid:
+        payload["source_id"] = sid
+    if source_mix:
+        payload["source_mix"] = source_mix
+    meta = json.dumps(payload)
     row = conn.execute(
         """
         SELECT edge_id FROM entity_edges
@@ -471,8 +496,10 @@ def materialize_signal_objects_to_graph(
             continue
         tag = str(payload.get("tag") or "").strip()
         related = payload.get("related_entities") or []
-        if not tag or not isinstance(related, list) or not related:
+        if not tag:
             continue
+        if not isinstance(related, list):
+            related = []
         topic_id = f"topic_{object_key}"
         # Date by WHEN members were active, not when the signal_object row was
         # first inserted — otherwise Active-in drops live topics (or keeps
@@ -488,8 +515,11 @@ def materialize_signal_objects_to_graph(
             if not _mintable(str(name)):
                 continue
             try:
-                # A vertex for the edge below, not a sighting — see resolve().
-                ent_id, _tier = resolver.resolve(str(name), queue_review=False)
+                # Prefer an already-typed spine row (org/person/product) over
+                # minting a topic twin — resolve() defaults entity_type to topic.
+                ent_id = _existing_non_topic(conn, str(name))
+                if not ent_id:
+                    ent_id, _tier = resolver.resolve(str(name), queue_review=False)
             except ValueError:
                 continue
             if ent_id == topic_id:
@@ -503,21 +533,9 @@ def materialize_signal_objects_to_graph(
             ))
             topic_edges += 1
             linked += 1
-        if linked == 0 and not conn.execute(
-            # Hub edges from an earlier run may still be live until the sweep;
-            # only a hub with no edges at all is truly an orphan.
-            "SELECT 1 FROM entity_edges WHERE src_entity_id=? OR dst_entity_id=? LIMIT 1",
-            (topic_id, topic_id),
-        ).fetchone():
-            # No real entities to link — drop the orphan hub we just made.
-            # ...unless it is black-holed. A topic hub can be protected like any
-            # other entity, and every id-keyed reap has to honour that.
-            from ..lifecycle.derived_scrub import is_entity_protected
-
-            if not is_entity_protected(conn, str(topic_id)):
-                conn.execute(
-                    "DELETE FROM entities WHERE entity_id=? AND mention_count=0", (topic_id,)
-                )
+        # Keep hubs with no discusses edges. Members are the evidence; dropping
+        # the node hid clusters like "OpenAI Model" whose related_entities
+        # failed to mint. Isolated-node display stays a UI toggle.
 
     # 2) SPO facts -> subject->object labeled edges.
     #

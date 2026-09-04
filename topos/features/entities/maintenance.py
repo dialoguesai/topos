@@ -536,11 +536,20 @@ def rebuild_evidence_edges(
     co = 0
     # (src, dst, type) -> {role: evidence_count}; folded into metadata below.
     edge_roles: Dict[tuple, Dict[str, int]] = {}
+    edge_sources: Dict[tuple, Dict[str, int]] = {}
 
     def _tally(src: str, dst: str, edge_type: str, role: str) -> None:
         key = _canonical_order(src, dst, edge_type) + (edge_type,)
         mix = edge_roles.setdefault(key, {})
         mix[role] = mix.get(role, 0) + 1
+
+    def _tally_source(src: str, dst: str, edge_type: str, source_id: str) -> None:
+        sid = str(source_id or "").strip()
+        if not sid:
+            return
+        key = _canonical_order(src, dst, edge_type) + (edge_type,)
+        mix = edge_sources.setdefault(key, {})
+        mix[sid] = mix.get(sid, 0) + 1
 
     # -- fold phase: replay every observation in memory, still no gate --------
     acc = _EdgeAccumulator()
@@ -552,9 +561,11 @@ def rebuild_evidence_edges(
         # edges ingest created above the cap.
         event_at = rec["event_at"]
         role = role_by_record.get(record_id, "ambient")
+        source_id = str(rec.get("source_id") or "")
         for src, dst in record_cooccurrence_pairs(rec["ents"]):
             acc.add(src, dst, EDGE_CO_OCCURRENCE, event_at)
             _tally(src, dst, EDGE_CO_OCCURRENCE, role)
+            _tally_source(src, dst, EDGE_CO_OCCURRENCE, source_id)
             co += 1
 
     # P3.2: talked-to edges from thread co-participants only.
@@ -594,11 +605,18 @@ def rebuild_evidence_edges(
     payload = []
     for (src, dst, edge_type), state in acc.edges.items():
         mix = edge_roles.get((src, dst, edge_type))
-        metadata = (
-            json.dumps({"actor_role": _dominant_role(mix), "role_mix": mix})
-            if mix
-            else None
-        )
+        src_mix = edge_sources.get((src, dst, edge_type))
+        meta_obj: Optional[Dict[str, object]] = None
+        if mix or src_mix:
+            meta_obj = {}
+            if mix:
+                meta_obj["actor_role"] = _dominant_role(mix)
+                meta_obj["role_mix"] = mix
+            if src_mix:
+                meta_obj["source_mix"] = src_mix
+                if len(src_mix) == 1:
+                    meta_obj["source_id"] = next(iter(src_mix))
+        metadata = json.dumps(meta_obj) if meta_obj else None
         last_event = state["last"]
         valid_from = prior_valid_from.get((src, dst, edge_type)) or now_iso
         payload.append(
@@ -989,6 +1007,16 @@ def rebuild_entity_graph(
         except Exception as exc:
             mz_lanes_ok = False
             logger.warning("graph enrichment during rebuild failed: %s", exc)
+        try:
+            from .discourse_graph import materialize_discourse_lenses_to_graph
+
+            discourse = materialize_discourse_lenses_to_graph(
+                conn, touched_edges=mz_touched
+            )
+            mz["discourse"] = discourse
+        except Exception as exc:
+            mz_lanes_ok = False
+            logger.warning("discourse lens materialization during rebuild failed: %s", exc)
         if mz_lanes_ok:
             from .fact_materializer import sweep_stale_materialized_edges
 
@@ -1029,6 +1057,7 @@ def rebuild_entity_graph(
         "goal_edges": enrich["goal_edges"],
         "place_edges": enrich["place_edges"],
         "conversation_edges": enrich["conversation_edges"],
+        "discourse": mz.get("discourse") or {},
         "mz_swept": mz_swept,
         "orphans_pruned": len(orphaned),
         "facts_closed_dangling": facts_closed,

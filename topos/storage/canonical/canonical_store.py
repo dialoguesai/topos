@@ -86,6 +86,12 @@ class SQLiteCanonicalStore(CanonicalStore):
             ref = self._upsert_location_event(record, sync_batch_id=sync_batch_id)
         elif table == "documents":
             ref = self._upsert_document(record, sync_batch_id=sync_batch_id)
+        elif table == "transcripts":
+            ref = self._upsert_transcript(record, sync_batch_id=sync_batch_id)
+        elif table == "transcript_speakers":
+            ref = self._upsert_transcript_speaker(record, sync_batch_id=sync_batch_id)
+        elif table == "transcript_segments":
+            ref = self._upsert_transcript_segment(record, sync_batch_id=sync_batch_id)
         else:
             raise ValueError(f"Unsupported canonical table: {table}")
         return ref
@@ -626,6 +632,188 @@ class SQLiteCanonicalStore(CanonicalStore):
         )
         return CanonicalRef(record_id=doc_id, created=existing is None)
 
+    def _upsert_transcript(self, record: Dict[str, Any], *, sync_batch_id: Optional[str]) -> CanonicalRef:
+        transcript_id = str(record.get("transcript_id") or record.get("source_record_id") or "")
+        if not transcript_id:
+            raise ValueError("transcripts upsert requires transcript_id")
+        existing = self._conn.execute(
+            "SELECT transcript_id FROM transcripts WHERE transcript_id=?",
+            (transcript_id,),
+        ).fetchone()
+        self._conn.execute(
+            """
+            INSERT INTO transcripts (
+                transcript_id, dataset_id, title, origin_url, origin_kind,
+                started_at, ended_at, duration_sec, language_code, asr_model,
+                asr_quality, is_generated, media_ref, participation_mode,
+                source_id, source_record_id, ingested_at, sync_batch_id, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(transcript_id) DO UPDATE SET
+                title=excluded.title,
+                origin_url=excluded.origin_url,
+                origin_kind=excluded.origin_kind,
+                started_at=excluded.started_at,
+                ended_at=excluded.ended_at,
+                duration_sec=excluded.duration_sec,
+                language_code=excluded.language_code,
+                asr_model=excluded.asr_model,
+                asr_quality=excluded.asr_quality,
+                is_generated=excluded.is_generated,
+                media_ref=excluded.media_ref,
+                sync_batch_id=excluded.sync_batch_id,
+                ingested_at=excluded.ingested_at,
+                metadata_json=excluded.metadata_json
+            """,
+            (
+                transcript_id,
+                record.get("dataset_id"),
+                record.get("title"),
+                record.get("origin_url"),
+                record.get("origin_kind"),
+                record.get("started_at"),
+                record.get("ended_at"),
+                record.get("duration_sec"),
+                record.get("language_code"),
+                record.get("asr_model"),
+                record.get("asr_quality") or "unknown",
+                record.get("is_generated"),
+                record.get("media_ref"),
+                "ambient",
+                record.get("source_id"),
+                record.get("source_record_id") or transcript_id,
+                record.get("ingested_at") or _utc_now(),
+                sync_batch_id or record.get("sync_batch_id"),
+                _json_metadata(record.get("metadata_json")),
+            ),
+        )
+        return CanonicalRef(record_id=transcript_id, created=existing is None)
+
+    def _upsert_transcript_speaker(self, record: Dict[str, Any], *, sync_batch_id: Optional[str]) -> CanonicalRef:
+        speaker_id = str(record.get("speaker_id") or record.get("source_record_id") or "")
+        if not speaker_id:
+            raise ValueError("transcript_speakers upsert requires speaker_id")
+        existing = self._conn.execute(
+            "SELECT speaker_id FROM transcript_speakers WHERE speaker_id=?",
+            (speaker_id,),
+        ).fetchone()
+        self._conn.execute(
+            """
+            INSERT INTO transcript_speakers (
+                speaker_id, transcript_id, dataset_id, label, display_name,
+                contact_id, is_owner, attribution_source, attribution_confidence,
+                source_id, source_record_id, ingested_at, sync_batch_id, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(speaker_id) DO UPDATE SET
+                label=excluded.label,
+                display_name=excluded.display_name,
+                attribution_source=excluded.attribution_source,
+                attribution_confidence=excluded.attribution_confidence,
+                sync_batch_id=excluded.sync_batch_id,
+                ingested_at=excluded.ingested_at,
+                metadata_json=excluded.metadata_json
+            """,
+            (
+                speaker_id,
+                record.get("transcript_id"),
+                record.get("dataset_id"),
+                record.get("label"),
+                record.get("display_name"),
+                None,
+                0,
+                record.get("attribution_source"),
+                record.get("attribution_confidence"),
+                record.get("source_id"),
+                record.get("source_record_id") or speaker_id,
+                record.get("ingested_at") or _utc_now(),
+                sync_batch_id or record.get("sync_batch_id"),
+                _json_metadata(record.get("metadata_json")),
+            ),
+        )
+        return CanonicalRef(record_id=speaker_id, created=existing is None)
+
+    def _upsert_transcript_segment(self, record: Dict[str, Any], *, sync_batch_id: Optional[str]) -> CanonicalRef:
+        segment_id = str(record.get("segment_id") or record.get("source_record_id") or "")
+        if not segment_id:
+            raise ValueError("transcript_segments upsert requires segment_id")
+        existing = self._conn.execute(
+            "SELECT segment_id FROM transcript_segments WHERE segment_id=?",
+            (segment_id,),
+        ).fetchone()
+        self._conn.execute(
+            """
+            INSERT INTO transcript_segments (
+                segment_id, transcript_id, dataset_id, speaker_id, speaker_label,
+                content, start_sec, duration_sec, event_at, actor_role, is_from_self,
+                asr_confidence, source_id, source_record_id, ingested_at,
+                sync_batch_id, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(segment_id) DO UPDATE SET
+                content=excluded.content,
+                speaker_id=excluded.speaker_id,
+                speaker_label=excluded.speaker_label,
+                start_sec=excluded.start_sec,
+                duration_sec=excluded.duration_sec,
+                event_at=excluded.event_at,
+                sync_batch_id=excluded.sync_batch_id,
+                ingested_at=excluded.ingested_at,
+                metadata_json=excluded.metadata_json
+            """,
+            (
+                segment_id,
+                record.get("transcript_id"),
+                record.get("dataset_id"),
+                record.get("speaker_id"),
+                record.get("speaker_label"),
+                record.get("content"),
+                record.get("start_sec"),
+                record.get("duration_sec"),
+                record.get("event_at"),
+                "ambient",
+                0,
+                record.get("asr_confidence"),
+                record.get("source_id"),
+                record.get("source_record_id") or segment_id,
+                record.get("ingested_at") or _utc_now(),
+                sync_batch_id or record.get("sync_batch_id"),
+                _json_metadata(record.get("metadata_json")),
+            ),
+        )
+        return CanonicalRef(record_id=segment_id, created=existing is None)
+
+    def drop_stale_transcript_segments(
+        self, transcript_id: str, keep_ids: set[str]
+    ) -> List[str]:
+        """Delete segments for ``transcript_id`` that are not in the new keep set.
+
+        Caption stitch changes segment ids (index → start_ms). A re-ingest
+        that only upserts would leave the old fragments in place.
+        """
+        transcript_id = str(transcript_id or "").strip()
+        if not transcript_id:
+            return []
+        existing = [
+            str(row[0])
+            for row in self._conn.execute(
+                "SELECT segment_id FROM transcript_segments WHERE transcript_id=?",
+                (transcript_id,),
+            ).fetchall()
+            if row[0]
+        ]
+        keep = {str(item) for item in keep_ids}
+        stale = [sid for sid in existing if sid not in keep]
+        if not stale:
+            return []
+        with with_db_write():
+            for start in range(0, len(stale), 400):
+                chunk = stale[start : start + 400]
+                placeholders = ",".join("?" * len(chunk))
+                self._conn.execute(
+                    f"DELETE FROM transcript_segments WHERE segment_id IN ({placeholders})",
+                    chunk,
+                )
+            self._maybe_commit()
+        return stale
+
 
 class InMemoryCanonicalStore(CanonicalStore):
     def __init__(self) -> None:
@@ -638,6 +826,9 @@ class InMemoryCanonicalStore(CanonicalStore):
             record.get("message_id")
             or record.get("event_id")
             or record.get("doc_id")
+            or record.get("transcript_id")
+            or record.get("segment_id")
+            or record.get("speaker_id")
             or record.get("conversation_id")
         )
         bucket = self._records.setdefault(table, {})

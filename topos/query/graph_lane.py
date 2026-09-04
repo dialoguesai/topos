@@ -38,6 +38,7 @@ from typing import Any, Dict, List, Optional
 
 from ..features.entities.edges import top_edges
 from . import narrowing as _N
+from .overheard import graph_lane_allows_edge_type
 
 logger = logging.getLogger(__name__)
 
@@ -77,6 +78,8 @@ def graph_neighborhood_items(
     manifest: Any,
     disclosure_tier: str,
     ledger: Optional[Any] = None,
+    query_text: str = "",
+    plan: Any = None,
 ) -> List[Dict[str, Any]]:
     """1-hop neighborhoods of the anchors, as fusion-ready summary items.
 
@@ -108,6 +111,10 @@ def graph_neighborhood_items(
             neighbor_id = str(edge.get("entity_id") or "")
             edge_type = str(edge.get("edge_type") or "")
             if not neighbor_id or not edge_type:
+                continue
+            if not graph_lane_allows_edge_type(
+                edge_type, scope_id=scope_id, query_text=query_text, plan=plan
+            ):
                 continue
             key = (anchor_id, neighbor_id, edge_type)
             if key in seen:

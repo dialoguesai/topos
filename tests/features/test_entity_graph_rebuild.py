@@ -37,15 +37,23 @@ def conn(tmp_path):
     c.close()
 
 
-def _mention(conn, *, entity_id, record_id, table="conversation_messages", event_at="2026-01-01T00:00:00Z"):
+def _mention(
+    conn,
+    *,
+    entity_id,
+    record_id,
+    table="conversation_messages",
+    event_at="2026-01-01T00:00:00Z",
+    source_id="imessage",
+):
     conn.execute(
         """
         INSERT INTO entity_mentions
             (mention_id, entity_id, record_id, source_id, canonical_table,
              surface_text, confidence, event_at, created_at)
-        VALUES (?, ?, ?, 'imessage', ?, 'x', 0.9, ?, ?)
+        VALUES (?, ?, ?, ?, ?, 'x', 0.9, ?, ?)
         """,
-        (f"m_{entity_id}_{record_id}", entity_id, record_id, table, event_at, event_at),
+        (f"m_{entity_id}_{record_id}_{source_id}", entity_id, record_id, source_id, table, event_at, event_at),
     )
 
 
@@ -167,6 +175,8 @@ def test_edge_metadata_carries_provenance_role_mix(conn):
     )
     assert meta.get("actor_role") == "observed"
     assert meta.get("role_mix") == {"observed": 1}
+    assert meta.get("source_mix") == {"imessage": 1}
+    assert meta.get("source_id") == "imessage"
 
     # And the API read path must EXPOSE it — graph_snapshot historically
     # synthesized metadata_json and dropped the stored column entirely.
@@ -174,6 +184,44 @@ def test_edge_metadata_carries_provenance_role_mix(conn):
     api_meta = _json.loads(snap["edges"][0]["metadata_json"] or "{}")
     assert api_meta.get("actor_role") == "observed"
     assert api_meta.get("evidence_count") is not None  # synthesized fields kept
+    node_meta = _json.loads(snap["nodes"][0]["metadata_json"] or "{}")
+    assert "imessage" in (node_meta.get("source_ids") or [])
+
+
+def test_cooccurrence_source_mix_keeps_journal_and_transcript(conn):
+    """A name pair seen in a journal AND a caption carries both source ids.
+
+    Muting YouTube must not drop an edge that still has journal evidence.
+    """
+    import json as _json
+
+    r = EntityResolver(conn)
+    a = r._create_entity("Ada", "person")
+    b = r._create_entity("MIT", "org")
+    conn.commit()
+    conn.execute(
+        "INSERT INTO journal_entries (entry_id, source_id, content) VALUES ('j1', 'grow_journal', 'Ada at MIT')"
+    )
+    _mention(conn, entity_id=a, record_id="j1", table="journal_entries", source_id="grow_journal")
+    _mention(conn, entity_id=b, record_id="j1", table="journal_entries", source_id="grow_journal")
+    _mention(conn, entity_id=a, record_id="yt1", table="transcript_segments", source_id="youtube_transcripts")
+    _mention(conn, entity_id=b, record_id="yt1", table="transcript_segments", source_id="youtube_transcripts")
+    conn.commit()
+
+    rebuild_evidence_edges(conn)
+    meta = _json.loads(
+        conn.execute(
+            "SELECT metadata_json FROM entity_edges WHERE edge_type='co_occurrence' AND valid_to IS NULL"
+        ).fetchone()[0]
+        or "{}"
+    )
+    assert meta.get("source_mix") == {"grow_journal": 1, "youtube_transcripts": 1}
+    assert "source_id" not in meta  # mixed: no single owner
+    snap = graph_snapshot(conn, min_weight=0.0)
+    ada_meta = _json.loads(
+        next(n["metadata_json"] for n in snap["nodes"] if n["label"] == "Ada") or "{}"
+    )
+    assert set(ada_meta.get("source_ids") or []) == {"grow_journal", "youtube_transcripts"}
 
 
 def test_journal_evidence_is_authored(conn):

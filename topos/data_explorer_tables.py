@@ -19,6 +19,9 @@ CANONICAL_SCHEMA_TABLES: frozenset[str] = frozenset(
         "financial_transactions",
         "location_events",
         "documents",
+        "transcripts",
+        "transcript_speakers",
+        "transcript_segments",
     }
 )
 
@@ -50,6 +53,9 @@ CANONICAL_ROW_ID_COLUMN: dict[str, str] = {
     "financial_transactions": "transaction_id",
     "location_events": "event_id",
     "documents": "doc_id",
+    "transcripts": "transcript_id",
+    "transcript_speakers": "speaker_id",
+    "transcript_segments": "segment_id",
 }
 
 

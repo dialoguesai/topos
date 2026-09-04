@@ -299,3 +299,56 @@ class TestCommitDerivedJournalRows:
             "content": "retrieval: date-qualify surprise movers",
         }
         assert record_role(row, table="activity_events", posture="ambient") == ROLE_AMBIENT
+
+
+def _transcript_segment(**kw) -> dict:
+    row = {
+        "segment_id": "yt:abc:0",
+        "transcript_id": "yt:abc",
+        "content": "I am going to start a company and I have diabetes",
+        "event_at": "2026-06-01T10:00:00+00:00",
+        "actor_role": "ambient",
+        "is_from_self": 0,
+        "_table": "transcript_segments",
+    }
+    row.update(kw)
+    return row
+
+
+class TestTranscriptRoles:
+    def test_segments_are_ambient_even_with_is_from_self(self):
+        row = _transcript_segment(is_from_self=1, sender_id="self")
+        assert record_role(row, table="transcript_segments") == ROLE_AMBIENT
+        assert owner_authored(row, table="transcript_segments") is False
+
+    def test_header_and_speakers_are_ambient(self):
+        assert record_role({"transcript_id": "yt:abc"}, table="transcripts") == ROLE_AMBIENT
+        assert (
+            record_role({"speaker_id": "yt:abc:roster:0"}, table="transcript_speakers")
+            == ROLE_AMBIENT
+        )
+
+    def test_inferred_table_from_segment_id_is_ambient(self):
+        row = _transcript_segment()
+        row.pop("_table")
+        assert record_role(row, table="") == ROLE_AMBIENT
+
+    def test_personal_posture_cannot_author_a_transcript_segment(self):
+        row = _transcript_segment(is_from_self=1)
+        assert (
+            record_role(row, table="transcript_segments", posture="personal")
+            == ROLE_AMBIENT
+        )
+
+    def test_extract_never_treats_transcript_as_owner_authored(self):
+        from topos.features.facts.extract import _is_owner_authored
+
+        row = _transcript_segment(is_from_self=1)
+        assert _is_owner_authored(row, "transcript_segments") is False
+        assert owner_authored(row, table="transcript_segments") is False
+
+    def test_youtube_source_declares_ambient_posture(self):
+        from topos.sources.registry import YOUTUBE_TRANSCRIPTS
+
+        assert YOUTUBE_TRANSCRIPTS.posture == "ambient"
+        assert YOUTUBE_TRANSCRIPTS.canonical_group_id == "transcripts"

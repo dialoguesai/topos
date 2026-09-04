@@ -223,6 +223,142 @@ def entity_card_aggregates(
     return {"mention_sources": mention_sources, "neighbor_counts": neighbor_counts}
 
 
+_CLUSTER_MEMBER_LIMIT = 12
+
+
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    return (
+        conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (name,)
+        ).fetchone()
+        is not None
+    )
+
+
+def _load_topic_cluster(
+    conn: sqlite3.Connection, entity_id: str, canonical_name: str
+) -> Optional[Dict[str, Any]]:
+    """Cluster backing a topic hub — members are the evidence, not mentions.
+
+    Hubs are minted as ``topic_{cluster_id}``. Related-name remints share the
+    cluster label but have an ``ent_*`` id; those still join by label so the
+    card can show the captions the hub was built from.
+    """
+    if not _table_exists(conn, "topic_clusters"):
+        return None
+    row = None
+    if str(entity_id).startswith("topic_"):
+        cluster_id = str(entity_id)[len("topic_") :]
+        row = conn.execute(
+            """
+            SELECT cluster_id, label, dimension, member_count, source_mix_json,
+                   label_terms_json, model, metadata_json
+            FROM topic_clusters WHERE cluster_id=?
+            """,
+            (cluster_id,),
+        ).fetchone()
+    if row is None and canonical_name:
+        row = conn.execute(
+            """
+            SELECT cluster_id, label, dimension, member_count, source_mix_json,
+                   label_terms_json, model, metadata_json
+            FROM topic_clusters WHERE label=? ORDER BY member_count DESC LIMIT 1
+            """,
+            (canonical_name,),
+        ).fetchone()
+    if row is None:
+        return None
+    try:
+        source_mix = json.loads(row[4] or "{}")
+        if not isinstance(source_mix, dict):
+            source_mix = {}
+    except (TypeError, ValueError):
+        source_mix = {}
+    try:
+        label_terms = json.loads(row[5] or "[]")
+        if not isinstance(label_terms, list):
+            label_terms = []
+    except (TypeError, ValueError):
+        label_terms = []
+    try:
+        meta = json.loads(row[7] or "{}")
+        if not isinstance(meta, dict):
+            meta = {}
+    except (TypeError, ValueError):
+        meta = {}
+
+    members: List[Dict[str, Any]] = []
+    videos: Dict[str, int] = {}
+    if _table_exists(conn, "topic_cluster_members"):
+        has_segments = _table_exists(conn, "transcript_segments")
+        if has_segments:
+            member_rows = conn.execute(
+                """
+                SELECT m.record_id, m.source_id, m.text_preview,
+                       s.transcript_id, s.event_at
+                FROM topic_cluster_members m
+                LEFT JOIN transcript_segments s ON s.segment_id = m.record_id
+                WHERE m.cluster_id=?
+                ORDER BY COALESCE(s.event_at, m.created_at)
+                LIMIT ?
+                """,
+                (row[0], _CLUSTER_MEMBER_LIMIT),
+            ).fetchall()
+            for rec_id, source_id, preview, transcript_id, event_at in member_rows:
+                members.append(
+                    {
+                        "record_id": rec_id,
+                        "source_id": source_id,
+                        "text_preview": preview,
+                        "transcript_id": transcript_id,
+                        "event_at": event_at,
+                    }
+                )
+            for vid, count in conn.execute(
+                """
+                SELECT COALESCE(s.transcript_id, m.source_id), COUNT(*)
+                FROM topic_cluster_members m
+                LEFT JOIN transcript_segments s ON s.segment_id = m.record_id
+                WHERE m.cluster_id=?
+                GROUP BY 1
+                ORDER BY COUNT(*) DESC
+                """,
+                (row[0],),
+            ):
+                if vid:
+                    videos[str(vid)] = int(count)
+        else:
+            for rec_id, source_id, preview in conn.execute(
+                """
+                SELECT record_id, source_id, text_preview
+                FROM topic_cluster_members WHERE cluster_id=?
+                ORDER BY created_at LIMIT ?
+                """,
+                (row[0], _CLUSTER_MEMBER_LIMIT),
+            ):
+                members.append(
+                    {
+                        "record_id": rec_id,
+                        "source_id": source_id,
+                        "text_preview": preview,
+                    }
+                )
+
+    return {
+        "cluster_id": row[0],
+        "label": row[1],
+        "dimension": row[2],
+        "member_count": int(row[3] or 0),
+        "source_mix": source_mix,
+        "label_terms": [str(t) for t in label_terms if t],
+        "term_label": str(meta.get("term_label") or "").strip() or None,
+        "label_model": str(meta.get("label_model") or "").strip() or None,
+        "model": row[6],
+        "members": members,
+        "videos": [{"id": vid, "count": n} for vid, n in videos.items()],
+    }
+
+
 def get_entity_detail(
     conn: sqlite3.Connection,
     entity_id: str,
@@ -298,6 +434,40 @@ def get_entity_detail(
     # owner-authored share, and a read that guessed for it would have to be
     # changed every time a card learns a new question.
     entity.update(entity_card_aggregates(conn, str(entity_id), guard=guard))
+    cluster = None
+    if str(entity.get("entity_type") or "") == "topic":
+        cluster = _load_topic_cluster(
+            conn, str(entity_id), str(entity.get("canonical_name") or "")
+        )
+    if cluster:
+        entity["cluster"] = cluster
+        if not entity.get("recent_mentions"):
+            entity["recent_mentions"] = [
+                {
+                    "record_id": m.get("record_id"),
+                    "source_id": m.get("source_id"),
+                    "canonical_table": "transcript_segments"
+                    if m.get("transcript_id")
+                    else None,
+                    "surface_text": m.get("text_preview"),
+                    "event_at": m.get("event_at"),
+                    "transcript_id": m.get("transcript_id"),
+                }
+                for m in cluster.get("members") or []
+            ]
+        if not entity.get("mention_sources"):
+            mix = cluster.get("source_mix") or {}
+            caption_n = int(cluster.get("member_count") or 0)
+            if caption_n and (
+                "youtube_transcripts" in mix or any(m.get("transcript_id") for m in cluster.get("members") or [])
+            ):
+                entity["mention_sources"] = [
+                    {
+                        "table": "transcript_segments",
+                        "count": caption_n,
+                        "owner_authored": 0,
+                    }
+                ]
     dossier = load_dossier_for_entity(conn, str(entity_id))
     if isinstance(dossier, dict) and not guard.sees_everything:
         dossier = dict(dossier)

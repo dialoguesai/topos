@@ -9,6 +9,14 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **YouTube transcripts are a first-class ingest class.** `[S1] [O]`
+  Caption archives land on `transcripts` / `transcript_segments` via
+  `youtube_transcripts` (`transcript.session.v1`), not on `messages:read`.
+  Retrieval admits them only for overheard-shaped asks or `transcripts:read`.
+  First-person belief asks and ordinary personal packets stay closed. The
+  tables are additive DDL (migration 73); existing rows are untouched.
+
 ## [1.3.50] — 2026-09-03
 
 ### Fixed

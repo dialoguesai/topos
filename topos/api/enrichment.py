@@ -53,6 +53,7 @@ _CANONICAL_TABLE_BY_GROUP: Dict[str, tuple[str, str]] = {
     "financial": ("financial_transactions", "transaction_id"),
     "places": ("location_events", "event_id"),
     "contacts": ("contacts", "contact_id"),
+    "transcripts": ("transcript_segments", "segment_id"),
 }
 
 # Marker helpers live in `enrichment/record_progress.py` so BOTH lanes share one

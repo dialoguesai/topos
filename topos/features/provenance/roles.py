@@ -26,6 +26,10 @@ Sender truth per family (attribution audit, Appendix A):
   ``is_from_self`` / ``sender_id == 'self'``.
 - journal/profile tables: authored by construction.
 - browser/activity rows: ambient; highlights/stars are the engagement modifier.
+- transcript_segments / transcripts / transcript_speakers: ambient by table.
+  The engine cannot tell if the owner spoke, sat in the room, or only
+  listened. Connector ``is_self`` / ``participation_mode`` fields are dropped
+  at parse; an owner tag after ingest is the only raise path.
 
 Unknown/ambiguous rows fail toward the LESS-attributing role (observed or
 ambient), never authored — belief extraction must not guess.
@@ -61,7 +65,17 @@ _AI_CHAT_OWNER_SENDERS = frozenset({"human", "user"})
 _AUTHORED_BY_CONSTRUCTION_TABLES = frozenset({"journal_entries", "profile_records"})
 
 # Browser/feed activity families: exposure, not expression.
-_AMBIENT_TABLES = frozenset({"activity_events", "browser_visits", "browser_events"})
+_AMBIENT_TABLES = frozenset({
+    "activity_events",
+    "browser_visits",
+    "browser_events",
+    "transcripts",
+    "transcript_speakers",
+    "transcript_segments",
+})
+
+# Keys that mark a transcript family row when ``_table`` is missing.
+_TRANSCRIPT_MARKER_KEYS = ("segment_id", "start_sec", "asr_quality", "participation_mode")
 
 # Keys that only conversation_messages rows carry (presence check — sqlite3.Row
 # dicts keep NULL columns as None). sender_type cannot tell the message
@@ -134,6 +148,10 @@ def _infer_table(row: Dict[str, Any]) -> str:
         return "journal_entries"
     if row.get("activity_type") is not None or row.get("url") is not None:
         return "activity_events"
+    if any(key in row for key in _TRANSCRIPT_MARKER_KEYS) or row.get("transcript_id") is not None:
+        if row.get("segment_id") is not None or row.get("start_sec") is not None:
+            return "transcript_segments"
+        return "transcripts"
     if any(key in row for key in _CONVERSATION_MARKER_KEYS):
         return "conversation_messages"
     # 'assistant'/'system' only ever appear in ai_chat rows — unambiguous.

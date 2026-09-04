@@ -28,6 +28,23 @@ def test_manifest_unions_registry_sources() -> None:
     assert "imessage" in manifest.default_source_ids
 
 
+def test_messages_read_excludes_youtube_transcripts_unless_opted_in() -> None:
+    from topos.sources.registry import get_sources_by_scope
+
+    messages = set(get_sources_by_scope("messages:read"))
+    assert "youtube_transcripts" not in messages
+    assert "voxterm_transcripts" in messages
+    assert "imessage" in messages
+
+    manifest = resolve_scope_manifest("messages:read")
+    assert "youtube_transcripts" not in (manifest.default_source_ids or [])
+
+    transcripts = resolve_scope_manifest("transcripts:read")
+    assert "youtube_transcripts" in (transcripts.default_source_ids or [])
+    assert "transcript_segments" in (transcripts.canonical_tables or [])
+    assert "youtube_transcripts" in get_sources_by_scope("transcripts:read")
+
+
 def test_contacts_manifest_includes_canonical_address_book() -> None:
     manifest = resolve_scope_manifest("contacts:resolve")
     assert CANONICAL_ADDRESS_BOOK_SOURCE_ID in manifest.default_source_ids

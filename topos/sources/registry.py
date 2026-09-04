@@ -7,6 +7,7 @@ from .definitions import (
     CANONICAL_ADDRESS_BOOK_SOURCE_ID,
     SOURCE_KIND_DERIVED,
     DataSourceDefinition,
+    source_gets_discourse_lenses,
 )
 from shared.filtering import FilterInstance, FilterManifest
 
@@ -674,6 +675,50 @@ VOXTERM_TRANSCRIPTS = _source(
     ],
 )
 
+# YouTube caption archives (and later meeting / sales-call / lecture tools)
+# → transcripts group. Discourse lenses (claims, events, programs, windowed
+# relations) attach to this lane, not journals or chats. Ambient by default:
+# the engine cannot tell if the owner spoke, sat in the room, or only listened.
+# Connectors must not set participation_mode / is_self.
+YOUTUBE_TRANSCRIPTS = _source(
+    source_id="youtube_transcripts",
+    posture="ambient",
+    display_name="YouTube Transcripts",
+    source_type="file",
+    delivery="owner_upload",
+    schema_id="transcript.session.v1",
+    parser_id="transcript.session.v1",
+    canonical_group_id="transcripts",
+    discourse_lenses=True,
+    raw_enrichment_jobs=[],
+    canonical_enrichment_jobs=["entities", "topics", "embeddings", "facts", "derivation"],
+    analytics_profile_id=None,
+    enrichment_trigger="automatic",
+    ingestion_trigger="automatic",
+    default_scope_id="transcripts",
+    allowed_scope_ids=["transcripts:read", "transcripts:write"],
+    file_ingest_shape={"format": "json"},
+    default_filter_hints=["rolling_window_days", "max_rows", "timestamp_to_date"],
+    filter_tier_kind="sensitivity",
+    default_filter_tiers={
+        "low": _manifest(FilterInstance(filter_id="rolling_window_days", params={"days": 90})),
+        "medium": _manifest(
+            FilterInstance(filter_id="rolling_window_days", params={"days": 30}),
+            FilterInstance(filter_id="max_rows", params={"count": 1000}),
+            FilterInstance(filter_id="timestamp_to_date", params={}),
+        ),
+        "high": _manifest(
+            FilterInstance(filter_id="rolling_window_days", params={"days": 14}),
+            FilterInstance(filter_id="max_rows", params={"count": 250}),
+            FilterInstance(filter_id="timestamp_to_date", params={}),
+        ),
+    },
+    field_transform_defaults=[
+        {"table_id": "transcript_segments", "field": "content", "transform_ids": ["pii_redaction", "nsfw_sanitization"]},
+        {"table_id": "transcript_segments", "field": "event_at", "transform_ids": ["timestamp_to_date"]},
+    ],
+)
+
 REGISTRY = {
     CHATGPT_FILE.source_id: CHATGPT_FILE,
     CHATGPT_UI.source_id: CHATGPT_UI,
@@ -684,6 +729,7 @@ REGISTRY = {
     GDRIVE_FILES.source_id: GDRIVE_FILES,
     GCAL_EVENTS.source_id: GCAL_EVENTS,
     VOXTERM_TRANSCRIPTS.source_id: VOXTERM_TRANSCRIPTS,
+    YOUTUBE_TRANSCRIPTS.source_id: YOUTUBE_TRANSCRIPTS,
     IMESSAGE.source_id: IMESSAGE,
     SIGNAL.source_id: SIGNAL,
     CALENDAR_STUB.source_id: CALENDAR_STUB,
@@ -716,6 +762,17 @@ def topic_cluster_source_ids() -> Tuple[str, ...]:
     from .canonical_signal_defaults import topic_cluster_eligible_source_ids
 
     return topic_cluster_eligible_source_ids(REGISTRY.values())
+
+
+def discourse_lens_source_ids() -> Tuple[str, ...]:
+    """Bundled source ids whose records may mint discourse-lens graph edges."""
+    return tuple(
+        sorted(
+            str(defn.source_id)
+            for defn in REGISTRY.values()
+            if source_gets_discourse_lenses(defn)
+        )
+    )
 
 
 def _scope_matches(scope_id: str, scope_base: str, default_scope: str, allowed: List[str]) -> bool:

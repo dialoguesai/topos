@@ -192,6 +192,10 @@ from .documents_v1 import (
     MIGRATION_ID as DOCUMENTS_V1_ID,
     apply_documents_v1_up,
 )
+from .transcripts_v1 import (
+    MIGRATION_ID as TRANSCRIPTS_V1_ID,
+    apply_transcripts_v1_up,
+)
 from .calendar_events_scheduling_v1 import (
     MIGRATION_ID as CALENDAR_EVENTS_SCHEDULING_V1_ID,
     apply_calendar_events_scheduling_v1_up,
@@ -400,6 +404,7 @@ MIGRATIONS: List[MigrationSpec] = [
     _spec(70, FACT_DIMENSION_BY_ENTITY_TYPE_V1_ID, apply_fact_dimension_by_entity_type_v1_up),
     _spec(71, MENTION_TABLE_STAMP_BACKFILL_V1_ID, apply_mention_table_stamp_backfill_v1_up),
     _spec(72, DERIVED_ROW_IDENTITY_V1_ID, apply_derived_row_identity_v1_up),
+    _spec(73, TRANSCRIPTS_V1_ID, apply_transcripts_v1_up),
 ]
 
 
@@ -456,6 +461,7 @@ __all__ = [
     "PIPELINE_JOBS_V1_ID",
     "CANONICAL_ADDRESS_BOOK_V1_ID",
     "DOCUMENTS_V1_ID",
+    "TRANSCRIPTS_V1_ID",
     "CALENDAR_EVENTS_SCHEDULING_V1_ID",
     "ATTENTION_TRIAGE_V1_ID",
     "ATTENTION_TRIAGE_V2_ID",

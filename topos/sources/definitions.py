@@ -105,6 +105,32 @@ def with_source_capabilities(payload: Dict[str, Any]) -> Dict[str, Any]:
     return out
 
 
+# Canonical group that discourse lenses (claims / events / programs / windowed
+# relations) attach to. Meetings and lectures opt in by writing here; journals
+# never do, even if a source sets discourse_lenses=True.
+DISCOURSE_LENSES_GROUP = "transcripts"
+
+
+def source_gets_discourse_lenses(source_def: Any) -> bool:
+    """True when this source may mint discourse-lens graph edges.
+
+    The bind is the transcripts canonical group, not a YouTube allowlist.
+    ``discourse_lenses=False`` opts a transcripts-group source out. The flag
+    cannot opt a journal (or any other group) in.
+    """
+    if source_def is None:
+        return False
+    if isinstance(source_def, dict):
+        group = str(source_def.get("canonical_group_id") or "").strip()
+        flag = source_def.get("discourse_lenses")
+    else:
+        group = str(getattr(source_def, "canonical_group_id", "") or "").strip()
+        flag = getattr(source_def, "discourse_lenses", None)
+    if group != DISCOURSE_LENSES_GROUP:
+        return False
+    return flag not in (False, 0, "false", "False")
+
+
 def definition_from_payload(payload: Dict[str, Any]) -> "DataSourceDefinition":
     """Build a definition from serialized JSON, ignoring unknown keys so newer
     payloads never break older readers again. Fills source_type from delivery
@@ -192,6 +218,12 @@ class DataSourceDefinition:
     pipeline_include_data_table: Optional[bool] = None
     pipeline_data_table_after_parser: Optional[bool] = None
     pipeline_data_table_match_parser_output: Optional[bool] = None
+    # Discourse lenses (claims / events / programs / windowed relations) bind to
+    # the transcripts canonical group — YouTube now; meetings, sales calls, and
+    # lectures when they land on the same lane. None = follow the group.
+    # False opts a transcripts-group source out. True does not let other groups
+    # (journals, chats, browser) opt in.
+    discourse_lenses: Optional[bool] = None
 
     def __post_init__(self) -> None:
         if self.source_kind not in SOURCE_KIND_VALUES:
@@ -275,4 +307,6 @@ class DataSourceDefinition:
             out["pipeline_data_table_after_parser"] = bool(self.pipeline_data_table_after_parser)
         if self.pipeline_data_table_match_parser_output is not None:
             out["pipeline_data_table_match_parser_output"] = bool(self.pipeline_data_table_match_parser_output)
+        if self.discourse_lenses is not None:
+            out["discourse_lenses"] = bool(self.discourse_lenses)
         return out

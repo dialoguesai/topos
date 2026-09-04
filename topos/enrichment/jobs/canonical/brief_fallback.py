@@ -245,6 +245,7 @@ def prepare_signal_record(record: Dict[str, Any]) -> Dict[str, Any]:
     out = dict(record)
     record_id = (
         out.get("message_id")
+        or out.get("segment_id")
         or out.get("entry_id")
         or out.get("record_id")
         or out.get("transaction_id")

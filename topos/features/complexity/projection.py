@@ -35,6 +35,7 @@ SOURCE_INTENT: Dict[str, float] = {
     "time_log": 0.9,
     "github_activity": 0.9,
     "voxterm_transcripts": 0.8,
+    "youtube_transcripts": 0.2,
     "chatgpt": 0.7,
     "chatgpt_ui_conversation": 0.7,
     "chatgpt_file_ingestion": 0.7,
@@ -50,6 +51,7 @@ TABLE_INTENT: Dict[str, float] = {
     "conversation_messages": 0.5,
     "location_events": 0.3,
     "activity_events": 0.3,
+    "transcript_segments": 0.2,
 }
 
 DEFAULT_INTENT = 0.4

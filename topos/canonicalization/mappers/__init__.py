@@ -18,6 +18,7 @@ from .github_activity_mapper import GithubActivityCanonicalMapper
 from .google_calendar_mapper import GoogleCalendarMapper
 from .grok_mapper import GrokCanonicalMapper
 from .messenger_mapper import ImessageCanonicalMapper, SignalCanonicalMapper, VoxtermTranscriptCanonicalMapper
+from .transcript_mapper import TranscriptCanonicalMapper
 
 MAPPER_REGISTRY = {
     "chatgpt": ChatGPTCanonicalMapper,
@@ -37,6 +38,7 @@ MAPPER_REGISTRY = {
     "journal_time_log": JournalTimeLogMapper,
     "documents": DocumentsCanonicalMapper,
     "google_calendar": GoogleCalendarMapper,
+    "transcript": TranscriptCanonicalMapper,
 }
 
 __all__ = [
@@ -49,5 +51,6 @@ __all__ = [
     "GrokCanonicalMapper",
     "ImessageCanonicalMapper",
     "SignalCanonicalMapper",
+    "TranscriptCanonicalMapper",
     "MAPPER_REGISTRY",
 ]

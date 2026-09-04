@@ -53,6 +53,22 @@ SCHEMAS: Dict[str, Dict[str, Any]] = {
         "description": "iMessage message format (normalized from chat.db or sync); id may be imessage:ROWID",
         "file_format": "jsonl",
     },
+    "transcript.session.v1": {
+        "name": "Transcript Session",
+        "version": "1",
+        "required_fields": ["transcript_id", "items"],
+        "field_types": {
+            "transcript_id": str,
+            "title": str,
+            "origin_url": str,
+            "items": list,
+        },
+        "description": (
+            "Session-shaped transcript (YouTube archive or meeting tool). "
+            "items[] are caption utterances; role fields are ignored at parse."
+        ),
+        "file_format": "json",
+    },
     "signal.messages.v1": {
         "name": "Signal Messages",
         "version": "1",

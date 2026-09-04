@@ -235,6 +235,50 @@ def test_rematerialize_updates_edges_in_place_never_deletes_first(conn):
     assert touched_second == ids_first
 
 
+def test_topic_hub_is_kept_when_related_entities_fail_to_mint(conn):
+    """Members are the evidence — a hub with no discusses edges stays on the spine."""
+    _put_object(
+        conn,
+        object_id="o-orphan",
+        object_type="top_topics",
+        object_key="tc_openai_model",
+        payload={"tag": "OpenAI Model", "related_entities": ["??"]},
+    )
+    out = materialize_signal_objects_to_graph(conn)
+    assert out["topic_edges"] == 0
+    row = conn.execute(
+        "SELECT entity_id, entity_type FROM entities WHERE entity_id=?",
+        ("topic_tc_openai_model",),
+    ).fetchone()
+    assert row is not None
+    assert row[1] == "topic"
+
+
+def test_topic_related_name_resolves_to_existing_org_not_a_topic_twin(conn):
+    r = EntityResolver(conn)
+    org_id = r._create_entity("OpenAI", "org")
+    conn.commit()
+    _put_object(
+        conn,
+        object_id="o-openai",
+        object_type="top_topics",
+        object_key="tc_openai",
+        payload={"tag": "OpenAI Model", "related_entities": ["OpenAI"]},
+    )
+    materialize_signal_objects_to_graph(conn)
+    twins = conn.execute(
+        "SELECT entity_id, entity_type FROM entities WHERE normalized_name='openai'"
+    ).fetchall()
+    assert [t[1] for t in twins] == ["org"]
+    edge = conn.execute(
+        """
+        SELECT dst_entity_id, edge_type FROM entity_edges
+        WHERE src_entity_id='topic_tc_openai'
+        """
+    ).fetchone()
+    assert edge == (org_id, "discusses")
+
+
 def test_sweep_removes_only_stale_mz_edges(conn):
     r = EntityResolver(conn)
     subj = r._create_entity("Jonny", "person")

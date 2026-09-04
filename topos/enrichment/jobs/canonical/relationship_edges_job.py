@@ -26,6 +26,12 @@ class RelationshipEdgesJob(BaseEnrichmentJob):
         pairs: Counter[Tuple[str, str]] = Counter()
         source_id = None
         for msg in canonical_messages:
+            table = str(msg.get("_table") or msg.get("canonical_table") or "")
+            role = str(msg.get("actor_role") or "").strip().lower()
+            if table in {"transcript_segments", "transcripts", "transcript_speakers"}:
+                continue
+            if role == "ambient":
+                continue
             source_id = msg.get("source_id") or source_id
             conv = str(msg.get("conversation_id") or msg.get("thread_id") or "default")
             sender = str(msg.get("sender_id") or msg.get("contact_id") or msg.get("from") or "").strip()

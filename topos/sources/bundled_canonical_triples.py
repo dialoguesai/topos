@@ -30,6 +30,7 @@ BUNDLED_CANONICAL_TRIPLES: Dict[str, Tuple[str, str]] = {
     "notion.page.v1": ("documents", "documents"),
     "gdrive.file.v1": ("documents", "documents"),
     "gcal.events.v1": ("google_calendar", "schedule"),
+    "transcript.session.v1": ("transcript", "transcripts"),
 }
 
 # Known drift variants of bundled schema ids, seen in the wild: a 2026-07
@@ -55,6 +56,7 @@ VALID_CANONICAL_GROUP_IDS = frozenset(
         "places",
         "contacts",
         "documents",
+        "transcripts",
     }
 )
 

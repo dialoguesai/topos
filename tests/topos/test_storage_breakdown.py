@@ -66,6 +66,52 @@ def test_compute_local_storage_breakdown_groups_sqlite_and_raw(tmp_path: Path, m
 
 
 @pytest.mark.asyncio
+async def test_local_device_info_storage_breakdown_runs_off_the_loop(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """dbstat on the event-loop handle stalled /healthcheck (2026-09-04)."""
+    import asyncio
+    import threading
+    import time
+
+    from topos.config.settings import settings
+    import topos.services.local as local_mod
+
+    db_path = tmp_path / "database.db"
+    db_path.write_bytes(b"a" * 4096)
+    seen: dict[str, int] = {}
+
+    def _slow(_path):
+        seen["thread"] = threading.get_ident()
+        time.sleep(0.25)
+        return 4096, {"total_bytes": 4096, "sqlite_bytes": 4096, "raw_files_bytes": 0, "categories": []}
+
+    monkeypatch.setattr(settings, "topos_database_mode", "sqlite")
+    monkeypatch.setattr(local_mod, "_resolve_device_database_path", lambda: db_path)
+    monkeypatch.setattr(local_mod, "_cached_storage_snapshot", _slow)
+    monkeypatch.setattr(state, "db_conn", None, raising=False)
+    monkeypatch.setattr(state, "sync_client", None, raising=False)
+    monkeypatch.setattr(state, "get_system_info", lambda: {"hostname": "test-host"}, raising=True)
+
+    ticks = {"n": 0}
+
+    async def heartbeat() -> None:
+        while True:
+            ticks["n"] += 1
+            await asyncio.sleep(0.02)
+
+    hb = asyncio.get_running_loop().create_task(heartbeat())
+    try:
+        info = await LocalDeviceService().get_device_info()
+        assert ticks["n"] >= 5, "event loop stalled — storage breakdown ran on the loop"
+        assert seen["thread"] != threading.get_ident()
+        assert info.database_size_bytes == 4096
+    finally:
+        hb.cancel()
+
+
+@pytest.mark.asyncio
 async def test_local_device_info_includes_storage_breakdown(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

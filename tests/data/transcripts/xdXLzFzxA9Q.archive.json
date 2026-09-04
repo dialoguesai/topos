@@ -1,0 +1,1714 @@
+{
+  "schema": "yt_transcript_archive",
+  "version": 2,
+  "video_id": "xdXLzFzxA9Q",
+  "origin_url": "https://www.youtube.com/watch?v=xdXLzFzxA9Q",
+  "fetched_at": "2026-09-04T02:21:05.828809+00:00",
+  "languages_requested": [],
+  "preserve_formatting": false,
+  "transcript_meta": {
+    "language": "English (auto-generated)",
+    "language_code": "en",
+    "is_generated": true,
+    "is_translated": null,
+    "translation_language_code": null,
+    "item_count": 338,
+    "total_duration_sec": 1713.1979999999987
+  },
+  "items": [
+    {
+      "text": "GPT6",
+      "start": 0.16,
+      "duration": 5.119
+    },
+    {
+      "text": "is here. The new generation of OpenAI",
+      "start": 1.68,
+      "duration": 6.079
+    },
+    {
+      "text": "model, the absolute frontier of what's",
+      "start": 5.279,
+      "duration": 5.36
+    },
+    {
+      "text": "possible, and it's called Astra. I have",
+      "start": 7.759,
+      "duration": 5.601
+    },
+    {
+      "text": "had early access and have been testing",
+      "start": 10.639,
+      "duration": 5.2
+    },
+    {
+      "text": "it like crazy. And I'm just going to say",
+      "start": 13.36,
+      "duration": 5.52
+    },
+    {
+      "text": "upfront, this is absolutely the best",
+      "start": 15.839,
+      "duration": 5.6
+    },
+    {
+      "text": "model I have ever used. And some of the",
+      "start": 18.88,
+      "duration": 4.88
+    },
+    {
+      "text": "demos that I was able to create with",
+      "start": 21.439,
+      "duration": 5.201
+    },
+    {
+      "text": "this model are truly mind-blowing. So,",
+      "start": 23.76,
+      "duration": 4.16
+    },
+    {
+      "text": "make sure you stick around for that",
+      "start": 26.64,
+      "duration": 2.799
+    },
+    {
+      "text": "towards the end of the video. So, let's",
+      "start": 27.92,
+      "duration": 3.279
+    },
+    {
+      "text": "get into some of the details. So, the",
+      "start": 29.439,
+      "duration": 3.361
+    },
+    {
+      "text": "first thing I want to show you are the",
+      "start": 31.199,
+      "duration": 5.04
+    },
+    {
+      "text": "benchmarks because it absolutely blows",
+      "start": 32.8,
+      "duration": 4.88
+    },
+    {
+      "text": "everything else out of the water. Look",
+      "start": 36.239,
+      "duration": 4.401
+    },
+    {
+      "text": "at this. This is Arc AGI 3. This is the",
+      "start": 37.68,
+      "duration": 5.76
+    },
+    {
+      "text": "benchmark that drops an AI into a game",
+      "start": 40.64,
+      "duration": 5.68
+    },
+    {
+      "text": "with no other instructions other than",
+      "start": 43.44,
+      "duration": 5.76
+    },
+    {
+      "text": "complete it. And it basically saturated",
+      "start": 46.32,
+      "duration": 4.88
+    },
+    {
+      "text": "this benchmark, which is kind of a",
+      "start": 49.2,
+      "duration": 5.679
+    },
+    {
+      "text": "recent benchmark at 98.6%.",
+      "start": 51.2,
+      "duration": 7.12
+    },
+    {
+      "text": "It also saturated math. This is Frontier",
+      "start": 54.879,
+      "duration": 7.2
+    },
+    {
+      "text": "Math Tier 4 97.6%.",
+      "start": 58.32,
+      "duration": 6.479
+    },
+    {
+      "text": "Claude Fable 5.1, which literally just",
+      "start": 62.079,
+      "duration": 5.04
+    },
+    {
+      "text": "came out about a day ago, only scored",
+      "start": 64.799,
+      "duration": 6.961
+    },
+    {
+      "text": "87.8. So, this model is much better at",
+      "start": 67.119,
+      "duration": 8.961
+    },
+    {
+      "text": "math than Fable. Agents last exam, 59.3.",
+      "start": 71.76,
+      "duration": 6.56
+    },
+    {
+      "text": "Here's Bench CAD, which tests the",
+      "start": 76.08,
+      "duration": 4.64
+    },
+    {
+      "text": "model's ability to create 3D objects in",
+      "start": 78.32,
+      "duration": 6.0
+    },
+    {
+      "text": "CAD. absolute saturation 95.9%",
+      "start": 80.72,
+      "duration": 6.16
+    },
+    {
+      "text": "coming in over 10 points ahead of Fable",
+      "start": 84.32,
+      "duration": 6.159
+    },
+    {
+      "text": "5.1. And by the way, with my testing,",
+      "start": 86.88,
+      "duration": 6.08
+    },
+    {
+      "text": "that is one major improvement that I've",
+      "start": 90.479,
+      "duration": 5.041
+    },
+    {
+      "text": "noticed about this model. It is so good",
+      "start": 92.96,
+      "duration": 5.6
+    },
+    {
+      "text": "at 3D object creation and just general",
+      "start": 95.52,
+      "duration": 5.76
+    },
+    {
+      "text": "spatial awareness while it's creating 3D",
+      "start": 98.56,
+      "duration": 6.0
+    },
+    {
+      "text": "worlds. Here's Deepsu, the probably most",
+      "start": 101.28,
+      "duration": 6.24
+    },
+    {
+      "text": "accurate coding benchmark there is. When",
+      "start": 104.56,
+      "duration": 4.64
+    },
+    {
+      "text": "you're thinking about how do actual",
+      "start": 107.52,
+      "duration": 3.919
+    },
+    {
+      "text": "engineers feel about a model, this is",
+      "start": 109.2,
+      "duration": 3.84
+    },
+    {
+      "text": "the benchmark that reflects that",
+      "start": 111.439,
+      "duration": 6.241
+    },
+    {
+      "text": "sentiment. Here we go. 73%",
+      "start": 113.04,
+      "duration": 9.759
+    },
+    {
+      "text": "coming in above Claude Fable 5.1 at 67%.",
+      "start": 117.68,
+      "duration": 6.56
+    },
+    {
+      "text": "This is one of the benchmarks in which",
+      "start": 122.799,
+      "duration": 4.081
+    },
+    {
+      "text": "GPT6 didn't actually get number one.",
+      "start": 124.24,
+      "duration": 5.28
+    },
+    {
+      "text": "This is crazy to me. Gemini 3.8 8 Flash",
+      "start": 126.88,
+      "duration": 4.88
+    },
+    {
+      "text": "got 73.7%",
+      "start": 129.52,
+      "duration": 6.24
+    },
+    {
+      "text": "beating GPT6 Astra, which actually makes",
+      "start": 131.76,
+      "duration": 6.08
+    },
+    {
+      "text": "me lose a little bit of confidence in",
+      "start": 135.76,
+      "duration": 5.36
+    },
+    {
+      "text": "this benchmark because GPT6 Astra is by",
+      "start": 137.84,
+      "duration": 5.039
+    },
+    {
+      "text": "far the best coding model I've ever",
+      "start": 141.12,
+      "duration": 3.759
+    },
+    {
+      "text": "used. All right, let's keep going. We",
+      "start": 142.879,
+      "duration": 4.241
+    },
+    {
+      "text": "have Terminal Bench Science coming in at",
+      "start": 144.879,
+      "duration": 5.281
+    },
+    {
+      "text": "64. Another win. Exploit bench. The",
+      "start": 147.12,
+      "duration": 6.56
+    },
+    {
+      "text": "ability for the model to basically hack",
+      "start": 150.16,
+      "duration": 8.159
+    },
+    {
+      "text": "exploit code saturated 100%. I'm going",
+      "start": 153.68,
+      "duration": 6.8
+    },
+    {
+      "text": "to drop all of these benchmarks along",
+      "start": 158.319,
+      "duration": 5.041
+    },
+    {
+      "text": "with my full review and all of the demos",
+      "start": 160.48,
+      "duration": 4.88
+    },
+    {
+      "text": "on forwardfuture.com. I'm going to link",
+      "start": 163.36,
+      "duration": 3.76
+    },
+    {
+      "text": "that down below. All right, so here are",
+      "start": 165.36,
+      "duration": 4.32
+    },
+    {
+      "text": "a couple quotes from the blog from",
+      "start": 167.12,
+      "duration": 5.199
+    },
+    {
+      "text": "OpenAI about this model, and I could not",
+      "start": 169.68,
+      "duration": 5.04
+    },
+    {
+      "text": "agree more. It sets a new frontier on",
+      "start": 172.319,
+      "duration": 4.321
+    },
+    {
+      "text": "computer and browser use, handling the",
+      "start": 174.72,
+      "duration": 3.519
+    },
+    {
+      "text": "most demanding professional work with",
+      "start": 176.64,
+      "duration": 4.319
+    },
+    {
+      "text": "unmatched speed, accuracy, and judgment.",
+      "start": 178.239,
+      "duration": 4.72
+    },
+    {
+      "text": "through my testing and I have some demo",
+      "start": 180.959,
+      "duration": 5.441
+    },
+    {
+      "text": "videos of this. The model is just",
+      "start": 182.959,
+      "duration": 5.841
+    },
+    {
+      "text": "flawless at computer control and browser",
+      "start": 186.4,
+      "duration": 4.4
+    },
+    {
+      "text": "control. It completes things in the",
+      "start": 188.8,
+      "duration": 4.0
+    },
+    {
+      "text": "browser that were previously not",
+      "start": 190.8,
+      "duration": 5.76
+    },
+    {
+      "text": "possible and it does so more quickly",
+      "start": 192.8,
+      "duration": 6.719
+    },
+    {
+      "text": "than I have ever seen. It really is a",
+      "start": 196.56,
+      "duration": 6.319
+    },
+    {
+      "text": "step up on these specific functions. And",
+      "start": 199.519,
+      "duration": 6.72
+    },
+    {
+      "text": "so compared to GPT 5.6 six soul, which",
+      "start": 202.879,
+      "duration": 6.241
+    },
+    {
+      "text": "at the time was my favorite browser use",
+      "start": 206.239,
+      "duration": 4.72
+    },
+    {
+      "text": "model. Really, it was a major",
+      "start": 209.12,
+      "duration": 4.96
+    },
+    {
+      "text": "improvement over anything else I've ever",
+      "start": 210.959,
+      "duration": 5.92
+    },
+    {
+      "text": "used. Now, we actually have something",
+      "start": 214.08,
+      "duration": 5.76
+    },
+    {
+      "text": "that is significantly better and much",
+      "start": 216.879,
+      "duration": 6.08
+    },
+    {
+      "text": "faster. So, on OS World 2.0, it's about",
+      "start": 219.84,
+      "duration": 9.6
+    },
+    {
+      "text": "7% better and 50% faster. Fantastic. And",
+      "start": 222.959,
+      "duration": 8.64
+    },
+    {
+      "text": "apparently, it is more aligned. They",
+      "start": 229.44,
+      "duration": 4.64
+    },
+    {
+      "text": "took more time than usual before",
+      "start": 231.599,
+      "duration": 4.56
+    },
+    {
+      "text": "releasing this model to make sure their",
+      "start": 234.08,
+      "duration": 3.76
+    },
+    {
+      "text": "environments were solid after the",
+      "start": 236.159,
+      "duration": 3.841
+    },
+    {
+      "text": "hugging face hack to make sure that the",
+      "start": 237.84,
+      "duration": 4.72
+    },
+    {
+      "text": "model was aligned and didn't go beyond",
+      "start": 240.0,
+      "duration": 5.36
+    },
+    {
+      "text": "authorized targets. So specifically look",
+      "start": 242.56,
+      "duration": 7.2
+    },
+    {
+      "text": "at this on GBT 5.6 soul 48.2% of the",
+      "start": 245.36,
+      "duration": 7.92
+    },
+    {
+      "text": "time when you gave it a difficult or",
+      "start": 249.76,
+      "duration": 7.36
+    },
+    {
+      "text": "impossible task but guard rails in the",
+      "start": 253.28,
+      "duration": 6.239
+    },
+    {
+      "text": "kind of instructions on how to complete",
+      "start": 257.12,
+      "duration": 7.04
+    },
+    {
+      "text": "that task. 48% of the time GPT 5.6 Soul",
+      "start": 259.519,
+      "duration": 7.68
+    },
+    {
+      "text": "went beyond those instructions and with",
+      "start": 264.16,
+      "duration": 7.44
+    },
+    {
+      "text": "GPT6 Astra 0% of the time. And this is a",
+      "start": 267.199,
+      "duration": 6.881
+    },
+    {
+      "text": "special evaluation that they created",
+      "start": 271.6,
+      "duration": 4.879
+    },
+    {
+      "text": "after the hugging face incident. So they",
+      "start": 274.08,
+      "duration": 5.44
+    },
+    {
+      "text": "basically set up that specific",
+      "start": 276.479,
+      "duration": 5.041
+    },
+    {
+      "text": "environment again and saw if it was",
+      "start": 279.52,
+      "duration": 3.36
+    },
+    {
+      "text": "willing to break out of that",
+      "start": 281.52,
+      "duration": 4.16
+    },
+    {
+      "text": "containment. So very good alignment on",
+      "start": 282.88,
+      "duration": 5.28
+    },
+    {
+      "text": "Astra. It is also discovering new",
+      "start": 285.68,
+      "duration": 4.48
+    },
+    {
+      "text": "knowledge. And I really think this is",
+      "start": 288.16,
+      "duration": 4.72
+    },
+    {
+      "text": "one of the first times that I've seen",
+      "start": 290.16,
+      "duration": 4.319
+    },
+    {
+      "text": "something like this happen. You know how",
+      "start": 292.88,
+      "duration": 3.039
+    },
+    {
+      "text": "I mentioned the Frontier Math benchmark",
+      "start": 294.479,
+      "duration": 3.921
+    },
+    {
+      "text": "is saturated? Well, check this out. Two",
+      "start": 295.919,
+      "duration": 5.28
+    },
+    {
+      "text": "advances in prime number research. Astra",
+      "start": 298.4,
+      "duration": 4.88
+    },
+    {
+      "text": "helped lower the bound on infinitely",
+      "start": 301.199,
+      "duration": 6.161
+    },
+    {
+      "text": "recurring prime gaps from 240 to 186.",
+      "start": 303.28,
+      "duration": 5.919
+    },
+    {
+      "text": "And if you don't know what that means,",
+      "start": 307.36,
+      "duration": 3.6
+    },
+    {
+      "text": "this is an improvement in a math",
+      "start": 309.199,
+      "duration": 4.961
+    },
+    {
+      "text": "algorithm basically. And number two, it",
+      "start": 310.96,
+      "duration": 5.519
+    },
+    {
+      "text": "improved a term in a large gap bound",
+      "start": 314.16,
+      "duration": 4.4
+    },
+    {
+      "text": "that had stood unchanged for over 80",
+      "start": 316.479,
+      "duration": 5.121
+    },
+    {
+      "text": "years. And so this is math that did not",
+      "start": 318.56,
+      "duration": 6.32
+    },
+    {
+      "text": "exist just a few weeks ago. Kind of",
+      "start": 321.6,
+      "duration": 6.319
+    },
+    {
+      "text": "crazy to think about. And yes, it's not",
+      "start": 324.88,
+      "duration": 5.039
+    },
+    {
+      "text": "cheap. It is the Frontier, so you're",
+      "start": 327.919,
+      "duration": 4.081
+    },
+    {
+      "text": "going to be paying Frontier prices. It's",
+      "start": 329.919,
+      "duration": 4.641
+    },
+    {
+      "text": "$10 per million input tokens, $50 per",
+      "start": 332.0,
+      "duration": 4.88
+    },
+    {
+      "text": "million output tokens. And we have fast",
+      "start": 334.56,
+      "duration": 5.12
+    },
+    {
+      "text": "mode. 2 1/2x the speed, two times the",
+      "start": 336.88,
+      "duration": 6.0
+    },
+    {
+      "text": "price, which is actually pretty good.",
+      "start": 339.68,
+      "duration": 5.12
+    },
+    {
+      "text": "Usually we get like 1 and a half times",
+      "start": 342.88,
+      "duration": 4.48
+    },
+    {
+      "text": "the speed for 2x the price, but now we",
+      "start": 344.8,
+      "duration": 5.36
+    },
+    {
+      "text": "get 2 and 1/2 for 2x. It's available on",
+      "start": 347.36,
+      "duration": 5.52
+    },
+    {
+      "text": "the OpenAI API, AWS Bedrock, and",
+      "start": 350.16,
+      "duration": 4.56
+    },
+    {
+      "text": "Microsoft Azure. And it's going to be",
+      "start": 352.88,
+      "duration": 3.759
+    },
+    {
+      "text": "available for all paying users over the",
+      "start": 354.72,
+      "duration": 3.68
+    },
+    {
+      "text": "next few days. All right, I know why",
+      "start": 356.639,
+      "duration": 3.681
+    },
+    {
+      "text": "you're all here. Let me show you some of",
+      "start": 358.4,
+      "duration": 4.32
+    },
+    {
+      "text": "these demos. I really want to emphasize",
+      "start": 360.32,
+      "duration": 4.879
+    },
+    {
+      "text": "how good it is at game creation and",
+      "start": 362.72,
+      "duration": 5.039
+    },
+    {
+      "text": "specifically 3D assets. This is called",
+      "start": 365.199,
+      "duration": 5.761
+    },
+    {
+      "text": "Little Planet. I gave it like a two",
+      "start": 367.759,
+      "duration": 5.681
+    },
+    {
+      "text": "sentence prompt to create this. And so",
+      "start": 370.96,
+      "duration": 5.2
+    },
+    {
+      "text": "we have this gorgeous little world. You",
+      "start": 373.44,
+      "duration": 4.56
+    },
+    {
+      "text": "can zoom in. You can see all of the",
+      "start": 376.16,
+      "duration": 3.36
+    },
+    {
+      "text": "little people, the little moving",
+      "start": 378.0,
+      "duration": 4.479
+    },
+    {
+      "text": "objects. Here's a butterfly. Zoom out,",
+      "start": 379.52,
+      "duration": 6.08
+    },
+    {
+      "text": "move around. But we actually have a",
+      "start": 382.479,
+      "duration": 5.921
+    },
+    {
+      "text": "little dude here. Look at this. This was",
+      "start": 385.6,
+      "duration": 5.36
+    },
+    {
+      "text": "a two sentence prompt and it is",
+      "start": 388.4,
+      "duration": 4.96
+    },
+    {
+      "text": "absolutely gorgeous. It has a bunch of",
+      "start": 390.96,
+      "duration": 4.239
+    },
+    {
+      "text": "different locations that it tells you to",
+      "start": 393.36,
+      "duration": 4.24
+    },
+    {
+      "text": "go look at and we can just walk around",
+      "start": 395.199,
+      "duration": 4.72
+    },
+    {
+      "text": "and see what's going on. We can jump.",
+      "start": 397.6,
+      "duration": 6.0
+    },
+    {
+      "text": "But just the detail is so so impressive.",
+      "start": 399.919,
+      "duration": 5.761
+    },
+    {
+      "text": "Nothing is colliding here. Everything",
+      "start": 403.6,
+      "duration": 5.039
+    },
+    {
+      "text": "looks really good. Here's a little polar",
+      "start": 405.68,
+      "duration": 5.04
+    },
+    {
+      "text": "bear I can go visit. Now, these are",
+      "start": 408.639,
+      "duration": 4.881
+    },
+    {
+      "text": "static. With one additional prompt, I",
+      "start": 410.72,
+      "duration": 5.84
+    },
+    {
+      "text": "can make the entire world come alive.",
+      "start": 413.52,
+      "duration": 4.72
+    },
+    {
+      "text": "And look at that. I didn't even ask it",
+      "start": 416.56,
+      "duration": 3.199
+    },
+    {
+      "text": "to do that, but as soon as it went in",
+      "start": 418.24,
+      "duration": 3.76
+    },
+    {
+      "text": "the water, he's started kind of walking",
+      "start": 419.759,
+      "duration": 3.84
+    },
+    {
+      "text": "different, like waiting through the",
+      "start": 422.0,
+      "duration": 4.4
+    },
+    {
+      "text": "water. Very, very impressive. Now he's",
+      "start": 423.599,
+      "duration": 5.681
+    },
+    {
+      "text": "back on land. There we go. So, here's",
+      "start": 426.4,
+      "duration": 4.799
+    },
+    {
+      "text": "one thing. Ring the bell. I go over",
+      "start": 429.28,
+      "duration": 4.16
+    },
+    {
+      "text": "there. Rang the bell. Little animation.",
+      "start": 431.199,
+      "duration": 5.12
+    },
+    {
+      "text": "Super nice. Super easy. And you know",
+      "start": 433.44,
+      "duration": 5.44
+    },
+    {
+      "text": "what? I really do feel like we're very",
+      "start": 436.319,
+      "duration": 5.44
+    },
+    {
+      "text": "close to a world in which like prompt to",
+      "start": 438.88,
+      "duration": 6.48
+    },
+    {
+      "text": "playable, enjoyable game feels like if",
+      "start": 441.759,
+      "duration": 5.761
+    },
+    {
+      "text": "we're not here, it is right around the",
+      "start": 445.36,
+      "duration": 4.239
+    },
+    {
+      "text": "corner. And again, I'm going to drop all",
+      "start": 447.52,
+      "duration": 3.6
+    },
+    {
+      "text": "of these down below so you can play",
+      "start": 449.599,
+      "duration": 4.081
+    },
+    {
+      "text": "them. Shout out to here. Now for hosting",
+      "start": 451.12,
+      "duration": 4.32
+    },
+    {
+      "text": "all of this. I literally just told my",
+      "start": 453.68,
+      "duration": 3.919
+    },
+    {
+      "text": "agent, \"Publish it.\" And it gave me a",
+      "start": 455.44,
+      "duration": 4.479
+    },
+    {
+      "text": "link within seconds. And if you want to",
+      "start": 457.599,
+      "duration": 4.561
+    },
+    {
+      "text": "use here now, it's so simple. Literally",
+      "start": 459.919,
+      "duration": 4.961
+    },
+    {
+      "text": "tell Codeex to publish to here. now and",
+      "start": 462.16,
+      "duration": 4.479
+    },
+    {
+      "text": "it will know exactly what to do. Your",
+      "start": 464.88,
+      "duration": 3.36
+    },
+    {
+      "text": "agent will grab the instruction, publish",
+      "start": 466.639,
+      "duration": 3.361
+    },
+    {
+      "text": "a website, and give you a link within",
+      "start": 468.24,
+      "duration": 3.2
+    },
+    {
+      "text": "seconds. You don't even need to be",
+      "start": 470.0,
+      "duration": 3.039
+    },
+    {
+      "text": "signed up. Then, if you sign up,",
+      "start": 471.44,
+      "duration": 3.36
+    },
+    {
+      "text": "whatever you publish will be permanent.",
+      "start": 473.039,
+      "duration": 3.6
+    },
+    {
+      "text": "Here now is the easiest way to let your",
+      "start": 474.8,
+      "duration": 4.56
+    },
+    {
+      "text": "agent publish and host anything on the",
+      "start": 476.639,
+      "duration": 6.56
+    },
+    {
+      "text": "web. PDFs, full games, websites, and",
+      "start": 479.36,
+      "duration": 6.239
+    },
+    {
+      "text": "everything in between. And it's free.",
+      "start": 483.199,
+      "duration": 4.641
+    },
+    {
+      "text": "You get a link instantly, and it works",
+      "start": 485.599,
+      "duration": 4.961
+    },
+    {
+      "text": "with any agent. So, thanks to Here Now",
+      "start": 487.84,
+      "duration": 4.32
+    },
+    {
+      "text": "for sponsoring this video. All right.",
+      "start": 490.56,
+      "duration": 3.919
+    },
+    {
+      "text": "Next is Ratronaut. And I used to play",
+      "start": 492.16,
+      "duration": 4.0
+    },
+    {
+      "text": "this game way back in the day called",
+      "start": 494.479,
+      "duration": 3.921
+    },
+    {
+      "text": "Choo Choo Rocket with my friends and I",
+      "start": 496.16,
+      "duration": 4.08
+    },
+    {
+      "text": "basically had it recreate Choo Choo",
+      "start": 498.4,
+      "duration": 3.919
+    },
+    {
+      "text": "Rocket. So basically these little mice",
+      "start": 500.24,
+      "duration": 3.92
+    },
+    {
+      "text": "roam around and you try to get them to",
+      "start": 502.319,
+      "duration": 4.16
+    },
+    {
+      "text": "land in the rocket. It's multiplayer.",
+      "start": 504.16,
+      "duration": 4.24
+    },
+    {
+      "text": "You want to get as many mice as you can.",
+      "start": 506.479,
+      "duration": 4.4
+    },
+    {
+      "text": "You can place these arrows to change the",
+      "start": 508.4,
+      "duration": 4.8
+    },
+    {
+      "text": "navigation of the mice to try to get it.",
+      "start": 510.879,
+      "duration": 4.561
+    },
+    {
+      "text": "You can also mess with the other players",
+      "start": 513.2,
+      "duration": 4.399
+    },
+    {
+      "text": "by basically making the mice go around",
+      "start": 515.44,
+      "duration": 5.039
+    },
+    {
+      "text": "their rockets. It's really cool. So it",
+      "start": 517.599,
+      "duration": 5.201
+    },
+    {
+      "text": "worked. This is just a single prompt.",
+      "start": 520.479,
+      "duration": 4.401
+    },
+    {
+      "text": "There we go. So, I'm red. I'm going to",
+      "start": 522.8,
+      "duration": 4.08
+    },
+    {
+      "text": "try to get all of them into my little",
+      "start": 524.88,
+      "duration": 4.399
+    },
+    {
+      "text": "red rocket right there. All right. Next,",
+      "start": 526.88,
+      "duration": 4.079
+    },
+    {
+      "text": "this is a test that I've been giving to",
+      "start": 529.279,
+      "duration": 3.841
+    },
+    {
+      "text": "all the models recently. And it's",
+      "start": 530.959,
+      "duration": 5.44
+    },
+    {
+      "text": "basically to create seven different mini",
+      "start": 533.12,
+      "duration": 5.6
+    },
+    {
+      "text": "kind of biomes. You know, we have one",
+      "start": 536.399,
+      "duration": 4.401
+    },
+    {
+      "text": "that's an ocean, we have a beach, we",
+      "start": 538.72,
+      "duration": 4.799
+    },
+    {
+      "text": "have a desert, a farm. And this one",
+      "start": 540.8,
+      "duration": 4.479
+    },
+    {
+      "text": "looks incredible. The detail is",
+      "start": 543.519,
+      "duration": 6.081
+    },
+    {
+      "text": "fantastic. I see no issues, no clipping,",
+      "start": 545.279,
+      "duration": 7.281
+    },
+    {
+      "text": "no weird assets. Everything looks",
+      "start": 549.6,
+      "duration": 6.72
+    },
+    {
+      "text": "beautiful. Um, GPT 5.6 Soul actually did",
+      "start": 552.56,
+      "duration": 5.76
+    },
+    {
+      "text": "really well with this. So, I'm not",
+      "start": 556.32,
+      "duration": 5.04
+    },
+    {
+      "text": "surprised that GPT6 also did very, very",
+      "start": 558.32,
+      "duration": 4.639
+    },
+    {
+      "text": "well. All right, this is another fun",
+      "start": 561.36,
+      "duration": 4.96
+    },
+    {
+      "text": "one. This is a 3D city created entirely",
+      "start": 562.959,
+      "duration": 6.0
+    },
+    {
+      "text": "with asky characters. So, if I enter the",
+      "start": 566.32,
+      "duration": 4.8
+    },
+    {
+      "text": "city, you can look around and if you",
+      "start": 568.959,
+      "duration": 4.0
+    },
+    {
+      "text": "look closely, everything are little",
+      "start": 571.12,
+      "duration": 3.52
+    },
+    {
+      "text": "characters. You can see all these",
+      "start": 572.959,
+      "duration": 4.241
+    },
+    {
+      "text": "windows right here are L's and yeah,",
+      "start": 574.64,
+      "duration": 4.319
+    },
+    {
+      "text": "everything. But it is a full generative",
+      "start": 577.2,
+      "duration": 3.68
+    },
+    {
+      "text": "world. We have a bunch of people walking",
+      "start": 578.959,
+      "duration": 3.921
+    },
+    {
+      "text": "around. It feels very alive. It's",
+      "start": 580.88,
+      "duration": 4.0
+    },
+    {
+      "text": "raining right now. There's a little mini",
+      "start": 582.88,
+      "duration": 4.0
+    },
+    {
+      "text": "map in the bottom right corner if you",
+      "start": 584.88,
+      "duration": 4.079
+    },
+    {
+      "text": "can see that. Here's a little overpass",
+      "start": 586.88,
+      "duration": 5.04
+    },
+    {
+      "text": "right there. And yeah, it it runs really",
+      "start": 588.959,
+      "duration": 6.081
+    },
+    {
+      "text": "well, very fast. All of the buildings",
+      "start": 591.92,
+      "duration": 5.12
+    },
+    {
+      "text": "look realistic, but again, it's all",
+      "start": 595.04,
+      "duration": 5.44
+    },
+    {
+      "text": "created with different ASI characters.",
+      "start": 597.04,
+      "duration": 5.68
+    },
+    {
+      "text": "Now, for the most impressive one, at",
+      "start": 600.48,
+      "duration": 5.6
+    },
+    {
+      "text": "least in my opinion, I put Astra on this",
+      "start": 602.72,
+      "duration": 7.28
+    },
+    {
+      "text": "and set a goal to recreate Sim City. And",
+      "start": 606.08,
+      "duration": 7.6
+    },
+    {
+      "text": "after 5 days, it was still going. And",
+      "start": 610.0,
+      "duration": 7.44
+    },
+    {
+      "text": "here's what it created. A 3D gorgeous",
+      "start": 613.68,
+      "duration": 6.24
+    },
+    {
+      "text": "Sim City replica. I mean, look at the",
+      "start": 617.44,
+      "duration": 5.44
+    },
+    {
+      "text": "details. If I start playing it, you can",
+      "start": 619.92,
+      "duration": 5.2
+    },
+    {
+      "text": "see the city looks very alive. We have a",
+      "start": 622.88,
+      "duration": 4.72
+    },
+    {
+      "text": "bunch of people walking around, cars",
+      "start": 625.12,
+      "duration": 4.8
+    },
+    {
+      "text": "with traffic. We have people crossing",
+      "start": 627.6,
+      "duration": 4.72
+    },
+    {
+      "text": "the street, all of these buildings, all",
+      "start": 629.92,
+      "duration": 5.039
+    },
+    {
+      "text": "of the assets. I literally watched it",
+      "start": 632.32,
+      "duration": 6.8
+    },
+    {
+      "text": "create each asset one by one using /goal",
+      "start": 634.959,
+      "duration": 6.241
+    },
+    {
+      "text": "and the amount of functionality it was",
+      "start": 639.12,
+      "duration": 4.64
+    },
+    {
+      "text": "able to build into this in just a few",
+      "start": 641.2,
+      "duration": 5.44
+    },
+    {
+      "text": "days was really impressive. Check this",
+      "start": 643.76,
+      "duration": 5.28
+    },
+    {
+      "text": "out. So, we have roads with multiple",
+      "start": 646.64,
+      "duration": 4.24
+    },
+    {
+      "text": "types of roads. We have highways. I can",
+      "start": 649.04,
+      "duration": 4.239
+    },
+    {
+      "text": "set up a highway right there. Railway.",
+      "start": 650.88,
+      "duration": 4.399
+    },
+    {
+      "text": "We have different zones, residential,",
+      "start": 653.279,
+      "duration": 3.68
+    },
+    {
+      "text": "commercial, industrial, office, and",
+      "start": 655.279,
+      "duration": 3.841
+    },
+    {
+      "text": "agriculture. We have different towers",
+      "start": 656.959,
+      "duration": 3.921
+    },
+    {
+      "text": "that you can put. Here are utilities",
+      "start": 659.12,
+      "duration": 4.0
+    },
+    {
+      "text": "which you have to unlock. The city is",
+      "start": 660.88,
+      "duration": 5.199
+    },
+    {
+      "text": "actually working. The population is",
+      "start": 663.12,
+      "duration": 5.76
+    },
+    {
+      "text": "growing or declining. There's happiness,",
+      "start": 666.079,
+      "duration": 4.801
+    },
+    {
+      "text": "city funds. Here's different energy",
+      "start": 668.88,
+      "duration": 4.16
+    },
+    {
+      "text": "sources. So, I can do a nuclear station.",
+      "start": 670.88,
+      "duration": 4.48
+    },
+    {
+      "text": "Boom. I'll plop that right there. Look",
+      "start": 673.04,
+      "duration": 4.72
+    },
+    {
+      "text": "at that. All of these assets were just",
+      "start": 675.36,
+      "duration": 4.32
+    },
+    {
+      "text": "created one by one. It's so impressive.",
+      "start": 677.76,
+      "duration": 3.6
+    },
+    {
+      "text": "Here's a police station I can throw down",
+      "start": 679.68,
+      "duration": 3.36
+    },
+    {
+      "text": "right there so you can see it. I can",
+      "start": 681.36,
+      "duration": 3.919
+    },
+    {
+      "text": "rotate around it. Here's a university",
+      "start": 683.04,
+      "duration": 4.08
+    },
+    {
+      "text": "right next to the nuclear energy",
+      "start": 685.279,
+      "duration": 4.24
+    },
+    {
+      "text": "facility. Perfect. Here's a convention",
+      "start": 687.12,
+      "duration": 4.56
+    },
+    {
+      "text": "center. We have transport, industry,",
+      "start": 689.519,
+      "duration": 4.32
+    },
+    {
+      "text": "landscape. We have all of these",
+      "start": 691.68,
+      "duration": 3.92
+    },
+    {
+      "text": "different settings. So, I can see like",
+      "start": 693.839,
+      "duration": 4.0
+    },
+    {
+      "text": "fire and rescue, medical, police. I can",
+      "start": 695.6,
+      "duration": 5.12
+    },
+    {
+      "text": "see recycling. I can see water quality.",
+      "start": 697.839,
+      "duration": 5.841
+    },
+    {
+      "text": "I mean, the depth of functionality in",
+      "start": 700.72,
+      "duration": 6.32
+    },
+    {
+      "text": "this game is just absolutely stunning.",
+      "start": 703.68,
+      "duration": 4.56
+    },
+    {
+      "text": "All right, I want to show you a few",
+      "start": 707.04,
+      "duration": 3.919
+    },
+    {
+      "text": "examples of how good Astra is at browser",
+      "start": 708.24,
+      "duration": 4.56
+    },
+    {
+      "text": "control. Check this out. So here I had",
+      "start": 710.959,
+      "duration": 4.241
+    },
+    {
+      "text": "it open Excal and draw a research",
+      "start": 712.8,
+      "duration": 4.56
+    },
+    {
+      "text": "workflow. You can see the timestamp",
+      "start": 715.2,
+      "duration": 4.48
+    },
+    {
+      "text": "right here. It's going to skip ahead in",
+      "start": 717.36,
+      "duration": 4.56
+    },
+    {
+      "text": "a few parts, but you'll see the overall",
+      "start": 719.68,
+      "duration": 4.0
+    },
+    {
+      "text": "duration of time that it took to do",
+      "start": 721.92,
+      "duration": 3.52
+    },
+    {
+      "text": "this. So check this out. Here we go.",
+      "start": 723.68,
+      "duration": 4.159
+    },
+    {
+      "text": "It's already adding text. It's adding",
+      "start": 725.44,
+      "duration": 5.839
+    },
+    {
+      "text": "bubbles. It's at 17 seconds right now.",
+      "start": 727.839,
+      "duration": 6.24
+    },
+    {
+      "text": "31 seconds to do this. And there we go.",
+      "start": 731.279,
+      "duration": 5.041
+    },
+    {
+      "text": "Completed in about 30 seconds. Now it's",
+      "start": 734.079,
+      "duration": 6.241
+    },
+    {
+      "text": "doing research on rare Pokemon cards. 30",
+      "start": 736.32,
+      "duration": 7.28
+    },
+    {
+      "text": "seconds in. 40 seconds in. And I mean,",
+      "start": 740.32,
+      "duration": 5.519
+    },
+    {
+      "text": "all of this gets done in under one or",
+      "start": 743.6,
+      "duration": 4.0
+    },
+    {
+      "text": "two minutes. Now, it's running",
+      "start": 745.839,
+      "duration": 3.601
+    },
+    {
+      "text": "comparisons. It's not just looking at",
+      "start": 747.6,
+      "duration": 4.239
+    },
+    {
+      "text": "the page. So, here we go. That finished",
+      "start": 749.44,
+      "duration": 5.68
+    },
+    {
+      "text": "in a minute 38 seconds to look at all of",
+      "start": 751.839,
+      "duration": 5.281
+    },
+    {
+      "text": "these different cards, compare them, and",
+      "start": 755.12,
+      "duration": 4.8
+    },
+    {
+      "text": "now we're going to plan our walk through",
+      "start": 757.12,
+      "duration": 5.2
+    },
+    {
+      "text": "Kyoto. So, this is actually it using",
+      "start": 759.92,
+      "duration": 5.28
+    },
+    {
+      "text": "Google Maps. And by the way, it put",
+      "start": 762.32,
+      "duration": 4.639
+    },
+    {
+      "text": "together this entire video you're",
+      "start": 765.2,
+      "duration": 3.84
+    },
+    {
+      "text": "looking at. It recorded its own screen,",
+      "start": 766.959,
+      "duration": 3.68
+    },
+    {
+      "text": "put together the information on the left",
+      "start": 769.04,
+      "duration": 4.479
+    },
+    {
+      "text": "side, and there we go, a minute 23 to",
+      "start": 770.639,
+      "duration": 5.521
+    },
+    {
+      "text": "plan an entire walk through Kyoto. Now,",
+      "start": 773.519,
+      "duration": 4.481
+    },
+    {
+      "text": "there are a few critiques that I will",
+      "start": 776.16,
+      "duration": 4.799
+    },
+    {
+      "text": "give it. Uh, number one, it has this",
+      "start": 778.0,
+      "duration": 6.56
+    },
+    {
+      "text": "tendency to work for 30 minutes, but",
+      "start": 780.959,
+      "duration": 5.921
+    },
+    {
+      "text": "with a little bit of prompt adjustments,",
+      "start": 784.56,
+      "duration": 4.079
+    },
+    {
+      "text": "you can get it to go for much longer.",
+      "start": 786.88,
+      "duration": 4.32
+    },
+    {
+      "text": "And of course, if you use /goal, same",
+      "start": 788.639,
+      "duration": 5.2
+    },
+    {
+      "text": "thing. It also has some of the same",
+      "start": 791.2,
+      "duration": 4.879
+    },
+    {
+      "text": "design tendencies. So, as you can see",
+      "start": 793.839,
+      "duration": 4.481
+    },
+    {
+      "text": "here, a lot of these demos kind of look",
+      "start": 796.079,
+      "duration": 5.281
+    },
+    {
+      "text": "the same. This like faded green and",
+      "start": 798.32,
+      "duration": 6.8
+    },
+    {
+      "text": "other pastel colors, very flat design.",
+      "start": 801.36,
+      "duration": 5.68
+    },
+    {
+      "text": "So, still a lot of those same design",
+      "start": 805.12,
+      "duration": 5.839
+    },
+    {
+      "text": "tendencies as GPT 5.6, but that can be",
+      "start": 807.04,
+      "duration": 6.88
+    },
+    {
+      "text": "easily fixed. It is very steerable in",
+      "start": 810.959,
+      "duration": 5.201
+    },
+    {
+      "text": "the design department. You just tell it.",
+      "start": 813.92,
+      "duration": 4.96
+    },
+    {
+      "text": "But by default, it really wants to use",
+      "start": 816.16,
+      "duration": 5.52
+    },
+    {
+      "text": "this forest green everywhere. And then",
+      "start": 818.88,
+      "duration": 6.079
+    },
+    {
+      "text": "last, writing. This is something that is",
+      "start": 821.68,
+      "duration": 5.12
+    },
+    {
+      "text": "near and dear to me. We write a lot at",
+      "start": 824.959,
+      "duration": 4.88
+    },
+    {
+      "text": "Ford Future and obviously every other",
+      "start": 826.8,
+      "duration": 6.479
+    },
+    {
+      "text": "model just has this severe AI smell to",
+      "start": 829.839,
+      "duration": 7.12
+    },
+    {
+      "text": "its writing and I will say GPT6 is",
+      "start": 833.279,
+      "duration": 7.441
+    },
+    {
+      "text": "definitely the best, but still very much",
+      "start": 836.959,
+      "duration": 6.081
+    },
+    {
+      "text": "has that AI smell to it. So, we got",
+      "start": 840.72,
+      "duration": 5.52
+    },
+    {
+      "text": "Fable 5.1 this week. We now have the",
+      "start": 843.04,
+      "duration": 5.2
+    },
+    {
+      "text": "brand new training run, the brand new",
+      "start": 846.24,
+      "duration": 5.599
+    },
+    {
+      "text": "model out of OpenAI. And what do you",
+      "start": 848.24,
+      "duration": 4.959
+    },
+    {
+      "text": "think? Which one do you think is better?",
+      "start": 851.839,
+      "duration": 2.961
+    },
+    {
+      "text": "I actually did a full review of Fable",
+      "start": 853.199,
+      "duration": 4.32
+    },
+    {
+      "text": "5.1.",
+      "start": 854.8,
+      "duration": 2.719
+    }
+  ],
+  "video": {
+    "video_id": "xdXLzFzxA9Q",
+    "canonical_url": "https://www.youtube.com/watch?v=xdXLzFzxA9Q"
+  }
+}

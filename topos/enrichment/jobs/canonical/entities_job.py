@@ -19,7 +19,15 @@ _MIN_RESOLVE_CONFIDENCE = 0.60
 # activity events: event_id/occurred_at, journal entries: entry_id/entry_at, …).
 # One key contract here, or whole sources silently skip extraction — the
 # 2026-07-14 backfill lost browser_visits/grow_* exactly this way.
-_RECORD_ID_FIELDS = ("message_id", "id", "record_id", "event_id", "entry_id", "transaction_id")
+_RECORD_ID_FIELDS = (
+    "message_id",
+    "segment_id",
+    "id",
+    "record_id",
+    "event_id",
+    "entry_id",
+    "transaction_id",
+)
 _EVENT_AT_FIELDS = ("event_at", "ts", "occurred_at", "entry_at", "starts_at", "created_at")
 
 

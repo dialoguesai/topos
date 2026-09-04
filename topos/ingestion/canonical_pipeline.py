@@ -45,6 +45,37 @@ def _prepare_signal_record(record: Dict[str, Any]) -> Dict[str, Any]:
     return prepare_signal_record(record)
 
 
+_STALE_SEGMENT_DERIVED_TABLES = (
+    ("entity_mentions", "record_id"),
+    ("signal_embeddings", "record_id"),
+    ("topic_cluster_members", "record_id"),
+    ("cluster_candidates", "record_id"),
+    ("timeline", "record_id"),
+)
+
+
+def _drop_derived_for_segment_ids(db_conn, stale_ids: Sequence[str]) -> None:
+    """Remove derived rows for replaced caption fragments. No graph rebuild."""
+    ids = [str(item) for item in stale_ids if str(item).strip()]
+    if not ids or db_conn is None:
+        return
+    import sqlite3
+
+    with batched_writes(db_conn):
+        for start in range(0, len(ids), 400):
+            chunk = ids[start : start + 400]
+            placeholders = ",".join("?" * len(chunk))
+            for table, column in _STALE_SEGMENT_DERIVED_TABLES:
+                try:
+                    db_conn.execute(
+                        f"DELETE FROM {table} WHERE {column} IN ({placeholders})",
+                        chunk,
+                    )
+                except sqlite3.OperationalError:
+                    continue
+        commit_connection(db_conn)
+
+
 def _episode_role_mix(canonical_records: List[Dict[str, Any]]) -> Optional[str]:
     """Best-effort provenance-role histogram for the batch (P4.2).
 
@@ -368,6 +399,55 @@ def canonicalize_normalized_batch(
             result.errors.append({"step": "ai_chat", "error": str(exc)})
         return _finish()
 
+    if group == "transcripts" and (
+        source_def.canonical_mapper_id or getattr(source_def, "canonical_field_map", None)
+    ):
+        try:
+            from ..canonicalization.declared_field_map import build_canonical_mapper
+            from ..storage.canonical.canonical_store import SQLiteCanonicalStore
+
+            mapper = build_canonical_mapper(source_def, default_table="transcripts")
+            store = SQLiteCanonicalStore(db_conn)
+            created = 0
+            keep_by_transcript: Dict[str, set[str]] = {}
+            for payload in payloads:
+                norm = NormalizedRecord(
+                    record_id=str(payload.get("transcript_id") or payload.get("record_id") or ""),
+                    payload=payload,
+                )
+                mapped_records = (
+                    [(rec.table or "transcripts", dict(rec.payload)) for rec in mapper.map_many(norm)]
+                    if mapper
+                    else [("transcripts", dict(payload))]
+                )
+                for target_table, canonical_payload in mapped_records:
+                    canonical_payload["source_id"] = source_id
+                    ref = store.upsert(target_table, canonical_payload, sync_batch_id=sync_batch_id)
+                    if ref.created:
+                        created += 1
+                    if target_table != "transcript_segments":
+                        continue
+                    tid = str(canonical_payload.get("transcript_id") or "")
+                    sid = str(canonical_payload.get("segment_id") or "")
+                    if tid and sid:
+                        keep_by_transcript.setdefault(tid, set()).add(sid)
+                    signal_record = _prepare_signal_record(dict(canonical_payload))
+                    signal_record["source_id"] = source_id
+                    signal_record["_table"] = "transcript_segments"
+                    signal_record["actor_role"] = "ambient"
+                    signal_record["is_from_self"] = 0
+                    result.canonical_records.append(signal_record)
+            stale_ids: List[str] = []
+            for tid, keep in keep_by_transcript.items():
+                stale_ids.extend(store.drop_stale_transcript_segments(tid, keep))
+            if stale_ids:
+                _drop_derived_for_segment_ids(db_conn, stale_ids)
+            result.messages_created = created
+        except Exception as exc:
+            logger.error("[PIPELINE:CANONICAL] transcripts upsert failed: %s", exc, exc_info=True)
+            result.errors.append({"step": "transcripts", "error": str(exc)})
+        return _finish()
+
     demo_table_by_group = {
         "schedule": "calendar_events",
         "journal": "journal_entries",
@@ -545,6 +625,10 @@ def load_canonical_records_for_signal(
 
     source_id = source_def.source_id
     group = getattr(source_def, "canonical_group_id", None)
+    # Caption archives for a single long video exceed the default 5_000-row
+    # reload window. A reprocess that hits this cap never embeds the rest.
+    if group == "transcripts" and limit <= 5000:
+        limit = 200_000
 
     if group == "activity":
         # content/hostname/metadata_json are selected so a reprocess/backfill
@@ -675,6 +759,31 @@ def load_canonical_records_for_signal(
                 "region": row[3],
                 "event_at": row[4],
                 "source_id": row[5] or source_id,
+            },
+        ),
+        "transcripts": (
+            # Multi-hour caption archives are thousands of rows; the shared
+            # 5_000 reload cap would silently drop most of a podcast on
+            # reprocess. Page size stays the caller's LIMIT bind.
+            """
+            SELECT segment_id, transcript_id, content, event_at, actor_role,
+                   is_from_self, speaker_id, speaker_label, source_id
+            FROM transcript_segments
+            WHERE source_id=?
+            ORDER BY event_at DESC
+            LIMIT ?
+            """,
+            lambda row: {
+                "segment_id": row[0],
+                "transcript_id": row[1],
+                "content": row[2],
+                "event_at": row[3],
+                "actor_role": row[4] or "ambient",
+                "is_from_self": 0,
+                "speaker_id": row[6],
+                "speaker_label": row[7],
+                "source_id": row[8] or source_id,
+                "_table": "transcript_segments",
             },
         ),
         "contacts": (

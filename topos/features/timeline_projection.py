@@ -24,6 +24,7 @@ CANONICAL_TIMELINE_TABLES = (
     "activity_events",
     "financial_transactions",
     "location_events",
+    "transcript_segments",
 )
 CANONICAL_RECORD_ID_COLUMNS = {
     "ai_chat_messages": "message_id",
@@ -34,6 +35,7 @@ CANONICAL_RECORD_ID_COLUMNS = {
     "activity_events": "event_id",
     "financial_transactions": "transaction_id",
     "location_events": "event_id",
+    "transcript_segments": "segment_id",
 }
 
 

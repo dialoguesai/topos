@@ -42,6 +42,8 @@ def _record_type(msg: Dict[str, Any]) -> Optional[str]:
         "conversation_messages": "conversation_message",
         "profile_records": "profile_record",
         "calendar_events": "calendar_event",
+        "transcript_segments": "transcript_segment",
+        "transcripts": "transcript_segment",
     }
     if table in mapping:
         return mapping[table]
@@ -93,8 +95,13 @@ class EmbeddingsJob(BaseEnrichmentJob):
         # vector row or it is unreachable through retrieval.
         seen_activity_hashes: set = set()
         for msg in canonical_messages:
-            message_id = msg.get("message_id") or msg.get("id")
-            record_id = msg.get("event_id") or msg.get("record_id") or message_id
+            message_id = msg.get("message_id") or msg.get("segment_id") or msg.get("id")
+            record_id = (
+                msg.get("event_id")
+                or msg.get("record_id")
+                or msg.get("segment_id")
+                or message_id
+            )
             content = embeddable_content(msg)
             if not record_id or not content or str(record_id) in excluded:
                 processed += 1

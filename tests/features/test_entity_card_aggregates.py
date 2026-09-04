@@ -187,3 +187,49 @@ def test_get_entity_detail_carries_the_aggregates(conn):
     detail = get_entity_detail(conn, "ent-place", guard=_owner(conn))
     assert "mention_sources" in detail and "neighbor_counts" in detail
     assert detail["mention_sources"][0]["table"] == "location_events"
+
+
+def test_get_entity_detail_joins_topic_cluster_members(conn):
+    cluster_id = "54bb73cf1ee14671"
+    hub_id = f"topic_{cluster_id}"
+    _entity(conn, hub_id, "topic", "Apps And Their Security")
+    conn.execute(
+        """
+        INSERT INTO topic_clusters
+            (cluster_id, label, dimension, member_count, source_mix_json,
+             label_terms_json, model, metadata_json)
+        VALUES (?, 'Apps And Their Security', 'memory', 2,
+                '{"youtube_transcripts": 2}', '["apps","store"]', 'kmeans',
+                '{"label_model":"llama3.2","term_label":"apps / store"}')
+        """,
+        (cluster_id,),
+    )
+    conn.execute(
+        """
+        INSERT INTO transcript_segments
+            (segment_id, transcript_id, content, event_at, source_id)
+        VALUES ('seg-apps-1', 'yt:NVZwqkxEX6g', 'the apps on the store',
+                '2026-09-04T02:00:00Z', 'youtube_transcripts')
+        """
+    )
+    conn.execute(
+        """
+        INSERT INTO topic_cluster_members
+            (member_id, cluster_id, record_id, source_id, record_type, text_preview)
+        VALUES ('m1', ?, 'seg-apps-1', 'youtube_transcripts', 'transcript_segment',
+                'the apps on the store')
+        """,
+        (cluster_id,),
+    )
+    conn.commit()
+    detail = get_entity_detail(conn, hub_id, guard=_owner(conn))
+    assert detail is not None
+    cluster = detail["cluster"]
+    assert cluster["cluster_id"] == cluster_id
+    assert cluster["member_count"] == 2
+    assert cluster["label_terms"] == ["apps", "store"]
+    assert cluster["label_model"] == "llama3.2"
+    assert cluster["members"][0]["transcript_id"] == "yt:NVZwqkxEX6g"
+    assert cluster["videos"][0]["id"] == "yt:NVZwqkxEX6g"
+    assert detail["recent_mentions"][0]["surface_text"] == "the apps on the store"
+    assert detail["mention_sources"][0]["table"] == "transcript_segments"
