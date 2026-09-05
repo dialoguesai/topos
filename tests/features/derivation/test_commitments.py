@@ -22,12 +22,12 @@ def test_promise_shaped_is_a_first_person_future_with_an_object():
 def test_records_are_the_owners_own_and_carry_the_authored_role():
     conn = sqlite3.connect(":memory:")
     conn.executescript("""
-      CREATE TABLE conversation_messages (message_id TEXT, content TEXT, event_at TEXT, is_from_self INTEGER);
+      CREATE TABLE conversation_messages (message_id TEXT, content TEXT, event_at TEXT, is_from_self INTEGER, conversation_id TEXT, sender_id TEXT);
       CREATE TABLE journal_entries (entry_id TEXT, content TEXT, entry_at TEXT);
     """)
-    conn.execute("INSERT INTO conversation_messages VALUES ('m1','I will send you the deck tomorrow, promise','2026-08-02T09:00:00Z',1)")
-    conn.execute("INSERT INTO conversation_messages VALUES ('m2','you said you would send the deck tomorrow','2026-08-03T09:00:00Z',0)")
-    conn.execute("INSERT INTO conversation_messages VALUES ('m3','lunch was great, thanks again for coming','2026-08-04T09:00:00Z',1)")
+    conn.execute("INSERT INTO conversation_messages VALUES ('m1','I will send you the deck tomorrow, promise','2026-08-02T09:00:00Z',1,'c1','self')")
+    conn.execute("INSERT INTO conversation_messages VALUES ('m2','you said you would send the deck tomorrow','2026-08-03T09:00:00Z',0,'c1','+15550001111')")
+    conn.execute("INSERT INTO conversation_messages VALUES ('m3','lunch was great, thanks again for coming','2026-08-04T09:00:00Z',1,'c1','self')")
     conn.execute("INSERT INTO journal_entries VALUES ('j1','Told Sam I’ll review the grant draft this week.','2026-08-05T09:00:00Z')")
     recs = C.promise_shaped_records(conn)
     assert [r["record_id"] for r in recs] == ["j1", "m1"], "newest first, the peer's line excluded"
@@ -154,3 +154,41 @@ def test_their_promises_join_the_ledger_marked_as_theirs():
     assert led["owed_to_you"][0]["stated_by"] == "them"
     assert led["open"] == 1 and led["reliability"] is None
     assert "them" in led["basis"]
+
+
+def test_a_dm_row_carries_its_recipient_from_the_record_and_the_prompt_says_so():
+    """First live pass: 40 promise-shaped messages, 40 calls, ZERO assertions — "I'll read
+    it" names nobody, and the pack rightly refuses a commitment with no counterparty. The
+    recipient is the conversation's one other party, from the record; a group gets none."""
+    from topos.features.derivation import template as T
+    from topos.features.derivation.packs import load_packs
+    from topos.features.derivation.registry import bundled_pack_dir
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript("""
+      CREATE TABLE conversation_messages (message_id TEXT, content TEXT, event_at TEXT, is_from_self INTEGER, conversation_id TEXT, sender_id TEXT);
+      CREATE TABLE journal_entries (entry_id TEXT, content TEXT, entry_at TEXT);
+      CREATE TABLE contacts (contact_id TEXT PRIMARY KEY, dataset_id TEXT, source_id TEXT, display_name TEXT,
+        is_self INTEGER DEFAULT 0, known_usernames_json TEXT, created_at TEXT, updated_at TEXT);
+      CREATE TABLE contact_identifiers (dataset_id TEXT, source_id TEXT, identifier TEXT, identifier_type TEXT,
+        contact_id TEXT, created_at TEXT, updated_at TEXT);
+      CREATE TABLE entities (entity_id TEXT PRIMARY KEY, entity_type TEXT, canonical_name TEXT, normalized_name TEXT,
+        aliases_json TEXT, is_self INTEGER DEFAULT 0, contact_id TEXT);
+      INSERT INTO contacts VALUES ('ct_1','d','address_book','Priya Anand',0,NULL,'t','t');
+      INSERT INTO contact_identifiers VALUES ('d','address_book','+15550001111','phone','ct_1','t','t');
+      INSERT INTO entities VALUES ('ent_priya','person','Priya Anand','priya anand','[]',0,'ct_1');
+      INSERT INTO conversation_messages VALUES ('p0','hey','2026-08-01T09:00:00Z',0,'dm1','+15550001111');
+      INSERT INTO conversation_messages VALUES ('m1','Oh, I''ll read it. One sec','2026-08-02T09:00:00Z',1,'dm1','self');
+      INSERT INTO conversation_messages VALUES ('g0','hi all','2026-08-01T09:00:00Z',0,'grp','+15550002222');
+      INSERT INTO conversation_messages VALUES ('g1','hi all','2026-08-01T09:01:00Z',0,'grp','+15550003333');
+      INSERT INTO conversation_messages VALUES ('m2','I''ll bring the charger tomorrow','2026-08-03T09:00:00Z',1,'grp','self');
+    """)
+    recs = {r["record_id"]: r for r in C.promise_shaped_records(conn)}
+    dm, grp = recs["m1"], recs["m2"]
+    assert dm.get("recipient_entity_id") in ("ent_priya", "") and bool(dm.get("recipient")) == bool(dm.get("recipient_entity_id"))
+    assert "recipient" not in grp, "a group thread names nobody"
+    pack = load_packs(bundled_pack_dir(), only=["obligations.commitments"])["obligations.commitments"]
+    p = T.build_prompt(pack, dm["text"], dm["date"], "authored", recipient="Priya Anand", recipient_entity_id="ent_priya")
+    assert "sent to Priya Anand" in p and 'id:ent_priya' in p
+    q = T.build_prompt(pack, grp["text"], grp["date"], "authored")
+    assert "sent to" not in q

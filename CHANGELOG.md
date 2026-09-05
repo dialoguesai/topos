@@ -89,6 +89,10 @@ The machine-readable twin of each release is
   the counterparty's node — owed by you, owed to you, resolved, stated statuses, and
   `reliability` only when the record has judged one. Engine-only route
   `POST /messenger-analytics/commitments/refresh`; the pack stays for the owner to enable.
+  **Live lesson, same evening:** the first pass extracted nothing from 40 promise-shaped
+  DMs because "I'll read it" names nobody and the pack refuses a counterparty-less
+  commitment; the runner now carries the DM's other party into the prompt (from the
+  record, never the text) and the pack is 0.1.2 so those records re-extract.
 - **`net.character` — the second outward pack, and the speaker label that makes it work.**
   `[E:derivation]` Status signals (hiring / looking / raising / moving / launching /
   learning / leave / availability, 90-day expiry at read) and promises the speaker made to

@@ -56,16 +56,27 @@ def promise_shaped_records(conn: sqlite3.Connection, *, limit: int = 2000) -> Li
     out: List[Dict[str, Any]] = []
     try:
         rows = conn.execute(
-            "SELECT message_id, content, event_at FROM conversation_messages"
+            "SELECT message_id, content, event_at, conversation_id FROM conversation_messages"
             " WHERE is_from_self=1 AND content IS NOT NULL AND LENGTH(content)>15"
             " ORDER BY event_at DESC LIMIT ?", (int(limit) * 10,)).fetchall()
     except sqlite3.Error:
         rows = []
-    for mid, text, at in rows:
-        if is_promise_shaped(text):
-            out.append({"table": "conversation_messages", "record_id": str(mid),
-                        "text": str(text)[:6000], "date": str(at or "")[:10],
-                        "role": "authored", "source_id": ""})
+    hits = [(str(mid), str(text), str(at or "")[:10], str(conv or ""))
+            for mid, text, at, conv in rows if is_promise_shaped(text)]
+    # THE RECIPIENT. In a direct message "I'll read it" is a promise to the person being
+    # texted, and their name is nowhere in the text — measured on the first live pass: 40
+    # promise-shaped records, 40 model calls, zero assertions, because the pack (rightly)
+    # refuses a commitment with no counterparty. So each DM row carries its partner, from
+    # the record and the identity bridge, never from the text; a group thread carries none
+    # and the pack must find a named counterparty in the words or abstain.
+    recipients = _dm_recipients(conn, sorted({c for _, _, _, c in hits if c}))
+    for mid, text, at, conv in hits:
+        rec = {"table": "conversation_messages", "record_id": mid,
+               "text": text[:6000], "date": at, "role": "authored", "source_id": ""}
+        who = recipients.get(conv)
+        if who:
+            rec["recipient"], rec["recipient_entity_id"] = who
+        out.append(rec)
     try:
         jrows = conn.execute(
             "SELECT entry_id, content, entry_at FROM journal_entries"
@@ -80,6 +91,43 @@ def promise_shaped_records(conn: sqlite3.Connection, *, limit: int = 2000) -> Li
                         "role": "authored", "source_id": ""})
     out.sort(key=lambda r: r["date"], reverse=True)
     return out[:limit]
+
+
+def _dm_recipients(conn: sqlite3.Connection, conversation_ids: List[str]) -> Dict[str, tuple]:
+    """conversation_id -> (display name, entity id) of the ONE other party in a DM.
+
+    A conversation with two or more other senders is a group; it gets no recipient, so a
+    promise in it needs a named counterparty in the text — the same rule as before.
+    """
+    if not conversation_ids:
+        return {}
+    peers: Dict[str, set] = {}
+    for chunk_start in range(0, len(conversation_ids), 400):
+        chunk = conversation_ids[chunk_start:chunk_start + 400]
+        placeholders = ",".join("?" for _ in chunk)
+        try:
+            rows = conn.execute(
+                f"SELECT DISTINCT conversation_id, sender_id FROM conversation_messages"
+                f" WHERE conversation_id IN ({placeholders}) AND COALESCE(is_from_self,0)=0"
+                f" AND sender_id IS NOT NULL AND sender_id<>'' AND sender_id<>'self'", chunk).fetchall()
+        except sqlite3.Error:
+            return {}
+        for conv, sender in rows:
+            peers.setdefault(str(conv), set()).add(str(sender))
+    singles = {conv: next(iter(ss)) for conv, ss in peers.items() if len(ss) == 1}
+    if not singles:
+        return {}
+    try:
+        from ...analytics.messenger_directed import resolve_peer_identities
+        idents = resolve_peer_identities(conn, sorted(set(singles.values())))
+    except Exception:  # noqa: BLE001 — no identity means no recipient, never a crash
+        return {}
+    out: Dict[str, tuple] = {}
+    for conv, key in singles.items():
+        _cid, eid, display = idents.get(key, (None, None, None))
+        if eid:
+            out[conv] = (str(display or "") or "this person", str(eid))
+    return out
 
 
 def refresh_commitments(conn: sqlite3.Connection, *, limit: int = MAX_PER_RUN) -> Dict[str, Any]:

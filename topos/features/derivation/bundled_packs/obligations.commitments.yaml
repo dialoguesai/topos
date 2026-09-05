@@ -7,7 +7,7 @@
 # and no outward gate. The counterparty rides as an entity_ref inside the value, exactly
 # as relationships.social carries people inside owner-facts.
 pack: obligations.commitments
-version: 0.1.1
+version: 0.1.2
 status: draft
 title: "Promises made and owed"
 author: topos
@@ -34,6 +34,7 @@ predicates:
     event_identity: "windowed:45"
     value_schema:
       counterparty: person_ref     # v0.1.1: person_ref, so the writer binds counterparty_entity_id (entity_ref was never bound)
+                                   # v0.1.2: the runner names the DM recipient in the prompt; a promise with nobody named binds to them by id
       direction: {enum: [owed_by_owner, owed_to_owner]}
       description: string
       due: string

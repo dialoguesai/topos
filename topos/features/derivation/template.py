@@ -254,7 +254,8 @@ def _predicate_menu(pack: Pack) -> str:
 
 
 def build_prompt(pack: Pack, record_text: str, record_date: str, actor_role: str,
-                 known_people=None, speaker: str = "", speaker_entity_id: str = "") -> str:
+                 known_people=None, speaker: str = "", speaker_entity_id: str = "",
+                 recipient: str = "", recipient_entity_id: str = "") -> str:
     record_text = clean_record_text(record_text)
     g = pack.guidance
     abst = "\n".join(f"- {a}" for a in (g.get("abstention") or []))
@@ -265,6 +266,14 @@ def build_prompt(pack: Pack, record_text: str, record_date: str, actor_role: str
         abst += (f"\n- This record was written by {speaker} (speaker id {speaker_entity_id}). A fact the "
                  f"speaker states about THEMSELVES is about \"other:id:{speaker_entity_id}\" — never "
                  f"\"owner\". A fact they state about a third person is about \"other:<that name>\".")
+    # The other side of a direct message the OWNER wrote. "I'll read it" is a promise to the
+    # person being texted and their name is nowhere in the text; the recipient comes from
+    # the record, so a counterparty-shaped field with nobody named in the words binds to
+    # them by id.
+    if recipient and recipient_entity_id and actor_role == "authored":
+        abst += (f"\n- This is a direct message the owner sent to {recipient} (id {recipient_entity_id}). "
+                 f"A promise, debt or plan with no other person named in the words is with THEM: put "
+                 f"\"id:{recipient_entity_id}\" in the counterparty/person field.")
     known_block = ""
     if known_people:
         names = ", ".join(known_people)
@@ -280,7 +289,7 @@ def build_prompt(pack: Pack, record_text: str, record_date: str, actor_role: str
     return f"""You extract personal facts about the OWNER of a private journal/message archive.
 Lens: {pack.title}. {str(g.get('definitions') or '').strip()}
 
-Record (role={actor_role}, date={record_date}{", speaker=" + speaker if speaker and actor_role == "observed" else ""}):
+Record (role={actor_role}, date={record_date}{", speaker=" + speaker if speaker and actor_role == "observed" else ""}{", sent to " + recipient if recipient and actor_role == "authored" else ""}):
 ---
 {record_text[:4000]}
 ---
