@@ -269,12 +269,22 @@ def resolve_pack_offer(conn: sqlite3.Connection, offer_id: str, action: str) -> 
     return {"offer_id": offer_id, "pack_id": pack_id, "kind": kind, "action": action}
 
 
-def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500) -> Dict[str, Any]:
+def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, *,
+                      records: Optional[List[Dict[str, Any]]] = None,
+                      use_prefilter: bool = True) -> Dict[str, Any]:
     """Owner-initiated history backfill for ONE enabled pack (the lens catalog's
     backfill control). Bounded by `limit` prefilter-HIT records per invocation —
     a huge history closes over a few presses (or the drip catch-up finishes it).
     Reuses the ingest pipeline wholesale: guards, multi-vote judging, ladder,
-    ledger, yield counters."""
+    ledger, yield counters.
+
+    `records` feeds an explicit list of `{table, record_id, text, date, role}` rows in
+    place of the history walk, and `use_prefilter=False` skips the pack's own routing
+    gate for them. A lane that has already chosen its records precisely — the
+    commitment ledger's promise-shaped owner messages, 118 of 7,011, where the pack's
+    descriptor prefilter passes 2,816 — must not pay the pack's cost for the rest; and a
+    record the caller did not feed is left UNMARKED in `derivation_progress`, so the
+    ordinary history walk can still reach it later."""
     from ...enrichment.jobs.canonical.derivation_job import (
         _bump_yield, _iter_history, _ledger_write, _verify_mode)
     from .packs import load_packs
@@ -317,13 +327,14 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500) 
     writer = DerivationWriter(conn, model=model)
     done = {r[0] for r in conn.execute("SELECT key FROM derivation_progress")}
     stats = {"processed": 0, "assertions": 0, "accepted": 0, "written": 0, "quarantined0": writer.stats.get("quarantined", 0)}
-    for rec in _iter_history(conn, limit=20000):
+    source = records if records is not None else _iter_history(conn, limit=20000)
+    for rec in source:
         if stats["processed"] >= limit:
             break
         key = f"{pack_id}@{pack.version}:{rec['table']}:{rec['record_id']}"
         if key in done:
             continue
-        if rec["role"] not in pack.allowed_roles() or not pf.passes(rec["text"]):
+        if rec["role"] not in pack.allowed_roles() or (use_prefilter and not pf.passes(rec["text"])):
             conn.execute("INSERT OR REPLACE INTO derivation_progress (key) VALUES (?)", (key,))
             continue
         stats["processed"] += 1

@@ -341,6 +341,11 @@ def read_person_graph(conn: Any, *, dataset_id: str,
     heard_stats = attach_heard_about(conn, dataset_id, nodes)
     # The owner's informant ratings — stated facts about this person, labelled as such.
     disposition_stats = person_disposition_facts(conn, nodes)
+    # The commitment ledger, owner's half: what the owner promised this person, in the
+    # owner's own words, and what the record says became of it.
+    from ..features.derivation.commitments import attach_commitments
+
+    commitment_stats = attach_commitments(conn, nodes)
     # The stored reading, when one exists: computed on the deferred lane, never here.
     from ..features.derivation.person_reading import load_person_readings
 
@@ -420,6 +425,7 @@ def read_person_graph(conn: Any, *, dataset_id: str,
         "heard_about": heard_stats,
         "readings": {"attached": sum(1 for n in nodes if n.get("reading"))},
         "disposition": disposition_stats,
+        "commitments": commitment_stats,
         "ambient_groups": {k: ambient_stats.get(k) for k in ("grouped", "ungrouped", "groups")},
         "context_affinity": context["pairs"],
         "context_coverage": context["coverage"],

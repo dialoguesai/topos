@@ -80,6 +80,15 @@ The machine-readable twin of each release is
   model call also asks for up to three VIA strengths as `strength: <name> [e.., e.., e..]`;
   `parse_strengths` keeps one only with a name from `personality.traits`' own enum and
   three DISTINCT cited rows. Stored as `strengths` on the reading; no extra model time.
+- **The commitment ledger, owner's half.** `[E:social]` `features/derivation/commitments.py`
+  feeds `obligations.commitments` only the owner's promise-shaped messages and journal
+  lines (118 live, against the pack's own prefilter at 2,816) through a new explicit
+  `records=` feed on `run_pack_backfill`, roles set to `authored` by construction, unfed
+  records left unmarked for the history walk. The pack's `counterparty` is now
+  `person_ref` (v0.1.1) so the writer binds it. `attach_commitments` puts the ledger on
+  the counterparty's node — owed by you, owed to you, resolved, stated statuses, and
+  `reliability` only when the record has judged one. Engine-only route
+  `POST /messenger-analytics/commitments/refresh`; the pack stays for the owner to enable.
 - **A ledger reason for the control plane's supply-claim rewrite.** `[O]` A home-chat
   answer that explains a `gate_vetoed` empty by telling the owner their data "might not
   be synced" is a false statement about their setup — the scope WAS queried, and the

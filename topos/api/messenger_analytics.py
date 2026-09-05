@@ -473,6 +473,40 @@ def post_readings_refresh(
     return {"status": "started", "dataset_id": dataset_id, "force": force, "limit": limit}
 
 
+@router.post("/messenger-analytics/commitments/refresh", dependencies=[Depends(require_api_key)])
+def post_commitments_refresh(limit: int = Query(40, ge=1, le=400)) -> Dict[str, Any]:
+    """The commitment ledger's owner half: run `obligations.commitments` over the owner's
+    promise-shaped records only (engine-only; the pack must be enabled by the owner)."""
+    import threading
+
+    from ..features.derivation import commitments as C
+    from ..features.derivation import person_reading as PR
+
+    def _go() -> None:
+        from ..core.state import close_thread_db_connection
+
+        with PR._LOCK:
+            if PR._RUNNING:
+                return
+            PR._RUNNING = True
+        try:
+            conn = get_db_connection()
+            if conn is None:
+                return
+            PR._LAST.update({"commitments": C.refresh_commitments(conn, limit=limit)})
+        except Exception as exc:  # noqa: BLE001
+            PR._LAST["commitments_error"] = str(exc)[:200]
+        finally:
+            with PR._LOCK:
+                PR._RUNNING = False
+            close_thread_db_connection()
+
+    if PR._RUNNING:
+        return {"status": "running", **PR.readings_status()}
+    threading.Thread(target=_go, name="topos-commitments-manual", daemon=True).start()
+    return {"status": "started", "limit": limit}
+
+
 @router.get("/messenger-analytics/readings/status", dependencies=[Depends(require_api_key)])
 def get_readings_status() -> Dict[str, Any]:
     from ..features.derivation.person_reading import readings_status
