@@ -141,6 +141,102 @@ _MONTH_TOKENS = frozenset(
 #: apart.
 _DATE_RANGE_TERMS = frozenset({"through", "thru", "until", "till", "between", "during"})
 
+#: OUTPUT SHAPE. The vocabulary that names the FORM the answer should take — its genre,
+#: medium, persona, framework or unit of length. It describes the response, never the
+#: rows, so it can only ever be absent from the corpus, and the rare-token gate reads
+#: that absence as "the owner asked about something their data does not mention".
+#:
+#: Live 2026-09-05, home chat, work_context:read: "Take the work I have been doing
+#: lately, and put it into a 3 stanza iambic pentameter poem for me" returned nothing —
+#: `iambic` df 0, `pentameter` df 0, 63 evidence items dropped, `empty_cause`
+#: gate_vetoed — while "what have I been working on lately" answered the SAME scope,
+#: window and node with 25 items. The subject survived retrieval and the instruction
+#: killed it: `work` was stripped as goals-surface vocabulary and `lately` as recency
+#: framing, so the ONLY needles left were the poem's metre. The owner was told their
+#: work data "might not be synced".
+#:
+#: Same principle as `_FIRST_PERSON_SHAPE_TOKENS` and `OVERHEARD_SHAPE_TOKENS`, applied
+#: unconditionally because a transform can be asked of any scope: these words are
+#: exempt from the ABSTENTION gate only. They stay in `_residual_content_tokens`, so
+#: "find the poem I wrote about my dad" still matches rows on `poem` — what changes is
+#: that a word naming the output can no longer VETO a lane, which is a loosening of an
+#: abstention and can never manufacture a false answer. Fabricated subjects
+#: ("zorblatt", "falconer") are untouched: they are not in this closed set.
+_OUTPUT_SHAPE_TOKENS = frozenset(
+    {
+        # Verse and literary form, including metre — the reported failure.
+        "poem", "poems", "poetry", "poetic", "verse", "verses", "stanza", "stanzas",
+        "haiku", "sonnet", "sonnets", "limerick", "limericks", "couplet", "couplets",
+        "quatrain", "ballad", "ode", "elegy", "eulogy", "acrostic", "epigram",
+        "rhyme", "rhymes", "rhyming", "meter", "metre", "iambic", "iamb",
+        "pentameter", "tetrameter", "hexameter", "trochaic", "trochee", "dactylic",
+        "anapestic", "spondee", "blank", "freeform", "prose", "lyric", "lyrics",
+        "shanty", "jingle", "haikus", "villanelle", "haibun",
+        # Document, medium and artifact shape.
+        "memo", "memos", "onepager", "essay", "letter", "postcard",
+        "headline", "headlines", "tweet", "tweets", "caption", "captions", "blurb",
+        "outline", "bullet", "bullets", "bulleted", "bulletpoint", "bulletpoints",
+        "table", "tabular", "diagram", "infographic", "deck", "slide", "slides",
+        "slideshow", "changelog", "readme", "newsletter", "pressrelease",
+        "toast", "speech", "script", "screenplay", "monologue", "manifesto",
+        "obituary", "limericks", "recipe", "checklist", "faq", "abstract",
+        "markdown", "csv", "json", "yaml", "html", "latex",
+        # Persona, register and tone — the curated core. Open-ended personas ("in the
+        # voice of a 1920s radio announcer") are handled by the caller-side distiller,
+        # which has the sentence and can strip the whole style span; a closed set can
+        # only ever cover the common ones.
+        "pirate", "pirates", "noir", "gonzo", "shakespeare", "shakespearean",
+        "yoda", "cowboy", "surfer", "hipster", "gothic", "victorian", "medieval",
+        "sarcastic", "sarcasm", "snarky", "deadpan", "wry", "whimsical", "campy",
+        "dramatic", "melodramatic", "epic", "heroic", "tabloid", "eli5",
+        # Analytic frameworks named as an output format.
+        "swot", "raci", "kanban", "eisenhower", "premortem", "postmortem",
+        "retrospective", "quadrant", "quadrants", "funnel", "matrix",
+        # Units of length and structure. A count is a constraint on the answer, never
+        # a topic: "3 stanza", "200 words", "exactly three sentences".
+        "paragraph", "paragraphs", "sentence", "sentences", "section", "sections",
+        "column", "columns", "line", "lines", "item", "items", "point", "points",
+        "wordcount", "word", "words", "page", "pages", "part", "parts",
+        "one", "two", "three", "four", "five", "six", "seven", "eight", "nine", "ten",
+        "eleven", "twelve", "twenty", "dozen", "couple", "several",
+        "first", "second", "third", "fourth", "fifth",
+        # Generic shape nouns: what the answer IS, as opposed to what it is about.
+        "summary", "summaries", "recap", "overview", "rundown", "writeup",
+        "version", "draft", "drafts", "format", "style", "styles", "voice", "tone",
+        "register", "wording", "phrasing", "thread", "post", "posts", "pager",
+        "board", "todo", "done", "analysis", "breakdown", "mock", "mockup",
+        # The DIRECTIVE VERBS. An imperative names the operation to perform, never the
+        # subject to find, and every one of them can be df 0 on a small corpus — which
+        # is why this class fails hardest on the newest nodes. Exempting them costs
+        # nothing: an abstention gate has no business firing on the word "write".
+        "take", "write", "writes", "wrote", "make", "makes", "turn", "put", "give",
+        "compose", "craft", "create", "generate", "produce", "render", "build",
+        "rewrite", "rephrase", "reword", "reformat", "convert", "translate",
+        "summarize", "summarise", "describe", "explain", "narrate", "recount",
+        "rank", "score", "rate", "phrase", "frame", "present", "package", "spin",
+        "distill", "distil", "condense", "expand", "polish",
+        # Register adverbs — the -ly forms the noun list above cannot reach.
+        "sarcastically", "humorously", "dramatically", "poetically", "formally",
+        "casually", "briefly", "concisely", "succinctly", "playfully",
+        # Framing words that carry no topic of their own. "what I've been DOING" is the
+        # same aspect marker as the `been`/`lately` already in `_RECENCY_TERMS`, and
+        # "EXACTLY three sentences" / "LIKE a summary" qualify the instruction.
+        "doing", "exactly", "like", "based", "using", "into",
+    }
+)
+
+
+def _is_bare_integer(token: str) -> bool:
+    """A pure number is a quantity, not a topic.
+
+    "3 stanza", "200 words", "top 5" — the digit constrains the answer's size or rank.
+    Vetoing a lane because the corpus contains no "200" is never the honest reading, and
+    `_residual_content_tokens` already treats day numbers this way inside a date span.
+    Content matching still sees it: this exempts the ABSTENTION only, so "issue 42"
+    keeps filtering rows on 42 and simply stops being able to empty the lane by itself.
+    """
+    return token.isdigit()
+
 
 
 def _facts_lane_weight() -> float:
@@ -250,7 +346,11 @@ def _rare_tokens(conn, tokens: List[str]) -> Dict[str, int]:
     the discriminative part of a specific ask. df==0 means the term appears
     nowhere in the indexed corpus (fabricated topics). Porter stemming on both
     sides makes 'committed' meet 'commitment'. Iteration yields the tokens, so
-    callers that only need membership can treat the result like a list."""
+    callers that only need membership can treat the result like a list.
+
+    Output-shape vocabulary (`_OUTPUT_SHAPE_TOKENS`) is dropped before the df pass. A
+    word that names the form of the answer is absent from the corpus by construction,
+    and every consumer of this map is an abstention gate."""
     if conn is None or not tokens:
         return {}
     from ..features.signal.vector_settings import rare_token_df_max
@@ -267,6 +367,13 @@ def _rare_tokens(conn, tokens: List[str]) -> Dict[str, int]:
         return {}
     rare: Dict[str, int] = {}
     for token in tokens:
+        if token in _OUTPUT_SHAPE_TOKENS or _is_bare_integer(token):
+            # Names the shape of the ANSWER, not the content of a row (see
+            # `_OUTPUT_SHAPE_TOKENS`). Never discriminative, so never a veto: this is
+            # the one place all three access modes and both the flat and per-part gate
+            # forms read through, which is why the exemption lives here and not at the
+            # four call sites that each compute their own needles.
+            continue
         variants = _token_variants(token)
         if not variants:
             continue

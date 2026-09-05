@@ -67,11 +67,31 @@ The machine-readable twin of each release is
   the only outward pack in the wheel, so a second one arrives with its own decision.
 
 
-
-
-
-
-
+### Fixed
+- **A word that names the SHAPE OF THE ANSWER can no longer empty a lane.** `[E:query]`
+  The rare-token gate is absence honesty: a query token the corpus does not contain
+  means "you asked about something your data does not mention". That is right about
+  subjects and wrong about forms. Live 2026-09-05, home chat, `work_context:read`:
+  *"Take the work I have been doing lately, and put it into a 3 stanza iambic pentameter
+  poem for me"* returned nothing — `iambic` df 0, `pentameter` df 0, **63 evidence items
+  dropped**, `empty_cause: gate_vetoed` — and the owner was told their work data "might
+  not be synced", in a session where *"what have I been working on lately"* answered the
+  same scope, node and window with 25 items. The subject reached the data and the
+  instruction threw it away, because `_residual_content_tokens` had already stripped the
+  subject's own words as framing (`lately` recency, `work` goals-surface): after
+  distillation the poem's metre was the only "content" left in the query.
+  `_OUTPUT_SHAPE_TOKENS` now exempts output vocabulary — verse and document form,
+  persona, framework, structural unit, directive verb, bare count — inside `_rare_tokens`,
+  the one chokepoint all three access modes and both the flat and per-part gate forms
+  read through. Exempt from the ABSTENTION only: the words stay in
+  `_residual_content_tokens`, so "find the poem I wrote" still matches rows on `poem`,
+  and removing a word from a veto set can never manufacture a match. Fabricated subjects
+  are untouched — including in a sentence carrying a transform, which the catalog's
+  NEG-2/NEG-4 pin. Measured on the owner's live node, engine-direct, `work_context:read`:
+  **6/35 answerable cases returned zero before, 0/35 after; 4/4 negatives abstained
+  both times.** Catalog `tests/gap/qq/engine/transform_eval_cases.py`
+  (`tx-catalog-1`, 39 cases). The class is corpus-dependent and therefore silent — a
+  fresh node, with the smallest corpus, fails the most of it.
 
 ## [1.3.51] — 2026-09-05
 
