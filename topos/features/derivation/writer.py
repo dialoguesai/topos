@@ -177,6 +177,10 @@ class DerivationWriter:
     def _resolve_person(self, name: str):
         """A name from an extraction -> the person entity it means, or None.
 
+        `id:<entity_id>` is the runner's own label for the record's SENDER (any_with_label
+        packs): the identity comes from the record, never from the text, so it is accepted
+        only when that id is a person entity — a made-up id in a message resolves to nothing.
+
         Exact name and alias are ONE pool, ranked, rather than two tiers tried in order.
         Trying the exact name first looks obviously right and is wrong wherever extraction
         has split a human in two: the owner's most-messaged collaborator exists twice on
@@ -192,6 +196,16 @@ class DerivationWriter:
         the extractor works and the address book is where the owner told us who is real.
         Mentions only break a tie between two entities the address book cannot separate.
         """
+        raw = str(name or "").strip()
+        if raw.lower().startswith("id:"):
+            eid = raw[3:].strip()
+            try:
+                row = self.conn.execute(
+                    "SELECT 1 FROM entities WHERE entity_id=? AND entity_type='person'"
+                    " AND COALESCE(is_self,0)=0", (eid,)).fetchone()
+            except Exception:  # noqa: BLE001
+                row = None
+            return eid if row else None
         if not name or not isinstance(name, str):
             return None
         n = " ".join(name.strip().lower().split())

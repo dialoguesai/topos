@@ -89,6 +89,14 @@ The machine-readable twin of each release is
   the counterparty's node — owed by you, owed to you, resolved, stated statuses, and
   `reliability` only when the record has judged one. Engine-only route
   `POST /messenger-analytics/commitments/refresh`; the pack stays for the owner to enable.
+- **`net.character` — the second outward pack, and the speaker label that makes it work.**
+  `[E:derivation]` Status signals (hiring / looking / raising / moving / launching /
+  learning / leave / availability, 90-day expiry at read) and promises the speaker made to
+  the owner, both STATED in the speaker's own message. `_iter_history` carries each
+  observed record's sender through the identity bridge as `speaker` + `speaker_entity_id`;
+  `build_prompt` states it and routes self-statements to `other:id:<speaker>`; the writer
+  accepts that id form only for a non-owner person entity. Consent-gated to enable
+  (d5323b0), disabled by default, pinned as one of exactly two outward packs.
 - **A ledger reason for the control plane's supply-claim rewrite.** `[O]` A home-chat
   answer that explains a `gate_vetoed` empty by telling the owner their data "might not
   be synced" is a false statement about their setup — the scope WAS queried, and the

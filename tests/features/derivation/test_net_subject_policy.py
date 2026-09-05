@@ -237,7 +237,11 @@ def test_without_the_table_the_owner_cannot_record_a_deny(bare):
 
 #: The packs allowed to describe someone other than the owner. Enumerated on purpose: this
 #: list is the whole outward surface, and it should be impossible to grow it by accident.
-OUTWARD_PACKS = {"net.capability"}
+OUTWARD_PACKS = {"net.capability", 
+    # 2026-09-05 (owner, plan §7 all five yes): the second outward pack, written after the
+    # enable-time consent gate and pinned in test_pack_consent with its decision.
+    "net.character",
+}
 
 
 def test_only_the_declared_packs_describe_other_people():

@@ -254,10 +254,17 @@ def _predicate_menu(pack: Pack) -> str:
 
 
 def build_prompt(pack: Pack, record_text: str, record_date: str, actor_role: str,
-                 known_people=None) -> str:
+                 known_people=None, speaker: str = "", speaker_entity_id: str = "") -> str:
     record_text = clean_record_text(record_text)
     g = pack.guidance
     abst = "\n".join(f"- {a}" for a in (g.get("abstention") or []))
+    # The record's own sender identity, for packs that read other people's words. It comes
+    # from the record (contacts + the entity spine), never from the text, and it is what
+    # lets a self-statement route to the speaker's node: "I'm hiring" is about the sender.
+    if speaker and speaker_entity_id and actor_role == "observed":
+        abst += (f"\n- This record was written by {speaker} (speaker id {speaker_entity_id}). A fact the "
+                 f"speaker states about THEMSELVES is about \"other:id:{speaker_entity_id}\" — never "
+                 f"\"owner\". A fact they state about a third person is about \"other:<that name>\".")
     known_block = ""
     if known_people:
         names = ", ".join(known_people)
@@ -273,7 +280,7 @@ def build_prompt(pack: Pack, record_text: str, record_date: str, actor_role: str
     return f"""You extract personal facts about the OWNER of a private journal/message archive.
 Lens: {pack.title}. {str(g.get('definitions') or '').strip()}
 
-Record (role={actor_role}, date={record_date}):
+Record (role={actor_role}, date={record_date}{", speaker=" + speaker if speaker and actor_role == "observed" else ""}):
 ---
 {record_text[:4000]}
 ---

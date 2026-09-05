@@ -316,12 +316,32 @@ def _iter_history(conn, limit=2000):
             f" ORDER BY entry_at DESC LIMIT {int(limit)}"):
         out.append({"table": tbl, "record_id": rid, "text": (text or "")[:6000],
                     "date": str(at or "")[:10], "role": role or "authored", "source_id": ""})
-    for tbl, rid, text, at, role in _rows(
+    msg_rows = _rows(
+            f"SELECT 'conversation_messages', message_id, content, event_at, actor_role,"
+            f" CASE WHEN COALESCE(is_from_self,0)=1 THEN NULL ELSE sender_id END"
+            f" FROM conversation_messages WHERE content IS NOT NULL AND LENGTH(content)>15"
+            f" ORDER BY event_at DESC LIMIT {int(limit)}")
+    if not msg_rows:
+        msg_rows = [tuple(r) + (None,) for r in _rows(
             f"SELECT 'conversation_messages', message_id, content, event_at, actor_role"
             f" FROM conversation_messages WHERE content IS NOT NULL AND LENGTH(content)>15"
-            f" ORDER BY event_at DESC LIMIT {int(limit)}"):
+            f" ORDER BY event_at DESC LIMIT {int(limit)}")]
+    # The SENDER of each observed row, from the record — the label an any_with_label pack
+    # carries into the prompt so a self-statement lands on the speaker's own node.
+    speakers = {}
+    keys = sorted({str(r[5]) for r in msg_rows if r[5]})
+    if keys:
+        try:
+            from ....analytics.messenger_directed import resolve_peer_identities
+            speakers = resolve_peer_identities(conn, keys)
+        except Exception:  # noqa: BLE001 — no speaker label means no outward fact, never a crash
+            speakers = {}
+    for tbl, rid, text, at, role, sender in msg_rows:
+        _cid, eid, display = speakers.get(str(sender or ""), (None, None, None))
         out.append({"table": tbl, "record_id": rid, "text": (text or "")[:6000],
-                    "date": str(at or "")[:10], "role": role or "observed", "source_id": ""})
+                    "date": str(at or "")[:10], "role": role or "observed", "source_id": "",
+                    "speaker": str(display or "") if eid else "",
+                    "speaker_entity_id": str(eid or "")})
     # Ambient captions are not taste/habit evidence. any_with_label catchup
     # must not mint owner-subject facts from overheard speech. A gated
     # overheard reader is the only path that may surface captions.

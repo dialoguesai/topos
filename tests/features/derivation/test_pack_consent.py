@@ -94,4 +94,14 @@ def test_the_only_outward_pack_in_the_wheel_is_the_one_we_know_about():
 
     outward = sorted(pid for pid, p in load_packs(bundled_pack_dir()).items()
                      if str(getattr(p, "net_subject", "deny")) == "allow")
-    assert outward == ["net.capability"]
+    # net.character joined 2026-09-05 (owner, plan §7: all five decisions yes), written AFTER
+    # the enable-time consent gate and pinned here with that decision.
+    assert outward == ["net.capability", "net.character"]
+
+
+def test_the_second_outward_pack_needs_consent_too_and_reads_others_words():
+    conn = _conn()
+    with pytest.raises(S.ConsentRequired) as info:
+        S.set_pack_enabled(conn, "net.character", True)
+    assert info.value.terms["role_policy"] == "any_with_label"
+    assert "reads text they wrote" in info.value.terms["message"]

@@ -339,7 +339,9 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
             continue
         stats["processed"] += 1
         try:
-            raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"]))
+            raw = llm(model, build_prompt(pack, rec["text"], rec["date"], rec["role"],
+                                          speaker=str(rec.get("speaker") or ""),
+                                          speaker_entity_id=str(rec.get("speaker_entity_id") or "")))
             _bump_yield(conn, pack_id, llm_calls=1, prefilter_hits=1)
         except Exception:  # noqa: BLE001
             continue
