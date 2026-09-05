@@ -1183,6 +1183,7 @@ def _merge_appearances(
     participation_total: int,
     *,
     show: int,
+    keep_record_ids: bool = False,
 ) -> Tuple[List[Dict[str, Any]], int]:
     merged: List[Dict[str, Any]] = []
     seen: Set[Tuple[str, str, str]] = set()
@@ -1218,7 +1219,12 @@ def _merge_appearances(
     chosen = merged[:show]
     for row in chosen:
         row.pop("_rich", None)
-        row.pop("record_id", None)
+        # The card's provenance list never wanted the raw id. The reading does: it is the
+        # record its evidence row cites, and without it the reading's provenance ref
+        # collapsed to the subject's spine ref alone (measured 2026-09-05 — every
+        # message-backed evidence row carried a source and no record).
+        if not keep_record_ids:
+            row.pop("record_id", None)
     return chosen, max(total, len(merged))
 
 
@@ -1228,6 +1234,7 @@ def batch_person_appearances(
     *,
     show: int = APPEARANCE_SHOW,
     fetch: int = APPEARANCE_FETCH,
+    keep_record_ids: bool = False,
 ) -> Dict[str, Dict[str, Any]]:
     """Connector-agnostic appearances for many people. Batched IN queries, never N+1.
 
@@ -1247,6 +1254,7 @@ def batch_person_appearances(
             participated.get(nid, []),
             part_totals.get(nid, 0),
             show=show,
+            keep_record_ids=keep_record_ids,
         )
         out[nid] = {
             "mentions": mentions,

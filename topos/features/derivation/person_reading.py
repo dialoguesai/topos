@@ -116,7 +116,7 @@ def assemble_evidence(conn: Any, node: Dict[str, Any], *,
     rows: List[Dict[str, Any]] = []
 
     # 1. what the owner wrote about them — the record, in the owner's words
-    packed = batch_person_appearances(conn, [node], show=200, fetch=400)
+    packed = batch_person_appearances(conn, [node], show=200, fetch=400, keep_record_ids=True)
     mentions = (packed.get(str(node.get("node_id") or ""), {}) or {}).get("mentions") or []
     owner_rows = [m for m in mentions if m.get("authored_by_owner") and m.get("text")]
     owner_rows.sort(key=lambda m: str(m.get("at") or ""), reverse=True)

@@ -92,6 +92,11 @@ def test_evidence_is_the_owners_rows_first_then_facts_then_measures():
     assert rows[0]["id"] == "e1" and rows[-1]["id"] == f"e{len(rows)}"
     assert rows[0]["at"] == "2026-08-06", "newest owner sentence first"
     assert "coffee" in rows[0]["text"], "the full journal line, not the 220-char list snippet"
+    # every owner-written row names its record, so the stored reading can cite it as an
+    # ATTRIBUTED ref — measured 2026-09-05, the appearance merge had popped the id and every
+    # message-backed evidence row reached the store with a source and no record
+    assert all(r["record_id"] for r in rows if r["kind"] == "owner_wrote"), rows[:2]
+    assert all(r["source_id"] for r in rows if r["kind"] == "owner_wrote")
 
 
 def test_the_evidence_hash_moves_only_when_the_evidence_does():
@@ -221,7 +226,8 @@ def test_the_derived_drift_sweep_does_not_reap_a_reading():
                                signals={}, relationships={})
     refs = json.loads(conn.execute(
         "SELECT source_refs_json FROM signal_objects WHERE object_type='person_reading'").fetchone()[0])
-    assert all(r.get("source_id") for r in refs if r.get("kind") == "owner_wrote"), refs
+    owner_refs = [r for r in refs if r.get("kind") == "owner_wrote"]
+    assert owner_refs and all(r.get("source_id") and r.get("record_id") for r in owner_refs), refs
     assert {"table": "entities", "record_id": "e1", "kind": "subject"} in refs
     assert not any(r.get("table") == "person_graph" for r in refs)
     closed = close_dangling_facts(conn)
