@@ -343,9 +343,11 @@ def read_person_graph(conn: Any, *, dataset_id: str,
     disposition_stats = person_disposition_facts(conn, nodes)
     # The commitment ledger, owner's half: what the owner promised this person, in the
     # owner's own words, and what the record says became of it.
-    from ..features.derivation.commitments import attach_commitments
+    from ..features.derivation.commitments import attach_commitments, attach_status_signals
 
     commitment_stats = attach_commitments(conn, nodes)
+    # What they told you their situation is, in their words, expiring at 90 days.
+    status_stats = attach_status_signals(conn, nodes)
     # The stored reading, when one exists: computed on the deferred lane, never here.
     from ..features.derivation.person_reading import load_person_readings
 
@@ -426,6 +428,7 @@ def read_person_graph(conn: Any, *, dataset_id: str,
         "readings": {"attached": sum(1 for n in nodes if n.get("reading"))},
         "disposition": disposition_stats,
         "commitments": commitment_stats,
+        "status_signals": status_stats,
         "ambient_groups": {k: ambient_stats.get(k) for k in ("grouped", "ungrouped", "groups")},
         "context_affinity": context["pairs"],
         "context_coverage": context["coverage"],

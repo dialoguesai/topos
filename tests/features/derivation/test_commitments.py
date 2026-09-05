@@ -118,3 +118,39 @@ def test_the_ledger_reads_back_per_person_with_reliability_only_when_judged():
     assert led["reliability"] == 0.5
     assert n2["commitments"]["reliability"] is None, "one open promise is not a reliability"
     assert "commitments" not in n3
+
+
+def test_status_signals_expire_at_read_and_stay_visible_as_expired():
+    from datetime import date
+
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE signal_objects (object_type TEXT, valid_to TEXT, payload_json TEXT, valid_from TEXT)")
+    def fact(struct, occ):
+        conn.execute("INSERT INTO signal_objects VALUES ('fact', NULL, ?, ?)",
+                     (json.dumps({"predicate": "net.status_signal", "subject_entity_id": "e1",
+                                  "value_struct": struct, "occurrence": occ, "quote": "we're hiring"}), occ))
+    fact({"kind": "hiring", "detail": "two backend roles"}, "2026-08-12")
+    fact({"kind": "relocating", "detail": "Austin"}, "2026-04-01")
+    n1 = {"node_id": "ent:e1", "entity_id": "e1", "is_owner": False}
+    assert C.attach_status_signals(conn, [n1], today=date(2026, 9, 5))["attached"] == 1
+    sig = n1["status_signals"]
+    assert [e["kind"] for e in sig["current"]] == ["hiring"]
+    assert sig["current"][0]["expires_on"] == "2026-11-10"
+    assert [e["kind"] for e in sig["expired"]] == ["relocating"], "kept, but no longer asserted"
+    assert sig["ttl_days"] == 90
+
+
+def test_their_promises_join_the_ledger_marked_as_theirs():
+    conn = sqlite3.connect(":memory:")
+    conn.execute("CREATE TABLE signal_objects (object_type TEXT, valid_to TEXT, payload_json TEXT, valid_from TEXT)")
+    conn.execute("INSERT INTO signal_objects VALUES ('fact', NULL, ?, '2026-08-13')",
+                 (json.dumps({"predicate": "net.promise", "subject_entity_id": "e1",
+                              "value_struct": {"description": "send the deck", "due": "tonight", "status": "open"},
+                              "occurrence": "2026-08-13", "quote": "I'll send you the deck tonight"}),))
+    n1 = {"node_id": "ent:e1", "entity_id": "e1", "is_owner": False}
+    assert C.attach_commitments(conn, [n1])["attached"] == 1
+    led = n1["commitments"]
+    assert led["owed_to_you"][0]["description"] == "send the deck"
+    assert led["owed_to_you"][0]["stated_by"] == "them"
+    assert led["open"] == 1 and led["reliability"] is None
+    assert "them" in led["basis"]

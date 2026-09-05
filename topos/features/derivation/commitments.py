@@ -95,6 +95,69 @@ def refresh_commitments(conn: sqlite3.Connection, *, limit: int = MAX_PER_RUN) -
 
 # --------------------------------------------------------------------------- read-back
 
+#: A status signal is the most perishable fact on a person. Past this, the card stops
+#: asserting it — "said 12 Aug, expired 10 Nov" — rather than reading a two-year-old job as
+#: current (plan §3 row 3, the "#6 failure mode").
+STATUS_TTL_DAYS = 90
+
+
+def attach_status_signals(conn: Any, nodes: List[Dict[str, Any]], *, today: Any = None) -> Dict[str, int]:
+    """`net.status_signal` facts (net.character) onto the speaker's node, with expiry at read.
+
+    Expired signals are kept on the node as `expired` rather than dropped: "they were hiring
+    in June" is still worth a line, it is just not "they are hiring".
+    """
+    from datetime import date, datetime, timedelta
+
+    by_entity = {str(n["entity_id"]): n for n in nodes if n.get("entity_id") and not n.get("is_owner")}
+    if not by_entity:
+        return {"attached": 0}
+    try:
+        rows = conn.execute(
+            "SELECT payload_json, valid_from FROM signal_objects"
+            " WHERE object_type='fact' AND valid_to IS NULL"
+            " AND payload_json LIKE '%net.status_signal%'").fetchall()
+    except sqlite3.Error:
+        return {"attached": 0}
+    now = today or date.today()
+    if isinstance(now, datetime):
+        now = now.date()
+    attached = 0
+    for payload, valid_from in rows:
+        try:
+            fact = json.loads(payload or "{}")
+        except (TypeError, ValueError):
+            continue
+        if str(fact.get("predicate") or "") != "net.status_signal":
+            continue
+        struct = fact.get("value_struct") or fact.get("value") or {}
+        node = by_entity.get(str(fact.get("subject_entity_id") or struct.get("person_entity_id") or ""))
+        if node is None:
+            continue
+        said = str(fact.get("occurrence") or valid_from or "")[:10]
+        try:
+            said_on = date.fromisoformat(said)
+        except (TypeError, ValueError):
+            said_on = None
+        expires = (said_on + timedelta(days=STATUS_TTL_DAYS)) if said_on else None
+        entry = {"kind": str(struct.get("kind") or ""), "detail": str(struct.get("detail") or ""),
+                 "said_on": said or None, "expires_on": expires.isoformat() if expires else None,
+                 "expired": bool(expires and expires < now),
+                 "quote": (fact.get("quote") or "")[:200] or None,
+                 "basis": "their own words, in a message to you"}
+        signals = node.setdefault("status_signals", {"current": [], "expired": [],
+                                                    "ttl_days": STATUS_TTL_DAYS})
+        (signals["expired"] if entry["expired"] else signals["current"]).append(entry)
+        if len(signals["current"]) + len(signals["expired"]) == 1:
+            attached += 1
+    for node in by_entity.values():
+        sig = node.get("status_signals")
+        if sig:
+            for key in ("current", "expired"):
+                sig[key].sort(key=lambda e: e.get("said_on") or "", reverse=True)
+                sig[key] = sig[key][:6]
+    return {"attached": attached}
+
 def attach_commitments(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[str, int]:
     """The ledger per person: what the owner promised them, what they promised the owner,
     and what the record says became of it — onto the node as `commitments`."""
@@ -105,7 +168,8 @@ def attach_commitments(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[str, int]
         rows = conn.execute(
             "SELECT payload_json, valid_from FROM signal_objects"
             " WHERE object_type='fact' AND valid_to IS NULL"
-            " AND (payload_json LIKE '%commit.made%' OR payload_json LIKE '%commit.resolved%')"
+            " AND (payload_json LIKE '%commit.made%' OR payload_json LIKE '%commit.resolved%'"
+            "      OR payload_json LIKE '%net.promise%')"
         ).fetchall()
     except sqlite3.Error:
         return {"attached": 0}
@@ -116,17 +180,22 @@ def attach_commitments(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[str, int]
         except (TypeError, ValueError):
             continue
         predicate = str(fact.get("predicate") or "")
-        if predicate not in ("commit.made", "commit.resolved"):
+        if predicate not in ("commit.made", "commit.resolved", "net.promise"):
             continue
         struct = fact.get("value_struct") or fact.get("value") or {}
-        node = by_entity.get(str(struct.get("counterparty_entity_id") or fact.get("object_entity_id") or ""))
+        # a net.promise is the SPEAKER's fact: its subject is the person, not a counterparty
+        if predicate == "net.promise":
+            node = by_entity.get(str(fact.get("subject_entity_id") or struct.get("person_entity_id") or ""))
+        else:
+            node = by_entity.get(str(struct.get("counterparty_entity_id") or fact.get("object_entity_id") or ""))
         if node is None:
             continue
         ledger = node.setdefault("commitments", {
             "owed_by_you": [], "owed_to_you": [], "resolved": [],
             "kept": 0, "open": 0, "overdue": 0, "released": 0, "reliability": None,
             "basis": ("promises in your own words — messages you sent and journal lines you "
-                      "wrote; status only as the record states it, never inferred from silence"),
+                      "wrote — and, marked 'them', promises they made you in theirs; status only "
+                      "as the record states it, never inferred from silence"),
         })
         entry = {"description": str(struct.get("description") or ""),
                  "due": struct.get("due") or None,
@@ -137,11 +206,14 @@ def attach_commitments(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[str, int]
         if predicate == "commit.resolved":
             entry["outcome"] = str(struct.get("outcome") or "")
             ledger["resolved"].append(entry)
+        elif predicate == "net.promise":
+            entry["stated_by"] = "them"
+            ledger["owed_to_you"].append(entry)
         elif str(struct.get("direction") or "") == "owed_to_owner":
             ledger["owed_to_you"].append(entry)
         else:
             ledger["owed_by_you"].append(entry)
-        if predicate == "commit.made" and entry["status"] in ("kept", "open", "overdue", "released"):
+        if predicate in ("commit.made", "net.promise") and entry["status"] in ("kept", "open", "overdue", "released"):
             ledger[entry["status"]] += 1
         if was_empty:
             attached += 1
