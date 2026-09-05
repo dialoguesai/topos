@@ -73,7 +73,7 @@ logger = logging.getLogger(__name__)
 STAGE_SOURCE_PIN = "source_pin"          # a /source chip pinned the whole request
 STAGE_SCOPE_ROUTING = "scope_routing"    # keyword rules / composite recipes / route cap
 STAGE_BOOTSTRAP = "bootstrap"            # the deterministic pre-fire declined
-STAGE_TRANSPORT = "transport"            # a payload allow-list dropped a field
+STAGE_TRANSPORT = "transport"            # (CP) a payload allow-list dropped a field, or the relay to the node failed
 STAGE_GRANT = "grant"                    # scope / mode / selector denial
 STAGE_PLANNER = "planner"                # the parsed time window
 STAGE_RETRIEVAL = "retrieval"            # lane filters, fusion cap, soft window
@@ -123,12 +123,21 @@ CAUSE_NOT_QUERIED = "not_queried"
 #: Permission stopped it: mode ceiling, classifier denial, selector suppression, or
 #: a scope this client is not granted.
 CAUSE_SCOPE_DENIED = "scope_denied"
+#: The node did not complete this query — unreachable, an error status, or an invalid
+#: response — so nothing is known about what the stores hold. Stamped by the control
+#: plane's relay on a ``transport`` entry whose reason names which failure. It is a
+#: statement about the SYSTEM, not about the data: it licenses "try again", never
+#: "nothing here" and never "not permitted". Until 2026-09-05 the relay built these
+#: three failures with ``scope_denied``, and a timeout read downstream as a refusal.
+CAUSE_ENGINE_FAILED = "engine_failed"
 
 #: Precedence when several stages have an opinion, most authoritative first. A denied
-#: scope is denied whatever the stores hold; a gate veto outranks "nothing matched",
-#: because the veto is *why* nothing matched.
+#: scope is denied whatever the stores hold; a failed relay outranks every inferred
+#: absence, because nothing about the stores was established; a gate veto outranks
+#: "nothing matched", because the veto is *why* nothing matched.
 _CAUSE_PRECEDENCE = (
     CAUSE_SCOPE_DENIED,
+    CAUSE_ENGINE_FAILED,
     CAUSE_NOT_QUERIED,
     CAUSE_GATE_VETOED,
     CAUSE_NO_MATCH,
@@ -257,6 +266,7 @@ REASONS = frozenset(
         "grantee_scrub_facts",
         "hosted_binding_text_withheld",
         "owner_permission_claim_replaced",
+        "owner_failure_claim_replaced",
         "owner_supply_claim_replaced",
         "grantee_scrub_scores",
         "grantee_scrub_semantic_hits",

@@ -69,17 +69,6 @@ The machine-readable twin of each release is
   the app an outward pack fails closed until the proxy carries the owner's yes — which is
   the intended state until the consent dialog ships. A test pins that `net.capability` is
   the only outward pack in the wheel, so a second one arrives with its own decision.
-- **Your read of a person's disposition — an informant rating, stored as a stated fact.**
-  `[E:social]` `rate_person_disposition` writes `trait.bfi2_domain` on the PERSON with
-  `asserted_by: owner` through the D-E consent path (decision recorded, blackhole binding);
-  the predicate now keys on `domain` so a re-rating revises in place with history kept.
-  Negative Emotionality is refused for anyone but the owner (decision 2: its facets are
-  the distress set). Read back onto the node as `disposition`, labelled "your read".
-  New type `messenger_person_rate`; engine route `POST /messenger-analytics/person-rate`.
-- **Character strengths with receipts, in the reading.** `[E:social]` The reading's one
-  model call also asks for up to three VIA strengths as `strength: <name> [e.., e.., e..]`;
-  `parse_strengths` keeps one only with a name from `personality.traits`' own enum and
-  three DISTINCT cited rows. Stored as `strengths` on the reading; no extra model time.
 - **A ledger reason for the control plane's supply-claim rewrite.** `[O]` A home-chat
   answer that explains a `gate_vetoed` empty by telling the owner their data "might not
   be synced" is a false statement about their setup — the scope WAS queried, and the
@@ -93,6 +82,24 @@ The machine-readable twin of each release is
 
 
 ### Fixed
+- **A relay failure is no longer reported as a permission denial.** `[E:query]` When the
+  control plane could not reach the node, got an error status, or got an invalid response,
+  it built the refusal shape with `empty_cause: scope_denied` and a `grant` ledger entry —
+  the same words a scope the client is not granted produces. Downstream that is
+  indistinguishable from "not allowed": the app's fabricated-refusal backstop stands down
+  on a node denial, so a timeout became "check your Sharing settings" (2026-09-03, five
+  owner questions with an invented permissions refusal; 2026-08, a working
+  `attention:read` holding 7,490 verdicts diagnosed as a broken lane for an hour). The
+  vocabulary gains `engine_failed` — a statement about the SYSTEM, not the data — ranked
+  just below `scope_denied` and above every inferred absence, and the relay stamps it on a
+  `transport` entry whose reason names which failure. Owned here because all three repos
+  test their mirrors against `topos/protocol/narrowing_vocabulary.json`; the engine does
+  not emit it yet (lane fault injection is the follow-up). Also admits the front end's
+  `owner_failure_claim_replaced`, the reason it records when it replaces, in code, an
+  answer that told an absence or permissions story about a search that never completed.
+  `turn_outcome` still says `denied` on that path because clients key on it; the cause is
+  now the field that says WHY. Pinned by `tests/query/test_narrowing_vocabulary.py`
+  (parity with the published contract) and the control plane's deny-response tests.
 - **A word that names the SHAPE OF THE ANSWER can no longer empty a lane.** `[E:query]`
   The rare-token gate is absence honesty: a query token the corpus does not contain
   means "you asked about something your data does not mention". That is right about
