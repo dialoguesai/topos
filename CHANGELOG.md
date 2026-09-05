@@ -36,6 +36,23 @@ The machine-readable twin of each release is
   structural people are the only link to at least one other, 48 are articulation points,
   the largest cut-off is 14. Orgs and places a person alone carries measured ZERO on the
   same node, so that half is not computed rather than reported as a confident zero.
+- **The reading — a critic's pass over one relationship, from cited rows only.**
+  `[E:social]` `features/derivation/person_reading.py` assembles a numbered evidence list
+  per person (the owner's own sentences about them, newest first; the owner's
+  relationship facts; what they do together, have heard about, share; the measured shape)
+  and asks the node's extraction model for 4–8 sentences on the arc, motifs, register,
+  tension and role — every sentence citing `[eN]`, and `parse_reading` DELETES any that
+  does not. Stored as `signal_objects` `person_reading` (relationships dimension,
+  `disclosure: owner_only`, supersede-on-change so history is kept) and attached to the
+  person node as `reading` at read time; never computed inside a request. The compute
+  rule is the eligibility rule: a measured tie or ≥5 owner-written rows, `needs_name`
+  never (D-F), black-holed never, and only when the evidence hash changed. Scheduled by a
+  10-minute debounce after any messenger-analytics recompute (`TOPOS_PERSON_READINGS=off`
+  kills it); `POST /v1/messenger-analytics/readings/refresh` runs it now, engine-only.
+  The subject is the dyad — "who this person is to you" — and the model never sees the
+  person's own messages, so this lane needs no outward pack.
+
+
 
 
 

@@ -448,6 +448,16 @@ def compute_and_persist_messenger_analytics(
         directed_totals["error"] = str(exc)[:200]
     totals.update(directed_totals)
 
+    # The readings lane hangs off this pass rather than off a request: a recompute means
+    # the dyads moved, so the evidence behind every reading may have. Debounced and
+    # single-flight inside; a failure to schedule never fails the analytics.
+    try:
+        from ..features.derivation.person_reading import mark_readings_due
+
+        mark_readings_due(dataset_id)
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("readings not scheduled: %s", exc)
+
     return {
         "dataset_id": dataset_id,
         "period_granularity": period_granularity,

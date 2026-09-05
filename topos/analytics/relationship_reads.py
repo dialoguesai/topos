@@ -338,6 +338,15 @@ def read_person_graph(conn: Any, *, dataset_id: str,
     # that name a body of work, through the luck rail's resolver. Per person here, per
     # work item there; same events, so the two screens agree.
     heard_stats = attach_heard_about(conn, dataset_id, nodes)
+    # The stored reading, when one exists: computed on the deferred lane, never here.
+    from ..features.derivation.person_reading import load_person_readings
+
+    readings = load_person_readings(conn)
+    for n in nodes:
+        r = readings.get(str(n.get("node_id") or ""))
+        if r:
+            n["reading"] = {k: r.get(k) for k in ("sentences", "evidence", "coverage", "computed_at",
+                                                    "model", "reason", "dropped_uncited", "version")}
     # Ambient is 173 of 437 and reads as an undifferentiated fringe, but it holds classical
     # poets, GitHub collaborators, LinkedIn contacts and several pieces of software mistaken
     # for people. Grouping by what each name was seen ALONGSIDE separates them.
@@ -405,6 +414,7 @@ def read_person_graph(conn: Any, *, dataset_id: str,
                             "never push them away: silence is not evidence of distance"),
         "fact_closeness_applied": fact_stats.get("applied", 0),
         "heard_about": heard_stats,
+        "readings": {"attached": sum(1 for n in nodes if n.get("reading"))},
         "ambient_groups": {k: ambient_stats.get(k) for k in ("grouped", "ungrouped", "groups")},
         "context_affinity": context["pairs"],
         "context_coverage": context["coverage"],

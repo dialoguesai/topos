@@ -21,7 +21,7 @@ def _now_iso() -> str:
 # UPDATE (which destroys the previous revision), a changed payload closes the
 # active row (valid_to) and inserts a fresh one. Bounded by refresh cadence;
 # no pruning yet by design.
-_SUPERSEDE_ON_CHANGE_TYPES = frozenset({"entity_dossier", "dimension_brief"})
+_SUPERSEDE_ON_CHANGE_TYPES = frozenset({"entity_dossier", "dimension_brief", "person_reading"})
 
 
 class SignalObjectStore:

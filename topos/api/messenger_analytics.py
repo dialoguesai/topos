@@ -436,6 +436,50 @@ def get_relationship_signals(
     return read_relationship_signals(conn, dataset_id=dataset_id, signal=signal)
 
 
+@router.post("/messenger-analytics/readings/refresh", dependencies=[Depends(require_api_key)])
+def post_readings_refresh(
+    dataset_id: str = Query(...),
+    force: bool = Query(False),
+    limit: int = Query(60, ge=1, le=500),
+) -> Dict[str, Any]:
+    """Run the readings pass now, on a background thread (single-flight). Engine-only."""
+    import threading
+
+    from ..features.derivation import person_reading as PR
+
+    def _go() -> None:
+        from ..core.state import close_thread_db_connection
+
+        with PR._LOCK:
+            if PR._RUNNING:
+                return
+            PR._RUNNING = True
+        try:
+            conn = get_db_connection()
+            if conn is None:
+                return
+            PR._LAST.update(PR.refresh_person_readings(conn, dataset_id, limit=limit, force=force))
+        except Exception as exc:  # noqa: BLE001
+            PR._LAST["error"] = str(exc)[:200]
+        finally:
+            with PR._LOCK:
+                PR._RUNNING = False
+            close_thread_db_connection()
+
+    if PR._RUNNING:
+        return {"status": "running", **PR.readings_status()}
+    t = threading.Thread(target=_go, name="topos-person-readings-manual", daemon=True)
+    t.start()
+    return {"status": "started", "dataset_id": dataset_id, "force": force, "limit": limit}
+
+
+@router.get("/messenger-analytics/readings/status", dependencies=[Depends(require_api_key)])
+def get_readings_status() -> Dict[str, Any]:
+    from ..features.derivation.person_reading import readings_status
+
+    return readings_status()
+
+
 @router.get("/messenger-analytics/bench", dependencies=[Depends(require_api_key)])
 def get_bench() -> Dict[str, Any]:
     conn = get_db_connection()

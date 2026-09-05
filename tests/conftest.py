@@ -730,3 +730,11 @@ def module_reload_isolation():
         parent = sys.modules.get(parent_name) if parent_name else None
         if parent is not None:
             setattr(parent, child, module)
+
+
+@pytest.fixture(autouse=True)
+def _no_person_readings_timer(monkeypatch):
+    """The readings lane arms a 10-minute daemon timer after any messenger-analytics
+    recompute; under pytest that timer would fire into whatever database the process
+    then holds. Off for every test — the lane has its own tests that call it directly."""
+    monkeypatch.setenv("TOPOS_PERSON_READINGS", "off")

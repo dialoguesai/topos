@@ -41,7 +41,8 @@
     "relationship_tier",
     "relationship_narrative_summary",
     "entity_dossier",
-    "relationship_edge_summary"
+    "relationship_edge_summary",
+    "person_reading"
   ],
   "gate_objects": [
     "warmth_score",
