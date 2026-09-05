@@ -69,6 +69,16 @@ The machine-readable twin of each release is
   the app an outward pack fails closed until the proxy carries the owner's yes — which is
   the intended state until the consent dialog ships. A test pins that `net.capability` is
   the only outward pack in the wheel, so a second one arrives with its own decision.
+- **A ledger reason for the control plane's supply-claim rewrite.** `[O]` A home-chat
+  answer that explains a `gate_vetoed` empty by telling the owner their data "might not
+  be synced" is a false statement about their setup — the scope WAS queried, and the
+  corpus simply does not mention the subject. The control plane now replaces such an
+  answer in code and records the rewrite as `owner_supply_claim_replaced`, the sibling
+  of `owner_permission_claim_replaced`. Admitted to `REASONS` and
+  `protocol/narrowing_vocabulary.json` here FIRST, so the literal cannot collapse to the
+  `unrecognized` sentinel on the way through `as_public()` and leave the audit trail
+  describing a turn that did not happen. Engine behaviour is unchanged; the rewrite and
+  its prompt-side half live in topos-react-app. Drift tests green in all three repos.
 
 
 ### Fixed

@@ -257,6 +257,7 @@ REASONS = frozenset(
         "grantee_scrub_facts",
         "hosted_binding_text_withheld",
         "owner_permission_claim_replaced",
+        "owner_supply_claim_replaced",
         "grantee_scrub_scores",
         "grantee_scrub_semantic_hits",
         "grantee_scrub_summaries",
