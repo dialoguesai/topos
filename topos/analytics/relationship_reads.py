@@ -287,6 +287,7 @@ def read_person_graph(conn: Any, *, dataset_id: str,
     from .dataset_resolution import resolve_messaging_dataset
     from .person_graph import (attach_closeness, attach_coactivity, attach_fact_closeness,
                                attach_heard_about, attach_shared_with_owner,
+                               person_disposition_facts,
                                auto_link_duplicates,
                                build_person_edges, build_person_nodes, group_ambient_people,
                                merge_suggestions, resolve_owner_identity,
@@ -338,6 +339,8 @@ def read_person_graph(conn: Any, *, dataset_id: str,
     # that name a body of work, through the luck rail's resolver. Per person here, per
     # work item there; same events, so the two screens agree.
     heard_stats = attach_heard_about(conn, dataset_id, nodes)
+    # The owner's informant ratings — stated facts about this person, labelled as such.
+    disposition_stats = person_disposition_facts(conn, nodes)
     # The stored reading, when one exists: computed on the deferred lane, never here.
     from ..features.derivation.person_reading import load_person_readings
 
@@ -345,8 +348,9 @@ def read_person_graph(conn: Any, *, dataset_id: str,
     for n in nodes:
         r = readings.get(str(n.get("node_id") or ""))
         if r:
-            n["reading"] = {k: r.get(k) for k in ("sentences", "evidence", "coverage", "computed_at",
-                                                    "model", "reason", "dropped_uncited", "version")}
+            n["reading"] = {k: r.get(k) for k in ("sentences", "strengths", "evidence", "coverage",
+                                                    "computed_at", "model", "reason",
+                                                    "dropped_uncited", "version")}
     # Ambient is 173 of 437 and reads as an undifferentiated fringe, but it holds classical
     # poets, GitHub collaborators, LinkedIn contacts and several pieces of software mistaken
     # for people. Grouping by what each name was seen ALONGSIDE separates them.
@@ -415,6 +419,7 @@ def read_person_graph(conn: Any, *, dataset_id: str,
         "fact_closeness_applied": fact_stats.get("applied", 0),
         "heard_about": heard_stats,
         "readings": {"attached": sum(1 for n in nodes if n.get("reading"))},
+        "disposition": disposition_stats,
         "ambient_groups": {k: ambient_stats.get(k) for k in ("grouped", "ungrouped", "groups")},
         "context_affinity": context["pairs"],
         "context_coverage": context["coverage"],
@@ -447,6 +452,15 @@ def read_person_graph(conn: Any, *, dataset_id: str,
                                     "other people — off unless you ask for it)"),
         },
     }
+
+
+def rate_person(conn: Any, *, subject_entity_id: str, domain: str, level: str,
+                note: str = "") -> Dict[str, Any]:
+    """The owner's informant rating of a person's Big Five domain (plan §2.2)."""
+    from ..features.derivation.surfaces import rate_person_disposition
+
+    return rate_person_disposition(conn, subject_entity_id=subject_entity_id,
+                                   domain=domain, level=level, note=note)
 
 
 def read_naming_queue(conn: Any, *, dataset_id: str, limit: int = 25) -> Dict[str, Any]:

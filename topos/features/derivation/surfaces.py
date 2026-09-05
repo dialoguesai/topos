@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 
@@ -65,6 +66,73 @@ def list_packs(conn: sqlite3.Connection) -> Dict[str, Any]:
             "yield_30d": yield_30d.get(pid),
         })
     return {"packs": packs, "total_conflicts": sum(conflict_counts.values())}
+
+
+BFI2_DOMAINS = ("extraversion", "agreeableness", "conscientiousness",
+                "negative_emotionality", "open_mindedness")
+LEVEL_5 = ("very_high", "high", "average", "low", "very_low")
+#: Decision 2 (owner, 2026-09-05): Negative Emotionality is never rated for a third party.
+#: Its facets — anxiety, depression tendency, emotional volatility — are the distress set
+#: `health.mental` fences for the owner; a rating of them about someone who never consented
+#: is the one thing the disposition read must not hold, whoever the rater is.
+THIRD_PARTY_EXCLUDED_DOMAINS = frozenset({"negative_emotionality"})
+
+
+def rate_person_disposition(conn: sqlite3.Connection, *, subject_entity_id: str, domain: str,
+                            level: str, note: str = "") -> Dict[str, Any]:
+    """The owner's informant rating of a person's Big Five domain — a STATED fact.
+
+    The instrument that is valid for rating someone else is the informant report, not
+    inference over their texts (plan §2.2). So this is the owner speaking, written through
+    the D-E consent path exactly as a promoted or revised fact is: owner-directed, the
+    decision recorded on the subject, the blackhole still binding. `trait.bfi2_domain`
+    keys on the domain, so re-rating revises the level in place and history is kept.
+    """
+    from .net_subject_policy import is_owner_entity, may_owner_write_about, record_owner_decision
+    from .packs import load_packs
+    from .registry import bundled_pack_dir
+    from .writer import DerivationWriter
+    from ...storage.db.write_gate import commit_connection, with_db_write
+
+    subject = str(subject_entity_id or "").strip()
+    dom = str(domain or "").strip().lower()
+    lvl = str(level or "").strip().lower()
+    if not subject:
+        raise ValueError("subject_entity_id is required")
+    if dom not in BFI2_DOMAINS:
+        raise ValueError(f"domain must be one of {', '.join(BFI2_DOMAINS)}")
+    if lvl not in LEVEL_5:
+        raise ValueError(f"level must be one of {', '.join(LEVEL_5)}")
+    if not conn.execute("SELECT 1 FROM entities WHERE entity_id=?", (subject,)).fetchone():
+        raise ValueError(f"unknown entity {subject}")
+    owner_subject = is_owner_entity(conn, subject)
+    if not owner_subject and dom in THIRD_PARTY_EXCLUDED_DOMAINS:
+        raise ValueError("negative_emotionality is not rated for other people — its facets are "
+                         "the distress set, withheld for anyone but you (decision 2, 2026-09-05)")
+    decision = may_owner_write_about(conn, subject)
+    if not decision.allowed:
+        raise ValueError(f"cannot rate this person: {decision.reason}")
+
+    pack = load_packs(bundled_pack_dir(), only=["personality.traits"]).get("personality.traits")
+    if pack is None:
+        raise ValueError("personality.traits pack is not bundled")
+    consent_recorded = False
+    if decision.reason != "owner_subject":
+        with with_db_write():
+            consent_recorded = record_owner_decision(conn, subject, note="rated disposition on the card")
+            commit_connection(conn)
+    today = datetime.now(timezone.utc).date().isoformat()
+    writer = DerivationWriter(conn, model="owner-informant")
+    out = writer.assert_pack_fact(
+        pack=pack, predicate="trait.bfi2_domain", subject_entity_id=subject,
+        value={"domain": dom, "level": lvl}, actor_role="authored",
+        source_refs=[{"table": "entities", "record_id": subject, "source_id": "owner_informant",
+                      "kind": "subject"}],
+        confidence=1.0, quote=(note or "your read, given on the person card"),
+        about="owner", event_date=today)
+    return {"subject_entity_id": subject, "domain": dom, "level": lvl,
+            "outcome": out.get("outcome"), "object_id": out.get("object_id"),
+            "consent_recorded": consent_recorded, "at": today}
 
 
 class ConsentRequired(PermissionError):

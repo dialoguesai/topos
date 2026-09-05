@@ -492,7 +492,8 @@ async def handle_messenger_analytics_periods(message: Dict[str, Any]) -> Optiona
          "messenger_directed_edges", "messenger_bench", "messenger_luck_surface",
          "messenger_person_graph", "messenger_naming_queue",
          "messenger_person_provenance", "messenger_person_curate",
-         "messenger_person_undo", "messenger_curation_history")
+         "messenger_person_undo", "messenger_curation_history",
+         "messenger_person_rate")
 async def handle_relationship_reads(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     if not req_id:
@@ -518,7 +519,7 @@ async def handle_relationship_reads(message: Dict[str, Any]) -> Optional[Dict[st
                     "messenger_luck_surface", "messenger_person_graph",
                     "messenger_naming_queue", "messenger_person_provenance",
                     "messenger_person_curate", "messenger_person_undo",
-                    "messenger_curation_history"):
+                    "messenger_curation_history", "messenger_person_rate"):
                 return {"id": req_id, "status": "error", "error": "dataset_id required"}
             if msg_type == "messenger_relationships":
                 result = reads.read_relationships(
@@ -547,6 +548,16 @@ async def handle_relationship_reads(message: Dict[str, Any]) -> Optional[Dict[st
                     conn, dataset_id=dataset_id,
                     subject_ids=payload.get("subject_ids") or payload.get("subject_id") or [],
                     action=str(payload.get("action") or ""), value=payload.get("value"))
+            elif msg_type == "messenger_person_rate":
+                try:
+                    result = reads.rate_person(
+                        conn, subject_entity_id=str(payload.get("subject_entity_id") or ""),
+                        domain=str(payload.get("domain") or ""),
+                        level=str(payload.get("level") or ""),
+                        note=str(payload.get("note") or ""))
+                except ValueError as bad:
+                    return {"id": req_id, "status": "error", "error": str(bad)[:300],
+                            "reason": "rating_refused"}
             elif msg_type == "messenger_person_undo":
                 result = reads.undo_curation(
                     conn, overlay_ids=payload.get("overlay_ids")

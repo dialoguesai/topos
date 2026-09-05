@@ -561,6 +561,26 @@ def post_person_curate(payload: Dict[str, Any]) -> Dict[str, Any]:
         action=str(payload.get("action") or ""), value=payload.get("value"))
 
 
+@router.post("/messenger-analytics/person-rate", dependencies=[Depends(require_api_key)])
+def post_person_rate(payload: Dict[str, Any]) -> Dict[str, Any]:
+    """The owner's informant rating of a person's Big Five domain — a stated fact through
+    the consent path. 400 with the reason when the rating is refused."""
+    from fastapi import HTTPException
+
+    conn = get_db_connection()
+    if conn is None:
+        return {"error": "no database"}
+    from ..analytics.relationship_reads import rate_person
+
+    try:
+        return rate_person(
+            conn, subject_entity_id=str(payload.get("subject_entity_id") or ""),
+            domain=str(payload.get("domain") or ""), level=str(payload.get("level") or ""),
+            note=str(payload.get("note") or ""))
+    except ValueError as bad:
+        raise HTTPException(status_code=400, detail={"reason": "rating_refused", "error": str(bad)}) from bad
+
+
 @router.post("/messenger-analytics/person-undo", dependencies=[Depends(require_api_key)])
 def post_person_undo(payload: Dict[str, Any]) -> Dict[str, Any]:
     conn = get_db_connection()

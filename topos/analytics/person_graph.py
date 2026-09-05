@@ -2154,6 +2154,56 @@ def attach_coactivity(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[str, int]:
     return {"attached": attached}
 
 
+def person_disposition_facts(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[str, int]:
+    """The owner's informant ratings of a person's Big Five domains, onto their node.
+
+    Only `trait.bfi2_domain` facts whose SUBJECT is this person, and the card labels every
+    one "your read": on this node they are all owner-stated, because the model's estimate
+    is gated behind a validation it has not passed (plan §2.2). Negative Emotionality is
+    named as withheld rather than left blank — a missing slider reads as "not rated yet",
+    a withheld one reads as the decision it is.
+    """
+    by_entity = {str(n["entity_id"]): n for n in nodes if n.get("entity_id") and not n.get("is_owner")}
+    if not by_entity:
+        return {"attached": 0}
+    try:
+        rows = conn.execute(
+            "SELECT payload_json, valid_from FROM signal_objects"
+            " WHERE object_type='fact' AND valid_to IS NULL"
+            " AND payload_json LIKE '%trait.bfi2_domain%'").fetchall()
+    except sqlite3.Error:
+        return {"attached": 0}
+    attached = 0
+    for payload, valid_from in rows:
+        try:
+            fact = json.loads(payload or "{}")
+        except (TypeError, ValueError):
+            continue
+        if str(fact.get("predicate") or "") != "trait.bfi2_domain":
+            continue
+        node = by_entity.get(str(fact.get("subject_entity_id") or ""))
+        if node is None:
+            continue
+        struct = fact.get("value_struct") or fact.get("value") or {}
+        domain, level = str(struct.get("domain") or ""), str(struct.get("level") or "")
+        if not domain or not level:
+            continue
+        disp = node.setdefault("disposition", {
+            "domains": {},
+            "excluded": ["negative_emotionality"],
+            "basis": ("your read — an informant rating you gave on this card; the model's "
+                      "estimate is not shown until it passes validation"),
+        })
+        if domain not in disp["domains"]:
+            attached += 1
+        disp["domains"][domain] = {
+            "level": level,
+            "at": str(valid_from or "")[:10] or None,
+            "stated_by_owner": str(fact.get("asserted_by") or "") == "owner",
+        }
+    return {"attached": attached}
+
+
 def attach_heard_about(conn: Any, dataset_id: str, nodes: List[Dict[str, Any]]) -> Dict[str, int]:
     """What of the OWNER'S OWN WORK this person has heard about, from the owner's DMs to them.
 

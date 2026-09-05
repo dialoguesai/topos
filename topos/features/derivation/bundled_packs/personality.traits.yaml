@@ -20,6 +20,7 @@ routing:
 
 predicates:
   - {name: trait.bfi2_domain, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,
+     key_fields: [domain],
      value_schema: {domain: {enum: [extraversion, agreeableness, conscientiousness, negative_emotionality, open_mindedness]}, level: {scale: level_5}},
      aligns_with: "https://en.wikipedia.org/wiki/Big_Five_personality_traits"}
   - {name: trait.bfi2_facet, value_type: structured, cardinality: multi, temporal: interval, altitude: inferred,

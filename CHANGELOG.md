@@ -69,6 +69,13 @@ The machine-readable twin of each release is
   the app an outward pack fails closed until the proxy carries the owner's yes — which is
   the intended state until the consent dialog ships. A test pins that `net.capability` is
   the only outward pack in the wheel, so a second one arrives with its own decision.
+- **Your read of a person's disposition — an informant rating, stored as a stated fact.**
+  `[E:social]` `rate_person_disposition` writes `trait.bfi2_domain` on the PERSON with
+  `asserted_by: owner` through the D-E consent path (decision recorded, blackhole binding);
+  the predicate now keys on `domain` so a re-rating revises in place with history kept.
+  Negative Emotionality is refused for anyone but the owner (decision 2: its facets are
+  the distress set). Read back onto the node as `disposition`, labelled "your read".
+  New type `messenger_person_rate`; engine route `POST /messenger-analytics/person-rate`.
 - **A ledger reason for the control plane's supply-claim rewrite.** `[O]` A home-chat
   answer that explains a `gate_vetoed` empty by telling the owner their data "might not
   be synced" is a false statement about their setup — the scope WAS queried, and the
