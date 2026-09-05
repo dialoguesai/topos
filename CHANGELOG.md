@@ -9,6 +9,23 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Added
+- **The relational archetype — one sentence about how a relationship behaves, from your
+  seat.** `[E:social]` `read_relationship_signals` now carries `archetypes`, one row per
+  dyad above the evidence floor, composed by a new `archetype` kernel over L1's directed
+  edges: who opens (a share, semantic cutpoints), how fast they answer (the owner's own
+  p33/p67, so "slower than most of your ties" says which world the word comes from), where
+  it happens (DM share across every edge kind), how steadily (reciprocal streak against
+  longest gap, own quantiles), and in what tone (the PEER's messages only, ten labelled or
+  it abstains). Live: 35 of 151 dyads typed in 34ms; the other 116 are "met, not yet a
+  relationship" and stay untyped. Every axis abstains on its own floor and the row names
+  its `unmeasured` axes, so the sentence never fills a gap with a guess — and initiation is
+  read from DM edges only, because one group-only peer carried 268 "openings" that were
+  who-posted-first-in-a-room, not who opened a conversation with this owner. This is the
+  first item of `PLAN_SOCIAL_GRAPH_PERSON_QUALITIES.md`; it is deliberately a type of the
+  EXCHANGE, not of the person — MBTI stays excluded and Big Five stays gated.
+
+
 ## [1.3.51] — 2026-09-05
 
 ### Fixed

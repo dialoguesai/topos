@@ -197,9 +197,13 @@ def read_directed_edges(
 
 
 def read_relationship_signals(conn: Any, *, dataset_id: str, signal: str = "all") -> Dict[str, Any]:
-    """The derived read: warmth / drift / reciprocity, calibrated against the owner's own
-    distribution, with what was NOT judged reported rather than hidden."""
-    from ..features.derivation.social_kernels import (_dyad_rows, apply_evidence_floor,
+    """The derived read: warmth / drift / reciprocity / archetype, calibrated against the
+    owner's own distribution, with what was NOT judged reported rather than hidden.
+
+    The archetype reads the directed edges as well as the dyads (766 rows on the live node,
+    one pass, no DDL); it is the one signal that names its unmeasured axes per row."""
+    from ..features.derivation.social_kernels import (_dyad_rows, _edge_rows,
+                                                      apply_evidence_floor, compute_archetype,
                                                       compute_drift, compute_reciprocity,
                                                       compute_warmth)
     from .messenger_directed import MESSENGER_DYAD_STATS_TABLE
@@ -221,11 +225,13 @@ def read_relationship_signals(conn: Any, *, dataset_id: str, signal: str = "all"
         out["drift_alarms"] = compute_drift(rows)
     if signal in ("all", "reciprocity"):
         out["reciprocity"] = compute_reciprocity(rows)
+    if signal in ("all", "archetype"):
+        out["archetypes"] = compute_archetype(rows, _edge_rows(conn, dataset_id))
 
-    labels_for = {r["peer_key"] for k in ("warmth", "drift_alarms", "reciprocity")
+    labels_for = {r["peer_key"] for k in ("warmth", "drift_alarms", "reciprocity", "archetypes")
                   for r in out.get(k, [])}
     labels = peer_labels(conn, dataset_id, sorted(labels_for))
-    for k in ("warmth", "drift_alarms", "reciprocity"):
+    for k in ("warmth", "drift_alarms", "reciprocity", "archetypes"):
         for r in out.get(k, []):
             r["label"] = labels.get(r["peer_key"]) or r["peer_key"]
     return out
