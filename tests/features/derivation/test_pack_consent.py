@@ -31,6 +31,8 @@ def _conn():
         conn.execute("INSERT INTO entities VALUES (?,?,?,?,?,?)",
                      (f"p{i}", "person", f"Person {i}", f"person {i}", "[]", 0))
     conn.execute("INSERT INTO entities VALUES ('me','person','Owner','owner','[]',1)")
+    # a bare number is a person entity the write gate can never admit — not a subject
+    conn.execute("INSERT INTO entities VALUES ('raw','person','+15125550199','+15125550199','[]',0)")
     seed_pack_registry(conn, bundled_pack_dir())
     return conn
 
@@ -47,7 +49,8 @@ def test_an_outward_pack_refuses_to_enable_without_consent():
     assert not _enabled(conn, "net.capability"), "refused means nothing changed"
     terms = info.value.terms
     assert terms["net_subject"] == "allow" and terms["role_policy"] == "any_with_label"
-    assert terms["subjects_in_scope"] == 7, "the owner is never a subject"
+    assert terms["subjects_in_scope"] == 7, "the owner is never a subject, nor is a bare number"
+    assert "nameable people" in terms["message"]
     assert "OTHER than you" in terms["message"] and "reads text they wrote" in terms["message"]
 
 

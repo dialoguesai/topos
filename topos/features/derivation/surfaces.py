@@ -85,10 +85,14 @@ def consent_terms(conn: sqlite3.Connection, pack_id: str) -> Optional[Dict[str, 
     pack = load_packs(bundled_pack_dir(), only=[pack_id]).get(pack_id)
     if pack is None or str(getattr(pack, "net_subject", "deny")) != "allow":
         return None
+    # Nameable people only — the write gate (D-F) never admits a bare phone number, so
+    # counting one would tell the owner the pack can reach people it cannot. Live: 1,912
+    # person entities, of which the raw `+1…` rows are exactly the ones this excludes.
     try:
         subjects = int(conn.execute(
             "SELECT COUNT(*) FROM entities WHERE entity_type='person'"
-            " AND COALESCE(is_self,0)=0").fetchone()[0])
+            " AND COALESCE(is_self,0)=0"
+            " AND canonical_name GLOB '*[A-Za-z]*'").fetchone()[0])
     except sqlite3.Error:
         subjects = 0
     reads = str(getattr(pack, "role_policy", "") or "")
@@ -101,9 +105,9 @@ def consent_terms(conn: sqlite3.Connection, pack_id: str) -> Optional[Dict[str, 
         "message": (
             f"{getattr(pack, 'title', pack_id)} writes facts about people OTHER than you"
             + (" and reads text they wrote to you" if reads == "any_with_label" else "")
-            + f". {subjects} people on this node could become subjects; a bare phone number "
-              "never does, a black-holed person never does, and nothing written leaves the "
-              "owner tier. Enable only if that is what you want."),
+            + f". {subjects} nameable people on this node could become subjects; a bare phone "
+              "number never does, a black-holed person never does, and nothing written leaves "
+              "the owner tier. Enable only if that is what you want."),
     }
 
 
