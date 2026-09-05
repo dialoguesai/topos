@@ -286,7 +286,7 @@ def read_person_graph(conn: Any, *, dataset_id: str,
     """
     from .dataset_resolution import resolve_messaging_dataset
     from .person_graph import (attach_closeness, attach_coactivity, attach_fact_closeness,
-                               attach_shared_with_owner,
+                               attach_heard_about, attach_shared_with_owner,
                                auto_link_duplicates,
                                build_person_edges, build_person_nodes, group_ambient_people,
                                merge_suggestions, resolve_owner_identity,
@@ -334,6 +334,10 @@ def read_person_graph(conn: Any, *, dataset_id: str,
     # different question of what the two of them WORK ON. Run after the duplicate fold, for
     # the same reason the facts are: the edge must land on the surviving node.
     attach_coactivity(conn, nodes)
+    # What of the owner's OWN work this person has heard about — the owner's DMs to them
+    # that name a body of work, through the luck rail's resolver. Per person here, per
+    # work item there; same events, so the two screens agree.
+    heard_stats = attach_heard_about(conn, dataset_id, nodes)
     # Ambient is 173 of 437 and reads as an undifferentiated fringe, but it holds classical
     # poets, GitHub collaborators, LinkedIn contacts and several pieces of software mistaken
     # for people. Grouping by what each name was seen ALONGSIDE separates them.
@@ -359,6 +363,11 @@ def read_person_graph(conn: Any, *, dataset_id: str,
         n["centrality_degree"] = structure["degree"].get(nid, 0.0)
         n["centrality_betweenness"] = structure["betweenness"].get(nid, 0.0)
         n["brokerage_meaningful"] = bool(structure.get("brokerage_meaningful", {}).get(nid))
+        reach = (structure.get("reach") or {}).get(nid)
+        if reach:
+            # `meaningful` carries the same component-size rule as brokerage: a cut-off
+            # claim inside a four-person corner is arithmetic, a leaf count is a fact.
+            n["reach"] = {**reach, "meaningful": bool(n["brokerage_meaningful"])}
     # People who turn up in the same subjects. A pull on the LAYOUT only: not an edge, not a
     # community, nothing that changes a colour or a count. The graph places people by their
     # relationship to the owner and to each other through messages, and neither of those
@@ -395,6 +404,7 @@ def read_person_graph(conn: Any, *, dataset_id: str,
                             "behaviour understates it, and can only pull someone closer, "
                             "never push them away: silence is not evidence of distance"),
         "fact_closeness_applied": fact_stats.get("applied", 0),
+        "heard_about": heard_stats,
         "ambient_groups": {k: ambient_stats.get(k) for k in ("grouped", "ungrouped", "groups")},
         "context_affinity": context["pairs"],
         "context_coverage": context["coverage"],

@@ -265,3 +265,38 @@ class TestDeclaredWorkOutranksAnInferredSubject:
         assert key not in declared_work, (
             "two people at the same venue is not two people working together"
         )
+
+
+class TestExclusiveReach:
+    """What a person is the ONLY way to, read from the tie graph alone."""
+
+    def test_leaf_neighbours_and_cut_off_on_a_chain(self, conn):
+        """a—x—b—y—c: x is a's only link and cuts a off; b cuts the chain in half; y is
+        c's only link. Numbers a reader can check by hand."""
+        for p, q in (("a", "x"), ("x", "b"), ("b", "y"), ("y", "c")):
+            _edge(conn, p, q, 3)
+        conn.commit()
+        out = PG.structural_metrics(conn, "d", _nodes("a", "x", "b", "y", "c"),
+                                    context_pairs=[])
+        reach = out["reach"]
+        assert reach["x"] == {"exclusive_people": 1, "cut_off_if_absent": 1, "component_size": 5}
+        assert reach["y"] == {"exclusive_people": 1, "cut_off_if_absent": 1, "component_size": 5}
+        assert reach["b"] == {"exclusive_people": 0, "cut_off_if_absent": 2, "component_size": 5}
+        assert "a" not in reach and "c" not in reach, "a leaf is the only way to nobody"
+
+    def test_a_pair_is_each_others_only_link_and_nothing_is_cut_off(self, conn):
+        _edge(conn, "p", "q", 2)
+        conn.commit()
+        out = PG.structural_metrics(conn, "d", _nodes("p", "q"), context_pairs=[])
+        assert out["reach"]["p"] == {"exclusive_people": 1, "cut_off_if_absent": 0, "component_size": 2}
+        assert out["reach"]["q"]["exclusive_people"] == 1
+
+    def test_a_shared_subject_opens_no_door(self, conn):
+        """Layer 2 is never a tie, so it can never make someone the only link to anyone."""
+        _edge(conn, "x", "y", 5)
+        conn.commit()
+        out = PG.structural_metrics(
+            conn, "d", _nodes("x", "y", "z"),
+            context_pairs=[{"source": "y", "target": "z", "weight": 0.9}])
+        assert "z" not in out["reach"]
+        assert out["reach"]["y"]["exclusive_people"] == 1, "x, through the real tie only"

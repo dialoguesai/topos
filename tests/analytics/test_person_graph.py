@@ -1276,3 +1276,96 @@ class TestWhatYouShareWithThisPerson:
                   "messenger_keys": ["self"]}]
         PG.attach_shared_with_owner(c, nodes)
         assert "shared_with_owner" not in nodes[0]
+
+
+class TestHeardAbout:
+    """What of the owner's own work a person has heard about — from the owner's DMs only."""
+
+    def _conn(self):
+        conn = sqlite3.connect(":memory:")
+        conn.executescript("""
+          CREATE TABLE entities (entity_id TEXT PRIMARY KEY, entity_type TEXT,
+            canonical_name TEXT, normalized_name TEXT, aliases_json TEXT, is_self INTEGER);
+          CREATE TABLE entity_mentions (mention_id TEXT PRIMARY KEY, entity_id TEXT,
+            record_id TEXT, source_id TEXT, canonical_table TEXT, event_at TEXT,
+            created_at TEXT, authored_by_owner INTEGER);
+          CREATE TABLE user_goals (goal_id TEXT, goal_text TEXT);
+          CREATE TABLE conversation_messages (dataset_id TEXT, message_id TEXT, content TEXT,
+            is_from_self INTEGER, conversation_id TEXT, sender_id TEXT, event_at TEXT,
+            source_id TEXT, reply_to_message_id TEXT);
+        """)
+        conn.execute("INSERT INTO entities VALUES ('w1','project','Halcyon','halcyon','[]',0)")
+        for i in range(12):
+            conn.execute("INSERT INTO entity_mentions VALUES (?,?,?,?,?,?,?,?)",
+                         (f"m{i}", "w1", f"r{i}", "github_activity", "activity_events",
+                          "2026-07-01T00:00:00Z", "2026-07-01T00:00:00Z", 1))
+        # Enough ordinary traffic that the work's name is a NAME and not a common word:
+        # the luck resolver drops any surface found in more than a fifth of messages, which
+        # is right on a corpus and wrong on a five-message fixture (measured: 2 of 5 = 40%,
+        # `matchable: False`, zero telling events, and a test that read as a code bug).
+        self._msg(conn, "f0", "c9", "+15550003333", 0, "hey", "2026-07-01T09:00:00Z")
+        for i in range(14):
+            self._msg(conn, f"f{i + 1}", "c9", None, 1, f"see you at {i} then",
+                      f"2026-07-{i + 2:02d}T09:00:00Z")
+        return conn
+
+    def _msg(self, conn, mid, conv, sender, from_self, text, at):
+        conn.execute("INSERT INTO conversation_messages VALUES (?,?,?,?,?,?,?,?,?)",
+                     ("d", mid, text, from_self, conv, sender, at, "imessage", None))
+
+    def _nodes(self):
+        return [
+            {"node_id": "msg:+15550001111", "entity_id": None, "contact_id": None,
+             "messenger_keys": ["+15550001111"], "is_owner": False, "label": "Peer",
+             "band": "core", "evidence": {"messaged": True, "mentioned": False}},
+            {"node_id": "msg:+15550002222", "entity_id": None, "contact_id": None,
+             "messenger_keys": ["+15550002222"], "is_owner": False, "label": "Other",
+             "band": "core", "evidence": {"messaged": True, "mentioned": False}},
+        ]
+
+    def test_the_owners_own_dms_naming_the_work_attach_with_count_and_date(self):
+        from topos.analytics.person_graph import attach_heard_about
+
+        conn = self._conn()
+        # the peer speaks first so the conversation has a known counterparty
+        self._msg(conn, "p0", "c1", "+15550001111", 0, "hey", "2026-08-01T09:00:00Z")
+        self._msg(conn, "o1", "c1", None, 1, "shipped the Halcyon scheduler today", "2026-08-02T09:00:00Z")
+        self._msg(conn, "o2", "c1", None, 1, "Halcyon demo went well", "2026-08-10T09:00:00Z")
+        self._msg(conn, "p1", "c2", "+15550002222", 0, "hi", "2026-08-01T09:00:00Z")
+        self._msg(conn, "o3", "c2", None, 1, "lunch?", "2026-08-02T09:00:00Z")
+        conn.commit()
+        nodes = self._nodes()
+        stats = attach_heard_about(conn, "d", nodes)
+        assert stats["attached"] == 1 and stats["events"] == 2
+        heard = nodes[0]["heard_about"]
+        assert heard["items"] == [{"label": "Halcyon", "events": 2, "last_at": "2026-08-10"}]
+        assert heard["events"] == 2
+        assert "heard_about" not in nodes[1], "told nothing means no key, not an empty list"
+
+    def test_what_the_peer_said_about_the_work_is_not_telling(self):
+        """Telling is the OWNER speaking. A peer naming the work is them telling the
+        owner — a different fact, and never evidence the owner told them."""
+        from topos.analytics.person_graph import attach_heard_about
+
+        conn = self._conn()
+        self._msg(conn, "p0", "c1", "+15550001111", 0, "how is Halcyon going?", "2026-08-01T09:00:00Z")
+        self._msg(conn, "o1", "c1", None, 1, "good thanks", "2026-08-02T09:00:00Z")
+        conn.commit()
+        nodes = self._nodes()
+        assert attach_heard_about(conn, "d", nodes)["attached"] == 0
+        assert "heard_about" not in nodes[0]
+
+    def test_two_handles_for_one_person_are_told_once(self):
+        from topos.analytics.person_graph import attach_heard_about
+
+        conn = self._conn()
+        self._msg(conn, "p0", "c1", "+15550001111", 0, "hey", "2026-08-01T09:00:00Z")
+        self._msg(conn, "o1", "c1", None, 1, "Halcyon is live", "2026-08-02T09:00:00Z")
+        self._msg(conn, "p1", "c2", "+15550009999", 0, "hey", "2026-08-03T09:00:00Z")
+        self._msg(conn, "o2", "c2", None, 1, "Halcyon again", "2026-08-04T09:00:00Z")
+        conn.commit()
+        nodes = self._nodes()
+        nodes[0]["messenger_keys"].append("+15550009999")
+        stats = attach_heard_about(conn, "d", nodes)
+        assert stats["attached"] == 1
+        assert nodes[0]["heard_about"]["items"][0]["events"] == 2

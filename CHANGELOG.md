@@ -24,6 +24,20 @@ The machine-readable twin of each release is
   who-posted-first-in-a-room, not who opened a conversation with this owner. This is the
   first item of `PLAN_SOCIAL_GRAPH_PERSON_QUALITIES.md`; it is deliberately a type of the
   EXCHANGE, not of the person — MBTI stays excluded and Big Five stays gated.
+- **Two more facts on the person node: what of your work they have heard about, and what
+  they are the only way to.** `[E:social]` `heard_about` reads the owner's own DMs that
+  name a body of work through the luck rail's resolver — per person here, per work item
+  there, same events — so a card can answer "can I bring this up without cold-starting?"
+  Measured live: 99 owner-authored messages named a work item to 19 people and none of
+  those cards said so. `reach` comes from the structural pass on the tie graph alone
+  (who you know, never shared subjects): the people whose sole tie into your network is
+  this person, and how many would lose their path to the rest of their corner without
+  them; `meaningful` carries the brokerage component-size rule. Live: 74 of 224
+  structural people are the only link to at least one other, 48 are articulation points,
+  the largest cut-off is 14. Orgs and places a person alone carries measured ZERO on the
+  same node, so that half is not computed rather than reported as a confident zero.
+
+
 
 
 ## [1.3.51] — 2026-09-05

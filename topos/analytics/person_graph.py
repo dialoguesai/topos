@@ -1504,6 +1504,34 @@ def structural_metrics(conn: Any, dataset_id: str, nodes: List[Dict[str, Any]], 
         for member in component:
             brokerage_ok[str(member)] = big_enough
 
+    # EXCLUSIVE REACH — what this person is the only way to. Two facts per node, both read
+    # from the tie graph alone (who you know, never shared subjects): the people whose ONLY
+    # connection into your network is this person (their leaf neighbours), and how many
+    # people would lose their path to the rest of their corner if this person were absent
+    # (articulation). Measured on the live node: 74 of 224 structural people are the only
+    # link to at least one other, 48 are articulation points, the largest cut-off is 14.
+    # Orgs and places a person alone carries measured ZERO on the same node — entity_edges
+    # attach them to nobody in the structural set — so that half is not computed, rather
+    # than reported as a confident zero.
+    reach: Dict[str, Dict[str, int]] = {}
+    for component in nx.connected_components(ties):
+        sub = ties.subgraph(component)
+        size = len(component)
+        cut_by: Dict[str, int] = {}
+        if size >= 3:
+            for p in nx.articulation_points(sub):
+                rest = sub.copy()
+                rest.remove_node(p)
+                pieces = sorted((len(c) for c in nx.connected_components(rest)), reverse=True)
+                # everyone outside the largest remaining piece has lost their way to it
+                cut_by[str(p)] = sum(pieces[1:])
+        for p in component:
+            leaves = sum(1 for q in sub.neighbors(p) if sub.degree(q) == 1)
+            cut = cut_by.get(str(p), 0)
+            if leaves or cut:
+                reach[str(p)] = {"exclusive_people": leaves, "cut_off_if_absent": cut,
+                                 "component_size": size}
+
     # Communities from greedy modularity, falling back to connected components — the point
     # is a stable grouping to lay out by, not a claim about social clubs.
     try:
@@ -1561,6 +1589,9 @@ def structural_metrics(conn: Any, dataset_id: str, nodes: List[Dict[str, Any]], 
         # A score from a four-person component is arithmetic; the flag says which ones are
         # worth showing as a finding rather than as a number.
         "brokerage_meaningful": brokerage_ok,
+        # Only the nodes with something to say; a missing key means "no exclusive reach",
+        # not "not computed" — every node in `ties` was looked at.
+        "reach": reach,
         "coverage": {
             "basis": ("connections BETWEEN your people, with you removed — you are connected "
                       "to everyone here, so leaving you in makes you the only broker and "
@@ -1570,6 +1601,9 @@ def structural_metrics(conn: Any, dataset_id: str, nodes: List[Dict[str, Any]], 
             "communities_from": ("who you know, plus what people have in common — the second "
                                  "is never drawn and never counted as a connection"),
             "centrality_from": "who you know only",
+            "reach_from": ("who you know only — leaf neighbours are people whose sole tie into "
+                           "your network is this person; cut-off counts who would lose their "
+                           "path to the rest of their corner without them"),
             "context_pairs_joined": context_added,
             "excluded": ("semantic similarity between two people is not evidence they know "
                          "each other"),
@@ -2118,6 +2152,74 @@ def attach_coactivity(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[str, int]:
         }
         attached += 1
     return {"attached": attached}
+
+
+def attach_heard_about(conn: Any, dataset_id: str, nodes: List[Dict[str, Any]]) -> Dict[str, int]:
+    """What of the OWNER'S OWN WORK this person has heard about, from the owner's DMs to them.
+
+    The Luck screen already computes this per body of work — "told two people" — and never
+    per person, so a card could not answer the question an ask begins with: can I bring
+    this up without cold-starting? Measured on the live node before this existed: 99
+    owner-authored messages named a work item to 19 people, and none of those 19 cards said
+    so. Reuses the luck rail's resolver end to end rather than a second surface matcher,
+    so the two screens cannot disagree about who has heard what.
+
+    First-party by construction — the events are messages the OWNER wrote (`is_from_self`)
+    in a DM, so this is the owner's record of what they said, never a claim about what the
+    other person knows or repeated. One message is one telling; the chip carries the count
+    and the date so a single mention a year ago reads as exactly that.
+    """
+    from . import luck_surface as L
+
+    for table in ("entity_mentions", "conversation_messages"):
+        if not _appearance_table_exists(conn, table):
+            return {"attached": 0, "events": 0}
+    try:
+        items = L.compile_surfaces(conn, dataset_id, L.build_work_items(conn))
+    except sqlite3.Error:
+        return {"attached": 0, "events": 0}
+    if not items:
+        return {"attached": 0, "events": 0}
+    try:
+        tells = L.build_telling_events(conn, dataset_id, items)
+    except sqlite3.Error:
+        return {"attached": 0, "events": 0}
+    if not tells:
+        return {"attached": 0, "events": 0}
+
+    labels = {i["work_item_id"]: i["label"] for i in items}
+    by_key: Dict[str, Dict[str, Any]] = {}
+    for n in nodes:
+        if n.get("is_owner"):
+            continue
+        for k in n.get("messenger_keys") or []:
+            by_key[str(k)] = n
+    # node_id -> work_item_id -> event times; merged across a person's handles so a person
+    # with two numbers is told once, not twice.
+    merged: Dict[str, Dict[str, List[str]]] = {}
+    for work_item_id, _mid, recipient, _comm, event_at, _period, _n in tells:
+        node = by_key.get(str(recipient))
+        if node is None:
+            continue
+        merged.setdefault(str(node["node_id"]), {}).setdefault(
+            str(work_item_id), []).append(str(event_at or ""))
+    by_node = {str(n["node_id"]): n for n in nodes}
+    attached = 0
+    for node_id, per_item in merged.items():
+        node = by_node.get(node_id)
+        if node is None:
+            continue
+        entries = sorted(((len(times), labels.get(wid, wid), max(times)) for wid, times in per_item.items()),
+                         key=lambda e: (-e[0], e[1]))
+        node["heard_about"] = {
+            "items": [{"label": label, "events": count, "last_at": (last[:10] if last else None)}
+                      for count, label, last in entries[:4]],
+            "events": sum(e[0] for e in entries),
+            "basis": ("your own direct messages to them that name the work — "
+                      "never what they said"),
+        }
+        attached += 1
+    return {"attached": attached, "events": len(tells)}
 
 
 def attach_shared_with_owner(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[str, int]:
