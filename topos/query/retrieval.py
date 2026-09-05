@@ -1062,7 +1062,16 @@ def _load_user_goal_summaries(
             key = text.lower()
             if key in seen_texts:
                 continue
-            token_match = bool(tokens) and any(token in key for token in tokens)
+            # Overlap is read through `_token_variants`, so an inflection of a word the
+            # goal holds still reaches it: "what I WORKED on this week" must find the
+            # goal that says "working on", exactly as "what did I WORK on" does. Found by
+            # the transform-invariance family (2026-09-05): "Write a haiku about what I
+            # worked on this week" lost the goal its plain control retrieved, with no
+            # veto anywhere — the surface-form test below was the whole loss. Variants
+            # of a fabricated word are fabricated words, so absence honesty is untouched.
+            token_match = bool(tokens) and any(
+                variant in key for token in tokens for variant in _token_variants(token)
+            )
             # A goal rides on token overlap OR on explicit goal intent ("what are
             # my goals") — never as unconditional filler.
             if tokens and not token_match and not goal_intent:

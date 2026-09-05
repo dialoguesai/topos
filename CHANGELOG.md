@@ -110,6 +110,15 @@ The machine-readable twin of each release is
 
 
 ### Fixed
+- **A word naming the shape of the answer, or an inflection of a word your goal uses, no
+  longer loses the goal.** `[S1]` `[E:query]` "Write a haiku about what I worked on this
+  week" retrieved nothing where "what did I work on this week" found the goal: the goals
+  lane matched the ask's words against the goal text by surface form, so `worked` never
+  reached `working on`. Overlap is now read through the same light suffix variants the
+  rare gate uses; fabricated words still match nothing. Found by the new transform-
+  invariance family (`tests/query/test_transform_invariance_family.py`), which grades a
+  plain ask and its output-form siblings for non-loss of evidence on a corpus where the
+  rare gate is live.
 - **A relay failure is no longer reported as a permission denial.** `[E:query]` When the
   control plane could not reach the node, got an error status, or got an invalid response,
   it built the refusal shape with `empty_cause: scope_denied` and a `grant` ledger entry —
