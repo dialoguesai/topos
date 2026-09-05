@@ -76,7 +76,12 @@ VIA_STRENGTHS = (
     "competitiveness", "adaptability",
 )
 MIN_STRENGTH_ACTS = 3
-_STRENGTH_LINE = re.compile(r"^\s*(?:[-*]\s*)?strength\s*:\s*([a-z_]+)\s*\[([^\]]*)\]", re.IGNORECASE)
+#: Both shapes the models actually write: `strength: perseverance [e1, e2, e3]` as asked, and
+#: `perseverance: [e1, e2, e3]` / `Perseverance [e1, e2, e3]` as the resident 9B answered on
+#: the first live run — 14 readings, 0 strengths kept, because the parser demanded the prefix.
+_STRENGTH_LINE = re.compile(
+    r"^\s*(?:[-*\d.]+\s*)?(?:strength\s*:\s*)?([A-Za-z][A-Za-z_ \-]*?)\s*:?\s*\[([^\]]*)\]",
+    re.IGNORECASE)
 
 _REF = re.compile(r"\[(e\d+(?:\s*,\s*e\d+)*)\]")
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"'(\[])")
@@ -278,7 +283,7 @@ def parse_strengths(text: str, valid_ids: List[str]) -> Dict[str, Any]:
         m = _STRENGTH_LINE.match(line)
         if not m:
             continue
-        name = m.group(1).strip().lower()
+        name = re.sub(r"[\s\-]+", "_", m.group(1).strip().lower())
         refs = []
         for tok in m.group(2).split(","):
             tok = tok.strip()

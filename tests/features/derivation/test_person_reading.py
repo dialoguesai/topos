@@ -272,3 +272,17 @@ def test_strengths_ride_in_the_stored_reading():
     stored = PR.load_person_readings(conn)["ent:e1"]
     assert stored["strengths"] == [{"strength": "honesty", "refs": ["e1", "e2", "e3"]}]
     assert "STRENGTHS" not in " ".join(s["text"] for s in stored["sentences"])
+
+
+def test_strengths_are_read_in_the_shape_the_model_actually_writes():
+    """First live run: 14 readings, 0 strengths — the 9B wrote `perseverance: [e1, e2, e25]`
+    with no `strength:` prefix, and the parser demanded it."""
+    text = ("A cited sentence [e1].\n\nSTRENGTHS:\n"
+            "perseverance: [e1, e2, e25]\n"
+            "Open mindedness [e2, e5, e9]\n"
+            "- strength: love-of-learning [e1, e3, e4]\n"
+            "leadership: [e1, e2]\n")
+    ids = [f"e{i}" for i in range(1, 30)]
+    out = PR.parse_strengths(text, ids)
+    assert [s["strength"] for s in out["strengths"]] == ["perseverance", "open_mindedness", "love_of_learning"]
+    assert out["dropped"] == 1, "two receipts is not a strength"
