@@ -286,3 +286,35 @@ def test_strengths_are_read_in_the_shape_the_model_actually_writes():
     out = PR.parse_strengths(text, ids)
     assert [s["strength"] for s in out["strengths"]] == ["perseverance", "open_mindedness", "love_of_learning"]
     assert out["dropped"] == 1, "two receipts is not a strength"
+
+
+def test_an_all_uncited_answer_gets_exactly_one_retry():
+    conn = _conn()
+    node = _person(conn)
+    answers = iter(["A warm and generous soul who lights up every room.",
+                    "They walk with you most weeks [e1]. The argument was the one tension [e7]."])
+    calls = []
+
+    def llm(prompt):
+        calls.append(prompt)
+        return next(answers)
+    llm.model_name = "fake"
+    PR.refresh_person_readings(conn, "d", llm=llm, nodes=[node], signals={}, relationships={})
+    stored = PR.load_person_readings(conn)["ent:e1"]
+    assert len(calls) == 2 and "was discarded" in calls[1]
+    assert [s["refs"] for s in stored["sentences"]] == [["e1"], ["e7"]]
+    assert stored["retried"] is True
+
+
+def test_a_second_uncited_answer_is_stored_as_the_abstention_with_no_third_call():
+    conn = _conn()
+    node = _person(conn)
+    calls = []
+
+    def llm(prompt):
+        calls.append(prompt)
+        return "Still no citations, just prose."
+    llm.model_name = "fake"
+    stats = PR.refresh_person_readings(conn, "d", llm=llm, nodes=[node], signals={}, relationships={})
+    assert len(calls) == 2 and stats["abstained"] == 1
+    assert PR.load_person_readings(conn)["ent:e1"]["sentences"] == []

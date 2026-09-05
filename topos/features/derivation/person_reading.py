@@ -413,9 +413,22 @@ def provenance_refs(node: Dict[str, Any], evidence: List[Dict[str, Any]]) -> Lis
 def build_reading(node: Dict[str, Any], evidence: List[Dict[str, Any]], llm: Callable[[str], str],
                   *, reason: str, model_name: str = "") -> Dict[str, Any]:
     label = str(node.get("label") or "this person")
-    raw = llm(build_prompt(label, evidence)) if evidence else ""
+    prompt = build_prompt(label, evidence)
+    raw = llm(prompt) if evidence else ""
     ids = [r["id"] for r in evidence]
     parsed = parse_reading(raw, ids)
+    retried = False
+    if evidence and raw.strip() and not parsed["sentences"]:
+        # ONE retry, only for the all-uncited case. First live run: 2 of 12 readings came
+        # back as prose with no citations at all — 7 sentences over 30 rows on one — and
+        # the checker rightly deleted every one. A second ask with the rule restated costs
+        # one more call for that person only; a second failure is stored as the abstention.
+        raw2 = llm(prompt + "\n\nYour previous answer was discarded: not one sentence ended with a "
+                            "citation. Every sentence MUST end with [eN] citations to the evidence "
+                            "rows above. Write the reading again, citing each sentence.")
+        again = parse_reading(raw2, ids)
+        if again["sentences"]:
+            raw, parsed, retried = raw2, again, True
     strengths = parse_strengths(raw, ids)
     counts: Dict[str, int] = {}
     for r in evidence:
@@ -434,6 +447,7 @@ def build_reading(node: Dict[str, Any], evidence: List[Dict[str, Any]], llm: Cal
         "dropped_uncited": parsed["dropped"],
         "strengths": strengths["strengths"],
         "strengths_dropped": strengths["dropped"],
+        "retried": retried,
         "evidence": evidence,
         "coverage": {
             "rows": len(evidence), "by_kind": counts,
