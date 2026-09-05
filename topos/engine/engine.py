@@ -270,6 +270,12 @@ class Engine:
                         "completion_tokens": completion_tokens,
                         "total_tokens": total_tokens,
                     },
+                    # Rebuilding usage from three keys DROPPED the provider's
+                    # load/prefill/decode split, so it reached the browser but
+                    # never the database — leaving the per-model latency table
+                    # empty. Same flatten-and-discard shape as the control
+                    # plane's parse_usage_tokens, missed on this path.
+                    timings=(usage.get("timings") if isinstance(usage.get("timings"), dict) else None),
                     origin=origin,
                     source_id=normalized.source_id,
                     duration_ms=duration_ms,

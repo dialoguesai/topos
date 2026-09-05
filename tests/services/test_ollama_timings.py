@@ -204,3 +204,50 @@ class TestReversionGate:
         assert "else resolved_duration" not in obs, (
             "ttfb_ms must stay RECORDED OR ABSENT, never defaulted to duration"
         )
+
+
+class TestTheSplitReachesTheDatabase:
+    """The write path, which is where the per-model latency table reads from.
+
+    Shipped 1.3.49/1.3.50 with the split reaching the BROWSER but not the
+    database: `Engine.run` rebuilt `usage` from three keys and dropped
+    `timings`, so every row in `llm_usage_events` carried no phase data and the
+    Plan & Billing table rendered em dashes for every model. Verified live on
+    2026-09-04: 426 rows across four sources, zero with a split.
+    """
+
+    def test_engine_forwards_timings_to_the_observation(self):
+        import inspect
+
+        from topos.engine import engine
+
+        src = inspect.getsource(engine)
+        assert "timings=(usage.get(\"timings\")" in src, (
+            "Engine.run stopped forwarding the provider's phase split; the "
+            "per-model latency table goes blank again with no other symptom"
+        )
+
+    def test_the_observation_writes_the_phase_keys_into_metadata(self):
+        import inspect
+
+        from topos.engine import usage_observation
+
+        src = inspect.getsource(usage_observation)
+        assert "phase_meta" in src and "**phase_meta" in src
+        assert "_TIMING_KEYS" in src
+
+    def test_only_known_phase_keys_are_written(self):
+        # metadata_json is free-form; an open passthrough would let a future
+        # provider field silently become a billing input.
+        from topos.engine.usage_observation import _TIMING_KEYS
+
+        assert set(_TIMING_KEYS) == {
+            "load_ms",
+            "prefill_ms",
+            "decode_ms",
+            "total_ms",
+            "prefill_tok_s",
+            "decode_tok_s",
+            "cold",
+            "prefill_cached",
+        }

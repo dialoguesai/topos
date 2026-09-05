@@ -304,6 +304,21 @@ def emit_usage_observation_sync(
     return envelope
 
 
+#: The phase keys lifted into usage metadata. A closed set, mirroring the
+#: control plane's TIMING_KEYS: metadata_json is free-form, and an open
+#: passthrough would let a future provider field become a billing input.
+_TIMING_KEYS = (
+    "load_ms",
+    "prefill_ms",
+    "decode_ms",
+    "total_ms",
+    "prefill_tok_s",
+    "decode_tok_s",
+    "cold",
+    "prefill_cached",
+)
+
+
 def emit_engine_llm_usage_observation(
     *,
     task_id: str,
@@ -318,6 +333,7 @@ def emit_engine_llm_usage_observation(
     ttfb_ms: Optional[int] = None,
     pack_id: Optional[str] = None,
     role: Optional[str] = None,
+    timings: Optional[Dict[str, Any]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Record + emit llm.generate usage for a completed generative Engine task.
 
@@ -380,6 +396,11 @@ def emit_engine_llm_usage_observation(
     # number is one you cannot.
     resolved_duration = int(duration_ms) if duration_ms is not None else None
     resolved_ttfb = int(ttfb_ms) if ttfb_ms is not None else None
+    # The load/prefill/decode split, if the provider reported one. This is the
+    # WRITE path for the per-model latency table: the engine records these rows
+    # directly, so a split that only reaches the browser never reaches the
+    # aggregation. Absent for providers that report nothing — never zero-filled.
+    phase_meta = {k: timings[k] for k in _TIMING_KEYS if isinstance(timings, dict) and k in timings}
     metadata: Dict[str, Any] = {
         "purpose": purpose,
         "provider": provider_key,
@@ -391,6 +412,7 @@ def emit_engine_llm_usage_observation(
         "subtype": subtype_key,
         "task_type": str(task_type or ""),
         "source_id": str(source_id or ""),
+        **phase_meta,
     }
     if resolved_pack_id:
         metadata["pack_id"] = resolved_pack_id

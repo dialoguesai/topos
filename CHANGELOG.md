@@ -9,6 +9,23 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.51] — 2026-09-05
+
+### Fixed
+- **The load/prefill/decode split now reaches the DATABASE, not just the
+  browser.** `[O]` 1.3.49 captured the split and 1.3.50 corrected its
+  cache-hit heuristic, but `Engine.run` rebuilt `usage` from three keys and
+  dropped `timings` on the way to `emit_engine_llm_usage_observation` — the
+  same flatten-and-discard shape already fixed in the control plane's
+  `parse_usage_tokens`, missed on this path. The consequence was invisible in
+  every test and obvious in the product: verified live 2026-09-04, **426 usage
+  rows across four sources, zero carrying a phase split**, so the per-model
+  latency table on Plan & Billing had nothing to render. The engine writes
+  those rows directly, so a split that only reaches the UI never reaches the
+  aggregation. Phase keys are lifted through a closed set — `metadata_json` is
+  free-form, and an open passthrough would let a future provider field
+  silently become a billing input.
+
 ### Added
 - **YouTube transcripts are a first-class ingest class.** `[S1] [O]`
   Caption archives land on `transcripts` / `transcript_segments` via
