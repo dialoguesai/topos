@@ -51,6 +51,10 @@ The machine-readable twin of each release is
   kills it); `POST /v1/messenger-analytics/readings/refresh` runs it now, engine-only.
   The subject is the dyad — "who this person is to you" — and the model never sees the
   person's own messages, so this lane needs no outward pack.
+  **Live lesson, same day:** the first pass's readings were closed 32 minutes later by
+  the derived-drift sweep because their provenance refs named a synthetic table; refs
+  now carry the record's `source_id` (attributed, the attribution sweep's to trim) and
+  the subject's spine id, and a test runs the real sweep over a stored reading.
 - **An outward pack cannot be enabled without the owner's yes.** `[E:derivation]`
   `set_pack_enabled` was a bare UPDATE, so `net.capability` — the one bundled pack that
   writes facts about people other than the owner and reads text they wrote — could be

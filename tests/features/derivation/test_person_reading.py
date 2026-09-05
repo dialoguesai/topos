@@ -205,3 +205,34 @@ def test_the_budget_goes_to_the_closest_people_first():
                                        relationships={}, limit=1)
     assert stats["written"] == 1
     assert "Sasha Okoro" in seen[0] and len(seen) == 1
+
+
+# --- the sweep ---------------------------------------------------------------------
+
+def test_the_derived_drift_sweep_does_not_reap_a_reading():
+    """THE BUG: the first live pass wrote refs at a synthetic `person_graph` table; the
+    drift sweep found no such records and closed all twelve readings 32 minutes later.
+    Run the REAL sweep over a stored reading: it must stay open."""
+    from topos.features.lifecycle.derived_scrub import close_dangling_facts
+
+    conn = _conn()
+    node = _person(conn)
+    PR.refresh_person_readings(conn, "d", llm=_fake_llm("A cited sentence [e1]."), nodes=[node],
+                               signals={}, relationships={})
+    refs = json.loads(conn.execute(
+        "SELECT source_refs_json FROM signal_objects WHERE object_type='person_reading'").fetchone()[0])
+    assert all(r.get("source_id") for r in refs if r.get("kind") == "owner_wrote"), refs
+    assert {"table": "entities", "record_id": "e1", "kind": "subject"} in refs
+    assert not any(r.get("table") == "person_graph" for r in refs)
+    closed = close_dangling_facts(conn)
+    assert closed == 0
+    assert len(PR.load_person_readings(conn)) == 1, "still active after the sweep"
+
+
+def test_a_reading_with_no_record_backed_evidence_keeps_an_unverifiable_ref():
+    """The sweep treats a ref it cannot check as alive on purpose; a reading with only
+    measured rows must carry one rather than a made-up table it can check and fail."""
+    refs = PR.provenance_refs({"node_id": "msg:+15550001111", "entity_id": None},
+                              [{"kind": "measure", "text": "warm", "table": "dyad stats", "record_id": ""}])
+    assert refs == [{"table": "", "record_id": "", "note": "person_graph node msg:+15550001111",
+                     "kind": "unverifiable"}]

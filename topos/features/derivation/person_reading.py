@@ -107,7 +107,11 @@ def assemble_evidence(conn: Any, node: Dict[str, Any], *,
             continue
         rows.append({"kind": "owner_wrote", "text": text, "at": (m.get("at") or "")[:10] or None,
                      "table": m.get("source_label") or m.get("source_id") or "",
-                     "record_id": m.get("record_id") or ""})
+                     "record_id": m.get("record_id") or "",
+                     # the connector the record came from — what makes the provenance ref
+                     # ATTRIBUTED, and therefore the attribution sweep's to trim, never the
+                     # drift sweep's to reap (see `provenance_refs`)
+                     "source_id": m.get("source_id") or ""})
 
     # 2. the owner's relationship facts about them
     for f in node.get("facts") or []:
@@ -320,6 +324,38 @@ def load_person_readings(conn: Any) -> Dict[str, Dict[str, Any]]:
     return out
 
 
+def provenance_refs(node: Dict[str, Any], evidence: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Where the reading came from, in the shape the lifecycle sweeps understand.
+
+    THE BUG this replaces: the first live pass wrote `{"table": "person_graph",
+    "record_id": "<node id>"}` — a synthetic table the derived-drift sweep could not find
+    a record in, so 32 minutes after they were written all twelve readings were judged
+    to have lost their evidence and closed. Two rules from `close_dangling_facts`, read
+    rather than guessed: a ref carrying `source_id` is the ATTRIBUTION sweep's to trim
+    (when that connector scrubs) and counts as live here; a spine id (`ent_…`) resolves
+    against `entities` whatever table the ref names. So every record-backed evidence row
+    becomes an attributed ref, and an entity-keyed person adds the spine ref. A reading
+    with neither keeps one unverifiable ref, which the sweep treats as alive on purpose —
+    "closing a real fact is worse than keeping a stale one an extra sweep".
+    """
+    refs: List[Dict[str, Any]] = []
+    seen = set()
+    for r in evidence:
+        rid = str(r.get("record_id") or "")
+        if not rid or rid in seen:
+            continue
+        seen.add(rid)
+        refs.append({"table": str(r.get("table") or ""), "record_id": rid,
+                     "source_id": str(r.get("source_id") or ""), "kind": r.get("kind")})
+    eid = str(node.get("entity_id") or "")
+    if eid:
+        refs.append({"table": "entities", "record_id": eid, "kind": "subject"})
+    if not refs:
+        refs.append({"table": "", "record_id": "", "note": "person_graph node "
+                     + str(node.get("node_id") or ""), "kind": "unverifiable"})
+    return refs
+
+
 def build_reading(node: Dict[str, Any], evidence: List[Dict[str, Any]], llm: Callable[[str], str],
                   *, reason: str, model_name: str = "") -> Dict[str, Any]:
     label = str(node.get("label") or "this person")
@@ -433,12 +469,10 @@ def refresh_person_readings(conn: Any, dataset_id: str, *, llm: Optional[Callabl
             continue
         if not payload["sentences"]:
             stats["abstained"] += 1
-        refs = [{"table": r.get("table") or "", "record_id": r.get("record_id") or "", "kind": r["kind"]}
-                for r in evidence if r.get("record_id")]
         try:
             store.upsert_object(
                 DIMENSION, OBJECT_TYPE, f"reading:{node.get('node_id')}", payload,
-                source_refs=refs or [{"table": "person_graph", "record_id": str(node.get("node_id"))}],
+                source_refs=provenance_refs(node, evidence),
                 confidence=min(1.0, len(payload["sentences"]) / MAX_SENTENCES),
                 extractor_version=f"person_reading_v{READING_VERSION}",
             )
