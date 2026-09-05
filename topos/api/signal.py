@@ -1100,13 +1100,23 @@ async def get_derivation_packs(_api_key: str = Depends(require_api_key)):
 async def put_derivation_pack(
     pack_id: str,
     enabled: bool = Body(..., embed=True),
+    consent: bool = Body(False, embed=True),
+    consent_note: str = Body("", embed=True),
     _api_key: str = Depends(require_api_key),
 ):
-    from ..features.derivation.surfaces import set_pack_enabled
+    """Enabling an outward pack (`net_subject: allow`) needs `consent: true`; without it
+    the route answers 409 with the terms the owner must be shown."""
+    from ..features.derivation.surfaces import ConsentRequired, set_pack_enabled
 
-    if not set_pack_enabled(_entities_conn(), pack_id, enabled):
+    try:
+        ok = set_pack_enabled(_entities_conn(), pack_id, enabled,
+                              consent=consent, consent_note=consent_note)
+    except ConsentRequired as need:
+        raise HTTPException(status_code=409, detail={"reason": "consent_required",
+                                                     "terms": need.terms}) from need
+    if not ok:
         raise HTTPException(status_code=404, detail=f"unknown pack {pack_id}")
-    return {"pack_id": pack_id, "enabled": enabled}
+    return {"pack_id": pack_id, "enabled": enabled, "consented": bool(consent and enabled)}
 
 
 @router.get("/facts/conflicts")

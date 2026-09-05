@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 import sqlite3
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 
 def list_packs(conn: sqlite3.Connection) -> Dict[str, Any]:
@@ -37,13 +37,22 @@ def list_packs(conn: sqlite3.Connection) -> Dict[str, Any]:
                  for r in _q("SELECT pack_id, SUM(prefilter_hits), SUM(llm_calls), SUM(written)"
                              " FROM pack_yield WHERE day >= date('now','-30 day') GROUP BY pack_id")}
     packs: List[Dict[str, Any]] = []
-    for pid, ver, enabled, disclosure, last_run in conn.execute(
-            "SELECT pack_id, version, enabled, disclosure_default, last_run_at"
+    consent_cols = {r[1] for r in conn.execute("PRAGMA table_info(pack_registry)")}
+    consent_sql = ", consented_at" if "consented_at" in consent_cols else ", NULL"
+    for pid, ver, enabled, disclosure, last_run, consented_at in conn.execute(
+            "SELECT pack_id, version, enabled, disclosure_default, last_run_at" + consent_sql +
             " FROM pack_registry ORDER BY pack_id"):
         p = catalog.get(pid)
         ns = pid.split(".")[0]
         pending = sum(n for pred, n in conflict_counts.items() if pred.split(".")[0] == ns)
+        outward = bool(p is not None and str(getattr(p, "net_subject", "deny")) == "allow")
         packs.append({
+            # Outward packs say so, and say whether the owner has ever consented: a
+            # toggle that looks like every other toggle is how a dossier lane gets
+            # switched on by accident.
+            "net_subject": "allow" if outward else "deny",
+            "consent_required": outward,
+            "consented_at": consented_at,
             "pack_id": pid, "version": ver, "enabled": bool(enabled),
             "disclosure_default": disclosure,
             "title": getattr(p, "title", pid) if p else pid,
@@ -58,12 +67,70 @@ def list_packs(conn: sqlite3.Connection) -> Dict[str, Any]:
     return {"packs": packs, "total_conflicts": sum(conflict_counts.values())}
 
 
-def set_pack_enabled(conn: sqlite3.Connection, pack_id: str, enabled: bool) -> bool:
+class ConsentRequired(PermissionError):
+    """Enabling an OUTWARD pack needs the owner's explicit yes, stated to them first."""
+
+    def __init__(self, pack_id: str, terms: Dict[str, Any]) -> None:
+        self.pack_id = pack_id
+        self.terms = terms
+        super().__init__(terms.get("message") or f"{pack_id} requires consent to enable")
+
+
+def consent_terms(conn: sqlite3.Connection, pack_id: str) -> Optional[Dict[str, Any]]:
+    """What enabling this pack means, in words the owner can say yes to — or None when
+    the pack describes only the owner and needs no such step."""
+    from .packs import load_packs
+    from .registry import bundled_pack_dir
+
+    pack = load_packs(bundled_pack_dir(), only=[pack_id]).get(pack_id)
+    if pack is None or str(getattr(pack, "net_subject", "deny")) != "allow":
+        return None
+    try:
+        subjects = int(conn.execute(
+            "SELECT COUNT(*) FROM entities WHERE entity_type='person'"
+            " AND COALESCE(is_self,0)=0").fetchone()[0])
+    except sqlite3.Error:
+        subjects = 0
+    reads = str(getattr(pack, "role_policy", "") or "")
+    return {
+        "pack_id": pack_id,
+        "title": getattr(pack, "title", pack_id),
+        "net_subject": "allow",
+        "role_policy": reads,
+        "subjects_in_scope": subjects,
+        "message": (
+            f"{getattr(pack, 'title', pack_id)} writes facts about people OTHER than you"
+            + (" and reads text they wrote to you" if reads == "any_with_label" else "")
+            + f". {subjects} people on this node could become subjects; a bare phone number "
+              "never does, a black-holed person never does, and nothing written leaves the "
+              "owner tier. Enable only if that is what you want."),
+    }
+
+
+def set_pack_enabled(conn: sqlite3.Connection, pack_id: str, enabled: bool, *,
+                     consent: bool = False, consent_note: str = "") -> bool:
+    """Flip a pack. Enabling an outward pack (`net_subject: allow`) REQUIRES `consent`.
+
+    This was a bare UPDATE, and the one pack that writes about non-owners could be
+    switched on with the same gesture as any other. Now the gate is structural: the
+    caller must have shown the owner `consent_terms` and pass their yes back, which the
+    row records. Disabling never needs consent and never erases the record of it.
+    """
     from ...storage.db.write_gate import commit_connection, with_db_write
+
+    terms = consent_terms(conn, pack_id) if enabled else None
+    if terms is not None and not consent:
+        raise ConsentRequired(pack_id, terms)
     with with_db_write():
-        cur = conn.execute(
-            "UPDATE pack_registry SET enabled=?, updated_at=datetime('now') WHERE pack_id=?",
-            (1 if enabled else 0, pack_id))
+        if terms is not None:
+            cur = conn.execute(
+                "UPDATE pack_registry SET enabled=1, consented_at=datetime('now'),"
+                " consent_note=?, updated_at=datetime('now') WHERE pack_id=?",
+                ((consent_note or terms["message"])[:500], pack_id))
+        else:
+            cur = conn.execute(
+                "UPDATE pack_registry SET enabled=?, updated_at=datetime('now') WHERE pack_id=?",
+                (1 if enabled else 0, pack_id))
         commit_connection(conn)
     return bool(cur.rowcount)
 

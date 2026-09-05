@@ -46,6 +46,12 @@ def seed_pack_registry(conn: sqlite3.Connection, pack_dir: Path) -> None:
     # compute-time half of that rule reads the registry, never the file on disk.
     _add_column_if_missing(conn, "pack_registry", "origin",
                            "TEXT NOT NULL DEFAULT 'unknown'")
+    # Enable-time consent for OUTWARD packs (decision 5, 2026-09-05). `set_pack_enabled`
+    # was a bare UPDATE, so the one lane that writes facts about non-owners could be
+    # switched on with no more ceremony than any other. The row now records when the
+    # owner said yes and what they were told; absent means never consented.
+    _add_column_if_missing(conn, "pack_registry", "consented_at", "TEXT")
+    _add_column_if_missing(conn, "pack_registry", "consent_note", "TEXT")
     packs = load_packs(pack_dir)
     for pid, pack in packs.items():
         origin = "first_party" if getattr(pack, "first_party", False) else "third_party"

@@ -34,8 +34,17 @@ async def handle_put_derivation_pack(message: Dict[str, Any]) -> Optional[Dict[s
     if not pack_id or not isinstance(enabled, bool):
         return {"id": req_id, "status": "error", "error": "pack_id and enabled (bool) required"}
     try:
-        from ...features.derivation.surfaces import set_pack_enabled
-        if not set_pack_enabled(conn, pack_id, enabled):
+        from ...features.derivation.surfaces import ConsentRequired, set_pack_enabled
+        try:
+            ok = set_pack_enabled(conn, pack_id, enabled,
+                                  consent=bool(payload.get("consent")),
+                                  consent_note=str(payload.get("consent_note") or ""))
+        except ConsentRequired as need:
+            # Not an error in the transport sense: the answer is "show the owner this and
+            # ask". The terms ride back so the client can render them verbatim.
+            return {"id": req_id, "status": "error", "error": str(need),
+                    "reason": "consent_required", "terms": need.terms}
+        if not ok:
             return {"id": req_id, "status": "error", "error": f"unknown pack {pack_id}"}
         return {"id": req_id, "status": "ok",
                 "payload": {"status": "ok", "pack_id": pack_id, "enabled": enabled}}

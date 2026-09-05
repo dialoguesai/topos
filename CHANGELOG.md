@@ -51,6 +51,22 @@ The machine-readable twin of each release is
   kills it); `POST /v1/messenger-analytics/readings/refresh` runs it now, engine-only.
   The subject is the dyad — "who this person is to you" — and the model never sees the
   person's own messages, so this lane needs no outward pack.
+- **An outward pack cannot be enabled without the owner's yes.** `[E:derivation]`
+  `set_pack_enabled` was a bare UPDATE, so `net.capability` — the one bundled pack that
+  writes facts about people other than the owner and reads text they wrote — could be
+  switched on with the same gesture as a pack about the owner's own habits. Enabling a
+  `net_subject: allow` pack now raises `ConsentRequired` unless the caller passes
+  `consent: true`; the HTTP route answers 409 with `consent_terms` (what the pack reads,
+  how many people on the node could become subjects — the owner never — and that nothing
+  leaves the owner tier), the websocket handler answers `reason: consent_required` with
+  the same terms, and the row records `consented_at` and the note. Disabling never needs
+  consent and never erases the record. The catalog now says `consent_required` and
+  `consented_at` per pack. The control plane forwards only `enabled` today, so through
+  the app an outward pack fails closed until the proxy carries the owner's yes — which is
+  the intended state until the consent dialog ships. A test pins that `net.capability` is
+  the only outward pack in the wheel, so a second one arrives with its own decision.
+
+
 
 
 
