@@ -4,9 +4,9 @@
 Examples:
   cd topos
   uv run python scripts/_b10_fact_density_measure.py \\
-    --out ../topos-ops-wiki/90_EXPERIMENTS/_b10_fact_density_before.json
+    --out ./_b10_fact_density_before.json
   uv run python scripts/_b10_fact_density_measure.py --run-fd-lane \\
-    --out ../topos-ops-wiki/90_EXPERIMENTS/_b10_fact_density_after.json
+    --out ./_b10_fact_density_after.json
 """
 
 from __future__ import annotations

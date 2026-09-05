@@ -3,8 +3,7 @@
 Not wired into run_release_eval hard gates. Markers:
   cer, private, check(C-quality-paraphrase-leak-probe)
 
-Experiment: topos-research-wiki
-  40_EXPERIMENTS/2026-08-03_paraphrase_leak_gate_false_green.md
+Experiment: 2026-08-03 paraphrase leak gate false-green (internal notes).
 """
 
 from __future__ import annotations

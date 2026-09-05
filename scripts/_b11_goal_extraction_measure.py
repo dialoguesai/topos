@@ -3,8 +3,8 @@
 
 Examples:
   cd topos
-  uv run python scripts/_b11_goal_extraction_measure.py --out ../topos-ops-wiki/90_EXPERIMENTS/_b11_goal_extraction_before.json
-  uv run python scripts/_b11_goal_extraction_measure.py --probe-d3m --out ../topos-ops-wiki/90_EXPERIMENTS/_b11_goal_extraction_after.json
+  uv run python scripts/_b11_goal_extraction_measure.py --out ./_b11_goal_extraction_before.json
+  uv run python scripts/_b11_goal_extraction_measure.py --probe-d3m --out ./_b11_goal_extraction_after.json
 """
 
 from __future__ import annotations

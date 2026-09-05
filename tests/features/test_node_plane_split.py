@@ -1,4 +1,4 @@
-"""Node plane-split invariants — SYS-node I1 and I2 in topos-ops-wiki.
+"""Node plane-split invariants — SYS-node I1 and I2.
 
 The intent (docs/ml-manager-v2/DECOUPLING_AND_REMOTE_ENGINE.md) is that the data
 plane and the engine plane can run on two separate machines: a cheap always-on box
@@ -35,7 +35,7 @@ ENGINE_DIR = pathlib.Path(__file__).resolve().parents[2] / "topos" / "engine"
 
 # Modules under topos/engine/ that reach for storage or sqlite today.
 # Each entry is a deliberate, reasoned exception — not an oversight. Adding to this
-# set is a decision about the plane split (see D-001 in topos-research-wiki), so it
+# set is a decision about the plane split, so it
 # should happen in a PR that says so, not incidentally.
 KNOWN_DATA_PLANE_REACHES = {
     # Blackhole enforcement opens the node DB per call, on purpose: a cached
@@ -86,7 +86,7 @@ def test_engine_plane_does_not_reach_the_data_plane() -> None:
         f"New engine module(s) reaching into the data plane: {sorted(new)}.\n"
         "This forecloses the node plane split (SYS-node I1). Either pass the data "
         "in the ProcessingTask, or add an entry to KNOWN_DATA_PLANE_REACHES with "
-        "the reason and update D-001 in topos-research-wiki."
+        "the reason."
     )
 
     # The ratchet tightens: if an exception is fixed, remove it from the set.
