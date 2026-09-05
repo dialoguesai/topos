@@ -63,6 +63,21 @@ MAX_PER_RUN = 60
 #: Sentences the model is asked for. Fewer reads as a chip, more reads as a dossier.
 MIN_SENTENCES, MAX_SENTENCES = 4, 8
 
+#: VIA character strengths as `personality.traits` declares them (v0.2 widened set). A
+#: strength on a person's card asserts only from at least three cited ACTS — the lane the
+#: catalog approved for v1, because acts are what an owner witnesses. Pinned against the
+#: pack's enum by test so the two cannot drift.
+VIA_STRENGTHS = (
+    "curiosity", "creativity", "love_of_learning", "open_mindedness", "perspective", "bravery",
+    "perseverance", "honesty", "zest", "capacity_for_love", "kindness", "social_intelligence",
+    "teamwork", "fairness", "leadership", "forgiveness", "humility", "prudence",
+    "self_regulation", "appreciation_of_beauty", "gratitude", "hope_optimism", "playfulness",
+    "spirituality", "ambition", "empathy", "resilience", "discipline", "generosity", "loyalty",
+    "competitiveness", "adaptability",
+)
+MIN_STRENGTH_ACTS = 3
+_STRENGTH_LINE = re.compile(r"^\s*(?:[-*]\s*)?strength\s*:\s*([a-z_]+)\s*\[([^\]]*)\]", re.IGNORECASE)
+
 _REF = re.compile(r"\[(e\d+(?:\s*,\s*e\d+)*)\]")
 _SENTENCE_SPLIT = re.compile(r"(?<=[.!?])\s+(?=[A-Z\"'(\[])")
 
@@ -194,6 +209,8 @@ Rules, all of them hard:
 - Refer to the person as "{label}" or "they". Address the owner as "you".
 - No headings, no bullet points, no preamble — sentences only.
 
+After the reading, on a new line write STRENGTHS: and then, one per line, up to three character strengths this person has SHOWN, in the form `strength: <name> [e1, e4, e9]`, choosing <name> only from: {strengths}. A strength needs at least {min_acts} different cited rows that each show an act of it — not a description, an act. If fewer than {min_acts} rows show one, list no strengths.
+
 Evidence:
 {evidence}
 
@@ -206,6 +223,7 @@ def build_prompt(label: str, evidence: List[Dict[str, Any]]) -> str:
         when = f" ({r['at']})" if r.get("at") else ""
         lines.append(f"[{r['id']}] {r['kind']}{when}: {r['text']}")
     return PROMPT.format(label=label, min_s=MIN_SENTENCES, max_s=MAX_SENTENCES,
+                         strengths=", ".join(VIA_STRENGTHS), min_acts=MIN_STRENGTH_ACTS,
                          evidence="\n".join(lines))
 
 
@@ -220,6 +238,8 @@ def parse_reading(text: str, valid_ids: List[str]) -> Dict[str, Any]:
     """
     valid = set(valid_ids)
     body = str(text or "").strip()
+    # the strengths block is parsed separately; it must never leak into the sentences
+    body = re.split(r"\n\s*strengths\s*:", body, maxsplit=1, flags=re.IGNORECASE)[0]
     # strip a leaked heading or preamble line
     body = re.sub(r"^(reading|here is .*?)[:\-]\s*", "", body, flags=re.IGNORECASE)
     body = body.replace("\n", " ")
@@ -241,6 +261,35 @@ def parse_reading(text: str, valid_ids: List[str]) -> Dict[str, Any]:
             continue
         kept.append({"text": clean, "refs": refs})
     return {"sentences": kept, "dropped": dropped}
+
+
+def parse_strengths(text: str, valid_ids: List[str]) -> Dict[str, Any]:
+    """Character strengths with receipts: a name from the VIA list and >= 3 distinct cited
+    rows, or nothing. A strength with two receipts is a compliment; three acts is a claim
+    the card can back, and the floor is the whole difference."""
+    valid = set(valid_ids)
+    parts = re.split(r"\n\s*strengths\s*:", str(text or ""), maxsplit=1, flags=re.IGNORECASE)
+    if len(parts) < 2:
+        return {"strengths": [], "dropped": 0}
+    kept: List[Dict[str, Any]] = []
+    dropped = 0
+    seen = set()
+    for line in parts[1].splitlines():
+        m = _STRENGTH_LINE.match(line)
+        if not m:
+            continue
+        name = m.group(1).strip().lower()
+        refs = []
+        for tok in m.group(2).split(","):
+            tok = tok.strip()
+            if tok in valid and tok not in refs:
+                refs.append(tok)
+        if name not in VIA_STRENGTHS or len(refs) < MIN_STRENGTH_ACTS or name in seen:
+            dropped += 1
+            continue
+        seen.add(name)
+        kept.append({"strength": name, "refs": refs})
+    return {"strengths": kept[:3], "dropped": dropped}
 
 
 # --------------------------------------------------------------------------- the model
@@ -360,7 +409,9 @@ def build_reading(node: Dict[str, Any], evidence: List[Dict[str, Any]], llm: Cal
                   *, reason: str, model_name: str = "") -> Dict[str, Any]:
     label = str(node.get("label") or "this person")
     raw = llm(build_prompt(label, evidence)) if evidence else ""
-    parsed = parse_reading(raw, [r["id"] for r in evidence])
+    ids = [r["id"] for r in evidence]
+    parsed = parse_reading(raw, ids)
+    strengths = parse_strengths(raw, ids)
     counts: Dict[str, int] = {}
     for r in evidence:
         counts[r["kind"]] = counts.get(r["kind"], 0) + 1
@@ -376,6 +427,8 @@ def build_reading(node: Dict[str, Any], evidence: List[Dict[str, Any]], llm: Cal
         "evidence_hash": evidence_hash(evidence),
         "sentences": parsed["sentences"],
         "dropped_uncited": parsed["dropped"],
+        "strengths": strengths["strengths"],
+        "strengths_dropped": strengths["dropped"],
         "evidence": evidence,
         "coverage": {
             "rows": len(evidence), "by_kind": counts,

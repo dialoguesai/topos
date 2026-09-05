@@ -236,3 +236,39 @@ def test_a_reading_with_no_record_backed_evidence_keeps_an_unverifiable_ref():
                               [{"kind": "measure", "text": "warm", "table": "dyad stats", "record_id": ""}])
     assert refs == [{"table": "", "record_id": "", "note": "person_graph node msg:+15550001111",
                      "kind": "unverifiable"}]
+
+
+# --- strengths with receipts ------------------------------------------------------
+
+def test_the_strengths_vocabulary_is_the_packs_own():
+    import yaml
+    from topos.features.derivation.registry import bundled_pack_dir
+
+    pack = yaml.safe_load(open(bundled_pack_dir() / "personality.traits.yaml"))
+    enum = next(p for p in pack["predicates"] if p["name"] == "trait.character_strength")["value_schema"]["strength"]["enum"]
+    assert sorted(PR.VIA_STRENGTHS) == sorted(enum)
+
+
+def test_a_strength_needs_three_cited_acts_and_a_name_from_the_list():
+    text = ("They drove across town at midnight [e1]. They kept the promise [e2].\n"
+            "STRENGTHS:\n"
+            "strength: perseverance [e1, e2, e3]\n"
+            "strength: kindness [e1, e2]\n"
+            "strength: charisma [e1, e2, e3]\n"
+            "strength: perseverance [e4, e5, e6]\n")
+    out = PR.parse_strengths(text, ["e1", "e2", "e3", "e4", "e5", "e6"])
+    assert out["strengths"] == [{"strength": "perseverance", "refs": ["e1", "e2", "e3"]}]
+    assert out["dropped"] == 3, "two receipts, an unknown name, and a duplicate"
+    # and the strengths block never leaks into the reading's sentences
+    sentences = PR.parse_reading(text, ["e1", "e2", "e3"])["sentences"]
+    assert [s["text"] for s in sentences] == ["They drove across town at midnight.", "They kept the promise."]
+
+
+def test_strengths_ride_in_the_stored_reading():
+    conn = _conn()
+    node = _person(conn)
+    llm = _fake_llm("A cited sentence [e1].\nSTRENGTHS:\nstrength: honesty [e1, e2, e3]\n")
+    PR.refresh_person_readings(conn, "d", llm=llm, nodes=[node], signals={}, relationships={})
+    stored = PR.load_person_readings(conn)["ent:e1"]
+    assert stored["strengths"] == [{"strength": "honesty", "refs": ["e1", "e2", "e3"]}]
+    assert "STRENGTHS" not in " ".join(s["text"] for s in stored["sentences"])

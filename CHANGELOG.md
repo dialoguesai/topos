@@ -76,6 +76,10 @@ The machine-readable twin of each release is
   Negative Emotionality is refused for anyone but the owner (decision 2: its facets are
   the distress set). Read back onto the node as `disposition`, labelled "your read".
   New type `messenger_person_rate`; engine route `POST /messenger-analytics/person-rate`.
+- **Character strengths with receipts, in the reading.** `[E:social]` The reading's one
+  model call also asks for up to three VIA strengths as `strength: <name> [e.., e.., e..]`;
+  `parse_strengths` keeps one only with a name from `personality.traits`' own enum and
+  three DISTINCT cited rows. Stored as `strengths` on the reading; no extra model time.
 - **A ledger reason for the control plane's supply-claim rewrite.** `[O]` A home-chat
   answer that explains a `gate_vetoed` empty by telling the owner their data "might not
   be synced" is a false statement about their setup — the scope WAS queried, and the
