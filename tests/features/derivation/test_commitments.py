@@ -246,3 +246,26 @@ def test_the_parser_accepts_runner_labels_and_the_named_recipient_but_no_other_u
     assert parse_output(raw("Priya Anand"), pack, record_text=text, grounded_exempt=("Priya Anand",))[0]
     valid, rejects = parse_output(raw("Marcus Lee"), pack, record_text=text)
     assert not valid and rejects == 1, "a name the text never contains and nobody labelled is still laundering"
+
+
+def test_the_verifier_is_told_the_lens_and_the_addressing():
+    """Third live pass: 3 parsed commitments, 3 rejected by the verifier — "a plan, not a
+    completed commit" and "counterparty phone number is not stated in the record". The
+    judge has to know what the lens's facts ARE and how the record was addressed."""
+    from topos.features.derivation.packs import load_packs
+    from topos.features.derivation.registry import bundled_pack_dir
+    from topos.features.derivation.verify import build_verify_prompt, label_note_for, lens_note_for
+
+    pack = load_packs(bundled_pack_dir(), only=["obligations.commitments"])["obligations.commitments"]
+    rec = {"recipient": "the person you are texting", "recipient_entity_id": "", "recipient_key": "+15125550199"}
+    p = build_verify_prompt("I'll drop off the iPad in like 2 hrs", "authored", "2026-08-02",
+                            "commit.made", {"counterparty": "key:+15125550199", "status": "open"}, "owner",
+                            lens_note=lens_note_for(pack), label_note=label_note_for(rec))
+    assert "Lens: Promises made and owed." in p and "stated promise with a counterparty" in p
+    assert "sent to the person you are texting = key:+15125550199" in p
+    assert "judge it as stated, never as invented" in p
+    assert '"not yet done" is not a reason to reject' in p
+    bare = build_verify_prompt("I'll drop off the iPad", "authored", "2026-08-02", "commit.made", {}, "owner")
+    assert "Lens:" not in bare and "Addressing" not in bare, "other packs' prompts are unchanged"
+    assert label_note_for({"speaker": "Priya Anand", "speaker_entity_id": "ent_priya"}) == "written by Priya Anand = id:ent_priya."
+    assert label_note_for({}) == ""

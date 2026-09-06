@@ -135,7 +135,7 @@ def run_derivation_batch(
     from ....features.derivation.packs import load_packs
     from ....features.derivation.template import build_prompt, parse_output
     from ....features.derivation.verify import (build_verify_prompt, parse_verdict,
-                                                apply_verdict, verifier_model)
+                                                apply_verdict, verifier_model, label_note_for, lens_note_for)
     from ....features.derivation.writer import DerivationWriter
     from ....features.facts.llm_extract import _resolved_extraction_model
     from ....config.settings import settings as _settings
@@ -205,7 +205,8 @@ def run_derivation_batch(
             try:
                 verdict = parse_verdict(llm(vmodel, build_verify_prompt(
                     rec["text"], rec["role"], rec["date"],
-                    a["predicate"], a["value"], a.get("about", "owner")), n=250))
+                    a["predicate"], a["value"], a.get("about", "owner"),
+                    lens_note=lens_note_for(pack), label_note=label_note_for(rec)), n=250))
             except Exception:  # noqa: BLE001
                 verdict = None
             last_verdict = verdict or last_verdict

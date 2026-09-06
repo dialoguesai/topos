@@ -292,8 +292,8 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
     from . import template as _T
     from .registry import bundled_pack_dir
     from .template import build_prompt, parse_output
-    from .verify import (apply_verdict, build_verify_prompt, parse_verdict,
-                         verifier_model)
+    from .verify import (apply_verdict, build_verify_prompt, label_note_for, lens_note_for,
+                         parse_verdict, verifier_model)
     from .writer import DerivationWriter
     from ...features.facts.llm_extract import _resolved_extraction_model  # type: ignore
     from ...config.settings import settings as _settings
@@ -357,7 +357,8 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
                 try:
                     verdict = parse_verdict(llm(vmodel, build_verify_prompt(
                         rec["text"], rec["role"], rec["date"],
-                        a["predicate"], a["value"], a.get("about", "owner")), n=250))
+                        a["predicate"], a["value"], a.get("about", "owner"),
+                        lens_note=lens_note_for(pack), label_note=label_note_for(rec)), n=250))
                 except Exception:  # noqa: BLE001
                     verdict = None
                 a = apply_verdict(a, verdict)

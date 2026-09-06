@@ -35,13 +35,15 @@ Record (role={role}, date={date}):
 {text}
 ---
 
-Claimed fact: {predicate} = {value}
+{context}Claimed fact: {predicate} = {value}
 Claimed about: {about}
 
 Answer three questions:
 1. supported: does the record actually STATE this (not hint, plan, hope, or describe
    someone else's situation)? A declined offer, an application, a fundraise, or advice
-   received is NOT a completed fact about the owner.
+   received is NOT a completed fact about the owner. When the Lens above defines its
+   facts as stated promises, plans or intentions, a stated one IS supported — its
+   status field says whether it is done, and "not yet done" is not a reason to reject.
 2. about: whose fact is this? "owner" only if the record states it about the author-owner.
    "other:<name>" if it is someone else's (their partner, their appointment, their loss).
    "unclear" if the person cannot be determined from the record.
@@ -65,14 +67,55 @@ def verifier_model() -> str:
 
 
 def build_verify_prompt(record_text: str, role: str, date: str,
-                        predicate: str, value: Any, about: str) -> str:
+                        predicate: str, value: Any, about: str,
+                        lens_note: str = "", label_note: str = "") -> str:
+    """`lens_note` is the pack's own definition of what its facts ARE; `label_note` is the
+    runner's addressing for the record (who sent it, who it was sent to, as labels).
+
+    Measured 2026-09-06 on the commitment ledger: with neither, the verifier rejected
+    every parsed commitment — "a plan, not a completed commit" (it read `commit.made` as
+    a finished act, where the pack defines it as a stated promise whose status is open)
+    and "counterparty phone number is not stated in the record" (the counterparty was the
+    record's own recipient label, which is never in the text by construction). The judge
+    has to know the lens's semantics and the record's addressing to judge it at all.
+    """
     from .template import clean_record_text
+    context = ""
+    if lens_note:
+        context += f"Lens: {lens_note.strip()}\n"
+    if label_note:
+        context += (f"Addressing (from the record itself, not from its text): {label_note.strip()} "
+                    f"A person value equal to one of these labels is the record's own addressing — "
+                    f"judge it as stated, never as invented.\n")
+    if context:
+        context += "\n"
     return _PROMPT.format(
         role=role, date=date, text=clean_record_text(record_text)[:2400],
         predicate=predicate,
         value=json.dumps(value, ensure_ascii=False, default=str)[:400],
-        about=about or "owner",
+        about=about or "owner", context=context,
     )
+
+
+def lens_note_for(pack: Any) -> str:
+    """The pack's title and definition, one line — what its predicates mean."""
+    g = getattr(pack, "guidance", None) or {}
+    definitions = " ".join(str(g.get("definitions") or "").split())
+    title = str(getattr(pack, "title", "") or getattr(pack, "pack", "") or "")
+    return f"{title}. {definitions}".strip(". ") if (title or definitions) else ""
+
+
+def label_note_for(rec: Dict[str, Any]) -> str:
+    """The record's addressing as the runner labelled it: speaker for an observed record,
+    recipient for an authored direct message. Empty when the runner knew neither."""
+    parts = []
+    if rec.get("speaker") and rec.get("speaker_entity_id"):
+        parts.append(f"written by {rec['speaker']} = id:{rec['speaker_entity_id']}")
+    if rec.get("recipient") and (rec.get("recipient_entity_id") or rec.get("recipient_key")):
+        label = (f"id:{rec['recipient_entity_id']}" if rec.get("recipient_entity_id")
+                 else f"key:{rec['recipient_key']}")
+        parts.append(f"sent to {rec['recipient']} = {label}")
+    return "; ".join(parts) + ("." if parts else "")
 
 
 def parse_verdict(raw: str) -> Optional[Dict[str, Any]]:

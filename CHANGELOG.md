@@ -107,6 +107,10 @@ The machine-readable twin of each release is
   runner-issued `id:`/`key:` labels and the prompt-named recipient are exempt, every
   other ungrounded name still refused. The pack (0.1.3) now says a small first-person
   future statement to the recipient IS a commitment; both models had answered empty.
+  **Third pass: parsed 3, verifier rejected 3.** The judge read `commit.made` as a finished
+  act and refused a counterparty label it could not find in the text. `build_verify_prompt`
+  now carries the pack's own definition (`lens_note`) and the record's addressing
+  (`label_note`); dry run on the rejected shape flips the 27B judge to accepted. Pack 0.1.4.
 - **`net.character` — the second outward pack, and the speaker label that makes it work.**
   `[E:derivation]` Status signals (hiring / looking / raising / moving / launching /
   learning / leave / availability, 90-day expiry at read) and promises the speaker made to
