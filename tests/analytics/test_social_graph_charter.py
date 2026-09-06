@@ -178,7 +178,11 @@ def test_charter_outward_surface_is_enumerated():
 
     outward = {p.pack: p for p in load_packs(bundled_pack_dir()).values()
                if p.net_subject == "allow"}
-    assert set(outward) == {"net.capability"}
+    # net.character joined 2026-09-05 by an owner decision (PLAN_SOCIAL_GRAPH_PERSON_QUALITIES
+    # §7, all five answered yes): status signals and promises in the speaker's own words,
+    # written AFTER the enable-time consent gate that refuses to switch an outward pack on
+    # without the owner's recorded consent. A third name here needs its own decision.
+    assert set(outward) == {"net.capability", "net.character"}
     assert all(p.first_party for p in outward.values())
 
 
@@ -187,6 +191,7 @@ def test_charter_outward_packs_are_disabled_by_default():
     from topos.features.derivation.registry import ENABLED_BY_DEFAULT
 
     assert "net.capability" not in ENABLED_BY_DEFAULT
+    assert "net.character" not in ENABLED_BY_DEFAULT
 
 
 def test_charter_spine_tables_stay_undeprecated():
