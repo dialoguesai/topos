@@ -10,6 +10,13 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Added
+- **The retrieval-text contract.** `[S1]` `[E:query]` `topos/protocol/retrieval_text_contract.json`
+  publishes what every entrance distils an ask into before the node sees it — the subject
+  words, minus output-shape words ("poem", "kanban", "two paragraph") and style spans ("in
+  the voice of a pirate") — with reference vectors both the app and the control plane replay
+  byte for byte. Until now only home chat distilled this way; a scheduled report asked the node
+  about its own instructions. The engine's test pins that every word a door strips is exempt
+  at the abstention gate, and that the door list stays narrower than the gate's.
 - **The relational archetype — one sentence about how a relationship behaves, from your
   seat.** `[E:social]` `read_relationship_signals` now carries `archetypes`, one row per
   dyad above the evidence floor, composed by a new `archetype` kernel over L1's directed

@@ -1,0 +1,645 @@
+{
+ "$comment": "`retrieval_text` is the SUBJECT of a request, distilled for the engine's rare-token gate and, when it differs from `query`, the semantic query. Two production entrances build it — home chat (next/lib/mcp/scopeQueryRouter.ts::buildRetrievalQueryText) and scheduled routines (control_plane/scope_query_router.py::build_retrieval_query_text) — and until 2026-09-06 only the first removed output-shape words and style spans, so a scheduled report asked the node about its own instructions. This file is the contract both entrances are tested against: the vocabularies, the algorithm, and reference vectors. The app is the reference implementation and `next/scripts/emit-retrieval-text-contract.ts` regenerates every copy from it (engine, control plane, app); `--check` fails when any copy differs. Vector inputs are invented sentences (the transform catalogue, pinned routine prompts, edge cases) — never text from a real node; this file ships in the public wheel.",
+ "version": 1,
+ "producers": {
+  "app": "next/lib/mcp/scopeQueryRouter.ts::buildRetrievalQueryText / buildRetrievalQueryParts",
+  "control_plane": "control_plane/scope_query_router.py::build_retrieval_query_text / build_retrieval_query_parts"
+ },
+ "consumers": {
+  "engine": [
+   "rare-token gate: _query_tokens(needle_text or query_text), _needle_token_groups(needle_text, needle_parts)",
+   "semantic query: needle_text replaces query_text for the vector lane when it differs"
+  ]
+ },
+ "algorithm": [
+  "1. dates = extract_date_expressions(raw) — verbatim, first-occurrence order, deduped case-insensitively",
+  "2. body = raw with every date span replaced by a single space",
+  "3. body = body with every style span replaced by a single space (style_span.patterns; case-insensitive, all occurrences)",
+  "4. tokens = body trimmed, capped at query_text_max characters, lowercased, matched by intent_token_pattern; keywords = tokens minus stop_words, deduped keeping order, first intent_keyword_cap",
+  "5. fewer than two keywords means nothing distillable: the result is raw, untouched (never a placeholder, never the stripped body)",
+  "6. subject = keywords minus output_shape_words, joined by single spaces",
+  "7. text = subject followed by the dates, joined by single spaces, trimmed; empty text falls back to raw; the result is capped at query_text_max characters",
+  "parts: segment_request_parts(raw) minus the preamble; fewer than two sections means no parts; each section goes through steps 1-7; fewer than two non-empty needles means no parts. A one-keyword section therefore falls back to its own raw text, enumerator included ('1) how did I sleep') — identical at both entrances, by design."
+ ],
+ "query_text_max": 500,
+ "intent_keyword_cap": 14,
+ "intent_token_pattern": "[a-z0-9]{3,}",
+ "stop_words": [
+  "what",
+  "when",
+  "where",
+  "which",
+  "who",
+  "whom",
+  "whose",
+  "why",
+  "how",
+  "does",
+  "did",
+  "do",
+  "are",
+  "is",
+  "was",
+  "were",
+  "can",
+  "could",
+  "would",
+  "should",
+  "tell",
+  "show",
+  "give",
+  "about",
+  "from",
+  "with",
+  "that",
+  "this",
+  "these",
+  "those",
+  "your",
+  "you",
+  "my",
+  "me",
+  "mine",
+  "our",
+  "their",
+  "them",
+  "they",
+  "have",
+  "has",
+  "had",
+  "say",
+  "says",
+  "said",
+  "the",
+  "and",
+  "for",
+  "any",
+  "all"
+ ],
+ "output_shape_words": [
+  "poem",
+  "poems",
+  "poetry",
+  "poetic",
+  "verse",
+  "verses",
+  "stanza",
+  "stanzas",
+  "haiku",
+  "haikus",
+  "sonnet",
+  "sonnets",
+  "limerick",
+  "limericks",
+  "couplet",
+  "couplets",
+  "quatrain",
+  "ballad",
+  "ode",
+  "elegy",
+  "eulogy",
+  "acrostic",
+  "epigram",
+  "rhyme",
+  "rhymes",
+  "rhyming",
+  "meter",
+  "metre",
+  "iambic",
+  "iamb",
+  "pentameter",
+  "tetrameter",
+  "hexameter",
+  "trochaic",
+  "trochee",
+  "dactylic",
+  "anapestic",
+  "spondee",
+  "prose",
+  "lyric",
+  "lyrics",
+  "shanty",
+  "jingle",
+  "villanelle",
+  "haibun",
+  "memo",
+  "memos",
+  "onepager",
+  "essay",
+  "letter",
+  "postcard",
+  "headline",
+  "headlines",
+  "tweet",
+  "tweets",
+  "caption",
+  "captions",
+  "blurb",
+  "outline",
+  "bullet",
+  "bullets",
+  "bulleted",
+  "table",
+  "tabular",
+  "diagram",
+  "infographic",
+  "deck",
+  "slide",
+  "slides",
+  "slideshow",
+  "changelog",
+  "readme",
+  "newsletter",
+  "toast",
+  "speech",
+  "script",
+  "screenplay",
+  "monologue",
+  "manifesto",
+  "obituary",
+  "recipe",
+  "checklist",
+  "faq",
+  "abstract",
+  "markdown",
+  "csv",
+  "json",
+  "yaml",
+  "html",
+  "latex",
+  "pirate",
+  "pirates",
+  "noir",
+  "gonzo",
+  "shakespeare",
+  "shakespearean",
+  "yoda",
+  "cowboy",
+  "surfer",
+  "hipster",
+  "gothic",
+  "victorian",
+  "medieval",
+  "sarcastic",
+  "sarcasm",
+  "snarky",
+  "deadpan",
+  "wry",
+  "whimsical",
+  "campy",
+  "dramatic",
+  "melodramatic",
+  "epic",
+  "heroic",
+  "tabloid",
+  "eli5",
+  "swot",
+  "raci",
+  "kanban",
+  "eisenhower",
+  "premortem",
+  "postmortem",
+  "retrospective",
+  "quadrant",
+  "quadrants",
+  "funnel",
+  "matrix",
+  "paragraph",
+  "paragraphs",
+  "sentence",
+  "sentences",
+  "section",
+  "sections",
+  "column",
+  "columns",
+  "wordcount"
+ ],
+ "style_span": {
+  "$comment": "Regex sources in the syntax both JavaScript (flags gi) and Python re (IGNORECASE) accept unchanged; a port compiles these strings, it does not retype them.",
+  "stops": [
+   "about",
+   "regarding",
+   "concerning",
+   "covering",
+   "based on",
+   "drawing on",
+   "using",
+   "from my",
+   "for my",
+   "of my",
+   "with my",
+   "on my",
+   "in my"
+  ],
+  "patterns": [
+   "\\bin the (?:style|voice|tone|manner) of\\b(?:(?!\\b(?:about|regarding|concerning|covering|based on|drawing on|using|from my|for my|of my|with my|on my|in my)\\b)[^.,;!?])*",
+   "\\bas (?:if|though)\\b(?:(?!\\b(?:about|regarding|concerning|covering|based on|drawing on|using|from my|for my|of my|with my|on my|in my)\\b)[^.,;!?])*\\b(?:wrote|writes|written|said|says|were writing)\\b(?:(?!\\b(?:about|regarding|concerning|covering|based on|drawing on|using|from my|for my|of my|with my|on my|in my)\\b)[^.,;!?])*",
+   "\\bwritten (?:by|like)\\b(?:(?!\\b(?:about|regarding|concerning|covering|based on|drawing on|using|from my|for my|of my|with my|on my|in my)\\b)[^.,;!?])*",
+   "\\b(?:sound|sounds|read|reads) like\\b(?:(?!\\b(?:about|regarding|concerning|covering|based on|drawing on|using|from my|for my|of my|with my|on my|in my)\\b)[^.,;!?])*\\bwould\\b(?:(?!\\b(?:about|regarding|concerning|covering|based on|drawing on|using|from my|for my|of my|with my|on my|in my)\\b)[^.,;!?])*"
+  ]
+ },
+ "vectors": [
+  {
+   "id": "TX-A1",
+   "input": "Take the work I have been doing lately, and put it into a 3 stanza iambic pentameter poem for me",
+   "retrieval_text": "take work been doing lately put into"
+  },
+  {
+   "id": "TX-A2",
+   "input": "Write a haiku about what I worked on this week",
+   "retrieval_text": "write worked this week"
+  },
+  {
+   "id": "TX-A3",
+   "input": "Turn my recent journal entries into a sonnet",
+   "retrieval_text": "turn recent journal entries into"
+  },
+  {
+   "id": "TX-A4",
+   "input": "Make a limerick out of my week",
+   "retrieval_text": "make out week"
+  },
+  {
+   "id": "TX-A5",
+   "input": "Write song lyrics in the style of a sea shanty about my projects",
+   "retrieval_text": "write song projects"
+  },
+  {
+   "id": "TX-A6",
+   "input": "Give me a four line rhyming couplet summary of my meetings",
+   "retrieval_text": "four line summary meetings"
+  },
+  {
+   "id": "TX-B1",
+   "input": "Turn what I've been working on into a bulleted executive summary",
+   "retrieval_text": "turn been working into executive summary"
+  },
+  {
+   "id": "TX-B2",
+   "input": "Draft a LinkedIn post about my recent work",
+   "retrieval_text": "draft linkedin post recent work"
+  },
+  {
+   "id": "TX-B3",
+   "input": "Make a tweet thread out of my week",
+   "retrieval_text": "make thread out week"
+  },
+  {
+   "id": "TX-B4",
+   "input": "Write a changelog entry for the work I did this week",
+   "retrieval_text": "write entry work this week"
+  },
+  {
+   "id": "TX-B5",
+   "input": "Put my recent work into a markdown table with columns for project and status",
+   "retrieval_text": "put recent work into project status"
+  },
+  {
+   "id": "TX-B6",
+   "input": "Create slide bullets for a standup deck from my week",
+   "retrieval_text": "create standup week"
+  },
+  {
+   "id": "TX-B7",
+   "input": "Write a one-pager memo about what I've been focused on",
+   "retrieval_text": "write one pager been focused"
+  },
+  {
+   "id": "TX-B8",
+   "input": "Give me a resume bullet for the work I did this month",
+   "retrieval_text": "resume work this month"
+  },
+  {
+   "id": "TX-C1",
+   "input": "Describe my week in the voice of a pirate",
+   "retrieval_text": "describe week"
+  },
+  {
+   "id": "TX-C2",
+   "input": "Explain what I've been working on like I'm five",
+   "retrieval_text": "explain been working like five"
+  },
+  {
+   "id": "TX-C3",
+   "input": "Narrate my recent work as a noir detective monologue",
+   "retrieval_text": "narrate recent work detective"
+  },
+  {
+   "id": "TX-C4",
+   "input": "Summarize my week sarcastically",
+   "retrieval_text": "summarize week sarcastically"
+  },
+  {
+   "id": "TX-C5",
+   "input": "Write my recent work up as if Shakespeare wrote it",
+   "retrieval_text": "write recent work"
+  },
+  {
+   "id": "TX-D1",
+   "input": "Do a SWOT analysis of what I've been working on",
+   "retrieval_text": "analysis been working"
+  },
+  {
+   "id": "TX-D2",
+   "input": "Give me a pros and cons list of my current projects",
+   "retrieval_text": "pros cons list current projects"
+  },
+  {
+   "id": "TX-D3",
+   "input": "Rank my recent work by impact and score each out of 10",
+   "retrieval_text": "rank recent work impact score each out"
+  },
+  {
+   "id": "TX-D4",
+   "input": "Turn my week into a kanban board with todo, doing and done columns",
+   "retrieval_text": "turn week into board todo doing done"
+  },
+  {
+   "id": "TX-D5",
+   "input": "Build a timeline infographic outline of my recent work",
+   "retrieval_text": "build timeline recent work"
+  },
+  {
+   "id": "TX-E1",
+   "input": "Summarize my week in exactly three sentences",
+   "retrieval_text": "summarize week exactly three"
+  },
+  {
+   "id": "TX-E2",
+   "input": "Give me five bullets on what I've been doing",
+   "retrieval_text": "five been doing"
+  },
+  {
+   "id": "TX-E3",
+   "input": "Write 200 words about my recent work",
+   "retrieval_text": "write 200 words recent work"
+  },
+  {
+   "id": "TX-E4",
+   "input": "Give me a two paragraph recap of my week",
+   "retrieval_text": "two recap week"
+  },
+  {
+   "id": "TX-F1",
+   "input": "Write a toast for my team based on what we shipped",
+   "retrieval_text": "write team based shipped"
+  },
+  {
+   "id": "TX-F2",
+   "input": "Draft a thank you note to the people I talked with most this week",
+   "retrieval_text": "draft thank note people talked most this week"
+  },
+  {
+   "id": "TX-F3",
+   "input": "Make a mock newspaper headline about my week",
+   "retrieval_text": "make mock newspaper week"
+  },
+  {
+   "id": "TX-F4",
+   "input": "Write a fortune cookie message based on my recent work",
+   "retrieval_text": "write fortune cookie message based recent work"
+  },
+  {
+   "id": "CTL-1",
+   "input": "What have I been working on lately",
+   "retrieval_text": "been working lately"
+  },
+  {
+   "id": "CTL-2",
+   "input": "Summarize my week",
+   "retrieval_text": "summarize week"
+  },
+  {
+   "id": "CTL-3",
+   "input": "What did I work on this week",
+   "retrieval_text": "What did I work on this week"
+  },
+  {
+   "id": "NEG-1",
+   "input": "What did I say about zorblatt tourism",
+   "retrieval_text": "zorblatt tourism"
+  },
+  {
+   "id": "NEG-2",
+   "input": "Write a poem about my years as a competitive falconer",
+   "retrieval_text": "write years competitive falconer"
+  },
+  {
+   "id": "NEG-3",
+   "input": "Summarize my notes on quantum chromodynamics in three bullets",
+   "retrieval_text": "summarize notes quantum chromodynamics three"
+  },
+  {
+   "id": "NEG-4",
+   "input": "Make a haiku about my trip to Ulaanbaatar",
+   "retrieval_text": "make trip ulaanbaatar"
+  },
+  {
+   "id": "FE-STYLE-1",
+   "input": "Summarize my projects in the style of a 1920s radio announcer",
+   "retrieval_text": "summarize projects"
+  },
+  {
+   "id": "FE-STYLE-2",
+   "input": "Write song lyrics in the style of a sea shanty about my projects",
+   "retrieval_text": "write song projects"
+  },
+  {
+   "id": "FE-STYLE-3",
+   "input": "messages that read like a threat",
+   "retrieval_text": "messages read like threat"
+  },
+  {
+   "id": "CP-PIN-1",
+   "input": "Using my journal entries from last week, summarize achievements",
+   "retrieval_text": "using journal entries summarize achievements last week"
+  },
+  {
+   "id": "CP-PIN-2",
+   "input": "how did I sleep last week",
+   "retrieval_text": "how did I sleep last week"
+  },
+  {
+   "id": "CP-PIN-3",
+   "input": "meetings August 11-16, 2026 with investors",
+   "retrieval_text": "meetings investors August 11-16, 2026"
+  },
+  {
+   "id": "RT-1",
+   "input": "Weekly report. 1) How did I sleep last week? 2) What did I ship on github last week? 3) Who did I talk with most, as a bulleted list",
+   "retrieval_text": "weekly report sleep ship github talk most list last week"
+  },
+  {
+   "id": "RT-2",
+   "input": "Write a two paragraph executive summary of my goals progress this month, in the voice of a calm coach",
+   "retrieval_text": "write two executive summary goals progress this month"
+  },
+  {
+   "id": "RT-3",
+   "input": "Draft a cover letter using my resume and my recent work",
+   "retrieval_text": "draft cover using resume recent work"
+  },
+  {
+   "id": "RT-4",
+   "input": "What did I say about the table tennis league?",
+   "retrieval_text": "tennis league"
+  },
+  {
+   "id": "PF-1",
+   "input": "What have I've been working on lately, in a one-pager memo?",
+   "retrieval_text": "been working lately one pager"
+  },
+  {
+   "id": "PF-2",
+   "input": "Don’t make it a poem — what did I do this week?",
+   "retrieval_text": "don make this week"
+  },
+  {
+   "id": "PF-3",
+   "input": "Summarize my café visits last week in the voice of a Parisian waiter",
+   "retrieval_text": "summarize caf visits last week"
+  },
+  {
+   "id": "PF-4",
+   "input": "Write a haiku 🌸 about my week 🚀 and my projects",
+   "retrieval_text": "write week projects"
+  },
+  {
+   "id": "PF-5",
+   "input": "How did I sleep last week compared to last week before that?",
+   "retrieval_text": "sleep compared before last week"
+  },
+  {
+   "id": "PF-6",
+   "input": "Meetings August 11-16, 2026 and August 11-16, 2026 again, as a table",
+   "retrieval_text": "meetings again August 11-16, 2026"
+  },
+  {
+   "id": "PF-7",
+   "input": "Weekly review for the team.\n\n1) How did I sleep last week, as a two paragraph summary?\n2) What did I ship on github last week? Make it a bulleted changelog.\n3) Who did I talk with most, in the voice of a sports commentator?\n4) Which goals moved this month and which stalled? Give me a kanban board with todo, doing and done columns.\n5) Anything I said I'd do and did not do yet? A checklist please.\n6) Close with a haiku about my week.",
+   "retrieval_text": "weekly review team sleep two summary ship github make talk most last week this month",
+   "retrieval_parts": [
+    "sleep two summary last week",
+    "ship github make last week",
+    "talk most",
+    "goals moved stalled board todo doing done this month",
+    "anything not yet please",
+    "close week"
+   ]
+  },
+  {
+   "id": "PF-8",
+   "input": "IN THE STYLE OF A PIRATE, DESCRIBE MY WEEK",
+   "retrieval_text": "describe week"
+  },
+  {
+   "id": "PF-9",
+   "input": "As if Shakespeare wrote it, what did I work on this week?",
+   "retrieval_text": "As if Shakespeare wrote it, what did I work on this week?"
+  },
+  {
+   "id": "PF-10",
+   "input": "messages that sound like my manager would say about my deck",
+   "retrieval_text": "messages"
+  },
+  {
+   "id": "PF-11",
+   "input": "   ",
+   "retrieval_text": ""
+  },
+  {
+   "id": "PF-12",
+   "input": "poem",
+   "retrieval_text": "poem"
+  },
+  {
+   "id": "PF-13",
+   "input": "Give me a table of my meetings this week and a column for who attended",
+   "retrieval_text": "meetings attended this week"
+  },
+  {
+   "id": "PF-14",
+   "input": "What did I say about the table tennis league and the cover letter?",
+   "retrieval_text": "tennis league cover"
+  },
+  {
+   "id": "PF-15",
+   "input": "Turn my journal into a sonnet; then a limerick; then prose.",
+   "retrieval_text": "turn journal into then"
+  },
+  {
+   "id": "PF-16",
+   "input": "Write it up as a LinkedIn post using my recent work, in the tone of a cheerful mentor",
+   "retrieval_text": "write linkedin post using recent work"
+  },
+  {
+   "id": "NX-1",
+   "input": "last week",
+   "retrieval_text": "last week"
+  },
+  {
+   "id": "NX-2",
+   "input": "August 11-16, 2026",
+   "retrieval_text": "August 11-16, 2026"
+  },
+  {
+   "id": "NX-3",
+   "input": "in the voice of a pirate",
+   "retrieval_text": "in the voice of a pirate"
+  },
+  {
+   "id": "NX-4",
+   "input": "in the voice of a pirate, last week",
+   "retrieval_text": "in the voice of a pirate, last week"
+  },
+  {
+   "id": "NX-5",
+   "input": "a poem",
+   "retrieval_text": "a poem"
+  },
+  {
+   "id": "NX-6",
+   "input": "Write a haiku",
+   "retrieval_text": "write"
+  },
+  {
+   "id": "MS-1",
+   "input": "Using my journal entries and GitHub activity, write my weekly report for Aug 11-16, 2026:\n1) how did I sleep\n2) what did I ship, as a bulleted list\n3) who did I talk with most, in the voice of a pirate",
+   "retrieval_text": "using journal entries github activity write weekly report sleep ship list talk most Aug 11-16, 2026",
+   "retrieval_parts": [
+    "1) how did I sleep",
+    "ship list",
+    "talk most"
+   ]
+  },
+  {
+   "id": "MS-2",
+   "input": "Weekly review:\n- how did I sleep last week\n- what did I ship on github, as a bulleted changelog\n- who did I talk with most this week, written like a sports commentator would",
+   "retrieval_text": "weekly review sleep ship github talk most last week this week",
+   "retrieval_parts": [
+    "- how did I sleep last week",
+    "ship github",
+    "talk most this week"
+   ]
+  },
+  {
+   "id": "MS-3",
+   "input": "Please write me a two paragraph summary of how my goals moved this month and which ones stalled, in the voice of a calm coach who never raises their voice.\n\nThen list everything I said I would do last week and did not get to yet, as a checklist with one line per item.",
+   "retrieval_text": "please write two summary goals moved ones stalled then list everything not get this month last week",
+   "retrieval_parts": [
+    "please write two summary goals moved ones stalled this month",
+    "then list everything not get yet one line per item last week"
+   ]
+  },
+  {
+   "id": "MS-4",
+   "input": "1. sleep last week\n2. github shipping this week\n3. people I talked with most",
+   "retrieval_text": "sleep github shipping people talked most last week this week",
+   "retrieval_parts": [
+    "1. sleep last week",
+    "github shipping this week",
+    "people talked most"
+   ]
+  }
+ ]
+}
