@@ -343,11 +343,13 @@ def run_pack_backfill(conn: sqlite3.Connection, pack_id: str, limit: int = 500, 
                                           speaker=str(rec.get("speaker") or ""),
                                           speaker_entity_id=str(rec.get("speaker_entity_id") or ""),
                                           recipient=str(rec.get("recipient") or ""),
-                                          recipient_entity_id=str(rec.get("recipient_entity_id") or "")))
+                                          recipient_entity_id=str(rec.get("recipient_entity_id") or ""),
+                                          recipient_key=str(rec.get("recipient_key") or "")))
             _bump_yield(conn, pack_id, llm_calls=1, prefilter_hits=1)
         except Exception:  # noqa: BLE001
             continue
-        valid, _rej = parse_output(raw, pack, record_text=rec["text"])
+        valid, _rej = parse_output(raw, pack, record_text=rec["text"],
+                                   grounded_exempt=(rec.get("recipient"), rec.get("speaker")))
         stats["assertions"] += len(valid)
         _bump_yield(conn, pack_id, assertions=len(valid))
         for a in valid:

@@ -93,6 +93,13 @@ The machine-readable twin of each release is
   DMs because "I'll read it" names nobody and the pack refuses a counterparty-less
   commitment; the runner now carries the DM's other party into the prompt (from the
   record, never the text) and the pack is 0.1.2 so those records re-extract.
+  **Second pass, still zero, two more causes:** only 11 of 138 records had a resolvable
+  recipient (6 of 33 partners resolve to an entity), so an unnamed partner is now labelled
+  by the conversation's key and the ledger joins by messenger key; and the parser's
+  grounding guard rejected the label because the recipient is never in the text —
+  runner-issued `id:`/`key:` labels and the prompt-named recipient are exempt, every
+  other ungrounded name still refused. The pack (0.1.3) now says a small first-person
+  future statement to the recipient IS a commitment; both models had answered empty.
 - **`net.character` — the second outward pack, and the speaker label that makes it work.**
   `[E:derivation]` Status signals (hiring / looking / raising / moving / launching /
   learning / leave / availability, 90-day expiry at read) and promises the speaker made to

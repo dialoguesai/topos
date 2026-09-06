@@ -197,6 +197,8 @@ class DerivationWriter:
         Mentions only break a tie between two entities the address book cannot separate.
         """
         raw = str(name or "").strip()
+        if raw.lower().startswith("key:"):
+            return None  # a messenger key names a node, not an entity; the ledger joins it by key
         if raw.lower().startswith("id:"):
             eid = raw[3:].strip()
             try:

@@ -75,7 +75,7 @@ def promise_shaped_records(conn: sqlite3.Connection, *, limit: int = 2000) -> Li
                "text": text[:6000], "date": at, "role": "authored", "source_id": ""}
         who = recipients.get(conv)
         if who:
-            rec["recipient"], rec["recipient_entity_id"] = who
+            rec["recipient"], rec["recipient_entity_id"], rec["recipient_key"] = who
         out.append(rec)
     try:
         jrows = conn.execute(
@@ -120,13 +120,18 @@ def _dm_recipients(conn: sqlite3.Connection, conversation_ids: List[str]) -> Dic
     try:
         from ...analytics.messenger_directed import resolve_peer_identities
         idents = resolve_peer_identities(conn, sorted(set(singles.values())))
-    except Exception:  # noqa: BLE001 — no identity means no recipient, never a crash
-        return {}
+    except Exception:  # noqa: BLE001 — identity is decoration here; the key is the label
+        idents = {}
+    # Measured 2026-09-06: of 33 single-party DM conversations with a promise in them, 6
+    # resolve to a person entity; 13 more are ambiguous (two contact rows for one number)
+    # and 12 have no clean entity. The person graph already draws those people as
+    # `msg:<key>` nodes, so the counterparty label is the conversation's own key when no
+    # entity is known — the ledger then attaches by messenger key, as the graph does.
     out: Dict[str, tuple] = {}
     for conv, key in singles.items():
         _cid, eid, display = idents.get(key, (None, None, None))
-        if eid:
-            out[conv] = (str(display or "") or "this person", str(eid))
+        label = str(display or "") if display and any(ch.isalpha() for ch in str(display)) else ""
+        out[conv] = (label or "the person you are texting", str(eid or ""), str(key))
     return out
 
 
@@ -209,8 +214,12 @@ def attach_status_signals(conn: Any, nodes: List[Dict[str, Any]], *, today: Any 
 def attach_commitments(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[str, int]:
     """The ledger per person: what the owner promised them, what they promised the owner,
     and what the record says became of it — onto the node as `commitments`."""
+    from .person_bridge import normalise_handle as _norm
+
     by_entity = {str(n["entity_id"]): n for n in nodes if n.get("entity_id") and not n.get("is_owner")}
-    if not by_entity:
+    by_key = {_norm(k): n for n in nodes if not n.get("is_owner")
+              for k in (n.get("messenger_keys") or []) if k}
+    if not by_entity and not by_key:
         return {"attached": 0}
     try:
         rows = conn.execute(
@@ -236,6 +245,12 @@ def attach_commitments(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[str, int]
             node = by_entity.get(str(fact.get("subject_entity_id") or struct.get("person_entity_id") or ""))
         else:
             node = by_entity.get(str(struct.get("counterparty_entity_id") or fact.get("object_entity_id") or ""))
+            if node is None:
+                # an unnamed partner: the counterparty is the conversation's key, and the
+                # graph keys that person by the same handle
+                cp = str(struct.get("counterparty") or "")
+                if cp.lower().startswith("key:"):
+                    node = by_key.get(_norm(cp[4:]))
         if node is None:
             continue
         ledger = node.setdefault("commitments", {
@@ -265,13 +280,15 @@ def attach_commitments(conn: Any, nodes: List[Dict[str, Any]]) -> Dict[str, int]
             ledger[entry["status"]] += 1
         if was_empty:
             attached += 1
-    for node in by_entity.values():
+    for node in list(by_entity.values()) + list(by_key.values()):
         ledger = node.get("commitments")
-        if not ledger:
+        if not ledger or ledger.get("_finalised"):
             continue
+        ledger["_finalised"] = True
         judged = ledger["kept"] + ledger["overdue"]
         ledger["reliability"] = round(ledger["kept"] / judged, 2) if judged else None
         for key in ("owed_by_you", "owed_to_you", "resolved"):
             ledger[key].sort(key=lambda e: e.get("at") or "", reverse=True)
             ledger[key] = ledger[key][:8]
+        ledger.pop("_finalised", None)
     return {"attached": attached}

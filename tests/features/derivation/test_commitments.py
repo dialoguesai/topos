@@ -192,3 +192,57 @@ def test_a_dm_row_carries_its_recipient_from_the_record_and_the_prompt_says_so()
     assert "sent to Priya Anand" in p and 'id:ent_priya' in p
     q = T.build_prompt(pack, grp["text"], grp["date"], "authored")
     assert "sent to" not in q
+
+
+def test_an_unnamed_partner_becomes_the_conversations_key_and_the_ledger_joins_by_it():
+    """Measured: 6 of 33 promise-bearing DM partners resolve to an entity. The rest are
+    `msg:<key>` nodes on the graph, so the label is the key and the ledger joins by it."""
+    from topos.features.derivation import template as T
+    from topos.features.derivation.packs import load_packs
+    from topos.features.derivation.registry import bundled_pack_dir
+
+    conn = sqlite3.connect(":memory:")
+    conn.executescript("""
+      CREATE TABLE conversation_messages (message_id TEXT, content TEXT, event_at TEXT, is_from_self INTEGER, conversation_id TEXT, sender_id TEXT);
+      CREATE TABLE journal_entries (entry_id TEXT, content TEXT, entry_at TEXT);
+      INSERT INTO conversation_messages VALUES ('p0','hey','2026-08-01T09:00:00Z',0,'dm1','+15125550199');
+      INSERT INTO conversation_messages VALUES ('m1','I''ll read it. One sec','2026-08-02T09:00:00Z',1,'dm1','self');
+    """)
+    rec = {r["record_id"]: r for r in C.promise_shaped_records(conn)}["m1"]
+    assert rec["recipient_key"] == "+15125550199" and rec["recipient_entity_id"] == ""
+    assert rec["recipient"] == "the person you are texting"
+    pack = load_packs(bundled_pack_dir(), only=["obligations.commitments"])["obligations.commitments"]
+    p = T.build_prompt(pack, rec["text"], rec["date"], "authored", recipient=rec["recipient"],
+                       recipient_entity_id="", recipient_key=rec["recipient_key"])
+    assert 'exactly "key:+15125550199"' in p
+    assert "FIRST-PERSON FUTURE STATEMENT" in p, "the pack's own rule reaches the prompt"
+    # the ledger joins a key-labelled counterparty to the graph node keyed by that handle
+    conn2 = sqlite3.connect(":memory:")
+    conn2.execute("CREATE TABLE signal_objects (object_type TEXT, valid_to TEXT, payload_json TEXT, valid_from TEXT)")
+    conn2.execute("INSERT INTO signal_objects VALUES ('fact', NULL, ?, '2026-08-02')",
+                  (json.dumps({"predicate": "commit.made", "occurrence": "2026-08-02",
+                               "value_struct": {"counterparty": "key:+15125550199", "direction": "owed_by_owner",
+                                                "description": "read it", "status": "open"}}),))
+    node = {"node_id": "msg:+15125550199", "entity_id": None, "messenger_keys": ["+15125550199"], "is_owner": False}
+    assert C.attach_commitments(conn2, [node])["attached"] == 1
+    assert node["commitments"]["owed_by_you"][0]["description"] == "read it"
+    assert "_finalised" not in node["commitments"]
+
+
+def test_the_parser_accepts_runner_labels_and_the_named_recipient_but_no_other_ungrounded_name():
+    from topos.features.derivation.packs import load_packs
+    from topos.features.derivation.registry import bundled_pack_dir
+    from topos.features.derivation.template import parse_output
+
+    pack = load_packs(bundled_pack_dir(), only=["obligations.commitments"])["obligations.commitments"]
+    text = "I'll read it. One sec"
+    def raw(cp):
+        return json.dumps({"assertions": [{"predicate": "commit.made",
+                                           "value": {"counterparty": cp, "direction": "owed_by_owner",
+                                                     "description": "read it", "status": "open"},
+                                           "about": "owner", "confidence": 0.9, "quote": "I'll read it"}]})
+    assert parse_output(raw("id:ent_priya"), pack, record_text=text)[0]
+    assert parse_output(raw("key:+15125550199"), pack, record_text=text)[0]
+    assert parse_output(raw("Priya Anand"), pack, record_text=text, grounded_exempt=("Priya Anand",))[0]
+    valid, rejects = parse_output(raw("Marcus Lee"), pack, record_text=text)
+    assert not valid and rejects == 1, "a name the text never contains and nobody labelled is still laundering"

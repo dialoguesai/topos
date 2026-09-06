@@ -7,7 +7,7 @@
 # and no outward gate. The counterparty rides as an entity_ref inside the value, exactly
 # as relationships.social carries people inside owner-facts.
 pack: obligations.commitments
-version: 0.1.2
+version: 0.1.3
 status: draft
 title: "Promises made and owed"
 author: topos
@@ -60,6 +60,7 @@ guidance:
     matters and is extracted, never assumed — "I'll send it" is owed_by_owner, "you said
     you'd send it" is owed_to_owner.
   abstention:
+    - "A FIRST-PERSON FUTURE STATEMENT TO THE RECIPIENT IS A COMMITMENT: 'I'll read it', 'I'll send it tonight', 'I'll bring the charger' are commit.made with direction owed_by_owner and status open, however small. Extract them; do not treat them as too minor."
     - "Aspirations without a counterparty ('I should exercise more') are not commitments."
     - "Hypotheticals and offers declined ('happy to review if you ever want') are not commitments until accepted."
     - "An unresolvable counterparty ('I told that guy I'd call') gets a mention, not a ledger row."

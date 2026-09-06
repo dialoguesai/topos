@@ -255,7 +255,7 @@ def _predicate_menu(pack: Pack) -> str:
 
 def build_prompt(pack: Pack, record_text: str, record_date: str, actor_role: str,
                  known_people=None, speaker: str = "", speaker_entity_id: str = "",
-                 recipient: str = "", recipient_entity_id: str = "") -> str:
+                 recipient: str = "", recipient_entity_id: str = "", recipient_key: str = "") -> str:
     record_text = clean_record_text(record_text)
     g = pack.guidance
     abst = "\n".join(f"- {a}" for a in (g.get("abstention") or []))
@@ -270,10 +270,11 @@ def build_prompt(pack: Pack, record_text: str, record_date: str, actor_role: str
     # person being texted and their name is nowhere in the text; the recipient comes from
     # the record, so a counterparty-shaped field with nobody named in the words binds to
     # them by id.
-    if recipient and recipient_entity_id and actor_role == "authored":
-        abst += (f"\n- This is a direct message the owner sent to {recipient} (id {recipient_entity_id}). "
-                 f"A promise, debt or plan with no other person named in the words is with THEM: put "
-                 f"\"id:{recipient_entity_id}\" in the counterparty/person field.")
+    if recipient and (recipient_entity_id or recipient_key) and actor_role == "authored":
+        label = f"id:{recipient_entity_id}" if recipient_entity_id else f"key:{recipient_key}"
+        abst += (f"\n- This is a direct message the owner sent to {recipient}. A promise, debt or plan "
+                 f"with no other person named in the words is with THEM: put exactly \"{label}\" in the "
+                 f"counterparty/person field (never their name — the label is how the archive knows them).")
     known_block = ""
     if known_people:
         names = ", ".join(known_people)
@@ -336,7 +337,19 @@ Respond with ONLY this JSON, nothing else:
 _JSON_RE = re.compile(r"\{.*\}", re.S)
 
 
-def parse_output(raw: str, pack: Pack, record_text: str = None) -> Tuple[List[Dict[str, Any]], int]:
+#: Person-field values the RUNNER issued rather than the model invented: the record's own
+#: sender or recipient, as an entity id or a messenger key. They can only come from the
+#: prompt's label line, so the grounding guard (which stops names the text never contains)
+#: does not apply — the text never contains them by construction.
+_RUNNER_LABEL_PREFIXES = ("id:", "key:")
+
+
+def is_runner_label(value: Any) -> bool:
+    return isinstance(value, str) and value.strip().lower().startswith(_RUNNER_LABEL_PREFIXES)
+
+
+def parse_output(raw: str, pack: Pack, record_text: str = None,
+                 grounded_exempt: Any = ()) -> Tuple[List[Dict[str, Any]], int]:
     """Return (valid_assertions, schema_reject_count)."""
     m = _JSON_RE.search(raw or "")
     if not m:
@@ -420,7 +433,12 @@ def parse_output(raw: str, pack: Pack, record_text: str = None) -> Tuple[List[Di
                     val[pf] = pv[4:].strip()
                     a["new_person"] = True
                     pv = val[pf]
-                if pv is not None and not person_field_ok(pv):
+                if pv is not None and is_runner_label(pv):
+                    pass  # the record's own label — grounded by construction
+                elif (pv is not None and isinstance(pv, str)
+                      and pv.strip().lower() in {str(x).strip().lower() for x in (grounded_exempt or ()) if x}):
+                    pass  # the recipient/speaker the prompt named, spelled as it was given
+                elif pv is not None and not person_field_ok(pv):
                     person_bad = True
                 elif pv is not None and record_text is not None and not person_grounded(pv, record_text):
                     person_bad = True
