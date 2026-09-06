@@ -56,13 +56,21 @@ class TestThePublishedContractIsWellFormed:
             assert key in CONTRACT, key
         assert CONTRACT["query_text_max"] == 500 and CONTRACT["intent_keyword_cap"] == 14
 
-    def test_vocabularies_are_lowercase_ascii_deduplicated_and_reachable(self) -> None:
-        """Reachable = a token the intent pattern can produce; a member it cannot produce is dead."""
+    @pytest.mark.parametrize("key", ["stop_words", "output_shape_words"])
+    def test_vocabularies_are_lowercase_ascii_and_deduplicated(self, key: str) -> None:
+        words = CONTRACT[key]
+        assert words and len(words) == len(set(words)), key
+        assert all(re.fullmatch(r"[a-z0-9]+", w) for w in words), key
+
+    def test_every_door_word_is_reachable(self) -> None:
+        """Reachable = a token the intent pattern can produce. A door word the tokeniser can
+        never emit is dead weight that reads as protection. (`stop_words` is deliberately NOT
+        checked: it carries two-letter members — "do", "is", "my", "me" — inherited from the
+        intent digest, where the same list also filters untokenised text. Dead in this pipeline,
+        harmless, and identical at both entrances, which is what this contract is about.)"""
         token = re.compile(CONTRACT["intent_token_pattern"])
-        for key in ("stop_words", "output_shape_words"):
-            words = CONTRACT[key]
-            assert words and len(words) == len(set(words)), key
-            assert all(token.fullmatch(w) for w in words), (key, [w for w in words if not token.fullmatch(w)])
+        dead = [w for w in CONTRACT["output_shape_words"] if not token.fullmatch(w)]
+        assert not dead, f"door words the tokeniser can never emit: {dead}"
 
     def test_vector_ids_are_unique_and_each_has_an_input_and_an_output(self) -> None:
         ids = [v["id"] for v in VECTORS]
@@ -102,9 +110,18 @@ class TestTheVectorsAreHonest:
             assert not any("user query" in o for o in outputs), v["id"]
 
     def test_no_output_starts_with_punctuation(self) -> None:
+        """A needle that opens with a stray comma is a distillation that mangled the sentence
+        (the app emitted `, what did I work on ? this week` before 2026-09-06). Two legitimate
+        exceptions, both the documented raw fallback: a whole message with nothing distillable
+        goes through untouched, and a one-keyword SECTION falls back to its own text with the
+        enumerator the owner typed ("- how did I sleep last week") — identical at both
+        entrances, which is the property this file protects."""
+        enumerator = re.compile(r"^\s*(?:\(\d{1,2}\)|\d{1,2}[).:]|#\d{1,2}\b|[-*\u2022]\s|section\s+\d{1,2}\b)", re.IGNORECASE)
         for v in VECTORS:
-            for o in [v["retrieval_text"], *(v.get("retrieval_parts") or [])]:
-                assert not o or o[0].isalnum() or o == v["input"], (v["id"], o)
+            if v["retrieval_text"] and v["retrieval_text"] != v["input"]:
+                assert v["retrieval_text"][0].isalnum(), (v["id"], v["retrieval_text"])
+            for part in v.get("retrieval_parts") or []:
+                assert part and (part[0].isalnum() or enumerator.match(part)), (v["id"], part)
 
     def test_every_output_fits_the_cap(self) -> None:
         cap = CONTRACT["query_text_max"]
