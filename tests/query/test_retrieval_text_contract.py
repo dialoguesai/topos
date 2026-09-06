@@ -43,6 +43,16 @@ CONTRACT_PATH = Path(__file__).resolve().parents[2] / "topos" / "protocol" / "re
 CONTRACT = json.loads(CONTRACT_PATH.read_text(encoding="utf-8"))
 VECTORS = CONTRACT["vectors"]
 
+#: The whitespace JavaScript's `trim()` removes — the doors trim with it, so the "raw fallback"
+#: a vector falls back to is the TRIMMED sentence, not the bytes the owner pasted.
+_JS_WHITESPACE = "\t\n\x0b\x0c\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+
+
+def _is_the_raw_fallback(vector: dict) -> bool:
+    """The distillation found nothing to work with and handed the sentence back whole."""
+    return vector["retrieval_text"] == vector["input"].strip(_JS_WHITESPACE)
+
+
 #: Gate-only generic nouns that must NEVER become door words: each is an ordinary subject in
 #: owner language. Named here so nobody "syncs the door up to the gate".
 GENERIC_NOUNS_THE_DOOR_MUST_KEEP = ("voice", "thread", "board", "summary", "draft", "style", "post", "analysis")
@@ -90,6 +100,13 @@ class TestEveryDoorWordIsExemptAtTheGate:
         missing = sorted(set(CONTRACT["output_shape_words"]) - set(_OUTPUT_SHAPE_TOKENS))
         assert not missing, f"stripped at the door but able to veto at the gate: {missing}"
 
+    def test_the_published_never_discriminative_list_is_the_gates_own(self) -> None:
+        """The doors do not strip these; they TEST against them. A distillation whose survivors
+        are all in this list has no subject left, so the owner's sentence goes through instead
+        ("Summarize my poetry" must not become `summarize`). Publishing the engine's list is what
+        lets a door make that judgement without inventing a second vocabulary."""
+        assert set(CONTRACT["never_discriminative_words"]) == set(_OUTPUT_SHAPE_TOKENS)
+
 
 class TestTheDoorStaysNarrowerThanTheGate:
     @pytest.mark.parametrize("noun", GENERIC_NOUNS_THE_DOOR_MUST_KEEP)
@@ -118,7 +135,7 @@ class TestTheVectorsAreHonest:
         entrances, which is the property this file protects."""
         enumerator = re.compile(r"^\s*(?:\(\d{1,2}\)|\d{1,2}[).:]|#\d{1,2}\b|[-*\u2022]\s|section\s+\d{1,2}\b)", re.IGNORECASE)
         for v in VECTORS:
-            if v["retrieval_text"] and v["retrieval_text"] != v["input"]:
+            if v["retrieval_text"] and not _is_the_raw_fallback(v):
                 assert v["retrieval_text"][0].isalnum(), (v["id"], v["retrieval_text"])
             for part in v.get("retrieval_parts") or []:
                 assert part and (part[0].isalnum() or enumerator.match(part)), (v["id"], part)
@@ -128,10 +145,28 @@ class TestTheVectorsAreHonest:
         for v in VECTORS:
             assert len(v["retrieval_text"]) <= cap, v["id"]
 
+    def test_no_vector_distils_to_words_that_cannot_discriminate(self) -> None:
+        """The defect this list exists for: a needle of `summarize`, `write` or `replied` is sent
+        as the semantic query and retrieves whatever a bare verb embeds to."""
+        never = set(CONTRACT["never_discriminative_words"])
+        for v in VECTORS:
+            # An empty message has no needle at all, and a subject-less distillation hands the
+            # sentence back — neither is a needle that cannot discriminate.
+            if not v["retrieval_text"] or _is_the_raw_fallback(v):
+                continue
+            words = v["retrieval_text"].lower().split()
+            assert any(w not in never for w in words), (v["id"], v["retrieval_text"])
+
+    def test_the_cap_unit_is_named_and_no_output_splits_a_character(self) -> None:
+        assert CONTRACT["cap_unit"] == "code_points"
+        for v in VECTORS:
+            for o in [v["retrieval_text"], *(v.get("retrieval_parts") or [])]:
+                assert o == o.encode("utf-8", "strict").decode("utf-8"), (v["id"], o)
+
     def test_no_vector_carries_a_door_word_unless_it_fell_back_to_the_raw_sentence(self) -> None:
         shape = set(CONTRACT["output_shape_words"])
         for v in VECTORS:
-            if v["retrieval_text"] == v["input"]:
+            if _is_the_raw_fallback(v):
                 continue  # nothing distillable: the sentence went through untouched
             leaked = shape & set(v["retrieval_text"].lower().split())
             assert not leaked, (v["id"], sorted(leaked))
