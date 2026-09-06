@@ -144,6 +144,7 @@ SUPPORTED_MESSAGE_TYPES = [
     "messenger_person_curate",
     "messenger_person_graph",
     "messenger_person_provenance",
+    "messenger_person_rate",
     "messenger_person_undo",
     "messenger_relationship_signals",
     "messenger_relationships",
