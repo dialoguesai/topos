@@ -269,3 +269,26 @@ def test_the_verifier_is_told_the_lens_and_the_addressing():
     assert "Lens:" not in bare and "Addressing" not in bare, "other packs' prompts are unchanged"
     assert label_note_for({"speaker": "Priya Anand", "speaker_entity_id": "ent_priya"}) == "written by Priya Anand = id:ent_priya."
     assert label_note_for({}) == ""
+
+
+def test_a_bare_handle_the_model_wrote_is_read_as_the_runners_label():
+    """Gold probe 2026-09-06: asked for `key:+1555…`, the 9B wrote `+1555…` in the
+    counterparty field; three of three real promises were rejected as ungrounded on that
+    alone. A bare label is the label; a bare stranger's number is still nothing."""
+    from topos.features.derivation.packs import load_packs
+    from topos.features.derivation.registry import bundled_pack_dir
+    from topos.features.derivation.template import normalise_runner_label, parse_output
+
+    assert normalise_runner_label("+15125550199", ["key:+15125550199"]) == "key:+15125550199"
+    assert normalise_runner_label("ID:ENT_PRIYA", ["id:ent_priya"]) == "id:ent_priya"
+    assert normalise_runner_label("+15125550000", ["key:+15125550199"]) == "+15125550000"
+    pack = load_packs(bundled_pack_dir(), only=["obligations.commitments"])["obligations.commitments"]
+    raw = json.dumps({"assertions": [{"predicate": "commit.made",
+                                      "value": {"counterparty": "+15125550199", "direction": "owed_by_owner",
+                                                "description": "send you the deck", "due": "tonight", "status": "open"},
+                                      "about": "owner", "confidence": 0.95, "quote": "I'll send you the deck tonight"}]})
+    valid, rej = parse_output(raw, pack, record_text="I'll send you the deck tonight, promise",
+                              runner_labels=["key:+15125550199"])
+    assert valid and valid[0]["value"]["counterparty"] == "key:+15125550199" and rej == 0
+    valid, rej = parse_output(raw, pack, record_text="I'll send you the deck tonight, promise")
+    assert not valid and rej == 1, "without the runner's label the bare number is still laundering"

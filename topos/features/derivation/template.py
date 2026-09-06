@@ -348,8 +348,26 @@ def is_runner_label(value: Any) -> bool:
     return isinstance(value, str) and value.strip().lower().startswith(_RUNNER_LABEL_PREFIXES)
 
 
+def normalise_runner_label(value: Any, runner_labels: Any) -> Any:
+    """A person value that names one of the runner's labels — prefixed or bare — becomes
+    the canonical prefixed label. Measured 2026-09-06: asked to put `key:+1555…` in the
+    counterparty field, the 9B wrote the bare handle `+1555…`, which is neither a runner
+    label nor a name in the text, and every real promise was rejected on that alone."""
+    if not isinstance(value, str) or not value.strip():
+        return value
+    v = value.strip().lower()
+    for label in (runner_labels or ()):
+        lab = str(label or "").strip()
+        if not lab or ":" not in lab:
+            continue
+        bare = lab.split(":", 1)[1].strip().lower()
+        if v == lab.lower() or v == bare or v == f"key:{bare}" or v == f"id:{bare}":
+            return lab
+    return value
+
+
 def parse_output(raw: str, pack: Pack, record_text: str = None,
-                 grounded_exempt: Any = ()) -> Tuple[List[Dict[str, Any]], int]:
+                 grounded_exempt: Any = (), runner_labels: Any = ()) -> Tuple[List[Dict[str, Any]], int]:
     """Return (valid_assertions, schema_reject_count)."""
     m = _JSON_RE.search(raw or "")
     if not m:
@@ -433,6 +451,9 @@ def parse_output(raw: str, pack: Pack, record_text: str = None,
                     val[pf] = pv[4:].strip()
                     a["new_person"] = True
                     pv = val[pf]
+                if pv is not None:
+                    pv = normalise_runner_label(pv, runner_labels)
+                    val[pf] = pv
                 if pv is not None and is_runner_label(pv):
                     pass  # the record's own label — grounded by construction
                 elif (pv is not None and isinstance(pv, str)
