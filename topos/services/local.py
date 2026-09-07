@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import sqlite3
+import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from ..__version__ import __version__
 from ..core.api_models import (
@@ -51,6 +53,43 @@ def _upgrade_summary_from_runner(conn: sqlite3.Connection) -> Dict[str, Any]:
         "pending_upgrade_steps": list(status_payload.get("pending_steps") or []),
         "pending_consent_steps": compact_consent,
     }
+
+
+#: ``dbstat`` plus a raw-file walk is seconds on a real Topos. The macOS
+#: shell used to ask ``/device_info`` on every 5s health poll, on the event
+#: loop, which is what made ``/healthcheck`` miss a 3s idle timeout.
+_STORAGE_SNAPSHOT_TTL_S = 60.0
+_storage_snapshot_cache: Optional[Tuple[float, str, Optional[int], Optional[Dict[str, Any]]]] = None
+
+
+def _compute_storage_snapshot(db_path: Path) -> Tuple[Optional[int], Optional[Dict[str, Any]]]:
+    """On-disk size + category breakdown. Own connection, never the loop handle."""
+    size = sqlite_on_disk_size_bytes(db_path)
+    breakdown = None
+    try:
+        conn = sqlite3.connect(str(db_path))
+        try:
+            breakdown = compute_local_storage_breakdown(conn, db_path)
+        finally:
+            conn.close()
+    except Exception:
+        breakdown = None
+    if breakdown is not None:
+        size = int(breakdown.get("total_bytes") or size or 0)
+    return size, breakdown
+
+
+def _cached_storage_snapshot(db_path: Path) -> Tuple[Optional[int], Optional[Dict[str, Any]]]:
+    """Reuse a fresh snapshot so a 5s poller does not rescan ``dbstat``."""
+    global _storage_snapshot_cache
+    now = time.monotonic()
+    key = str(db_path)
+    cached = _storage_snapshot_cache
+    if cached is not None and cached[1] == key and (now - cached[0]) < _STORAGE_SNAPSHOT_TTL_S:
+        return cached[2], cached[3]
+    size, breakdown = _compute_storage_snapshot(db_path)
+    _storage_snapshot_cache = (now, key, size, breakdown)
+    return size, breakdown
 
 
 def _resolve_device_database_path() -> Optional[Path]:
@@ -139,19 +178,12 @@ class LocalDeviceService:
         if settings.topos_database_mode in {"local", "sqlite"}:
             db_path = _resolve_device_database_path()
             if db_path is not None:
-                database_size_bytes = sqlite_on_disk_size_bytes(db_path)
-                conn = state.db_conn
-                if conn is None:
-                    try:
-                        conn = sqlite3.connect(str(db_path))
-                        storage_breakdown = compute_local_storage_breakdown(conn, db_path)
-                        conn.close()
-                    except Exception:
-                        storage_breakdown = None
-                else:
-                    storage_breakdown = compute_local_storage_breakdown(conn, db_path)
-                if storage_breakdown is not None:
-                    database_size_bytes = int(storage_breakdown.get("total_bytes") or database_size_bytes or 0)
+                # dbstat + a raw-file walk on the event-loop handle stalled
+                # /healthcheck (2026-09-04 tray flicker). Own connection, off
+                # the loop; cache so a 5s poller does not rescan the whole DB.
+                database_size_bytes, storage_breakdown = await asyncio.to_thread(
+                    _cached_storage_snapshot, db_path
+                )
 
         upgrade_fields: Dict[str, Any] = {
             "upgrade_baseline": None,

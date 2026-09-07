@@ -9,6 +9,21 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **`/device_info` computes its storage breakdown off the event loop again — and main's CI
+  is green.** `[O]` `topos/services/local.py` regained `_cached_storage_snapshot`: a `dbstat`
+  scan plus a raw-file walk on its own connection, dispatched through `asyncio.to_thread` and
+  cached for 60s, so the macOS shell's 5s `/device_info` poll no longer runs seconds of work
+  on the loop handle and starves `/healthcheck`. The test that pins exactly that
+  (`test_local_device_info_storage_breakdown_runs_off_the_loop`, "dbstat on the event-loop
+  handle stalled /healthcheck (2026-09-04)") was committed on 2026-09-04 while the
+  implementation it monkeypatches stayed an uncommitted edit in a shared working tree, so
+  every CI run since failed on `AttributeError: ... has no attribute
+  '_cached_storage_snapshot'`. Eight consecutive reds — and because the public test lane is
+  the ninth of fourteen steps, the five after it (private-reference guard, privacy eval
+  gates, `uv build`, `twine check`, fresh-install wheel smoke) were skipped, so nothing
+  downstream of the tests had been measured on main since 1.3.50.
+
 ## [1.3.53] — 2026-09-07
 
 ### Changed
