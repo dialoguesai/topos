@@ -9,6 +9,21 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.53] — 2026-09-07
+
+### Changed
+- **The menu-bar glyphs carry the refreshed Topos mark.** `[O]` `topos/cli/assets/topos_blk_rounded.png`
+  and `topos_white.png` — the pystray tray's light- and dark-appearance icons — are redrawn from
+  new artwork and kept byte-identical to the Swift and Windows shells' copies of the same pair.
+  The two are not one asset in two colours: `blk_rounded` is black ink on an opaque white rounded
+  tile, `white` is white ink on a transparent ground, and `tray.py` picks between them by taskbar
+  brightness. Either ground on the wrong bar disappears, with no error to say so. Raised to
+  1024px, which matters downstream rather than here: the macOS shell builds a 1024 icns slot from
+  its copy, so the previous 400px source had the Dock icon running at a 2.56x upscale. Framing is
+  now an even 10% margin around the ink, replacing a ~4% left / ~14% elsewhere inset, so the mark
+  keeps its scale and only loses the left bias. Checked at the size it actually renders — 18px,
+  with the status dot drawn over the bottom-right corner — not at full size.
+
 ## [1.3.52] — 2026-09-07
 
 ### Added
