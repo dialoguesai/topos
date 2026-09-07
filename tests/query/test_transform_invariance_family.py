@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Set, Tuple
 
@@ -142,17 +143,25 @@ def seeded_db(tmp_path_factory) -> Path:
         # Make the gate LIVE: `_rare_tokens` trusts the frequency signal only above
         # df_max * 10 indexed rows. The trigger on signal_embeddings fills the FTS index.
         floor = rare_token_df_max() * 10
+        now = datetime.now(timezone.utc)
+        # `chunk_index` and a recent `event_at` are load-bearing, not decoration: without them a
+        # row raises the FTS count — switching the gate ON — while staying invisible to every
+        # evidence lane, so the fusion returns `store_empty` at the branch ABOVE the gate and no
+        # veto can ever be observed. `_load_recent_summary_items` selects on exactly these two
+        # columns. A first version of this fixture omitted them, and its "sensitivity kept" check
+        # below passed without a single veto ever firing.
         rows = [
             (f"tx-fts-{i}", f"tx-rec-{i}", "chatgpt_ingestion", "work", "fixture", "fixture",
              0, _SUBJECT_SENTENCES[i % len(_SUBJECT_SENTENCES)],
-             _SUBJECT_SENTENCES[i % len(_SUBJECT_SENTENCES)])
+             _SUBJECT_SENTENCES[i % len(_SUBJECT_SENTENCES)],
+             0, (now - timedelta(days=1 + (i % 3))).isoformat())
             for i in range(floor + 100)
         ]
         conn.executemany(
             """INSERT INTO signal_embeddings
                (embedding_id, record_id, source_id, signal_dimension, model, provider, dims,
-                text_preview, search_text)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                text_preview, search_text, chunk_index, event_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             rows,
         )
         conn.commit()
@@ -215,15 +224,26 @@ def _jaccard(a: Set[str], b: Set[str]) -> float:
 
 
 class TestTheFixtureIsAnInstrument:
-    def test_the_gate_is_live_here(self, seeded_db: Path) -> None:
-        """Below df_max*10 rows `_rare_tokens` returns {} and every relation below holds
-        vacuously. This is the self-check that makes a green board mean something."""
+    def test_the_gate_is_live_here(self, seeded_db: Path, run) -> None:
+        """The self-check that makes a green board mean something — and it has to pin all THREE of
+        the veto's preconditions, not just the frequency one. A veto needs an evidence lane holding
+        rows, a rare token, and that token unevidenced among the rows. The first version of this
+        check counted FTS rows only; the fixture met that and still could not produce a single
+        veto, because filler with no `chunk_index` / `event_at` is invisible to every evidence lane
+        (found by the corpus-density sweep, 2026-09-06). So the check now ends by DEMONSTRATING a
+        veto end to end."""
         conn = sqlite3.connect(str(seeded_db))
         try:
-            n = conn.execute("SELECT count(*) FROM signal_embeddings_fts").fetchone()[0]
+            assert conn.execute("SELECT count(*) FROM signal_embeddings_fts").fetchone()[0] >= rare_token_df_max() * 10
+            assert conn.execute(
+                "SELECT count(*) FROM signal_embeddings WHERE chunk_index = 0 AND event_at IS NOT NULL"
+            ).fetchone()[0] >= rare_token_df_max() * 10
         finally:
             conn.close()
-        assert n >= rare_token_df_max() * 10
+        _, ledger = run("What did I do recently about zorblatt tourism")
+        assert ledger.empty_cause == _N.CAUSE_GATE_VETOED, (
+            "the fixture cannot produce a veto, so every invariance relation below is vacuous"
+        )
 
     def test_every_family_member_is_a_catalog_case(self) -> None:
         for control, siblings in FAMILIES.items():
@@ -234,6 +254,11 @@ class TestTheFixtureIsAnInstrument:
     def test_the_absence_negatives_still_veto_in_this_fixture(self, run) -> None:
         """Sensitivity kept: the fabricated subjects the catalog carries must empty the lane
         with the gate's own cause — in the same corpus where the transforms must not."""
+        # These catalogue negatives carry no recency framing, so the `recent` lane stays CONTEXT
+        # and they never reach the gate at all — they empty one branch earlier, as `store_empty`.
+        # That is why this accepts any honest empty rather than demanding `gate_vetoed`: the
+        # sensitivity it pins is "a fabricated subject retrieves nothing", and the gate's own
+        # sensitivity is pinned by `test_the_gate_is_live_here` above, which forces a real veto.
         honest_empty = {_N.CAUSE_GATE_VETOED, _N.CAUSE_NO_MATCH, _N.CAUSE_STORE_EMPTY}
         for case in ABSTAIN_CASES:
             ids, ledger = run(case.query)

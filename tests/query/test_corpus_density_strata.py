@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import sqlite3
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -69,6 +70,12 @@ _SUBJECT = "spelunking"
 #: nothing to veto.
 _MIXED_ASK = f"What have I been working on lately and my {_SUBJECT}"
 
+#: A wholly fabricated subject, framed with recency. The recency word is not decoration: the
+#: `recent` lane counts as CONTEXT rather than evidence unless the ask carries recency intent, so
+#: without it this ask cannot reach the gate either. With it, this is the false-PRESENCE probe —
+#: the ask has no honest answer, and what the node does with it is the other half of the ledger.
+_FABRICATED_ASK = "What did I do recently about zorblatt tourism"
+
 WORK_CONTEXT_SOURCES = [
     "chatgpt_ingestion", "chatgpt_file_ingestion", "chatgpt_ui_conversation",
     "demo_resume_file", "demo_journal_file", "grow_journal", "grow_data_file",
@@ -91,29 +98,43 @@ class _NoSemanticLane:
         return _empty
 
 
+#: Filler rows carry `chunk_index = 0` and a RECENT `event_at` on purpose. Without them a row
+#: raises the FTS count — switching the gate on — while remaining invisible to every evidence lane,
+#: so the empty is stamped `store_empty` at the branch ABOVE the gate and the sweep measures
+#: nothing. `_load_recent_summary_items` selects on exactly these two columns within the last 14
+#: days. This is the difference between a fixture that can observe a veto and one that cannot.
+_RECENT_DAYS = 3
+
+
+def _rows(prefix: str, sentences: List[str], count: int, now: datetime) -> List[tuple]:
+    return [
+        (
+            f"{prefix}{i}", f"{prefix}r{i}", "chatgpt_ingestion", "work", "m", "p", 0,
+            sentences[i % len(sentences)], sentences[i % len(sentences)],
+            0, (now - timedelta(days=1 + (i % _RECENT_DAYS))).isoformat(),
+        )
+        for i in range(count)
+    ]
+
+
+_INSERT = """INSERT INTO signal_embeddings
+             (embedding_id, record_id, source_id, signal_dimension, model, provider, dims,
+              text_preview, search_text, chunk_index, event_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"""
+
+
 def _build(tmp: Path, total_rows: int, subject_rows: int = 0) -> Path:
     """A migrated node with `total_rows` indexed rows, `subject_rows` of which mention the subject."""
     db = tmp / f"n{total_rows}-{subject_rows}.db"
     build_seeded_corpus(db)
     if total_rows:
+        now = datetime.now(timezone.utc)
         conn = sqlite3.connect(str(db))
         try:
             sentence = f"went {_SUBJECT} in the caves at the weekend with friends"
-            rows = [
-                (f"f{i}", f"fr{i}", "chatgpt_ingestion", "work", "m", "p", 0, _FILLER[i % 4], _FILLER[i % 4])
-                for i in range(max(0, total_rows - subject_rows))
-            ]
-            rows += [
-                (f"s{i}", f"sr{i}", "chatgpt_ingestion", "work", "m", "p", 0, sentence, sentence)
-                for i in range(subject_rows)
-            ]
-            conn.executemany(
-                """INSERT INTO signal_embeddings
-                   (embedding_id, record_id, source_id, signal_dimension, model, provider, dims,
-                    text_preview, search_text)
-                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-                rows,
-            )
+            rows = _rows("f", _FILLER, max(0, total_rows - subject_rows), now)
+            rows += _rows("s", [sentence], subject_rows, now)
+            conn.executemany(_INSERT, rows)
             conn.commit()
         finally:
             conn.close()
@@ -168,11 +189,32 @@ class TestTheFixtureCanMeasureAVeto:
         _, cause = _ask(_build(tmp_path, FLOOR + 100), _MIXED_ASK, monkeypatch)
         assert cause == _N.CAUSE_GATE_VETOED
 
-    def test_a_bare_fabricated_ask_never_reaches_the_gate(self, tmp_path: Path, monkeypatch) -> None:
-        """Recorded because it is the trap: with no evidence lane the fusion returns `store_empty`
-        before the veto code runs, so a catalogue negative alone cannot exercise this gate."""
+    def test_a_fabricated_ask_with_no_recency_never_reaches_the_gate(self, tmp_path: Path, monkeypatch) -> None:
+        """Recorded because it is the trap, and it is not the one it looks like. The `recent` lane
+        is CONTEXT unless the ask carries recency intent, and context lanes are excluded from
+        `evidence_items` — so the fusion returns `store_empty` at the branch above the gate. A
+        catalogue negative as written therefore cannot exercise this gate at any density."""
         _, cause = _ask(_build(tmp_path, FLOOR + 100), "What did I say about zorblatt tourism", monkeypatch)
         assert cause == _N.CAUSE_STORE_EMPTY
+
+    def test_the_fixture_meets_all_three_preconditions_for_a_veto(self, tmp_path: Path, monkeypatch) -> None:
+        """A veto needs an evidence lane with rows, a rare token, and that token unevidenced. The
+        FTS count alone pins only the second; a fixture can satisfy it and still measure nothing,
+        which is what a count-only self-check misses."""
+        db = _build(tmp_path, FLOOR + 100)
+        conn = sqlite3.connect(str(db))
+        try:
+            assert conn.execute("SELECT count(*) FROM signal_embeddings_fts").fetchone()[0] >= FLOOR
+            # rows an evidence lane can actually select on
+            dated = conn.execute(
+                "SELECT count(*) FROM signal_embeddings WHERE chunk_index = 0 AND event_at IS NOT NULL"
+            ).fetchone()[0]
+            assert dated >= FLOOR, "filler is invisible to the recent lane; the gate cannot be reached"
+        finally:
+            conn.close()
+        # and the whole chain, end to end
+        _, cause = _ask(db, _FABRICATED_ASK, monkeypatch)
+        assert cause == _N.CAUSE_GATE_VETOED
 
 
 # ---------------------------------------------------------------- the corpus guard
@@ -189,6 +231,19 @@ class TestTheCorpusGuardIsADiscontinuity:
         # The owner-visible consequence: on the smallest nodes an ask naming something absent is
         # ANSWERED from whatever the lane held. That is the answer-when-you-should-abstain side.
         assert items > 0
+
+    @pytest.mark.parametrize("rows", [FLOOR - 1, FLOOR])
+    def test_the_false_presence_side_of_the_same_step(self, tmp_path: Path, monkeypatch, rows: int) -> None:
+        """The other half of the ledger, which the abstention discipline says must be reported
+        separately. A wholly fabricated subject is ANSWERED below the floor — from rows that have
+        nothing to do with it — and refused at the floor. A new owner is therefore the one most
+        likely to be handed confident noise, and the same step that fixes it is the one that starts
+        refusing real subjects mentioned once."""
+        items, cause = _ask(_build(tmp_path, rows), _FABRICATED_ASK, monkeypatch)
+        if rows < FLOOR:
+            assert cause != _N.CAUSE_GATE_VETOED and items > 0
+        else:
+            assert cause == _N.CAUSE_GATE_VETOED
 
     @pytest.mark.parametrize("rows", [FLOOR, FLOOR + 1, FLOOR + 100])
     def test_at_and_above_the_floor_the_gate_is_live(self, tmp_path: Path, monkeypatch, rows: int) -> None:
@@ -279,17 +334,7 @@ def _build_with(tmp: Path, filler: List[str], total_rows: int, tag: str) -> Path
     build_seeded_corpus(db)
     conn = sqlite3.connect(str(db))
     try:
-        conn.executemany(
-            """INSERT INTO signal_embeddings
-               (embedding_id, record_id, source_id, signal_dimension, model, provider, dims,
-                text_preview, search_text)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            [
-                (f"{tag}{i}", f"{tag}r{i}", "chatgpt_ingestion", "work", "m", "p", 0,
-                 filler[i % len(filler)], filler[i % len(filler)])
-                for i in range(total_rows)
-            ],
-        )
+        conn.executemany(_INSERT, _rows(tag, filler, total_rows, datetime.now(timezone.utc)))
         conn.commit()
     finally:
         conn.close()
