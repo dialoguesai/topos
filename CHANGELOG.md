@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.52] — 2026-09-07
+
 ### Added
 - **The retrieval-text contract.** `[S1]` `[E:query]` `topos/protocol/retrieval_text_contract.json`
   publishes what every entrance distils an ask into before the node sees it — the subject
