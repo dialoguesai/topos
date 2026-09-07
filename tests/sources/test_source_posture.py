@@ -27,6 +27,8 @@ EXPECTED_POSTURES = {
     "signal": "mixed",
     "demo_messenger_file": "mixed",
     "browser_visits": "ambient",
+    # 2026-09-04, added with the transcripts lane; the registry declares this posture
+    "youtube_transcripts": "ambient",
     "browser_events": "personal",  # highlights/stars = personal-grade engagement
     "demo_journal_file": "personal",
     "demo_resume_file": "personal",
