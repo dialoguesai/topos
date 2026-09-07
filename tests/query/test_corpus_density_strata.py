@@ -8,7 +8,11 @@ in `_rare_tokens` / `_veto_for` therefore make the owner's experience depend on 
 have rather than on what they asked:
 
   * the corpus guard — below `rare_token_df_max() * 10` indexed rows (300 by default) the gate is
-    switched off entirely and nothing can be vetoed;
+    switched off entirely and nothing can be vetoed. That state is not a synthetic curiosity:
+    `build_seeded_corpus` writes canonical rows and ZERO `signal_embeddings` rows, and embeddings
+    are written by the enrichment path AFTER ingestion, so "canonical rows present, embeddings
+    still empty" is the ordinary state of a node just after its first import — the exact moment the
+    first-answer journey runs;
   * the veto rule — above it, an unevidenced token with df <= 2 empties the lane.
 
 This file measures both boundaries and pins what each side means for the owner. It is a SWEEP, not
@@ -141,6 +145,27 @@ def _build(tmp: Path, total_rows: int, subject_rows: int = 0) -> Path:
     return db
 
 
+def _summaries(db: Path, query: str, monkeypatch) -> List[dict]:
+    """The rows an ask is actually answered with."""
+    monkeypatch.setattr(signal_service, "get_signal_service", lambda *a, **k: _NoSemanticLane())
+    conn = sqlite3.connect(str(db))
+    try:
+        bundle = R.DefaultSignalRetrievalAdapter(
+            AdapterFactory.create("local_database", conn=conn)
+        ).retrieve(
+            RetrievalRequest(
+                manifest=resolve_scope_manifest("work_context:read"),
+                access_mode="summary",
+                query_text=query,
+                installed_source_ids=list(WORK_CONTEXT_SOURCES),
+                ledger=NarrowingLedger(),
+            )
+        )
+        return list(bundle.context_packet.get("summaries") or [])
+    finally:
+        conn.close()
+
+
 def _ask(db: Path, query: str, monkeypatch) -> Tuple[int, str]:
     """(items returned, the ledger's empty cause or 'answered')."""
     monkeypatch.setattr(signal_service, "get_signal_service", lambda *a, **k: _NoSemanticLane())
@@ -239,11 +264,17 @@ class TestTheCorpusGuardIsADiscontinuity:
         nothing to do with it — and refused at the floor. A new owner is therefore the one most
         likely to be handed confident noise, and the same step that fixes it is the one that starts
         refusing real subjects mentioned once."""
-        items, cause = _ask(_build(tmp_path, rows), _FABRICATED_ASK, monkeypatch)
-        if rows < FLOOR:
-            assert cause != _N.CAUSE_GATE_VETOED and items > 0
-        else:
+        db = _build(tmp_path, rows)
+        items, cause = _ask(db, _FABRICATED_ASK, monkeypatch)
+        if rows >= FLOOR:
             assert cause == _N.CAUSE_GATE_VETOED
+            return
+        assert cause != _N.CAUSE_GATE_VETOED and items > 0
+        # And the rows it answers WITH are unrelated to the ask: not one of them mentions the
+        # subject, because the corpus does not contain it. This is the material a synthesis step
+        # is handed for a question that has no honest answer.
+        blob = " ".join(str(item) for item in _summaries(db, _FABRICATED_ASK, monkeypatch)).lower()
+        assert "zorblatt" not in blob and "tourism" not in blob
 
     @pytest.mark.parametrize("rows", [FLOOR, FLOOR + 1, FLOOR + 100])
     def test_at_and_above_the_floor_the_gate_is_live(self, tmp_path: Path, monkeypatch, rows: int) -> None:
