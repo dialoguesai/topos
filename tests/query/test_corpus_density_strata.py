@@ -362,6 +362,61 @@ class TestTheVerdictIsAPropertyOfTheCorpusNotTheAsk:
         )
 
 
+class TestWhatTheGateCountsAndWhatItDemands:
+    """The sharpest form of the density finding, and the one that explains the rest.
+
+    `_rare_tokens` counts document frequency across the WHOLE `signal_embeddings_fts` index — no
+    scope, no source-install filter, no time window. The evidence it then demands is filtered by
+    all three. So rows the answer could never contain decide whether the answer is allowed, and
+    "how rare is this word" is asked of a universe the owner is not querying.
+    """
+
+    def _with_nonce_in(self, tmp_path: Path, source_id: str, count: int) -> Path:
+        db = tmp_path / f"asym-{source_id}-{count}.db"
+        build_seeded_corpus(db)
+        now = datetime.now(timezone.utc)
+        sentence = f"went {_SUBJECT} in the caves at the weekend"
+        conn = sqlite3.connect(str(db))
+        try:
+            conn.executemany(_INSERT, _rows("f", _FILLER, FLOOR + 100, now))
+            conn.executemany(
+                _INSERT,
+                [
+                    (f"n{i}", f"nr{i}", source_id, "work", "m", "p", 0, sentence, sentence,
+                     0, (now - timedelta(days=2)).isoformat())
+                    for i in range(count)
+                ],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        return db
+
+    def test_out_of_scope_rows_are_counted_by_the_gate(self, tmp_path: Path, monkeypatch) -> None:
+        """Measured, and stated as a fact about the mechanism rather than a verdict: adding rows
+        to a source this scope never returns changes what the gate does. `demo_messenger_file` is
+        not in `work_context:read`'s sources, and its rows appear in neither answer."""
+        few = self._with_nonce_in(tmp_path, "demo_messenger_file", 2)
+        many = self._with_nonce_in(tmp_path, "demo_messenger_file", 3)
+        assert _ask(few, _MIXED_ASK, monkeypatch)[1] == _N.CAUSE_GATE_VETOED
+        assert _ask(many, _MIXED_ASK, monkeypatch)[1] != _N.CAUSE_GATE_VETOED
+
+    @pytest.mark.xfail(
+        strict=True,
+        reason="the verdict is decided by rows the scope cannot return; df is counted over the "
+               "whole index while the evidence it demands is scope, source and window filtered. "
+               "Measured 2026-09-06, filed against H-02 — a sweep does not change the mechanism.",
+    )
+    def test_the_verdict_does_not_depend_on_rows_this_scope_cannot_return(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        """What should hold. Three rows in an unrelated source are the whole difference between
+        "your data does not mention this" and an answer built from exactly the same evidence."""
+        few = self._with_nonce_in(tmp_path, "demo_messenger_file", 2)
+        many = self._with_nonce_in(tmp_path, "demo_messenger_file", 3)
+        assert _ask(few, _MIXED_ASK, monkeypatch)[1] == _ask(many, _MIXED_ASK, monkeypatch)[1]
+
+
 class TestFreshNodeParity:
     """The property the bundle is named for: an ask a mature node answers, a small node must not
     refuse. Graded per case so the board reads as a flip-rate rather than one red line."""
