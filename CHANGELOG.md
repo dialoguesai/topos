@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.54] — 2026-09-07
+
 ### Fixed
 - **`/device_info` computes its storage breakdown off the event loop again — and main's CI
   is green.** `[O]` `topos/services/local.py` regained `_cached_storage_snapshot`: a `dbstat`
