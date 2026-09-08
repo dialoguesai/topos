@@ -7,9 +7,9 @@
 
 # Topos
 
-### Your personal AI node.
+### A digital twin, built from your own data.
 
-**Your data lives on your machine. You decide, app by app and person by person, what it is allowed to see.**
+**Connect the data you choose, and it takes the shape of you. Keep it private, or give access to your friends, your AIs, or the organizations you belong to — each seeing only what you allow.**
 
 [Website](https://topos.dialogues.ai) · [Docs](https://topos.dialogues.ai/docs/welcome) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Discord](https://discord.gg/BSahgm54mD)
 
@@ -23,13 +23,19 @@
 
 ---
 
+https://github.com/user-attachments/assets/11a92ab3-0aad-436f-9815-73b1ef2855e2
+
+---
+
 ## What Topos is
 
 Topos is a small program you run on your own computer.
 
-It pulls in the data you already have — messages, mail, calendar, files, notes, browsing history, past AI chats — and keeps it in **one local database on your disk**. On top of that database it runs an engine that can answer questions about your life, and a permission layer that decides exactly what any app, assistant, or person gets back.
+You connect the data you already have — messages, mail, calendar, files, notes, browsing history, past AI chats — one source at a time, and only the ones you choose. Whatever you connect lands in one shape, and from that shape Topos builds a working model of you: what you know, who you know, where your attention goes, and how all of it has changed over time. Not a backup of your files — a representation of the person who made them.
 
-So you can ask your own data the things you would never paste into ChatGPT, and you can hand a slice of it to someone else without handing over the rest.
+That model stays on your disk. An engine sits on top of it to answer questions about your life, and a permission layer decides exactly what any app, assistant, or person gets back.
+
+So you can ask it the things you would never paste into ChatGPT — and you can carry a slice of yourself to a friend, an AI, or an organization without handing over the rest.
 
 ```
   YOUR DATA             TOPOS DATABASE         TOPOS ENGINE           THE ANSWER
@@ -44,10 +50,10 @@ So you can ask your own data the things you would never paste into ChatGPT, and 
 
 |   | | |
 | --- | --- | --- |
-| 🔌 | **Connect** | Bring mail, chat, calendar, files and notes into one local database. |
-| 💬 | **Chat** | Ask the questions you would not send to a cloud assistant. |
-| 🤝 | **Share** | Issue scoped keys. A scheduling assistant sees your availability — not your messages. |
-| 📊 | **See** | Analytics over your own memory, attention and relationships. |
+| 🔌 | **Connect** | Choose which sources to plug in — mail, chat, calendar, files, notes. Nothing comes in that you didn't connect. |
+| 🧬 | **Shape** | What you connect is formed into a model of you — what you know, who you know, how it has changed. |
+| 💬 | **Ask** | Put the questions to it that you would never send to a cloud assistant. |
+| 🤝 | **Carry** | Bring a slice of yourself to friends, AIs, and the organizations you are part of. Each sees only what you allow. |
 
 ---
 
@@ -102,8 +108,9 @@ Your Topos now shows as **Connected** in the web app, and you can start adding s
 | 🎙️ **Transcripts** | VoxTerm voice transcripts, YouTube transcripts |
 | 👥 **People** | Canonical address book |
 | 🧪 **Demo data** | Ten fixture sets — messenger, email, calendar, journal, resume, finance, browsing, places, contacts — so you can try Topos before connecting anything real |
+| 🔧 **Your own** | Anything not on this list — build a connector for it. Keep it private to your node, or share it to the community catalog for others to install in one click. |
 
-Sources are not hardcoded. New connectors are declared and registered at **[sheaf.dialogues.ai](https://sheaf.dialogues.ai)**, and the node installs them at runtime.
+Sources are not hardcoded. Connectors are declared at **[sheaf.dialogues.ai](https://sheaf.dialogues.ai)** and installed by your node at runtime — one you build stays private to your node until you choose to share it.
 
 ### Connect an assistant
 
