@@ -1,243 +1,261 @@
-# Topos Node
+<div align="center">
 
-<p align="center">
-  <img src="https://dialogues.ai/static/images/topos_logo.png" alt="Topos Logo" width="170" />
-</p>
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/dialoguesai/topos/main/docs/assets/topos_mark_white.png">
+  <img src="https://raw.githubusercontent.com/dialoguesai/topos/main/docs/assets/topos_mark_black.png" alt="Topos" width="120" />
+</picture>
 
-Topos Node is your personal AI node that runs on your own device.
-It helps you process and organize your data locally, then connect to Topos and 3rd-party services with explicit user-controlled access.
+# Topos
 
-- Product: [topos.dialogues.ai](https://topos.dialogues.ai)
-- Company: [dialogues.ai](https://dialogues.ai)
-- Topos Apps/Sources: [sheaf.dialogues.ai](https://sheaf.dialogues.ai)
+### Your personal AI node.
 
-## Why Topos Node
+**Your data lives on your machine. You decide, app by app and person by person, what it is allowed to see.**
 
-- Runs locally on your machine
-- Keeps your node data under your control
-- Supports source ingestion, local processing, and controlled sharing flows
-- Installs as a single command-line tool via `uv`
+[Website](https://topos.dialogues.ai) · [Docs](https://topos.dialogues.ai/docs/welcome) · [Quick start](#quick-start) · [How it works](#how-it-works) · [Discord](https://discord.gg/BSahgm54mD)
 
-## How Topos Works (in product terms)
+[![PyPI](https://img.shields.io/pypi/v/topos-node?style=flat-square&color=111111&label=topos-node)](https://pypi.org/project/topos-node/)
+[![Python](https://img.shields.io/pypi/pyversions/topos-node?style=flat-square&color=111111)](https://pypi.org/project/topos-node/)
+[![License](https://img.shields.io/badge/license-Apache%202.0-111111?style=flat-square)](LICENSE)
+[![Discord](https://img.shields.io/badge/discord-join-5865F2?style=flat-square&logo=discord&logoColor=white)](https://discord.gg/BSahgm54mD)
+[![X](https://img.shields.io/badge/@dialoguesai-111111?style=flat-square&logo=x&logoColor=white)](https://x.com/dialoguesai)
 
-Topos Node has two core parts that work together to give you control:
+</div>
 
-```text
-Your Apps/Data -> Topos Database -> Topos Engine -> Safe Responses
+---
+
+## What Topos is
+
+Topos is a small program you run on your own computer.
+
+It pulls in the data you already have — messages, mail, calendar, files, notes, browsing history, past AI chats — and keeps it in **one local database on your disk**. On top of that database it runs an engine that can answer questions about your life, and a permission layer that decides exactly what any app, assistant, or person gets back.
+
+So you can ask your own data the things you would never paste into ChatGPT, and you can hand a slice of it to someone else without handing over the rest.
+
+```
+  YOUR DATA             TOPOS DATABASE         TOPOS ENGINE           THE ANSWER
+  ─────────             ──────────────         ────────────           ──────────
+  mail · chat           one SQLite file        reads, reasons,        scoped
+  calendar · files      on your disk,          enforces your          filtered
+  notes · browsing  ─▶  yours alone        ─▶  permissions        ─▶  logged
+  AI chat history
 ```
 
-| Part | What it is | What it does for you |
+### Four things it does
+
+|   | | |
 | --- | --- | --- |
-| 🗂️ **Topos Database** | Your private memory layer on your device | Stores your records, keeps your history, and makes your personal context searchable |
-| 🧠 **Topos Engine** | Your decision and processing layer | Understands requests, runs AI workflows, and returns the right answer based on your permissions |
+| 🔌 | **Connect** | Bring mail, chat, calendar, files and notes into one local database. |
+| 💬 | **Chat** | Ask the questions you would not send to a cloud assistant. |
+| 🤝 | **Share** | Issue scoped keys. A scheduling assistant sees your availability — not your messages. |
+| 📊 | **See** | Analytics over your own memory, attention and relationships. |
 
-### 🛡️ Cognitive Firewall (user control first)
+---
 
-The **Topos Engine** acts as a Cognitive Firewall: it helps ensure only the right information is used and shared.
+## Quick start
 
-| Cognitive Firewall principle | What that means in practice |
-| --- | --- |
-| 🔒 Permission-aware | Requests are evaluated against your access rules before data is returned |
-| 🎯 Precision over data dumps | The engine is designed to return only what is needed, not your entire history |
-| 👁️ Transparent behavior | Boundaries and limits are explicit so sharing stays understandable and controllable |
+You need a Dialogues account to get a **Topos key** — the credential that pairs the node on your machine with your account. Sign up at **[topos.dialogues.ai](https://topos.dialogues.ai)** and open **Create Topos**; your key is on that screen.
 
-### 🤖 Core ML tools in the Engine
+### Option A — macOS app (easiest)
 
-Topos Engine uses both local and model-hub paths so users can choose flexibility and control:
+1. On the **Create Topos** screen, click **Download** to get `Topos.dmg` (signed and notarized).
+2. Mount it, drag **Topos** into Applications, and launch it. A menu-bar icon appears.
+3. Back in the browser, click **Connect this Mac** and allow the prompt. The app takes a one-time pairing code and stores your key.
+4. Leave the page open while it prepares: the node downloads its engine (~900 MB) and language models (~2.9 GB). The menu-bar icon shows progress.
 
-| ML tool | Role in the workflow | User-facing benefit |
-| --- | --- | --- |
-| 🦙 **Ollama** | Local model execution path | Keep more processing on-device and reduce external dependency |
-| 🤗 **Hugging Face** | Model and backend integration path | Access broad model capabilities for enrichment and analysis tasks |
+### Option B — terminal (macOS, Linux, Windows)
 
-### Why this split matters
+Install [uv](https://docs.astral.sh/uv/) if you do not have it:
 
-- 🏠 Your data lives in one durable place (Database)
-- ⚙️ Intelligence and policy decisions happen in a separate runtime (Engine)
-- 🛡️ The Cognitive Firewall model helps protect context while still enabling useful AI actions
-- 🔄 You can evolve processing/model strategy without changing your core stored memory
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
 
-### Shared runtime contracts
-
-The `shared/` package in this repo is part of the node runtime contract. It contains common schema and filtering definitions used by both API and engine paths.
-
-## Quick Start
-
-### 1) Install
+Then:
 
 ```bash
 uv tool install topos-node
-```
-
-### 2) Configure
-
-Topos Node requires a `TOPOS_KEY`.
-
-```bash
 topos-node --set-topos-key "<YOUR_TOPOS_KEY>"
-```
-
-This stores your key in:
-
-- `~/.topos/.env`
-
-Optional:
-
-- `TOPOS_CONTROL_PLANE_URL` if you need a non-default endpoint
-
-### 3) Run
-
-```bash
-topos-node --host 0.0.0.0 --port 8676
-```
-
-### 4) Verify
-
-```bash
-curl http://localhost:8676/health
-```
-
-## Common Commands
-
-```bash
-# Start node
 topos-node
-
-# Save your TOPOS_KEY for future runs
-topos-node --set-topos-key "<YOUR_TOPOS_KEY>"
-
-# Discover available local databases and exit
-topos-node --discover
-
-# Use custom database path
-topos-node --db-path /path/to/topos.sqlite
-
-# Bind custom host and port
-topos-node --host 127.0.0.1 --port 9100
 ```
 
-## Upgrade or Uninstall
+Your key is written to `~/.topos/.env` with restricted permissions. The node starts on port **8676** and connects out to the control plane.
+
+Check that it is up:
 
 ```bash
-# Upgrade to latest
-uv tool upgrade topos-node
-
-# Remove
-uv tool uninstall topos-node
+curl http://localhost:8676/healthcheck
 ```
 
-## Security and Privacy Notes
+Your Topos now shows as **Connected** in the web app, and you can start adding sources.
 
-- Do not commit `topos/.env` or any real credentials.
-- Keep your `TOPOS_KEY` private.
-- Review `env.example` for available configuration options.
+---
 
-## Developing Locally
+## What it connects to
+
+| Kind | Sources available today |
+| --- | --- |
+| 💬 **Messages** | iMessage, Signal Desktop |
+| 🤖 **AI history** | ChatGPT (export file, and live conversations) |
+| 🗂️ **Work & docs** | GitHub activity, Notion pages, Google Drive |
+| 📅 **Calendar** | Google Calendar |
+| 🌐 **Web** | Browser visits, browser events (highlights, stars) |
+| 🎙️ **Transcripts** | VoxTerm voice transcripts, YouTube transcripts |
+| 👥 **People** | Canonical address book |
+| 🧪 **Demo data** | Ten fixture sets — messenger, email, calendar, journal, resume, finance, browsing, places, contacts — so you can try Topos before connecting anything real |
+
+Sources are not hardcoded. New connectors are declared and registered at **[sheaf.dialogues.ai](https://sheaf.dialogues.ai)**, and the node installs them at runtime.
+
+### Connect an assistant
+
+Your node speaks [MCP](https://modelcontextprotocol.io), so Claude and ChatGPT can query it — through the control plane, which routes the request to your machine rather than holding your data.
+
+- **Claude Desktop** — point the MCP adapter at the control plane's `/mcp` endpoint with your Topos key as the bearer token.
+- **ChatGPT** — add the same URL as a connector and sign in with Dialogues.
+
+One node, one key, both assistants. See [Docs → Install Topos](https://topos.dialogues.ai/docs/install-topos).
+
+---
+
+## How it works
+
+From the apps you plug in, to the assistant asking a question:
+
+```
+ ├─ WHAT YOU PLUG IN
+ │  gmail . imessage . calendar . drive . notion . github
+ │  browser history . your old chatgpt conversations
+ ▼
+ ├─ EVERYTHING LANDS IN THE SAME SHAPE
+ │  imessage . telegram . signal      all become one kind of row
+ │  ical . google calendar . outlook  become another
+ │  chatgpt . claude . grok           become another
+ ▼
+ ├─ TOPOS READS BACK OVER IT
+ │  models on your own machine tag it, link it, summarise it
+ │  raw records turn into understanding
+ ▼
+ ├─ AND BUILDS FOUR THINGS
+ └──┬──────────────────┬──────────────────┬──────────────────┐
+    │                  │                  │                  │
+    timeline           search             dossiers           people
+    ────────           ──────             ────────           ──────
+    temporal           vector database    everything topos   social graph
+    knowledge graph    finds things by    knows about a      who you know,
+    how things         what they mean,    person, project    and how you
+    changed over time  not exact words    or topic           relate to them
+    │                  │                  │                  │
+    └──────────────────┴────────┬─────────┴──────────────────┘
+                                ▼
+ ═══════════════════════════════╧═════════════════════════════════════════════
+    THE COGNITIVE FIREWALL
+    nothing leaves without crossing this. it checks who is asking,
+    what they may see, hands back only that, and logs what it sent.
+ ═══════════════════════════════╤═════════════════════════════════════════════
+    WHO GETS TO ASK             │
+    ┌───────────────────────────┼───────────────────────────┐
+    ▼                           ▼                           ▼
+    claude and chatgpt          the topos app               any other app
+    the ai apps you use         your own view of it         you handed a key
+```
+
+Underneath, that is two parts kept deliberately separate.
+
+| Part | What it is | What it does |
+| --- | --- | --- |
+| 🗂️ **Topos Database** | Your memory, on your disk | Stores your records, keeps your history, makes your context searchable |
+| 🧠 **Topos Engine** | Your decision layer | Understands the request, runs the AI work, and returns only what your permissions allow |
+
+Because they are separate, you can change how your Topos thinks — models, pipelines, enrichment — without touching what it remembers.
+
+### The Cognitive Firewall
+
+The engine does not hand out rows. Every request is evaluated against **scopes** — named lanes over your data that you grant, and can revoke.
+
+Grant a scheduling agent `schedule:read` and `availability:read`:
+
+```
+✅ granted      schedule:read, availability:read   →  "free Thursday afternoon"
+❌ not granted  messages:read                      →  never sees a single message
+🔒 revoked      any scope, at any time             →  the next request comes back empty
+```
+
+Some lanes are owner-only by design and are not offered for sharing at all.
+
+Three rules hold across every path:
+
+- **Permission-aware** — the grant is checked before data is read, not after.
+- **Precision over data dumps** — the engine is built to answer the question, not to ship your history.
+- **Transparent** — what was asked, what was disclosed, and what was withheld are all legible to you.
+
+### Where your data actually lives
+
+- Everything is under **`~/.topos`** — a SQLite database, your key, your logs, your backups.
+- Processing runs on your machine, through **[Ollama](https://ollama.com)** for local models and **[Hugging Face](https://huggingface.co)** for model downloads.
+- Nothing is uploaded to Topos for storage.
+
+### Why there is a control plane
+
+Your node sits behind your home network with no open ports. The control plane is
+what makes it reachable anyway: leave your Topos running and online, and you can
+use the web app from anywhere — phone, laptop, someone else's machine — and reach
+your own node. It is a router, not a store.
+
+The same layer is what lets nodes coordinate with each other, so sharing and
+networked flows work between people rather than only inside one machine.
+
+> The control plane is being prepared to run on confidential compute, so that even
+> the routing tier cannot read what passes through it.
+
+---
+
+## Everyday commands
+
+```bash
+topos-node                                  # start the node
+topos-node --set-topos-key "<KEY>"          # save your key and exit
+topos-node --discover                       # show which database is being served
+topos-node --port 9100 --host 127.0.0.1     # bind somewhere else
+topos-node --app                            # menu-bar mode; logs to ~/.topos/logs/node.log
+topos-node profile --help                   # run more than one Topos on this machine
+
+uv tool upgrade topos-node                  # update
+uv tool uninstall topos-node                # remove
+```
+
+Keep your `TOPOS_KEY` private, and never commit a real one. `env.example` lists every setting the node reads.
+
+---
+
+## For developers
 
 ```bash
 uv sync --extra engine
 just run
 ```
 
-### Engine memory (local dev)
-
-ML models are cached inside the Engine with LRU eviction. For lighter local runs (especially inside Cursor's integrated terminal), see [Engine memory management](topos/docs/ml-manager-v2/MEMORY_MANAGEMENT.md).
+Tests:
 
 ```bash
-# Default: ENGINE_MAX_RESIDENT_MODELS=3; pipeline flush is automatic
-# Override only if needed, e.g. lower RAM: export ENGINE_MAX_RESIDENT_MODELS=2
-export PRIVACY_FILTER_DEVICE=cpu
-```
-
-Run tests:
-
-```bash
-pip install -e ".[dev,engine]"
 pytest tests -q
 ```
 
-The default lane is hermetic — temp databases only. Tests that read your own
-`~/.topos` database or drive a running node are deselected unless you ask for
-them by marker; see [docs/testing/TEST_LANES.md](docs/testing/TEST_LANES.md).
+The default lane is hermetic — temporary databases only. Lanes that touch your real `~/.topos` or a running node are opt-in by marker.
 
-## Plugins
+- **[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)** — local setup, test lanes, engine memory tuning
+- **[docs/PLUGINS.md](docs/PLUGINS.md)** — write a plugin that registers handlers and connectors
+- **[docs/testing/TEST_LANES.md](docs/testing/TEST_LANES.md)** — which tests run when, and why
+- **[CONTRIBUTING.md](CONTRIBUTING.md)** — scope, hooks, and security expectations
 
-Topos Node supports **optional plugins**: separate Python packages installed alongside
-`topos-node` that register handlers, connectors, or other runtime hooks. The core node
-does not hardcode plugin names — discovery is entirely via setuptools entry points.
+---
 
-### Contract: `topos.extensions`
+## Links
 
-| Rule | Detail |
-| --- | --- |
-| **Entry-point group** | `topos.extensions` |
-| **Entry-point target** | A callable, e.g. `my_plugin:register` |
-| **When it runs** | At process startup, before the server accepts traffic (`topos/extensions.py`) |
-| **Failure mode** | A broken plugin is logged and skipped; the node keeps running |
-| **Dependencies** | Your plugin declares `topos-node` (or `topos-node[local]`) in its own `pyproject.toml` |
-
-**Minimal plugin**
-
-`pyproject.toml`:
-
-```toml
-[project]
-name = "my-topos-plugin"
-dependencies = ["topos-node[local]"]
-
-[project.entry-points."topos.extensions"]
-my_plugin = "my_topos_plugin:register"
-```
-
-`my_topos_plugin/__init__.py`:
-
-```python
-def register() -> None:
-    from my_topos_plugin.handlers import example  # noqa: F401 — registers @handles
-```
-
-`my_topos_plugin/handlers/example.py`:
-
-```python
-from typing import Any, Dict, Optional
-from topos.core.handlers.registry import handles
-
-@handles("my_message_type")
-async def handle_my_message(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
-    return {"status": "ok", "payload": {"received": message.get("type")}}
-```
-
-**Install and run**
-
-```bash
-pip install topos-node my-topos-plugin
-topos-node
-```
-
-Handlers registered in `register()` are available to the control-plane WebSocket
-and local API paths that dispatch through `topos.core.handlers`.
-
-### Starter template
-
-Fork **[dialoguesai/topos-plugin-template](https://github.com/dialoguesai/topos-plugin-template)**
-for a working package with tests and CI. It registers a sample `plugin_template_ping`
-handler you can copy and rename.
-
-### Guidelines
-
-- Use **unique message type names** (prefix with your project) to avoid colliding with core handlers.
-- Keep plugins in **separate repositories** — do not add proprietary logic to this repo.
-- Message types your plugin handles do not need to appear in the public engine protocol
-  snapshot unless the hosted control plane will send them to all nodes.
-
-## Contributing
-
-See `CONTRIBUTING.md` for:
-
-- public vs private test lanes
-- where deployment scripts now live
-- contribution scope and security expectations
+- **Product** — [topos.dialogues.ai](https://topos.dialogues.ai)
+- **Docs** — [topos.dialogues.ai/docs](https://topos.dialogues.ai/docs/welcome)
+- **Connector creator** — [sheaf.dialogues.ai](https://sheaf.dialogues.ai)
+- **Company** — [dialogues.ai](https://dialogues.ai)
+- **Community** — [Discord](https://discord.gg/BSahgm54mD) · [X](https://x.com/dialoguesai)
 
 ## License
 
-Apache License 2.0. See `LICENSE`.
+[Apache 2.0](LICENSE)
