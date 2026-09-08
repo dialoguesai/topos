@@ -23,10 +23,12 @@ from typing import Optional, Tuple
 logger = logging.getLogger("topos.core.db_health")
 
 #: Healthcheck is polled by the tray, the desktop app and the control plane, and
-#: a caller waiting on it cannot tell "slow" from "down". Bounded well under the
-#: control plane's 20s request timeout so a wedged database reports as unhealthy
-#: rather than timing out the whole healthcheck.
-_PROBE_TIMEOUT_S = 2.0
+#: a caller waiting on it cannot tell "slow" from "down". The probe itself is
+#: ``SELECT 1`` — milliseconds when a worker is free. The previous 2s budget
+#: made the liveness route late: the macOS shell's 3s URLSession idle timeout
+#: then painted a live node red. Stay well under that first-byte window so
+#: "pool is busy" reports as ``db_ok=None``, not as a timed-out /healthcheck.
+_PROBE_TIMEOUT_S = 0.25
 
 
 def _probe_sync() -> Tuple[Optional[bool], Optional[str]]:
@@ -36,6 +38,13 @@ def _probe_sync() -> Tuple[Optional[bool], Optional[str]]:
 
         conn = hub.get_db_connection()
     except Exception as exc:  # noqa: BLE001 — a diagnostic never breaks healthcheck
+        # DowngradeGuardError / MigrationError are written for a person
+        # ("user_version=73 > 72… upgrade the package"). The class name
+        # alone is what the tray used to show, which is not a next step.
+        from topos.storage.db.migrations import MigrationError
+
+        if isinstance(exc, MigrationError) and str(exc).strip():
+            return False, str(exc).strip()
         return False, f"database connection unavailable: {type(exc).__name__}"
     if conn is None:
         # No database configured (or not opened yet). Not a failure claim —
@@ -80,7 +89,7 @@ async def probe_db_health() -> Tuple[Optional[bool], Optional[str]]:
         # immediately and is caught above, well inside this window.
         # The worker thread is left to finish; a `SELECT 1` is bounded.
         logger.warning(
-            "database probe exceeded %.1fs — reporting unknown, not unhealthy "
+            "database probe exceeded %.2fs — reporting unknown, not unhealthy "
             "(the thread pool may simply be saturated)",
             _PROBE_TIMEOUT_S,
         )

@@ -114,7 +114,10 @@ class TestTrayHealthHysteresis:
         assert failures == 1
 
     def test_client_timeout_sits_above_the_database_probe(self):
-        assert tray.HEALTH_TIMEOUT_SECONDS > 2.0
+        from topos.core.db_health import _PROBE_TIMEOUT_S
+
+        assert tray.HEALTH_TIMEOUT_SECONDS > _PROBE_TIMEOUT_S
+        assert tray.HEALTH_TIMEOUT_SECONDS >= 10.0
         assert tray.HEALTH_FAILURE_THRESHOLD == 2
 
     def test_poller_uses_hysteresis_and_the_raised_timeout(self):

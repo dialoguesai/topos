@@ -36,6 +36,25 @@ async def test_probe_reports_ok_on_a_working_database(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
+async def test_probe_surfaces_downgrade_guard_wording(monkeypatch):
+    """The tray used to show only ``DowngradeGuardError`` — no next step."""
+    from topos.storage.db.migrations import DowngradeGuardError
+
+    def _boom():
+        raise DowngradeGuardError(
+            "database was upgraded by a newer topos-node "
+            "(PRAGMA user_version=73 > 72 known to this build)"
+        )
+
+    monkeypatch.setattr(hub, "get_db_connection", _boom)
+    db_ok, db_error = await probe_db_health()
+    assert db_ok is False
+    assert db_error is not None
+    assert "73 > 72" in db_error
+    assert "DowngradeGuardError" not in db_error
+
+
+@pytest.mark.asyncio
 async def test_probe_reports_unknown_when_no_database_is_configured(monkeypatch):
     monkeypatch.setattr(hub, "get_db_connection", lambda: None)
 
@@ -127,3 +146,26 @@ async def test_a_slow_probe_reports_unknown_rather_than_accusing_the_node(monkey
     db_ok, db_error = await db_health.probe_db_health()
     assert db_ok is None
     assert db_error is None
+
+
+@pytest.mark.asyncio
+async def test_http_healthcheck_does_not_wait_out_a_saturated_pool(monkeypatch):
+    """Liveness is "the route answered". Waiting 2s for a queued SELECT 1
+    made /healthcheck itself late, and the macOS shell's 3s idle timeout
+    painted a live node red every few polls (2026-09-04)."""
+    import time
+
+    import topos.core.db_health as db_health
+    from topos.api.health import healthcheck
+
+    def _slow_probe() -> tuple:
+        time.sleep(2.0)
+        return True, None
+
+    monkeypatch.setattr(db_health, "_probe_sync", _slow_probe)
+    started = time.monotonic()
+    body = await healthcheck(credentials=None)
+    elapsed = time.monotonic() - started
+    assert body.status == "ok"
+    assert body.db_ok is None
+    assert elapsed < 1.0, f"/healthcheck waited {elapsed:.2f}s for a saturated probe"

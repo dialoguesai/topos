@@ -34,8 +34,9 @@ STATUS_COLORS = {
 }
 
 HEALTH_POLL_SECONDS = 5.0
-#: Must sit above ``probe_db_health``'s 2s budget. A 3s client deadline raced
-#: the probe under ingest load and painted the tray red for a live node.
+#: Must sit above ``probe_db_health`` and above a busy event loop. A 3s
+#: client deadline raced the probe (and ``/device_info`` on the same tick)
+#: and painted the tray red for a live node.
 HEALTH_TIMEOUT_SECONDS = 10.0
 #: One missed probe is a stalled event loop, not a down node. Two in a row
 #: is enough to go red; a single success clears the count (same shape as

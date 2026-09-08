@@ -10,6 +10,17 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Fixed
+- **`/healthcheck` answers before the macOS shell gives up on it, and a downgrade guard says
+  what to do.** `[O]` The database probe's 2s budget made the liveness route itself late
+  whenever the thread pool was busy; the shell's 3s idle timeout then painted a live node red
+  (the 2026-09-04 tray flicker; the storage breakdown left the loop in 1.3.54, this is the
+  probe half). `_PROBE_TIMEOUT_S` is now 0.25s — the probe is `SELECT 1`, milliseconds when a
+  worker is free — so a saturated pool reports `db_ok=None` instead of timing out the whole
+  route; a new test stalls the probe for 2s and asserts `/healthcheck` still answers in under
+  1s. When opening the database raises a `MigrationError` (`DowngradeGuardError` after a newer
+  node upgraded the file), the probe surfaces that error's own wording ("user_version=73 > 72
+  …") instead of the class name the tray used to show. The tray's 10s client deadline is now
+  asserted against the probe budget it must exceed.
 - **`test_startup_sends_engine_register_message` waits for the message instead of timing the
   event loop.** `[O]` The test slept a fixed 0.25s after startup and then looked for the
   `engine_register` message — 0.15s of slack over the presence loop's own 0.1s delay. That
