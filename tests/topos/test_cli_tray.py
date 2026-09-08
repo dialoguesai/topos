@@ -57,7 +57,7 @@ class TestStatusImage:
     def _needs_pillow(self):
         pytest.importorskip("PIL")
 
-    @pytest.mark.parametrize("glyph", ["topos_white.png", "topos_blk_rounded.png"])
+    @pytest.mark.parametrize("glyph", ["topos_white.png", "topos_black.png"])
     def test_glyph_assets_ship_and_render(self, glyph):
         image = tray.create_status_image("healthy", glyph=glyph)
         assert image.size == (tray.ICON_SIZE, tray.ICON_SIZE)

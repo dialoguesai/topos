@@ -127,7 +127,16 @@ def _glyph_filename() -> str:
                 timeout=2,
             )
             if "Dark" not in result.stdout:
-                return "topos_blk_rounded.png"  # light menu bar → dark glyph
+                # Ink on a transparent ground, like every other tray icon.
+                # topos_blk_rounded is ink on an opaque white TILE — that is
+                # the app icon, and it drew a filled white box among bare
+                # glyphs. Caveat: macOS tints the menu bar to the desktop
+                # picture, so a light-mode Mac with a dark wallpaper has a DARK
+                # bar that `defaults read` cannot see, and this returns the
+                # dark glyph for it. The Swift shell reads the status button's
+                # own effectiveAppearance and gets it right; pystray has no
+                # equivalent, so this stays a best guess.
+                return "topos_black.png"  # light menu bar → dark glyph
         except Exception:
             pass
     return "topos_white.png"
