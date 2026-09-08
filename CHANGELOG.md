@@ -9,6 +9,20 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **`test_startup_sends_engine_register_message` waits for the message instead of timing the
+  event loop.** `[O]` The test slept a fixed 0.25s after startup and then looked for the
+  `engine_register` message — 0.15s of slack over the presence loop's own 0.1s delay. That
+  failed only in the full public lane (2 of 2 runs red, 6 of 6 green alone, 2026-09-07), and
+  nothing leaks into the test: a gen-2 garbage collection walks every tracked object in the
+  process, and by test #5186 of 5812 the suite's accumulated heap makes one pause 165–254ms
+  (506ms at the lane's largest, each collecting nothing) against 35–76ms for the same
+  collections alone. The collector holds the GIL across both the presence task's timer and
+  the test's, they fire in the same loop iteration, and the assertion runs before the
+  presence task's thread hop returns. The test now polls for the message with a 10s bound,
+  which asserts what it always meant — startup sends the message — and still fails a startup
+  that never does.
+
 ## [1.3.54] — 2026-09-07
 
 ### Fixed
