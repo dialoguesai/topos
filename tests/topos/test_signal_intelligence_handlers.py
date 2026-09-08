@@ -90,6 +90,36 @@ async def test_entity_graph_shape(conn) -> None:
 
 
 @pytest.mark.asyncio
+async def test_entity_graph_activity_shape_and_forwarded_params(conn) -> None:
+    """The relay must answer the same shape as GET /entities/graph/activity, and
+    the hosted app's bars have to honour the same weight floor as its edges."""
+    a = _mk_entity(conn, "Maya Chen")
+    b = _mk_entity(conn, "Mudlark Studio", etype="org")
+    conn.execute(
+        "INSERT INTO entity_edges (edge_id, src_entity_id, dst_entity_id, edge_type,"
+        " weight, last_event_at) VALUES (?,?,?,?,?,?)",
+        ("e-1", a, b, "co_occurrence", 1.0, "2026-06-01T10:00:00Z"),
+    )
+    conn.execute(
+        "INSERT INTO entity_edges (edge_id, src_entity_id, dst_entity_id, edge_type,"
+        " weight, last_event_at) VALUES (?,?,?,?,?,?)",
+        ("e-2", a, b, "mentions", 0.4, "2026-06-02T10:00:00Z"),
+    )
+    conn.commit()
+
+    result = await _send("signal_entity_graph_activity", {})
+    assert result["status"] == "ok"
+    assert result["payload"]["days"] == [
+        {"day": "2026-06-01", "edges": 1},
+        {"day": "2026-06-02", "edges": 1},
+    ]
+    assert result["payload"]["meta"]["undated_edges"] == 0
+
+    floored = await _send("signal_entity_graph_activity", {"min_weight": 1.0, "since": "2026-05-01"})
+    assert [d["day"] for d in floored["payload"]["days"]] == ["2026-06-01"]
+
+
+@pytest.mark.asyncio
 async def test_facts_insights_timeline_empty_shapes(conn) -> None:
     for msg_type in ("signal_list_facts", "signal_list_insights", "signal_list_timeline"):
         result = await _send(msg_type, {})

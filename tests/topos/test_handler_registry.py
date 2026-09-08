@@ -211,6 +211,7 @@ SUPPORTED_MESSAGE_TYPES = [
     "signal_data_health",
     "signal_dismiss_blackhole_notification",
     "signal_entity_graph",
+    "signal_entity_graph_activity",
     "signal_entity_graph_search",
     "signal_entity_merge",
     "signal_entity_review_action",

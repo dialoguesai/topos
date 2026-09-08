@@ -536,6 +536,42 @@ async def handle_signal_entity_graph(message: Dict[str, Any]) -> Optional[Dict[s
         return {"id": req_id, "status": "error", "error": str(exc)}
 
 
+@handles("signal_entity_graph_activity")
+async def handle_signal_entity_graph_activity(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Per-day edge activity — the density strip under the graph scrubber.
+
+    Mirrors GET /v1/signal/entities/graph/activity; same shape, same rules
+    (last_event_at only, no validity filter, the graph's own weight floor).
+    The guard is built inside the read so the exclusion it pushes into SQL is
+    computed on the connection that runs the query.
+    """
+    req_id = message.get("id")
+    if not req_id:
+        return None
+    payload = message.get("payload") or {}
+    try:
+        from ...features.entities.reads import entity_graph_activity
+        from ...features.lifecycle.blackhole_guard import guard_from_message
+
+        min_weight = max(0.0, float(payload.get("min_weight") or 0.0))
+        since = payload.get("since") or None
+        until = payload.get("until") or None
+
+        def _read(conn):
+            return entity_graph_activity(
+                conn,
+                guard=guard_from_message(conn, message),
+                min_weight=min_weight,
+                since=since,
+                until=until,
+            )
+
+        result = await run_db_read(_read)
+        return {"id": req_id, "status": "ok", "payload": result}
+    except Exception as exc:  # noqa: BLE001
+        return {"id": req_id, "status": "error", "error": str(exc)}
+
+
 @handles("signal_entity_graph_search")
 async def handle_signal_entity_graph_search(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
