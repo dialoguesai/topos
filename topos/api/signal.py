@@ -431,6 +431,49 @@ async def search_entity_graph(
     return await asyncio.to_thread(_run)
 
 
+@router.get("/entities/graph/activity")
+async def entity_graph_activity_route(
+    min_weight: float = Query(default=0.0, ge=0.0),
+    since: Optional[str] = Query(default=None, max_length=40),
+    until: Optional[str] = Query(default=None, max_length=40),
+    _api_key: str = Depends(require_api_key),
+):
+    """Per-day edge-activity counts — the density strip under the graph scrubber.
+
+    Returns ``{days: [{day: "YYYY-MM-DD", edges: N}], meta: {...}}``, one row per
+    calendar day that saw activity, ordered oldest first. A day is an edge's
+    ``last_event_at`` (UTC), never ``valid_from``: the scrubber's window filters
+    on activity, so the bars have to be counting the same thing the window
+    keeps, or the histogram would invite the owner to drag into a month whose
+    height came from a rebuild's clock.
+
+    Undated edges are excluded from the days and reported as
+    ``meta.undated_edges`` — they are why the bars do not sum to the graph's
+    edge count. ``min_weight`` mirrors the graph's own floor so raising it moves
+    bars and edges together; ``since`` / ``until`` (ISO date or timestamp) bound
+    the axis to the track the UI is drawing.
+
+    These counts precede whatever the caller then hides: the graph read is
+    page-capped, and the owner UI culls edge types, sources, roles and
+    communities client-side. A day's number says activity exists there, not how
+    many edges any particular view will draw.
+    """
+    import asyncio
+
+    from ..features.entities.reads import entity_graph_activity
+    from ..features.lifecycle.blackhole_guard import owner_ui_guard
+
+    conn = _entities_conn()
+    return await asyncio.to_thread(
+        entity_graph_activity,
+        conn,
+        guard=owner_ui_guard(conn),
+        min_weight=min_weight,
+        since=since,
+        until=until,
+    )
+
+
 @router.get("/entities/{entity_id}")
 async def get_entity(
     entity_id: str,

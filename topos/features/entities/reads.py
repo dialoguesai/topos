@@ -15,7 +15,12 @@ from typing import Any, Dict, List, Optional
 
 from ..lifecycle.blackhole_guard import BlackholeGuard
 from .dossier import load_dossier_for_entity
-from .edges import EDGE_SEMANTIC_AFFINITY, graph_snapshot, top_edges
+from .edges import (
+    EDGE_SEMANTIC_AFFINITY,
+    graph_activity_daily,
+    graph_snapshot,
+    top_edges,
+)
 
 _ENTITY_COLUMNS = (
     "entity_id, entity_type, canonical_name, aliases_json, identifiers_json,"
@@ -493,6 +498,34 @@ def get_entity_detail(
                 )
     entity["dossier"] = dossier
     return entity
+
+
+def entity_graph_activity(
+    conn: sqlite3.Connection,
+    *,
+    guard: BlackholeGuard,
+    min_weight: float = 0.0,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Daily edge-activity counts for the graph's time-scrubber density strip.
+
+    The guard is pushed into the query (``sql_exclusion`` on BOTH ends of the
+    relation) rather than applied to the result, because there is nothing to
+    filter afterwards: a day bucket carries no entity id, and a bar whose height
+    changes when a person is protected would announce that the person exists.
+    """
+    exclusions = [
+        guard.sql_exclusion("src_entity_id"),
+        guard.sql_exclusion("dst_entity_id"),
+    ]
+    return graph_activity_daily(
+        conn,
+        min_weight=max(0.0, float(min_weight)),
+        since=(str(since).strip() or None) if since else None,
+        until=(str(until).strip() or None) if until else None,
+        exclusions=[pair for pair in exclusions if pair[0]],
+    )
 
 
 def entity_graph(

@@ -128,6 +128,26 @@ async def test_entity_graph_shape_and_route_precedence(client_ctx) -> None:
 
 
 @pytest.mark.asyncio
+async def test_entity_graph_activity_shape_and_route_precedence(client_ctx) -> None:
+    """/entities/graph/activity must not be captured by /entities/{entity_id}."""
+    app, _maya = client_ctx
+    resp = await _get(app, "/v1/signal/entities/graph/activity")
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["days"] == [{"day": "2026-06-01", "edges": 1}]
+    assert body["meta"]["max_edges"] == 1
+    assert body["meta"]["undated_edges"] == 0
+
+
+@pytest.mark.asyncio
+async def test_entity_graph_activity_bounds_the_axis(client_ctx) -> None:
+    app, _maya = client_ctx
+    resp = await _get(app, "/v1/signal/entities/graph/activity?since=2026-07-01")
+    assert resp.status_code == 200
+    assert resp.json()["days"] == []
+
+
+@pytest.mark.asyncio
 async def test_entities_requires_auth(populated_conn, monkeypatch) -> None:
     conn, _maya = populated_conn
     import topos.core.state as state_mod

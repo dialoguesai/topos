@@ -500,6 +500,95 @@ def _edge_birth(conn: sqlite3.Connection, node_ids: List[str]) -> Dict[str, str]
     return out
 
 
+def graph_activity_daily(
+    conn: sqlite3.Connection,
+    *,
+    min_weight: float = 0.0,
+    since: Optional[str] = None,
+    until: Optional[str] = None,
+    exclusions: Optional[List[tuple]] = None,
+) -> Dict[str, Any]:
+    """Per-day count of edges whose ACTIVITY falls on that day.
+
+    The density strip under the graph's time scrubber: one number per calendar
+    day, so the owner can see where the graph's evidence actually is before
+    dragging a window into a month that holds nothing.
+
+    Three choices make the bars agree with the graph above them:
+
+    * ``last_event_at`` ONLY, never ``COALESCE(last_event_at, valid_from)``.
+      valid_from is when the node started BELIEVING a relation -- a recompute's
+      own clock for structural edges -- and reading it as activity is the exact
+      regression documented in ``graph_snapshot`` (69 dormant entities landing
+      in "the last 11 days"). Undated edges are counted separately and reported
+      in ``meta`` rather than smeared across the axis.
+    * No validity filter. A day's bar answers "did anything happen", which is
+      the same question ``graph_snapshot``'s event-window branch answers, and
+      that branch drops ``valid_to IS NULL`` deliberately: an ended edge whose
+      last event is in range IS activity on that day.
+    * The same ``(edge_type = semantic_affinity OR weight >= ?)`` floor the
+      snapshot applies, so a raised ``min_weight`` moves bars and edges together.
+
+    ``exclusions`` are ``(clause, params)`` pairs from ``BlackholeGuard`` --
+    pushed into the WHERE rather than applied afterwards, because a count that
+    moves when an entity is protected is itself a disclosure (D5).
+    """
+    where = "WHERE (edge_type = ? OR weight >= ?)"
+    params: List[Any] = [EDGE_SEMANTIC_AFFINITY, max(0.0, float(min_weight))]
+    for clause, clause_params in exclusions or ():
+        if not clause:
+            continue
+        where += f" AND {clause}"
+        params.extend(clause_params)
+
+    dated = (
+        " AND last_event_at IS NOT NULL AND last_event_at != ''"
+        f" AND last_event_at > '{_BIRTH_FLOOR}'"
+    )
+    day_params = list(params)
+    day_where = where + dated
+    if since:
+        day_where += " AND last_event_at >= ?"
+        day_params.append(str(since))
+    if until:
+        day_where += " AND last_event_at <= ?"
+        day_params.append(str(until))
+
+    rows = conn.execute(
+        "SELECT substr(last_event_at, 1, 10) AS day, COUNT(*) AS n"
+        f" FROM entity_edges {day_where} GROUP BY day ORDER BY day",
+        tuple(day_params),
+    ).fetchall()
+    days = [{"day": str(r[0]), "edges": int(r[1])} for r in rows if r[0]]
+
+    # Undated edges are the honest reason the bars do not sum to the graph's
+    # edge count. Reported, not hidden: 2,847 of 43,863 on the reference node.
+    undated = int(
+        conn.execute(
+            f"SELECT COUNT(*) FROM entity_edges {where}"
+            " AND (last_event_at IS NULL OR last_event_at = ''"
+            f" OR last_event_at <= '{_BIRTH_FLOOR}')",
+            tuple(params),
+        ).fetchone()[0]
+    )
+
+    total = sum(d["edges"] for d in days)
+    return {
+        "days": days,
+        "meta": {
+            "days_returned": len(days),
+            "total_edges": total,
+            "undated_edges": undated,
+            "max_edges": max((d["edges"] for d in days), default=0),
+            "first_day": days[0]["day"] if days else None,
+            "last_day": days[-1]["day"] if days else None,
+            "min_weight": max(0.0, float(min_weight)),
+            "since": str(since) if since else None,
+            "until": str(until) if until else None,
+        },
+    }
+
+
 def graph_snapshot(
     conn: sqlite3.Connection,
     *,
