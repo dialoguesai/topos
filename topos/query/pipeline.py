@@ -37,6 +37,43 @@ from .types import AccessMode, QueryTurn, RetrievalError, RetrievalRequest
 
 logger = logging.getLogger(__name__)
 
+
+def _query_work_stays_on_loop(adapters=None) -> bool:
+    """True in tests and injected-adapter harnesses; False on the live node.
+
+    Production retrieve() loads MiniLM/CrossEncoder and takes the write gate.
+    Doing that inside the uvicorn ``async`` handler starves ``/healthcheck``
+    and the CP keepalive (live 2026-09-08: tray red within seconds of
+    ``query_scope``, PersonalDB gray at the 3-minute probe TTL).
+
+    A pytest process can already have ``state._db_conn_path`` set from the
+    developer node. Offload only when this orchestrator's handle *is* that
+    runtime connection — injected tmp/memory adapters stay on the test thread.
+    """
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return True
+    try:
+        from ..core.state import get_db_connection
+
+        runtime = get_db_connection()
+        if runtime is None:
+            return True
+        if adapters is None:
+            return False
+        return _db_conn_from_adapters(adapters) is not runtime
+    except Exception:  # noqa: BLE001 — fail toward the injected-adapter path
+        return True
+
+
+async def _offload_query_work(fn, /, *args, adapters=None):
+    """Run sync query work on a worker when this orchestrator is the live node."""
+    if _query_work_stays_on_loop(adapters):
+        return fn(*args)
+    return await asyncio.to_thread(fn, *args)
+
+
 #: Turn outcomes that ended the turn without retrieving anything. An empty answer
 #: here means "we never looked", which is the commonest false "no data" of all.
 _NOT_QUERIED_OUTCOMES = frozenset(
@@ -393,6 +430,36 @@ class QueryPipelineOrchestrator:
     def _session_store(self):
         return self._adapters.query_session
 
+    def _thread_session_store(self):
+        """Session store on the calling thread's DB handle.
+
+        On a file-backed node the event-loop connection must not be used from
+        ``asyncio.to_thread`` workers (one Connection, one transaction state).
+        """
+        if _query_work_stays_on_loop(self._adapters):
+            return self._session_store()
+        from ..core.state import get_db_connection
+        from .runtime import adapter_bundle_for_conn
+
+        conn = get_db_connection()
+        if conn is None:
+            return self._session_store()
+        return adapter_bundle_for_conn(conn).query_session
+
+    def _retrieve_on_calling_thread(self, request: RetrievalRequest):
+        """``retrieve()`` using a handle that is safe for this thread."""
+        if _query_work_stays_on_loop(self._adapters):
+            return self._retrieval.retrieve(request)
+        from ..core.state import get_db_connection
+        from .runtime import adapter_bundle_for_conn
+
+        conn = get_db_connection()
+        if conn is None:
+            return self._retrieval.retrieve(request)
+        return DefaultSignalRetrievalAdapter(adapter_bundle_for_conn(conn)).retrieve(
+            request
+        )
+
     async def execute(self, **kwargs: Any) -> Dict[str, Any]:
         """Run one turn and hand back what narrowed it.
 
@@ -460,7 +527,10 @@ class QueryPipelineOrchestrator:
         turn_start_ms = now_ms()
         store = self._session_store()
         try:
-            store.purge_expired()
+            await _offload_query_work(
+                lambda: self._thread_session_store().purge_expired(),
+                adapters=self._adapters,
+            )
         except Exception:
             pass
 
@@ -754,7 +824,8 @@ class QueryPipelineOrchestrator:
         timings = StageTimings()
         _t0 = now_ms()
         try:
-            bundle = self._retrieval.retrieve(
+            bundle = await _offload_query_work(
+                self._retrieve_on_calling_thread,
                 RetrievalRequest(
                     manifest=manifest,
                     access_mode=access_mode,
@@ -780,7 +851,8 @@ class QueryPipelineOrchestrator:
                     # the planner's month/as-of arithmetic is reproducible.
                     now=now,
                     ledger=ledger,
-                )
+                ),
+                adapters=self._adapters,
             )
         except RetrievalError as exc:
             audit = build_query_audit_event(
@@ -854,10 +926,22 @@ class QueryPipelineOrchestrator:
             # closeness_tier is the durable FACT view"). It only became reachable once
             # the lens dispatcher existed; before that the predicate was empty and the
             # closeness lane below was the only answer.
+            def _facts_lane_conn():
+                if _query_work_stays_on_loop(self._adapters):
+                    return db_conn
+                from ..core.state import get_db_connection
+
+                return get_db_connection() or db_conn
+
             try:
                 from .facts_direct import try_facts_direct
-                direct = try_facts_direct(
-                    db_conn, query_text, packet_resolution=_pr["effective"])
+                direct = await _offload_query_work(
+                    lambda: try_facts_direct(
+                        _facts_lane_conn(), query_text,
+                        packet_resolution=_pr["effective"],
+                    ),
+                    adapters=self._adapters,
+                )
             except Exception:  # noqa: BLE001 — this lane must never break a turn
                 direct = None
             if direct is None:
@@ -866,8 +950,13 @@ class QueryPipelineOrchestrator:
                 # answering nothing while the derivation catches up.
                 try:
                     from .closeness import try_close_circle
-                    direct = try_close_circle(
-                        db_conn, query_text, packet_resolution=_pr["effective"])
+                    direct = await _offload_query_work(
+                        lambda: try_close_circle(
+                            _facts_lane_conn(), query_text,
+                            packet_resolution=_pr["effective"],
+                        ),
+                        adapters=self._adapters,
+                    )
                 except Exception:  # noqa: BLE001 — this lane must never break a turn
                     direct = None
             if direct is None:
@@ -878,8 +967,13 @@ class QueryPipelineOrchestrator:
                 # answered from the work region.
                 try:
                     from .collaborators import try_collaborators
-                    direct = try_collaborators(
-                        db_conn, query_text, packet_resolution=_pr["effective"])
+                    direct = await _offload_query_work(
+                        lambda: try_collaborators(
+                            _facts_lane_conn(), query_text,
+                            packet_resolution=_pr["effective"],
+                        ),
+                        adapters=self._adapters,
+                    )
                 except Exception:  # noqa: BLE001 — this lane must never break a turn
                     direct = None
             if direct is not None:
@@ -972,14 +1066,16 @@ class QueryPipelineOrchestrator:
                                     intent_hash=intent_hash, packet_resolution=_pr["effective"])
         ttl = (datetime.now(timezone.utc) + timedelta(hours=24)).isoformat()
         prior_envelope = session.envelope_json if session else {}
-        store.put(
-            {
-                "session_id": session_id,
-                "requester_id": requester_id,
-                "intent_hash": intent_hash,
-                "envelope_json": _merge_envelope(prior_envelope, scope_id=scope_id, access_mode=access_mode),
-                "ttl_expires_at": ttl,
-            }
+        session_row = {
+            "session_id": session_id,
+            "requester_id": requester_id,
+            "intent_hash": intent_hash,
+            "envelope_json": _merge_envelope(prior_envelope, scope_id=scope_id, access_mode=access_mode),
+            "ttl_expires_at": ttl,
+        }
+        await _offload_query_work(
+            lambda: self._thread_session_store().put(session_row),
+            adapters=self._adapters,
         )
         # Turn-level total, in whole milliseconds, on the one durable per-turn record.
         # Spans the whole retrieve-to-persist path: retrieval, disclosure filtering,
@@ -992,16 +1088,17 @@ class QueryPipelineOrchestrator:
         # because the question it answers is what the *request* cost, not what the
         # measured stages summed to.
         turn_duration_ms = max(0, int(round(now_ms() - turn_start_ms)))
-        store.append_artifact(
-            session_id,
-            {
-                "artifact_id": str(uuid.uuid4()),
-                "cache_key": cache_key,
-                "public_result_json": public_dict,
-                "retrieval_fingerprint": fingerprint,
-                "game_layer_strategy": public.strategy,
-                "duration_ms": turn_duration_ms,
-            },
+        artifact_row = {
+            "artifact_id": str(uuid.uuid4()),
+            "cache_key": cache_key,
+            "public_result_json": public_dict,
+            "retrieval_fingerprint": fingerprint,
+            "game_layer_strategy": public.strategy,
+            "duration_ms": turn_duration_ms,
+        }
+        await _offload_query_work(
+            lambda: self._thread_session_store().append_artifact(session_id, artifact_row),
+            adapters=self._adapters,
         )
 
         audit = build_query_audit_event(

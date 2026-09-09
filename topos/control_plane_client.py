@@ -134,6 +134,8 @@ class ControlPlaneClient:
         # matters.
         self._device_info_snapshot: dict[str, Any] | None = None
         self._device_info_snapshot_lock = threading.Lock()
+        self._healthcheck_snapshot: dict[str, Any] | None = None
+        self._healthcheck_snapshot_lock = threading.Lock()
 
         self._inbound_concurrency_limit = max(1, int(settings.control_plane_inbound_concurrency_limit))
         self._inbound_max_pending = max(
@@ -517,9 +519,36 @@ class ControlPlaneClient:
             return None
         payload = dict(snapshot)
         payload["snapshot_stale"] = True
-        return {"id": request_id, "status": "ok", "payload": payload}
+        return {"id": request_id, "status": "ok", "type": "get_device_info", "payload": payload}
+
+    def set_healthcheck_snapshot(self, payload: dict[str, Any] | None) -> None:
+        if not isinstance(payload, dict) or not payload:
+            return
+        with self._healthcheck_snapshot_lock:
+            self._healthcheck_snapshot = dict(payload)
+
+    def _healthcheck_snapshot_response(self, request_id: Any) -> dict[str, Any]:
+        with self._healthcheck_snapshot_lock:
+            snapshot = self._healthcheck_snapshot
+        payload = dict(snapshot) if snapshot else {}
+        db_ok = payload.get("db_ok") if isinstance(payload.get("db_ok"), bool) else None
+        return {
+            "id": request_id,
+            "status": "ok",
+            "type": "healthcheck",
+            "payload": {"ok": True, "db_ok": db_ok, "snapshot_stale": True},
+        }
+
+    def _echo_request_type(self, resp: Dict[str, Any], data: Dict[str, Any]) -> Dict[str, Any]:
+        inbound = str(data.get("type") or "").strip()
+        if inbound and not str(resp.get("type") or "").strip():
+            echoed = dict(resp)
+            echoed["type"] = inbound
+            return echoed
+        return resp
 
     _SNAPSHOT_ANSWER_DEADLINE_S = 5.0
+    _HEALTHCHECK_ANSWER_DEADLINE_S = 1.0
 
     async def _handle_message(self, ws, data: Dict[str, Any]) -> None:
         msg_type = str(data.get("type") or "").strip().lower()
@@ -545,6 +574,10 @@ class ControlPlaneClient:
                     resp = await self._await_with_device_info_fallback(ws, data, handler_future)
                     if resp is None:
                         return
+                elif msg_type == "healthcheck":
+                    resp = await self._await_with_healthcheck_fallback(ws, data, handler_future)
+                    if resp is None:
+                        return
                 else:
                     resp = await handler_future
             else:
@@ -554,7 +587,7 @@ class ControlPlaneClient:
             resp = {"id": data.get("id"), "status": "error", "error": str(exc)}
         if resp is None:
             return  # e.g. connection_info or message without id; CP has no pending request to match
-        await self._send_ws_json(ws, resp)
+        await self._send_ws_json(ws, self._echo_request_type(resp, data))
 
     async def _await_with_device_info_fallback(self, ws, data: Dict[str, Any], handler_future) -> dict[str, Any] | None:
         """Answer get_device_info from the snapshot when the app loop is too
@@ -569,15 +602,21 @@ class ControlPlaneClient:
         except (TimeoutError, asyncio.TimeoutError):
             fallback = self._device_info_snapshot_response(data.get("id"))
             if fallback is None:
-                # Nothing cached yet — let the real handler run to completion.
-                resp = await handler_future
-                if isinstance(resp, dict) and resp.get("status") == "ok" and isinstance(resp.get("payload"), dict):
-                    self.set_device_info_snapshot(resp["payload"])
-                return resp
-            logger.warning(
-                "get_device_info answered from snapshot: app loop did not respond within %.1fs",
-                self._SNAPSHOT_ANSWER_DEADLINE_S,
-            )
+                logger.warning(
+                    "get_device_info: empty snapshot; answering stale stub after %.1fs",
+                    self._SNAPSHOT_ANSWER_DEADLINE_S,
+                )
+                fallback = {
+                    "id": data.get("id"),
+                    "status": "ok",
+                    "type": "get_device_info",
+                    "payload": {"snapshot_stale": True, "snapshot_empty": True},
+                }
+            else:
+                logger.warning(
+                    "get_device_info answered from snapshot: app loop did not respond within %.1fs",
+                    self._SNAPSHOT_ANSWER_DEADLINE_S,
+                )
             await self._send_ws_json(ws, fallback)
 
             async def _refresh_from_late_answer() -> None:
@@ -587,6 +626,34 @@ class ControlPlaneClient:
                     return
                 if isinstance(late, dict) and late.get("status") == "ok" and isinstance(late.get("payload"), dict):
                     self.set_device_info_snapshot(late["payload"])
+
+            asyncio.create_task(_refresh_from_late_answer())
+            return None
+
+    async def _await_with_healthcheck_fallback(self, ws, data: Dict[str, Any], handler_future) -> dict[str, Any] | None:
+        """Answer healthcheck from the WS client thread when the app loop is
+        too stalled. A 1s miss still beats the CP 20s timeout and keeps the
+        FE verdict younger than HEALTH_VERDICT_MAX_AGE_MS."""
+        try:
+            resp = await asyncio.wait_for(asyncio.shield(handler_future), timeout=self._HEALTHCHECK_ANSWER_DEADLINE_S)
+            if isinstance(resp, dict) and resp.get("status") == "ok" and isinstance(resp.get("payload"), dict):
+                self.set_healthcheck_snapshot(resp["payload"])
+            return resp
+        except (TimeoutError, asyncio.TimeoutError):
+            fallback = self._healthcheck_snapshot_response(data.get("id"))
+            logger.warning(
+                "healthcheck answered from client-thread snapshot: app loop did not respond within %.1fs",
+                self._HEALTHCHECK_ANSWER_DEADLINE_S,
+            )
+            await self._send_ws_json(ws, fallback)
+
+            async def _refresh_from_late_answer() -> None:
+                try:
+                    late = await handler_future
+                except Exception:  # noqa: BLE001
+                    return
+                if isinstance(late, dict) and late.get("status") == "ok" and isinstance(late.get("payload"), dict):
+                    self.set_healthcheck_snapshot(late["payload"])
 
             asyncio.create_task(_refresh_from_late_answer())
             return None

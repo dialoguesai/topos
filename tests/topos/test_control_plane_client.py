@@ -528,8 +528,118 @@ async def test_get_device_info_answered_from_snapshot_when_app_loop_stalls(monke
         assert resp["status"] == "ok"
         assert resp["payload"]["system"]["computer_name"] == "q4"
         assert resp["payload"]["snapshot_stale"] is True
+        assert resp["type"] == "get_device_info"
     finally:
         stall.set()
+        await client.stop()
+
+
+@pytest.mark.asyncio
+async def test_get_device_info_empty_snapshot_answers_stub_instead_of_waiting(monkeypatch):
+    request = {"id": "di-empty", "type": "get_device_info", "payload": {}}
+    ws = StayOpenWebSocket([json.dumps(request)])
+    connect = FakeConnect(ws)
+    monkeypatch.setattr(control_plane_client, "connect", connect)
+    monkeypatch.setattr(ControlPlaneClient, "_SNAPSHOT_ANSWER_DEADLINE_S", 0.3)
+
+    stall = asyncio.Event()
+
+    async def stalled_handler(message):
+        await stall.wait()
+        return {"id": message["id"], "status": "ok", "payload": {"system": {"computer_name": "late"}}}
+
+    client = ControlPlaneClient(
+        control_plane_url="wss://cp.example/ws/engine",
+        api_key="test-key",
+        handler=stalled_handler,
+        verify_ssl=True,
+    )
+    client.start()
+    try:
+        assert await client.wait_until_connected(timeout_s=5.0)
+        for _ in range(40):
+            if ws.sent:
+                break
+            await asyncio.sleep(0.1)
+        assert ws.sent, "empty snapshot must not wait for the stalled handler"
+        resp = json.loads(ws.sent[0])
+        assert resp["id"] == "di-empty"
+        assert resp["status"] == "ok"
+        assert resp["payload"]["snapshot_empty"] is True
+        assert resp["payload"]["snapshot_stale"] is True
+    finally:
+        stall.set()
+        await client.stop()
+
+
+@pytest.mark.asyncio
+async def test_healthcheck_answered_from_client_thread_when_app_loop_stalls(monkeypatch):
+    request = {"id": "hc-1", "type": "healthcheck", "payload": {}}
+    ws = StayOpenWebSocket([json.dumps(request)])
+    connect = FakeConnect(ws)
+    monkeypatch.setattr(control_plane_client, "connect", connect)
+    monkeypatch.setattr(ControlPlaneClient, "_HEALTHCHECK_ANSWER_DEADLINE_S", 0.3)
+
+    stall = asyncio.Event()
+
+    async def stalled_handler(message):
+        await stall.wait()
+        return {"id": message["id"], "status": "ok", "payload": {"ok": True, "db_ok": True}}
+
+    client = ControlPlaneClient(
+        control_plane_url="wss://cp.example/ws/engine",
+        api_key="test-key",
+        handler=stalled_handler,
+        verify_ssl=True,
+    )
+    client.set_healthcheck_snapshot({"ok": True, "db_ok": False})
+    client.start()
+    try:
+        assert await client.wait_until_connected(timeout_s=5.0)
+        for _ in range(40):
+            if ws.sent:
+                break
+            await asyncio.sleep(0.1)
+        assert ws.sent, "healthcheck must answer from the client thread within the CP timeout"
+        resp = json.loads(ws.sent[0])
+        assert resp["id"] == "hc-1"
+        assert resp["status"] == "ok"
+        assert resp["type"] == "healthcheck"
+        assert resp["payload"]["ok"] is True
+        assert resp["payload"]["snapshot_stale"] is True
+        assert resp["payload"]["db_ok"] is False
+    finally:
+        stall.set()
+        await client.stop()
+
+
+@pytest.mark.asyncio
+async def test_terminal_frame_echoes_inbound_type(monkeypatch):
+    request = {"id": "echo-1", "type": "get_device_info", "payload": {}}
+    ws = StayOpenWebSocket([json.dumps(request)])
+    connect = FakeConnect(ws)
+    monkeypatch.setattr(control_plane_client, "connect", connect)
+
+    async def healthy_handler(message):
+        return {"id": message["id"], "status": "ok", "payload": {"system": {"computer_name": "q4"}}}
+
+    client = ControlPlaneClient(
+        control_plane_url="wss://cp.example/ws/engine",
+        api_key="test-key",
+        handler=healthy_handler,
+        verify_ssl=True,
+    )
+    client.start()
+    try:
+        assert await client.wait_until_connected(timeout_s=5.0)
+        for _ in range(80):
+            if ws.sent:
+                break
+            await asyncio.sleep(0.1)
+        resp = json.loads(ws.sent[0])
+        assert resp["type"] == "get_device_info"
+        assert resp["status"] == "ok"
+    finally:
         await client.stop()
 
 
