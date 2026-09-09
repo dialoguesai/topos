@@ -243,7 +243,15 @@ class TestTheCallSiteItself:
 
         from topos.query import retrieval
 
-        src = textwrap.dedent(inspect.getsource(retrieval.DefaultSignalRetrievalAdapter.retrieve))
+        # `retrieve` became a thin wrapper on 2026-09-08 (it asks an empty result whether the
+        # node is still indexing) and the body this probe lives in moved to `_retrieve_bundle`.
+        # Read whichever exists, so the invariant is pinned to the retrieval path rather than to
+        # a method name.
+        body = getattr(
+            retrieval.DefaultSignalRetrievalAdapter, "_retrieve_bundle",
+            retrieval.DefaultSignalRetrievalAdapter.retrieve,
+        )
+        src = textwrap.dedent(inspect.getsource(body))
         tree = ast.parse(src)
         calls = [
             n for n in ast.walk(tree)
