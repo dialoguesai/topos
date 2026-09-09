@@ -5916,6 +5916,7 @@ def _build_summary_items_unfiltered(
     entity_thread_items: List[Dict[str, Any]] = []
     fact_store_items: List[Dict[str, Any]] = []
     graph_items: List[Dict[str, Any]] = []
+    journal_items: List[Dict[str, Any]] = []
     if query_text:
         try:
             from ..core.state import get_db_connection
@@ -6000,6 +6001,24 @@ def _build_summary_items_unfiltered(
                     logger.debug("graph lane skipped: %s", graph_exc)
         except Exception as exc:
             logger.debug("entity linking skipped: %s", exc)
+
+    # The lived-event journal lane: the ask itself is the key, so it runs
+    # outside the entity-linking block above -- "when did I see a movie" links
+    # no entity and would otherwise never reach it. Own try/except: a journal
+    # failure must not cost the turn its other lanes.
+    try:
+        from .journal_event_lane import journal_event_items
+
+        journal_items = journal_event_items(
+            bundle_conn,
+            query_text=query_text,
+            scope_id=str(getattr(manifest, "scope_id", "") or ""),
+            manifest=manifest,
+            disclosure_tier=disclosure_tier,
+            ledger=ledger,
+        )
+    except Exception as journal_exc:  # noqa: BLE001
+        logger.debug("journal event lane skipped: %s", journal_exc)
 
     # Q1. The per-goal evidence join. Gated on BOTH the commitment question and goals
     # actually being in play, so every other request in the corpus takes the byte-identical
@@ -6149,6 +6168,10 @@ def _build_summary_items_unfiltered(
                 # thread lane, so the same weight: beside the scope routes,
                 # never above them.
                 ("graph", 1.0, graph_items),
+                # Diary rows reached by the ask instead of by a content key --
+                # the thread/graph/commitment argument again, so the same
+                # weight: beside the scope routes, never above them.
+                ("journal_events", 1.0, journal_items),
                 ("overheard", 1.2, overheard_items),
                 # Q1. Same argument, same weight: evidence for a stated goal is
                 # ordinary canonical evidence that arrived keyed to that goal's ids.
@@ -6187,6 +6210,7 @@ def _build_summary_items_unfiltered(
         + derived_items
         + entity_thread_items
         + graph_items
+        + journal_items
         + commitment_items
         + goal_items
         + emotion_items

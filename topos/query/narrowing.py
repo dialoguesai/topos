@@ -215,6 +215,7 @@ REASONS = frozenset(
         "entity_thread_is_self",
         "entity_thread_lane",
         "graph_lane",
+        "journal_event_lane",
         "entity_thread_selector_not_accessible",
         "entity_thread_self_check_unavailable",
         "entity_thread_unresolved",
