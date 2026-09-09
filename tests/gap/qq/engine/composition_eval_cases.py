@@ -259,10 +259,16 @@ def _contact_names_for_identifier(conn: sqlite3.Connection, identifier: str) -> 
     return [r[0] for r in rows if r and r[0]]
 
 
-def oracle_c1_top_contact_volume(conn: sqlite3.Connection) -> Oracle:
-    # Top NON-self contact: 'self' can be the max-n group_key (notes to self) but
-    # is not a "most frequent contact", and as a needle it substring-matches
-    # everywhere (json keys, 'yourself', ...).
+def _top_contact(conn: sqlite3.Connection) -> Tuple[str, List[str]]:
+    """(identifier, every way that person is named) for the owner's top NON-self contact.
+
+    Resolved from the node at run time, never written down. A case that needs to ask about a
+    real person names them through this, so the catalogue keeps its grading power without
+    publishing a contact of the owner's in a repository anyone can read. 'self' can be the
+    max-n group key (notes to self) but is not a "most frequent contact", and as a needle it
+    substring-matches everywhere (json keys, 'yourself', ...); `Speaker N` rows are diarization
+    artifacts, not people.
+    """
     row = _one(
         conn,
         """SELECT payload_json FROM signal_facts
@@ -272,10 +278,16 @@ def oracle_c1_top_contact_volume(conn: sqlite3.Connection) -> Oracle:
            ORDER BY json_extract(payload_json, '$.stat_summary.n') DESC LIMIT 1""",
     )
     if not row:
+        return "", []
+    ident = str(json.loads(row[0]).get("group_key") or "")
+    return ident, _contact_names_for_identifier(conn, ident)
+
+
+def oracle_c1_top_contact_volume(conn: sqlite3.Connection) -> Oracle:
+    ident, names = _top_contact(conn)
+    if not ident:
         return Oracle([], "no messages.volume stat insights in DB", ok=False)
-    payload = json.loads(row[0])
-    ident = str(payload.get("group_key") or "")
-    who = [ident, *(_contact_names_for_identifier(conn, ident))]
+    who = [ident, *names]
     groups = [[a for a in who if a and len(a) >= 5]]
     if not groups[0]:
         return Oracle([], "top contact has no usable identifier/name", ok=False)
@@ -434,9 +446,26 @@ def oracle_c11_active_hours(conn: sqlite3.Connection) -> Oracle:
     return Oracle(groups, f"{len(groups)} hour-of-week stat tags")
 
 
+def query_c12_top_contact(conn: sqlite3.Connection) -> str:
+    """The ask, with the owner's own contact resolved at run time.
+
+    qq-catalog-22: this case used to carry a contact's first name in its query text, its
+    `topic_terms` and its oracle — three copies of a real person's name in a public repository,
+    against PLAN_EVAL_PIPELINES' rule that a case says the SHAPE and not the value. The case
+    grades the same fusion either way, because the name was never what was under test: the
+    subject is "a person the owner actually talks with", and the node knows who that is.
+    """
+    _, names = _top_contact(conn)
+    who = next((n for n in names if n and len(n) >= 3), "my most frequent contact")
+    return f"Tell me about {who} and how often we talk"
+
+
 def oracle_c12_fusion(conn: sqlite3.Connection) -> Oracle:
-    # qq-catalog-10: Luc was a demo persona; Marcus has real mention evidence.
-    return Oracle([["marcus"]], "entity + volume fusion for Marcus")
+    ident, names = _top_contact(conn)
+    who = [a for a in [ident, *names] if a and len(a) >= 5]
+    if not who:
+        return Oracle([], "no resolvable top contact in DB", ok=False)
+    return Oracle([who], "entity + volume fusion for the owner's top contact")
 
 
 LIVE_COMPOSITION_CASES: List[CompositionCase] = [
@@ -501,9 +530,9 @@ LIVE_COMPOSITION_CASES: List[CompositionCase] = [
         layer="stats:hour_of_week",
         description="Hour-of-week stats answer a rhythm question"),
     CompositionCase(
-        "C12", "live", "Tell me about Marcus and how often we talk", "relationship_context:read", "summary",
+        "C12", "live", query_c12_top_contact, "relationship_context:read", "summary",
         oracle_c12_fusion, expected_sources=("entity_dossier", "stat_insight"),
-        topic_terms=("marcus",), layer="fusion:entities+stats",
+        layer="fusion:entities+stats",
         description="Cross-layer fusion: entity spine AND stats must both contribute"),
 ]
 

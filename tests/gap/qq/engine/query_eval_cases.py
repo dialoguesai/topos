@@ -53,7 +53,7 @@ EvalFn = Callable[[Dict[str, Any]], Tuple[bool, str]]
 # qq-catalog-10 (C-series post-purge recalibration + rare-gate morphology): C1 excludes
 # Speaker-N diarization artifacts (voxterm labels are not contacts; vacuous when no real
 # contact volume exists), C8 → PostHog analytics (real niche cluster; demo art needle df 0),
-# C12 → Marcus (Luc was a demo persona). Engine-side, the rare-token gate gained light
+# C12 → the owner's top contact, resolved at run time (the previous personas were written into the case). Engine-side, the rare-token gate gained light
 # morphology (journaling→journal, active→activity) and stat-insight tags entered the
 # evidence blob — C11/C23-class self-vetoes on aggregate asks are fixed, not recalibrated.
 # Comparable to qq-catalog-9 via the iteration gauge's shared case_ids.
