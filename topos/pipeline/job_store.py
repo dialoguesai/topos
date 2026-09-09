@@ -115,6 +115,46 @@ def get_job(conn: sqlite3.Connection, job_id: str) -> Optional[Dict[str, Any]]:
     return _row_to_dict(row)
 
 
+def find_active_job(
+    conn: sqlite3.Connection,
+    *,
+    kind: str,
+    source_id: str,
+    dataset_id: Optional[str] = None,
+) -> Optional[Dict[str, Any]]:
+    """The queued-or-running job of ``kind`` for this source, if one exists.
+
+    A read-only in-flight check. It exists because the idempotency key cannot
+    serve as one: ``enqueue_job`` returns a ``done`` row's id untouched, so a
+    stable key would make the FIRST success block every later run forever —
+    the failure ``topic_clusters_job`` records as having swallowed two weeks of
+    consolidations. Jobs therefore key per-request, and mutual exclusion is
+    asked for explicitly, here.
+
+    ``dataset_id`` is matched from ``payload_json`` because it is not a column;
+    two datasets syncing the same source are genuinely independent runs.
+    """
+    ensure_pipeline_jobs_schema(conn)
+    rows = conn.execute(
+        """
+        SELECT job_id, kind, status, lease_owner, lease_expires_at, payload_json,
+               progress_json, detail_json, sync_batch_id, source_id, write_id,
+               idempotency_key, started_at, finished_at, created_at, updated_at
+        FROM pipeline_jobs
+        WHERE kind=? AND source_id=? AND status IN ('queued','running')
+        ORDER BY created_at ASC
+        """,
+        (kind, source_id),
+    ).fetchall()
+    for row in rows:
+        job = _row_to_dict(row)
+        if dataset_id is None:
+            return job
+        if str((job.get("payload") or {}).get("dataset_id") or "") == str(dataset_id):
+            return job
+    return None
+
+
 def update_job_progress(
     conn: sqlite3.Connection,
     job_id: str,

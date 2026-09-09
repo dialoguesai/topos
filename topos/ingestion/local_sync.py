@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import sqlite3
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from .checkpoints.checkpoint_store import CheckpointStore, IngestionCheckpoint
 from .checkpoints.sqlite_checkpoint_store import SqliteCheckpointStore
@@ -342,6 +342,40 @@ def _backfill_signal_reply_links_in_db(*, db_conn: Any, dataset_id: str) -> int:
     return updated
 
 
+def _emit_sync_progress(
+    progress_cb: Optional[Callable[[Dict[str, Any]], None]],
+    *,
+    batch_num: int,
+    records_processed: int,
+    records_skipped: int,
+    last_record_id: str,
+) -> None:
+    """Publish one batch's progress, if anyone is listening.
+
+    Called only after ``save_checkpoint`` has made the batch durable, so a
+    reported count is always a count that survives a crash — a progress number
+    ahead of the checkpoint would re-run on restart and count twice.
+
+    Never raises: a sync that has already written its rows must not fail
+    because a progress sink did. The callback runs on the sync's worker thread
+    (never the event loop), which is what lets it take the write gate.
+    """
+    if progress_cb is None:
+        return
+    try:
+        progress_cb({
+            "status": "processing",
+            "batch_num": batch_num,
+            "messages_processed": records_processed,
+            "messages_skipped": records_skipped,
+            "records_processed": records_processed,
+            "records_skipped": records_skipped,
+            "last_record_id": last_record_id,
+        })
+    except Exception as exc:  # noqa: BLE001 — progress is best-effort
+        logger.debug("sync progress callback failed: %s", exc)
+
+
 def run_imessage_sync(
     dataset_id: str,
     *,
@@ -350,6 +384,7 @@ def run_imessage_sync(
     chat_db_path: Optional[Any] = None,
     batch_size: int = 5000,
     sync_options: Optional[Dict[str, Any]] = None,
+    progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     """
     Run iMessage sync: load checkpoint → read from chat.db → parse → write to conversation_messages → save checkpoint.
@@ -383,6 +418,7 @@ def run_imessage_sync(
             chat_db_path=chat_db_path,
             batch_size=batch_size,
             sync_options=sync_options,
+            progress_cb=progress_cb,
         )
     except Exception as e:
         logger.warning(
@@ -402,6 +438,7 @@ def _run_imessage_sync_impl(
     chat_db_path: Optional[Any] = None,
     batch_size: int = 5000,
     sync_options: Optional[Dict[str, Any]] = None,
+    progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     """Implementation of run_imessage_sync (called inside try so we never raise)."""
     start_unix, start_error = _resolve_sync_start_unix(sync_options)
@@ -562,6 +599,13 @@ def _run_imessage_sync_impl(
             metadata={"exclude_spam": exclude_spam},
         ))
         current_last_record_id = final_last_record_id
+        _emit_sync_progress(
+            progress_cb,
+            batch_num=batch_num,
+            records_processed=total_processed,
+            records_skipped=total_skipped,
+            last_record_id=final_last_record_id,
+        )
 
         if batch.scanned_count < batch_size:
             break
@@ -681,6 +725,7 @@ def run_signal_sync(
     owner_user_id: Optional[str] = None,
     batch_size: int = 5000,
     sync_options: Optional[Dict[str, Any]] = None,
+    progress_cb: Optional[Callable[[Dict[str, Any]], None]] = None,
 ) -> Dict[str, Any]:
     """
     Run Signal sync: load checkpoint → read from SQLCipher DB → parse → write to conversation_messages → save checkpoint.
@@ -725,8 +770,10 @@ def run_signal_sync(
     current_last_record_id = "0" if start_unix is not None else last_record_id
     final_last_record_id = last_record_id
     total_processed = 0
+    batch_num = 0
 
     while True:
+        batch_num += 1
         try:
             rows = read_signal_rows(
                 last_record_id=current_last_record_id if current_last_record_id != "0" else None,
@@ -874,6 +921,13 @@ def run_signal_sync(
                 metadata={},
             ))
             current_last_record_id = final_last_record_id
+            _emit_sync_progress(
+                progress_cb,
+                batch_num=batch_num,
+                records_processed=total_processed,
+                records_skipped=0,
+                last_record_id=final_last_record_id,
+            )
 
         if len(rows) < batch_size:
             break

@@ -9,7 +9,6 @@ from .common import (
     Optional,
     REGISTRY,
     base64,
-    datetime,
     enrich_contact_rows_with_resolved_display_names,
     enrich_conversation_thread_previews,
     get_signal_identity,
@@ -17,8 +16,6 @@ from .common import (
     logger,
     put_signal_identity,
     put_source_settings,
-    timezone,
-    update_sync_result,
 )
 from .registry import handles
 
@@ -371,10 +368,24 @@ async def handle_auto_resolve_source_contacts(message: Dict[str, Any]) -> Option
 
 @handles("source_sync")
 async def handle_source_sync(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Enqueue a local sync and answer with its job handle, immediately.
+
+    This used to await the sync inline. A first iMessage run drains the whole
+    backlog — hours — while the control plane's engine deadline is 20s, so the
+    caller always got a 5xx (which Cloudflare then rewrites into a CORS-less
+    error page, surfacing in the browser as "Failed to fetch") while the sync
+    itself ran on invisibly and its receipt was never written. The work was
+    never the problem; waiting for it inside a request was.
+
+    The response keeps the same envelope and simply gains ``job_id``. Nothing
+    is renamed and no new message type is introduced, so an older control plane
+    relays this verbatim and an older app — which discards this body and
+    re-reads settings — sees no error. Progress is read with the existing,
+    kind-agnostic ``enrichment_progress``.
+    """
     req_id = message.get("id")
     if not req_id:
         return None
-    import asyncio as _asyncio
     payload = message.get("payload") or {}
     source_id = (payload.get("source_id") or "").strip()
     dataset_id = (payload.get("dataset_id") or "").strip()
@@ -393,40 +404,38 @@ async def handle_source_sync(message: Dict[str, Any]) -> Optional[Dict[str, Any]
     source = REGISTRY.get(source_id)
     if not source or getattr(source, "source_type", None) != "local_sync":
         return {"id": req_id, "status": "error", "error": "sync only applies to local_sync sources"}
-    from ...ingestion.local_sync import run_imessage_sync, run_signal_sync
-    conn = hub.get_db_connection()
-    try:
-        if source_id == "imessage":
-            result = await _asyncio.to_thread(run_imessage_sync, dataset_id, sync_options=sync_options)
-        elif source_id == "signal":
-            result = await _asyncio.to_thread(run_signal_sync, dataset_id, sync_options=sync_options)
-        else:
-            return {"id": req_id, "status": "error", "error": f"sync not implemented for source_id={source_id}"}
-        status = result.get("status", "error")
-        error = result.get("error")
-        if status == "error" and error and ("84" in str(error) or "EOVERFLOW" in str(error).upper()):
-            logger.warning(
-                "[PIPELINE:SYNC] source_sync returned errno 84 / EOVERFLOW: source_id=%s error=%s",
-                source_id,
-                error,
-                exc_info=False,
-            )
-        logger.debug("[PIPELINE:SYNC] source_sync completed: source_id=%s status=%s", source_id, status)
-        if conn and status == "ok":
-            update_sync_result(conn, dataset_id, source_id, success=True, last_sync_at=datetime.now(timezone.utc).isoformat())
-        elif conn and status == "error":
-            update_sync_result(conn, dataset_id, source_id, success=False, last_error=error or "Sync failed")
-        return {"id": req_id, "status": status, "payload": result, "error": error}
-    except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "[PIPELINE:SYNC] source_sync raised exception: source_id=%s exc=%s",
-            source_id,
-            exc,
-            exc_info=True,
-        )
-        if conn:
-            update_sync_result(conn, dataset_id, source_id, success=False, last_error=str(exc))
-        return {"id": req_id, "status": "error", "error": str(exc)}
+    if source_id not in ("imessage", "signal"):
+        return {"id": req_id, "status": "error", "error": f"sync not implemented for source_id={source_id}"}
+
+    from ...ingestion.local_sync_jobs import enqueue_local_sync
+
+    outcome = await enqueue_local_sync(
+        source_id=source_id,
+        dataset_id=dataset_id,
+        sync_options=sync_options,
+        conn_factory=hub.get_db_connection,
+    )
+    if outcome.get("status") != "ok":
+        return {"id": req_id, "status": "error", "error": str(outcome.get("error") or "sync enqueue failed")}
+
+    already = bool(outcome.get("already_running"))
+    return {
+        "id": req_id,
+        "status": "ok",
+        "payload": {
+            "job_id": str(outcome.get("job_id")),
+            "status": "processing",
+            "source_id": source_id,
+            "dataset_id": dataset_id,
+            "already_running": already,
+            "message": (
+                "A sync is already running for this source."
+                if already
+                else "Sync started. Use enrichment_progress to track progress."
+            ),
+        },
+    }
+
 
 @handles("get_signal_settings")
 async def handle_get_signal_settings(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:

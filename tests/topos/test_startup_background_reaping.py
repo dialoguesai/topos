@@ -236,20 +236,28 @@ async def test_stop_pipeline_worker_clears_the_global(monkeypatch):
 
     monkeypatch.setattr(job_runner, "_enabled", lambda: True)
 
-    async def _idle(_factory):
+    # **_kwargs: the long-running lane passes kinds_fn/sweep_debts/label. A
+    # double that only accepts the factory would fail on that call alone, which
+    # says nothing about the lifecycle this test is about.
+    async def _idle(_factory, **_kwargs):
         await asyncio.sleep(3600)
 
     monkeypatch.setattr(job_runner, "_worker_loop", _idle)
 
     job_runner.start_pipeline_worker(lambda: None)
     assert job_runner._worker_task is not None
+    assert job_runner._long_worker_task is not None, "the long-running lane never started"
 
     await job_runner.stop_pipeline_worker()
     assert job_runner._worker_task is None, "the global still names a dead worker"
+    # Both lanes are cleared together: a teardown that stopped only the general
+    # loop would leave the long one running against a closed app.
+    assert job_runner._long_worker_task is None, "the long lane outlived its app"
 
     # The slot is genuinely reusable.
     job_runner.start_pipeline_worker(lambda: None)
     assert job_runner._worker_task is not None
+    assert job_runner._long_worker_task is not None
     await job_runner.stop_pipeline_worker()
 
 
@@ -259,6 +267,7 @@ async def test_stop_pipeline_worker_is_safe_when_none_running():
 
     await job_runner.stop_pipeline_worker()  # must not raise
     assert job_runner._worker_task is None
+    assert job_runner._long_worker_task is None
 
 
 # --- shutdown reaps what startup spawned ------------------------------------

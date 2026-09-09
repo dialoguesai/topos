@@ -10,6 +10,53 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Fixed
+- **iMessage/Signal sync no longer runs inside the HTTP request, so the browser stops
+  reporting "Failed to fetch" on a sync that is working.** `[S1]` A first iMessage run
+  drains the whole backlog — measured here at ~5 rows/sec, hours for a ~96k-row corpus —
+  while the control plane's engine deadline is 20s (`request_timeout_seconds`), so the
+  caller always got a 5xx. Cloudflare replaces an origin 5xx with its own `text/plain`
+  page and drops the CORS header, so that 5xx never reached the browser as a status at
+  all: `fetch` rejected and the real reason was lost. Verified live on the same host,
+  seconds apart — a 502 came back with no `access-control-allow-origin`, a 404 came back
+  as JSON with it. `source_sync` now enqueues a `local_sync` pipeline job and answers with
+  a job handle in milliseconds; progress is read through the existing, kind-agnostic
+  `enrichment_progress`. No message type was added and `engine-compat.json` does not move,
+  so an older control plane relays the new body verbatim and an older app — which discards
+  it — sees no error.
+- **The sync receipt is finally written.** `[S1]` `update_sync_result` ran in the handler
+  coroutine, which was gone long before an hours-long sync finished, so
+  `user_ingestion_sources.last_sync_at` for the live dataset was still empty while the
+  sync had advanced the checkpoint by tens of thousands of rows. The job executor owns
+  the receipt now, so it lands whether or not anyone is still listening.
+- **A second Sync press re-attaches to the running job instead of starting a rival one.**
+  `[S1]` Two syncs against one SQLite file is the shape behind the live
+  `last_error='database is locked'`. Mutual exclusion is an explicit queued/running lookup
+  (`find_active_job`), not an idempotency key — `enqueue_job` returns a `done` row's id
+  untouched, so a stable key would have let the first success block every later sync
+  forever, the failure `topic_clusters_job` already records.
+- **A failed pipeline job now reports why.** `[S1]` The runner writes an executor's failure
+  reason one level down under `result`, while the progress projection read only
+  `errors` at the top level — so every returned failure rendered as "0%" with no message,
+  indistinguishable from a job that had not started. Fixes enrichment as well as sync.
+- **The node's own HTTP surface can poll job progress.** `[S1]` `enrichment_progress` has
+  existed on the websocket since v1.0.8 but never had an HTTP twin, so the app's poll loop
+  404'd whenever it ran against the node directly (the dev proxy).
+  `GET /v1/enrichment/progress/{job_id}` closes that for sync and retroactively for
+  enrichment, and answers 200 with `status:"error"` for an unknown id rather than a 404.
+
+### Changed
+- **Long-running jobs get their own worker lane.** `[S1]` The pipeline worker is strictly
+  serial — one claim, then `await process_job` inline — so an hours-long sync sitting in it
+  would have stalled `inbox_deferred_enrichment`, `file_ingestion`,
+  `enrichment_process_source`, `topic_consolidation` and `signal_derive_retry` for its whole
+  run. `local_sync` is partitioned onto a second loop over the same `pipeline_jobs` table;
+  the general lane keeps exactly its five pre-existing kinds, pinned by test.
+- **Both sync doors share one enqueue path.** `[S1]` The websocket handler and the node's
+  own HTTP route serve the same url and the same button, and had already drifted: only the
+  HTTP route refreshed messenger analytics after a sync. Both now go through
+  `ingestion/local_sync_jobs.enqueue_local_sync`, so the websocket path gains the analytics
+  refresh it never had.
+
 - **`/healthcheck` answers before the macOS shell gives up on it, and a downgrade guard says
   what to do.** `[O]` The database probe's 2s budget made the liveness route itself late
   whenever the thread pool was busy; the shell's 3s idle timeout then painted a live node red

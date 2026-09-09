@@ -16,6 +16,27 @@ from .common import (
 from .registry import handles
 
 
+def _job_error_messages(progress: Dict[str, Any]) -> list:
+    """Every error the runner may have recorded, wherever it put it.
+
+    A crash writes ``{"status": "failed", "error": ...}`` but an executor that
+    returns ``status="error"`` writes ``{"status": "failed", "result": {...}}``
+    with the reason one level down. Reading only the top level — as this
+    projection used to — rendered every returned failure as "0%" with no
+    message, which is indistinguishable from a job that has not started.
+    """
+    errors = list(progress.get("errors") or [])
+    candidates = [progress.get("error")]
+    result = progress.get("result")
+    if isinstance(result, dict):
+        candidates.extend([result.get("error"), result.get("message")])
+    for candidate in candidates:
+        text = str(candidate or "").strip()
+        if text and text not in errors:
+            errors.append(text)
+    return errors
+
+
 def _progress_dict(job: Dict[str, Any]) -> Dict[str, Any]:
     progress = dict(job.get("progress") or {})
     status = str(job.get("status") or progress.get("status") or "processing")
@@ -31,7 +52,7 @@ def _progress_dict(job: Dict[str, Any]) -> Dict[str, Any]:
         "messages_skipped": progress.get("messages_skipped", 0),
         "messages_total": progress.get("messages_total", 0),
         "records_created": progress.get("records_created", {}),
-        "errors": progress.get("errors", []),
+        "errors": _job_error_messages(progress),
         "jobs_complete": progress.get("jobs_complete", 0),
         "jobs_total": progress.get("jobs_total", 0),
         "jobs_progress_percent": progress.get("jobs_progress_percent", 0.0),

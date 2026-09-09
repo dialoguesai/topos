@@ -11,12 +11,14 @@ from fastapi import APIRouter, Body, Depends, Query, Request  # noqa: F401 Body 
 from ..auth import require_api_key
 from ..core.state import get_db_connection
 from ..ingestion.ingest_helpers import ingest_file_payload, ingest_ui_payload, resolve_file_format
-from ..ingestion.local_sync import run_imessage_sync, run_signal_sync, run_signal_upload
+from ..ingestion.local_sync import run_signal_upload
+from ..ingestion.local_sync_jobs import enqueue_local_sync
+from ..core.handlers.enrichment import _progress_dict
+from ..pipeline.job_store import get_job
 from ..sources.definitions import DELIVERY_LOCAL_SYNC, accepts_app_ingest, is_file_delivery
 from ..sources.registry import REGISTRY
 from ..storage.signal_identity import get_signal_identity, put_signal_identity
-from ..storage.source_settings import get_source_settings, put_source_settings, update_sync_result
-from ..analytics.messenger_communities import compute_and_persist_messenger_analytics
+from ..storage.source_settings import get_source_settings, put_source_settings
 from ..engine.usage_observation import emit_usage_observation
 from ..engine.usage_guard import submit_usage_guard_check
 
@@ -205,42 +207,59 @@ async def sync_source(
     if not dataset_id:
         return {"status": "error", "error": "dataset_id required (query param)"}
 
-    conn = get_db_connection()
     sync_options = (body or {}).get("sync_options")
     if source_id == "imessage" and not sync_options:
         sync_options = {"mode": "3m"}
-    if source_id == "imessage":
-        result = await asyncio.to_thread(run_imessage_sync, dataset_id, sync_options=sync_options)
-    elif source_id == "signal":
-        result = await asyncio.to_thread(run_signal_sync, dataset_id, sync_options=sync_options)
-    else:
-        return {"status": "error", "error": f"sync not implemented for source_id={source_id}"}
 
-    if conn and result.get("status") == "ok":
-        update_sync_result(
-            conn, dataset_id, source_id,
-            success=True,
-            last_sync_at=datetime.now(timezone.utc).isoformat(),
-        )
-        # Sprint 03 trigger: refresh messenger analytics after successful sync.
-        try:
-            await asyncio.to_thread(
-                compute_and_persist_messenger_analytics,
-                dataset_id=dataset_id,
-                conn=conn,
-                source_ids=[source_id],
-                period_granularity="month",
-            )
-        except Exception:
-            # Non-fatal; sync result should still return success.
-            pass
-    elif conn and result.get("status") == "error":
-        update_sync_result(
-            conn, dataset_id, source_id,
-            success=False,
-            last_error=result.get("error", "Sync failed"),
-        )
-    return result
+    # Same helper the websocket handler uses. This route and that one serve the
+    # SAME url — the app reaches this one through the dev proxy and that one in
+    # production — so they must not drift; they already had, with only this side
+    # refreshing messenger analytics after a sync.
+    outcome = await enqueue_local_sync(
+        source_id=source_id,
+        dataset_id=dataset_id,
+        sync_options=sync_options,
+        conn_factory=get_db_connection,
+    )
+    if outcome.get("status") != "ok":
+        return {"status": "error", "error": outcome.get("error") or "sync enqueue failed"}
+    already = bool(outcome.get("already_running"))
+    return {
+        "status": "ok",
+        "job_id": str(outcome.get("job_id")),
+        "source_id": source_id,
+        "dataset_id": dataset_id,
+        "already_running": already,
+        "message": (
+            "A sync is already running for this source."
+            if already
+            else "Sync started. Poll /v1/enrichment/progress/{job_id} for progress."
+        ),
+    }
+
+
+@router.get("/v1/enrichment/progress/{job_id}", dependencies=[Depends(require_api_key)])
+async def get_job_progress(job_id: str):
+    """Progress for any pipeline job, by id.
+
+    The websocket surface has had ``enrichment_progress`` since v1.0.8 and it is
+    kind-agnostic — a plain ``get_job`` — but the node's own HTTP surface never
+    grew the matching route, so the app's poll loop 404s whenever it runs
+    against the node directly (the dev proxy). Sync needs to be pollable on both
+    surfaces, and adding it here fixes enrichment's dev lane at the same time.
+
+    Returns 200 with ``{"status": "error"}`` for an unknown id rather than a
+    404/5xx: this is polled every couple of seconds, and an error status on a
+    poll route is how a transient miss turns into an unreadable failure at the
+    edge.
+    """
+    conn = get_db_connection()
+    if conn is None:
+        return {"status": "error", "error": "Database connection not available"}
+    job = await asyncio.to_thread(get_job, conn, str(job_id))
+    if not job:
+        return {"status": "error", "error": f"Job {job_id} not found"}
+    return {"status": "ok", **_progress_dict(job)}
 
 
 @router.post("/sources/signal/upload", dependencies=[Depends(require_api_key)])
