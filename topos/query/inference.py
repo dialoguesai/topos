@@ -115,6 +115,13 @@ def run_query_inference(
     packet_resolution: str = "scores_only",
 ) -> Dict[str, Any]:
     bounded = build_inference_context_packet(context_packet, max_chars=max_chars, packet_resolution=packet_resolution)
+    # Whether the evidence handed to the model was CUT. Computed since 2026-08-25 and, until now,
+    # dropped at every one of this function's exits — so an answer written from a packet whose tail
+    # was removed was indistinguishable from one written from the whole of it. A qualifier that
+    # sits past the budget is exactly the kind of thing that changes an answer, and the reader had
+    # no way to know it was missing. Carried on every return, including the failures, because a
+    # deferred or errored turn that was ALSO truncated is worth knowing about.
+    context_truncated = bool(bounded.get("context_truncated"))
     client = get_engine_client_or_local(engine)
     task = ProcessingTask(
         id=f"query_inf_{scope_id}",
@@ -133,20 +140,25 @@ def run_query_inference(
         future = _INFERENCE_POOL.submit(_run)
         result = future.result(timeout=timeout_sec)
     except FuturesTimeoutError:
-        return {"answer": "unknown", "confidence": 0.0, "deferred": True, "error": "inference_timeout"}
+        return {"answer": "unknown", "confidence": 0.0, "deferred": True,
+                "error": "inference_timeout", "context_truncated": context_truncated}
     except Exception as exc:
-        return {"answer": "unknown", "confidence": 0.0, "error": str(exc)}
+        return {"answer": "unknown", "confidence": 0.0, "error": str(exc),
+                "context_truncated": context_truncated}
 
     if result.status == "deferred":
         err = getattr(result, "error", None) or (result.output or {}).get("error")
-        out = {"answer": "unknown", "confidence": 0.0, "deferred": True}
+        out = {"answer": "unknown", "confidence": 0.0, "deferred": True,
+               "context_truncated": context_truncated}
         if err:
             out["error"] = err
         return out
     if result.status != "completed":
-        return {"answer": "unknown", "confidence": 0.0, "error": result.error}
+        return {"answer": "unknown", "confidence": 0.0, "error": result.error,
+                "context_truncated": context_truncated}
     out = result.output or {}
     return {
         "answer": out.get("answer") or out.get("output") or "unknown",
         "confidence": float(out.get("confidence") or 0.0),
+        "context_truncated": context_truncated,
     }
