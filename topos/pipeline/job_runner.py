@@ -327,6 +327,16 @@ _LONG_RUNNING_KINDS: frozenset[str] = frozenset({LOCAL_SYNC_KIND})
 #: on every batch, so this is the worst case after a crash, not the norm.
 LONG_JOB_LEASE_SECONDS = 1800
 
+#: Idle cadence for the long lane. Every tick claims against SQLite under the
+#: write gate, and this lane's kinds fire a few times a day — polling them four
+#: times a second would double the queue's idle gate traffic to watch for work
+#: that is almost never there, on a node whose write-gate contention is what put
+#: the sync in a job in the first place. A newly enqueued sync waits at most
+#: _LONG_MAX_POLL_SECONDS to start, which is nothing against a run measured in
+#: hours, and the caller stamps the row 'processing' before that.
+_LONG_IDLE_POLL_SECONDS = 1.0
+_LONG_MAX_POLL_SECONDS = 10.0
+
 
 def _executable_kinds() -> list[str]:
     """Kinds the general worker may claim. Computed per claim so tests that patch
@@ -578,6 +588,8 @@ async def _worker_loop(
     sweep_debts: bool = True,
     label: str = "pipeline",
     lease_seconds: int = DEFAULT_LEASE_SECONDS,
+    idle_seconds: float = _IDLE_POLL_SECONDS,
+    max_idle_seconds: float = _MAX_POLL_SECONDS,
 ) -> None:
     """One serial claim-and-run loop over the kinds ``kinds_fn`` returns.
 
@@ -586,7 +598,7 @@ async def _worker_loop(
     only — running the derivation-debt sweep from both would double its
     database traffic for no benefit.
     """
-    idle_delay = _IDLE_POLL_SECONDS
+    idle_delay = idle_seconds
     next_debt_sweep = 0.0
     while True:
         try:
@@ -622,9 +634,9 @@ async def _worker_loop(
             if job is None:
                 await asyncio.sleep(idle_delay)
                 # Ease off while nothing is queued; snap back the moment work lands.
-                idle_delay = min(idle_delay * 1.5, _MAX_POLL_SECONDS)
+                idle_delay = min(idle_delay * 1.5, max_idle_seconds)
                 continue
-            idle_delay = _IDLE_POLL_SECONDS
+            idle_delay = idle_seconds
             try:
                 await process_job(conn_factory, job)
             except Exception as exc:  # noqa: BLE001
@@ -646,7 +658,7 @@ async def _worker_loop(
             else:
                 logger.warning("%s worker loop error: %s", label, exc, exc_info=exc)
             await asyncio.sleep(idle_delay)
-            idle_delay = min(idle_delay * 1.5, _MAX_POLL_SECONDS)
+            idle_delay = min(idle_delay * 1.5, max_idle_seconds)
 
 
 def start_pipeline_worker(conn_factory: Callable[[], Any]) -> None:
@@ -678,6 +690,8 @@ def start_pipeline_worker(conn_factory: Callable[[], Any]) -> None:
                     sweep_debts=False,
                     label="pipeline-long",
                     lease_seconds=LONG_JOB_LEASE_SECONDS,
+                    idle_seconds=_LONG_IDLE_POLL_SECONDS,
+                    max_idle_seconds=_LONG_MAX_POLL_SECONDS,
                 )
             )
 

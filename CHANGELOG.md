@@ -61,7 +61,10 @@ The machine-readable twin of each release is
   would have stalled `inbox_deferred_enrichment`, `file_ingestion`,
   `enrichment_process_source`, `topic_consolidation` and `signal_derive_retry` for its whole
   run. `local_sync` is partitioned onto a second loop over the same `pipeline_jobs` table;
-  the general lane keeps exactly its five pre-existing kinds, pinned by test.
+  the general lane keeps exactly its five pre-existing kinds, pinned by test. The long lane
+  polls on its own slower cadence (1s backing off to 10s, against the general lane's 0.25s/5s)
+  — every tick claims under the write gate, and a kind that fires a few times a day does not
+  earn four claims a second on a node whose gate contention is why the sync moved here at all.
 - **Both sync doors share one enqueue path.** `[S1]` The websocket handler and the node's
   own HTTP route serve the same url and the same button, and had already drifted: only the
   HTTP route refreshed messenger analytics after a sync. Both now go through
