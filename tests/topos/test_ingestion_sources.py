@@ -94,8 +94,23 @@ async def test_sync_imessage_requires_dataset_id():
     assert "dataset_id" in payload.get("error", "").lower()
 
 
+@pytest.fixture
+def no_pipeline_worker(monkeypatch: pytest.MonkeyPatch):
+    """Enqueue without executing.
+
+    The pipeline worker defaults to ON, so a test that enqueues a real
+    `local_sync` job hands the long lane something to claim — and its executor
+    reads the machine's actual chat.db and runs enrichment over it, inside the
+    test process. That is heavy real I/O appearing at an arbitrary point in the
+    run: harmless to these assertions, but it starves whatever timing-sensitive
+    test comes next. These tests are about what the ROUTE returns, so the worker
+    stays off and the row simply sits queued.
+    """
+    monkeypatch.setenv("TOPOS_PIPELINE_WORKER", "off")
+
+
 @pytest.mark.asyncio
-async def test_sync_imessage_returns_job_handle_without_running_the_sync():
+async def test_sync_imessage_returns_job_handle_without_running_the_sync(no_pipeline_worker):
     """Sync answers with a job handle immediately; it does not run inline.
 
     The whole point of the change: a first iMessage run drains the entire
@@ -126,7 +141,7 @@ async def test_sync_imessage_returns_job_handle_without_running_the_sync():
 
 
 @pytest.mark.asyncio
-async def test_sync_imessage_second_call_reattaches_to_the_running_job():
+async def test_sync_imessage_second_call_reattaches_to_the_running_job(no_pipeline_worker):
     """A second press returns the SAME job id instead of starting a rival sync.
 
     Two concurrent syncs write the same SQLite file; that is the shape behind
@@ -159,7 +174,7 @@ async def test_sync_imessage_second_call_reattaches_to_the_running_job():
 
 
 @pytest.mark.asyncio
-async def test_job_progress_route_answers_200_for_an_unknown_job():
+async def test_job_progress_route_answers_200_for_an_unknown_job(no_pipeline_worker):
     """The poll route never answers 5xx — not even for a job that does not exist.
 
     A 5xx on a route polled every couple of seconds is how a transient miss
