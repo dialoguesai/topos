@@ -16,12 +16,14 @@ from ..storage.db.write_gate import is_busy_error
 # Safe at import time: derivation_recovery has no module-level heavy imports.
 from ..enrichment.derivation_recovery import SIGNAL_DERIVE_RETRY_KIND
 from .job_store import (
+    DEFAULT_LEASE_SECONDS,
     claim_matching_queued_jobs,
     claim_next_job,
     complete_job,
     fail_job,
     recover_stale_jobs,
     record_derivation_completion,
+    renew_job_lease,
     requeue_job,
     update_job_progress,
 )
@@ -208,6 +210,29 @@ async def _execute_local_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
     dataset_id = str(payload.get("dataset_id") or "").strip()
     sync_options = payload.get("sync_options")
     progress_updater = payload.get("_progress_updater")
+    job_id = str(payload.get("_job_id") or "")
+
+    def _on_batch(progress: Dict[str, Any]) -> None:
+        """Report a batch and prove the job is still alive, in that order.
+
+        The lease is renewed here rather than on a timer because a batch is the
+        only moment this job is provably making progress; a heartbeat that ran
+        independently of the work would keep claiming liveness for a sync that
+        had silently stopped.
+        """
+        if progress_updater is not None:
+            progress_updater(progress)
+        if not job_id:
+            return
+        try:
+            from ..core.state import get_db_connection
+
+            own = get_db_connection()
+            if own is not None:
+                renew_job_lease(own, job_id, lease_seconds=LONG_JOB_LEASE_SECONDS)
+        except Exception as exc:  # noqa: BLE001 — liveness is best-effort
+            logger.debug("lease renewal failed job_id=%s: %s", job_id, exc)
+
     if not source_id or not dataset_id:
         return {"status": "error", "error": "source_id and dataset_id required"}
     if source_id not in ("imessage", "signal"):
@@ -223,9 +248,9 @@ async def _execute_local_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
             return {"status": "error", "error": "no database connection"}
 
         if source_id == "imessage":
-            result = run_imessage_sync(dataset_id, sync_options=sync_options, progress_cb=progress_updater)
+            result = run_imessage_sync(dataset_id, sync_options=sync_options, progress_cb=_on_batch)
         else:
-            result = run_signal_sync(dataset_id, sync_options=sync_options, progress_cb=progress_updater)
+            result = run_signal_sync(dataset_id, sync_options=sync_options, progress_cb=_on_batch)
 
         status = str(result.get("status") or "error")
         # The receipt, on this thread, where taking the write gate is legal.
@@ -293,6 +318,14 @@ EXECUTORS: Dict[str, ExecutorFn] = {
 #: is separately serial, which is also the guard that stops two syncs of the
 #: same source overlapping on one SQLite file.
 _LONG_RUNNING_KINDS: frozenset[str] = frozenset({LOCAL_SYNC_KIND})
+
+#: Lease for the long lane. The default 300s is shorter than a SINGLE iMessage
+#: batch (~9 min here), so a healthy sync would spend most of its life looking
+#: dead to anything that reads the table — including the queued/running check
+#: that stops two syncs running at once. Long enough to cover a batch, short
+#: enough that a real death is noticed in minutes; the executor also renews it
+#: on every batch, so this is the worst case after a crash, not the norm.
+LONG_JOB_LEASE_SECONDS = 1800
 
 
 def _executable_kinds() -> list[str]:
@@ -439,6 +472,8 @@ async def process_job(conn_factory: Callable[[], Any], job: Dict[str, Any]) -> N
         jobs, payload = await _run_db(conn_factory, _coalesce_inbox_jobs, job, payload)
     if kind in ("enrichment_process_source", LOCAL_SYNC_KIND):
         payload["_progress_updater"] = _progress_updater
+    if kind == LOCAL_SYNC_KIND:
+        payload["_job_id"] = job_id
 
     try:
         result = await executor(payload)
@@ -542,6 +577,7 @@ async def _worker_loop(
     kinds_fn: Callable[[], list[str]] = _executable_kinds,
     sweep_debts: bool = True,
     label: str = "pipeline",
+    lease_seconds: int = DEFAULT_LEASE_SECONDS,
 ) -> None:
     """One serial claim-and-run loop over the kinds ``kinds_fn`` returns.
 
@@ -578,7 +614,9 @@ async def _worker_loop(
                 own = conn_factory()
                 if own is None:
                     return None
-                return claim_next_job(own, lease_owner=_lease_owner, kinds=kinds_fn())
+                return claim_next_job(
+                    own, lease_owner=_lease_owner, kinds=kinds_fn(), lease_seconds=lease_seconds
+                )
 
             job = await asyncio.to_thread(_claim)
             if job is None:
@@ -639,6 +677,7 @@ def start_pipeline_worker(conn_factory: Callable[[], Any]) -> None:
                     kinds_fn=_long_running_kinds,
                     sweep_debts=False,
                     label="pipeline-long",
+                    lease_seconds=LONG_JOB_LEASE_SECONDS,
                 )
             )
 

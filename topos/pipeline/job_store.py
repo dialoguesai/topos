@@ -135,6 +135,7 @@ def find_active_job(
     two datasets syncing the same source are genuinely independent runs.
     """
     ensure_pipeline_jobs_schema(conn)
+    now = _now()
     rows = conn.execute(
         """
         SELECT job_id, kind, status, lease_owner, lease_expires_at, payload_json,
@@ -142,9 +143,10 @@ def find_active_job(
                idempotency_key, started_at, finished_at, created_at, updated_at
         FROM pipeline_jobs
         WHERE kind=? AND source_id=? AND status IN ('queued','running')
+          AND (status='queued' OR lease_expires_at IS NULL OR lease_expires_at >= ?)
         ORDER BY created_at ASC
         """,
-        (kind, source_id),
+        (kind, source_id, now),
     ).fetchall()
     for row in rows:
         job = _row_to_dict(row)
@@ -153,6 +155,78 @@ def find_active_job(
         if str((job.get("payload") or {}).get("dataset_id") or "") == str(dataset_id):
             return job
     return None
+
+
+def reclaim_stale_job(
+    conn: sqlite3.Connection,
+    *,
+    kind: str,
+    source_id: str,
+    dataset_id: Optional[str] = None,
+) -> Optional[str]:
+    """Requeue a 'running' job of this kind whose lease has expired, and name it.
+
+    A job whose owner died is still marked running, and ``recover_stale_jobs``
+    only runs at startup — so without this, a node that stopped mid-sync leaves a
+    row that ``find_active_job`` used to read as live and refuse to start behind,
+    wedging the sync button with no error anywhere. Requeuing the SAME row rather
+    than starting a new one keeps it to one job: the worker re-claims it within a
+    poll and the sync resumes from its checkpoint.
+
+    Scoped to one kind and one source deliberately. A blanket sweep here would
+    also requeue other kinds' long-but-healthy jobs — a live 32-minute
+    consolidation holds a 300s lease — and re-running one of those concurrently
+    with itself is a worse bug than the one this fixes.
+    """
+    ensure_pipeline_jobs_schema(conn)
+    now = _now()
+    rows = conn.execute(
+        """
+        SELECT job_id, kind, status, lease_owner, lease_expires_at, payload_json,
+               progress_json, detail_json, sync_batch_id, source_id, write_id,
+               idempotency_key, started_at, finished_at, created_at, updated_at
+        FROM pipeline_jobs
+        WHERE kind=? AND source_id=? AND status='running'
+          AND lease_expires_at IS NOT NULL AND lease_expires_at < ?
+        ORDER BY created_at ASC
+        """,
+        (kind, source_id, now),
+    ).fetchall()
+    for row in rows:
+        job = _row_to_dict(row)
+        if dataset_id is not None and str((job.get("payload") or {}).get("dataset_id") or "") != str(dataset_id):
+            continue
+        job_id = str(job.get("job_id"))
+        requeue_job(conn, job_id)
+        return job_id
+    return None
+
+
+def renew_job_lease(
+    conn: sqlite3.Connection,
+    job_id: str,
+    *,
+    lease_seconds: int = DEFAULT_LEASE_SECONDS,
+) -> None:
+    """Push a running job's lease forward. No-op for a job that is not running.
+
+    A lease is a liveness claim, and a job that outlives it looks dead to
+    everything that reads the table. Only jobs whose runtime can exceed the
+    lease need this — for those, the alternative is a lease long enough to cover
+    the worst case, which then takes just as long to notice a genuine death.
+    """
+    ensure_pipeline_jobs_schema(conn)
+    expires = (datetime.now(timezone.utc) + timedelta(seconds=lease_seconds)).isoformat()
+    with with_db_write():
+        conn.execute(
+            """
+            UPDATE pipeline_jobs
+            SET lease_expires_at=?, updated_at=datetime('now')
+            WHERE job_id=? AND status='running'
+            """,
+            (expires, job_id),
+        )
+        commit_connection(conn)
 
 
 def update_job_progress(

@@ -217,3 +217,126 @@ async def test_executor_rejects_an_unsupported_source() -> None:
 
     result = await job_runner._execute_local_sync({"source_id": "slack", "dataset_id": "ds"})
     assert result["status"] == "error"
+
+
+def _expire_lease(conn: sqlite3.Connection, job_id: str) -> None:
+    conn.execute(
+        "UPDATE pipeline_jobs SET lease_expires_at='2000-01-01T00:00:00+00:00' WHERE job_id=?",
+        (job_id,),
+    )
+    conn.commit()
+
+
+def test_a_dead_sync_does_not_block_the_next_one(conn: sqlite3.Connection) -> None:
+    """A node that stopped mid-sync must not wedge the button forever.
+
+    The lease is 300s by default and recover_stale_jobs only runs at startup, so
+    a row left `running` by a dead worker would otherwise read as a live sync to
+    find_active_job and every later press would be refused — with no error
+    anywhere, since a re-attach looks like success.
+    """
+    from topos.pipeline.job_store import reclaim_stale_job
+
+    enqueue_job(
+        conn,
+        kind=LOCAL_SYNC_KIND,
+        payload={"source_id": "imessage", "dataset_id": "ds"},
+        job_id="sync-dead",
+        source_id="imessage",
+        idempotency_key=f"{LOCAL_SYNC_KIND}:sync-dead",
+    )
+    claim_next_job(conn, lease_owner="worker-that-died", kinds=_long_running_kinds())
+    _expire_lease(conn, "sync-dead")
+
+    # The corpse is not a live sync.
+    assert find_active_job(conn, kind=LOCAL_SYNC_KIND, source_id="imessage", dataset_id="ds") is None
+
+    # And the next press resumes THAT job rather than starting a rival.
+    assert reclaim_stale_job(conn, kind=LOCAL_SYNC_KIND, source_id="imessage", dataset_id="ds") == "sync-dead"
+    resumed = find_active_job(conn, kind=LOCAL_SYNC_KIND, source_id="imessage", dataset_id="ds")
+    assert resumed is not None and resumed["job_id"] == "sync-dead"
+    assert resumed["status"] == "queued"
+    assert claim_next_job(conn, lease_owner="new-worker", kinds=_long_running_kinds())["job_id"] == "sync-dead"
+
+
+def test_a_live_sync_still_blocks_a_second_one(conn: sqlite3.Connection) -> None:
+    """The lease-awareness must not open the door it was added to keep shut."""
+    from topos.pipeline.job_store import reclaim_stale_job
+
+    enqueue_job(
+        conn,
+        kind=LOCAL_SYNC_KIND,
+        payload={"source_id": "imessage", "dataset_id": "ds"},
+        job_id="sync-live",
+        source_id="imessage",
+        idempotency_key=f"{LOCAL_SYNC_KIND}:sync-live",
+    )
+    claim_next_job(conn, lease_owner="live-worker", kinds=_long_running_kinds())
+
+    assert reclaim_stale_job(conn, kind=LOCAL_SYNC_KIND, source_id="imessage", dataset_id="ds") is None
+    active = find_active_job(conn, kind=LOCAL_SYNC_KIND, source_id="imessage", dataset_id="ds")
+    assert active is not None and active["job_id"] == "sync-live"
+    assert active["status"] == "running"
+
+
+def test_renewing_the_lease_keeps_a_long_sync_alive(conn: sqlite3.Connection) -> None:
+    """A batch takes longer than the default lease, so renewal is what keeps
+    a healthy multi-hour sync from looking dead to its own mutual-exclusion check."""
+    from topos.pipeline.job_store import renew_job_lease
+
+    enqueue_job(
+        conn,
+        kind=LOCAL_SYNC_KIND,
+        payload={"source_id": "imessage", "dataset_id": "ds"},
+        job_id="sync-renew",
+        source_id="imessage",
+        idempotency_key=f"{LOCAL_SYNC_KIND}:sync-renew",
+    )
+    claim_next_job(conn, lease_owner="w", kinds=_long_running_kinds())
+    _expire_lease(conn, "sync-renew")
+    assert find_active_job(conn, kind=LOCAL_SYNC_KIND, source_id="imessage", dataset_id="ds") is None
+
+    renew_job_lease(conn, "sync-renew", lease_seconds=1800)
+    revived = find_active_job(conn, kind=LOCAL_SYNC_KIND, source_id="imessage", dataset_id="ds")
+    assert revived is not None and revived["status"] == "running"
+
+
+def test_renewal_never_resurrects_a_finished_job(conn: sqlite3.Connection) -> None:
+    from topos.pipeline.job_store import get_job, renew_job_lease
+
+    enqueue_job(
+        conn,
+        kind=LOCAL_SYNC_KIND,
+        payload={"source_id": "imessage", "dataset_id": "ds"},
+        job_id="sync-done",
+        source_id="imessage",
+        idempotency_key=f"{LOCAL_SYNC_KIND}:sync-done",
+    )
+    conn.execute("UPDATE pipeline_jobs SET status='done' WHERE job_id='sync-done'")
+    conn.commit()
+    renew_job_lease(conn, "sync-done", lease_seconds=1800)
+    assert get_job(conn, "sync-done")["status"] == "done"
+
+
+def test_reclaim_is_scoped_to_its_own_kind(conn: sqlite3.Connection) -> None:
+    """A blanket sweep would requeue other kinds' long-but-healthy jobs.
+
+    A live topic_consolidation runs far past its 300s lease; requeuing one
+    mid-flight would run it concurrently with itself — worse than the wedge this
+    reclaim exists to clear.
+    """
+    from topos.pipeline.job_store import get_job, reclaim_stale_job
+
+    enqueue_job(
+        conn,
+        kind="topic_consolidation",
+        payload={"source_id": "imessage"},
+        job_id="other-kind",
+        source_id="imessage",
+        idempotency_key="topic_consolidation:other-kind",
+    )
+    claim_next_job(conn, lease_owner="w", kinds=["topic_consolidation"])
+    _expire_lease(conn, "other-kind")
+
+    assert reclaim_stale_job(conn, kind=LOCAL_SYNC_KIND, source_id="imessage", dataset_id=None) is None
+    assert get_job(conn, "other-kind")["status"] == "running"

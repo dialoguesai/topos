@@ -46,7 +46,12 @@ async def enqueue_local_sync(
     corruption.
     """
     from ..pipeline.job_runner import LOCAL_SYNC_KIND, start_pipeline_worker
-    from ..pipeline.job_store import enqueue_job, find_active_job, update_job_progress
+    from ..pipeline.job_store import (
+        enqueue_job,
+        find_active_job,
+        reclaim_stale_job,
+        update_job_progress,
+    )
 
     source_id = (source_id or "").strip()
     dataset_id = (dataset_id or "").strip()
@@ -68,6 +73,20 @@ async def enqueue_local_sync(
         own = conn_factory()
         if own is None:
             return {"status": "error", "error": "Database connection not available"}
+        # A node that stopped mid-sync leaves a row marked running with a dead
+        # owner, and the only stale-job sweep runs at startup — so without this
+        # the next press would read that corpse as a live sync and refuse to
+        # start behind it, wedging the button with no error anywhere. Requeuing
+        # the same row resumes that sync from its checkpoint instead.
+        reclaimed = reclaim_stale_job(
+            own, kind=LOCAL_SYNC_KIND, source_id=source_id, dataset_id=dataset_id
+        )
+        if reclaimed:
+            logger.info(
+                "[PIPELINE:SYNC] requeued a sync whose worker died: source_id=%s job_id=%s",
+                source_id,
+                reclaimed,
+            )
         active = find_active_job(
             own, kind=LOCAL_SYNC_KIND, source_id=source_id, dataset_id=dataset_id
         )

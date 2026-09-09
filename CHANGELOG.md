@@ -38,6 +38,17 @@ The machine-readable twin of each release is
   reason one level down under `result`, while the progress projection read only
   `errors` at the top level — so every returned failure rendered as "0%" with no message,
   indistinguishable from a job that had not started. Fixes enrichment as well as sync.
+- **A node that stops mid-sync no longer wedges the Sync button.** `[S1]` Found by review, with
+  a reproduction. The lease is 300s and the only stale-job sweep runs at startup, so a node that
+  died — or quit cleanly, which cancels the worker without requeuing — inside the first five
+  minutes of a sync left a row marked `running` with a dead owner. The new queued/running check
+  read that corpse as a live sync and refused to start behind it, so every later press answered
+  `already_running` and the button stayed disabled with no error anywhere. The lane's lease is
+  now 1800s (a single iMessage batch alone takes ~9 min) and the executor renews it on every
+  batch, so a healthy sync never looks dead; a press that finds an expired lease requeues that
+  same job, resuming it from its checkpoint rather than starting a rival. The reclaim is scoped
+  to `local_sync` — a blanket sweep would requeue other kinds' long-but-healthy jobs, and a live
+  32-minute consolidation holds a 300s lease.
 - **The node's own HTTP surface can poll job progress.** `[S1]` `enrichment_progress` has
   existed on the websocket since v1.0.8 but never had an HTTP twin, so the app's poll loop
   404'd whenever it ran against the node directly (the dev proxy).
