@@ -505,8 +505,6 @@ async def startup_event() -> None:
         # Seed before connecting so the first CP poll can fall back. The
         # 5s snapshot path used to wait forever when this was empty.
         try:
-            from .services.container import get_services
-
             seed_payload = await get_services().device.get_device_info(context=None)
             if isinstance(seed_payload, dict):
                 state.control_plane_client.set_device_info_snapshot(seed_payload)
