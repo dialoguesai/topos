@@ -95,6 +95,8 @@
     "first_source_ref_only",
     "graph_lane",
     "gate_vetoed",
+    "index_incomplete",
+    "index_job_in_flight",
     "grantee_scrub_facts",
     "hosted_binding_text_withheld",
     "owner_permission_claim_replaced",
@@ -170,6 +172,7 @@
   "empty_causes": [
     "engine_failed",
     "gate_vetoed",
+    "index_incomplete",
     "no_match",
     "not_queried",
     "scope_denied",
@@ -179,6 +182,7 @@
     "scope_denied",
     "engine_failed",
     "not_queried",
+    "index_incomplete",
     "gate_vetoed",
     "no_match",
     "store_empty"

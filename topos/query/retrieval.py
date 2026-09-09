@@ -6414,6 +6414,29 @@ def routing_supply_states(
     return out
 
 
+def _index_jobs_in_flight(conn: Any, source_ids: List[str]) -> bool:
+    """Is the node still ingesting or embedding anything this scope reads?
+
+    `pipeline_jobs.status` is one of queued / running / done / failed (`pipeline/job_store.py`),
+    and a job carries the `source_id` it is working on. Only the first two mean "not finished
+    yet". A node with no such table has nothing in flight, which is the honest answer for every
+    fixture and every older database.
+    """
+    if conn is None or not source_ids:
+        return False
+    placeholders = ",".join("?" for _ in source_ids)
+    try:
+        row = conn.execute(
+            f"""SELECT 1 FROM pipeline_jobs
+                WHERE status IN ('queued', 'running') AND source_id IN ({placeholders})
+                LIMIT 1""",
+            tuple(source_ids),
+        ).fetchone()
+    except Exception:
+        return False  # no such table on this node: nothing is in flight
+    return row is not None
+
+
 class DefaultSignalRetrievalAdapter:
     """Retrieve minimum necessary data per access mode and manifest."""
 
@@ -6525,6 +6548,50 @@ class DefaultSignalRetrievalAdapter:
         )
 
     def retrieve(self, request: RetrievalRequest) -> RetrievalBundle:
+        """Retrieve, then let an empty result say whether the node is still indexing.
+
+        An empty lane has more than one honest explanation and they are not interchangeable.
+        "You never mentioned this" (`gate_vetoed`, `no_match`) and "connect a source"
+        (`store_empty`) are both wrong when the rows are already here and the embeddings are not:
+        the true answer is "ask again shortly". Embeddings are written by the enrichment path
+        AFTER ingestion, so this window is not an edge case — it is where a node sits just after
+        its first import, which is exactly when someone asks their first question.
+
+        Kept as a wrapper rather than folded into the stages so it reads once, at the end, off the
+        result that actually came back. `_CAUSE_PRECEDENCE` does the rest: `index_incomplete`
+        outranks the three explanations above and yields to a denial or a relay failure, which are
+        about whether the question ran at all.
+        """
+        bundle = self._retrieve_bundle(request)
+        try:
+            self._stamp_index_lag(request, bundle)
+        except Exception as exc:  # noqa: BLE001 — an explanation must never break a retrieval
+            logger.debug("index-lag stamp skipped: %s", exc)
+        return bundle
+
+    #: The empties that an in-flight index job explains better than they explain themselves.
+    _LAG_EXPLAINS = (_N.CAUSE_GATE_VETOED, _N.CAUSE_NO_MATCH, _N.CAUSE_STORE_EMPTY)
+
+    def _stamp_index_lag(self, request: RetrievalRequest, bundle: RetrievalBundle) -> None:
+        ledger = request.ledger
+        if ledger is None or ledger.empty_cause not in self._LAG_EXPLAINS:
+            return
+        packet = bundle.context_packet if isinstance(bundle.context_packet, dict) else {}
+        if any(isinstance(v, list) and v for v in packet.values()):
+            return  # something came back; the empty cause is not the story
+        conn = getattr(self._adapters.signal, "_conn", None)
+        sources = [str(s).strip() for s in (request.manifest.default_source_ids or []) if str(s).strip()]
+        if conn is None or not sources:
+            return
+        if not _index_jobs_in_flight(conn, sources):
+            return
+        ledger.empty(
+            _N.CAUSE_INDEX_INCOMPLETE,
+            stage=_N.STAGE_RETRIEVAL,
+            reason="index_job_in_flight",
+        )
+
+    def _retrieve_bundle(self, request: RetrievalRequest) -> RetrievalBundle:
         self.retrieve_call_count += 1
         manifest: ScopeResolutionManifest = request.manifest
         query_text = str(request.query_text or "").strip()

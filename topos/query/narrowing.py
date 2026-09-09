@@ -130,6 +130,11 @@ CAUSE_SCOPE_DENIED = "scope_denied"
 #: "nothing here" and never "not permitted". Until 2026-09-05 the relay built these
 #: three failures with ``scope_denied``, and a timeout read downstream as a refusal.
 CAUSE_ENGINE_FAILED = "engine_failed"
+#: The node holds the rows but has not finished indexing them. Distinct from every other empty:
+#: the answer is not "you never mentioned this" (`gate_vetoed`, `no_match`) and not "connect a
+#: source" (`store_empty`) — it is "ask again shortly". Outranks all three for that reason, and
+#: yields to a denial or a relay failure, which are about whether the question ran at all.
+CAUSE_INDEX_INCOMPLETE = "index_incomplete"
 
 #: Precedence when several stages have an opinion, most authoritative first. A denied
 #: scope is denied whatever the stores hold; a failed relay outranks every inferred
@@ -139,6 +144,7 @@ _CAUSE_PRECEDENCE = (
     CAUSE_SCOPE_DENIED,
     CAUSE_ENGINE_FAILED,
     CAUSE_NOT_QUERIED,
+    CAUSE_INDEX_INCOMPLETE,
     CAUSE_GATE_VETOED,
     CAUSE_NO_MATCH,
     CAUSE_STORE_EMPTY,
@@ -267,6 +273,7 @@ REASONS = frozenset(
         "hosted_binding_text_withheld",
         "owner_permission_claim_replaced",
         "owner_failure_claim_replaced",
+        "index_job_in_flight",
         "owner_supply_claim_replaced",
         "grantee_scrub_scores",
         "grantee_scrub_semantic_hits",

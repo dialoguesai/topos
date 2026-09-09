@@ -69,6 +69,12 @@ The machine-readable twin of each release is
 ## [1.3.52] — 2026-09-07
 
 ### Added
+- **A node that is still indexing says so.** `[S1]` `[E:query]` A new empty cause,
+  `index_incomplete`, for the window between an import finishing and its embeddings being
+  written — where the rows are already here and an ask about them was answered with
+  "nothing in your data mentions that". It outranks the three empties it explains and
+  yields to a denial or a relay failure, and it is stamped only for a queued or running job
+  on a source the asking scope actually reads.
 - **The retrieval-text contract.** `[S1]` `[E:query]` `topos/protocol/retrieval_text_contract.json`
   publishes what every entrance distils an ask into before the node sees it — the subject
   words, minus output-shape words ("poem", "kanban", "two paragraph") and style spans ("in
