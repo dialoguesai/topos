@@ -147,41 +147,59 @@ def resolve_spec(dep: str, versions: dict[str, str]) -> str:
     return compatible_spec(version)
 
 
-def build_section_lines(names: tuple[str, ...], versions: dict[str, str]) -> list[str]:
-    lines: list[str] = []
-    for dep in names:
-        spec = resolve_spec(dep, versions)
-        lines.append(f'  "{dep}{spec}",')
-    return lines
+def build_section_specs(names: tuple[str, ...], versions: dict[str, str]) -> dict[str, str]:
+    return {dep: resolve_spec(dep, versions) for dep in names}
 
 
-def replace_section(content: str, section: DepSection, lines: list[str]) -> str:
-    if section.header == "dependencies":
-        pattern = re.compile(
-            r"(dependencies = \[)\n(?:  \"[^\"]+\",\n)+\]",
-            re.MULTILINE,
+def replace_section(content: str, section: DepSection, specs: dict[str, str]) -> str:
+    """Rewrite each dependency's version spec in place, line by line.
+
+    Deliberately NOT a whole-block regex replacement. The dependency lists carry
+    comments that are load-bearing -- `grand-cypher`'s ceiling records that 1.0.0+
+    changed `RETURN a` and breaks test_entity_cypher, and `torch`'s records a
+    reproduced Apple-silicon SIGSEGV. Rewriting the block from generated lines
+    would silently delete them. (The old block regex could not match a list
+    containing comments at all, so this path raised RuntimeError for every real
+    edit; it was never reached because main() returns early when pins already
+    match, which is the only case the write path had ever run against.)
+    """
+    if not specs:
+        pattern = re.compile(rf"{re.escape(section.header)} = \[[^\]]*\]", re.MULTILINE)
+        updated, count = pattern.subn(f"{section.header} = []", content, count=1)
+        if count != 1:
+            raise RuntimeError(f"Could not update [{section.header}] in {PYPROJECT}")
+        return updated
+
+    start = re.search(rf"^{re.escape(section.header)} = \[$", content, re.MULTILINE)
+    if not start:
+        raise RuntimeError(f"Could not locate [{section.header}] in {PYPROJECT}")
+    end = re.compile(r"^\]$", re.MULTILINE).search(content, start.end())
+    if not end:
+        raise RuntimeError(f"Unterminated [{section.header}] list in {PYPROJECT}")
+
+    block = content[start.end() : end.start()]
+    for dep, spec in specs.items():
+        # (?![-\w.]) bounds the name on its right. Without it `pydantic` also
+        # matches the `pydantic-settings` entry -- `[^"]*` swallows the rest of
+        # the longer name -- and rewrites it into a second `pydantic` line,
+        # silently deleting a dependency from a file that ships to PyPI. Today
+        # every prefix pair here (pydantic/pydantic-settings, pytest/
+        # pytest-asyncio) is managed and ordered so the collision raises instead,
+        # but that is an accident of ordering, not a guarantee.
+        line = re.compile(
+            rf'^(  ")({re.escape(dep)}(?![-\w.]))([^"]*)(",)$', re.MULTILINE
         )
-        replacement = "dependencies = [\n" + "\n".join(lines) + "\n]"
-    elif lines:
-        pattern = re.compile(
-            rf"({section.header} = \[)\n(?:  \"[^\"]+\",\n)+\]",
-            re.MULTILINE,
-        )
-        replacement = f"{section.header} = [\n" + "\n".join(lines) + "\n]"
-    else:
-        pattern = re.compile(rf"{section.header} = \[[^\]]*\]", re.MULTILINE)
-        replacement = f"{section.header} = []"
-    updated, count = pattern.subn(replacement, content, count=1)
-    if count != 1:
-        raise RuntimeError(f"Could not update [{section.header}] in {PYPROJECT}")
-    return updated
+        block, count = line.subn(rf'\g<1>\g<2>{spec}\g<4>', block, count=1)
+        if count != 1:
+            raise RuntimeError(f"Could not update {dep} in [{section.header}] of {PYPROJECT}")
+    return content[: start.end()] + block + content[end.start() :]
 
 
 def expected_content(versions: dict[str, str]) -> str:
     content = PYPROJECT.read_text(encoding="utf-8")
     for section in SECTIONS:
-        lines = build_section_lines(section.names, versions)
-        content = replace_section(content, section, lines)
+        specs = build_section_specs(section.names, versions)
+        content = replace_section(content, section, specs)
     return content
 
 

@@ -9,6 +9,32 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Security
+- **Nine of the eleven packages behind 36 Dependabot alerts move; the two that stay are
+  unreachable, and now say so in the file that pins them.** `[O]` `uv lock` takes
+  cryptography 46.0.7 → 50.0.1, mcp 1.27.0 → 1.30.0, starlette 1.0.0 → 1.6.0,
+  pydantic-settings 2.13.1 → 2.15.0, python-multipart 0.0.26 → 0.0.32, pyjwt 2.12.1 → 2.13.0,
+  urllib3 2.6.3 → 2.7.0, idna 3.11 → 3.19 and pyasn1 0.6.3 → 0.6.4; `scripts/sync-dep-pins.py`
+  re-derives the four direct pins from the lock. 34 of the 36 alerts close. Measured in a clean
+  worktree on its own venv, because a concurrent session's uncommitted edits to `narrowing.py`
+  made the first reading show three regressions that were not there: public lane 5951 passed / 0
+  failed, privacy battery 405 passed, and `uv build` + `twine check` pass both artifacts with the
+  isolated build env selecting setuptools 84.0.0.
+- **The remaining two alerts are one coupled problem, and taking either would cost more than
+  it buys.** `[O]` `torch` is capped `<2.13` because 2.13.0 SIGSEGVs in `mps copy_cast` under
+  the node's concurrent first-query load (the 1.3.5 cap; every fresh Apple-silicon install
+  died on its first chat turn), and torch 2.11.0 in turn requires `setuptools<82` — so the
+  lock's setuptools cannot reach the 83.0.0 that CVE-2026-59890 names. Neither CVE is
+  reachable from this tree. torch's CVE-2025-3000 is memory corruption through
+  `torch.jit.script`, and nothing here calls `torch.jit`, `jit.trace` or `torch.compile`.
+  setuptools' CVE-2026-59890 is an sdist MANIFEST.in *exclusion* bypass via NFC/NFD collision,
+  and this MANIFEST.in carries only `recursive-include` directives — there is no exclusion to
+  bypass. The exposure that was real is the build environment, which resolves from
+  `[build-system].requires` and never from `uv.lock`: that floor is now `setuptools>=83`, so a
+  build picks 84.0.0, which is where the sdist flaw actually lives. Both caps now carry the
+  reasoning inline — `torch`'s at both of its pin sites, `setuptools`' in `[build-system]` — so
+  the next reader does not re-litigate them from the alert list alone.
+
 ### Fixed
 - **iMessage/Signal sync no longer runs inside the HTTP request, so the browser stops
   reporting "Failed to fetch" on a sync that is working.** `[S1]` A first iMessage run
@@ -55,6 +81,23 @@ The machine-readable twin of each release is
   `GET /v1/enrichment/progress/{job_id}` closes that for sync and retroactively for
   enrichment, and answers 200 with `status:"error"` for an unknown id rather than a 404.
 
+- **`scripts/sync-dep-pins.py` can write again — it had never successfully written.** `[O]`
+  `replace_section` matched a dependency list only if every line between the brackets was a
+  quoted requirement, so it raised `RuntimeError: Could not update [dependencies]` against a
+  list carrying comments — which this one has, including the `grand-cypher` and `torch`
+  ceilings recording why those versions are capped. The crash stayed invisible because
+  `main()` returns early when the pins already match, so the write path had only ever run in
+  the no-op case, and CI's `--check` reaches the pins through `check_pins` instead and stayed
+  green. The failure mode was therefore precisely inverted: `--check` told you pins were stale
+  and to run the script, and the script then crashed. It now rewrites each dependency's spec
+  in place, line by line, leaving every comment intact — a whole-block rewrite would have
+  deleted the very notes that stop the next person lifting a deliberate cap. The per-entry match also
+  gained a right boundary on the package name: `[^"]*` otherwise swallows the rest of a longer
+  neighbour, so rewriting `pydantic` against a list whose `pydantic-settings` entry sits above it
+  rewrote *that* line and exited 0, one dependency lighter, in a file that ships to PyPI. Today's
+  ordering happens to make both prefix pairs raise instead, which is why the guard is driven from
+  a synthetic block rather than the real file — against the real file it passes with the bug
+  fully present.
 ### Changed
 - **Long-running jobs get their own worker lane.** `[S1]` The pipeline worker is strictly
   serial — one claim, then `await process_job` inline — so an hours-long sync sitting in it
