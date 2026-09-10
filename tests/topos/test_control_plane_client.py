@@ -148,6 +148,14 @@ async def test_reconnect_loop_survives_backoff_timeout(monkeypatch):
             await self._gate.wait()
             raise StopAsyncIteration
 
+        async def close(self, code=1000):
+            # A real websocket's close() ends the iteration blocked in recv.
+            # Without this the fake parked `_run` on `_gate` forever: stop()
+            # set `_stop` (which `_run` only reads BETWEEN messages), waited out
+            # its full 10s join, and returned with the thread still alive.
+            await super().close(code)
+            self._gate.set()
+
     class FlappingConnect:
         def __init__(self):
             self.last_headers = None
@@ -199,7 +207,11 @@ async def test_reconnect_loop_survives_backoff_timeout(monkeypatch):
         raise AssertionError(f"reconnect loop did not survive backoff: {status}")
 
     assert client._thread.is_alive()
+    thread = client._thread
     await client.stop()
+    # The property this test exists for includes getting OUT: a stop() that
+    # returns with the thread still parked is the leak the suite could not see.
+    assert not thread.is_alive(), "stop() returned with the client thread still running"
 
 
 @pytest.mark.asyncio
@@ -723,3 +735,91 @@ async def test_connect_sets_a_real_pong_deadline(monkeypatch):
         assert detection < 150.0, "must notice before the control plane evicts us"
     finally:
         await client.stop()
+
+
+def _reap_client_thread(client, thread) -> None:
+    """Stop a client thread a failing assertion left behind, so it cannot
+    reconnect through a later test's patched `connect` and poison that test."""
+    if thread is None or not thread.is_alive():
+        return
+    client._stop_requested = True
+    loop = client._loop
+    if loop is not None:
+        asyncio.run_coroutine_threadsafe(client._shutdown_on_client_loop(), loop)
+    thread.join(5.0)
+
+
+@pytest.mark.asyncio
+async def test_stop_before_the_thread_has_a_loop_still_stops_the_thread(monkeypatch):
+    """stop() must not return while the client thread is still running.
+
+    If stop() runs before `_thread_main` has published `_loop`, it cannot reach
+    the client loop, so it sets the `_stop` Event from `__init__` -- which the
+    thread then REPLACES with a fresh, unset one and reconnects forever. Measured
+    on the unfixed client: 25 of 40 back-to-back start()/stop() calls left the
+    thread alive. Each zombie reconnects through the module-level `connect`, so
+    when its backoff fires during a later test that has patched `connect`, it
+    lands on that test's fake socket, eats its scripted message and pins the
+    socket's Event to its own loop. That is the CI failure of
+    `test_get_device_info_prefers_the_real_answer_when_the_loop_is_healthy`
+    ("Event ... is bound to a different event loop", 2026-09-09 and 09-10).
+
+    Deterministic, not lucky: the thread is held back so stop() is guaranteed to
+    run before the loop exists.
+    """
+    import time as _time
+
+    ws = StayOpenWebSocket([])
+    monkeypatch.setattr(control_plane_client, "connect", FakeConnect(ws))
+
+    async def handler(message):
+        return None
+
+    client = ControlPlaneClient(
+        control_plane_url="wss://cp.example/ws/engine",
+        api_key="test-key",
+        handler=handler,
+        verify_ssl=True,
+    )
+    real_thread_main = client._thread_main
+
+    def late_thread_main():
+        _time.sleep(0.2)  # stop() runs before this thread publishes its loop
+        real_thread_main()
+
+    monkeypatch.setattr(client, "_thread_main", late_thread_main)
+    client.start()
+    thread = client._thread
+    try:
+        await client.stop()
+        assert thread is not None
+        assert not thread.is_alive(), "stop() returned with the client thread still running"
+    finally:
+        _reap_client_thread(client, thread)
+
+
+@pytest.mark.asyncio
+async def test_back_to_back_start_stop_leaves_no_client_thread(monkeypatch):
+    """The same property without the forced delay: the natural race, repeated."""
+    leftovers = []
+    for _ in range(10):
+        ws = StayOpenWebSocket([])
+        monkeypatch.setattr(control_plane_client, "connect", FakeConnect(ws))
+
+        async def handler(message):
+            return None
+
+        client = ControlPlaneClient(
+            control_plane_url="wss://cp.example/ws/engine",
+            api_key="test-key",
+            handler=handler,
+            verify_ssl=True,
+        )
+        client.start()
+        thread = client._thread
+        await client.stop()
+        if thread is not None and thread.is_alive():
+            leftovers.append((client, thread))
+    for client, thread in leftovers:
+        _reap_client_thread(client, thread)
+    assert not leftovers, f"{len(leftovers)} of 10 start()/stop() pairs left a client thread running"

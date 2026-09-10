@@ -222,7 +222,13 @@ def _disarm_graph_refresh_debounce() -> None:
 #:
 #: Prefixes, not exact names, because the two upgrade threads differ
 #: (`topos-upgrade-runner` / `topos-upgrade-stamp`).
-_THREAD_LEAK_PREFIXES = ("topos-upgrade-", "topos-startup-db")
+#:
+#: `control-plane-client` since 2026-09-10. A leaked client thread does not write,
+#: but it RECONNECTS -- through the module-level `connect`, which a later test may
+#: have patched -- so it lands on that test's fake socket, eats its scripted
+#: message and pins the socket's Event to the wrong loop. That read as an
+#: unexplained flake in whichever test owned the socket, the same shape as above.
+_THREAD_LEAK_PREFIXES = ("topos-upgrade-", "topos-startup-db", "control-plane-client")
 
 #: Threads get a moment to finish after teardown before being called a leak — a
 #: thread already on its way out is not what this is looking for.

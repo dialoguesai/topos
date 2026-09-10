@@ -163,6 +163,27 @@ The machine-readable twin of each release is
   tray green; a `get_device_info` with no snapshot yet answers a marked stub instead of waiting
   forever; and terminal frames echo the inbound `type`, so a late answer still classifies after
   the 600s TTL.
+- **Stopping the control-plane client right after starting it no longer leaves it running, and
+  a leaked client thread now fails the test run.** `[O]` If `stop()` ran before the client
+  thread had published its loop, it set the `_stop` Event from `__init__` — which the thread
+  then replaced with a fresh, unset one, and kept reconnecting after `stop()` had returned.
+  Measured on the unfixed client: 25 of 40 back-to-back `start()`/`stop()` pairs left a thread
+  alive. In a node that is a second, unowned connection to the control plane. In the test suite
+  it is what turned main red: `test_send_message_restarts_background_task_if_stopped` stops a
+  self-heal restart before the new thread has a loop, and its zombie reconnects through the
+  module-level `connect` — which a later test in the same file has patched — so it lands on
+  that test's fake socket, eats its scripted message and pins the socket's Event to the wrong
+  loop. That is the `bound to a different event loop` failure
+  `test_get_device_info_prefers_the_real_answer_when_the_loop_is_healthy` showed on 2026-09-09
+  and 09-10, reproduced locally from the race alone. The thread now honours a stop requested
+  before its loop existed, and `stop()` joins a thread that has not published one; one guard
+  forces the race rather than waiting for it. The suite's leak detector watched only upgrade
+  and startup threads, so none of this was visible to it; `control-plane-client` is on its list
+  now. On the unfixed client it names two leakers and fails the run; on the fixed client, none.
+  The second was `test_reconnect_loop_survives_backoff_timeout`, whose fake socket never ended
+  its iteration on `close()`, so `stop()` there waited out a 10s join and returned with the
+  thread parked. The fake now closes like a real socket and the test asserts the thread
+  actually stopped.
 
 ### Changed
 - **Long-running jobs get their own worker lane.** `[S1]` The pipeline worker is strictly
