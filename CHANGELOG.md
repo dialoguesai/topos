@@ -35,6 +35,37 @@ The machine-readable twin of each release is
   reasoning inline — `torch`'s at both of its pin sites, `setuptools`' in `[build-system]` — so
   the next reader does not re-litigate them from the alert list alone.
 
+### Added
+- **A node that is still indexing says so.** `[S1]` `[E:query]` A new empty cause,
+  `index_incomplete`, for the window between an import finishing and its embeddings being
+  written — where the rows are already here and an ask about them was answered with
+  "nothing in your data mentions that". It outranks the three empties it explains and
+  yields to a denial or a relay failure, and it is stamped only for a queued or running job
+  on a source the asking scope actually reads.
+- **A lived-social ask reads the diary — inside the one scope allowed to disclose it.** `[O]`
+  "Who was I with", "when did I see a movie" were answered from browsing stats while the diary
+  row naming the people sat unread. `journal_event_lane` contributes an ask-gated scan of the
+  journal head, matched on the people, place and category the question names. It carries the
+  two gates `graph_lane` carries — `owner_raw`, then `journal_entries` in the manifest's
+  `canonical_tables`, which resolves to `health:read` alone — so it widens no scope's
+  disclosure ceiling; an earlier draft took no manifest and would have delivered raw diary
+  prose under grants capped at `summary`. It fuses at the canonical weight (1.0) with no
+  diversity floor until one is measured. The gate's own function words ("was", "last",
+  "weekend") never become search terms and matching is whole-word: that draft answered "who was
+  I with at dinner last weekend?" with five unrelated sensitive rows and dropped the one naming
+  the people. Reachable today when the front end's `health_wellbeing` rule routes the ask (a
+  meal, a feeling, "journal"); a lived-social ask carrying none of those still loses
+  `health:read` to the four-route cut, which is a routing change rather than a node one.
+- **The graph scrubber's track says, per day, where the evidence is.** `[O]`
+  `GET /v1/signal/entities/graph/activity` returns one row per calendar day with edge activity,
+  oldest first, so a scrub into an empty month no longer looks like a scrub into the busiest
+  week. Bars date by `last_event_at` only — never `valid_from`, which is when the node started
+  believing a relation rather than when anything happened — take no validity filter, and apply
+  the snapshot's own weight floor, so bars and edges move together. The black-hole guard is
+  pushed into the query on both ends of each relation: filtering returned rows is a silent
+  no-op on a day bucket, and a count that moves when an entity is protected confirms the entity
+  exists. Undated edges are counted as `meta.undated_edges`.
+
 ### Fixed
 - **"Before last week" no longer returns last week.** `[O]` The planner read "before" (it set
   `temporal_shift`) but never moved the window, so "what did I work on before last week" and
@@ -112,6 +143,27 @@ The machine-readable twin of each release is
   ordering happens to make both prefix pairs raise instead, which is why the guard is driven from
   a synthetic block rather than the real file — against the real file it passes with the bug
   fully present.
+- **An answer written from a cut packet says it was cut.** `[O]`
+  `build_inference_context_packet` has recorded `context_truncated` since 2026-08-25 whenever
+  it trims evidence to the model's budget, and every exit of `run_query_inference` dropped it.
+  The packet is serialized in order, so what gets cut is the tail — often the qualifier:
+  "shipped, but only for the pilot cohort" reads as "shipped". The flag now rides all five
+  exits, the failures included, and reaches `public_result.payload`.
+- **The activity histogram answers over the control-plane relay, not only over HTTP.** `[O]`
+  `[P]` The hosted app never speaks HTTP to a node — the control plane turns each request into
+  a websocket message — so with no `signal_entity_graph_activity` handler the relay had nothing
+  to deliver to, the proxy returned 404, and the app drew the scrubber's taller track with no
+  bars (its deliberate degrade for an old node, so nothing said why). The handler applies the
+  HTTP route's own rules and the handled-types snapshot gains the type; the control plane's
+  proxy route already exists.
+- **`healthcheck` and `get_device_info` are answered from the client thread when the app loop
+  is stalled.** `[O]` Both 504'd on 2026-09-04 and 2026-09-08 because every relayed RPC waited
+  on the uvicorn loop through a local generation. A healthcheck the app loop misses by 1s is
+  answered from the client thread's last snapshot (`snapshot_stale: true`), which keeps the
+  tray green; a `get_device_info` with no snapshot yet answers a marked stub instead of waiting
+  forever; and terminal frames echo the inbound `type`, so a late answer still classifies after
+  the 600s TTL.
+
 ### Changed
 - **Long-running jobs get their own worker lane.** `[S1]` The pipeline worker is strictly
   serial — one claim, then `await process_job` inline — so an hours-long sync sitting in it
@@ -151,6 +203,23 @@ The machine-readable twin of each release is
   presence task's thread hop returns. The test now polls for the message with a 10s bound,
   which asserts what it always meant — startup sends the message — and still fails a startup
   that never does.
+- **The menu-bar glyph loses its white tile, and its stroke survives an 18px render.** `[O]` On
+  a light bar the tray drew `topos_blk_rounded.png` — the app icon, ink on an opaque white tile
+  — a filled box among bare-glyph neighbours; it now draws `topos_black.png`, the white glyph's
+  ink inverted with alpha preserved, so the pair stays pixel-registered. The stroke measured
+  0.67px at 18px, sub-pixel, so antialiasing greyed it out and none of the mark's interiors
+  survived; it is ~1.3px now (mean ink alpha 0.57 → 0.83), grown from a signed distance field
+  rather than by dilation, and byte-identical to the macOS and Windows shells' copies. Known
+  limit: a light-mode Mac with a dark wallpaper has a dark bar that `AppleInterfaceStyle`
+  cannot see, so it gets the dark glyph.
+- **The README — which is also the PyPI page — leads with what Topos is, and its quickstart
+  works.** `[O]` Its verify step pointed at `/health`, a route that does not exist
+  (`/healthcheck` does), so following the quickstart produced a 404 as its first signal; it
+  never said where a `TOPOS_KEY` comes from and omitted the macOS app path; and two links 404'd
+  for every visitor. Rewritten pitch-first with install and sources up front and the
+  architecture after; plugin and development notes moved unchanged to `docs/PLUGINS.md` and
+  `docs/DEVELOPMENT.md`. The mark is served from `docs/assets` by absolute URL, since relative
+  paths break on PyPI.
 
 ## [1.3.54] — 2026-09-07
 
@@ -187,12 +256,6 @@ The machine-readable twin of each release is
 ## [1.3.52] — 2026-09-07
 
 ### Added
-- **A node that is still indexing says so.** `[S1]` `[E:query]` A new empty cause,
-  `index_incomplete`, for the window between an import finishing and its embeddings being
-  written — where the rows are already here and an ask about them was answered with
-  "nothing in your data mentions that". It outranks the three empties it explains and
-  yields to a denial or a relay failure, and it is stamped only for a queued or running job
-  on a source the asking scope actually reads.
 - **The retrieval-text contract.** `[S1]` `[E:query]` `topos/protocol/retrieval_text_contract.json`
   publishes what every entrance distils an ask into before the node sees it — the subject
   words, minus output-shape words ("poem", "kanban", "two paragraph") and style spans ("in
