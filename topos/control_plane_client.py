@@ -206,6 +206,15 @@ class ControlPlaneClient:
         # Fresh, bound to this loop: the one from __init__ may already be bound
         # to the app loop by an earlier legacy run.
         self._stop = asyncio.Event()
+        # A stop() that ran before this thread published `_loop` could not reach
+        # this loop, so it set the Event from __init__ -- the one just replaced.
+        # Without this the thread ran `_run()` against a fresh, unset Event and
+        # reconnected forever after stop() had returned: 25 of 40 back-to-back
+        # start()/stop() calls left one alive. stop() sets `_stop_requested`
+        # before it reads `_loop`, so whichever side gets there first, this
+        # sees it.
+        if self._stop_requested:
+            self._stop.set()
         try:
             loop.run_until_complete(self._run())
         except Exception:  # noqa: BLE001
@@ -281,6 +290,13 @@ class ControlPlaneClient:
                 except asyncio.CancelledError:
                     pass
             await self._cancel_inbound_tasks()
+            # Started, but the thread had not published its loop yet. It will see
+            # `_stop_requested` as soon as it has, and exit -- wait for that, so
+            # stop() never returns with a client thread still running.
+            thread = self._thread
+            if thread is not None and thread.is_alive():
+                await asyncio.to_thread(thread.join, 10.0)
+                self._thread = None
         self._ws = None
         self._ready.clear()
         self._set_state("idle")
