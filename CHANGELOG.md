@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.55] — 2026-09-10
+
 ### Security
 - **Nine of the eleven packages behind 36 Dependabot alerts move; the two that stay are
   unreachable, and now say so in the file that pins them.** `[O]` `uv lock` takes
