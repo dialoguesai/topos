@@ -275,6 +275,7 @@ REASONS = frozenset(
         "owner_permission_claim_replaced",
         "owner_failure_claim_replaced",
         "index_job_in_flight",
+        "lane_error",
         "owner_supply_claim_replaced",
         "grantee_scrub_scores",
         "grantee_scrub_semantic_hits",

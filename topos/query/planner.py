@@ -205,6 +205,64 @@ _RELATIVE_RANGES = (
     (re.compile(r"\blast (\d{1,2}) days\b", re.I), None),  # handled specially
 )
 
+#: The words that decide WHICH SIDE of a named period the owner means. Measured 2026-09-09:
+#: "what did I work on before last week" and "... after last week" produced the identical
+#: window, last week, so the first question returned exactly the interval it excludes. The word
+#: was read (`_PAST_RE` still sets `temporal_shift`) and never reached the window.
+_BOUNDARY_RE = re.compile(r"\b(before|prior to|after|since)$", re.I)
+#: An open lower bound the window filter can still parse. `_prefer_time_window` treats a missing
+#: bound as "no window at all", so None here would quietly turn a scoped ask into an unscoped one.
+_EARLIEST_INSTANT = "1970-01-01T00:00:00+00:00"
+
+
+def _relative_match(query_text: str) -> Optional["re.Match[str]"]:
+    """The phrase `_relative_time_range` resolved, found in the same precedence order."""
+    match = re.search(r"\blast (\d{1,3}) days\b", query_text, re.I)
+    if match:
+        return match
+    for pattern, resolver in _RELATIVE_RANGES:
+        if resolver is None:
+            continue
+        match = pattern.search(query_text)
+        if match:
+            return match
+    return None
+
+
+def _apply_time_boundary(
+    query_text: str, window: Optional[Tuple[str, str]], now: datetime
+) -> Optional[Tuple[str, str]]:
+    """Move a relative window to the side of it that a boundary word asks for.
+
+    Only a word that GOVERNS the time phrase counts, meaning the one immediately before it: in
+    "what did I do before the meeting last week" the "before" belongs to the meeting, and the ask
+    is about last week. A window that would start after it ends ("after today", a period that has
+    not happened) is left as the plain window rather than inverted into one that matches nothing.
+    """
+    if not window:
+        return window
+    match = _relative_match(query_text)
+    if match is None:
+        return window
+    governing = _BOUNDARY_RE.search(query_text[: match.start()].rstrip())
+    if governing is None:
+        return window
+    word = governing.group(1).lower()
+    start_raw, end_raw = window
+    today = now.strftime("%Y-%m-%d")
+    if word in ("before", "prior to"):
+        day_before = datetime.fromisoformat(start_raw[:10]) - timedelta(days=1)
+        adjusted = (_EARLIEST_INSTANT, day_before.strftime("%Y-%m-%dT23:59:59+00:00"))
+    elif word == "after":
+        day_after = datetime.fromisoformat(end_raw[:10]) + timedelta(days=1)
+        adjusted = (day_after.strftime("%Y-%m-%dT00:00:00+00:00"), f"{today}T23:59:59+00:00")
+    else:  # since: the named period itself, and everything after it
+        adjusted = (start_raw, f"{today}T23:59:59+00:00")
+    if adjusted[0] > adjusted[1]:
+        return window
+    return adjusted
+
+
 _DIMENSION_KEYWORDS = {
     "work": ("work", "job", "meeting", "project", "employer", "career", "colleague"),
     "wellbeing": ("sleep", "exercise", "run", "running", "mood", "health", "injury", "workout", "training"),
@@ -377,7 +435,13 @@ def build_query_plan(
         except Exception:
             plan.entities = []
 
-    plan.time_range = _explicit_time_range(q) or _relative_time_range(q, now)
+    explicit = _explicit_time_range(q)
+    if explicit:
+        plan.time_range = explicit
+    else:
+        # A boundary word moves the window instead of only flagging the read as past. Relative
+        # windows only: an explicit date range keeps its own reading for now.
+        plan.time_range = _apply_time_boundary(q, _relative_time_range(q, now), now)
     # R2: a differenced ask over two named windows keeps BOTH, and widens `time_range`
     # to their union span so retrieval sees both sides. Without this, `_relative_time_range`
     # returns whichever window matched first and the other half of the question is

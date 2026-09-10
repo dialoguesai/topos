@@ -98,6 +98,7 @@
     "gate_vetoed",
     "index_incomplete",
     "index_job_in_flight",
+    "lane_error",
     "grantee_scrub_facts",
     "hosted_binding_text_withheld",
     "owner_permission_claim_replaced",

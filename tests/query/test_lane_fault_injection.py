@@ -173,9 +173,11 @@ class TestTheInventoryIsHonest:
         assert result["items"] > 0 and result["cause"] == "answered"
 
 
-class TestASwallowedFaultIsIndistinguishableFromAnAbsence:
-    """The mis-caused state itself. A loader's own handler turns a crash into `[]`, and from there
-    nothing downstream can tell the lane crashed from the lane looking and finding nothing."""
+class TestAWholesaleEmptyLaneIsStillAnAbsence:
+    """These replace a loader WHOLESALE with one returning `[]`, so no exception is ever raised:
+    that is a lane that genuinely found nothing, and it must still read as an absence. Until
+    2026-09-10 a real fault read exactly the same way; since then every handler records its fault,
+    and `test_lane_fault_reporting.py` pins what the owner is told when a lane actually breaks."""
 
     @pytest.mark.parametrize("loader", SWALLOWING_LOADERS)
     def test_the_ledger_says_nothing_about_the_failure(
@@ -192,10 +194,9 @@ class TestASwallowedFaultIsIndistinguishableFromAnAbsence:
     def test_when_every_lane_swallows_the_owner_is_told_an_absence(
         self, node: Path, monkeypatch
     ) -> None:
-        """The concrete harm. One lane failing is usually covered by another, which is why this
-        has never been noticed. Fault them all — the state a shared dependency going down actually
-        produces — and the owner is told their data holds nothing, on the strength of thirteen
-        crashes, with nothing in the ledger to say otherwise."""
+        """When every lane returns nothing WITHOUT faulting, the honest answer is an absence and
+        the ledger has no failure to report. (The same shape with real faults was the 2026-09-09
+        harm, and is now reported: `test_lane_fault_reporting.py`.)"""
         monkeypatch.setattr(signal_service, "get_signal_service", lambda *a, **k: _NoSemanticLane())
         for loader in SWALLOWING_LOADERS:
             monkeypatch.setattr(R, loader, lambda *a, **k: [])

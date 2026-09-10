@@ -10,7 +10,8 @@ retrieval trace. The plan is the seam: if the distinction is not in it, no lane 
 recover it, and a test against retrieved rows would blame the wrong stage.
 
 Backlog option H-04. What it found on 2026-09-09 is written into the assertions rather than
-smoothed over — two of the four pairs are read, one is read only partly, and one is not read at all.
+smoothed over. Three of the four pairs are read (before/after was fixed on 2026-09-10) and
+cardinality is not read at all.
 """
 
 from __future__ import annotations
@@ -71,29 +72,23 @@ class TestAsOfMonths:
 
 
 class TestBeforeVersusAfter:
-    """The pair the option names first, and the one that is only half read."""
+    """The pair the option names first. Fixed 2026-09-10: until then "before" set a past-read flag
+    and left the window alone, so "before last week" returned last week, the one interval it
+    excludes. `test_time_boundary_words.py` carries the full set; these are the original pair."""
 
     def test_before_marks_the_read_as_past_and_after_does_not(self) -> None:
         assert _plan("what did I work on before last week").temporal_shift == "past"
         assert _plan("what did I work on after last week").temporal_shift != "past"
 
-    def test_but_the_window_itself_is_identical(self) -> None:
-        """Measured, and stated as a fact rather than a verdict: the boundary word changes a flag
-        and not the window, so both asks retrieve the same seven days. "Before last week" returns
-        last week — which is the one interval it excludes."""
+    def test_before_and_after_select_different_windows(self) -> None:
         before = _plan("what did I work on before last week").time_range
         after = _plan("what did I work on after last week").time_range
-        assert before == after and before is not None
+        assert before and after and before != after
 
-    @pytest.mark.xfail(
-        strict=True,
-        reason="the boundary word moves a flag, not the window; measured 2026-09-09 and filed "
-               "against H-04 rather than fixed — moving a window is a retrieval change with its "
-               "own two-sided cost",
-    )
-    def test_before_and_after_should_not_share_a_window(self) -> None:
-        b, a = _plan("what did I work on before last week"), _plan("what did I work on after last week")
-        assert b.time_range != a.time_range
+    def test_before_last_week_ends_before_last_week_begins(self) -> None:
+        _, end = _plan("what did I work on before last week").time_range
+        last_week_start, _ = _plan("what did I work on last week").time_range
+        assert end < last_week_start
 
 
 class TestCardinality:

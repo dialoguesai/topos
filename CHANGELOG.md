@@ -36,6 +36,20 @@ The machine-readable twin of each release is
   the next reader does not re-litigate them from the alert list alone.
 
 ### Fixed
+- **"Before last week" no longer returns last week.** `[O]` The planner read "before" (it set
+  `temporal_shift`) but never moved the window, so "what did I work on before last week" and
+  "... after last week" searched the same seven days, the first one returning exactly the
+  interval it excludes. A boundary word immediately before a relative period now moves it:
+  before / prior to ends the day before the period starts, after starts the day after it ends,
+  since runs from its start to today. Explicit dates keep their own reading (pinned as a strict
+  xfail).
+- **A retrieval lane that crashes says it crashed.** `[O]` Fourteen loaders swallowed every
+  exception into `[]`, so a locked or closed database read as "nothing in your data", and with
+  every lane down the owner was told exactly that. Each handler now records its fault; the
+  ledger gets a `lane_error` entry per faulted lane, and an empty result is stamped
+  `engine_failed` ("try again") instead of an absence. A store that is simply not on the node
+  (`no such table`, `no such module`) is still an honest absence. New vocabulary member
+  `lane_error`, landed in the control plane and app in the same change.
 - **iMessage/Signal sync no longer runs inside the HTTP request, so the browser stops
   reporting "Failed to fetch" on a sync that is working.** `[S1]` A first iMessage run
   drains the whole backlog — measured here at ~5 rows/sec, hours for a ~96k-row corpus —

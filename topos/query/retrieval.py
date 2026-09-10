@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from contextvars import ContextVar
+
 import json
 import logging
 import os
@@ -1095,6 +1097,7 @@ def _load_user_goal_summaries(
         items.sort(key=lambda item: float(item.get("relevance_score") or 0.0), reverse=True)
         return items[:limit]
     except Exception as exc:
+        _note_lane_fault("goals", exc)
         logger.debug("user_goals load skipped: %s", exc)
         return []
 
@@ -1820,6 +1823,7 @@ def _entity_thread_entities(
             ids,
         ).fetchall()
     except Exception as exc:  # noqa: BLE001 — fail closed: no lane rather than a blind one
+        _note_lane_fault("entity_thread", exc)
         logger.debug("entity thread self-check unavailable: %s", exc)
         skipped["self_check_unavailable"] = len(ids)
         return [], skipped
@@ -3077,6 +3081,7 @@ def _goal_entity_ids(
             (record_id,),
         ).fetchall()
     except Exception as exc:  # noqa: BLE001 — no mention table → no join, not a failure
+        _note_lane_fault("commitment_goal_entities", exc)
         logger.debug("commitment goal entity lookup unavailable: %s", exc)
         return [], "commitment_goal_unresolved"
     linked = [{"entity_id": str(r[0])} for r in rows if str(r[0] or "").strip()]
@@ -3501,6 +3506,7 @@ def _load_emotion_summary_items(
             (max(1, int(limit)),),
         ).fetchall()
     except Exception as exc:
+        _note_lane_fault("emotions", exc)
         logger.debug("message_emotions load skipped: %s", exc)
         return []
     if not rows:
@@ -3557,7 +3563,8 @@ def _load_complexity_summary_items(conn: Optional[Any]) -> List[Dict[str, Any]]:
         from ..features.complexity.store import load_latest_summary
 
         summary = load_latest_summary(conn)
-    except Exception:
+    except Exception as exc:
+        _note_lane_fault("complexity", exc)
         return []
     if not isinstance(summary, dict) or not summary:
         return []
@@ -3710,7 +3717,8 @@ def _load_attention_summary_items(
     params.append(_attention_window_fetch_limit(window, limit))
     try:
         rows = conn.execute(sql, tuple(params)).fetchall()
-    except Exception:
+    except Exception as exc:
+        _note_lane_fault("attention", exc)
         return []
     items: List[Dict[str, Any]] = []
     for otype, okey, payload_json in rows:
@@ -3831,7 +3839,8 @@ def _load_time_summary_items(
                 "ORDER BY object_type ASC LIMIT ?",
                 (*object_types, limit),
             ).fetchall()
-        except Exception:
+        except Exception as exc:
+            _note_lane_fault("time", exc)
             return []
     items: List[Dict[str, Any]] = []
     for otype, okey, payload_json in rows:
@@ -3970,6 +3979,7 @@ def _load_brief_summary_items(
             )
         return items
     except Exception as exc:
+        _note_lane_fault("briefs", exc)
         logger.debug("dimension brief load skipped: %s", exc)
         return []
 
@@ -4444,6 +4454,7 @@ def _semantic_hits(
             )
         return hits, result.get("error")
     except Exception as exc:
+        _note_lane_fault("vector", exc)
         logger.debug("semantic vector search skipped: %s", exc)
         return [], str(exc)
 
@@ -4539,6 +4550,7 @@ def _load_ranked_clusters_unfiltered(
         ranked = sorted(clusters, key=lambda c: int(c.get("member_count") or 0), reverse=True)
         return [_strip_vector_keys({**c, "relevance_score": 0.0}) for c in ranked[:limit]]
     except Exception as exc:
+        _note_lane_fault("clusters", exc)
         logger.debug("topic cluster load skipped: %s", exc)
         return []
 
@@ -4620,7 +4632,8 @@ def _load_fact_store_items(
     instant, marking them stale would misdescribe the point-in-time truth."""
     try:
         from ..features.facts.store import FactStore
-    except Exception:
+    except Exception as exc:
+        _note_lane_fault("facts_store", exc)
         return []
     store = FactStore(conn)
     include_closed = temporal_shift == "past" or bool(as_of)
@@ -4649,6 +4662,7 @@ def _load_fact_store_items(
                 facts.append(fact)
                 seen_ids.add(fact["object_id"])
     except Exception as exc:
+        _note_lane_fault("facts_store", exc)
         logger.debug("fact store load skipped: %s", exc)
         return []
 
@@ -4735,7 +4749,8 @@ def _load_stat_insight_items(
         rows = conn.execute(
             "SELECT payload_json, created_at FROM signal_facts WHERE fact_id LIKE 'stat:%' ORDER BY created_at DESC LIMIT 5000"
         ).fetchall()
-    except Exception:
+    except Exception as exc:
+        _note_lane_fault("stat_insights", exc)
         return []
     tokens = set(_query_tokens(query_text))
     wanted_dims = {d.lower() for d in (dimensions or [])}
@@ -4861,6 +4876,7 @@ def _load_recent_summary_items(
             params,
         ).fetchall()
     except Exception as exc:
+        _note_lane_fault("recent", exc)
         logger.debug("recent summary items skipped: %s", exc)
         return []
     items: List[Dict[str, Any]] = []
@@ -6438,6 +6454,38 @@ def routing_supply_states(
     return out
 
 
+#: The faults the lanes of ONE retrieval swallowed, keyed by lane. `retrieve()` sets it for the
+#: length of a retrieval and reads it back at the end; a loader called from anywhere else sees the
+#: default None and records nothing, which is how every other caller behaves today.
+_LANE_FAULTS: "ContextVar[Optional[Dict[str, str]]]" = ContextVar("_lane_faults", default=None)
+
+#: What a swallowed exception says when a store is not ON this node rather than broken on it. A
+#: node that never had an optional store (emotions, complexity, a mention table) has nothing to say
+#: about it, and "nothing in your data" is the honest answer, so these stay an absence. Everything
+#: else a loader swallows (a locked database, a closed connection, a schema the code does not
+#: match, a plain bug) is a lane that could have answered and did not.
+_ABSENT_STORE_MARKERS = ("no such table", "no such module")
+
+
+def _lane_absent(exc: BaseException) -> bool:
+    text = str(exc).lower()
+    return any(marker in text for marker in _ABSENT_STORE_MARKERS)
+
+
+def _note_lane_fault(lane: str, exc: BaseException) -> None:
+    """Called from every loader's swallowing handler, so a crash stops reading as a lane that
+    looked and found nothing. Never raises: it already runs inside an exception handler."""
+    logger.debug("%s lane swallowed %s: %s", lane, type(exc).__name__, exc)
+    try:
+        if _lane_absent(exc):
+            return
+        faults = _LANE_FAULTS.get()
+        if faults is not None:
+            faults.setdefault(lane, type(exc).__name__)
+    except Exception:  # noqa: BLE001 — bookkeeping must never turn one failure into two
+        pass
+
+
 def _index_jobs_in_flight(conn: Any, source_ids: List[str]) -> bool:
     """Is the node still ingesting or embedding anything this scope reads?
 
@@ -6586,12 +6634,54 @@ class DefaultSignalRetrievalAdapter:
         outranks the three explanations above and yields to a denial or a relay failure, which are
         about whether the question ran at all.
         """
-        bundle = self._retrieve_bundle(request)
+        token = _LANE_FAULTS.set({})
+        try:
+            bundle = self._retrieve_bundle(request)
+            faults = dict(_LANE_FAULTS.get() or {})
+        finally:
+            _LANE_FAULTS.reset(token)
+        # A lane that crashed is reported as one, and an empty result it may have caused is not
+        # passed off as an absence. Precedence settles it against the index-lag stamp below:
+        # `engine_failed` outranks `index_incomplete`.
+        try:
+            self._stamp_lane_faults(request, bundle, faults)
+        except Exception as exc:  # noqa: BLE001 — an explanation must never break a retrieval
+            logger.debug("lane-fault stamp skipped: %s", exc)
         try:
             self._stamp_index_lag(request, bundle)
         except Exception as exc:  # noqa: BLE001 — an explanation must never break a retrieval
             logger.debug("index-lag stamp skipped: %s", exc)
         return bundle
+
+    def _stamp_lane_faults(
+        self, request: RetrievalRequest, bundle: RetrievalBundle, faults: Dict[str, str]
+    ) -> None:
+        """Every lane that swallowed a real fault gets a ledger entry, and an EMPTY result is
+        stamped `engine_failed` instead of being left as an absence.
+
+        Measured 2026-09-09 (`test_lane_fault_injection.py`): with every lane faulted the owner
+        was told their data held nothing, and the ledger said nothing about a failure. A lane that
+        crashed never looked, so no statement about the owner's data can rest on it. When other
+        lanes still answered, the partial failure is recorded and the answer stands.
+
+        Written here at the end, so the entries follow the stages that ran rather than
+        interleaving with them. The lane and the exception TYPE ride in `detail`, which is
+        local-only; the message never does.
+        """
+        ledger = request.ledger
+        if ledger is None or not faults:
+            return
+        for lane, error_type in faults.items():
+            ledger.record(
+                _N.STAGE_RETRIEVAL,
+                "emptied",
+                "lane_error",
+                detail={"lane": lane, "error": error_type},
+            )
+        packet = bundle.context_packet if isinstance(bundle.context_packet, dict) else {}
+        if any(isinstance(v, list) and v for v in packet.values()):
+            return
+        ledger.empty(_N.CAUSE_ENGINE_FAILED, stage=_N.STAGE_RETRIEVAL, reason="lane_error")
 
     #: The empties that an in-flight index job explains better than they explain themselves.
     _LAG_EXPLAINS = (_N.CAUSE_GATE_VETOED, _N.CAUSE_NO_MATCH, _N.CAUSE_STORE_EMPTY)
