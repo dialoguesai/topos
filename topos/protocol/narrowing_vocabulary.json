@@ -94,6 +94,7 @@
     "expand_boundary_downgrade",
     "first_source_ref_only",
     "graph_lane",
+    "journal_event_lane",
     "gate_vetoed",
     "index_incomplete",
     "index_job_in_flight",
