@@ -189,6 +189,16 @@ async def _ollama_generate(payload: Dict[str, Any]) -> Dict[str, Any]:
                 )
                 body.pop("think", None)
                 r = await client.post(f"{base}/api/generate", json=body)
+    except httpx.ConnectTimeout as exc:
+        # Ahead of TimeoutException, which it also is: no connection within the
+        # connect budget is a host that is off or asleep, not a slow model. The
+        # detail avoids the word "timeout" -- the web app's failure copy reads
+        # that as a stalled local model.
+        _log_ollama_failure("failed", budget_s=timeout.connect, exc=exc, **clocks)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Ollama unreachable at {base}: no connection within {timeout.connect:.0f}s",
+        ) from exc
     except httpx.TimeoutException as exc:
         # Ahead of RequestError, which every httpx timeout also is. A timeout's
         # text is empty, so it used to read "Ollama unreachable at …: " while
@@ -448,6 +458,13 @@ async def _ollama_stream_generate(
                         completion_tokens = int(data.get("eval_count") or completion_tokens)
                         done_reason = str(data.get("done_reason") or "")
                         timings = _ollama_timings(data)
+    except httpx.ConnectTimeout as exc:
+        # Same as the non-stream path: a host that never answered the connect.
+        _log_ollama_failure("failed", budget_s=timeout.connect, exc=exc, **clocks)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Ollama unreachable at {base}: no connection within {timeout.connect:.0f}s",
+        ) from exc
     except httpx.TimeoutException as exc:
         # Same split as the non-stream path: a timeout is not "unreachable".
         _log_ollama_failure("timed out", budget_s=timeout.read, exc=exc, **clocks)

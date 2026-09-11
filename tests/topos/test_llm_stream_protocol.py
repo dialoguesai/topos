@@ -304,6 +304,38 @@ _SENTINEL = "SENTINEL-PROMPT-BODY-9c2d"
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_handler_success_lines_carry_the_id_and_no_content(monkeypatch, caplog, stream):
+    # The done line is the only id-tagged record of a streamed success (the
+    # service's complete line has no id). Prompt and output are both the
+    # sentinel, so a line logging either instead of its length fails here.
+    cp = _FakeCpClient()
+
+    async def behavior(payload, on_delta, on_protocol):
+        return {"output": _SENTINEL, "model": "m", "usage": {}}
+
+    _install_llm(monkeypatch, cp, behavior)
+    with caplog.at_level(logging.INFO, logger="topos.core.handlers"):
+        result = await device.handle_llm_generation(
+            {
+                "id": "req-x",
+                "type": "llm_generation",
+                "payload": {"prompt": _SENTINEL, "model": "m", "stream": stream},
+            }
+        )
+
+    assert result["status"] == "ok"
+    messages = [r.getMessage() for r in caplog.records]
+    request = [m for m in messages if m.startswith("llm_generation request: id=req-x")]
+    done = [m for m in messages if m.startswith("llm_generation done: id=req-x")]
+    assert len(request) == 1 and f"prompt_chars={len(_SENTINEL)}" in request[0]
+    assert len(done) == 1
+    assert f"output_chars={len(_SENTINEL)}" in done[0]
+    assert "elapsed_s=" in done[0] and "wall_s=" in done[0]
+    assert _SENTINEL not in caplog.text
+
+
+@pytest.mark.asyncio
 async def test_handler_logs_failures_with_request_id_and_cause(monkeypatch, caplog):
     # Two routines overlap on the node, and the service-layer lines carry no
     # request id -- without it here, a failure cannot be paired with its run.
@@ -313,15 +345,23 @@ async def test_handler_logs_failures_with_request_id_and_cause(monkeypatch, capl
         try:
             raise httpx.ReadTimeout("")
         except httpx.ReadTimeout as exc:
-            raise HTTPException(status_code=502, detail="x") from exc
+            # An Ollama >=400 detail quotes up to 800 chars of its body.
+            raise HTTPException(status_code=502, detail=f"Ollama error: {_SENTINEL}") from exc
 
     _install_llm(monkeypatch, cp, behavior)
-    with caplog.at_level(logging.WARNING, logger="topos.core.handlers"):
+    # INFO, so the sentinel check covers the request line too.
+    with caplog.at_level(logging.INFO, logger="topos.core.handlers"):
         result = await device.handle_llm_generation(
             {"id": "req-9", "type": "llm_generation", "payload": {"prompt": _SENTINEL, "model": "m"}}
         )
 
-    assert result == {"id": "req-9", "status": "error", "error": "x", "error_code": 502}
+    # The detail goes back to the control plane in the reply, never to the log.
+    assert result == {
+        "id": "req-9",
+        "status": "error",
+        "error": f"Ollama error: {_SENTINEL}",
+        "error_code": 502,
+    }
     assert "llm_generation failed: id=req-9" in caplog.text
     assert "code=502" in caplog.text
     assert "cause=ReadTimeout" in caplog.text
@@ -337,7 +377,7 @@ async def test_generic_failure_reply_error_is_never_empty(monkeypatch, caplog):
         raise ValueError()
 
     _install_llm(monkeypatch, cp, behavior)
-    with caplog.at_level(logging.WARNING, logger="topos.core.handlers"):
+    with caplog.at_level(logging.INFO, logger="topos.core.handlers"):
         result = await device.handle_llm_generation(
             {"id": "req-10", "type": "llm_generation", "payload": {"prompt": _SENTINEL, "model": "m"}}
         )
@@ -345,6 +385,34 @@ async def test_generic_failure_reply_error_is_never_empty(monkeypatch, caplog):
     assert result == {"id": "req-10", "status": "error", "error": "ValueError"}
     assert "llm_generation failed: id=req-10" in caplog.text
     assert "cause=ValueError" in caplog.text
+    assert _SENTINEL not in caplog.text
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "exc, expected",
+    [
+        (ValueError(_SENTINEL), {"error": _SENTINEL}),
+        (
+            LlmTypedError("thinking_budget_exhausted", _SENTINEL),
+            {"error": _SENTINEL, "error_code": "thinking_budget_exhausted"},
+        ),
+    ],
+)
+async def test_failure_text_reaches_the_reply_not_the_log(monkeypatch, caplog, exc, expected):
+    cp = _FakeCpClient()
+
+    async def behavior(payload, on_delta, on_protocol):
+        raise exc
+
+    _install_llm(monkeypatch, cp, behavior)
+    with caplog.at_level(logging.INFO, logger="topos.core.handlers"):
+        result = await device.handle_llm_generation(
+            {"id": "req-12", "type": "llm_generation", "payload": {"prompt": "q", "model": "m"}}
+        )
+
+    assert result == {"id": "req-12", "status": "error", **expected}
+    assert "llm_generation failed: id=req-12" in caplog.text
     assert _SENTINEL not in caplog.text
 
 
