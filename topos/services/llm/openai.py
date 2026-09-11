@@ -74,6 +74,37 @@ def _ollama_generate_timeout() -> httpx.Timeout:
     )
 
 
+def _log_ollama_failure(
+    outcome: str,
+    *,
+    model: str,
+    stream: bool,
+    started: float,
+    wall_started: float,
+    budget_s: float,
+    exc: Optional[BaseException] = None,
+    status_code: Optional[int] = None,
+) -> None:
+    """One line per failed generation. Classes and numbers only: the prompt,
+    the response and Ollama's body never go into it.
+
+    ``elapsed_s`` is monotonic and ``wall_s`` wall-clock. On macOS the
+    monotonic clock stops while the Mac sleeps, so a gap between the two is
+    time asleep mid-generation — which a node log could not show before.
+    """
+    logger.warning(
+        "Ollama generate %s: model=%r stream=%s exc=%s status=%s elapsed_s=%.1f wall_s=%.1f timeout_s=%.0f",
+        outcome,
+        model,
+        stream,
+        type(exc).__name__ if exc is not None else None,
+        status_code,
+        time.monotonic() - started,
+        time.time() - wall_started,
+        budget_s,
+    )
+
+
 def _ensure_ollama_running(base_url: str) -> None:
     """Start a local Ollama if this request needs one and :11434 is down.
 
@@ -113,6 +144,9 @@ async def _ollama_generate(payload: Dict[str, Any]) -> Dict[str, Any]:
     num_ctx = payload.get("num_ctx")
     base = settings.engine_ollama_base_url.rstrip("/")
     await asyncio.to_thread(_ensure_ollama_running, base)
+    # After the cold start, so elapsed_s is comparable to timeout_s: the httpx
+    # budget does not cover ensure_running either.
+    started, wall_started = time.monotonic(), time.time()
     # Routines / non-stream API: suppress CoT so the visible answer is not
     # starved. Models that reject think=false still get a request without it
     # (Ollama returns 400); we retry once without the flag below.
@@ -131,14 +165,16 @@ async def _ollama_generate(payload: Dict[str, Any]) -> Dict[str, Any]:
         body["options"] = opts
     timeout = _ollama_generate_timeout()
     logger.info(
-        "Ollama generate: model=%r base=%s prompt_chars=%d max_tokens=%s temperature=%s think=%s",
+        "Ollama generate: model=%r base=%s prompt_chars=%d max_tokens=%s temperature=%s think=%s timeout_s=%.0f",
         model,
         base,
         len(prompt),
         max_tokens,
         temperature,
         think,
+        timeout.read,
     )
+    clocks = {"model": model, "stream": False, "started": started, "wall_started": wall_started}
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             r = await client.post(f"{base}/api/generate", json=body)
@@ -153,12 +189,23 @@ async def _ollama_generate(payload: Dict[str, Any]) -> Dict[str, Any]:
                 )
                 body.pop("think", None)
                 r = await client.post(f"{base}/api/generate", json=body)
-    except httpx.RequestError as exc:
+    except httpx.TimeoutException as exc:
+        # Ahead of RequestError, which every httpx timeout also is. A timeout's
+        # text is empty, so it used to read "Ollama unreachable at …: " while
+        # Ollama was up and simply had not answered yet.
+        _log_ollama_failure("timed out", budget_s=timeout.read, exc=exc, **clocks)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Ollama unreachable at {base}: {exc}",
+            detail=f"Ollama did not answer within {timeout.read:.0f}s at {base} ({type(exc).__name__})",
+        ) from exc
+    except httpx.RequestError as exc:
+        _log_ollama_failure("failed", budget_s=timeout.read, exc=exc, **clocks)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Ollama unreachable at {base}: {str(exc) or type(exc).__name__}",
         ) from exc
     if r.status_code >= 400:
+        _log_ollama_failure("error", budget_s=timeout.read, status_code=r.status_code, **clocks)
         detail = (r.text or str(r.status_code))[:800]
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=f"Ollama error: {detail}")
     data = r.json()
@@ -168,11 +215,14 @@ async def _ollama_generate(payload: Dict[str, Any]) -> Dict[str, Any]:
     completion_tokens = int(data.get("eval_count") or 0)
     total_tokens = prompt_tokens + completion_tokens
     logger.info(
-        "Ollama generate complete: model=%r response_chars=%d prompt_tokens=%d completion_tokens=%d",
+        "Ollama generate complete: model=%r response_chars=%d prompt_tokens=%d completion_tokens=%d"
+        " elapsed_s=%.1f wall_s=%.1f",
         resp_model,
         len(text),
         prompt_tokens,
         completion_tokens,
+        time.monotonic() - started,
+        time.time() - wall_started,
     )
     usage: Dict[str, Any] = {}
     if total_tokens > 0:
@@ -353,11 +403,16 @@ async def _ollama_stream_generate(
             if time.monotonic() - last_frame_at >= interval:
                 await _emit_protocol("heartbeat", {"phase": phase})
 
+    started, wall_started = time.monotonic(), time.time()
+    clocks = {"model": model, "stream": True, "started": started, "wall_started": wall_started}
     hb_task = asyncio.create_task(_heartbeats()) if on_protocol is not None else None
     try:
         async with httpx.AsyncClient(timeout=timeout) as client:
             async with client.stream("POST", f"{base}/api/generate", json=body) as response:
                 if response.status_code >= 400:
+                    _log_ollama_failure(
+                        "error", budget_s=timeout.read, status_code=response.status_code, **clocks
+                    )
                     detail = (await response.aread()).decode("utf-8", errors="replace")[:800]
                     raise HTTPException(
                         status_code=status.HTTP_502_BAD_GATEWAY,
@@ -393,10 +448,18 @@ async def _ollama_stream_generate(
                         completion_tokens = int(data.get("eval_count") or completion_tokens)
                         done_reason = str(data.get("done_reason") or "")
                         timings = _ollama_timings(data)
-    except httpx.RequestError as exc:
+    except httpx.TimeoutException as exc:
+        # Same split as the non-stream path: a timeout is not "unreachable".
+        _log_ollama_failure("timed out", budget_s=timeout.read, exc=exc, **clocks)
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
-            detail=f"Ollama unreachable at {base}: {exc}",
+            detail=f"Ollama did not answer within {timeout.read:.0f}s at {base} ({type(exc).__name__})",
+        ) from exc
+    except httpx.RequestError as exc:
+        _log_ollama_failure("failed", budget_s=timeout.read, exc=exc, **clocks)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Ollama unreachable at {base}: {str(exc) or type(exc).__name__}",
         ) from exc
     finally:
         if hb_task is not None:

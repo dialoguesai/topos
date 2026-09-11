@@ -517,7 +517,16 @@ class ControlPlaneClient:
             await ws.send(json.dumps(payload))
             return True
         except Exception as exc:  # noqa: BLE001
-            logger.error("Failed to send message to control plane: %s", exc)
+            # Routing fields only, never the payload: this is the one line that
+            # says which request's answer died on a dead socket.
+            logger.error(
+                "Failed to send message to control plane: id=%s type=%s status=%s exc=%s: %s",
+                payload.get("id"),
+                payload.get("type"),
+                payload.get("status"),
+                type(exc).__name__,
+                exc,
+            )
             return False
 
     def set_device_info_snapshot(self, payload: dict[str, Any] | None) -> None:

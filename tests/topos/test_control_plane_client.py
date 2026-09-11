@@ -366,6 +366,40 @@ def test_record_failure_logs_endpoint_context(monkeypatch, caplog):
     assert "event=connection_failed" in caplog.text
 
 
+@pytest.mark.asyncio
+async def test_failed_reply_send_names_what_was_lost(caplog):
+    # A reply that dies on a socket the Mac slept on used to log only the
+    # transport text -- no way to tell which request's answer was lost.
+    sentinel = "SENTINEL-REPLY-BODY-2e7a"
+
+    class DeadWebSocket(FakeWebSocket):
+        async def send(self, message):
+            raise Exception("no close frame received or sent")
+
+    async def handler(_message):
+        return None
+
+    client = ControlPlaneClient(
+        control_plane_url="wss://cp.example/ws/engine",
+        api_key="test-key",
+        handler=handler,
+        verify_ssl=True,
+    )
+
+    with caplog.at_level(logging.WARNING, logger="topos.control_plane_client"):
+        sent = await client._send_ws_json(
+            DeadWebSocket([]),
+            {"id": "r1", "type": "llm_generation", "status": "error", "payload": {"x": sentinel}},
+        )
+
+    assert sent is False
+    assert "id=r1" in caplog.text
+    assert "type=llm_generation" in caplog.text
+    assert "status=error" in caplog.text
+    assert "no close frame received or sent" in caplog.text
+    assert sentinel not in caplog.text
+
+
 def test_ui_bootstrap_types_bypass_inbound_saturation():
     fast = control_plane_client._FAST_INBOUND_MESSAGE_TYPES
     assert "get_runtime_bootstrap" in fast

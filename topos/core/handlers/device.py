@@ -280,13 +280,34 @@ async def handle_llm_generation(message: Dict[str, Any]) -> Optional[Dict[str, A
     unusable = _unusable_num_ctx(payload)
     if unusable is not None:
         return {"id": req_id, "status": "error", "error": unusable, "error_code": 422}
+    started, wall_started = time.monotonic(), time.time()
+    # Every outcome line carries the id: two routines overlap on the node, and
+    # the service-layer lines have none, so pairing by order is ambiguous.
     logger.info(
-        "llm_generation request: provider=%r model=%r prompt_chars=%d stream=%s",
+        "llm_generation request: id=%s provider=%r model=%r prompt_chars=%d stream=%s",
+        req_id,
         payload.get("provider"),
         payload.get("model"),
         len(str(payload.get("prompt") or "")),
         bool(payload.get("stream")),
     )
+
+    def _log_failed(exc: BaseException, code: Any) -> None:
+        # Classes and codes only: an error's text can quote an Ollama body.
+        # openai.py raises `from exc`, so the cause names the transport error.
+        logger.warning(
+            "llm_generation failed: id=%s provider=%r model=%r code=%s cause=%s"
+            " elapsed_s=%.1f wall_s=%.1f stream=%s",
+            req_id,
+            payload.get("provider"),
+            payload.get("model"),
+            code,
+            type(exc.__cause__ or exc).__name__,
+            time.monotonic() - started,
+            time.time() - wall_started,
+            bool(payload.get("stream")),
+        )
+
     current = asyncio.current_task()
     if current is not None:
         _LLM_GENERATION_TASKS[str(req_id)] = current
@@ -335,6 +356,14 @@ async def handle_llm_generation(message: Dict[str, Any]) -> Optional[Dict[str, A
         result = await get_services().llm.generate(
             payload, on_delta=on_delta, on_protocol=on_protocol
         )
+        logger.info(
+            "llm_generation done: id=%s model=%r output_chars=%d elapsed_s=%.1f wall_s=%.1f",
+            req_id,
+            payload.get("model"),
+            len(str((result or {}).get("output") or "")),
+            time.monotonic() - started,
+            time.time() - wall_started,
+        )
         return {"id": req_id, "status": "ok", "payload": result}
     except asyncio.CancelledError:
         # llm_cancel: answer the original request with a typed 499 so the
@@ -354,10 +383,13 @@ async def handle_llm_generation(message: Dict[str, Any]) -> Optional[Dict[str, A
                         }
                     )
                 )
-            except Exception:  # noqa: BLE001 — reporting must not mask the cancel
-                pass
+            except Exception as e:  # noqa: BLE001 — reporting must not mask the cancel
+                logger.warning(
+                    "llm_generation cancel reply not sent: id=%s exc=%s", req_id, type(e).__name__
+                )
         raise
     except LlmTypedError as exc:
+        _log_failed(exc, exc.code)
         return {
             "id": req_id,
             "status": "error",
@@ -365,6 +397,7 @@ async def handle_llm_generation(message: Dict[str, Any]) -> Optional[Dict[str, A
             "error_code": exc.code,
         }
     except HTTPException as exc:
+        _log_failed(exc, exc.status_code)
         detail = exc.detail
         err_msg = detail if isinstance(detail, str) else str(detail)
         return {
@@ -374,7 +407,10 @@ async def handle_llm_generation(message: Dict[str, Any]) -> Optional[Dict[str, A
             "error_code": exc.status_code,
         }
     except Exception as exc:  # noqa: BLE001
-        return {"id": req_id, "status": "error", "error": str(exc)}
+        _log_failed(exc, None)
+        # A bare `ValueError()` has empty text; the control plane would record
+        # a failure with no reason at all.
+        return {"id": req_id, "status": "error", "error": str(exc) or type(exc).__name__}
     finally:
         _LLM_GENERATION_TASKS.pop(str(req_id), None)
 

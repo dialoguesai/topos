@@ -16,9 +16,12 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 from typing import Any, Dict, List
 
+import httpx
 import pytest
+from fastapi import HTTPException
 
 import topos.core.handlers.device as device
 from topos.services.llm import openai as llm_openai
@@ -295,6 +298,85 @@ async def test_llm_cancel_aborts_the_generation_and_answers_499(monkeypatch):
     assert terminal[0]["error_code"] == 499
     # And the task registry does not leak the cancelled entry.
     assert "req-3" not in device._LLM_GENERATION_TASKS
+
+
+_SENTINEL = "SENTINEL-PROMPT-BODY-9c2d"
+
+
+@pytest.mark.asyncio
+async def test_handler_logs_failures_with_request_id_and_cause(monkeypatch, caplog):
+    # Two routines overlap on the node, and the service-layer lines carry no
+    # request id -- without it here, a failure cannot be paired with its run.
+    cp = _FakeCpClient()
+
+    async def behavior(payload, on_delta, on_protocol):
+        try:
+            raise httpx.ReadTimeout("")
+        except httpx.ReadTimeout as exc:
+            raise HTTPException(status_code=502, detail="x") from exc
+
+    _install_llm(monkeypatch, cp, behavior)
+    with caplog.at_level(logging.WARNING, logger="topos.core.handlers"):
+        result = await device.handle_llm_generation(
+            {"id": "req-9", "type": "llm_generation", "payload": {"prompt": _SENTINEL, "model": "m"}}
+        )
+
+    assert result == {"id": "req-9", "status": "error", "error": "x", "error_code": 502}
+    assert "llm_generation failed: id=req-9" in caplog.text
+    assert "code=502" in caplog.text
+    assert "cause=ReadTimeout" in caplog.text
+    assert "wall_s=" in caplog.text
+    assert _SENTINEL not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_generic_failure_reply_error_is_never_empty(monkeypatch, caplog):
+    cp = _FakeCpClient()
+
+    async def behavior(payload, on_delta, on_protocol):
+        raise ValueError()
+
+    _install_llm(monkeypatch, cp, behavior)
+    with caplog.at_level(logging.WARNING, logger="topos.core.handlers"):
+        result = await device.handle_llm_generation(
+            {"id": "req-10", "type": "llm_generation", "payload": {"prompt": _SENTINEL, "model": "m"}}
+        )
+
+    assert result == {"id": "req-10", "status": "error", "error": "ValueError"}
+    assert "llm_generation failed: id=req-10" in caplog.text
+    assert "cause=ValueError" in caplog.text
+    assert _SENTINEL not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_cancel_reply_that_cannot_be_sent_is_logged(monkeypatch, caplog):
+    started = asyncio.Event()
+
+    class _DeadCpClient:
+        async def send_message(self, message: Dict[str, Any]) -> None:
+            raise ConnectionError("socket gone")
+
+    async def behavior(payload, on_delta, on_protocol):
+        started.set()
+        await asyncio.sleep(60)
+        return {"output": "never", "model": "m", "usage": {}}
+
+    _install_llm(monkeypatch, _DeadCpClient(), behavior)
+    gen_task = asyncio.create_task(
+        device.handle_llm_generation(
+            {"id": "req-11", "type": "llm_generation", "payload": {"prompt": _SENTINEL}}
+        )
+    )
+    await started.wait()
+    with caplog.at_level(logging.WARNING, logger="topos.core.handlers"):
+        await device.handle_llm_cancel(
+            {"id": "cancel-11", "type": "llm_cancel", "payload": {"target_request_id": "req-11"}}
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await gen_task
+
+    assert "llm_generation cancel reply not sent: id=req-11 exc=ConnectionError" in caplog.text
+    assert _SENTINEL not in caplog.text
 
 
 @pytest.mark.asyncio

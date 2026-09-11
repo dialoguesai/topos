@@ -163,7 +163,7 @@ class Settings(BaseSettings):
     sanitization_ollama_timeout_sec: float = Field(120.0)
     # llm_generation / routine hops — must cover local thinking models. Do NOT
     # reuse sanitization_ollama_timeout_sec (120s): that cuts digest synthesis
-    # mid-flight and surfaces as "Ollama unreachable".
+    # mid-flight and surfaces as "Ollama did not answer within 120s".
     engine_ollama_generate_timeout_sec: float = Field(300.0)
     ollama_list_timeout_sec: float = Field(10.0)
     sanitization_ollama_auto_pull: bool = Field(True)
