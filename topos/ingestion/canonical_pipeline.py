@@ -1032,12 +1032,26 @@ async def run_post_canonical_pipeline(
     # a 17k-edge node, inside the import, which is the point. Skipped when the
     # graph is not dirty, so a re-import that changed nothing pays nothing.
     if canonical_records:
+        from ..features.entities.rebuild_subprocess import GraphRebuildStopped
+
         try:
             from ..features.entities.graph_refresh import mark_graph_dirty, refresh_now_if_dirty
 
             mark_graph_dirty()
             outcome["graph_fill"] = await asyncio.to_thread(refresh_now_if_dirty)
             logger.info("[PIPELINE:GRAPH] mid-import graph fill: %s", outcome["graph_fill"])
+        except GraphRebuildStopped as exc:
+            # The node is going down. Swallowed by the handler below, this
+            # would start signal derivation -- hours of model work -- in a
+            # process that is exiting. Nor may it travel as an ordinary
+            # exception: the IngestionManager, the enrichment core and the
+            # per-source reprocess loops each catch Exception and would record
+            # this import done with its signal lane never run. A BaseException
+            # passes all of them; job_runner requeues the job and the upgrade
+            # runner leaves its step pending (see ShutdownInterrupt).
+            from ..runtime_shutdown import ShutdownInterrupt
+
+            raise ShutdownInterrupt(str(exc)) from exc
         except Exception as exc:  # noqa: BLE001 -- the graph must never break ingest
             logger.warning("mid-import graph fill skipped: %s", exc)
 

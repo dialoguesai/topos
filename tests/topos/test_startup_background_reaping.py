@@ -349,6 +349,116 @@ async def test_reap_upgrade_runner_is_safe_with_no_runner():
     await app_module._reap_upgrade_runner(timeout_s=1.0)  # must not raise
 
 
+# --- the graph rebuild child is stopped too ----------------------------------
+
+
+@pytest.mark.asyncio
+async def test_reap_rebuild_children_stops_them(monkeypatch):
+    from topos import app as app_module
+
+    calls = []
+    monkeypatch.setattr(
+        "topos.features.entities.rebuild_subprocess.stop_rebuild_children",
+        lambda grace_s=2.0: calls.append(grace_s) or 1,
+    )
+    await app_module._reap_rebuild_children(grace_s=0.5)
+    assert calls == [0.5]
+
+
+@pytest.mark.asyncio
+async def test_reap_rebuild_children_never_raises(monkeypatch):
+    from topos import app as app_module
+
+    def _boom(grace_s=2.0):
+        raise RuntimeError("no such process group")
+
+    monkeypatch.setattr("topos.features.entities.rebuild_subprocess.stop_rebuild_children", _boom)
+    await app_module._reap_rebuild_children()  # must not raise
+
+
+@pytest.mark.asyncio
+async def test_app_shutdown_stops_graph_rebuild_children(monkeypatch, tmp_path):
+    """The supervisor signals the node's pid only, so the node is the one thing
+    that can stop its rebuild child on the way out."""
+    from topos.testing.lifespan import LifespanManager
+
+    monkeypatch.setenv("TOPOS_KEY", "test-key")
+    monkeypatch.setenv("CONTROL_PLANE_URL", "")
+    monkeypatch.setenv("TOPOS_DATABASE_PATH", str(tmp_path / "engine.db"))
+    order = []
+    monkeypatch.setattr(
+        "topos.features.entities.rebuild_subprocess.stop_rebuild_children",
+        lambda grace_s=2.0: order.append("rebuild") or 0,
+    )
+    from topos import app as app_module
+    from topos.pipeline import job_runner
+
+    real_reap_tasks = app_module._reap_background_tasks
+    real_stop_worker = job_runner.stop_pipeline_worker
+
+    async def _reap_tasks():
+        order.append("background")
+        await real_reap_tasks()
+
+    async def _stop_worker():
+        order.append("pipeline")
+        await real_stop_worker()
+
+    monkeypatch.setattr(app_module, "_reap_background_tasks", _reap_tasks)
+    monkeypatch.setattr(job_runner, "stop_pipeline_worker", _stop_worker)
+
+    async with LifespanManager(app_module.app):
+        assert order == [], "startup must not stop rebuilds"
+    # First — before the tasks and workers it unblocks are reaped, since
+    # cancelling a task never stops the thread it awaits — AND last, for a
+    # rebuild a worker drained in between could have started.
+    assert order[0] == "rebuild" and order[-1] == "rebuild", order
+    assert order.count("rebuild") == 2 and {"background", "pipeline"} <= set(order), order
+
+
+@pytest.mark.asyncio
+async def test_app_startup_reopens_the_rebuild_gate_and_listens_for_signals(monkeypatch, tmp_path):
+    from topos import runtime_shutdown
+    from topos.features.entities import rebuild_subprocess
+    from topos.testing.lifespan import LifespanManager
+
+    monkeypatch.setenv("TOPOS_KEY", "test-key")
+    monkeypatch.setenv("CONTROL_PLANE_URL", "")
+    monkeypatch.setenv("TOPOS_DATABASE_PATH", str(tmp_path / "engine.db"))
+    rebuild_subprocess.stop_rebuild_children()  # as a previous run's shutdown left it
+    assert rebuild_subprocess._accepting is False
+    from topos.app import app
+
+    async with LifespanManager(app):
+        assert rebuild_subprocess._accepting is True, "startup left the rebuild gate closed"
+        assert rebuild_subprocess.signal_rebuild_children in runtime_shutdown._SHUTDOWN_LISTENERS
+    assert rebuild_subprocess._accepting is False, "shutdown left the rebuild gate open"
+
+
+def test_shutdown_signal_runs_listeners_and_survives_a_failing_one(monkeypatch):
+    """The listeners run from the installed SIGINT/SIGTERM handler itself —
+    called directly here, never by raising a real signal at the test process."""
+    import signal as _signal
+
+    from topos import runtime_shutdown
+
+    runtime_shutdown.install_shutdown_signal_hooks()
+    handler = _signal.getsignal(_signal.SIGTERM)
+    if getattr(handler, "__name__", "") != "_chain":
+        pytest.skip("shutdown hooks are not installed in this process")
+    monkeypatch.setattr(runtime_shutdown, "_SHUTDOWN_LISTENERS", [])
+    monkeypatch.setitem(runtime_shutdown._PREVIOUS_HANDLERS, _signal.SIGTERM, _signal.SIG_IGN)
+    seen = []
+    runtime_shutdown.add_shutdown_listener(lambda: 1 / 0)
+    runtime_shutdown.add_shutdown_listener(lambda: seen.append("ran"))
+    try:
+        handler(_signal.SIGTERM, None)
+        assert seen == ["ran"], "a failing listener stopped the ones after it"
+        assert runtime_shutdown.is_shutdown_requested()
+    finally:
+        runtime_shutdown.clear_shutdown()
+
+
 # --- the lock-order inversion ------------------------------------------------
 
 

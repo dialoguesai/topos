@@ -25,6 +25,17 @@ The machine-readable twin of each release is
   exactly 1.0) can still reach 0.8. On the owner's goals with the same embeddings: 947.9s → 67.4s,
   identical clusters, roots and order. Blocking on a shared token was rejected: typo pairs that
   share no token would silently stop merging.
+- **The graph-rebuild child no longer outlives the node, and a stop no longer reads as a
+  finished import.** `[O]` The supervisor signals the node's pid only, so a rebuild child kept
+  running after the node stopped — holding the rebuild lock with no timeout left (eight startups
+  on 2026-09-08 found one) — or held the node's exit until it finished. A shutdown signal now
+  stops the child at once, app shutdown and the tray's quit and re-exec stop it again, a spawn gate
+  keeps a new one from starting, and the child exits within a second if the node dies. A stop that
+  interrupts an import's graph fill raises `ShutdownInterrupt` (a `BaseException`), so no
+  catch-all can record the import done: the pipeline job is requeued without burning an attempt
+  and an upgrade step is left pending. A default-disposition SIGTERM behind the node's signal
+  hook now kills instead of being swallowed. The 1800s rebuild cap was never late: it counts
+  monotonic time, which stops while the Mac sleeps (see 1.3.56).
 
 ## [1.3.56] — 2026-09-11
 
