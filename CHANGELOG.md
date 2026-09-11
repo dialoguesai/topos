@@ -9,6 +9,22 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **A failed generation now leaves a trace in node.log, and a Mac that slept through it is
+  visible there.** `[O]` Every failure branch of the Ollama service and the `llm_generation`
+  handler used to raise or reply without a line, so a routine whose Mac went back to sleep
+  mid-generation left nothing on the node — only a control-plane stale-run close an hour later.
+  Each failure now logs one WARNING with the request id, model, exception class, HTTP status,
+  `timeout_s`, `elapsed_s` (monotonic) and `wall_s` (wall clock), and success lines carry both
+  clocks. macOS stops the monotonic clock during sleep — which is also why the node's own 300s
+  budget never fired — so `wall_s` minus `elapsed_s` is the time slept. No prompt, response or
+  Ollama body text reaches any of these lines; sentinel tests cover every path. A read timeout's
+  error now says "Ollama did not answer within 300s at …" instead of an empty
+  "Ollama unreachable at …:"; a connect timeout keeps the "unreachable" prefix and ends "no
+  connection within 10s", so the web app's failure copy does not show its stalled-model card for
+  a host it cannot reach. A reply lost on a dead control-plane socket now names its id, type and
+  status.
+
 ## [1.3.55] — 2026-09-10
 
 ### Security
