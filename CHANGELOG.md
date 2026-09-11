@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.56] — 2026-09-11
+
 ### Fixed
 - **A failed generation now leaves a trace in node.log, and a Mac that slept through it is
   visible there.** `[O]` Every failure branch of the Ollama service and the `llm_generation`
