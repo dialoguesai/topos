@@ -9,6 +9,15 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Fixed
+- **The entity-graph rebuild finishes again.** `[O]` Every rebuild since 2026-09-08 16:32 ran
+  into its 1800s cap and was killed, so the graph behind the scrubber and the relationship
+  answers went stale. The "who talked to whom" load looked up the sender of every message —
+  94,746 rows, 38,562 of them the owner's, where the lookup runs a ~40ms correlated COUNT —
+  and that alone took 1,400.8s. It now resolves each of the 1,168 senders once: 9.2s, with the
+  same output (772 conversations and 90,956 events, in the same order). With the goal-clustering
+  change below, a full rebuild of the same data takes 119.4s instead of 2,398.7s.
+
 ## [1.3.56] — 2026-09-11
 
 ### Fixed
