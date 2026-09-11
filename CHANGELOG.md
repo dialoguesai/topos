@@ -17,6 +17,14 @@ The machine-readable twin of each release is
   and that alone took 1,400.8s. It now resolves each of the 1,168 senders once: 9.2s, with the
   same output (772 conversations and 90,956 events, in the same order). With the goal-clustering
   change below, a full rebuild of the same data takes 119.4s instead of 2,398.7s.
+- **Goal clustering finds the same merges without comparing every pair.** `[O]`
+  `_cluster_goal_keys` compared all 5.19M pairs of the node's 3,222 distinct goals in pure
+  Python — a cosine and, for nearly every pair, a difflib ratio — for 985.7s of a rebuild capped
+  at 1800s. Cosine is now one matrix product, and difflib runs only on the 4.13% of pairs whose
+  provable upper bound (shared characters over summed length, per ratio; a contained token set is
+  exactly 1.0) can still reach 0.8. On the owner's goals with the same embeddings: 947.9s → 67.4s,
+  identical clusters, roots and order. Blocking on a shared token was rejected: typo pairs that
+  share no token would silently stop merging.
 
 ## [1.3.56] — 2026-09-11
 
