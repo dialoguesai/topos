@@ -61,3 +61,47 @@ async def test_a_second_run_does_not_revive_the_first(monkeypatch, tmp_path):
         assert stop_checker(second)() is False, "the new run starts clean"
         # The old run's workers must NOT be un-stopped by the new startup.
         assert stop_checker(first)() is True
+
+
+def test_shutdown_cancel_passes_every_catch_all():
+    """Between a stopped graph fill and the job that owns it sit handlers that
+    catch Exception. As an ordinary exception the stop was swallowed there and
+    the import recorded done with its signal lane never run; as a BaseException
+    it reaches the owner."""
+    import asyncio
+
+    from topos.runtime_shutdown import ShutdownInterrupt
+
+    assert issubclass(ShutdownInterrupt, BaseException)
+    assert not issubclass(ShutdownInterrupt, Exception)
+    # ...and not a cancellation: asyncio rebuilds those at every task boundary,
+    # which cost the upgrade runner the name it catches the stop by.
+    assert not issubclass(ShutdownInterrupt, asyncio.CancelledError)
+
+    async def _raises():
+        raise ShutdownInterrupt("stopped")
+
+    with pytest.raises(ShutdownInterrupt):
+        asyncio.run(_raises())
+
+
+@pytest.mark.skipif(not hasattr(__import__("signal"), "SIGTERM") or __import__("os").name != "posix",
+                    reason="POSIX signal dispositions")
+def test_a_sigterm_with_only_the_default_behind_the_hook_still_kills():
+    """With nothing but the default disposition behind it (no uvicorn handler),
+    the hook used to swallow SIGTERM and the process ran on until a SIGKILL."""
+    import signal
+    import subprocess
+    import sys
+
+    code = (
+        "import os, signal, time\n"
+        "from topos.runtime_shutdown import install_shutdown_signal_hooks\n"
+        "install_shutdown_signal_hooks()\n"
+        "os.kill(os.getpid(), signal.SIGTERM)\n"
+        "time.sleep(10)\n"
+        "print('survived')\n"
+    )
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=60)
+    assert "survived" not in result.stdout
+    assert result.returncode == -signal.SIGTERM, (result.returncode, result.stderr[-400:])

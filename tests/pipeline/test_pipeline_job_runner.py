@@ -443,3 +443,132 @@ def test_requeue_job_does_not_resurrect_settled_rows(conn: sqlite3.Connection) -
     conn.commit()
     requeue_job(conn, "jr2")
     assert get_job(conn, "jr2")["status"] == "done"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raised", ["through_the_pipeline", "from_a_direct_rebuild"])
+async def test_job_stopped_by_node_shutdown_is_requeued_not_failed(
+    conn: sqlite3.Connection, raised: str
+) -> None:
+    """Shutdown stops a job's graph rebuild child. That is neither a failure
+    (fail_job would end the import for good) nor an attempt: the claim goes back
+    to the queue at once, not when the lease runs out. It reaches process_job as
+    ShutdownInterrupt when it came through the pipeline (so no catch-all on the way
+    could record the import done), or as GraphRebuildStopped when the executor
+    waited on the rebuild itself; either way process_job re-raises
+    ShutdownInterrupt, which ends the worker."""
+    from topos.features.entities.rebuild_subprocess import GraphRebuildStopped
+    from topos.pipeline.job_runner import process_job
+    from topos.runtime_shutdown import ShutdownInterrupt
+
+    message = "graph rebuild subprocess pid=1 stopped by node shutdown"
+
+    async def _exec(_payload: dict) -> dict:
+        if raised == "through_the_pipeline":
+            raise ShutdownInterrupt(message)
+        raise GraphRebuildStopped(message)
+
+    enqueue_job(conn, kind="file_ingestion", payload={}, job_id="js1")
+    claimed = claim_next_job(conn, lease_owner="worker-a")
+    assert claimed is not None and claimed["status"] == "running"
+
+    with patch.dict("topos.pipeline.job_runner.EXECUTORS", {"file_ingestion": _exec}):
+        with pytest.raises(ShutdownInterrupt):
+            await process_job(lambda: conn, claimed)
+
+    job = get_job(conn, "js1")
+    assert job["status"] == "queued", job
+    assert job["lease_owner"] is None and job["lease_expires_at"] is None
+
+
+@pytest.mark.asyncio
+async def test_worker_claims_nothing_while_the_node_is_stopping(conn: sqlite3.Connection) -> None:
+    """Once a stop has closed the rebuild spawn gate, a claimed job would redo
+    its privacy and enrichment work in an exiting process only to be stopped at
+    its graph fill -- and the job a stop just requeued is the one it would claim.
+    A control-plane message can restart the worker in that window, so the loop
+    itself idles until the next startup reopens the gate."""
+    import asyncio
+
+    from topos.features.entities import rebuild_subprocess
+    from topos.pipeline.job_runner import _worker_loop
+
+    ran: list[dict] = []
+
+    async def _exec(payload: dict) -> dict:
+        ran.append(payload)
+        return {"status": "ok", "messages_processed": 1, "records_created": {}}
+
+    enqueue_job(conn, kind="file_ingestion", payload={"marker": "gate"}, job_id="job-gate-1")
+    rebuild_subprocess.stop_rebuild_children()  # closes the gate, as a node stop does
+    with patch.dict("topos.pipeline.job_runner.EXECUTORS", {"file_ingestion": _exec}):
+        task = asyncio.get_running_loop().create_task(_worker_loop(lambda: conn))
+        try:
+            await asyncio.sleep(1.5)
+            assert ran == [] and get_job(conn, "job-gate-1")["status"] == "queued"
+
+            rebuild_subprocess.allow_rebuild_children()  # the next startup
+            deadline = asyncio.get_running_loop().time() + 10
+            while not ran and asyncio.get_running_loop().time() < deadline:
+                await asyncio.sleep(0.05)
+        finally:
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+    assert ran, "the worker never resumed after the gate reopened"
+
+
+@pytest.mark.asyncio
+async def test_worker_loop_returns_cleanly_when_a_stop_interrupts_its_job(conn: sqlite3.Connection) -> None:
+    """The worker ends on the stop -- returning, not dying with an exception
+    nobody retrieves -- and leaves the interrupted job queued for the next start."""
+    import asyncio
+
+    from topos.pipeline.job_runner import _worker_loop
+    from topos.runtime_shutdown import ShutdownInterrupt
+
+    async def _exec(_payload: dict) -> dict:
+        raise ShutdownInterrupt("graph rebuild subprocess pid=1 stopped by node shutdown")
+
+    enqueue_job(conn, kind="file_ingestion", payload={}, job_id="job-stop-1")
+    with patch.dict("topos.pipeline.job_runner.EXECUTORS", {"file_ingestion": _exec}):
+        task = asyncio.get_running_loop().create_task(_worker_loop(lambda: conn))
+        await asyncio.wait_for(task, timeout=10)
+    assert task.done() and task.exception() is None
+    assert get_job(conn, "job-stop-1")["status"] == "queued"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("node_stopping", [True, False])
+async def test_job_cancelled_by_node_shutdown_is_requeued(
+    conn: sqlite3.Connection, node_stopping: bool
+) -> None:
+    """shutdown_event cancels the worker right after reaping the rebuild child,
+    so a job can be cancelled before it sees the stop itself. While the node is
+    stopping that must hand the claim back too, or the job sits 'running' until
+    its lease runs out; any other cancellation leaves the row as it always did."""
+    import asyncio
+
+    from topos.features.entities import rebuild_subprocess
+    from topos.pipeline.job_runner import process_job
+
+    started = asyncio.Event()
+
+    async def _exec(_payload: dict) -> dict:
+        started.set()
+        await asyncio.Event().wait()  # parked, like a worker awaiting a graph fill
+        return {"status": "ok"}
+
+    enqueue_job(conn, kind="file_ingestion", payload={}, job_id="jc1")
+    claimed = claim_next_job(conn, lease_owner="worker-a")
+    if node_stopping:
+        rebuild_subprocess.stop_rebuild_children()  # what shutdown_event does first
+
+    with patch.dict("topos.pipeline.job_runner.EXECUTORS", {"file_ingestion": _exec}):
+        task = asyncio.get_running_loop().create_task(process_job(lambda: conn, claimed))
+        await asyncio.wait_for(started.wait(), timeout=10)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    assert get_job(conn, "jc1")["status"] == ("queued" if node_stopping else "running")

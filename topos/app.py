@@ -229,6 +229,26 @@ async def _reap_upgrade_runner(timeout_s: float = _UPGRADE_JOIN_TIMEOUT_S) -> No
         )
 
 
+async def _reap_rebuild_children(grace_s: float = 2.0) -> None:
+    """Stop any entity-graph rebuild child this process started.
+
+    The child is a separate process writing the same database, and nothing
+    else stops it: the supervisor signals the node's pid only. Left alone it
+    ran on after the node exited, holding the rebuild lock (eight node starts
+    on 2026-09-08 found one), and a rebuild awaited through asyncio.to_thread
+    held this process's exit in asyncio.run until the child finished.
+    """
+    from .features.entities.rebuild_subprocess import stop_rebuild_children
+
+    try:
+        stopped = await asyncio.to_thread(stop_rebuild_children, grace_s)
+    except Exception as exc:  # noqa: BLE001 — teardown never raises
+        logger.warning("could not stop graph rebuild subprocess at shutdown: %s", exc)
+        return
+    if stopped:
+        logger.info("stopped %d graph rebuild subprocess(es) at shutdown", stopped)
+
+
 @app.on_event("startup")
 async def startup_event() -> None:
     from .runtime_shutdown import begin_runtime, install_shutdown_signal_hooks
@@ -239,6 +259,18 @@ async def startup_event() -> None:
     # leaves theirs retired and gives this run its own.
     begin_runtime("app_startup")
     install_shutdown_signal_hooks()
+    # The last run's shutdown closed the graph-rebuild spawn gate; this run may
+    # rebuild again. And a stop request ends rebuild children at the signal,
+    # not only in shutdown_event, which an in-flight rebuild request can keep
+    # uvicorn from ever reaching (see rebuild_subprocess.signal_rebuild_children).
+    from .features.entities.rebuild_subprocess import (
+        allow_rebuild_children,
+        signal_rebuild_children,
+    )
+    from .runtime_shutdown import add_shutdown_listener
+
+    allow_rebuild_children()
+    add_shutdown_listener(signal_rebuild_children)
     # This process holds the database, so its backups are the ones the model
     # manager may spend before it evicts a model. The disk floor never resolves
     # that directory for itself — on a split node it runs beside the models, on
@@ -624,6 +656,10 @@ async def shutdown_event() -> None:
     # Reaped before the network teardown below, because these are the writers.
     if state.upgrade_runner_stop is not None:
         state.upgrade_runner_stop.set()
+    # First, because it unblocks the rest: a background task awaiting a rebuild
+    # through asyncio.to_thread is stuck until the child dies, however it is
+    # cancelled.
+    await _reap_rebuild_children()
     await _reap_background_tasks()
     await stop_pipeline_worker()
     await _reap_upgrade_runner()
@@ -649,3 +685,6 @@ async def shutdown_event() -> None:
         state.hosted_pool_lease_client = None
     if state.sync_client:
         await state.sync_client.stop()
+    # Again, last: a worker drained above could have started a rebuild after the
+    # first pass, and one awaited from an executor thread would hold exit open.
+    await _reap_rebuild_children()

@@ -448,6 +448,21 @@ async def report_terminal_failure(
         logger.warning("could not report job failure upstream job_ids=%s: %s", job_ids, exc)
 
 
+async def _requeue_stopped_jobs(
+    conn_factory: Callable[[], Any], jobs: List[Dict[str, Any]], why: object
+) -> None:
+    def _requeue(own: Any) -> None:
+        for entry in jobs:
+            requeue_job(own, str(entry["job_id"]))
+
+    await _run_db(conn_factory, _requeue)
+    logger.info(
+        "pipeline job(s) %s requeued: %s",
+        ", ".join(str(e["job_id"]) for e in jobs),
+        why,
+    )
+
+
 async def process_job(conn_factory: Callable[[], Any], job: Dict[str, Any]) -> None:
     """Run one claimed job (plus any coalesced siblings) to completion."""
     job_id = str(job["job_id"])
@@ -485,9 +500,45 @@ async def process_job(conn_factory: Callable[[], Any], job: Dict[str, Any]) -> N
     if kind == LOCAL_SYNC_KIND:
         payload["_job_id"] = job_id
 
+    from ..features.entities.rebuild_subprocess import GraphRebuildStopped
+    from ..features.entities.rebuild_subprocess import accepting as rebuild_children_accepted
+    from ..runtime_shutdown import ShutdownInterrupt
+
     try:
         result = await executor(payload)
+    except asyncio.CancelledError:
+        if not rebuild_children_accepted():
+            # The node is stopping, and shutdown_event cancelled this worker
+            # before the job saw the stop itself (it cancels right after
+            # reaping the rebuild child). Same hand-back as below, or the job
+            # sits 'running' until its lease runs out. Outside a stop, a
+            # cancelled job is left as it always was.
+            try:
+                # Bounded: the write gate has no timeout, and every later
+                # shutdown step waits behind this one. On a timeout the write
+                # still lands from its thread before the process exits.
+                await asyncio.wait_for(
+                    _requeue_stopped_jobs(conn_factory, jobs, "worker cancelled by node shutdown"),
+                    timeout=2.0,
+                )
+            except Exception as exc:  # noqa: BLE001 — best-effort on the way out
+                logger.debug("requeue on shutdown cancel failed job_id=%s: %s", job_id, exc)
+        raise
+    except ShutdownInterrupt as stop:
+        # The node is stopping under this job (its graph fill was stopped).
+        # Not a failure -- fail_job would end the import for good -- and not
+        # an attempt: hand the claim back, as for a "requeue" result, so the
+        # next start picks it up at once rather than when the lease runs out.
+        # Re-raised, it ends this worker (_worker_loop returns on it), and a
+        # restarted one stays idle until the next startup, so the job is not
+        # claimed straight back.
+        await _requeue_stopped_jobs(conn_factory, jobs, stop)
+        raise
     except Exception as exc:  # noqa: BLE001
+        if isinstance(exc, GraphRebuildStopped):
+            # An executor that waited on a rebuild itself: the same stop.
+            await _requeue_stopped_jobs(conn_factory, jobs, exc)
+            raise ShutdownInterrupt(str(exc)) from exc
         logger.warning("pipeline job failed job_id=%s kind=%s: %s", job_id, kind, exc, exc_info=exc)
 
         def _mark_crashed(own: Any, error: str = str(exc)) -> None:
@@ -598,11 +649,22 @@ async def _worker_loop(
     only — running the derivation-debt sweep from both would double its
     database traffic for no benefit.
     """
+    from ..features.entities.rebuild_subprocess import accepting as rebuild_children_accepted
+    from ..runtime_shutdown import ShutdownInterrupt
+
     idle_delay = idle_seconds
     next_debt_sweep = 0.0
     while True:
         try:
             if not _enabled():
+                await asyncio.sleep(1.0)
+                continue
+            if not rebuild_children_accepted():
+                # The node is stopping: the graph-rebuild spawn gate closes at
+                # the first stop and reopens at the next startup. A job claimed
+                # now would redo its privacy and enrichment work in an exiting
+                # process only to be stopped at its graph fill -- and the job a
+                # stop just requeued is the one it would claim.
                 await asyncio.sleep(1.0)
                 continue
 
@@ -647,6 +709,11 @@ async def _worker_loop(
                     pass
         except asyncio.CancelledError:
             raise
+        except ShutdownInterrupt as stop:
+            # process_job requeued the job the stop interrupted; this worker is
+            # done until the next startup starts another.
+            logger.info("%s worker stopping: %s", label, stop)
+            return
         except Exception as exc:  # noqa: BLE001
             # The claim used to sit OUTSIDE any try: on 2026-08-07 a "database
             # is locked" that outlived claim_next_job's bounded busy-retries
