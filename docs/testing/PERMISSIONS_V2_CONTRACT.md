@@ -65,8 +65,10 @@ protection revision must match when reopening. File permissions are 0600.
 Only an already verified `OWNER_APP` principal may activate, revoke, update the
 protection revision, or read signer coordination snapshots. A matching owner ID,
 legacy shared key, routine class, or grantee signature cannot do so. A relay owner
-must match the ledger owner ID; a verified local owner key may omit the acting
-user, but an explicit different owner or unknown channel rejects. These are
+must match the ledger owner ID; the verified owner socket (`uds`) may omit the
+acting user, but an explicit different owner or any TCP channel rejects. The
+current engine deliberately demotes owner keys on TCP; the local socket and
+signed owner relay are the two owner channels. These are
 in-process coordination hooks. A CP-approved synchronization protocol needs a
 separately reviewed mutation signature domain; the grantee envelope cannot
 activate itself. Local mutation results are not authenticated network ACKs.
@@ -121,12 +123,13 @@ database without a monotonic authority outside that restored database.
 
 ## Verification
 
-The focused gate passed **128 tests**. The final combined gate passed **166**,
-including those 128 plus 38 existing principal-fabric invariants, with the live
+The focused gate initially passed **128 tests**. The transport follow-up gate
+passed **168**, including 130 P2a tests plus 38 existing principal-fabric invariants, with the live
 DB tripwire clean. These counts overlap.
 Independent review reproduced the owner-binding and removed-signer gaps before
 repair; a separate canary traceback test failed before exception suppression and
-passed afterward. These are package-level boundary checks, not full-route or
+passed afterward. Two UDS owner controls failed before aligning the local owner
+hook with the actual socket transport and passed afterward. These are package-level boundary checks, not full-route or
 lineage certification.
 
 Run `tests/permissions_v2` through the live DB tripwire with the scratch/offline

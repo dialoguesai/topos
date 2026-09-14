@@ -36,7 +36,7 @@ def sample_policy():
 
 @pytest.fixture
 def owner():
-    token = set_principal(Principal(cls=OWNER_APP, channel="local_http", acting_user="owner-1"))
+    token = set_principal(Principal(cls=OWNER_APP, channel="uds", acting_user="owner-1"))
     try:
         yield
     finally:
@@ -381,7 +381,7 @@ def test_copied_ledger_cannot_be_opened_as_other_node(setup):
         PolicyLedger(ledger.path, identity=other, protection_revision="a" * 64, trusted_keys=keys)
 
 
-@pytest.mark.parametrize("channel,acting_user", [("local_http", "other-owner"), ("cp_relay", "other-owner"), ("cp_relay", ""), ("unverified", "owner-1")])
+@pytest.mark.parametrize("channel,acting_user", [("uds", "other-owner"), ("local_http", "owner-1"), ("local_http", ""), ("cp_relay", "other-owner"), ("cp_relay", ""), ("unverified", "owner-1")])
 def test_owner_class_still_requires_correct_ledger_owner_and_channel(setup, channel, acting_user):
     token = set_principal(Principal(cls=OWNER_APP, channel=channel, acting_user=acting_user))
     try:
@@ -391,8 +391,8 @@ def test_owner_class_still_requires_correct_ledger_owner_and_channel(setup, chan
         reset_principal(token)
 
 
-@pytest.mark.parametrize("channel,acting_user", [("local_http", ""), ("local_http", "owner-1"), ("cp_relay", "owner-1")])
-def test_verified_owner_key_and_bound_relay_owner_remain_usable(setup, channel, acting_user):
+@pytest.mark.parametrize("channel,acting_user", [("uds", ""), ("uds", "owner-1"), ("cp_relay", "owner-1")])
+def test_verified_owner_socket_and_bound_relay_owner_remain_usable(setup, channel, acting_user):
     token = set_principal(Principal(cls=OWNER_APP, channel=channel, acting_user=acting_user))
     try:
         assert setup[0].authority_snapshot("grant-1", now=1100).grant_generation == 1
@@ -423,7 +423,7 @@ def test_wrong_signature_domain_cannot_replay_legacy_stamp(setup):
 def test_concurrent_owner_mutations_compare_and_set_once(setup):
     ledger = setup[0]
     def attempt(index):
-        token = set_principal(Principal(cls=OWNER_APP, channel="local_http", acting_user="owner-1"))
+        token = set_principal(Principal(cls=OWNER_APP, channel="uds", acting_user="owner-1"))
         try:
             ledger.update_protection(str(index) * 64, expected_epoch=1, command_id=f"protection-{index}")
             return "applied"

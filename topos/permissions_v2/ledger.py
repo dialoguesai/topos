@@ -91,7 +91,7 @@ class PolicyLedger:
         principal = current_principal()
         if principal is None or principal.cls != OWNER_APP:
             raise PolicyError("owner_required")
-        if principal.channel not in {"local_http", "cp_relay"}:
+        if principal.channel not in {"uds", "cp_relay"}:
             raise PolicyError("owner_channel")
         if (principal.acting_user and principal.acting_user != self.identity.owner_id) or (principal.channel == "cp_relay" and principal.acting_user != self.identity.owner_id):
             raise PolicyError("owner_binding")
