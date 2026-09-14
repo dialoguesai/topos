@@ -1,0 +1,136 @@
+{
+  "fixture_version": "topos-p2a-golden/v1",
+  "synthetic_private_key_seed_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "public_key_hex": "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+  "policy": {
+    "version": "topos-policy/v2",
+    "policy_version_id": "policy-1",
+    "binding": {
+      "environment_id": "beta",
+      "node_id": "node-1",
+      "resource_id": "resource-1",
+      "owner_id": "owner-1",
+      "actor_id": "actor-1",
+      "client_id": "client-1",
+      "grant_id": "grant-1",
+      "assignment_id": "assignment-1"
+    },
+    "versions": {
+      "vocabulary": "vocabulary-1",
+      "capability": "permissions-beta/p2a-v1"
+    },
+    "validity": {
+      "starts_at": 1000,
+      "expires_at": 5000
+    },
+    "source_universe": {
+      "universe_id": "sources-1",
+      "revision": 1,
+      "source_ids": [
+        "source-A",
+        "source-B"
+      ]
+    },
+    "hard_constraints": {
+      "owner_only": "deny",
+      "unknown_classification": "withhold",
+      "unknown_lineage": "withhold",
+      "cross_rule_derivation": "deny",
+      "capability_growth": "require_consent"
+    },
+    "rules": [
+      {
+        "rule_id": "rule-A",
+        "effect": "permit",
+        "evidence_use": {
+          "sources": {
+            "kind": "only",
+            "values": [
+              "source-A"
+            ]
+          },
+          "predicate": {
+            "kind": "all_of",
+            "terms": []
+          },
+          "purpose": "reading",
+          "processors": {
+            "kind": "only",
+            "values": [
+              "owner-engine-local"
+            ]
+          },
+          "new_records": "include_if_predicate"
+        },
+        "release": {
+          "predicate": {
+            "kind": "all_of",
+            "terms": []
+          },
+          "ceiling": "raw",
+          "forms": [
+            {
+              "family": "canonical_record",
+              "operation": "read",
+              "view_id": "canonical.message_disclosure.v1",
+              "tables": [
+                "conversation_messages"
+              ]
+            }
+          ]
+        }
+      }
+    ],
+    "evaluator": {
+      "kind": "hard_rules",
+      "version": "hard-rules/p2a-v1"
+    },
+    "natural_language": null
+  },
+  "policy_canonical": "{\"binding\":{\"actor_id\":\"actor-1\",\"assignment_id\":\"assignment-1\",\"client_id\":\"client-1\",\"environment_id\":\"beta\",\"grant_id\":\"grant-1\",\"node_id\":\"node-1\",\"owner_id\":\"owner-1\",\"resource_id\":\"resource-1\"},\"evaluator\":{\"kind\":\"hard_rules\",\"version\":\"hard-rules/p2a-v1\"},\"hard_constraints\":{\"capability_growth\":\"require_consent\",\"cross_rule_derivation\":\"deny\",\"owner_only\":\"deny\",\"unknown_classification\":\"withhold\",\"unknown_lineage\":\"withhold\"},\"natural_language\":null,\"policy_version_id\":\"policy-1\",\"rules\":[{\"effect\":\"permit\",\"evidence_use\":{\"new_records\":\"include_if_predicate\",\"predicate\":{\"kind\":\"all_of\",\"terms\":[]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"reading\",\"sources\":{\"kind\":\"only\",\"values\":[\"source-A\"]}},\"release\":{\"ceiling\":\"raw\",\"forms\":[{\"family\":\"canonical_record\",\"operation\":\"read\",\"tables\":[\"conversation_messages\"],\"view_id\":\"canonical.message_disclosure.v1\"}],\"predicate\":{\"kind\":\"all_of\",\"terms\":[]}},\"rule_id\":\"rule-A\"}],\"source_universe\":{\"revision\":1,\"source_ids\":[\"source-A\",\"source-B\"],\"universe_id\":\"sources-1\"},\"validity\":{\"expires_at\":5000,\"starts_at\":1000},\"version\":\"topos-policy/v2\",\"versions\":{\"capability\":\"permissions-beta/p2a-v1\",\"vocabulary\":\"vocabulary-1\"}}",
+  "policy_hash": "786e2b3336eae103dcd7dc5fb15a9302f024b9fc8705219ecf01b0e1d194c15d",
+  "payload": {
+    "question": "Caf\u00e9 \ud83d\udcda / line\n",
+    "limit": 10,
+    "empty": [],
+    "literal": "e\u0301"
+  },
+  "request": {
+    "environment_id": "beta",
+    "node_id": "node-1",
+    "resource_id": "resource-1",
+    "owner_id": "owner-1",
+    "actor_id": "actor-1",
+    "client_id": "client-1",
+    "grant_id": "grant-1",
+    "assignment_id": "assignment-1",
+    "request_id": "request-1",
+    "request_type": "permissions.v2.preview"
+  },
+  "signing_text": "topos-grantee-envelope/v2\n{\"actor_id\":\"actor-1\",\"assignment_generation\":1,\"assignment_id\":\"assignment-1\",\"capability_version\":\"permissions-beta/p2a-v1\",\"client_id\":\"client-1\",\"environment_id\":\"beta\",\"expires_at\":1200,\"grant_generation\":1,\"grant_id\":\"grant-1\",\"issued_at\":1100,\"kid\":\"beta-key-1\",\"node_epoch\":1,\"node_id\":\"node-1\",\"owner_id\":\"owner-1\",\"policy_hash\":\"786e2b3336eae103dcd7dc5fb15a9302f024b9fc8705219ecf01b0e1d194c15d\",\"policy_version_id\":\"policy-1\",\"protection_revision\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"request_hash\":\"d5881ceaf6d06c44b35b8fc39f1fadb3095dede9e79d13074e8f2ca928ae4b7f\",\"request_id\":\"request-1\",\"request_type\":\"permissions.v2.preview\",\"resource_id\":\"resource-1\",\"version\":\"topos-grantee-envelope/v2\"}",
+  "envelope": {
+    "environment_id": "beta",
+    "node_id": "node-1",
+    "resource_id": "resource-1",
+    "owner_id": "owner-1",
+    "actor_id": "actor-1",
+    "client_id": "client-1",
+    "grant_id": "grant-1",
+    "assignment_id": "assignment-1",
+    "grant_generation": 1,
+    "assignment_generation": 1,
+    "policy_version_id": "policy-1",
+    "policy_hash": "786e2b3336eae103dcd7dc5fb15a9302f024b9fc8705219ecf01b0e1d194c15d",
+    "capability_version": "permissions-beta/p2a-v1",
+    "protection_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "node_epoch": 1,
+    "version": "topos-grantee-envelope/v2",
+    "kid": "beta-key-1",
+    "request_id": "request-1",
+    "request_type": "permissions.v2.preview",
+    "request_hash": "d5881ceaf6d06c44b35b8fc39f1fadb3095dede9e79d13074e8f2ca928ae4b7f",
+    "issued_at": 1100,
+    "expires_at": 1200,
+    "signature": "_7doSVPu0uN-1YzjPbb1-Zs5us2QPmlR0BRk5fA6CPT5123EBmboxCyxH-9rr61LFpUXdn36PDwMOY3KW5WnCA"
+  }
+}

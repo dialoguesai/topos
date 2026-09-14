@@ -1,0 +1,78 @@
+{
+  "$defs": {
+    "MessageRecord": {
+      "additionalProperties": false,
+      "properties": {
+        "canonical_table": {
+          "enum": [
+            "conversation_messages",
+            "ai_chat_messages"
+          ],
+          "title": "Canonical Table",
+          "type": "string"
+        },
+        "content": {
+          "maxLength": 100000,
+          "title": "Content",
+          "type": "string"
+        },
+        "record_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Record Id",
+          "type": "string"
+        },
+        "source_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Source Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "record_id",
+        "source_id",
+        "canonical_table",
+        "content"
+      ],
+      "title": "MessageRecord",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "family": {
+      "const": "canonical_record",
+      "title": "Family",
+      "type": "string"
+    },
+    "operation": {
+      "const": "read",
+      "title": "Operation",
+      "type": "string"
+    },
+    "records": {
+      "items": {
+        "$ref": "#/$defs/MessageRecord"
+      },
+      "maxItems": 100,
+      "title": "Records",
+      "type": "array"
+    },
+    "view_id": {
+      "const": "canonical.message_disclosure.v1",
+      "title": "View Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "family",
+    "operation",
+    "view_id",
+    "records"
+  ],
+  "title": "MessageDisclosure",
+  "type": "object"
+}
