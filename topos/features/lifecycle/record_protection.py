@@ -42,6 +42,21 @@ class RecordProtectionStore:
     def blocked_ids(self, canonical_table: Optional[str] = None) -> Set[str]:
         return {r["record_id"] for r in self.list() if canonical_table is None or r["canonical_table"] == canonical_table}
 
+    def supported_tables(self) -> List[str]:
+        """Advertise only concrete canonical stores with selectable native IDs."""
+        from ...storage.adapters.sqlite.stores import _NATIVE_ID_COL
+
+        supported = []
+        for table, id_column in _NATIVE_ID_COL.items():
+            if self.conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone() is None:
+                continue
+            columns = {row[1] for row in self.conn.execute(f'PRAGMA table_info("{table}")')}
+            if id_column in columns:
+                supported.append(table)
+        return sorted(supported)
+
     def protect(self, *, canonical_table: str, record_id: str, note: Optional[str] = None) -> Dict[str, Any]:
         from ...storage.adapters.sqlite.stores import _NATIVE_ID_COL
 

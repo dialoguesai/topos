@@ -524,6 +524,23 @@ class QueryPipelineOrchestrator:
         now: Optional[datetime] = None,
     ) -> Dict[str, Any]:
         session_id = query_session_id or f"qs_{uuid.uuid4()}"
+        from ..principal import OWNER_APP, current_principal
+        from ..uma_filters import query_filter_restriction_reason
+
+        # Inference scope is a product contract, not a prompt instruction. Only
+        # availability currently has a closed non-owner output schema. In
+        # particular a forged tier/owner ID cannot enable the unrestricted
+        # facts shortcuts or model lane below.
+        trusted_owner = not is_grantee_request and getattr(current_principal(), "cls", None) == OWNER_APP
+        restriction = query_filter_restriction_reason(filter_manifest, access_mode, scope_id, field_transforms)
+        if access_mode == "inference" and not trusted_owner and scope_id != "availability:read":
+            restriction = "inference_view_unsupported"
+        if restriction:
+            return {"turn_outcome": TurnOutcome.DENIED.value, "public_result": None,
+                    "deny_reason": restriction, "session_id": session_id, "query_session_id": session_id,
+                    "supported_inference_scopes": ["availability:read"],
+                    "supported_derived_filter_ids": [],
+                    "audit": {"deny_reason": restriction, "stores_touched": []}}
         turn_start_ms = now_ms()
         store = self._session_store()
         try:

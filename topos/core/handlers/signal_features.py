@@ -1099,6 +1099,7 @@ async def handle_signal_list_blackholes(message: Dict[str, Any]) -> Optional[Dic
                 "blackholes": store.list(),
                 "notifications": store.notifications(state="open"),
                 "record_protection_supported": True,
+                "record_protection_tables": RecordProtectionStore(hub.get_db_connection()).supported_tables(),
                 "records": RecordProtectionStore(hub.get_db_connection()).list(),
             },
         }

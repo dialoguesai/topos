@@ -796,7 +796,9 @@ async def list_blackholes(_api_key: str = Depends(require_api_key)):
     from ..features.lifecycle.record_protection import RecordProtectionStore
 
     return {"blackholes": store.list(), "notifications": store.notifications(state="open"),
-            "record_protection_supported": True, "records": RecordProtectionStore(_entities_conn()).list()}
+            "record_protection_supported": True,
+            "record_protection_tables": RecordProtectionStore(_entities_conn()).supported_tables(),
+            "records": RecordProtectionStore(_entities_conn()).list()}
 
 
 class RecordBlackholeBody(BaseModel):

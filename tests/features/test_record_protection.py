@@ -190,6 +190,17 @@ def test_missing_migrated_protection_table_fails_closed(conn):
         RecordProtectionStore(conn).list()
 
 
+def test_record_capability_names_only_present_native_tables(conn):
+    supported = RecordProtectionStore(conn).supported_tables()
+    assert "conversation_messages" in supported
+    conn.execute("CREATE TABLE custom_private_table(record_id TEXT)")
+    assert "custom_private_table" not in RecordProtectionStore(conn).supported_tables()
+    # Unsupported schema cannot be advertised merely because its table name is familiar.
+    with sqlite3.connect(":memory:") as malformed:
+        malformed.execute("CREATE TABLE journal_entries(wrong_id TEXT)")
+        assert RecordProtectionStore(malformed).supported_tables() == []
+
+
 def test_missing_migrated_entity_protection_table_fails_closed(conn):
     from topos.features.lifecycle.blackhole import BlackholeStore
 

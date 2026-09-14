@@ -25,8 +25,8 @@ from .common import (
     settings,
     strip_contact_runtime_filters,
 )
-from ...uma_filters import enrichment_filters_in_manifest, strip_enrichment_retrieval_filters
-from ...uma_authority import bound_uma_scope, dataset_scope_predicate, message_stream_granted, local_node_resource_scope
+from ...uma_filters import enrichment_filters_in_manifest, strip_enrichment_retrieval_filters, generic_source_sql_constraints, query_filter_restriction_reason
+from ...uma_authority import bound_uma_scope, dataset_scope_predicate, message_stream_granted, local_node_resource_scope, raw_table_projection_allowed
 from .registry import handles
 
 
@@ -131,6 +131,11 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
     message_stream = _raw_ms
     if not message_stream_granted(payload.get("allowed_scopes"), message_stream):
         return {"id": req_id, "status": "error", "code": 403, "error": "message_scope_required"}
+    if not raw_table_projection_allowed(payload.get("allowed_scopes"), filter_manifest,
+                                        "conversation_messages" if message_stream == "conversation" else "ai_chat_messages"):
+        return {"id": req_id, "status": "error", "code": 403, "error": "raw_table_projection_not_granted"}
+    if query_filter_restriction_reason(filters_dict, "raw") == "empty_allowlist":
+        return {"id": req_id, "status": "ok", "payload": {"messages": []}}
     limit = get_limit_cap(
         limit,
         filter_manifest,
@@ -549,6 +554,12 @@ async def handle_uma_get_rows(message: Dict[str, Any]) -> Optional[Dict[str, Any
         return {"id": req_id, "status": "error", "error": "table_name required"}
     if table_name not in allowed_set:
         return {"id": req_id, "status": "error", "error": f"table not allowed: {table_name}"}
+    if not raw_table_projection_allowed(payload.get("allowed_scopes"), filter_manifest, table_name):
+        return {"id": req_id, "status": "error", "code": 403, "error": "raw_table_projection_not_granted"}
+    if query_filter_restriction_reason(filters_dict, "raw") == "empty_allowlist":
+        return {"id": req_id, "status": "ok", "payload": {
+            "rows": [], "table_name": table_name, "applied_limit": limit,
+            "has_more": False, "next_offset": None, "cap_reason": "empty_allowlist"}}
     try:
         from ...features.lifecycle.blackhole_guard import BlackholeGuard
 
@@ -619,6 +630,10 @@ async def handle_uma_get_rows(message: Dict[str, Any]) -> Optional[Dict[str, Any
                     is_sqlite=_is_sqlite_conn(conn),
                 )
 
+                source_where, source_params = generic_source_sql_constraints(filter_manifest, col_names)
+                scope_where += source_where
+                scope_params += source_params
+
                 # Pull one extra row to derive has_more without a separate COUNT.
                 if _is_sqlite_conn(conn):
                     cursor = conn.execute(
@@ -666,6 +681,9 @@ async def handle_uma_get_rows(message: Dict[str, Any]) -> Optional[Dict[str, Any
                 table_name=table_name,
                 is_sqlite=True,
             )
+            source_where, source_params = generic_source_sql_constraints(filter_manifest, col_names)
+            scope_where += source_where
+            scope_params += source_params
             cursor = conn.execute(
                 f'SELECT * FROM "{table_name}"{scope_where} ORDER BY {order_clause} LIMIT ? OFFSET ?',
                 scope_params + (limit + 1, offset),

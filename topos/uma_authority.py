@@ -18,6 +18,43 @@ def message_stream_granted(scopes: Any, stream: str) -> bool:
     ))
 
 
+def raw_table_projection_allowed(scopes: Any, manifest: Any, table: str) -> bool:
+    """Apply persisted view/table obligations to each UMA raw reader.
+
+    Table permission remains correlated with the scope which grants that table;
+    an unconstrained AI scope must not erase an empty messages scope selection.
+    Baseline scope/allowed_tables checks remain the responsibility of the entry
+    point, including when no optional projection metadata exists.
+    """
+    if manifest is None:
+        return True
+    if manifest.access_mode_ceiling is not None and manifest.access_mode_ceiling != "raw":
+        return False
+    restrictions = manifest.scope_table_allowlist
+    if restrictions is None:
+        return True
+    if not isinstance(scopes, list):
+        return False
+    aliases = {"messages": "conversation_messages", "ai_messages": "ai_chat_messages", "ai_chat": "ai_chat_messages"}
+    canonical = aliases.get(table, table)
+    for scope in scopes:
+        if not isinstance(scope, str):
+            continue
+        if scope == "all:read":
+            covers = True
+        elif canonical in {"conversation_messages", "ai_chat_messages"}:
+            covers = message_stream_granted([scope], "conversation" if canonical == "conversation_messages" else "ai_chat")
+        else:
+            from .query.manifest_validation import ManifestValidationError, resolve_scope_manifest
+            try:
+                covers = canonical in resolve_scope_manifest(scope).canonical_tables
+            except ManifestValidationError:
+                covers = False
+        if covers and (scope not in restrictions or canonical in {aliases.get(t, t) for t in restrictions[scope]}):
+            return True
+    return False
+
+
 def bound_uma_scope(payload: Mapping[str, Any]) -> tuple[str, str]:
     """Resource identity is authoritative over optional caller-supplied hints."""
     resource_id = str(payload.get("resource_id") or "").strip()

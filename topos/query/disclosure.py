@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Optional
 from shared.filtering import FieldTransform, filter_manifest_from_storage
 
 from ..disclosure.tier import strip_ingest_pii_transforms
-from ..uma_filters import apply_filter_manifest, extract_field_transforms
+from ..uma_filters import apply_filter_manifest, extract_field_transforms, query_filter_manifest, UMAFilterError
 from . import narrowing as _N
 from .types import FilteredContext, RetrievalBundle
 
@@ -66,6 +66,7 @@ _GRANTEE_TEXT_KEYS = (
     "tag",
     "title",
     "description",
+    "search_text",
 )
 
 
@@ -112,18 +113,38 @@ def _scrub_grantee_text_items(items: List[Any]) -> List[Any]:
 def _apply_field_transforms(rows: List[Dict[str, Any]], transforms: Optional[List[FieldTransform]]) -> List[Dict[str, Any]]:
     if not transforms:
         return rows
+    compiled = []
+    for tf in transforms:
+        field = _transform_field(tf, "field")
+        table_id = _transform_field(tf, "table_id")
+        singular = _transform_field(tf, "transform_id")
+        plural = _transform_field(tf, "transform_ids")
+        if not isinstance(field, str) or not field or (singular and plural):
+            raise UMAFilterError("Invalid mandatory query field transform")
+        tids = [singular] if singular else plural
+        if not isinstance(tids, list) or not tids or any(not isinstance(tid, str) for tid in tids):
+            raise UMAFilterError("Invalid mandatory query field transform")
+        if set(tids) - {"pii_redaction", "nsfw_sanitization", "timestamp_to_date"}:
+            raise UMAFilterError("Unsupported mandatory query field transform")
+        compiled.append((field, table_id, tids))
     out: List[Dict[str, Any]] = []
     for row in rows:
         copy = dict(row)
-        for tf in transforms:
-            field = _transform_field(tf, "field")
-            table_id = _transform_field(tf, "table_id")
-            tids = _transform_field(tf, "transform_ids") or []
+        for field, table_id, tids in compiled:
             if table_id and copy.get("_table") and copy.get("_table") != table_id:
                 continue
-            if field not in copy or not isinstance(copy[field], str):
+            if field not in copy:
                 continue
+            if not isinstance(copy[field], str):
+                raise UMAFilterError("Mandatory query field transform requires text")
             val = copy[field]
+            if "timestamp_to_date" in tids:
+                from ..uma_filters import _normalize_datetime
+
+                dt = _normalize_datetime(val)
+                if dt is None:
+                    raise UMAFilterError("timestamp_to_date requires a valid timestamp")
+                val = dt.date().isoformat()
             if "pii_redaction" in tids:
                 val = _redact_pii(val)
             if "nsfw_sanitization" in tids:
@@ -165,7 +186,7 @@ class DisclosureFilterPipeline:
 
         rows = packet.get("rows")
         if isinstance(rows, list) and filter_manifest:
-            fm = filter_manifest_from_storage(filter_manifest)
+            fm = query_filter_manifest(filter_manifest)
             if fm:
                 rows = apply_filter_manifest(rows, fm)
                 packet["rows"] = rows

@@ -40,9 +40,6 @@ _INFERENCE_EXCLUDED_KEYS = frozenset({"content", "text", "body"})
 # summary_text because those are computed labels, not raw content.
 _INFERENCE_CANONICAL_EXCLUDED_KEYS = _INFERENCE_EXCLUDED_KEYS | frozenset({"topic", "summary_text"})
 # Semantic hits carry raw chunk previews; inference keeps only the similarity/id signal.
-_INFERENCE_SEMANTIC_EXCLUDED_KEYS = frozenset(
-    {"content", "text", "body", "content_preview", "text_preview", "title"}
-)
 _SUMMARY_ITEM_CAP = 25
 # Work "working on lately" asks: keep authored goals visible without letting a
 # dense user_goals corpus monopolize the summary cap (D3 diversity floor).
@@ -7471,10 +7468,9 @@ class DefaultSignalRetrievalAdapter:
             if semantic_hits:
                 # Inference exposes only the similarity/id signal from semantic hits, never
                 # the raw chunk preview text.
-                packet["semantic_hits"] = [
-                    {k: v for k, v in hit.items() if k not in _INFERENCE_SEMANTIC_EXCLUDED_KEYS}
-                    for hit in semantic_hits
-                ]
+                from .inference import project_semantic_inference_hit
+
+                packet["semantic_hits"] = [project_semantic_inference_hit(hit) for hit in semantic_hits]
                 counts["semantic_hits"] = len(semantic_hits)
             # D1.8: legacy graph_nodes/graph_edges furniture removed (GC-deprecated).
             meta = self._adapters.vector.list_metadata(limit=20, offset=0)

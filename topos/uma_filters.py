@@ -71,6 +71,72 @@ def extract_field_transforms(filters: Optional[Dict[str, Any]]) -> Optional[List
     return field_transforms_from_storage(filters.get("field_transforms"))
 
 
+def query_filter_manifest(filters: Optional[Dict[str, Any]]) -> Optional[FilterManifest]:
+    """Decode the saved grant envelope as well as an already decoded manifest.
+
+    The outer envelope carries selector/processor constraints used by other
+    consumers. It must never be mistaken for an empty FilterManifest.
+    """
+    if filters is None:
+        return None
+    if not isinstance(filters, dict):
+        raise UMAFilterError("query filters must be an object")
+    if "filter_manifest" in filters:
+        return filter_manifest_from_storage(filters["filter_manifest"])
+    return filter_manifest_from_storage(filters)
+
+
+def query_filter_restriction_reason(filters: Optional[Dict[str, Any]], access_mode: str, scope_id: Optional[str] = None, field_transforms: Optional[list] = None) -> Optional[str]:
+    """Do not feed denied sources/fields into untraceable derived query lanes."""
+    manifest = query_filter_manifest(filters)
+    if access_mode != "raw" and (field_transforms or (filters or {}).get("field_transforms")):
+        return "derived_filter_lineage_unavailable"
+    if manifest is None:
+        return None
+    # Legacy derived contributors (including availability's timing evaluator)
+    # never receive this manifest. A query-date hint is not a granted rolling
+    # window, and truncating final prose is not a cap on contributing rows.
+    # Until a contributor certifies each obligation, all typed derived filters
+    # are unsupported rather than being silently claimed as applied.
+    restricted = bool(manifest.filters)
+    tables = (manifest.scope_table_allowlist or {}).get(scope_id)
+    if tables is not None:
+        if not tables:
+            return "empty_allowlist"
+        restricted = True
+    for item in manifest.filters:
+        if item.filter_id in {"source_filter", "column_allowlist"}:
+            key = "source_ids" if item.filter_id == "source_filter" else "fields"
+            if not item.params[key]:
+                return "empty_allowlist"
+            restricted = True
+        elif item.filter_id == "column_blocklist" and item.params["fields"]:
+            restricted = True
+    if restricted and access_mode != "raw":
+        return "derived_filter_lineage_unavailable"
+    return None
+
+
+def generic_source_sql_constraints(manifest: Optional[FilterManifest], columns: set[str]) -> Tuple[str, Tuple[Any, ...]]:
+    """Filter source membership before pagination, on SQLite and PostgreSQL.
+
+    No source column means membership cannot be established, so that table
+    contributes no rows under an explicit source restriction.
+    """
+    clauses = []
+    params = []
+    for item in manifest.filters if manifest is not None else []:
+        if item.filter_id != "source_filter":
+            continue
+        ids = item.params["source_ids"]
+        if not ids or "source_id" not in columns:
+            clauses.append("1=0")
+        else:
+            clauses.append('"source_id" IN (' + ','.join('?' for _ in ids) + ')')
+            params.extend(ids)
+    return (" AND " + " AND ".join(clauses) if clauses else ""), tuple(params)
+
+
 def _params_table_id(item_params: Dict[str, Any]) -> str:
     return str(item_params.get("table_id") or "").strip()
 
@@ -222,11 +288,15 @@ def build_sql_constraints(
                 conditions.append(f"datetime({table_prefix}event_at) <= ?")
                 params.append(str(end).strip())
         elif item.filter_id == "source_filter":
-            source_ids = item.params.get("source_ids") or []
-            if isinstance(source_ids, list) and source_ids:
+            source_ids = item.params.get("source_ids")
+            if not isinstance(source_ids, list):
+                raise UMAFilterError("source_filter requires source_ids list")
+            if source_ids:
                 placeholders = ",".join("?" for _ in source_ids)
                 conditions.append(f"{table_prefix}source_id IN ({placeholders})")
                 params.extend(str(sid) for sid in source_ids)
+            else:
+                conditions.append("1=0")
         elif item.filter_id in ENRICHMENT_RETRIEVAL_FILTERS:
             if (logical_table_id or "").strip() not in _ENRICHMENT_FILTERABLE_TABLES:
                 continue
@@ -271,25 +341,13 @@ def _apply_time_range(
     return out
 
 
-# UMA read path adds these after the DB fetch; they are not physical table columns. Column allowlists
-# are meant to restrict stored fields — keep enrichments when the engine produced them (names still
-# respect contact_display_names + contacts:resolve + sharing_policy upstream).
-_UMA_PRESERVE_THROUGH_COLUMN_ALLOWLIST = frozenset(
-    {"sender_display_name", "sender_is_owner", "is_from_self"}
-)
-
-
 def _apply_field_include(items: List[Dict[str, Any]], fields: List[str]) -> List[Dict[str, Any]]:
     if not fields:
-        return items
+        return []
     allowed = set(fields)
     out: List[Dict[str, Any]] = []
     for row in items:
         filtered = {k: v for k, v in row.items() if k in allowed}
-        for key in _UMA_PRESERVE_THROUGH_COLUMN_ALLOWLIST:
-            val = row.get(key)
-            if val is not None and str(val).strip() and key not in filtered:
-                filtered[key] = val
         out.append(filtered)
     return out
 
@@ -302,9 +360,9 @@ def _apply_field_exclude(items: List[Dict[str, Any]], fields: List[str]) -> List
 
 
 def _apply_source(items: List[Dict[str, Any]], source_ids: Optional[List[str]] = None) -> List[Dict[str, Any]]:
-    allowed = set(source_ids or [])
-    if not allowed:
+    if source_ids is None:
         return items
+    allowed = set(source_ids)
     return [row for row in items if row.get("source_id") in allowed]
 
 

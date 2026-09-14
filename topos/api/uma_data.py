@@ -12,11 +12,11 @@ from fastapi import APIRouter, HTTPException, Query, Request, status
 
 from ..core.state import get_db_connection
 from ..uma_rpt import RPTValidationError, get_control_plane_http_base, introspect_for_resource
-from ..uma_filters import UMAFilterError, apply_filter_manifest, extract_field_transforms, extract_filter_manifest, get_limit_cap
+from ..uma_filters import UMAFilterError, apply_filter_manifest, extract_field_transforms, extract_filter_manifest, get_limit_cap, query_filter_restriction_reason
 from ..uma_contact_enrichment import apply_message_contact_pipeline, strip_contact_runtime_filters
 from ..uma_resource_id import parse_dataset_id_from_uma_dataset_resource_id
 from ..engine.usage_observation import emit_usage_observation
-from ..uma_authority import bound_uma_scope, dataset_scope_predicate, message_stream_granted, local_node_resource_scope, require_local_resource_binding
+from ..uma_authority import bound_uma_scope, dataset_scope_predicate, message_stream_granted, local_node_resource_scope, require_local_resource_binding, raw_table_projection_allowed
 
 router = APIRouter(prefix="/v1/uma/resources", tags=["uma-data"])
 
@@ -183,6 +183,11 @@ async def get_uma_messages(
 
     protection_revision = protection_fingerprint(conn)
     manifest = extract_filter_manifest(filters if isinstance(filters, dict) else None)
+    allowed_tables = {table for table in allowed_tables if raw_table_projection_allowed(allowed_scopes, manifest, table)}
+    if not allowed_tables:
+        raise HTTPException(status_code=403, detail="raw_table_projection_not_granted")
+    if query_filter_restriction_reason(filters, "raw") == "empty_allowlist":
+        return {"messages": [], "count": 0, "message_owner": {}}
     ai_only = bool(
         allowed_tables & {"ai_chat_messages", "ai_messages", "ai_chat"}
     ) and not bool(allowed_tables & {"messages", "conversation_messages"})

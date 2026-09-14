@@ -15,6 +15,24 @@ DEFAULT_MAX_CONTEXT_CHARS = 4000
 DEFAULT_INFERENCE_TIMEOUT_SEC = 45.0
 _INFERENCE_POOL = ThreadPoolExecutor(max_workers=2, thread_name_prefix="query_inference")
 
+# Model context is a projection: adding a retrieval field does not authorize it
+# as evidence. Semantic records are similarity signals only, regardless of the
+# packet resolution chosen for separately classified derived facts.
+INFERENCE_SEMANTIC_FIELDS = frozenset({
+    "record_id", "source_id", "similarity", "signal_dimension", "event_at", "record_type",
+})
+_INFERENCE_SCORE_FIELDS = frozenset({
+    "record_id", "source_id", "retrieval_source", "dimension", "signal_dimension",
+    "value", "confidence", "score", "relevance_score", "event_at", "created_at",
+    "topic", "label", "summary_text", "entity_text", "predicate", "valid_from", "valid_to",
+    "altitude", "pack", "sensitivity", "fact_id", "owner_authored", "speaker_label",
+})
+
+
+def project_semantic_inference_hit(hit: Dict[str, Any]) -> Dict[str, Any]:
+    return {key: value for key, value in hit.items()
+            if key in INFERENCE_SEMANTIC_FIELDS and isinstance(value, (str, int, float, bool, type(None)))}
+
 
 def build_inference_context_packet(filtered_context: Dict[str, Any], *, max_chars: int = DEFAULT_MAX_CONTEXT_CHARS, packet_resolution: str = "scores_only") -> Dict[str, Any]:
     """Bound the context for the inference model, strongest evidence first.
@@ -72,22 +90,25 @@ def build_inference_context_packet(filtered_context: Dict[str, Any], *, max_char
             key=lambda s: float(s.get("relevance_score") or 0.0),
             reverse=True,
         )
-        compact["scores"] = ranked[:15]
+        compact["scores"] = [
+            {key: value for key, value in score.items() if key in _INFERENCE_SCORE_FIELDS
+             and isinstance(value, (str, int, float, bool, type(None)))}
+            for score in ranked[:15]
+        ]
     hits = ctx.get("semantic_hits")
     if isinstance(hits, list) and hits:
         strong = [h for h in hits if isinstance(h, dict) and h.get("similarity") is not None]
         strong.sort(key=lambda h: float(h.get("similarity") or 0.0), reverse=True)
         if strong:
-            compact["semantic_hits"] = strong[:10]
+            compact["semantic_hits"] = [project_semantic_inference_hit(hit) for hit in strong[:10]]
     clusters = ctx.get("topic_clusters")
     if isinstance(clusters, list) and clusters:
         compact["topic_clusters"] = [
             {k: c.get(k) for k in ("label", "relevance_score") if isinstance(c, dict)}
             for c in clusters[:3]
         ]
-    for key, value in ctx.items():
-        if key not in compact and key not in ("semantic_hits", "topic_clusters", "graph", "scores"):
-            compact[key] = value
+    # Unknown containers (including rows and arbitrary future metadata) have no
+    # certified inference projection. Do not recursively copy them to the model.
     raw = json.dumps(compact, default=str, separators=(",", ":"))
     _cut_marker = " …[CONTEXT CUT AT CHAR LIMIT]"
     char_truncated = len(raw) > max_chars
