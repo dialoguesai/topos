@@ -9,6 +9,8 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.57] — 2026-09-14
+
 ### Fixed
 - **Shared message reads enforce the approved resource and message family.** `[O]` `[P]`
   Coarse `read` grants, mismatched dataset hints, empty table grants, and ambiguous
