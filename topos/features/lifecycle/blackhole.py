@@ -100,6 +100,19 @@ class BlackholeStore:
     def __init__(self, conn: sqlite3.Connection) -> None:
         self._conn = conn
 
+    def _legacy_table_missing(self, exc: sqlite3.OperationalError) -> bool:
+        if not _missing_table(exc):
+            return False
+        try:
+            migrated = self._conn.execute("SELECT 1 FROM wiki_schema_migrations WHERE migration_id='entity_blackhole_v1'").fetchone()
+        except sqlite3.OperationalError as ledger_exc:
+            if "no such table: wiki_schema_migrations" not in str(ledger_exc).lower():
+                raise
+            migrated = None
+        if migrated:
+            raise sqlite3.OperationalError("entity protection schema is unavailable") from exc
+        return True
+
     # -------------------------------------------------------------- reads
 
     def is_blackholed(self, entity_ref: str) -> bool:
@@ -113,7 +126,7 @@ class BlackholeStore:
                 (ref, normalize_entity_name(ref)),
             ).fetchone()
         except sqlite3.OperationalError as exc:
-            if _missing_table(exc):
+            if self._legacy_table_missing(exc):
                 return False
             raise
         return row is not None
@@ -132,7 +145,7 @@ class BlackholeStore:
                 (ref, normalize_entity_name(ref)),
             ).fetchone()
         except sqlite3.OperationalError as exc:
-            if _missing_table(exc):
+            if self._legacy_table_missing(exc):
                 return None
             raise
         return self._row_to_dict(row) if row else None
@@ -147,7 +160,7 @@ class BlackholeStore:
                 """
             ).fetchall()
         except sqlite3.OperationalError as exc:
-            if _missing_table(exc):
+            if self._legacy_table_missing(exc):
                 return []
             raise
         return [self._row_to_dict(r) for r in rows]
@@ -180,7 +193,7 @@ class BlackholeStore:
                 "SELECT entity_id FROM entity_blackholes WHERE entity_id != ''"
             ).fetchall()
         except sqlite3.OperationalError as exc:
-            if _missing_table(exc):
+            if self._legacy_table_missing(exc):
                 return set()
             raise
         return {str(r[0]) for r in rows if r[0]}
@@ -214,7 +227,7 @@ class BlackholeStore:
                 "SELECT normalized_name, aliases_json, canonical_name FROM entity_blackholes"
             ).fetchall()
         except sqlite3.OperationalError as exc:
-            if _missing_table(exc):
+            if self._legacy_table_missing(exc):
                 return set()
             raise
         terms: Set[str] = set()
@@ -243,7 +256,7 @@ class BlackholeStore:
                 "SELECT blackhole_id, canonical_name, normalized_name FROM entity_blackholes"
             ).fetchall()
         except sqlite3.OperationalError as exc:
-            if _missing_table(exc):
+            if self._legacy_table_missing(exc):
                 return 0
             raise
         repaired = 0
@@ -271,7 +284,7 @@ class BlackholeStore:
                 "SELECT normalized_name FROM entity_blackholes WHERE rebuild_state != 'complete'"
             ).fetchall()
         except sqlite3.OperationalError as exc:
-            if _missing_table(exc):
+            if self._legacy_table_missing(exc):
                 return set()
             raise
         return {str(r[0]) for r in rows if r[0]}
@@ -427,7 +440,7 @@ class BlackholeStore:
                 " FROM entity_blackholes WHERE entity_id != ''"
             ).fetchall()
         except sqlite3.OperationalError as exc:
-            if _missing_table(exc):
+            if self._legacy_table_missing(exc):
                 return 0
             raise
         rebound = 0
@@ -575,7 +588,7 @@ class BlackholeStore:
         try:
             rows = self._conn.execute(query, params).fetchall()
         except sqlite3.OperationalError as exc:
-            if _missing_table(exc):
+            if self._legacy_table_missing(exc):
                 return []
             raise
         return [
@@ -619,7 +632,7 @@ class BlackholeStore:
                     (normalize_entity_name(ref),),
                 ).fetchone()
         except sqlite3.OperationalError as exc:
-            if _missing_table(exc):
+            if self._legacy_table_missing(exc):
                 return ("", ref, "[]")
             raise
         if row is None:

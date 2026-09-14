@@ -5246,6 +5246,9 @@ def _blackhole_policy_for_summary(
     build path exits through, so it is also the backstop for the lanes that do
     not filter at source.
     """
+    from ..principal import OWNER_APP, current_principal
+
+    owner_view = str(disclosure_tier or "") == "owner_raw" and getattr(current_principal(), "cls", None) == OWNER_APP
     if conn is None or not items:
         return items
     try:
@@ -5259,22 +5262,23 @@ def _blackhole_policy_for_summary(
     try:
         terms = blackholed_name_terms(conn)
         blocked_ids = blackholed_entity_ids(conn)
-        blocked_records = _blackhole_blocked_record_ids(conn) if blocked_ids else set()
+        blocked_records = _blackhole_blocked_record_ids(conn)
     except Exception:  # noqa: BLE001
         # A store that cannot answer must not silently serve protected content
         # to a grantee; the owner's own path is unaffected.
-        if str(disclosure_tier or "") == "owner_raw":
+        if owner_view:
             return items
         raise
-    if not terms and not blocked_ids:
+    if not terms and not blocked_ids and not blocked_records:
         return items
 
-    owner_view = str(disclosure_tier or "") == "owner_raw"
     kept: List[Dict[str, Any]] = []
     for item in items:
         hit = _blackhole_id_hit(item, blocked_records, blocked_ids)
         if not hit:
-            blob = normalize_entity_name(_item_text_blob(item))
+            # Payload projections evolve. Protect all nested prose (including
+            # group_key/value_struct/source_refs), not only old display fields.
+            blob = normalize_entity_name(json.dumps(item, ensure_ascii=False, default=str))
             hit = bool(blob) and any(term in blob for term in terms)
         if not hit:
             kept.append(item)
@@ -5288,6 +5292,15 @@ def _blackhole_id_hit(
     item: Dict[str, Any], blocked_records: Set[str], blocked_entities: Set[str]
 ) -> bool:
     """Does this item point at a protected entity by an id it carries?"""
+    def nested_hit(value):
+        if isinstance(value, dict):
+            return any(nested_hit(v) for v in value.values())
+        if isinstance(value, (list, tuple)):
+            return any(nested_hit(v) for v in value)
+        return isinstance(value, str) and (value in blocked_records or value in blocked_entities)
+
+    if nested_hit(item):
+        return True
     for key in _BLACKHOLE_RECORD_ID_KEYS:
         value = item.get(key)
         if value is not None and str(value) in blocked_records:
@@ -5341,6 +5354,9 @@ def _blackhole_policy_for_clusters(
     rebuild, arrives by restore, or is written by an older node against the
     same database.
     """
+    from ..principal import OWNER_APP, current_principal
+
+    owner_view = str(disclosure_tier or "") == "owner_raw" and getattr(current_principal(), "cls", None) == OWNER_APP
     if conn is None or not clusters:
         return clusters
     try:
@@ -5355,13 +5371,12 @@ def _blackhole_policy_for_clusters(
     except Exception:  # noqa: BLE001
         # Same fail-closed rule as the summary policy: a store that cannot
         # answer must not serve protected content to a grantee.
-        if str(disclosure_tier or "") == "owner_raw":
+        if owner_view:
             return clusters
         raise
     if not terms:
         return clusters
 
-    owner_view = str(disclosure_tier or "") == "owner_raw"
     kept: List[Dict[str, Any]] = []
     for cluster in clusters:
         blob = normalize_entity_name(_cluster_text_blob(cluster))
@@ -6753,6 +6768,22 @@ class DefaultSignalRetrievalAdapter:
         }
         packet: Dict[str, Any] = {"scope_id": manifest.scope_id, "access_mode": request.access_mode}
 
+        # Legacy materialized intelligence has incomplete input lineage. Until
+        # each reader can recompute from allowed inputs, exact record protection
+        # conservatively withholds these derived modes, before model/vector reads.
+        # It is an owner-only safety floor, shared by structured and NL filters.
+        if not request.owner_mode and request.access_mode != "raw":
+            from ..features.lifecycle.record_protection import RecordProtectionStore
+
+            protection_conn = getattr(self._adapters.signal, "_conn", None)
+            if protection_conn is not None and RecordProtectionStore(protection_conn).list():
+                if request.access_mode == "inference":
+                    packet["scores"] = []
+                else:
+                    packet.update(answer_type="summary", summaries=[])
+                self._last_stores = []
+                return RetrievalBundle(context_packet=packet, stores_touched=[], record_counts={})
+
         # Selector-aware suppression (plan A2): the query names a third-party entity this
         # grantee may not select. Produce an empty, mode-appropriate result WITHOUT touching
         # the entity's data — access-advantage=0 (PermLLM) — and shaped identically to a query
@@ -7106,6 +7137,19 @@ class DefaultSignalRetrievalAdapter:
                 if query_text and table_rows:
                     retrieval_meta["retrieval_strategy"] = "raw_query_filter"
                 table_rows = _apply_filter_manifest_rows(table_rows, request.filter_manifest)
+                protection_conn = getattr(self._adapters.signal, "_conn", None)
+                if request.owner_mode and protection_conn is not None:
+                    from ..features.lifecycle.record_protection import RecordProtectionStore
+
+                    blocked = RecordProtectionStore(protection_conn).blocked_ids(table)
+                    table_rows = [{**row, "blackhole_protected": True} if str(row.get("record_id") or row.get("message_id") or "") in blocked else row for row in table_rows]
+                if not request.owner_mode:
+                    from ..features.lifecycle.record_protection import RecordProtectionStore
+
+                    protection_conn = getattr(self._adapters.signal, "_conn", None)
+                    if protection_conn is not None:
+                        blocked = RecordProtectionStore(protection_conn).blocked_ids(table)
+                        table_rows = [row for row in table_rows if str(row.get("record_id") or row.get("message_id") or "") not in blocked]
                 max_rows = int((request.filter_manifest or {}).get("max_rows") or 0)
                 if max_rows > 0:
                     if len(table_rows) > max_rows and table not in truncated_tables:

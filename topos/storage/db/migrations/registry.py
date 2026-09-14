@@ -13,6 +13,7 @@ from typing import Callable, List, Optional
 import sqlite3
 
 from .wiki_mvp_phase0 import MIGRATION_ID as PHASE0_ID, apply_wiki_mvp_phase0_up
+from .owner_only_records_v1 import MIGRATION_ID as OWNER_ONLY_RECORDS_V1_ID, apply_owner_only_records_v1_up
 from .wiki_mvp_phase1 import MIGRATION_ID as PHASE1_ID, apply_wiki_mvp_phase1_up
 from .wiki_mvp_phase4_messages_cutover import (
     MIGRATION_ID as PHASE4_ID,
@@ -405,6 +406,7 @@ MIGRATIONS: List[MigrationSpec] = [
     _spec(71, MENTION_TABLE_STAMP_BACKFILL_V1_ID, apply_mention_table_stamp_backfill_v1_up),
     _spec(72, DERIVED_ROW_IDENTITY_V1_ID, apply_derived_row_identity_v1_up),
     _spec(73, TRANSCRIPTS_V1_ID, apply_transcripts_v1_up),
+    _spec(74, OWNER_ONLY_RECORDS_V1_ID, apply_owner_only_records_v1_up),
 ]
 
 

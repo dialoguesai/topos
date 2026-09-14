@@ -493,7 +493,7 @@ _ITEM_KEYS = ("rows", "summaries", "scores", "semantic_hits", "topic_clusters", 
 
 _TABLE_KEYS = ("_table", "table", "table_id", "canonical_table")
 _SOURCE_KEYS = ("source_id", "retrieval_source", "source", "connector_id")
-_DIMENSION_KEYS = ("dimension", "primary_dimension")
+_DIMENSION_KEYS = ("dimension", "primary_dimension", "signal_dimension")
 _RECORD_ID_KEYS = ("record_id", "message_id", "id", "canonical_record_id")
 _ENTITY_ID_KEYS = ("entity_id", "subject_entity_id", "object_entity_id")
 _TEXT_KEYS = (
@@ -507,6 +507,7 @@ _TEXT_KEYS = (
     "entity_text",
     "content_preview",
     "text_preview",
+    "search_text",
 )
 
 

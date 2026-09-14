@@ -301,22 +301,28 @@ def read_query_retrieval(conn: sqlite3.Connection, guard: BlackholeGuard) -> Any
     adapter = DefaultSignalRetrievalAdapter(
         AdapterFactory.create("local_database", conn=conn)
     )
-    return adapter.retrieve(
-        RetrievalRequest(
-            manifest=resolve_scope_manifest("messages:read"),
-            access_mode="summary",
-            # Naming the entity is what resolves it and opens the entity lane —
-            # a query that never names it exercises nothing.
-            query_text=f"what happened with the {BH_CANONICAL} thread",
-            # Must be a source the scope manifest actually lists:
-            # `resolve_retrieval_source_ids` intersects these with the manifest's
-            # defaults and silently falls back to the defaults when nothing
-            # matches, which is how a corpus-shaped id turned every canonical
-            # lane into a no-op while this reader still returned a packet.
-            installed_source_ids=[SOURCE_ID],
-            disclosure_tier="owner_raw" if guard.sees_everything else "default_disclosure",
-        )
-    ).context_packet
+    from topos.principal import OWNER_APP, THIRD_PARTY, Principal, set_principal, reset_principal
+    token = set_principal(Principal(OWNER_APP if guard.sees_everything else THIRD_PARTY, "test"))
+    try:
+        return adapter.retrieve(
+            RetrievalRequest(
+                manifest=resolve_scope_manifest("messages:read"),
+                access_mode="summary",
+                # Naming the entity is what resolves it and opens the entity lane —
+                # a query that never names it exercises nothing.
+                query_text=f"what happened with the {BH_CANONICAL} thread",
+                # Must be a source the scope manifest actually lists:
+                # `resolve_retrieval_source_ids` intersects these with the manifest's
+                # defaults and silently falls back to the defaults when nothing
+                # matches, which is how a corpus-shaped id turned every canonical
+                # lane into a no-op while this reader still returned a packet.
+                installed_source_ids=[SOURCE_ID],
+                owner_mode=guard.sees_everything,
+                disclosure_tier="owner_raw" if guard.sees_everything else "default_disclosure",
+            )
+        ).context_packet
+    finally:
+        reset_principal(token)
 
 
 # Surface name → reader. The battery iterates this, so adding a surface here is

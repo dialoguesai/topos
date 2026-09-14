@@ -220,7 +220,12 @@ async def get_uma_messages(
     """
     resource_id = resource_id.strip()
     payload = await require_uma_rpt(request, resource_id)
+    bound_dataset = parse_dataset_id_from_uma_dataset_resource_id(resource_id)
+    if not bound_dataset or (dataset_id and dataset_id != bound_dataset):
+        raise HTTPException(status_code=403, detail="resource_binding_required")
     allowed_scopes = payload.get("allowed_scopes") or []
+    if not isinstance(allowed_scopes, list) or not any(s in {"messages:read", "ai_conversations:read", "aiChat:read", "aiMessages:read", "all:read"} for s in allowed_scopes if isinstance(s, str)):
+        raise HTTPException(status_code=403, detail="message_scope_required")
     allowed_tables = resolve_scopes_to_tables(allowed_scopes)
     if not allowed_tables:
         return {"messages": [], "count": 0}
@@ -239,6 +244,9 @@ async def get_uma_messages(
             detail="Database not initialized",
         )
     filters = (request.state.uma_introspection or {}).get("filters")
+    from ..features.lifecycle.record_protection import protection_fingerprint
+
+    protection_revision = protection_fingerprint(conn)
     manifest = extract_filter_manifest(filters if isinstance(filters, dict) else None)
     ai_only = bool(
         allowed_tables & {"ai_chat_messages", "ai_messages", "ai_chat"}
@@ -275,6 +283,8 @@ async def get_uma_messages(
         )
     except UMAFilterError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    if protection_fingerprint(conn) != protection_revision:
+        raise HTTPException(status_code=409, detail="authorization_changed")
     return {
         "messages": filtered,
         "count": len(filtered),
@@ -294,22 +304,5 @@ async def get_uma_oplog(
     Return oplog entries for the UMA resource, filtered by the permission's filters.
     Sprint 05: returns data only if RPT has at least one allowed scope (any read access).
     """
-    resource_id = resource_id.strip()
-    payload = await require_uma_rpt(request, resource_id)
-    allowed_scopes = payload.get("allowed_scopes") or []
-    allowed_tables = resolve_scopes_to_tables(allowed_scopes)
-    if not allowed_tables:
-        return {"ops": [], "count": 0}
-    conn = get_db_connection()
-    if not conn:
-        raise HTTPException(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            detail="Database not initialized",
-        )
-    items = _get_oplog_from_db(conn, dataset_id, limit, offset)
-    filters = (request.state.uma_introspection or {}).get("filters")
-    try:
-        filtered = apply_filters(items, filters)
-    except UMAFilterError as exc:
-        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-    return {"ops": filtered, "count": len(filtered)}
+    await require_uma_rpt(request, resource_id.strip())
+    raise HTTPException(status_code=403, detail="shared_oplog_unavailable")

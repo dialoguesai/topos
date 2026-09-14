@@ -107,15 +107,22 @@ def evaluate(
         return EgressVerdict(False, frozenset(), (), provider=configured)
 
     rows = _blackhole_rows(conn)
-    if not rows:
+    from .record_protection import RecordProtectionStore
+
+    record_floor = bool(RecordProtectionStore(conn).list())
+    if not rows and not record_floor:
         return EgressVerdict(False, frozenset(), (), provider=configured)
 
     haystack = normalize_entity_name(text_of(payload))
-    if not haystack:
+    if not haystack and not record_floor:
         return EgressVerdict(False, frozenset(), (), provider=configured)
 
-    matched: list = []
-    allowed: Optional[Set[str]] = None
+    # Payloads are not yet required to carry complete input lineage. An
+    # id/name scan would miss a selected record paraphrased into a task input.
+    # The beta therefore holds all engine inference local while record-level
+    # protections exist; future certified lineage may narrow this impact.
+    matched: list = ["owner_only_record_policy"] if record_floor else []
+    allowed: Optional[Set[str]] = set(LOCAL_PROVIDERS) if record_floor else None
     for row in rows:
         terms = [row["normalized_name"], *row.get("aliases", [])]
         hit = next((t for t in terms if t and t in haystack), None)

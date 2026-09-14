@@ -112,8 +112,9 @@ class BlackholeGuard:
         """True only for callers entitled to black-holed content."""
         if self._caller_class == CallerClass.OWNER_UI:
             return True
-        if self._caller_class == CallerClass.ROUTINE and self._routine_local_only:
-            return True
+        # Processing locality is not permission to read owner-only data. A
+        # routine requires a future verified owner-mode capability; this legacy
+        # locality boolean cannot grant one.
         return False
 
     @property
@@ -121,7 +122,12 @@ class BlackholeGuard:
         """Whether this guard actually filters anything (cheap early-out)."""
         if self.sees_everything:
             return False
-        return bool(self._blocked_ids() or self._blocked_terms())
+        return bool(self._blocked_ids() or self._blocked_terms() or self.has_record_protections())
+
+    def has_record_protections(self) -> bool:
+        from .record_protection import RecordProtectionStore
+
+        return not self.sees_everything and bool(RecordProtectionStore(self._conn).list())
 
     # -------------------------------------------------------------- lookups
 
@@ -151,9 +157,12 @@ class BlackholeGuard:
         if self.sees_everything:
             return set()
         if self._record_ids is None:
+            from .record_protection import RecordProtectionStore
+
+            protected_records = RecordProtectionStore(self._conn).blocked_ids()
             blocked = self._blocked_ids()
             if not blocked:
-                self._record_ids = set()
+                self._record_ids = protected_records
             else:
                 placeholders = ",".join("?" for _ in blocked)
                 try:
@@ -163,11 +172,11 @@ class BlackholeGuard:
                         sorted(blocked),
                     ).fetchall()
                 except sqlite3.OperationalError as exc:
-                    if "no such table" in str(exc).lower():
-                        rows = []
-                    else:
-                        raise
-                self._record_ids = {str(r[0]) for r in rows if r and r[0]}
+                    # We have protected entity ids: losing their mention join
+                    # cannot mean those entities have no canonical records.
+                    # A name-only fallback misses nameless linked content.
+                    raise sqlite3.OperationalError("protected record lineage is unavailable") from exc
+                self._record_ids = protected_records | {str(r[0]) for r in rows if r and r[0]}
         return self._record_ids
 
     def blocks_record_id(self, record_id: Optional[str]) -> bool:
@@ -243,7 +252,7 @@ class BlackholeGuard:
         self,
         rows: Sequence[Dict[str, Any]],
         *,
-        record_id_keys: Sequence[str] = ("record_id", "message_id", "id"),
+        record_id_keys: Sequence[str] = ("record_id", "message_id", "id", "event_id", "entry_id", "transaction_id", "segment_id", "contact_id"),
         text_keys: Sequence[str] = ("content", "text", "body", "summary_text"),
     ) -> List[Dict[str, Any]]:
         """Drop canonical rows that mention a protected entity.
@@ -301,7 +310,10 @@ class BlackholeGuard:
         """
         if self.sees_everything:
             return False
-        return bool(self._pending_names())
+        # The legacy prose stores lack certified complete lineage. Suppress
+        # their non-owner releases until a reader can recompute from permitted
+        # inputs, regardless of whether the prose happens to repeat an id/name.
+        return bool(self._pending_names()) or self.has_record_protections()
 
     def filter_name_string_artifacts(
         self, artifacts: Sequence[Dict[str, Any]], *, text_keys: Sequence[str]
@@ -371,9 +383,16 @@ def guard_from_message(conn: sqlite3.Connection, message: Dict[str, Any]) -> Bla
     leaking to every third-party agent. A degraded view is recoverable; a leak
     is not.
     """
+    from ...principal import OWNER_APP, current_principal
+
+    principal = current_principal()
+    # Only the channel verifier can confer the owner-mode exception. A caller
+    # block, matching owner subject, raw tier, or local routine flag cannot.
+    if getattr(principal, "cls", None) != OWNER_APP:
+        return BlackholeGuard(conn, caller_class=CallerClass.UNKNOWN)
     caller = message.get("caller")
     if not isinstance(caller, dict):
-        return BlackholeGuard(conn, caller_class=CallerClass.UNKNOWN)
+        return owner_ui_guard(conn)
     return BlackholeGuard(
         conn,
         caller_class=CallerClass.resolve(

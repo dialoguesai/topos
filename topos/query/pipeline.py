@@ -711,6 +711,34 @@ class QueryPipelineOrchestrator:
         installed_source_ids = list_installed_source_ids(db_conn)
         resolved_source_ids = resolve_retrieval_source_ids(manifest, installed_source_ids or None)
         data_health_version = get_data_health_version(scope_id, resolved_source_ids, db_conn)
+        protection_revision = None
+        if db_conn is not None:
+            from ..features.lifecycle.record_protection import protection_fingerprint
+
+            # Recheck before a cached answer can escape: a saved session must
+            # not replay data that was made owner-only after its last turn.
+            protection_revision = protection_fingerprint(db_conn)
+            data_health_version = f"{data_health_version}:protection={protection_revision}"
+
+        def protection_changed():
+            return db_conn is not None and protection_fingerprint(db_conn) != protection_revision
+
+        def authorization_changed_response():
+            return {"turn_outcome": TurnOutcome.DENIED.value, "public_result": None,
+                    "session_id": session_id, "query_session_id": session_id,
+                    "audit": {"deny_reason": "authorization_changed"}}
+
+        if getattr(_principal, "cls", None) != "owner_app" and access_mode != "raw" and db_conn is not None:
+            from ..features.lifecycle.record_protection import RecordProtectionStore
+
+            if RecordProtectionStore(db_conn).list():
+                # Incomplete lineage affects deterministic answer shortcuts too,
+                # not only retrieval. Stop before cache, inference or model use.
+                result = {"scope_id": scope_id, "access_mode": access_mode,
+                          "answer_type": "summary" if access_mode == "summary" else "inference"}
+                result["summaries" if access_mode == "summary" else "scores"] = []
+                return {"turn_outcome": TurnOutcome.LIVE_QUERY.value, "public_result": result,
+                        "session_id": session_id, "query_session_id": session_id, "audit": {}}
 
         # Packet resolution: computed ONCE per turn with both floors applied
         # (requester + model locality); threaded into retrieval (whether fact
@@ -791,6 +819,8 @@ class QueryPipelineOrchestrator:
                 if art.cache_key != cache_key:
                     continue
                 strategy = art.game_layer_strategy or "direct"
+                if protection_changed():
+                    return authorization_changed_response()
                 audit = build_query_audit_event(
                     turn_outcome=TurnOutcome.MEMORY_HIT,
                     scope_id=scope_id,
@@ -843,6 +873,7 @@ class QueryPipelineOrchestrator:
                     skip_retrieval=False,
                     installed_source_ids=installed_source_ids or None,
                     disclosure_tier=disclosure_tier,
+                    owner_mode=getattr(_principal, "cls", None) == "owner_app",
                     requester_id=requester_id,
                     packet_resolution=_pr["effective"],
                     suppress_selectors=suppress_selectors,
@@ -998,6 +1029,10 @@ class QueryPipelineOrchestrator:
             public.payload = enforce_availability_inference_contract(public.payload)
 
         public_dict = public.to_dict()
+        if protection_changed():
+            # A flag can change while retrieval/synthesis runs. Never release
+            # or cache that in-flight result under the old protection snapshot.
+            return authorization_changed_response()
         # The hosted-binding floor reaches the ANSWER, not only the packet.
         # `effective_packet_resolution` gates what the engine's own model reads;
         # summary prose does not stop there — it rides `public_result` to
@@ -1128,6 +1163,10 @@ class QueryPipelineOrchestrator:
         }
         if _ddr_debug_enabled():
             result["disclosure_decision_record"] = ddr
+        if protection_changed():
+            # Session persistence itself yields; the last check must follow it.
+            # An artifact written under the earlier fingerprint cannot replay.
+            return authorization_changed_response()
         return result
 
 

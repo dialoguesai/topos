@@ -181,12 +181,15 @@ def test_message_without_caller_block_fails_closed(corpus):
     assert BH_CANONICAL not in [i["canonical_name"] for i in result["items"]]
 
 
-def test_caller_block_drives_the_class(corpus):
+def test_caller_block_drives_the_class_only_after_owner_verification(corpus):
+    from topos.principal import OWNER_APP, Principal, set_principal, reset_principal
+    token = set_principal(Principal(OWNER_APP, "cp_relay"))
     owner = guard_from_message(
         corpus.conn, {"caller": {"mcp_source": "topos_home_chat"}}
     )
     agent = guard_from_message(corpus.conn, {"caller": {"mcp_source": "claude_desktop"}})
 
+    reset_principal(token)
     assert owner.caller_class == CallerClass.OWNER_UI
     assert agent.caller_class == CallerClass.OWNER_AGENT
     assert BH_CANONICAL in str(list_entities(corpus.conn, guard=owner)["items"])
@@ -204,7 +207,7 @@ def test_payload_cannot_forge_the_caller_class(corpus):
         },
     )
 
-    assert forged.caller_class == CallerClass.GRANTEE
+    assert forged.caller_class == CallerClass.UNKNOWN
     assert BH_CANONICAL not in str(list_entities(corpus.conn, guard=forged)["items"])
 
 

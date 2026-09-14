@@ -8,12 +8,20 @@ from typing import Any, Dict, Optional
 from fastapi import APIRouter, Body, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
 
-from ..auth import require_api_key
+from ..auth import require_api_key, resolve_request_principal
 from ..features.signal.service import get_signal_service
 
 logger = logging.getLogger("topos.api.signal")
 
-router = APIRouter(prefix="/signal", tags=["signal"])
+def require_signal_owner(principal=Depends(resolve_request_principal)):
+    from ..principal import OWNER_APP
+
+    if getattr(principal, "cls", None) != OWNER_APP:
+        raise HTTPException(status_code=403, detail="owner_mode_required")
+    return principal
+
+
+router = APIRouter(prefix="/signal", tags=["signal"], dependencies=[Depends(require_signal_owner)])
 
 
 def _probe_adapters():
@@ -785,7 +793,33 @@ async def list_blackholes(_api_key: str = Depends(require_api_key)):
     from ..features.lifecycle.blackhole import BlackholeStore
 
     store = BlackholeStore(_entities_conn())
-    return {"blackholes": store.list(), "notifications": store.notifications(state="open")}
+    from ..features.lifecycle.record_protection import RecordProtectionStore
+
+    return {"blackholes": store.list(), "notifications": store.notifications(state="open"),
+            "record_protection_supported": True, "records": RecordProtectionStore(_entities_conn()).list()}
+
+
+class RecordBlackholeBody(BaseModel):
+    canonical_table: str = Field(min_length=1, max_length=80)
+    record_id: str = Field(min_length=1, max_length=500)
+    note: Optional[str] = Field(default=None, max_length=500)
+
+
+@router.post("/blackholes/records")
+async def blackhole_record(body: RecordBlackholeBody):
+    from ..features.lifecycle.record_protection import RecordProtectionStore
+
+    try:
+        return RecordProtectionStore(_entities_conn()).protect(**body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.delete("/blackholes/records/{record_id}")
+async def unblackhole_record(record_id: str, canonical_table: str = Query(..., min_length=1, max_length=80)):
+    from ..features.lifecycle.record_protection import RecordProtectionStore
+
+    return {"removed": RecordProtectionStore(_entities_conn()).unprotect(canonical_table=canonical_table, record_id=record_id)}
 
 
 @router.post("/blackholes/notifications/{notification_id}/dismiss")

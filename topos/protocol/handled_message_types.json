@@ -196,6 +196,7 @@
   "signal_affinity_status",
   "signal_attention_dashboard",
   "signal_blackhole_entity",
+  "signal_blackhole_record",
   "signal_data_health",
   "signal_dismiss_blackhole_notification",
   "signal_entity_graph",
@@ -234,6 +235,7 @@
   "signal_set_worn_badge",
   "signal_timeline_daily",
   "signal_unblackhole_entity",
+  "signal_unblackhole_record",
   "signal_update_brief",
   "signal_upload",
   "signal_vector_source_text",
@@ -269,6 +271,8 @@
   "mcp_client_list",
   "mcp_client_list_elevations",
   "mcp_client_revoke",
-  "mcp_client_revoke_elevation"
+  "mcp_client_revoke_elevation",
+  "signal_blackhole_record",
+  "signal_unblackhole_record"
  ]
 }

@@ -454,6 +454,17 @@ class SQLiteCanonicalStore:
         # Wrap the spec so filters/ordering see its aliased columns (content,
         # event_at, …) uniformly across tables.
         query = f"SELECT * FROM ({base})"
+        from ....principal import OWNER_APP, current_principal
+
+        if disclosure_tier != "owner_raw" or getattr(current_principal(), "cls", None) != OWNER_APP:
+            from ....features.lifecycle.record_protection import RecordProtectionStore
+
+            blocked = sorted(RecordProtectionStore(self._conn).blocked_ids(table))
+            if blocked:
+                # Filter before COUNT/LIMIT so protected rows neither affect
+                # pagination nor remove an otherwise visible positive control.
+                clauses.append("record_id NOT IN (" + ",".join("?" for _ in blocked) + ")")
+                params.extend(blocked)
         if source_id is not None:
             clauses.append("source_id=?")
             params.append(source_id)
@@ -587,7 +598,8 @@ class SQLiteSignalFeatureStore:
                 """
                 INSERT INTO signal_facts (fact_id, dimension, source_id, record_id, payload_json)
                 VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(fact_id) DO UPDATE SET payload_json=excluded.payload_json
+                ON CONFLICT(fact_id) DO UPDATE SET
+                    dimension=excluded.dimension, payload_json=excluded.payload_json
                 """,
                 (
                     fact_id,
@@ -607,7 +619,8 @@ class SQLiteSignalFeatureStore:
                 """
                 INSERT INTO signal_scores (score_id, dimension, source_id, record_id, payload_json)
                 VALUES (?, ?, ?, ?, ?)
-                ON CONFLICT(score_id) DO UPDATE SET payload_json=excluded.payload_json
+                ON CONFLICT(score_id) DO UPDATE SET
+                    dimension=excluded.dimension, payload_json=excluded.payload_json
                 """,
                 (
                     score_id,
@@ -626,7 +639,7 @@ class SQLiteSignalFeatureStore:
         return str(summary.get("summary_id") or uuid.uuid4())
 
     def _list_rows(self, table: str, *, dimension: Optional[str], limit: int, offset: int) -> ListPage:
-        query = f"SELECT payload_json, created_at FROM {table}"
+        query = f"SELECT payload_json, created_at, dimension FROM {table}"
         params: List[Any] = []
         if dimension is not None:
             query += " WHERE dimension=?"
@@ -636,8 +649,12 @@ class SQLiteSignalFeatureStore:
         query += " ORDER BY rowid LIMIT ? OFFSET ?"
         params.extend([limit, offset])
         items: List[Dict[str, Any]] = []
-        for payload_json, created_at in self._conn.execute(query, params).fetchall():
+        for payload_json, created_at, stored_dimension in self._conn.execute(query, params).fetchall():
             item = json.loads(payload_json)
+            # Legacy restamps changed the indexed dimension while retaining the
+            # original evidence payload. Return the same authority used by the
+            # WHERE clause, including NULL (unknown), without rewriting history.
+            item["dimension"] = stored_dimension
             # The row timestamp lives in the column, not the payload; without it
             # facts are undated downstream (no recency decay, no time filtering).
             if created_at:

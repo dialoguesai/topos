@@ -218,6 +218,30 @@ async def handle_control_plane_request(
 
     token = set_principal(principal if principal is not None else current_principal())
     try:
+        # Signal APIs are the owner's inspection/curation surface, not a grant
+        # transport. The HTTP dispatcher must not let a shared key sidestep the
+        # owner-only proxy and invoke their unfiltered readers or mutations.
+        if msg_type.startswith("signal_"):
+            from ...principal import OWNER_APP
+
+            if getattr(current_principal(), "cls", None) != OWNER_APP:
+                return {"id": message.get("id"), "status": "error", "code": 403, "error": "owner_mode_required"}
+        from .registry import OWNER_ONLY_MESSAGE_TYPES
+        from ...principal import OWNER_APP
+
+        if msg_type in OWNER_ONLY_MESSAGE_TYPES and getattr(current_principal(), "cls", None) != OWNER_APP:
+            return {"id": message.get("id"), "status": "error", "code": 403, "error": "owner_mode_required"}
+        # Legacy inspection APIs expose unprojected payloads/counts. A separate
+        # owner MCP policy cannot override the owner's global off-limits floor.
+        legacy_inspection = {"get_table_rows", "get_table_count", "get_table_schema",
+                             "list_database_tables", "get_analytics", "get_oplog", "get_messages",
+                             "graph_summary", "read_jsonl_file", "list_jsonl_files"}
+        if msg_type in legacy_inspection and getattr(current_principal(), "cls", None) != OWNER_APP:
+            from ...features.lifecycle.blackhole_guard import BlackholeGuard
+
+            conn = get_db_connection()
+            if conn is None or BlackholeGuard(conn).active:
+                return {"id": message.get("id"), "status": "error", "code": 403, "error": "owner_mode_required"}
         return await handler(message)
     finally:
         reset_principal(token)

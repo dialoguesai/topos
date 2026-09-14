@@ -270,6 +270,7 @@ def test_no_cloud_provider_in_any_tier(conn):
 def test_missing_tables_report_no_blackholes(conn):
     """A DB predating the migration genuinely has none — empty is the right answer."""
     conn.execute("DROP TABLE entity_blackholes")
+    conn.execute("DELETE FROM wiki_schema_migrations WHERE migration_id='entity_blackhole_v1'")
     conn.commit()
 
     assert blackholed_entity_ids(conn) == set()

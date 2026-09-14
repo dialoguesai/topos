@@ -31,6 +31,17 @@ from ...uma_filters import enrichment_filters_in_manifest, strip_enrichment_retr
 from .registry import handles
 
 
+def _uma_binding_error(payload: Dict[str, Any]) -> bool:
+    resource_id = str(payload.get("resource_id") or "").strip()
+    dataset = parse_dataset_id_from_uma_dataset_resource_id(resource_id)
+    parts = resource_id.split(":")
+    if not dataset or len(parts) < 4 or not parts[1] or not parts[-1]:
+        return True
+    requested_dataset = str(payload.get("dataset_id") or "").strip()
+    requested_owner = str(payload.get("owner_user_id") or "").strip()
+    return bool((requested_dataset and requested_dataset != dataset) or (requested_owner and requested_owner != parts[1]))
+
+
 def _uma_attribution_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
     tags = routine_uma_attribution(mcp_source=payload.get("mcp_source"))
     acc_ch = tags.get("access_channel") or (payload.get("access_channel") or "http").strip() or "http"
@@ -133,6 +144,12 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
     field_transforms = extract_field_transforms(filters_dict)
     _raw_ms = (payload.get("message_stream") or "conversation").strip().lower()
     message_stream = _raw_ms if _raw_ms in ("conversation", "ai_chat") else "conversation"
+    required_scopes = {"ai_conversations:read", "aiChat:read", "aiMessages:read", "all:read"} if message_stream == "ai_chat" else {"messages:read", "all:read"}
+    raw_scopes = payload.get("allowed_scopes")
+    if not isinstance(raw_scopes, list) or not any(s in required_scopes for s in raw_scopes if isinstance(s, str)):
+        return {"id": req_id, "status": "error", "code": 403, "error": "message_scope_required"}
+    if _uma_binding_error(payload):
+        return {"id": req_id, "status": "error", "code": 403, "error": "resource_binding_required"}
     limit = get_limit_cap(
         limit,
         filter_manifest,
@@ -164,6 +181,9 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
             return {"id": req_id, "status": "error", "error": "Database connection not available"}
 
         from ...disclosure.tier import apply_disclosure_tier_to_rows, resolve_disclosure_tier
+        from ...features.lifecycle.record_protection import protection_fingerprint
+
+        protection_revision = protection_fingerprint(db_conn)
 
         _, owner_uid_for_tier, _ = _resolve_uma_scope(payload, resource_id)
         req_uid_for_tier = (
@@ -172,7 +192,9 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
         uma_disclosure_tier = resolve_disclosure_tier(
             requester_id=req_uid_for_tier or "owner",
             owner_id=owner_uid_for_tier or "owner",
-            is_grantee_request=bool(payload.get("is_grantee_request")),
+            # This is an UMA-only entry point. Caller-influenced identity may
+            # never turn its release into owner_raw.
+            is_grantee_request=True,
             disclosure_ceiling=str(payload.get("disclosure_ceiling") or "default"),
         )
 
@@ -180,6 +202,8 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
             messages_out: list,
             debug_metadata: Optional[Dict[str, Any]] = None,
         ) -> Dict[str, Any]:
+            if protection_fingerprint(db_conn) != protection_revision:
+                return {"id": req_id, "status": "error", "code": 409, "error": "authorization_changed"}
             logger.debug("[PIPELINE:UMA] uma_get_messages returned %d messages", len(messages_out))
             _, owner_uid_resolved, _ = _resolve_uma_scope(payload, resource_id)
             owner_uid = (owner_uid_resolved or "").strip()
@@ -629,27 +653,9 @@ async def handle_uma_get_oplog(message: Dict[str, Any]) -> Optional[Dict[str, An
     req_id = message.get("id")
     if not req_id:
         return None
-    """UMA: return oplog for a resource (control plane proxies here). Record read for engine request counts."""
-    payload = message.get("payload") or {}
-    resource_id = (payload.get("resource_id") or "").strip()
-    dataset_id = (payload.get("dataset_id") or "").strip() or None
-    owner_uid = payload.get("owner_user_id") or ((resource_id.split(":")[1] if len(resource_id.split(":")) >= 2 else "") or (dataset_id.split(":")[0] if dataset_id else ""))
-    requesting_app_id = (payload.get("requesting_app_id") or "").strip() or None
-    db_conn = hub.get_db_connection()
-    if db_conn and owner_uid and resource_id:
-        uma_attr = _uma_attribution_from_payload(payload)
-        hub.record_uma_request(
-            db_conn,
-            owner_user_id=owner_uid,
-            resource_id=resource_id,
-            request_type="read",
-            endpoint="oplog",
-            requesting_user_id=payload.get("requesting_user_id") or payload.get("mcp_requester_id"),
-            app_id=uma_attr.get("app_id") or requesting_app_id,
-            access_channel=uma_attr.get("access_channel"),
-            access_context=uma_attr.get("access_context"),
-        )
-    return {"id": req_id, "status": "ok", "payload": {"ops": []}}
+    # Raw operations mix every information family and may contain deleted or
+    # protected payloads. No current grantable projection can authorize them.
+    return {"id": req_id, "status": "error", "code": 403, "error": "shared_oplog_unavailable"}
 
 @handles("uma_get_rows")
 async def handle_uma_get_rows(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -658,6 +664,8 @@ async def handle_uma_get_rows(message: Dict[str, Any]) -> Optional[Dict[str, Any
         return None
     """UMA generic row read for one concrete table name."""
     payload = message.get("payload") or {}
+    if _uma_binding_error(payload):
+        return {"id": req_id, "status": "error", "code": 403, "error": "resource_binding_required"}
     resource_id = (payload.get("resource_id") or "").strip()
     dataset_id, owner_uid, tenant_id = _resolve_uma_scope(payload, resource_id)
     table_name = (payload.get("table_name") or payload.get("table_id") or "").strip()
@@ -673,9 +681,22 @@ async def handle_uma_get_rows(message: Dict[str, Any]) -> Optional[Dict[str, Any
     allowed_set = {str(t).strip() for t in allowed_tables if str(t).strip()}
     if not table_name:
         return {"id": req_id, "status": "error", "error": "table_name required"}
-    if allowed_set and table_name not in allowed_set:
+    if table_name not in allowed_set:
         return {"id": req_id, "status": "error", "error": f"table not allowed: {table_name}"}
     try:
+        from ...features.lifecycle.blackhole_guard import BlackholeGuard
+
+        protection_conn = hub.get_db_connection()
+        from ...features.lifecycle.record_protection import protection_fingerprint
+
+        protection_revision = protection_fingerprint(protection_conn) if protection_conn is not None else None
+        # Arbitrary views and derived tables have no certified input lineage.
+        # Do not pretend post-query text redaction protects their counts/facts.
+        # Dedicated canonical/message readers supply the supported narrow path.
+        if protection_conn is None or BlackholeGuard(protection_conn).active:
+            return {"id": req_id, "status": "ok", "payload": {
+                "rows": [], "table_name": table_name, "applied_limit": limit,
+                "has_more": False, "next_offset": None, "cap_reason": None}}
         use_postgres = settings.topos_database_mode == "postgres"
         if use_postgres:
             with connect_postgres() as conn:
@@ -825,6 +846,8 @@ async def handle_uma_get_rows(message: Dict[str, Any]) -> Optional[Dict[str, Any
                 access_channel=uma_attr.get("access_channel"),
                 access_context=uma_attr.get("access_context"),
             )
+        if protection_fingerprint(protection_conn) != protection_revision:
+            return {"id": req_id, "status": "error", "code": 409, "error": "authorization_changed"}
         return {
             "id": req_id,
             "status": "ok",

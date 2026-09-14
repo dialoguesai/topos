@@ -224,13 +224,12 @@ def test_neighbour_dossier_is_stripped_not_dropped(corpus):
 # ------------------------------------------------------------ D2: routines
 
 
-def test_local_only_routine_sees_protected_content(corpus):
-    """D2 — the carve-out, asserted positively so the gate above is not just
-    'routines are blocked'."""
+def test_local_only_routine_does_not_substitute_for_owner_mode(corpus):
+    """Processing locality never widens a routine's access authority."""
     guard = guard_for(corpus.conn, mcp_source="routine_executor", routine_local_only=True)
     blob = serialize(read_all(corpus.conn, guard))
 
-    assert corpus.tokens["brief"] in blob
+    assert corpus.tokens["brief"] not in blob
     assert guard.caller_class == CallerClass.ROUTINE
 
 

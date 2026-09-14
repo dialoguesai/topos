@@ -137,11 +137,11 @@ def test_routine_blocked_by_default(conn):
     assert guard.blocks_entity_id("ent-bh") is True
 
 
-def test_local_only_routine_may_see_protected_entities(conn):
-    """D2 — allowed, but only when local-only end-to-end."""
+def test_local_only_routine_requires_explicit_owner_mode(conn):
+    """Local processing alone cannot authorize owner-only information."""
     guard = guard_for(conn, mcp_source="routine_executor", routine_local_only=True)
-    assert guard.sees_everything is True
-    assert guard.blocks_entity_id("ent-bh") is False
+    assert guard.sees_everything is False
+    assert guard.blocks_entity_id("ent-bh") is True
 
 
 def test_local_only_flag_does_not_help_a_grantee(conn):
