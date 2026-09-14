@@ -20,14 +20,13 @@ from .common import (
     extract_field_transforms,
     extract_filter_manifest,
     get_limit_cap,
-    load_raw_messages,
     logger,
-    parse_dataset_id_from_uma_dataset_resource_id,
     routine_uma_attribution,
     settings,
     strip_contact_runtime_filters,
 )
 from ...uma_filters import enrichment_filters_in_manifest, strip_enrichment_retrieval_filters
+from ...uma_authority import bound_uma_scope, dataset_scope_predicate, message_stream_granted, local_node_resource_scope
 from .registry import handles
 
 
@@ -40,18 +39,11 @@ def _uma_attribution_from_payload(payload: Dict[str, Any]) -> Dict[str, Any]:
         out["access_context"] = tags["access_context"]
     return out
 
-def _resolve_uma_scope(payload: Dict[str, Any], resource_id: str) -> tuple[Optional[str], Optional[str], Optional[str]]:
-    """Resolve tenant scope for UMA reads: dataset_id, owner_user_id, tenant_id."""
-    dataset_id = (payload.get("dataset_id") or "").strip() or None
-    if not dataset_id and resource_id:
-        dataset_id = parse_dataset_id_from_uma_dataset_resource_id(resource_id)
-    owner_user_id = (payload.get("owner_user_id") or "").strip() or None
-    if not owner_user_id and dataset_id:
-        owner_user_id = dataset_id.split(":")[0] if ":" in dataset_id else dataset_id
-    if not owner_user_id and resource_id and len(resource_id.split(":")) >= 2:
-        owner_user_id = resource_id.split(":")[1]
-    tenant_id = (payload.get("tenant_id") or "").strip() or None
-    return dataset_id, owner_user_id, tenant_id
+def _resolve_uma_scope(payload: Dict[str, Any], resource_id: str) -> tuple[str, str, Optional[str]]:
+    """Bind the dataset and owner to the approved UMA resource."""
+    dataset_id, owner_user_id = bound_uma_scope({**payload, "resource_id": resource_id})
+    return dataset_id, owner_user_id, None
+
 
 def _build_uma_scope_clause(
     col_names: set[str],
@@ -59,17 +51,20 @@ def _build_uma_scope_clause(
     owner_user_id: Optional[str],
     tenant_id: Optional[str],
 ) -> tuple[str, tuple[Any, ...]]:
-    """
-    Build a mandatory scope predicate for UMA table reads.
-    Prefer dataset_id (strongest), then owner_user_id, then tenant_id.
-    """
-    if dataset_id and "dataset_id" in col_names:
-        return ' WHERE "dataset_id" = ?', (dataset_id,)
-    if owner_user_id and "owner_user_id" in col_names:
-        return ' WHERE "owner_user_id" = ?', (owner_user_id,)
-    if tenant_id and "tenant_id" in col_names:
-        return ' WHERE "tenant_id" = ?', (tenant_id,)
-    return "", ()
+    """No owner-wide or tenant-wide fallback for a dataset-bound grant."""
+    try:
+        predicate, params = dataset_scope_predicate(
+            col_names, dataset_id, owner_user_id,
+        )
+    except ValueError:
+        return "", ()
+    return " WHERE " + predicate, params
+
+
+def _uma_message_columns(conn: Any, table: str) -> set[str]:
+    # Table names are internal canonical constants at every call site.
+    return {str(row[1]) for row in conn.execute(f'PRAGMA table_info("{table}")').fetchall()}
+
 
 def _semantic_narrowing_ids(query_text: str, *, limit: int = 400) -> Optional[set]:
     """Vector/hybrid search over signal_embeddings to pre-filter UMA reads.
@@ -122,9 +117,10 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
     """UMA: return messages for a resource (control plane proxies here for My Access). Stage 2b: apply filter_manifest from payload.filters."""
     payload = message.get("payload") or {}
     resource_id = (payload.get("resource_id") or "").strip()
-    dataset_id = (payload.get("dataset_id") or "").strip() or None
-    if not dataset_id and resource_id:
-        dataset_id = parse_dataset_id_from_uma_dataset_resource_id(resource_id)
+    try:
+        dataset_id, bound_owner = bound_uma_scope(payload)
+    except ValueError as exc:
+        return {"id": req_id, "status": "error", "code": 403, "error": str(exc)}
     limit = min(int(payload.get("limit") or 100), 1000)
     offset = max(0, int(payload.get("offset") or 0))
     filters = payload.get("filters") or {}
@@ -132,7 +128,9 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
     filter_manifest = extract_filter_manifest(filters_dict)
     field_transforms = extract_field_transforms(filters_dict)
     _raw_ms = (payload.get("message_stream") or "conversation").strip().lower()
-    message_stream = _raw_ms if _raw_ms in ("conversation", "ai_chat") else "conversation"
+    message_stream = _raw_ms
+    if not message_stream_granted(payload.get("allowed_scopes"), message_stream):
+        return {"id": req_id, "status": "error", "code": 403, "error": "message_scope_required"}
     limit = get_limit_cap(
         limit,
         filter_manifest,
@@ -163,6 +161,7 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
         if not db_conn:
             return {"id": req_id, "status": "error", "error": "Database connection not available"}
 
+        whole_engine_scope = local_node_resource_scope(db_conn, resource_id)
         from ...disclosure.tier import apply_disclosure_tier_to_rows, resolve_disclosure_tier
 
         _, owner_uid_for_tier, _ = _resolve_uma_scope(payload, resource_id)
@@ -172,7 +171,8 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
         uma_disclosure_tier = resolve_disclosure_tier(
             requester_id=req_uid_for_tier or "owner",
             owner_id=owner_uid_for_tier or "owner",
-            is_grantee_request=bool(payload.get("is_grantee_request")),
+            # This entry point always exercises a grant, even for equal IDs.
+            is_grantee_request=True,
             disclosure_ceiling=str(payload.get("disclosure_ceiling") or "default"),
         )
 
@@ -207,6 +207,10 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
 
         if message_stream == "conversation":
             if _table_exists(db_conn, "conversation_messages") and dataset_id:
+                scope_predicate, scope_params = dataset_scope_predicate(
+                    _uma_message_columns(db_conn, "conversation_messages"), dataset_id, bound_owner, alias="m",
+                    whole_engine_scope=whole_engine_scope,
+                )
                 filter_where_m, filter_params = build_sql_constraints(
                     filter_manifest, "m.", logical_table_id="conversation_messages", conn=db_conn
                 )
@@ -219,8 +223,7 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
                                m.metadata_json, m.source_id, m.dataset_id,
                                m.reply_to_message_id, m.message_type, m.event_type, m.is_from_self, m.owner_user_id
                         FROM conversation_messages m
-                        WHERE m.dataset_id = ?
-                        """
+                        WHERE """ + scope_predicate
                     + filter_where_m
                     + narrowing_where
                     + """
@@ -230,7 +233,7 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
                 )
                 cursor = db_conn.execute(
                     query,
-                    (dataset_id,) + tuple(filter_params) + tuple(narrowing_params) + (limit, offset),
+                    scope_params + tuple(filter_params) + tuple(narrowing_params) + (limit, offset),
                 )
                 messages = []
                 for row in cursor.fetchall():
@@ -364,112 +367,44 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
             return _uma_messages_record_and_return([], {"contact_names_enriched_count": 0, "field_transforms": {}})
 
         if _table_exists(db_conn, "ai_chat_messages"):
-            has_conversations_table = _table_exists(db_conn, "ai_chat_conversations")
+            # Custom resources require message dataset provenance; the verified
+            # default local-engine resource covers the physical node. A join on
+            # conversation owner alone cannot prove a custom dataset.
+            scope_predicate, scope_params = dataset_scope_predicate(
+                _uma_message_columns(db_conn, "ai_chat_messages"), dataset_id, bound_owner, alias="m",
+                whole_engine_scope=whole_engine_scope,
+            )
             has_emotions_table = _table_exists(db_conn, "message_emotions")
             filter_where_m, filter_params = build_sql_constraints(
                 filter_manifest, "m.", logical_table_id="ai_chat_messages", conn=db_conn
             )
-            filter_where_plain, filter_params_plain = build_sql_constraints(
-                filter_manifest, "", logical_table_id="ai_chat_messages", conn=db_conn
-            )
-            narrowing_where_m, narrowing_params_m = _narrowing_sql(narrowing_ids, "m.")
-            narrowing_where_plain, narrowing_params_plain = _narrowing_sql(narrowing_ids, "")
-            filter_where_m += narrowing_where_m
-            filter_params = list(filter_params) + list(narrowing_params_m)
-            filter_where_plain += narrowing_where_plain
-            filter_params_plain = list(filter_params_plain) + list(narrowing_params_plain)
-            if has_conversations_table and dataset_id:
-                user_id = dataset_id.split(":")[0] if ":" in dataset_id else dataset_id
-                if has_emotions_table:
-                    query = """
-                            SELECT m.message_id, m.conversation_id, m.sender_type, m.sender_id,
-                                   m.event_at, m.content, m.content_rendered,
-                                   m.content_disclosure, m.content_rendered_disclosure,
-                                   m.content_nsfw, m.content_nsfw_score,
-                                   m.metadata_json, m.sequence, m.source_id,
-                                   e.emotion_label, e.confidence
-                            FROM ai_chat_messages m
-                            LEFT JOIN ai_chat_conversations c ON m.conversation_id = c.conversation_id
-                            LEFT JOIN (
-                                SELECT e1.message_id, e1.emotion_label, e1.confidence
-                                FROM message_emotions e1
-                                INNER JOIN (
-                                    SELECT message_id, MAX(confidence) as max_confidence
-                                    FROM message_emotions
-                                    WHERE role IS NULL OR role IN ('authored', 'addressed')
-                                    GROUP BY message_id
-                                ) e2 ON e1.message_id = e2.message_id AND e1.confidence = e2.max_confidence
-                                WHERE e1.role IS NULL OR e1.role IN ('authored', 'addressed')
-                            ) e ON m.message_id = e.message_id
-                            WHERE c.owner_user_id = ?
-                            """ + filter_where_m + """
-                            ORDER BY m.event_at DESC
-                            LIMIT ? OFFSET ?
-                        """
-                else:
-                    query = """
-                            SELECT m.message_id, m.conversation_id, m.sender_type, m.sender_id,
-                                   m.event_at, m.content, m.content_rendered,
-                                   m.content_disclosure, m.content_rendered_disclosure,
-                                   m.content_nsfw, m.content_nsfw_score,
-                                   m.metadata_json, m.sequence, m.source_id,
-                                   NULL as emotion_label, NULL as confidence
-                            FROM ai_chat_messages m
-                            LEFT JOIN ai_chat_conversations c ON m.conversation_id = c.conversation_id
-                            WHERE c.owner_user_id = ?
-                            """ + filter_where_m + """
-                            ORDER BY m.event_at DESC
-                            LIMIT ? OFFSET ?
-                        """
-                cursor = db_conn.execute(query, (user_id,) + tuple(filter_params) + (limit, offset))
-            else:
-                if has_emotions_table:
-                    query = """
-                            SELECT m.message_id, m.conversation_id, m.sender_type, m.sender_id,
-                                   m.event_at, m.content, m.content_rendered,
-                                   m.content_disclosure, m.content_rendered_disclosure,
-                                   m.content_nsfw, m.content_nsfw_score,
-                                   m.metadata_json, m.sequence, m.source_id,
-                                   e.emotion_label, e.confidence
-                            FROM ai_chat_messages m
-                            LEFT JOIN (
-                                SELECT e1.message_id, e1.emotion_label, e1.confidence
-                                FROM message_emotions e1
-                                INNER JOIN (
-                                    SELECT message_id, MAX(confidence) as max_confidence
-                                    FROM message_emotions
-                                    WHERE role IS NULL OR role IN ('authored', 'addressed')
-                                    GROUP BY message_id
-                                ) e2 ON e1.message_id = e2.message_id AND e1.confidence = e2.max_confidence
-                                WHERE e1.role IS NULL OR e1.role IN ('authored', 'addressed')
-                            ) e ON m.message_id = e.message_id
-                            """ + ("WHERE 1=1" + filter_where_m if filter_where_m else "") + """
-                            ORDER BY m.event_at DESC
-                            LIMIT ? OFFSET ?
-                        """
-                else:
-                    query = """
-                            SELECT message_id, conversation_id, sender_type, sender_id,
-                                   event_at, content, content_rendered,
-                                   content_disclosure, content_rendered_disclosure,
-                                   content_nsfw, content_nsfw_score,
-                                   metadata_json, sequence, source_id,
-                                   NULL as emotion_label, NULL as confidence
-                            FROM ai_chat_messages
-                            """ + ("WHERE 1=1" + filter_where_plain if filter_where_plain else "") + """
-                            ORDER BY event_at DESC
-                            LIMIT ? OFFSET ?
-                        """
-                if has_emotions_table:
-                    cursor = db_conn.execute(
-                        query,
-                        tuple(filter_params) + (limit, offset) if filter_where_m else (limit, offset),
-                    )
-                else:
-                    cursor = db_conn.execute(
-                        query,
-                        tuple(filter_params_plain) + (limit, offset) if filter_where_plain else (limit, offset),
-                    )
+            narrowing_where, narrowing_params = _narrowing_sql(narrowing_ids, "m.")
+            emotion_columns = "NULL as emotion_label, NULL as confidence"
+            emotion_join = ""
+            if has_emotions_table:
+                emotion_columns = "e.emotion_label, e.confidence"
+                emotion_join = """
+                    LEFT JOIN (
+                        SELECT e1.message_id, e1.emotion_label, e1.confidence
+                        FROM message_emotions e1
+                        INNER JOIN (
+                            SELECT message_id, MAX(confidence) AS max_confidence
+                            FROM message_emotions
+                            WHERE role IS NULL OR role IN ('authored', 'addressed')
+                            GROUP BY message_id
+                        ) e2 ON e1.message_id = e2.message_id AND e1.confidence = e2.max_confidence
+                        WHERE e1.role IS NULL OR e1.role IN ('authored', 'addressed')
+                    ) e ON m.message_id = e.message_id
+                """
+            query = """
+                SELECT m.message_id, m.conversation_id, m.sender_type, m.sender_id,
+                       m.event_at, m.content, m.content_rendered,
+                       m.content_disclosure, m.content_rendered_disclosure,
+                       m.content_nsfw, m.content_nsfw_score,
+                       m.metadata_json, m.sequence, m.source_id,
+                """ + emotion_columns + " FROM ai_chat_messages m " + emotion_join + " WHERE " + scope_predicate
+            query += filter_where_m + narrowing_where + " ORDER BY m.event_at DESC LIMIT ? OFFSET ?"
+            cursor = db_conn.execute(query, scope_params + tuple(filter_params) + tuple(narrowing_params) + (limit, offset))
             messages = []
             seen_message_ids = set()
             for row in cursor.fetchall():
@@ -564,62 +499,11 @@ async def handle_uma_get_messages(message: Dict[str, Any]) -> Optional[Dict[str,
                 ),
             }
             return _uma_messages_record_and_return(messages, debug_metadata)
-        messages = load_raw_messages(
-            dataset_id=dataset_id or "",
-            schema_id="chatgpt.conversation.v1",
-            limit=limit,
-            offset=offset,
-            filter_manifest=filter_manifest.to_storage_dict() if filter_manifest else None,
-        )
-        allowed_scopes = []
-        raw_scopes = payload.get("allowed_scopes")
-        if isinstance(raw_scopes, list):
-            allowed_scopes = [str(s).strip() for s in raw_scopes if str(s).strip()]
-        pre_contact_len = len(messages)
-        messages, uma_contact_sidecar = apply_message_contact_pipeline(
-            messages,
-            blackhole_guard=_uma_blackhole_guard(db_conn),
-            conn=db_conn,
-            dataset_id=dataset_id,
-            allowed_scopes=allowed_scopes,
-            manifest=filter_manifest,
-            filters=filters_dict,
-        )
-        if pre_contact_len > 0 and len(messages) == 0:
-            logger.warning(
-                "[PIPELINE:UMA] req=%s ai_chat JSONL: contact pipeline dropped all %s row(s); "
-                "no field transforms run. Try a larger limit.",
-                req_id,
-                pre_contact_len,
-            )
-        transform_diag = {}
-        logger.debug(
-            "[PIPELINE:UMA][TRANSFORM] req=%s stage=ai_chat_messages_jsonl start rows=%s",
-            req_id,
-            len(messages),
-        )
-        messages = await apply_filter_manifest_async(
-            messages,
-            filter_manifest,
-            field_transforms=field_transforms,
-            table_id="ai_chat_messages",
-            diagnostics=transform_diag,
-            progress_hook=_uma_transform_progress_hook(req_id, "ai_chat_messages_jsonl"),
-        )
-        logger.debug(
-            "[PIPELINE:UMA][TRANSFORM] req=%s stage=ai_chat_messages_jsonl done applied=%s skipped=%s reasons=%s",
-            req_id,
-            transform_diag.get("applied_count", 0),
-            transform_diag.get("skipped_count", 0),
-            transform_diag.get("skip_reasons", {}),
-        )
-        debug_metadata = {
-            "contact_names_enriched_count": sum(1 for row in messages if bool(row.get("sender_display_name"))),
-            "contact_rows_filtered_count": max(0, pre_contact_len - len(messages)),
-            "field_transforms": transform_diag,
-            "message_owner": (uma_contact_sidecar.get("message_owner") or {}),
-        }
-        return _uma_messages_record_and_return(messages, debug_metadata)
+        # Legacy JSONL paths normalize distinct dataset IDs to the same name,
+        # and their decoded rows do not preserve verifiable dataset provenance.
+        return {"id": req_id, "status": "error", "code": 403, "error": "dataset_scope_unavailable"}
+    except ValueError as exc:
+        return {"id": req_id, "status": "error", "code": 403, "error": str(exc)}
     except Exception as exc:  # noqa: BLE001
         logger.debug("[PIPELINE:UMA] uma_get_messages error: %s", exc)
         return {"id": req_id, "status": "error", "error": str(exc)}
@@ -629,27 +513,8 @@ async def handle_uma_get_oplog(message: Dict[str, Any]) -> Optional[Dict[str, An
     req_id = message.get("id")
     if not req_id:
         return None
-    """UMA: return oplog for a resource (control plane proxies here). Record read for engine request counts."""
-    payload = message.get("payload") or {}
-    resource_id = (payload.get("resource_id") or "").strip()
-    dataset_id = (payload.get("dataset_id") or "").strip() or None
-    owner_uid = payload.get("owner_user_id") or ((resource_id.split(":")[1] if len(resource_id.split(":")) >= 2 else "") or (dataset_id.split(":")[0] if dataset_id else ""))
-    requesting_app_id = (payload.get("requesting_app_id") or "").strip() or None
-    db_conn = hub.get_db_connection()
-    if db_conn and owner_uid and resource_id:
-        uma_attr = _uma_attribution_from_payload(payload)
-        hub.record_uma_request(
-            db_conn,
-            owner_user_id=owner_uid,
-            resource_id=resource_id,
-            request_type="read",
-            endpoint="oplog",
-            requesting_user_id=payload.get("requesting_user_id") or payload.get("mcp_requester_id"),
-            app_id=uma_attr.get("app_id") or requesting_app_id,
-            access_channel=uma_attr.get("access_channel"),
-            access_context=uma_attr.get("access_context"),
-        )
-    return {"id": req_id, "status": "ok", "payload": {"ops": []}}
+    # Raw operation logs mix information families and have no scoped projection.
+    return {"id": req_id, "status": "error", "code": 403, "error": "shared_oplog_unavailable"}
 
 @handles("uma_get_rows")
 async def handle_uma_get_rows(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -659,7 +524,10 @@ async def handle_uma_get_rows(message: Dict[str, Any]) -> Optional[Dict[str, Any
     """UMA generic row read for one concrete table name."""
     payload = message.get("payload") or {}
     resource_id = (payload.get("resource_id") or "").strip()
-    dataset_id, owner_uid, tenant_id = _resolve_uma_scope(payload, resource_id)
+    try:
+        dataset_id, owner_uid, tenant_id = _resolve_uma_scope(payload, resource_id)
+    except ValueError as exc:
+        return {"id": req_id, "status": "error", "code": 403, "error": str(exc)}
     table_name = (payload.get("table_name") or payload.get("table_id") or "").strip()
     requested_limit = min(int(payload.get("limit") or 100), 1000)
     offset = max(0, int(payload.get("offset") or 0))
@@ -669,11 +537,11 @@ async def handle_uma_get_rows(message: Dict[str, Any]) -> Optional[Dict[str, Any
     field_transforms = extract_field_transforms(filters_dict)
     limit = get_limit_cap(requested_limit, filter_manifest, table_name)
     cap_reason = "permission_max_rows" if limit < requested_limit else None
-    allowed_tables = payload.get("allowed_tables") or []
-    allowed_set = {str(t).strip() for t in allowed_tables if str(t).strip()}
+    allowed_tables = payload.get("allowed_tables")
+    allowed_set = {t.strip() for t in allowed_tables if isinstance(t, str) and t.strip()} if isinstance(allowed_tables, list) else set()
     if not table_name:
         return {"id": req_id, "status": "error", "error": "table_name required"}
-    if allowed_set and table_name not in allowed_set:
+    if table_name not in allowed_set:
         return {"id": req_id, "status": "error", "error": f"table not allowed: {table_name}"}
     try:
         use_postgres = settings.topos_database_mode == "postgres"
@@ -724,7 +592,7 @@ async def handle_uma_get_rows(message: Dict[str, Any]) -> Optional[Dict[str, Any
                     return {
                         "id": req_id,
                         "status": "error",
-                        "error": f"table not tenant scoped for UMA reads: {table_name}",
+                        "error": f"table not dataset scoped for UMA reads: {table_name}",
                     }
                 order_clause = _table_row_order_clause(
                     col_names,
@@ -772,7 +640,7 @@ async def handle_uma_get_rows(message: Dict[str, Any]) -> Optional[Dict[str, Any
                 return {
                     "id": req_id,
                     "status": "error",
-                    "error": f"table not tenant scoped for UMA reads: {table_name}",
+                    "error": f"table not dataset scoped for UMA reads: {table_name}",
                 }
             order_clause = _table_row_order_clause(
                 col_names,
@@ -786,6 +654,8 @@ async def handle_uma_get_rows(message: Dict[str, Any]) -> Optional[Dict[str, Any
             all_rows = [dict(r) for r in cursor.fetchall()]
         has_more = len(all_rows) > limit
         rows = all_rows[:limit]
+        from ...disclosure.tier import apply_disclosure_tier_to_rows
+        rows = apply_disclosure_tier_to_rows(rows, table=table_name, tier="default_disclosure")
         try:
             transform_diag = {}
             logger.debug(

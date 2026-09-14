@@ -10,6 +10,13 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Fixed
+- **Shared message reads enforce the approved resource and message family.** `[O]` `[P]`
+  Coarse `read` grants, mismatched dataset hints, empty table grants, and ambiguous
+  legacy JSONL paths no longer open shared data. Direct HTTP grants bind to the
+  actual local owner and node; the automatic local-node resource retains message
+  access across ingestion datasets only after verifying that identity. Shared
+  readers always use the grantee disclosure tier, and raw shared operation logs
+  are withheld until a scoped projection exists. No schema or reprocessing changes.
 - **The entity-graph rebuild finishes again.** `[O]` Every rebuild since 2026-09-08 16:32 ran
   into its 1800s cap and was killed, so the graph behind the scrubber and the relationship
   answers went stale. The "who talked to whom" load looked up the sender of every message —
