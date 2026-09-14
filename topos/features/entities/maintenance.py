@@ -198,6 +198,25 @@ def _load_conversation_participation(
     conv_filter = {str(c) for c in conversation_ids} if conversation_ids is not None else None
     by_conv: Dict[str, List[Dict[str, object]]] = {}
 
+    # One lookup per distinct sender, not per message row. lookup_person_entity
+    # scans every person's identifiers_json and, for the owner, runs a
+    # correlated COUNT over signal_objects (~40ms). Called per row it made the
+    # rebuild's evidence phase take 1,400.8s on the owner's node (2026-09-11:
+    # 94,746 sender rows, 38,562 of them the owner's, 1,168 distinct senders)
+    # and pushed every rebuild past its 1800s cap; memoized, this load takes
+    # 9.2s. Nothing in this load writes entities, so the memo changes an answer
+    # only if ANOTHER connection commits a person mid-load. The load was never a
+    # snapshot: per row, such a commit already split one sender's rows between
+    # two answers. Memoized, a sender keeps its first answer for the ~9s load;
+    # either way the next rebuild picks the new person up.
+    resolved: Dict[Tuple[str, bool], Optional[str]] = {}
+
+    def _resolve(sender_raw: str, is_from_self: bool = False) -> Optional[str]:
+        key = (sender_raw, is_from_self)
+        if key not in resolved:
+            resolved[key] = lookup_person_entity(conn, sender_raw, is_from_self=is_from_self)
+        return resolved[key]
+
     for table, sender_col in _SENDER_TABLES.items():
         cols = _table_columns(conn, table)
         if not cols or sender_col not in cols:
@@ -244,9 +263,7 @@ def _load_conversation_participation(
             event_at = None
             if has_event:
                 event_at = row[idx]
-            entity_id = lookup_person_entity(
-                conn, sender_raw, is_from_self=is_from_self
-            )
+            entity_id = _resolve(sender_raw, is_from_self)
             if not entity_id:
                 continue
             if not has_role:
@@ -270,7 +287,7 @@ def _load_conversation_participation(
         conv_key = str(conv_id)
         if conv_filter is not None and conv_key not in conv_filter:
             continue
-        entity_id = lookup_person_entity(conn, str(contact_id))
+        entity_id = _resolve(str(contact_id))
         if not entity_id:
             continue
         events = by_conv.setdefault(conv_key, [])

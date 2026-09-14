@@ -269,3 +269,19 @@ def test_a_dropped_progress_post_is_resent_and_visible():
     assert 'logger.warning(' in src and "enrichment progress post failed (will resend on next callback)" in src
     # And a successful send clears the flag, or every later post skips the throttle.
     assert "_last_failed[0] = False" in src
+
+
+def test_a_graph_fill_stopped_by_shutdown_is_not_swallowed():
+    """The handler around the mid-import fill ("the graph must never break
+    ingest") would swallow a shutdown stop and carry on into signal derivation
+    in a process that is exiting. The stop must reach the job's owner, so
+    job_runner requeues the job and the upgrade runner leaves its step pending."""
+    src = inspect.getsource(canonical_pipeline.run_post_canonical_pipeline)
+    fill = src.index("refresh_now_if_dirty)")
+    stopped = src.index("except GraphRebuildStopped as exc:", fill)
+    generic = src.index("except Exception as exc:", fill)
+    assert stopped < generic, "the generic handler would catch the stop first"
+    # ...and it must leave as a BaseException, not an ordinary exception: the
+    # IngestionManager, the enrichment core and the per-source reprocess loops
+    # all catch Exception and would record the import done.
+    assert "raise ShutdownInterrupt(str(exc)) from exc" in src[stopped:generic]

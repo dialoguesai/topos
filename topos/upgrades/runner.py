@@ -37,6 +37,8 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Dict, List, Optional
 
 from . import _version_key, declaring_versions, steps_between, steps_through
+from ..features.entities.rebuild_subprocess import GraphRebuildStopped
+from ..runtime_shutdown import ShutdownInterrupt
 from ..storage.db.write_gate import commit_connection, with_db_write
 
 logger = logging.getLogger("topos.upgrades.runner")
@@ -836,6 +838,17 @@ def run_pending_upgrades(
             record["ran_under"] = shipped_v
             _ledger_set(conn, ledger_v, step_id, "done", record)
             ran += 1
+        except (ShutdownInterrupt, GraphRebuildStopped) as exc:
+            # The node is stopping mid-step: a reprocess's graph fill was
+            # stopped (ShutdownInterrupt, which the per-source loops cannot
+            # swallow) or a rebuild step's own child was. Interrupted, not
+            # failed: left pending, it re-runs next boot like a step the
+            # stop_event ended at a boundary. Nothing after it starts now.
+            logger.info("upgrade step %s stopped by node shutdown: %s", step_id, exc)
+            _ledger_set(conn, ledger_v, step_id, "pending",
+                        {"interrupted": str(exc), "ran_under": shipped_v})
+            stopped_early = True
+            break
         except Exception as exc:  # noqa: BLE001 — ledger the failure, keep the node up
             logger.warning("upgrade step %s failed: %s", step_id, exc)
             _ledger_set(conn, ledger_v, step_id, "failed",

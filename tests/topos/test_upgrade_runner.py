@@ -636,3 +636,69 @@ def test_canonical_reprocess_still_defaults_to_running_enrichment(conn, monkeypa
         conn,
     )
     assert seen["run_enrichment"] is True
+
+
+def test_step_stopped_by_node_shutdown_is_left_pending_not_failed(conn):
+    """Shutdown now stops a graph rebuild child mid-step (GraphRebuildStopped).
+    That is an interrupted step, not a failed upgrade: it re-runs next boot and
+    must not read as failed in the meantime."""
+    from topos.features.entities.rebuild_subprocess import GraphRebuildStopped
+
+    _seed_data(conn)
+    execs = _recording_executors([])
+
+    def stopped(step, conn_):
+        raise GraphRebuildStopped("graph rebuild subprocess pid=1 stopped by node shutdown")
+
+    execs["enrichment_reprocess"] = stopped
+    result = run_pending_upgrades(conn, shipped="1.2.0", executors=execs)
+    assert result["steps_failed"] == 0 and result["stopped_early"] is True
+    status = conn.execute(
+        "SELECT status FROM derivation_ledger WHERE step_id='reextract-entities'"
+    ).fetchone()[0]
+    assert status == "pending"
+    assert read_baseline(conn) != "1.2.0"
+
+
+def test_reprocess_step_stopped_mid_source_is_left_pending_by_the_real_executor(conn, monkeypatch):
+    """Third review, 2026-09-11, reproduced: the per-source loop in
+    _exec_canonical_reprocess catches Exception, so a stop travelling as one was
+    recorded as that source's error, the step ledgered DONE and the baseline
+    advanced past a source whose signal derivation never ran. Driven through the
+    real executor: the stop must leave the step pending, skip the rest of the
+    walk, and never count as a failure."""
+    import topos.ingestion.reprocess as reprocess
+    from topos.runtime_shutdown import ShutdownInterrupt
+    from topos.upgrades.runner import _exec_canonical_reprocess
+
+    _seed_data(conn)
+    walked = []
+    later = []
+
+    async def fake_reprocess_source(**kwargs):
+        walked.append(kwargs["source_id"])
+        if kwargs["source_id"] == "b":
+            raise ShutdownInterrupt("graph rebuild subprocess pid=1 stopped by node shutdown")
+        return {"status": "accepted"}
+
+    monkeypatch.setattr(reprocess, "reprocess_source", fake_reprocess_source)
+
+    def real_canonical(step, conn_):
+        return _exec_canonical_reprocess(
+            {"id": step["id"], "params": {"source_ids": ["a", "b", "c"]}}, conn_
+        )
+
+    execs = {
+        "enrichment_reprocess": real_canonical,
+        "engine_endpoint": lambda step, conn_: later.append(step["id"]) or {"ok": True},
+    }
+    result = run_pending_upgrades(conn, shipped="1.2.0", executors=execs)
+
+    assert walked == ["a", "b"], "the walk went on in a process that is exiting"
+    assert later == [], "a step started after the stop"
+    assert result["steps_failed"] == 0 and result["stopped_early"] is True, result
+    status = conn.execute(
+        "SELECT status FROM derivation_ledger WHERE step_id='reextract-entities'"
+    ).fetchone()[0]
+    assert status == "pending"
+    assert read_baseline(conn) != "1.2.0", "the baseline advanced past an unfinished step"

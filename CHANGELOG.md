@@ -9,6 +9,43 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+## [1.3.57] — 2026-09-14
+
+### Fixed
+- **Shared message reads enforce the approved resource and message family.** `[O]` `[P]`
+  Coarse `read` grants, mismatched dataset hints, empty table grants, and ambiguous
+  legacy JSONL paths no longer open shared data. Direct HTTP grants bind to the
+  actual local owner and node; the automatic local-node resource retains message
+  access across ingestion datasets only after verifying that identity. Shared
+  readers always use the grantee disclosure tier, and raw shared operation logs
+  are withheld until a scoped projection exists. No schema or reprocessing changes.
+- **The entity-graph rebuild finishes again.** `[O]` Every rebuild since 2026-09-08 16:32 ran
+  into its 1800s cap and was killed, so the graph behind the scrubber and the relationship
+  answers went stale. The "who talked to whom" load looked up the sender of every message —
+  94,746 rows, 38,562 of them the owner's, where the lookup runs a ~40ms correlated COUNT —
+  and that alone took 1,400.8s. It now resolves each of the 1,168 senders once: 9.2s, with the
+  same output (772 conversations and 90,956 events, in the same order). With the goal-clustering
+  change below, a full rebuild of the same data takes 119.4s instead of 2,398.7s.
+- **Goal clustering finds the same merges without comparing every pair.** `[O]`
+  `_cluster_goal_keys` compared all 5.19M pairs of the node's 3,222 distinct goals in pure
+  Python — a cosine and, for nearly every pair, a difflib ratio — for 985.7s of a rebuild capped
+  at 1800s. Cosine is now one matrix product, and difflib runs only on the 4.13% of pairs whose
+  provable upper bound (shared characters over summed length, per ratio; a contained token set is
+  exactly 1.0) can still reach 0.8. On the owner's goals with the same embeddings: 947.9s → 67.4s,
+  identical clusters, roots and order. Blocking on a shared token was rejected: typo pairs that
+  share no token would silently stop merging.
+- **The graph-rebuild child no longer outlives the node, and a stop no longer reads as a
+  finished import.** `[O]` The supervisor signals the node's pid only, so a rebuild child kept
+  running after the node stopped — holding the rebuild lock with no timeout left (eight startups
+  on 2026-09-08 found one) — or held the node's exit until it finished. A shutdown signal now
+  stops the child at once, app shutdown and the tray's quit and re-exec stop it again, a spawn gate
+  keeps a new one from starting, and the child exits within a second if the node dies. A stop that
+  interrupts an import's graph fill raises `ShutdownInterrupt` (a `BaseException`), so no
+  catch-all can record the import done: the pipeline job is requeued without burning an attempt
+  and an upgrade step is left pending. A default-disposition SIGTERM behind the node's signal
+  hook now kills instead of being swallowed. The 1800s rebuild cap was never late: it counts
+  monotonic time, which stops while the Mac sleeps (see 1.3.56).
+
 ## [1.3.56] — 2026-09-11
 
 ### Fixed

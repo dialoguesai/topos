@@ -617,6 +617,12 @@ def _reexec_topos_node() -> None:
     PyInstaller bundle on Windows all differ), while the interpreter running
     us always is.
     """
+    # execv keeps this pid, so a graph rebuild child's parent watch never fires,
+    # and the new image starts with an empty child registry: stop it here or it
+    # runs on unowned, holding the rebuild lock against the node we become.
+    from topos.features.entities.rebuild_subprocess import stop_rebuild_children
+
+    stop_rebuild_children()
     os.execv(sys.executable, [sys.executable, "-m", "topos.cli.commands", *sys.argv[1:]])
 
 
@@ -697,7 +703,19 @@ def serve_with_tray(
     server = uvicorn.Server(config)
 
     def stop_server() -> None:
-        server.should_exit = True
+        # Every tray exit comes through here (Quit, Select Topos, Ctrl+C). None
+        # is a signal the node's shutdown hooks see — uvicorn runs off the main
+        # thread here, so they never install — and uvicorn drains an in-flight
+        # graph rebuild request before shutdown_event can stop the child. So
+        # stop it now; the request then ends and the drain can finish.
+        try:
+            from topos.features.entities.rebuild_subprocess import signal_rebuild_children
+
+            signal_rebuild_children()
+        except Exception as exc:  # noqa: BLE001 — never let this cost the exit itself
+            print(f"Could not stop graph rebuild children ({exc}); quitting anyway.")
+        finally:
+            server.should_exit = True
 
     server_thread = threading.Thread(target=server.run, daemon=True)
     server_thread.start()

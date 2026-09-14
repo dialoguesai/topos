@@ -744,3 +744,15 @@ def _no_person_readings_timer(monkeypatch):
     recompute; under pytest that timer would fire into whatever database the process
     then holds. Off for every test — the lane has its own tests that call it directly."""
     monkeypatch.setenv("TOPOS_PERSON_READINGS", "off")
+
+
+@pytest.fixture(autouse=True)
+def _graph_rebuild_gate_open():
+    """App shutdown closes the graph-rebuild spawn gate until the next app startup
+    (topos.features.entities.rebuild_subprocess), as does a shutdown signal.
+    A test that spawns a rebuild without starting an app would otherwise inherit
+    a gate that some earlier test's lifespan closed, and fail for no reason of its
+    own."""
+    from topos.features.entities import rebuild_subprocess
+
+    rebuild_subprocess.allow_rebuild_children()

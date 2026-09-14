@@ -109,6 +109,58 @@ def test_mention_only_does_not_get_communicates_with(conn):
     assert owner_bram >= 1
 
 
+def test_participation_load_looks_up_each_sender_once(conn, monkeypatch):
+    """Per message row, this lookup cost 1,400.8s of every rebuild on the owner's
+    node (94,746 sender rows from 1,168 distinct senders) and pushed the rebuild
+    past its 1800s cap. The answer depends only on the sender, so it is resolved
+    once per distinct (sender, is_from_self) — and the output must not change."""
+    from topos.features.entities import maintenance
+
+    _person(conn, entity_id="e-owner", name="Owner", contact_id="c-o", identifiers=["self"], is_self=1)
+    _person(conn, entity_id="e-bram", name="Bram", contact_id="c-b", identifiers=["bram-7"])
+    n = 0
+    for conv, rows in (("c1", 10), ("c2", 5)):
+        for _ in range(rows):
+            for sender, self_flag in (("self", 1), ("bram-7", 0)):
+                n += 1
+                conn.execute(
+                    "INSERT INTO conversation_messages "
+                    "(message_id, conversation_id, sender_id, is_from_self, actor_role, event_at) "
+                    "VALUES (?, ?, ?, ?, 'participated', '2026-01-01T00:00:00Z')",
+                    (f"m{n}", conv, sender, self_flag),
+                )
+        conn.execute(
+            "INSERT INTO conversation_participants "
+            "(conversation_id, dataset_id, source_id, contact_id) VALUES (?, 'd', 'imessage', 'c-b')",
+            (conv,),
+        )
+    # The same handle with BOTH flags: iMessage from-me rows can carry the
+    # partner's handle as sender_id. The flag changes the answer (owner vs
+    # Bram), so a memo keyed on the sender alone would misattribute one of them.
+    conn.execute(
+        "INSERT INTO conversation_messages "
+        "(message_id, conversation_id, sender_id, is_from_self, actor_role, event_at) "
+        "VALUES ('m-from-me', 'c2', 'bram-7', 1, 'authored', '2026-01-01T00:00:00Z')"
+    )
+    conn.commit()
+
+    calls = []
+    real_lookup = maintenance.lookup_person_entity
+
+    def counting(c, sender_raw, *, is_from_self=False):
+        calls.append((sender_raw, is_from_self))
+        return real_lookup(c, sender_raw, is_from_self=is_from_self)
+
+    monkeypatch.setattr(maintenance, "lookup_person_entity", counting)
+    by_conv = maintenance._load_conversation_participation(conn)
+
+    assert sorted(calls) == [("bram-7", False), ("bram-7", True), ("c-b", False), ("self", True)]
+    # One event per message row; the membership row adds nobody new (Bram spoke).
+    assert len(by_conv["c1"]) == 20 and len(by_conv["c2"]) == 11
+    c2 = [e["entity_id"] for e in by_conv["c2"]]
+    assert c2.count("e-owner") == 6 and c2.count("e-bram") == 5, "a flag was keyed away"
+
+
 def test_fold_respects_conversation_filter(conn):
     _person(conn, entity_id="e-owner", name="Owner", contact_id="c-o", identifiers=["self"], is_self=1)
     _person(conn, entity_id="e-a", name="Ada", contact_id="c-a", identifiers=["ada-1"])

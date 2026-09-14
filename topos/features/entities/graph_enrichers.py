@@ -30,7 +30,7 @@ import hashlib
 import logging
 import sqlite3
 import uuid
-from typing import Dict, Optional
+from typing import Dict, List, Optional, Tuple
 
 from ...storage.db.write_gate import commit_connection, with_db_write
 from .fact_materializer import (
@@ -155,10 +155,127 @@ def _default_goal_embedder(texts):
         return None
 
 
+def _similar_goal_pairs(keys: List[str], vectors) -> List[Tuple[int, int]]:
+    """Every (i, j), i < j, the all-pairs comparison would have merged, in order.
+
+    The same rule as testing every pair — cosine >= GOAL_EMBED_MERGE_SCORE, or
+    else token_set_similarity >= GOAL_TOKEN_MERGE_SCORE — without testing every
+    pair. That loop was O(n²) in pure Python: 5.19M pairs for 3,222 goals on
+    the owner's node, 26µs of cosine plus 156µs of difflib each, 985.7s of a
+    rebuild capped at 1800s (2026-09-11).
+
+      * Cosine is one normalized matrix product. Pairs within 1e-9 of the
+        threshold are re-scored by cosine_similarity itself, so float order
+        cannot flip one.
+      * difflib runs only where it can still reach the threshold.
+        token_set_similarity is exactly 1.0 for a contained token set, and
+        otherwise the max of up to three difflib ratios — each at most
+        2·(characters the two strings share) / (their lengths summed), which is
+        counted for every pair at once from character and token counts. On the
+        same node 4.13% of pairs survive the bound (70s instead of ~810s), and
+        no pruned pair in a 57,551-pair sample would have merged.
+    """
+    import numpy as np
+    from scipy import sparse
+
+    from ..signal.vector_math import cosine_similarity
+    from .resolver import normalize_name, token_set_similarity
+
+    n = len(keys)
+    block = 256
+    edges: set = set()
+
+    def _upper(i0: int, i1: int):
+        return np.arange(n)[None, :] > np.arange(i0, i1)[:, None]
+
+    # -- cosine ---------------------------------------------------------------
+    if vectors is not None:
+        try:
+            if len({len(v) for v in vectors}) != 1:
+                raise ValueError("vectors of mixed length")
+            mat = np.asarray(vectors, dtype=np.float64)
+            if mat.ndim != 2 or mat.shape[1] == 0:
+                raise ValueError("not a matrix of vectors")
+        except (TypeError, ValueError):
+            mat = None
+        if mat is None:
+            # What the loop did with vectors it could not batch: score each pair
+            # and treat a failure as dissimilar. A batch embedder never lands here.
+            for i in range(n):
+                for j in range(i + 1, n):
+                    try:
+                        if cosine_similarity(vectors[i], vectors[j]) >= GOAL_EMBED_MERGE_SCORE:
+                            edges.add((i, j))
+                    except Exception:  # noqa: BLE001 — the loop's own rule
+                        pass
+        else:
+            norms = np.linalg.norm(mat, axis=1)
+            live = norms > 0.0  # cosine_similarity scores a zero vector 0.0
+            unit = np.divide(mat, norms[:, None], out=np.zeros_like(mat), where=live[:, None])
+            for i0 in range(0, n, block):
+                i1 = min(n, i0 + block)
+                sims = unit[i0:i1] @ unit.T
+                upper = _upper(i0, i1)
+                for i, j in zip(*np.nonzero(upper & (sims >= GOAL_EMBED_MERGE_SCORE + 1e-9))):
+                    edges.add((int(i) + i0, int(j)))
+                near = upper & (np.abs(sims - GOAL_EMBED_MERGE_SCORE) < 1e-9)
+                for i, j in zip(*np.nonzero(near)):
+                    a, b = int(i) + i0, int(j)
+                    if cosine_similarity(vectors[a], vectors[b]) >= GOAL_EMBED_MERGE_SCORE:
+                        edges.add((a, b))
+
+    # -- token-set similarity -------------------------------------------------
+    tokens = [frozenset(normalize_name(k).split()) for k in keys]  # as token_set_similarity sees them
+    joined = [" ".join(sorted(t)) for t in tokens]
+    size = np.array([len(t) for t in tokens], dtype=np.float64)
+    length = np.array([len(s) for s in joined], dtype=np.float64)
+    vocab: Dict[str, int] = {}
+    rows: List[int] = []
+    cols: List[int] = []
+    chars: List[float] = []
+    for i, toks in enumerate(tokens):
+        for tok in toks:
+            rows.append(i)
+            cols.append(vocab.setdefault(tok, len(vocab)))
+            chars.append(float(len(tok)))
+    shape = (n, max(len(vocab), 1))
+    has = sparse.csr_matrix((np.ones(len(rows)), (rows, cols)), shape=shape)
+    tok_chars = sparse.csr_matrix((np.asarray(chars), (rows, cols)), shape=shape)
+    alphabet = {ch: a for a, ch in enumerate(sorted({ch for s in joined for ch in s}))}
+    counts = np.zeros((n, max(len(alphabet), 1)))
+    for i, s in enumerate(joined):
+        for ch in s:
+            counts[i, alphabet[ch]] += 1
+
+    reachable = GOAL_TOKEN_MERGE_SCORE - 1e-9  # a rounding error must never prune a merge
+    for i0 in range(0, n, block):
+        i1 = min(n, i0 + block)
+        # token_set_similarity is 0.0 when either side has no tokens.
+        upper = _upper(i0, i1) & (size[i0:i1, None] > 0) & (size[None, :] > 0)
+        shared = (has[i0:i1] @ has.T).toarray()
+        contained = (shared == size[i0:i1, None]) | (shared == size[None, :])
+        for i, j in zip(*np.nonzero(upper & contained)):  # exactly 1.0
+            edges.add((int(i) + i0, int(j)))
+
+        la, lb = length[i0:i1, None], length[None, :]
+        common = np.zeros((i1 - i0, n))
+        for a in range(counts.shape[1]):
+            common += np.minimum(counts[i0:i1, a][:, None], counts[None, :, a])
+        bound = 2.0 * common / (la + lb)  # ratio(sa, sb)
+        # ratio(inter, sa) and ratio(inter, sb): inter is " ".join(shared tokens).
+        inter_len = (tok_chars[i0:i1] @ has.T).toarray() + np.maximum(shared - 1, 0)
+        with np.errstate(divide="ignore", invalid="ignore"):
+            via_inter = np.where(shared > 0, 2.0 * inter_len / (inter_len + np.minimum(la, lb)), 0.0)
+        maybe = upper & ~contained & (np.maximum(bound, via_inter) >= reachable)
+        for i, j in zip(*np.nonzero(maybe)):
+            a, b = int(i) + i0, int(j)
+            if (a, b) not in edges and token_set_similarity(keys[a], keys[b]) >= GOAL_TOKEN_MERGE_SCORE:
+                edges.add((a, b))
+    return sorted(edges)
+
+
 def _cluster_goal_keys(grouped: Dict[str, Dict], embed_fn) -> Dict[str, list]:
     """Union near-duplicate goal groups. Returns {cluster_root_key: [keys]}."""
-    from .resolver import token_set_similarity
-
     keys = list(grouped.keys())
     if len(keys) <= 1:
         return {k: [k] for k in keys}
@@ -182,24 +299,9 @@ def _cluster_goal_keys(grouped: Dict[str, Dict], embed_fn) -> Dict[str, list]:
         if ra != rb:
             parent[rb] = ra
 
-    cos = None
-    if vectors is not None:
-        from ..signal.vector_math import cosine_similarity
-
-        cos = cosine_similarity
-
-    for i in range(len(keys)):
-        for j in range(i + 1, len(keys)):
-            similar = False
-            if cos is not None:
-                try:
-                    similar = cos(vectors[i], vectors[j]) >= GOAL_EMBED_MERGE_SCORE
-                except Exception:
-                    similar = False
-            if not similar:
-                similar = token_set_similarity(keys[i], keys[j]) >= GOAL_TOKEN_MERGE_SCORE
-            if similar:
-                union(keys[i], keys[j])
+    # In the order the all-pairs loop met them, so even the roots come out the same.
+    for i, j in _similar_goal_pairs(keys, vectors):
+        union(keys[i], keys[j])
 
     clusters: Dict[str, list] = {}
     for k in keys:

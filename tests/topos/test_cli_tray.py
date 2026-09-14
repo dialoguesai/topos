@@ -353,3 +353,62 @@ class TestApplyPendingProfileAction:
             lambda pid: (_ for _ in ()).throw(ProfileError("node is running")),
         )
         assert tray.apply_pending_profile_action(("switch", "work")) is False
+
+
+class TestReexecStopsRebuildChildren:
+    def test_rebuild_children_are_stopped_before_execv(self, monkeypatch):
+        """execv keeps this pid, so a graph rebuild child's parent watch never
+        fires, and the new image has an empty child registry: a child left
+        running would hold the rebuild lock against the node it becomes."""
+        from topos.features.entities import rebuild_subprocess
+
+        order = []
+        monkeypatch.setattr(
+            rebuild_subprocess, "stop_rebuild_children", lambda *a, **k: order.append("stop") or 0
+        )
+        monkeypatch.setattr(tray.os, "execv", lambda *a: order.append("execv"))
+        tray._reexec_topos_node()
+        assert order == ["stop", "execv"]
+
+
+class TestTrayQuitStopsRebuildChildren:
+    def test_quit_stops_rebuild_children_before_uvicorn_drains(self, monkeypatch):
+        """No tray exit is a signal the node's hooks see (uvicorn runs off the
+        main thread here), and uvicorn drains an in-flight rebuild request
+        before shutdown_event — so the tray's own stop path must end the child."""
+        import time
+
+        import uvicorn
+
+        from topos.features.entities import rebuild_subprocess
+
+        order = []
+
+        class FakeServer:
+            def __init__(self, config):
+                self.should_exit = False
+
+            def run(self):
+                while not self.should_exit:
+                    time.sleep(0.01)
+                order.append("server-exit")
+
+        class FakeTray:
+            pending_profile_action = None
+
+            def __init__(self, **kwargs):
+                self._on_quit = kwargs["on_quit"]
+
+            def run(self):
+                self._on_quit()  # what ToposTray.run's finally does on Quit
+
+        monkeypatch.setattr(uvicorn, "Config", lambda *a, **k: None)
+        monkeypatch.setattr(uvicorn, "Server", FakeServer)
+        monkeypatch.setattr(tray, "ToposTray", FakeTray)
+        monkeypatch.setattr(
+            rebuild_subprocess, "signal_rebuild_children", lambda *a, **k: order.append("signal") or 0
+        )
+        tray.serve_with_tray(
+            object(), host="127.0.0.1", port=0, log_config=None, version="t", package_name="p"
+        )
+        assert order == ["signal", "server-exit"]

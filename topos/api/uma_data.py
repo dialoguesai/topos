@@ -6,17 +6,17 @@ from __future__ import annotations
 
 import hashlib
 
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set
 
 from fastapi import APIRouter, HTTPException, Query, Request, status
 
 from ..core.state import get_db_connection
 from ..uma_rpt import RPTValidationError, get_control_plane_http_base, introspect_for_resource
-from ..uma_filters import UMAFilterError, apply_filter_manifest, apply_filters, extract_field_transforms, extract_filter_manifest, get_limit_cap
-from ..scope_resolution import resolve_scopes_to_tables, may_access_table
+from ..uma_filters import UMAFilterError, apply_filter_manifest, extract_field_transforms, extract_filter_manifest, get_limit_cap
 from ..uma_contact_enrichment import apply_message_contact_pipeline, strip_contact_runtime_filters
 from ..uma_resource_id import parse_dataset_id_from_uma_dataset_resource_id
 from ..engine.usage_observation import emit_usage_observation
+from ..uma_authority import bound_uma_scope, dataset_scope_predicate, message_stream_granted, local_node_resource_scope, require_local_resource_binding
 
 router = APIRouter(prefix="/v1/uma/resources", tags=["uma-data"])
 
@@ -56,109 +56,40 @@ def _get_messages_from_db(
     limit: int,
     offset: int,
     allowed_tables: Optional[Set[str]] = None,
+    owner_user_id: Optional[str] = None,
+    *, whole_engine_scope: bool = False,
 ) -> List[Dict[str, Any]]:
-    """Query only the message-like tables permitted by the granted scopes."""
-
-    def _fetch_rows(query: str, params: Tuple[int, int]) -> List[Dict[str, Any]]:
-        cursor = conn.execute(query, params)
-        columns = [d[0] for d in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
-
-    def _allowed_message_sources() -> List[str]:
-        if not allowed_tables:
-            candidates = []
-            if _table_exists(conn, "conversation_messages"):
-                candidates.append("conversation_messages")
-            elif _table_exists(conn, "messages"):
-                candidates.append("messages")
-            if _table_exists(conn, "ai_chat_messages"):
-                candidates.append("ai_chat_messages")
-            return candidates
-
-        candidates: List[str] = []
-        if "messages" in allowed_tables:
-            if _table_exists(conn, "conversation_messages"):
-                candidates.append("conversation_messages")
-            elif _table_exists(conn, "messages"):
-                candidates.append("messages")
-        if "conversation_messages" in allowed_tables and _table_exists(conn, "conversation_messages"):
-            if "conversation_messages" not in candidates:
-                candidates.append("conversation_messages")
-        if (
-            {"ai_chat", "ai_messages", "ai_chat_messages"} & set(allowed_tables)
-            and _table_exists(conn, "ai_chat_messages")
-        ):
-            candidates.append("ai_chat_messages")
-        return candidates
-
-    sources = _allowed_message_sources()
-    if not sources:
+    """Read only explicitly granted message tables, scoped before pagination."""
+    if not allowed_tables:
         return []
-
-    # Keep single-table queries paginated in SQL; when multiple tables are allowed,
-    # fetch and merge in Python so limit/offset apply to the combined result set.
-    if sources == ["conversation_messages"]:
-        oc = _message_time_order_column(conn, "conversation_messages")
-        return _fetch_rows(
-            f"SELECT * FROM conversation_messages ORDER BY {oc} DESC LIMIT ? OFFSET ?",
-            (limit, offset),
-        )
-    if sources == ["messages"]:
-        return _fetch_rows(
-            "SELECT * FROM messages ORDER BY ts DESC LIMIT ? OFFSET ?",
-            (limit, offset),
-        )
-    if sources == ["ai_chat_messages"]:
-        oc = _message_time_order_column(conn, "ai_chat_messages")
-        return _fetch_rows(
-            f"SELECT * FROM ai_chat_messages ORDER BY {oc} DESC LIMIT ? OFFSET ?",
-            (limit, offset),
-        )
-
+    sources: List[str] = []
+    if {"messages", "conversation_messages"} & allowed_tables:
+        if _table_exists(conn, "conversation_messages"):
+            sources.append("conversation_messages")
+        elif _table_exists(conn, "messages"):
+            sources.append("messages")
+    if {"ai_chat", "ai_messages", "ai_chat_messages"} & allowed_tables and _table_exists(conn, "ai_chat_messages"):
+        sources.append("ai_chat_messages")
     merged: List[Dict[str, Any]] = []
-    if "conversation_messages" in sources:
-        oc_cm = _message_time_order_column(conn, "conversation_messages")
-        merged.extend(
-            _fetch_rows(
-                f"SELECT * FROM conversation_messages ORDER BY {oc_cm} DESC LIMIT ? OFFSET ?",
-                (limit + offset, 0),
-            )
+    from ..disclosure.tier import apply_disclosure_tier_to_rows
+    for table in sources:
+        scope, scope_params = dataset_scope_predicate(
+            _sqlite_table_columns(conn, table), dataset_id, owner_user_id,
+            whole_engine_scope=whole_engine_scope,
         )
-    if "messages" in sources:
-        merged.extend(
-            _fetch_rows(
-                "SELECT * FROM messages ORDER BY ts DESC LIMIT ? OFFSET ?",
-                (limit + offset, 0),
-            )
+        order_column = _message_time_order_column(conn, table)
+        # Fetch at most the requested prefix from each eligible table; no
+        # out-of-dataset row can consume the limit or alter the returned count.
+        cursor = conn.execute(
+            f'SELECT * FROM "{table}" WHERE {scope} ORDER BY "{order_column}" DESC, message_id DESC LIMIT ?',
+            scope_params + (limit + offset,),
         )
-    if "ai_chat_messages" in sources:
-        oc_ac = _message_time_order_column(conn, "ai_chat_messages")
-        merged.extend(
-            _fetch_rows(
-                f"SELECT * FROM ai_chat_messages ORDER BY {oc_ac} DESC LIMIT ? OFFSET ?",
-                (limit + offset, 0),
-            )
-        )
+        columns = [column[0] for column in cursor.description]
+        rows = [dict(zip(columns, row)) for row in cursor.fetchall()]
+        disclosure_table = "conversation_messages" if table == "messages" else table
+        merged.extend(apply_disclosure_tier_to_rows(rows, table=disclosure_table, tier="default_disclosure"))
     merged.sort(key=lambda row: (row.get("event_at") or row.get("ts") or "", row.get("message_id") or ""), reverse=True)
     return merged[offset:offset + limit]
-
-
-def _get_oplog_from_db(
-    conn,
-    dataset_id: Optional[str],
-    limit: int,
-    offset: int,
-) -> List[Dict[str, Any]]:
-    """Query oplog table if it exists; otherwise return empty list."""
-    if not _table_exists(conn, "oplog"):
-        return []
-    query = "SELECT * FROM oplog ORDER BY hlc_ts LIMIT ? OFFSET ?"
-    try:
-        cursor = conn.execute(query, (limit, offset))
-        columns = [d[0] for d in cursor.description]
-        return [dict(zip(columns, row)) for row in cursor.fetchall()]
-    except Exception:
-        return []
 
 
 def _extract_bearer(request: Request) -> Optional[str]:
@@ -216,33 +147,37 @@ async def get_uma_messages(
 ):
     """
     Return messages for the UMA resource, filtered by the permission's filters.
-    Sprint 05: returns data only if RPT allows messages, ai_messages, or ai_chat scope.
+    Exact message-family scopes select the tables; resource authority selects rows.
     """
     resource_id = resource_id.strip()
     payload = await require_uma_rpt(request, resource_id)
-    bound_dataset = parse_dataset_id_from_uma_dataset_resource_id(resource_id)
-    if not bound_dataset or (dataset_id and dataset_id != bound_dataset):
-        raise HTTPException(status_code=403, detail="resource_binding_required")
+    try:
+        # Validate both introspected hints and any narrower query hint.
+        bound_uma_scope({**payload, "resource_id": resource_id})
+        effective_dataset_id, bound_owner = bound_uma_scope({
+            **payload, "resource_id": resource_id, "dataset_id": dataset_id,
+        })
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     allowed_scopes = payload.get("allowed_scopes") or []
-    if not isinstance(allowed_scopes, list) or not any(s in {"messages:read", "ai_conversations:read", "aiChat:read", "aiMessages:read", "all:read"} for s in allowed_scopes if isinstance(s, str)):
-        raise HTTPException(status_code=403, detail="message_scope_required")
-    allowed_tables = resolve_scopes_to_tables(allowed_scopes)
+    # This endpoint can combine the two streams only when both are granted.
+    allowed_tables: Set[str] = set()
+    if message_stream_granted(allowed_scopes, "conversation"):
+        allowed_tables.update({"conversation_messages", "messages"})
+    if message_stream_granted(allowed_scopes, "ai_chat"):
+        allowed_tables.add("ai_chat_messages")
     if not allowed_tables:
-        return {"messages": [], "count": 0}
-    if not (
-        may_access_table(allowed_tables, "messages")
-        or may_access_table(allowed_tables, "conversation_messages")
-        or may_access_table(allowed_tables, "ai_chat_messages")
-        or may_access_table(allowed_tables, "ai_chat")
-        or may_access_table(allowed_tables, "ai_messages")
-    ):
-        return {"messages": [], "count": 0}
+        raise HTTPException(status_code=403, detail="message_scope_required")
     conn = get_db_connection()
     if not conn:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail="Database not initialized",
         )
+    try:
+        require_local_resource_binding(conn, resource_id, bound_owner)
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     filters = (request.state.uma_introspection or {}).get("filters")
     from ..features.lifecycle.record_protection import protection_fingerprint
 
@@ -256,10 +191,14 @@ async def get_uma_messages(
     )
     logical_table = "ai_chat_messages" if ai_only else "conversation_messages" if conv_only else None
     limited = get_limit_cap(limit, manifest, logical_table)
-    effective_dataset_id = (dataset_id or "").strip() or parse_dataset_id_from_uma_dataset_resource_id(
-        resource_id
-    )
-    items = _get_messages_from_db(conn, effective_dataset_id, limited, offset, allowed_tables=allowed_tables)
+    try:
+        items = _get_messages_from_db(
+            conn, effective_dataset_id, limited, offset,
+            allowed_tables=allowed_tables, owner_user_id=bound_owner,
+            whole_engine_scope=local_node_resource_scope(conn, resource_id, rpt_validated=True),
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     try:
         # UMA data proxy = the grantee HTTP lane; filter unconditionally.
         from ..features.lifecycle.blackhole_guard import BlackholeGuard, CallerClass
@@ -300,9 +239,6 @@ async def get_uma_oplog(
     offset: int = Query(0, ge=0),
     dataset_id: Optional[str] = Query(None),
 ):
-    """
-    Return oplog entries for the UMA resource, filtered by the permission's filters.
-    Sprint 05: returns data only if RPT has at least one allowed scope (any read access).
-    """
+    """No safe grantable projection exists for raw operation logs."""
     await require_uma_rpt(request, resource_id.strip())
     raise HTTPException(status_code=403, detail="shared_oplog_unavailable")

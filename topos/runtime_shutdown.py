@@ -34,6 +34,7 @@ life of the node process, silently, with the job still reporting success.
 from __future__ import annotations
 
 import logging
+import os
 import signal
 import threading
 from typing import Any, Callable, Dict, Optional
@@ -172,8 +173,57 @@ def shutdown_reason() -> str:
     return current_generation().reason
 
 
+class ShutdownInterrupt(BaseException):
+    """Abandon this unit of work: the node is stopping under it.
+
+    A BaseException, like KeyboardInterrupt and for the same reason. Between
+    the point that learns of the stop and the owner of the work sit broad
+    ``except Exception`` handlers ("the graph must never break ingest", the
+    per-source reprocess loops), and an ordinary exception there turned a
+    stopped import into one recorded done, its signal derivation never run
+    (third review, 2026-09-11). Owners that can put the work back catch it by
+    name: job_runner requeues the job, the upgrade runner leaves the step
+    pending.
+
+    Deliberately NOT a CancelledError subclass: asyncio rebuilds a cancellation
+    at every task boundary, so ``asyncio.run`` handed the upgrade runner a plain
+    CancelledError and the name was lost. Measured on 3.10.16 across
+    asyncio.run, a Task, to_thread and a thread running its own loop: a
+    CancelledError subclass lost its identity at every one, a BaseException
+    subclass kept it at every one.
+    """
+
+
 _HOOKS_INSTALLED = False
 _PREVIOUS_HANDLERS: Dict[int, Any] = {}
+_SHUTDOWN_LISTENERS: list = []
+
+
+def add_shutdown_listener(fn: Callable[[], Any]) -> None:
+    """Call ``fn()`` when a SIGINT/SIGTERM arrives, right after the stop request.
+
+    For work that must be stopped from OUTSIDE its thread — a child process —
+    because it never polls a generation. Runs inside the signal handler, on
+    whatever the main thread was doing: ``fn`` must be quick and must not take
+    a lock the main thread could hold. Signals only, deliberately not
+    ``request_shutdown``, which has been used for narrower stops than "the
+    process is going down" (see the module docstring). Idempotent per function.
+    """
+    if fn not in _SHUTDOWN_LISTENERS:
+        _SHUTDOWN_LISTENERS.append(fn)
+
+
+def _notify_shutdown_listeners() -> None:
+    for fn in list(_SHUTDOWN_LISTENERS):
+        try:
+            fn()
+        except Exception as exc:  # noqa: BLE001 — a listener must never break the stop
+            logger.debug("shutdown listener %r failed: %s", fn, exc)
+
+
+def will_notify(fn: Callable[[], Any]) -> bool:
+    """True when a SIGINT/SIGTERM to this process will call ``fn``."""
+    return _HOOKS_INSTALLED and fn in _SHUTDOWN_LISTENERS
 
 
 def install_shutdown_signal_hooks() -> None:
@@ -192,11 +242,19 @@ def install_shutdown_signal_hooks() -> None:
         except (ValueError, AttributeError):
             name = str(signum)
         request_shutdown(f"signal:{name}")
+        _notify_shutdown_listeners()
         prev = _PREVIOUS_HANDLERS.get(signum)
         if callable(prev):
             prev(signum, frame)
-        elif prev is signal.SIG_DFL and signum == getattr(signal, "SIGINT", None):
-            raise KeyboardInterrupt
+        elif prev is signal.SIG_DFL:
+            if signum == getattr(signal, "SIGINT", None):
+                raise KeyboardInterrupt
+            # The default disposition for anything else (SIGTERM with no uvicorn
+            # handler in front of it): die of the signal, as the process would
+            # have without this hook. Returning here swallowed it, and the
+            # process ran on until a SIGKILL.
+            signal.signal(signum, signal.SIG_DFL)
+            os.kill(os.getpid(), signum)
 
     installed = False
     for sig in (getattr(signal, "SIGINT", None), getattr(signal, "SIGTERM", None)):
