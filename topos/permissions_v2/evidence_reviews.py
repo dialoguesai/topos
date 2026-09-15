@@ -168,7 +168,7 @@ class EvidenceReviewService:
                 # Owner can inspect a bounded root even when its lineage cannot
                 # support review. Never invent a partial qualified snapshot.
                 reason = exc.code
-                versions = [EvidenceRevision(identity=root, revision=_row_revision(root_row))]
+                versions = [EvidenceRevision(identity=root, revision=_row_revision(root_row, table="signal_objects"))]
                 rows = {_key(root): root_row}
             records = []
             for version in versions:

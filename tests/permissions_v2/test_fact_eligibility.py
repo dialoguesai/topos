@@ -14,6 +14,18 @@ import sqlite3
 import pytest
 
 from tests.permissions_v2 import _fact_policy_oracle as oracle
+from topos.permissions_v2.evidence import _row_revision as _surface_revision
+
+
+def _oracle_row_revision(row):
+    # The frozen oracle predates per-table review surfaces and pins every
+    # column. Only its revision helper is adapted, by the table each fixture
+    # row belongs to; its decision logic stays byte-identical to 81c1e9c.
+    table = "signal_objects" if "object_id" in row else "conversation_messages" if "dataset_id" in row else "ai_chat_messages"
+    return _surface_revision(row, table=table)
+
+
+oracle._row_revision = _oracle_row_revision
 from tests.permissions_v2.test_evidence import corpus, edit
 from tests.permissions_v2.test_fact_policy import AS_OF, atom, bundle, policy, rule, timed, two_leaves, utc
 from topos.features.facts.store import FactStore
@@ -119,7 +131,7 @@ def test_consistent_pure_bundle_preserves_missing_and_closed_fact_validity(timed
     elif change == "missing_end": supplied["rows"][key].pop("valid_to")
     elif change == "closed": supplied["rows"][key]["valid_to"] = utc(AS_OF+1)
     else: supplied["rows"][key]["valid_from"] = utc(AS_OF+1)
-    replacement = root.model_copy(update={"revision": _row_revision(supplied["rows"][key])})
+    replacement = root.model_copy(update={"revision": _row_revision(supplied["rows"][key], table="signal_objects")})
     snapshot = snapshot.model_copy(update={"artifacts": [replacement], "candidate_revision": replacement.revision,
         "lineage_revision": digest({"artifacts": [replacement.model_dump()],
             "leaves": [ref.model_dump() for ref in sorted(snapshot.leaves, key=lambda ref: _key(ref.identity))],

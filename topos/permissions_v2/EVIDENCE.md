@@ -66,13 +66,31 @@ with source identities supplied by the recursive references rather than fabricat
 Unregistered leaf tables, partial references and contradictory node/resource IDs
 are withheld.
 
-Every row revision hashes all SQLite columns, including exact legacy JSON text,
-timestamps and tagged finite SQLite float values. The snapshot additionally binds
-the complete graph, the durable canonical identity (resource binding, protection
-clock identity and exact database path), and the actual canonical protection
-clock/floor. Any changed candidate, source, parent or recursive edge
-invalidates the review. A protection change invalidates it even if protection is
-later lifted and the visible floor returns to its earlier shape.
+Every row revision hashes the row's reviewed surface: every valued SQLite
+column except a closed per-table list of operational columns that routine
+syncs, derived scrubs and fact refreshes rewrite without changing what the
+owner reviewed (`REVIEW_SURFACE_EXCLUSIONS`: batch ids, ingest and row
+timestamps, derived content hashes and scrub outputs, extractor confidence and
+writer identity). A column missing from that list is consent-relevant as soon
+as it holds a value; a NULL column is absent from the surface, so a migration
+that adds a column stales nothing until a value appears, and clearing a
+reviewed value is a change. Legacy JSON text is pinned exactly, except that a
+fact payload is compared as sorted JSON without its confidence. Tagged finite
+SQLite floats are encoded as exact hex. The snapshot additionally binds the
+complete graph and the durable canonical identity (resource binding,
+protection clock identity and exact database path). Any changed candidate,
+source, parent or recursive edge invalidates the review.
+
+The snapshot's `protection_revision` binds the protection history of its own
+closure, not of the whole node (`closure_protection_revision`): the current
+Off-limits and record-tombstone state of every closure record, every fact
+tombstone key its facts could match, and the latest clock-v3 event that
+touched any of them. Protecting, excluding or lifting anything else on the
+node leaves every unaffected review current, while any event touching the
+closure, including a protect-then-lift with no intervening read, changes it
+permanently. Entity Off-limits and entity exclusions remain node-wide inputs
+until entity coverage exists. Signed authority still binds the node-wide
+revision of the read that serves it, checked by the release adapters.
 
 ## Owner review storage and trust
 

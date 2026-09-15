@@ -74,3 +74,59 @@ store is reset by this operation. Signed policy/ACK/result schemas do not change
 Rollback means disabling beta release. An older v1 engine rejects the v2 trigger
 set and cannot serve against this upgraded state. Do not drop triggers, decrement
 generation, strip the version column or reverse-migrate to make older code run.
+
+## Clock v3: closure-scoped review binding
+
+Clock v3 keeps the single monotonic generation and adds an append-only event
+log, `permissions_v2_protection_events(sequence, generation, source,
+artifact_key)`, written by the same nine triggers in the same canonical
+transaction. Each insert, update or delete on `owner_only_records`,
+`entity_blackholes` or `intelligence_exclusions` records the generation it
+advanced to and the touched artifact (`canonical_table|record_id`, the
+blackhole id, or `artifact_type|artifact_key`; an update records both the old
+and the new key). No note, name or content is copied into the log.
+
+Owner review snapshots bind `closure_protection_revision`: the protection and
+tombstone state of their own records and fact keys plus the latest event that
+touched them, with entity floors kept node-wide. Before v3 a review bound the
+node-wide revision, so protecting one unrelated record staled every review on
+the node; the event log lets a closure-scoped binding still detect a
+protect-then-lift of its own record. Signed authority, envelopes and receipts
+keep the node-wide `current_protection_revision`, which now carries
+`contract_version: 3`.
+
+### Explicit migration of an initialized v2 node
+
+Stop serving and every canonical writer, keep the canonical DB with its
+private stores together for backup, then run the standalone helper with the
+new engine environment:
+
+```python
+from pathlib import Path
+from topos.permissions_v2.protection_clock import upgrade_protection_clock_v3
+result = upgrade_protection_clock_v3(
+    Path(EXPLICIT_STOPPED_BETA_DATABASE),
+    owner_id=VERIFIED_PINNED_OWNER,
+    expected_clock_id=RECORDED_V2_CLOCK_ID,
+    expected_generation=RECORDED_V2_GENERATION,
+)
+```
+
+The helper validates the exact v2 columns, the nine v2 trigger definitions,
+owner binding, expected clock identity and generation, existing exclusion
+schema and the absence of an event table. It rebuilds the state table because
+the v2 CHECK constraint pins the version, preserving the clock identity and
+advancing the generation exactly once, creates the event log, replaces the nine
+triggers and verifies the v3 clock before committing. Repeating it against
+intact v3 is an idempotent read; partial triggers, a changed clock id, a stale
+generation or a stray event table are rejected. Before/after: every other
+table's rows and schema are unchanged; the only schema changes are the rebuilt
+state table, the event log and the nine trigger bodies.
+
+On restart the ledger reopens with its recorded revision and protection
+synchronization advances its epoch once. Existing owner reviews are stale by
+design because their snapshots bound the former node-wide revision; obtain new
+reviews. Review stores need no re-enrollment: their durable identity and clock
+high-water are unchanged and the generation only moved forward. An older v2
+engine rejects the v3 trigger set and cannot serve this state; rollback means
+disabling beta release, never dropping the event log or reversing the clock.

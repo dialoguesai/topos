@@ -69,7 +69,7 @@ def test_closed_output_schema_cannot_be_widened(corpus,field,value):
 def test_forged_inconsistent_or_withheld_evidence_cannot_be_rescued_by_output_review(corpus,change):
     qualification, raw, _, review = reviewed(corpus)
     data = qualification.model_dump()
-    if change == "row": raw["payload_json"] += " "
+    if change == "row": raw["altitude"] = "forged"
     elif change == "snapshot": data["evidence"]["snapshot"]["candidate_revision"] = "a"*64
     elif change == "leaf_binding": data["evidence"]["snapshot"]["leaves"][0]["identity"]["binding"]["owner_id"] = "other"
     elif change == "missing_leaf": data["evidence"]["snapshot"]["leaves"] = []

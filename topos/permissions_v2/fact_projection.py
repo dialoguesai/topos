@@ -107,7 +107,7 @@ def prepare_fact_projection(*, qualification: Qualification, fact_row: dict) -> 
     roots = [ref for ref in snapshot.artifacts if ref.identity.table == "signal_objects" and ref.identity.record_id == snapshot.fact_id]
     if (type(fact_row) is not dict or len(roots) != 1 or fact_row.get("object_id") != snapshot.fact_id
         or fact_row.get("object_type") != "fact" or roots[0].revision != snapshot.candidate_revision
-        or _row_revision(fact_row) != snapshot.candidate_revision):
+        or _row_revision(fact_row, table="signal_objects") != snapshot.candidate_revision):
         raise PolicyError("projection_evidence_binding")
     payload = _json(fact_row.get("payload_json"), dict)
     if (payload.get("disclosure") != "scoped" or payload.get("subject_entity_id") != "self"

@@ -25,11 +25,23 @@ from topos.storage.db.write_gate import with_db_write
 
 from .canonical import MAX_INTEGER, PolicyError, canonical_bytes, digest
 from .contract import Hash, Identifier, Number, StrictModel
-from .protection_clock import clock_state, current_protection_revision
+from .protection_clock import clock_state, closure_protection_revision, current_protection_revision
 
 MAX_NODES = 128
 MAX_DEPTH = 16
 LEAF_TABLES = ("conversation_messages", "ai_chat_messages")
+# The owner's attestation covers every column except these operational ones,
+# which routine syncs, re-derivations and derived scrubs rewrite without any
+# change to the reviewed content, role, time, identity or lineage. A column
+# missing from this closed list is consent-relevant by default.
+REVIEW_SURFACE_EXCLUSIONS = {
+    "conversation_messages": frozenset({"ingested_at", "sync_batch_id", "created_at", "content_hash",
+        "content_disclosure", "content_disclosure_hash", "content_disclosure_model"}),
+    "ai_chat_messages": frozenset({"ingested_at", "sync_batch_id", "content_hash", "content_disclosure",
+        "content_disclosure_hash", "content_rendered_disclosure", "content_rendered_disclosure_hash", "content_disclosure_model"}),
+    "ai_chat_conversations": frozenset({"ingested_at", "sync_batch_id", "created_at", "updated_at"}),
+    "signal_objects": frozenset({"created_at", "updated_at", "created_by", "updated_by", "confidence"}),
+}
 _ANY_REVIEW = object()
 _IDENTITY_SELECT = "SELECT binding_json,file_revision,clock_id,highest_generation,store_id FROM review_identity WHERE singleton=1"
 _STORE_ID = re.compile(r"[0-9a-f]{64}")
@@ -149,15 +161,31 @@ def _json(raw, expected):
         raise PolicyError("evidence_malformed") from None
 
 
-def _row_revision(row: dict) -> str:
-    """Pin every SQLite column, including legacy JSON text and float confidence.
+def _row_revision(row: dict, *, table: str | None = None) -> str:
+    """Pin the reviewed surface of one row: every valued column but the table's operational ones.
 
-    The policy JSON grammar intentionally rejects floats. SQLite floats are
-    instead encoded as tagged exact hex strings solely for revision hashing.
+    Without a table every column is pinned. A NULL column is absent from the
+    surface, so a migration that adds a column stales nothing until a value
+    appears in it; clearing a reviewed value is a change. A fact's payload is
+    compared as sorted JSON without the extractor confidence a refresh
+    rewrites; all other legacy JSON text is pinned exactly. The policy JSON
+    grammar intentionally rejects floats, so SQLite floats are encoded as
+    tagged exact hex strings solely for revision hashing.
     """
+    excluded = REVIEW_SURFACE_EXCLUSIONS.get(table, frozenset())
     values = {}
     for name, value in row.items():
-        if value is None:
+        if name in excluded or (value is None and table is not None):
+            continue
+        if table == "signal_objects" and name == "payload_json" and isinstance(value, str):
+            payload = {key: item for key, item in _json(value, dict).items() if key != "confidence"}
+            try:
+                # Deterministic for equal values; this is a revision key, not
+                # the float-free signed policy grammar, so floats stay allowed.
+                values[name] = ["json", json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False)]
+            except (TypeError, ValueError):
+                raise PolicyError("evidence_malformed") from None
+        elif value is None:
             values[name] = ["null"]
         elif type(value) is int:
             values[name] = ["integer", str(value)]
@@ -316,6 +344,9 @@ class EvidenceResolver:
         self._file_identity = (info.st_dev, info.st_ino)
         self.binding = EvidenceBinding.parse(binding.model_dump())
         self._clock_id = self._durable_clock_id()
+        # The node-wide protection revision of the read in progress; adapters
+        # compare it to signed authority. Snapshots bind their own closure.
+        self.current_floor = None
 
     def _durable_clock_id(self) -> str:
         """The installed protection clock identity is this database's durable identity.
@@ -371,11 +402,13 @@ class EvidenceResolver:
                 floor = current_protection_revision(conn, owner_id=self.binding.owner_id)
                 if clock_state(conn)[0] != self._clock_id:
                     raise PolicyError("evidence_database_binding")
+                self.current_floor = floor
                 yield conn, floor
                 self._incarnation()
             except sqlite3.Error:
                 raise PolicyError("evidence_storage_unavailable") from None
             finally:
+                self.current_floor = None
                 conn.close()
 
     def _identity(self, table: str, record_id: str, source_id=None, dataset_id=None):
@@ -425,7 +458,7 @@ class EvidenceResolver:
                 raise PolicyError("evidence_owner_binding")
             if _deleted(dict(parents[0])) or "_p2b_parent_revision" in row:
                 raise PolicyError("evidence_malformed")
-            row["_p2b_parent_revision"] = _row_revision(dict(parents[0]))
+            row["_p2b_parent_revision"] = _row_revision(dict(parents[0]), table="ai_chat_conversations")
         if table in LEAF_TABLES:
             row["_p2b_source_revision"] = _source_posture(conn, identity)[1]
         return row
@@ -500,7 +533,7 @@ class EvidenceResolver:
                 _json(row.get("payload_json"), dict), tombstones["fact"], self._owner_subjects(conn)):
                 raise PolicyError("intelligence_excluded")
             rows[key] = row
-            version = EvidenceRevision(identity=identity, revision=_row_revision(row))
+            version = EvidenceRevision(identity=identity, revision=_row_revision(row, table=identity.table))
             if identity.table == "signal_objects":
                 if enforce_floor and _json(row.get("payload_json"), dict).get("disclosure") != "scoped":
                     raise PolicyError("owner_only")
@@ -519,12 +552,40 @@ class EvidenceResolver:
             visiting.remove(key)
 
         visit(root, 0)
+        # The review binds the protection history of this closure, not of the
+        # whole node: unrelated Off-limits edits no longer stale every review,
+        # while any protect or lift of a closure record does. Entity floors
+        # remain node-wide until coverage exists. `floor` stays the node-wide
+        # revision for signed authority and is not bound here.
+        scoped = closure_protection_revision(conn, owner_id=self.binding.owner_id,
+            records=self._closure_records(artifacts, leaves), fact_prefixes=self._fact_prefixes(conn, rows, artifacts))
         snapshot = EvidenceSnapshot(binding=self.binding, canonical_file_revision=self._file_revision(), fact_id=fact_id,
             candidate_revision=artifacts[_key(root)].revision,
             lineage_revision=digest({"artifacts": [artifacts[k].model_dump() for k in sorted(artifacts)],
                 "leaves": [leaves[k].model_dump() for k in sorted(leaves)], "edges": edges}),
-            protection_revision=floor, artifacts=[artifacts[k] for k in sorted(artifacts)], leaves=[leaves[k] for k in sorted(leaves)])
+            protection_revision=scoped, artifacts=[artifacts[k] for k in sorted(artifacts)], leaves=[leaves[k] for k in sorted(leaves)])
         return snapshot, rows
+
+    @staticmethod
+    def _closure_records(artifacts, leaves):
+        return {(version.identity.table, version.identity.record_id) for version in list(artifacts.values()) + list(leaves.values())}
+
+    def _fact_prefixes(self, conn, rows, artifacts):
+        from topos.features.facts.store import normalize_predicate
+        try:
+            owners = self._owner_subjects(conn)
+        except PolicyError:
+            owners = {"self"}
+        prefixes = set()
+        for key in artifacts:
+            payload = _json(rows[key].get("payload_json"), dict)
+            subject, predicate = payload.get("subject_entity_id"), payload.get("predicate")
+            if type(subject) is not str or type(predicate) is not str:
+                # Malformed facts are withheld at read time; they bind no prefix.
+                continue
+            for candidate in (owners if subject in owners else {subject}):
+                prefixes.add((candidate + ":" + normalize_predicate(predicate)).lower())
+        return prefixes
 
     def inspect_for_review(self, fact_id: str) -> EvidenceSnapshot:
         _owner(self.binding)

@@ -57,8 +57,9 @@ class FactProjectionRelease:
                     self.protocol._sync_protection(db)
                     authority, policy = ledger._authority(db, signed.grant_id, self.clock())
                     expected = parse_authority({field: getattr(signed, field) for field in AuthorityBinding.model_fields})
+                    floor = self.projections.resolver.current_floor
                     if (authority != expected or not isinstance(policy, FactPolicyV2)
-                        or evidence.snapshot.protection_revision != authority.protection_revision):
+                        or floor is None or floor != authority.protection_revision):
                         raise PolicyError("authority_stale")
                 # Extract only after full verified authority equality above.
                 binding = Binding.parse({field: getattr(authority, field) for field in Binding.model_fields})

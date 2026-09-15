@@ -149,8 +149,10 @@ class SourceMessageRelease:
                 with ledger._transaction() as db:
                     self.protocol._sync_protection(db)
                     authority, policy = ledger._authority(db, signed.grant_id, self.clock())
+                    # The snapshot binds its closure's protection history; signed
+                    # authority binds the node-wide revision of this very read.
                     if (authority != AuthorityBinding.parse({field: getattr(signed, field) for field in AuthorityBinding.model_fields})
-                        or qualified.snapshot.protection_revision != authority.protection_revision):
+                        or self.resolver.current_floor is None or self.resolver.current_floor != authority.protection_revision):
                         raise PolicyError("authority_stale")
                 decision = source_message_decision(policy, qualified)
                 if decision.verdict != "permit":

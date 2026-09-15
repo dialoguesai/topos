@@ -9,8 +9,8 @@ from tests.permissions_v2.test_evidence import corpus,owner,attest,decision,edit
 from tests.permissions_v2.test_fact_release import fact_setup,timed,projection_service,issue,dispatch
 from tests.permissions_v2.test_release import release_setup,issue as source_issue,dispatch as source_dispatch
 from topos.permissions_v2.canonical import PolicyError,digest
-from topos.permissions_v2.protection_clock import (TABLE,TRIGGERS,LEGACY_TRIGGERS,clock_state,
-    current_protection_revision,ensure_protection_clock,upgrade_protection_clock_v2)
+from topos.permissions_v2.protection_clock import (EVENTS,TABLE,TRIGGERS,V2_TRIGGERS,LEGACY_TRIGGERS,clock_state,
+    current_protection_revision,ensure_protection_clock,upgrade_protection_clock_v2,upgrade_protection_clock_v3)
 from topos.features.lifecycle.exclusions import ExclusionStore
 
 
@@ -82,8 +82,9 @@ def test_unknown_or_damaged_exclusions_never_mean_empty(corpus,damage):
     assert decision(corpus).verdict=="withheld"
 
 
-@pytest.mark.parametrize("kind,key",[("record","unrelated"),("fact","self:likes"),("entity","unrelated person")])
-def test_add_remove_aba_without_intervening_read_invalidates_review_and_signed_work(fact_setup,kind,key):
+@pytest.mark.parametrize("kind,key,review",[("record","unrelated","qualified"),("fact","self:likes","qualified"),
+    ("record","message-1","withheld"),("fact","self:prefers","withheld"),("entity","unrelated person","withheld")])
+def test_add_remove_aba_without_intervening_read_invalidates_signed_work_and_only_touched_reviews(fact_setup,kind,key,review):
     envelope,payload=issue(fact_setup)
     corpus=fact_setup[5]
     with sqlite3.connect(corpus[0].path) as db:
@@ -91,19 +92,30 @@ def test_add_remove_aba_without_intervening_read_invalidates_review_and_signed_w
         store=ExclusionStore(db);store._tombstone(kind,key,None);db.commit();store.remove_exclusion(kind,key)
         after=clock_state(db)
     assert after==(before[0],before[1]+2)
+    # Signed authority binds the node-wide revision, so every ABA stales it.
     with pytest.raises(PolicyError):dispatch(fact_setup,envelope,payload)
-    assert decision(corpus).verdict=="withheld"
+    # A review binds only its closure; entity exclusions stay node-wide.
+    assert decision(corpus).verdict==review
     attest(corpus,review_id="fresh-evidence")
     assert decision(corpus).verdict=="qualified"
 
 
 def make_legacy(corpus):
+    """Rebuild the exact former v1 clock: no version column, six triggers, no event log."""
     with sqlite3.connect(corpus[0].path) as db:
         old=clock_state(db)
         for name in TRIGGERS:db.execute(f"DROP TRIGGER {name}")
-        db.execute(f"ALTER TABLE {TABLE} DROP COLUMN contract_version")
+        db.execute(f"DROP TABLE {EVENTS}")
+        db.execute(f"CREATE TABLE {TABLE}_v1 (singleton INTEGER PRIMARY KEY CHECK(singleton=1), clock_id TEXT NOT NULL, generation INTEGER NOT NULL)")
+        db.execute(f"INSERT INTO {TABLE}_v1 SELECT singleton,clock_id,generation FROM {TABLE}")
+        db.execute(f"DROP TABLE {TABLE}");db.execute(f"ALTER TABLE {TABLE}_v1 RENAME TO {TABLE}")
         for sql in LEGACY_TRIGGERS.values():db.execute(sql)
     return old
+
+
+def upgrade_to_current(path,old):
+    upgrade_protection_clock_v2(path,owner_id="owner-1",expected_clock_id=old[0],expected_generation=old[1])
+    return upgrade_protection_clock_v3(path,owner_id="owner-1",expected_clock_id=old[0],expected_generation=old[1]+1)
 
 
 def test_upgrade_is_explicit_monotone_and_never_repairs_partial_clock(corpus):
@@ -112,8 +124,38 @@ def test_upgrade_is_explicit_monotone_and_never_repairs_partial_clock(corpus):
     result=upgrade_protection_clock_v2(corpus[0].path,owner_id="owner-1",expected_clock_id=old[0],expected_generation=old[1])
     assert result=={"contract_version":2,"clock_id":old[0],"generation":old[1]+1,"already_current":False}
     assert upgrade_protection_clock_v2(corpus[0].path,owner_id="owner-1",expected_clock_id=old[0],expected_generation=old[1])["already_current"]
+    with pytest.raises(PolicyError):ensure_protection_clock(corpus[0].path,owner_id="owner-1")
     with sqlite3.connect(corpus[0].path) as db:db.execute("DROP TRIGGER permissions_v2_intelligence_exclusions_insert")
     with pytest.raises(PolicyError):upgrade_protection_clock_v2(corpus[0].path,owner_id="owner-1",expected_clock_id=old[0],expected_generation=old[1])
+
+
+def test_upgrade_v3_is_explicit_monotone_logs_events_and_never_repairs_partial_clock(corpus):
+    old=make_legacy(corpus)
+    upgrade_protection_clock_v2(corpus[0].path,owner_id="owner-1",expected_clock_id=old[0],expected_generation=old[1])
+    with pytest.raises(PolicyError):upgrade_protection_clock_v3(corpus[0].path,owner_id="owner-1",expected_clock_id="a"*64,expected_generation=old[1]+1)
+    with pytest.raises(PolicyError):upgrade_protection_clock_v3(corpus[0].path,owner_id="owner-1",expected_clock_id=old[0],expected_generation=old[1])
+    result=upgrade_protection_clock_v3(corpus[0].path,owner_id="owner-1",expected_clock_id=old[0],expected_generation=old[1]+1)
+    assert result=={"contract_version":3,"clock_id":old[0],"generation":old[1]+2,"already_current":False}
+    assert upgrade_protection_clock_v3(corpus[0].path,owner_id="owner-1",expected_clock_id=old[0],expected_generation=old[1]+1)["already_current"]
+    ensure_protection_clock(corpus[0].path,owner_id="owner-1")
+    with sqlite3.connect(corpus[0].path) as db:
+        assert db.execute(f"SELECT count(*) FROM {EVENTS}").fetchone()[0]==0
+        from topos.features.lifecycle.record_protection import RecordProtectionStore
+        RecordProtectionStore(db).protect(canonical_table="conversation_messages",record_id="message-1")
+        RecordProtectionStore(db).unprotect(canonical_table="conversation_messages",record_id="message-1")
+        events=db.execute(f"SELECT generation,source,artifact_key FROM {EVENTS} ORDER BY sequence").fetchall()
+        assert events==[(old[1]+3,"owner_only_records","conversation_messages|message-1"),(old[1]+4,"owner_only_records","conversation_messages|message-1")]
+        assert clock_state(db)==(old[0],old[1]+4)
+        db.execute("DROP TRIGGER permissions_v2_owner_only_records_delete")
+    with pytest.raises(PolicyError):upgrade_protection_clock_v3(corpus[0].path,owner_id="owner-1",expected_clock_id=old[0],expected_generation=old[1]+1)
+    with pytest.raises(PolicyError):ensure_protection_clock(corpus[0].path,owner_id="owner-1")
+
+
+def test_upgrade_v3_refuses_a_v2_clock_with_a_stray_event_table(corpus):
+    old=make_legacy(corpus)
+    upgrade_protection_clock_v2(corpus[0].path,owner_id="owner-1",expected_clock_id=old[0],expected_generation=old[1])
+    with sqlite3.connect(corpus[0].path) as db:db.execute(f"CREATE TABLE {EVENTS}(x)")
+    with pytest.raises(PolicyError):upgrade_protection_clock_v3(corpus[0].path,owner_id="owner-1",expected_clock_id=old[0],expected_generation=old[1]+1)
 
 
 @pytest.mark.parametrize("damage",["trigger","clock_id","generation","missing_v2_column"])
@@ -149,9 +191,13 @@ def test_upgrade_invalidates_initialized_v1_ledger_and_reviews_then_fresh_state_
         for module in (protection_clock,evidence,node_protocol):
             stack.enter_context(patch.object(module,"clock_state",legacy_clock))
             stack.enter_context(patch.object(module,"current_protection_revision",legacy_revision))
+        # v1 reviews bound the node-wide revision; the current closure binding
+        # did not exist yet and its event log is absent from a v1 database.
+        stack.enter_context(patch.object(evidence,"closure_protection_revision",
+            lambda conn,*,owner_id,records,fact_prefixes:legacy_revision(conn,owner_id=owner_id)))
         setup=fact_setup.__wrapped__(timed,projection_service,tmp_path)
         envelope,payload=issue(setup)
-    upgrade_protection_clock_v2(timed[0].path,owner_id="owner-1",expected_clock_id=old[0],expected_generation=old[1])
+    upgrade_to_current(timed[0].path,old)
     service=setup[0]
     service.protocol=reopen((service.protocol,setup[1],setup[2],setup[3]))
     status=sign_status_request(StatusRequestBody.parse({"version":"topos-policy-status-request/v2","kid":"cp-key",

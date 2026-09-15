@@ -212,7 +212,7 @@ def test_assistant_source_is_not_owner_authored(corpus):
     assert decision(corpus).reason_code == "not_owner_authored"
 
 
-@pytest.mark.parametrize("sql", ["UPDATE conversation_messages SET content='Changed claim.'", "UPDATE signal_objects SET updated_at='new-revision'",
+@pytest.mark.parametrize("sql", ["UPDATE conversation_messages SET content='Changed claim.'", "UPDATE signal_objects SET extractor_version='forged'",
     "UPDATE signal_objects SET source_refs_json='[]'", "DELETE FROM conversation_messages", "UPDATE conversation_messages SET deleted_at='now'",
     "UPDATE signal_objects SET valid_to='closed'", "DELETE FROM signal_objects"])
 def test_stale_changed_deleted_or_closed_evidence_withholds(corpus, sql):
@@ -875,3 +875,116 @@ def test_resolver_requires_an_installed_clock_at_construction(tmp_path):
     binding = EvidenceBinding(environment_id="permissions-beta-test", node_id="node-1", resource_id="resource-1", owner_id="owner-1")
     with pytest.raises(PolicyError, match="protection_clock_unavailable"):
         EvidenceResolver(canonical, binding=binding)
+
+
+def _add_columns(corpus, table, columns):
+    for name in columns:
+        edit(corpus, f"ALTER TABLE {table} ADD COLUMN {name} TEXT")
+
+
+@pytest.mark.parametrize("churn", ["sync_bookkeeping", "derived_scrub", "fact_refresh", "payload_whitespace", "ai_conversation_bookkeeping"])
+def test_operational_churn_keeps_an_owner_review_current(corpus, churn):
+    """A re-sync, a derived scrub or a fact refresh must not stale consent."""
+    if churn == "ai_conversation_bookkeeping":
+        edit(corpus, "UPDATE signal_objects SET source_refs_json=?",
+             (json.dumps([{"table": "ai_chat_messages", "source_id": "ai-source-1", "record_id": "ai-message-1"}]),))
+        _add_columns(corpus, "ai_chat_conversations", ["created_at", "updated_at", "ingested_at", "sync_batch_id"])
+    elif churn == "sync_bookkeeping":
+        _add_columns(corpus, "conversation_messages", ["ingested_at", "sync_batch_id", "created_at"])
+    elif churn == "derived_scrub":
+        _add_columns(corpus, "conversation_messages", ["content_hash", "content_disclosure", "content_disclosure_hash", "content_disclosure_model"])
+    attest(corpus)
+    assert decision(corpus).verdict == "qualified"
+    if churn == "sync_bookkeeping":
+        # This is what every canonical re-sync does to rows it already holds.
+        edit(corpus, "UPDATE conversation_messages SET sync_batch_id='batch-2', ingested_at='2026-09-15T12:00:00Z', created_at='2026-09-15T12:00:00Z'")
+    elif churn == "derived_scrub":
+        edit(corpus, "UPDATE conversation_messages SET content_hash='h2', content_disclosure='scrubbed', content_disclosure_hash='h3', content_disclosure_model='scrub-v2'")
+    elif churn == "fact_refresh":
+        # FactStore._refresh on the same value: max confidence, new updated_at.
+        edit(corpus, "UPDATE signal_objects SET confidence=0.99, updated_at='later', created_by='job-2'")
+        payload(corpus, confidence=0.99)
+    elif churn == "payload_whitespace":
+        with sqlite3.connect(corpus[0].path) as conn:
+            raw = conn.execute("SELECT payload_json FROM signal_objects WHERE object_id=?", (corpus[2],)).fetchone()[0]
+            conn.execute("UPDATE signal_objects SET payload_json=? WHERE object_id=?", (json.dumps(json.loads(raw), indent=2), corpus[2]))
+    else:
+        edit(corpus, "UPDATE ai_chat_conversations SET created_at='c', updated_at='u', ingested_at='i', sync_batch_id='b'")
+    assert decision(corpus).verdict == "qualified"
+
+
+@pytest.mark.parametrize("change,reason", [
+    ("UPDATE conversation_messages SET content='Changed claim.'", "review_stale"),
+    ("UPDATE conversation_messages SET is_from_self=0", "review_stale"),
+    ("UPDATE signal_objects SET extractor_version='forged'", "review_stale"),
+    ("UPDATE signal_objects SET valid_from='2026-01-01T00:00:00Z'", "review_stale"),
+    ("payload_value", "review_stale"), ("metadata", "review_stale"), ("ai_title", "review_stale")])
+def test_consent_relevant_changes_still_invalidate_the_review(corpus, change, reason):
+    if change == "ai_title":
+        edit(corpus, "UPDATE signal_objects SET source_refs_json=?",
+             (json.dumps([{"table": "ai_chat_messages", "source_id": "ai-source-1", "record_id": "ai-message-1"}]),))
+        _add_columns(corpus, "ai_chat_conversations", ["title"])
+    elif change == "metadata":
+        _add_columns(corpus, "conversation_messages", ["metadata_json"])
+    attest(corpus)
+    assert decision(corpus).verdict == "qualified"
+    if change == "payload_value":
+        payload(corpus, object_value="science books")
+    elif change == "metadata":
+        edit(corpus, "UPDATE conversation_messages SET metadata_json='{\"note\":\"context\"}'")
+    elif change == "ai_title":
+        edit(corpus, "UPDATE ai_chat_conversations SET title='renamed thread'")
+    else:
+        edit(corpus, change)
+    assert decision(corpus).reason_code == reason
+
+
+def test_a_new_unlisted_column_is_consent_relevant_once_it_holds_a_value(corpus):
+    attest(corpus)
+    _add_columns(corpus, "conversation_messages", ["future_semantic_column"])
+    assert decision(corpus).verdict == "qualified"
+    edit(corpus, "UPDATE conversation_messages SET future_semantic_column='set'")
+    assert decision(corpus).reason_code == "review_stale"
+    attest(corpus, review_id="review-with-value")
+    assert decision(corpus).verdict == "qualified"
+    edit(corpus, "UPDATE conversation_messages SET future_semantic_column=NULL")
+    assert decision(corpus).reason_code == "review_stale"
+
+
+@pytest.mark.parametrize("action", ["protect_other_record", "exclude_other_record", "exclude_other_fact", "protect_lift_other_record"])
+def test_unrelated_protection_changes_keep_the_review_current(corpus, action):
+    from topos.features.lifecycle.exclusions import ExclusionStore
+    edit(corpus, "INSERT INTO conversation_messages VALUES('message-2','dataset-1','source-1','Another synthetic note.',1,NULL,'owner-1')")
+    attest(corpus)
+    with sqlite3.connect(corpus[0].path) as conn:
+        if action.startswith("protect"):
+            RecordProtectionStore(conn).protect(canonical_table="conversation_messages", record_id="message-2")
+            if action == "protect_lift_other_record":
+                RecordProtectionStore(conn).unprotect(canonical_table="conversation_messages", record_id="message-2")
+        else:
+            store = ExclusionStore(conn)
+            store._tombstone("record" if action == "exclude_other_record" else "fact", "message-2" if action == "exclude_other_record" else "self:likes:jazz", None)
+            conn.commit()
+    result = decision(corpus)
+    assert result.verdict == "qualified", result.reason_code
+
+
+@pytest.mark.parametrize("action,lifted_reason", [("record", "review_stale"), ("fact", "review_stale")])
+def test_touching_the_closure_still_invalidates_even_after_lifting(corpus, action, lifted_reason):
+    from topos.features.lifecycle.exclusions import ExclusionStore
+    attest(corpus)
+    with sqlite3.connect(corpus[0].path) as conn:
+        if action == "record":
+            RecordProtectionStore(conn).protect(canonical_table="conversation_messages", record_id="message-1")
+        else:
+            ExclusionStore(conn)._tombstone("fact", "self:prefers", None)
+            conn.commit()
+    assert decision(corpus).reason_code == ("owner_only" if action == "record" else "intelligence_excluded")
+    with sqlite3.connect(corpus[0].path) as conn:
+        if action == "record":
+            RecordProtectionStore(conn).unprotect(canonical_table="conversation_messages", record_id="message-1")
+        else:
+            ExclusionStore(conn).remove_exclusion("fact", "self:prefers")
+    assert decision(corpus).reason_code == lifted_reason
+    attest(corpus, review_id="review-after-lift")
+    assert decision(corpus).verdict == "qualified"

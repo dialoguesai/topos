@@ -79,7 +79,7 @@ def _check_bundle(evidence, projection, rows, binding):
         raise PolicyError("fact_policy_lineage")
     edges = {}
     for key, ref in versions.items():
-        if type(rows[key]) is not dict or _row_revision(rows[key]) != ref.revision:
+        if type(rows[key]) is not dict or _row_revision(rows[key], table=ref.identity.table) != ref.revision:
             raise PolicyError("fact_policy_revision")
         if ref.identity.table == "signal_objects":
             children = [_key(_reference(raw, snapshot.binding)) for raw in _json(rows[key].get("source_refs_json"), list)]
