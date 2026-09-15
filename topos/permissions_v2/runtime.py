@@ -43,6 +43,42 @@ class Runtime:
         self._evidence_review_runtime = None
         self.projection_review_store_path = projection_review_store_path
         self._projection_review_runtime = None
+        self._ingestion_service = None
+        self._ingestion_snapshot_root = None
+
+    def ingestion(self):
+        """Owner-attested snapshots use only the paired canonical DB and root."""
+        if self.pid != os.getpid():
+            raise PolicyError("configuration_restart_required")
+        if os.environ.get("TOPOS_PERMISSIONS_V2_ENABLED", "").lower() != "true":
+            raise PolicyError("permissions_v2_disabled")
+        if os.environ.get("TOPOS_PERMISSIONS_V2_INGEST_SNAPSHOTS_ENABLED", "").lower() != "true":
+            raise PolicyError("ingest_snapshots_disabled")
+        expected = self.protocol.canonical_database.parent / "permissions-v2" / "ingest-snapshots"
+        configured = os.environ.get("TOPOS_PERMISSIONS_V2_INGEST_SNAPSHOT_ROOT", "")
+        if not configured or Path(configured) != expected:
+            raise PolicyError("ingest_snapshots_not_configured")
+        from .evidence import EvidenceBinding
+        from .ingest_provenance import IngestProvenanceService
+        from topos.storage.db.write_gate import with_db_write
+        with with_db_write():
+            if self._ingestion_snapshot_root is not None and self._ingestion_snapshot_root != expected:
+                raise PolicyError("configuration_restart_required")
+            if self._ingestion_service is None:
+                self._ingestion_service = IngestProvenanceService(
+                    canonical_database=self.protocol.canonical_database,
+                    binding=EvidenceBinding.parse(self.protocol.ledger.identity.model_dump()),
+                    snapshot_root=expected)
+                self._ingestion_snapshot_root = expected
+            return self._ingestion_service
+
+    def ingestion_connection(self):
+        """A new thread-owned connection; never create or select another DB."""
+        self.ingestion()  # Recheck feature/root/process configuration on every open.
+        conn = sqlite3.connect(self.protocol.canonical_database.as_uri() + "?mode=rw", uri=True, timeout=30)
+        conn.row_factory = sqlite3.Row
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
 
     def evidence_reviews(self, *, require_existing=True):
         """Trusted runtime accessor; request payloads never select enrollment."""

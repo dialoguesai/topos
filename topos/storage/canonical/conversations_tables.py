@@ -358,12 +358,20 @@ class ConversationsTablesManager:
         source_id: str,
         *,
         sync_batch_id: Optional[str] = None,
-    ) -> Dict[str, int]:
+        trusted_context: Any = None,
+    ) -> Dict[str, Any]:
         """
         Upsert messages into conversation_messages and ensure parent rows in conversations.
         Each record must have: message_id, thread_id or conversation_id, ts, sender_type, content.
         Optional: sender_id, _metadata, from_self (0/1), owner_user_id (for Signal identity).
         """
+        if trusted_context is not None:
+            from .canonical_store import _insert_trusted_conversation_batch
+
+            return _insert_trusted_conversation_batch(
+                self.conn, records, source_id=source_id, dataset_id=dataset_id,
+                trusted_context=trusted_context, sync_batch_id=sync_batch_id,
+            )
         if not self.conn or not records:
             return {"messages_created": 0, "conversations_created": 0}
         self.ensure_tables()

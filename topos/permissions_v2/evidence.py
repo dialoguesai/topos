@@ -388,6 +388,43 @@ class EvidenceResolver:
             row["_p2b_source_revision"] = _source_posture(conn, identity)[1]
         return row
 
+    def _validate_native_origin(self, conn, identity: EvidenceIdentity, row: dict) -> None:
+        """New owner-attested rows retain their revocable origin requirement.
+
+        The reserved marker is inserted by the trusted canonical writer. It
+        cannot authorize a legacy row: the separate durable service must prove
+        the exact current enrollment, completed job and stored row identity.
+        Existing untagged rows keep their independently required native/review
+        checks only when they have no durable origin link. Losing the proof
+        schema of an enrolled node cannot establish that absence. This shares
+        the service's trusted-storage boundary, not an arbitrary host-tamper
+        guarantee if both canonical history and private enrollment are erased.
+        """
+        if identity.table != "conversation_messages":
+            return
+        metadata = _json(row["metadata_json"], dict) if row.get("metadata_json") not in (None, "") else {}
+        try:
+            marker = self.path.parent / "permissions-v2" / "ingest-snapshots.enrollment.json"
+            installed = conn.execute("SELECT 1 FROM sqlite_master WHERE name GLOB 'ingest_provenance_*' LIMIT 1").fetchone()
+            if "topos_owner_ingest" not in metadata and not installed and not marker.exists() and not marker.is_symlink():
+                return
+            from .ingest_provenance import IngestProvenanceService
+
+            service = IngestProvenanceService(
+                canonical_database=self.path, binding=self.binding,
+                snapshot_root=self.path.parent / "permissions-v2" / "ingest-snapshots",
+            )
+            # The complete store must be intact before treating absent linkage
+            # as a genuinely historical record rather than lost provenance.
+            service._check(conn)
+            if "topos_owner_ingest" not in metadata:
+                if conn.execute("SELECT 1 FROM ingest_provenance_records WHERE message_id=?", (identity.record_id,)).fetchone():
+                    raise PolicyError("native_owner_provenance_unavailable")
+                return
+            service.validate_record_origin(conn, message_id=identity.record_id, origin=metadata["topos_owner_ingest"])
+        except Exception:
+            raise PolicyError("native_owner_provenance_unavailable") from None
+
     def _snapshot(self, conn, floor: str, fact_id: str, *, enforce_floor: bool = False):
         root = self._identity("signal_objects", fact_id)
         from .exclusion_floor import exclusions, fact_excluded
@@ -416,6 +453,7 @@ class EvidenceResolver:
             if enforce_floor and identity.record_id in tombstones["record"]:
                 raise PolicyError("intelligence_excluded")
             row = self._load(conn, identity)
+            self._validate_native_origin(conn, identity, row)
             if enforce_floor and identity.table == "signal_objects" and fact_excluded(
                 _json(row.get("payload_json"), dict), tombstones["fact"], self._owner_subjects(conn)):
                 raise PolicyError("intelligence_excluded")

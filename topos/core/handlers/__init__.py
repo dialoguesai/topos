@@ -161,6 +161,7 @@ from . import (  # noqa: F401  (imported for handler registration side effects)
     signal_features,
     permissions_v2,
     permissions_v2_release,
+    permissions_v2_ingestion,
     query,
     database_explorer,
     enrichment,

@@ -1,0 +1,395 @@
+{
+  "$defs": {
+    "EnrollmentMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "dataset_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Dataset Id",
+          "type": "string"
+        },
+        "enrollment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Enrollment Id",
+          "type": "string"
+        },
+        "ownership_basis": {
+          "const": "owner_attested_snapshot",
+          "title": "Ownership Basis",
+          "type": "string"
+        },
+        "revision": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Revision",
+          "type": "integer"
+        },
+        "source_id": {
+          "const": "imessage",
+          "title": "Source Id",
+          "type": "string"
+        },
+        "state": {
+          "enum": [
+            "active",
+            "revoked"
+          ],
+          "title": "State",
+          "type": "string"
+        }
+      },
+      "required": [
+        "enrollment_id",
+        "dataset_id",
+        "source_id",
+        "revision",
+        "state",
+        "ownership_basis"
+      ],
+      "title": "EnrollmentMetadata",
+      "type": "object"
+    },
+    "NodeIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "environment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Environment Id",
+          "type": "string"
+        },
+        "node_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "owner_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Owner Id",
+          "type": "string"
+        },
+        "resource_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Resource Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "environment_id",
+        "node_id",
+        "resource_id",
+        "owner_id"
+      ],
+      "title": "NodeIdentity",
+      "type": "object"
+    },
+    "SnapshotJobMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "enrollment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Enrollment Id",
+          "type": "string"
+        },
+        "job_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Job Id",
+          "type": "string"
+        },
+        "result": {
+          "anyOf": [
+            {
+              "discriminator": {
+                "mapping": {
+                  "error": "#/$defs/SnapshotRunFailure",
+                  "ok": "#/$defs/SnapshotRunSuccess"
+                },
+                "propertyName": "status"
+              },
+              "oneOf": [
+                {
+                  "$ref": "#/$defs/SnapshotRunSuccess"
+                },
+                {
+                  "$ref": "#/$defs/SnapshotRunFailure"
+                }
+              ]
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "default": null,
+          "title": "Result"
+        },
+        "status": {
+          "enum": [
+            "queued",
+            "running",
+            "done",
+            "failed"
+          ],
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "job_id",
+        "enrollment_id",
+        "status"
+      ],
+      "title": "SnapshotJobMetadata",
+      "type": "object"
+    },
+    "SnapshotMetadata": {
+      "additionalProperties": false,
+      "properties": {
+        "ownership_basis": {
+          "const": "owner_attested_snapshot",
+          "title": "Ownership Basis",
+          "type": "string"
+        },
+        "reader_contract": {
+          "const": "imessage-owner-snapshot/v1",
+          "title": "Reader Contract",
+          "type": "string"
+        },
+        "snapshot_bytes": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Snapshot Bytes",
+          "type": "integer"
+        },
+        "snapshot_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Snapshot Id",
+          "type": "string"
+        },
+        "snapshot_sha256": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Snapshot Sha256",
+          "type": "string"
+        }
+      },
+      "required": [
+        "snapshot_id",
+        "snapshot_sha256",
+        "snapshot_bytes",
+        "reader_contract",
+        "ownership_basis"
+      ],
+      "title": "SnapshotMetadata",
+      "type": "object"
+    },
+    "SnapshotRunFailure": {
+      "additionalProperties": false,
+      "properties": {
+        "reason_code": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Reason Code",
+          "type": "string"
+        },
+        "status": {
+          "const": "error",
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "reason_code"
+      ],
+      "title": "SnapshotRunFailure",
+      "type": "object"
+    },
+    "SnapshotRunSuccess": {
+      "additionalProperties": false,
+      "properties": {
+        "conversations_created": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Conversations Created",
+          "type": "integer"
+        },
+        "historical_skipped": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Historical Skipped",
+          "type": "integer"
+        },
+        "messages_created": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Messages Created",
+          "type": "integer"
+        },
+        "messages_processed": {
+          "maximum": 9007199254740991,
+          "minimum": 0,
+          "title": "Messages Processed",
+          "type": "integer"
+        },
+        "status": {
+          "const": "ok",
+          "title": "Status",
+          "type": "string"
+        }
+      },
+      "required": [
+        "status",
+        "messages_created",
+        "conversations_created",
+        "messages_processed",
+        "historical_skipped"
+      ],
+      "title": "SnapshotRunSuccess",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "audience_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Audience Id",
+      "type": "string"
+    },
+    "binding": {
+      "$ref": "#/$defs/NodeIdentity"
+    },
+    "command_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Command Id",
+      "type": "string"
+    },
+    "error_code": {
+      "anyOf": [
+        {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Error Code"
+    },
+    "expires_at": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "Expires At",
+      "type": "integer"
+    },
+    "issued_at": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "Issued At",
+      "type": "integer"
+    },
+    "issuer_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Issuer Id",
+      "type": "string"
+    },
+    "kid": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Kid",
+      "type": "string"
+    },
+    "operation": {
+      "enum": [
+        "describe",
+        "enroll",
+        "revoke",
+        "enqueue",
+        "status",
+        "run"
+      ],
+      "title": "Operation",
+      "type": "string"
+    },
+    "response_to": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Response To",
+      "type": "string"
+    },
+    "result": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/SnapshotMetadata"
+        },
+        {
+          "$ref": "#/$defs/EnrollmentMetadata"
+        },
+        {
+          "$ref": "#/$defs/SnapshotJobMetadata"
+        },
+        {
+          "$ref": "#/$defs/SnapshotRunSuccess"
+        },
+        {
+          "$ref": "#/$defs/SnapshotRunFailure"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Result"
+    },
+    "signature": {
+      "pattern": "^[A-Za-z0-9_-]{86}$",
+      "title": "Signature",
+      "type": "string"
+    },
+    "version": {
+      "const": "topos-owner-ingest-ack/v2",
+      "title": "Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "version",
+    "kid",
+    "issuer_id",
+    "audience_id",
+    "command_id",
+    "response_to",
+    "binding",
+    "operation",
+    "result",
+    "error_code",
+    "issued_at",
+    "expires_at",
+    "signature"
+  ],
+  "title": "SignedIngestAck",
+  "type": "object"
+}

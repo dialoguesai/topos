@@ -1,8 +1,11 @@
 # New-ingestion owner provenance, investigation v1
 
-Status: the initial-self creation race below is repaired. The authenticated
-owner-binding package is a proposed next implementation, not a backfill or a
-permission to stamp owner IDs today. The copied corpus remains unchanged. Its
+Status (2026-09-15): the initial-self creation race below is repaired. A separate,
+default-disabled [immutable snapshot lane](INGEST_SNAPSHOT_DESIGN.md) now implements
+explicit owner attestation, signed commands, new-row provenance and revocable
+evidence checks. The live-sync binding described below remains proposed; native
+account identity is not established by existing readers. This is not a backfill.
+The copied corpus remains unchanged. Its
 zero current `prefers` intersection is a valid narrow-contract result, not proof
 of data corruption. Source-event time and fact applicability precision remain a
 separate investigation.
