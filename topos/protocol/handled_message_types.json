@@ -148,6 +148,8 @@
   "patch_filter_lab_job_run",
   "patch_routine",
   "patch_source_install",
+  "permissions_v2_mutate",
+  "permissions_v2_status",
   "pooled_scope_backfill_apply",
   "pooled_scope_backfill_dry_run",
   "pooled_scope_backfill_rollback",
@@ -272,6 +274,8 @@
   "mcp_client_list_elevations",
   "mcp_client_revoke",
   "mcp_client_revoke_elevation",
+  "permissions_v2_mutate",
+  "permissions_v2_status",
   "signal_blackhole_record",
   "signal_unblackhole_record"
  ]

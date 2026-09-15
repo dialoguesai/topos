@@ -50,3 +50,17 @@ assert.throws(() => canonical({value: 1.5}));
 assert.throws(() => canonical({value: Number.MAX_SAFE_INTEGER + 1}));
 assert.throws(() => canonical({value: '\ud800'}));
 console.log('P2a canonical policy, request hash and Ed25519 golden verified in Node');
+
+const protocol = JSON.parse(readFileSync(new URL('./protocol-golden-v1.json', import.meta.url), 'utf8'));
+for (const name of ['mutation', 'status_request', 'ack']) {
+  const {signature: sig, ...body} = protocol[name];
+  const text = `${body.version}\n${canonical(body)}`;
+  assert.equal(text, protocol.signing_text[name]);
+  const hex = name === 'ack' ? protocol.node_public_key_hex : protocol.cp_public_key_hex;
+  const key = createPublicKey({key: Buffer.concat([Buffer.from('302a300506032b6570032100','hex'), Buffer.from(hex,'hex')]), type:'spki',format:'der'});
+  assert(verify(null, Buffer.from(text,'ascii'), key, Buffer.from(sig,'base64url')));
+}
+const {version: _v, kid: _kid, issued_at: _iat, expires_at: _exp, signature: _sig, ...commandCore} = protocol.mutation;
+assert.equal(hash(commandCore), protocol.command_hash);
+assert.equal(hash(protocol.mutation), protocol.ack.response_to);
+console.log('Mutation/status/ACK signatures and semantic command hash verified in Node');

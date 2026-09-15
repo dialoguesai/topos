@@ -1,0 +1,174 @@
+{
+  "$defs": {
+    "Binding": {
+      "additionalProperties": false,
+      "properties": {
+        "actor_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Actor Id",
+          "type": "string"
+        },
+        "assignment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Assignment Id",
+          "type": "string"
+        },
+        "client_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Client Id",
+          "type": "string"
+        },
+        "environment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Environment Id",
+          "type": "string"
+        },
+        "grant_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Grant Id",
+          "type": "string"
+        },
+        "node_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "owner_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Owner Id",
+          "type": "string"
+        },
+        "resource_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Resource Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "environment_id",
+        "node_id",
+        "resource_id",
+        "owner_id",
+        "actor_id",
+        "client_id",
+        "grant_id",
+        "assignment_id"
+      ],
+      "title": "Binding",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "audience_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Audience Id",
+      "type": "string"
+    },
+    "binding": {
+      "$ref": "#/$defs/Binding"
+    },
+    "command_hash": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Command Hash"
+    },
+    "command_id": {
+      "anyOf": [
+        {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Command Id"
+    },
+    "expires_at": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "Expires At",
+      "type": "integer"
+    },
+    "issued_at": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "Issued At",
+      "type": "integer"
+    },
+    "issuer_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Issuer Id",
+      "type": "string"
+    },
+    "kid": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Kid",
+      "type": "string"
+    },
+    "request_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Request Id",
+      "type": "string"
+    },
+    "signature": {
+      "pattern": "^[A-Za-z0-9_-]{86}$",
+      "title": "Signature",
+      "type": "string"
+    },
+    "version": {
+      "const": "topos-policy-status-request/v2",
+      "title": "Version",
+      "type": "string"
+    }
+  },
+  "required": [
+    "version",
+    "kid",
+    "issuer_id",
+    "audience_id",
+    "request_id",
+    "binding",
+    "command_id",
+    "command_hash",
+    "issued_at",
+    "expires_at",
+    "signature"
+  ],
+  "title": "SignedStatusRequest",
+  "type": "object"
+}

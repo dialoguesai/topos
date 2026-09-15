@@ -40,6 +40,11 @@ _DDL = (
     "CREATE TABLE IF NOT EXISTS p2a_mutations (command_id TEXT PRIMARY KEY, command_hash TEXT NOT NULL, result_json TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS p2a_requests (request_id TEXT PRIMARY KEY, envelope_hash TEXT NOT NULL, envelope_json TEXT NOT NULL, status TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS p2a_receipts (request_id TEXT PRIMARY KEY, receipt_json TEXT NOT NULL, decision_json TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS p2a_grant_bindings (grant_id TEXT PRIMARY KEY, binding_json TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS p2a_grant_authorities (grant_id TEXT PRIMARY KEY, authority_json TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS p2a_policy_commitments (version_id TEXT PRIMARY KEY, policy_hash TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS p2a_protocol_commands (command_id TEXT PRIMARY KEY, command_hash TEXT NOT NULL, receipt_json TEXT NOT NULL)",
+    "CREATE TABLE IF NOT EXISTS p2a_protection_observation (singleton INTEGER PRIMARY KEY CHECK(singleton=1), clock_id TEXT NOT NULL, generation INTEGER NOT NULL)",
 )
 
 
@@ -170,8 +175,9 @@ class PolicyLedger:
                     raise PolicyError("assignment_binding")
                 if grant_generation <= old["grant_generation"] or assignment_generation <= old["assignment_generation"]:
                     raise PolicyError("generation_stale")
-                old_policy = self._policy(conn, old["version_id"])
-                if old_policy.binding != policy.binding:
+                old_binding = conn.execute("SELECT binding_json FROM p2a_grant_bindings WHERE grant_id=?", (policy.binding.grant_id,)).fetchone()
+                bound = parse_json(old_binding["binding_json"]) if old_binding else self._policy(conn, old["version_id"]).binding.model_dump()
+                if bound != policy.binding.model_dump():
                     raise PolicyError("policy_binding")
             elif grant_generation != 1 or assignment_generation != 1:
                 raise PolicyError("initial_generation")
@@ -180,7 +186,12 @@ class PolicyLedger:
             immutable = conn.execute("SELECT policy_hash FROM p2a_policies WHERE version_id=?", (policy.policy_version_id,)).fetchone()
             if immutable and immutable["policy_hash"] != hashed:
                 raise PolicyError("immutable_policy")
+            committed = conn.execute("SELECT policy_hash FROM p2a_policy_commitments WHERE version_id=?", (policy.policy_version_id,)).fetchone()
+            if committed and committed["policy_hash"] != hashed:
+                raise PolicyError("immutable_policy")
             conn.execute("INSERT OR IGNORE INTO p2a_policies VALUES (?, ?, ?)", (policy.policy_version_id, hashed, encoded))
+            conn.execute("INSERT OR IGNORE INTO p2a_policy_commitments VALUES (?, ?)", (policy.policy_version_id, hashed))
+            conn.execute("INSERT OR IGNORE INTO p2a_grant_bindings VALUES (?, ?)", (policy.binding.grant_id, canonical_bytes(policy.binding.model_dump()).decode("ascii")))
             conn.execute("INSERT INTO p2a_grants VALUES (?, ?, ?, ?, ?, 1) ON CONFLICT(grant_id) DO UPDATE SET grant_generation=excluded.grant_generation, assignment_generation=excluded.assignment_generation, version_id=excluded.version_id, active=1", (policy.binding.grant_id, policy.binding.assignment_id, grant_generation, assignment_generation, policy.policy_version_id))
             return self._mutated(conn, command_id, body, expected_epoch)
 

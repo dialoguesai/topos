@@ -1,0 +1,218 @@
+{
+  "fixture_version": "topos-policy-protocol-golden/v1",
+  "cp_public_key_hex": "03a107bff3ce10be1d70dd18e74bc09967e4d6309ba50d5f1ddc8664125531b8",
+  "node_public_key_hex": "29acbae141bccaf0b22e1a94d34d0bc7361e526d0bfe12c89794bc9322966dd7",
+  "mutation": {
+    "version": "topos-policy-mutation/v2",
+    "kid": "cp-key",
+    "issuer_id": "beta-cp",
+    "audience_id": "node-1",
+    "command_id": "activate-1",
+    "operation": "activate",
+    "expected_epoch": 0,
+    "authority": {
+      "environment_id": "beta",
+      "node_id": "node-1",
+      "resource_id": "resource-1",
+      "owner_id": "owner-1",
+      "actor_id": "actor-1",
+      "client_id": "client-1",
+      "grant_id": "grant-1",
+      "assignment_id": "assignment-1",
+      "grant_generation": 1,
+      "assignment_generation": 1,
+      "policy_version_id": "policy-1",
+      "policy_hash": "786e2b3336eae103dcd7dc5fb15a9302f024b9fc8705219ecf01b0e1d194c15d",
+      "capability_version": "permissions-beta/p2a-v1",
+      "protection_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "node_epoch": 1
+    },
+    "policy": {
+      "version": "topos-policy/v2",
+      "policy_version_id": "policy-1",
+      "binding": {
+        "environment_id": "beta",
+        "node_id": "node-1",
+        "resource_id": "resource-1",
+        "owner_id": "owner-1",
+        "actor_id": "actor-1",
+        "client_id": "client-1",
+        "grant_id": "grant-1",
+        "assignment_id": "assignment-1"
+      },
+      "versions": {
+        "vocabulary": "vocabulary-1",
+        "capability": "permissions-beta/p2a-v1"
+      },
+      "validity": {
+        "starts_at": 1000,
+        "expires_at": 5000
+      },
+      "source_universe": {
+        "universe_id": "sources-1",
+        "revision": 1,
+        "source_ids": [
+          "source-A",
+          "source-B"
+        ]
+      },
+      "hard_constraints": {
+        "owner_only": "deny",
+        "unknown_classification": "withhold",
+        "unknown_lineage": "withhold",
+        "cross_rule_derivation": "deny",
+        "capability_growth": "require_consent"
+      },
+      "rules": [
+        {
+          "rule_id": "rule-A",
+          "effect": "permit",
+          "evidence_use": {
+            "sources": {
+              "kind": "only",
+              "values": [
+                "source-A"
+              ]
+            },
+            "predicate": {
+              "kind": "all_of",
+              "terms": []
+            },
+            "purpose": "reading",
+            "processors": {
+              "kind": "only",
+              "values": [
+                "owner-engine-local"
+              ]
+            },
+            "new_records": "include_if_predicate"
+          },
+          "release": {
+            "predicate": {
+              "kind": "all_of",
+              "terms": []
+            },
+            "ceiling": "raw",
+            "forms": [
+              {
+                "family": "canonical_record",
+                "operation": "read",
+                "view_id": "canonical.message_disclosure.v1",
+                "tables": [
+                  "conversation_messages"
+                ]
+              }
+            ]
+          }
+        }
+      ],
+      "evaluator": {
+        "kind": "hard_rules",
+        "version": "hard-rules/p2a-v1"
+      },
+      "natural_language": null
+    },
+    "owner_authorization": {
+      "actor_id": "owner-1",
+      "client_id": "permissions-beta-web"
+    },
+    "issued_at": 1100,
+    "expires_at": 1220,
+    "signature": "py0g0T-8988I3R7VgxPepnfoU4qF6xtrgrLWZuvJQkAsdFPeq94W7fzqPdyMn8S83iGbzdxs1CTDkYYvOG_uCQ"
+  },
+  "status_request": {
+    "version": "topos-policy-status-request/v2",
+    "kid": "cp-key",
+    "issuer_id": "beta-cp",
+    "audience_id": "node-1",
+    "request_id": "status-1",
+    "binding": {
+      "environment_id": "beta",
+      "node_id": "node-1",
+      "resource_id": "resource-1",
+      "owner_id": "owner-1",
+      "actor_id": "actor-1",
+      "client_id": "client-1",
+      "grant_id": "grant-1",
+      "assignment_id": "assignment-1"
+    },
+    "command_id": "activate-1",
+    "command_hash": "febd94d4673b7e2a4166eaed44cfdcdb7ad70725074d21c3051d4efe62c0ab44",
+    "issued_at": 1100,
+    "expires_at": 1220,
+    "signature": "X4YBdQyU_WS-ZU8EuewFY3Jlz7lriM8rjVuYqFyg5hx9gTUIg8V1CtaMzhK3ar5AnqMcJn62SIaVySTw-ZgSDw"
+  },
+  "ack": {
+    "version": "topos-policy-ack/v2",
+    "kid": "node-key",
+    "issuer_id": "node-1",
+    "audience_id": "beta-cp",
+    "response_to": "80e9a979dc02276a48b1b51ed086293cc896f434f02c85ce18db27a9a9134ba1",
+    "request_kind": "mutation",
+    "request_id": "activate-1",
+    "command_id": "activate-1",
+    "command_hash": "febd94d4673b7e2a4166eaed44cfdcdb7ad70725074d21c3051d4efe62c0ab44",
+    "outcome": "applied",
+    "reason_code": "ok",
+    "receipt": {
+      "command_id": "activate-1",
+      "command_hash": "febd94d4673b7e2a4166eaed44cfdcdb7ad70725074d21c3051d4efe62c0ab44",
+      "operation": "activate",
+      "authority": {
+        "environment_id": "beta",
+        "node_id": "node-1",
+        "resource_id": "resource-1",
+        "owner_id": "owner-1",
+        "actor_id": "actor-1",
+        "client_id": "client-1",
+        "grant_id": "grant-1",
+        "assignment_id": "assignment-1",
+        "grant_generation": 1,
+        "assignment_generation": 1,
+        "policy_version_id": "policy-1",
+        "policy_hash": "786e2b3336eae103dcd7dc5fb15a9302f024b9fc8705219ecf01b0e1d194c15d",
+        "capability_version": "permissions-beta/p2a-v1",
+        "protection_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "node_epoch": 1
+      },
+      "applied_at": 1100
+    },
+    "state": {
+      "identity": {
+        "environment_id": "beta",
+        "node_id": "node-1",
+        "resource_id": "resource-1",
+        "owner_id": "owner-1"
+      },
+      "node_epoch": 1,
+      "protection_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+      "grant_state": "active",
+      "authority": {
+        "environment_id": "beta",
+        "node_id": "node-1",
+        "resource_id": "resource-1",
+        "owner_id": "owner-1",
+        "actor_id": "actor-1",
+        "client_id": "client-1",
+        "grant_id": "grant-1",
+        "assignment_id": "assignment-1",
+        "grant_generation": 1,
+        "assignment_generation": 1,
+        "policy_version_id": "policy-1",
+        "policy_hash": "786e2b3336eae103dcd7dc5fb15a9302f024b9fc8705219ecf01b0e1d194c15d",
+        "capability_version": "permissions-beta/p2a-v1",
+        "protection_revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "node_epoch": 1
+      }
+    },
+    "issued_at": 1100,
+    "expires_at": 1220,
+    "signature": "yp1oxFhyzwuNrNAb35vXlZpwCgG5f1cEWtrn_Uq4I2FZJpitAohoP3PuyamViEtPGfltgCWMP6WO0OHVZ3kMDg"
+  },
+  "command_hash": "febd94d4673b7e2a4166eaed44cfdcdb7ad70725074d21c3051d4efe62c0ab44",
+  "signing_text": {
+    "mutation": "topos-policy-mutation/v2\n{\"audience_id\":\"node-1\",\"authority\":{\"actor_id\":\"actor-1\",\"assignment_generation\":1,\"assignment_id\":\"assignment-1\",\"capability_version\":\"permissions-beta/p2a-v1\",\"client_id\":\"client-1\",\"environment_id\":\"beta\",\"grant_generation\":1,\"grant_id\":\"grant-1\",\"node_epoch\":1,\"node_id\":\"node-1\",\"owner_id\":\"owner-1\",\"policy_hash\":\"786e2b3336eae103dcd7dc5fb15a9302f024b9fc8705219ecf01b0e1d194c15d\",\"policy_version_id\":\"policy-1\",\"protection_revision\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"resource_id\":\"resource-1\"},\"command_id\":\"activate-1\",\"expected_epoch\":0,\"expires_at\":1220,\"issued_at\":1100,\"issuer_id\":\"beta-cp\",\"kid\":\"cp-key\",\"operation\":\"activate\",\"owner_authorization\":{\"actor_id\":\"owner-1\",\"client_id\":\"permissions-beta-web\"},\"policy\":{\"binding\":{\"actor_id\":\"actor-1\",\"assignment_id\":\"assignment-1\",\"client_id\":\"client-1\",\"environment_id\":\"beta\",\"grant_id\":\"grant-1\",\"node_id\":\"node-1\",\"owner_id\":\"owner-1\",\"resource_id\":\"resource-1\"},\"evaluator\":{\"kind\":\"hard_rules\",\"version\":\"hard-rules/p2a-v1\"},\"hard_constraints\":{\"capability_growth\":\"require_consent\",\"cross_rule_derivation\":\"deny\",\"owner_only\":\"deny\",\"unknown_classification\":\"withhold\",\"unknown_lineage\":\"withhold\"},\"natural_language\":null,\"policy_version_id\":\"policy-1\",\"rules\":[{\"effect\":\"permit\",\"evidence_use\":{\"new_records\":\"include_if_predicate\",\"predicate\":{\"kind\":\"all_of\",\"terms\":[]},\"processors\":{\"kind\":\"only\",\"values\":[\"owner-engine-local\"]},\"purpose\":\"reading\",\"sources\":{\"kind\":\"only\",\"values\":[\"source-A\"]}},\"release\":{\"ceiling\":\"raw\",\"forms\":[{\"family\":\"canonical_record\",\"operation\":\"read\",\"tables\":[\"conversation_messages\"],\"view_id\":\"canonical.message_disclosure.v1\"}],\"predicate\":{\"kind\":\"all_of\",\"terms\":[]}},\"rule_id\":\"rule-A\"}],\"source_universe\":{\"revision\":1,\"source_ids\":[\"source-A\",\"source-B\"],\"universe_id\":\"sources-1\"},\"validity\":{\"expires_at\":5000,\"starts_at\":1000},\"version\":\"topos-policy/v2\",\"versions\":{\"capability\":\"permissions-beta/p2a-v1\",\"vocabulary\":\"vocabulary-1\"}},\"version\":\"topos-policy-mutation/v2\"}",
+    "status_request": "topos-policy-status-request/v2\n{\"audience_id\":\"node-1\",\"binding\":{\"actor_id\":\"actor-1\",\"assignment_id\":\"assignment-1\",\"client_id\":\"client-1\",\"environment_id\":\"beta\",\"grant_id\":\"grant-1\",\"node_id\":\"node-1\",\"owner_id\":\"owner-1\",\"resource_id\":\"resource-1\"},\"command_hash\":\"febd94d4673b7e2a4166eaed44cfdcdb7ad70725074d21c3051d4efe62c0ab44\",\"command_id\":\"activate-1\",\"expires_at\":1220,\"issued_at\":1100,\"issuer_id\":\"beta-cp\",\"kid\":\"cp-key\",\"request_id\":\"status-1\",\"version\":\"topos-policy-status-request/v2\"}",
+    "ack": "topos-policy-ack/v2\n{\"audience_id\":\"beta-cp\",\"command_hash\":\"febd94d4673b7e2a4166eaed44cfdcdb7ad70725074d21c3051d4efe62c0ab44\",\"command_id\":\"activate-1\",\"expires_at\":1220,\"issued_at\":1100,\"issuer_id\":\"node-1\",\"kid\":\"node-key\",\"outcome\":\"applied\",\"reason_code\":\"ok\",\"receipt\":{\"applied_at\":1100,\"authority\":{\"actor_id\":\"actor-1\",\"assignment_generation\":1,\"assignment_id\":\"assignment-1\",\"capability_version\":\"permissions-beta/p2a-v1\",\"client_id\":\"client-1\",\"environment_id\":\"beta\",\"grant_generation\":1,\"grant_id\":\"grant-1\",\"node_epoch\":1,\"node_id\":\"node-1\",\"owner_id\":\"owner-1\",\"policy_hash\":\"786e2b3336eae103dcd7dc5fb15a9302f024b9fc8705219ecf01b0e1d194c15d\",\"policy_version_id\":\"policy-1\",\"protection_revision\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"resource_id\":\"resource-1\"},\"command_hash\":\"febd94d4673b7e2a4166eaed44cfdcdb7ad70725074d21c3051d4efe62c0ab44\",\"command_id\":\"activate-1\",\"operation\":\"activate\"},\"request_id\":\"activate-1\",\"request_kind\":\"mutation\",\"response_to\":\"80e9a979dc02276a48b1b51ed086293cc896f434f02c85ce18db27a9a9134ba1\",\"state\":{\"authority\":{\"actor_id\":\"actor-1\",\"assignment_generation\":1,\"assignment_id\":\"assignment-1\",\"capability_version\":\"permissions-beta/p2a-v1\",\"client_id\":\"client-1\",\"environment_id\":\"beta\",\"grant_generation\":1,\"grant_id\":\"grant-1\",\"node_epoch\":1,\"node_id\":\"node-1\",\"owner_id\":\"owner-1\",\"policy_hash\":\"786e2b3336eae103dcd7dc5fb15a9302f024b9fc8705219ecf01b0e1d194c15d\",\"policy_version_id\":\"policy-1\",\"protection_revision\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"resource_id\":\"resource-1\"},\"grant_state\":\"active\",\"identity\":{\"environment_id\":\"beta\",\"node_id\":\"node-1\",\"owner_id\":\"owner-1\",\"resource_id\":\"resource-1\"},\"node_epoch\":1,\"protection_revision\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"},\"version\":\"topos-policy-ack/v2\"}"
+  }
+}

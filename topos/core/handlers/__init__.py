@@ -159,6 +159,7 @@ from . import (  # noqa: F401  (imported for handler registration side effects)
     messages,
     ingest,
     signal_features,
+    permissions_v2,
     query,
     database_explorer,
     enrichment,

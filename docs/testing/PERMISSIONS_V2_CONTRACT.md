@@ -1,7 +1,8 @@
 # Policy v2 boundary contract — P2a
 
-This package is isolated from legacy routes. No existing HTTP, relay, MCP, query,
-or disclosure handler imports it. The capability document has one **registered**
+This package is isolated from legacy data routes. A disabled-by-default owner
+relay now mounts the signed coordination protocol described in
+`PERMISSIONS_V2_PROTOCOL.md`; no data execution adapter is installed. The capability document has one **registered**
 form, `canonical_record / read / canonical.message_disclosure.v1`, and an empty
 `executable_forms` list. The closed message schema supports only
 `conversation_messages` and `ai_chat_messages`. Registration is syntax support,
@@ -68,10 +69,10 @@ legacy shared key, routine class, or grantee signature cannot do so. A relay own
 must match the ledger owner ID; the verified owner socket (`uds`) may omit the
 acting user, but an explicit different owner or any TCP channel rejects. The
 current engine deliberately demotes owner keys on TCP; the local socket and
-signed owner relay are the two owner channels. These are
-in-process coordination hooks. A CP-approved synchronization protocol needs a
-separately reviewed mutation signature domain; the grantee envelope cannot
-activate itself. Local mutation results are not authenticated network ACKs.
+signed owner relay are the two owner channels. The original in-process hooks
+remain local. CP synchronization uses separate signed mutation, status and ACK
+domains; the grantee envelope cannot activate itself. Local hook results are not
+authenticated network ACKs.
 
 P2a permits one immutable assignment identity per grant. First activation uses
 grant/assignment generations 1/1; every update must advance both. Binding a
@@ -112,14 +113,13 @@ prove those obligations and check the current epoch immediately before their
 actual transport release. A committed receipt does not authorize later replay
 or release after revocation.
 
-The protection revision is a ledger coordination input. The existing Off-limits
-mutation and receipt/cache routes are not wired to it yet. Integration must
-couple real protection changes and the epoch bump transactionally or with an
-equally conservative invalidation protocol. CP user/client grant conjunction,
-authenticated mutation/ACK transport, source-catalog synchronization, restart
-rollback detection, trust-key rotation, receipt retention and hosted PostgreSQL
-transactions remain separate work. The node cannot detect restoration of an old
-database without a monotonic authority outside that restored database.
+The protocol now couples actual record/entity Off-limits changes to a durable
+canonical protection clock and synchronizes the ledger before reporting state,
+admission and checkpoint. Existing legacy receipt/cache routes are not v2
+execution adapters. Source-catalog synchronization, automatic key distribution,
+receipt retention and hosted PostgreSQL transactions remain separate work.
+Clock identity and generation detect canonical rollback relative to the ledger;
+restoring both databases still requires monotonic authority outside them.
 
 ## Verification
 
