@@ -2,6 +2,20 @@
 
 from __future__ import annotations
 
+# Owner permission state: protection clock, owner attestations, ingest provenance.
+# These rows are the owner's own restrictions and consent record, not content, and
+# the legacy inspection handlers (get_table_rows, list_database_tables and the
+# explorer) serve any table to a non-owner principal while no black hole is
+# active. Reading them would disclose which records the owner put Off-limits and
+# which facts they excluded, so they are hidden from every explorer surface and
+# can never be dropped or cleared there.
+PERMISSION_STATE_TABLE_PREFIXES: tuple[str, ...] = ("permissions_v2_", "ingest_provenance_")
+
+
+def is_permission_state_table(table_name: str) -> bool:
+    return str(table_name or "").startswith(PERMISSION_STATE_TABLE_PREFIXES)
+
+
 # MVP canonical schema tables: fixed DDL from migrations — clear rows, never DROP.
 CANONICAL_SCHEMA_TABLES: frozenset[str] = frozenset(
     {
