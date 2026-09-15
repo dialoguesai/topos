@@ -390,10 +390,14 @@ class EvidenceResolver:
 
     def _snapshot(self, conn, floor: str, fact_id: str, *, enforce_floor: bool = False):
         root = self._identity("signal_objects", fact_id)
+        from .exclusion_floor import exclusions, fact_excluded
+        tombstones = exclusions(conn)
         artifacts, leaves, rows, edges = {}, {}, {}, {}
         visiting = set()
         if enforce_floor and conn.execute("SELECT 1 FROM entity_blackholes LIMIT 1").fetchone():
             raise PolicyError("entity_protection_lineage_unavailable")
+        if enforce_floor and tombstones["entity"]:
+            raise PolicyError("entity_exclusion_lineage_unavailable")
 
         def visit(identity, depth):
             key = _key(identity)
@@ -409,7 +413,12 @@ class EvidenceResolver:
             if enforce_floor and conn.execute("SELECT 1 FROM owner_only_records WHERE canonical_table=? AND record_id=? LIMIT 1",
                 (identity.table, identity.record_id)).fetchone():
                 raise PolicyError("owner_only")
+            if enforce_floor and identity.record_id in tombstones["record"]:
+                raise PolicyError("intelligence_excluded")
             row = self._load(conn, identity)
+            if enforce_floor and identity.table == "signal_objects" and fact_excluded(
+                _json(row.get("payload_json"), dict), tombstones["fact"], self._owner_subjects(conn)):
+                raise PolicyError("intelligence_excluded")
             rows[key] = row
             version = EvidenceRevision(identity=identity, revision=_row_revision(row))
             if identity.table == "signal_objects":
@@ -467,6 +476,8 @@ class EvidenceResolver:
 
     def _eligible(self, conn, snapshot: EvidenceSnapshot, rows: dict, review: OwnerEvidenceReview):
         owners = self._owner_subjects(conn)
+        from .exclusion_floor import exclusions, fact_excluded
+        tombstones = exclusions(conn)
         expected = {_key(ref.identity): ref for ref in snapshot.artifacts + snapshot.leaves}
         classifications = {_key(item.evidence.identity): item for item in review.classifications}
         if len(classifications) != len(review.classifications) or set(classifications) != set(expected):
@@ -475,6 +486,8 @@ class EvidenceResolver:
         # protected entity anywhere conservatively withholds this fact family.
         if conn.execute("SELECT 1 FROM entity_blackholes LIMIT 1").fetchone():
             raise PolicyError("entity_protection_lineage_unavailable")
+        if tombstones["entity"]:
+            raise PolicyError("entity_exclusion_lineage_unavailable")
         for key, reference in expected.items():
             item = classifications[key]
             if item.evidence != reference:
@@ -488,6 +501,8 @@ class EvidenceResolver:
             if item.independent_copies != "none_known":
                 raise PolicyError("independent_copy_lineage")
             identity = reference.identity
+            if identity.record_id in tombstones["record"]:
+                raise PolicyError("intelligence_excluded")
             row = rows[key]
             if row.get("actor_role") not in (None, "authored"):
                 raise PolicyError("not_owner_authored")
@@ -496,6 +511,8 @@ class EvidenceResolver:
                 raise PolicyError("owner_only")
             if identity.table == "signal_objects":
                 payload = _json(row.get("payload_json"), dict)
+                if fact_excluded(payload, tombstones["fact"], owners):
+                    raise PolicyError("intelligence_excluded")
                 if payload.get("disclosure") != "scoped":
                     raise PolicyError("owner_only")
                 if (not isinstance(payload.get("subject_entity_id"), str) or payload["subject_entity_id"] not in owners

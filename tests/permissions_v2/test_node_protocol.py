@@ -10,6 +10,7 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 from cryptography.hazmat.primitives.serialization import Encoding, PublicFormat
 
 from topos.features.lifecycle.record_protection import RecordProtectionStore, protection_fingerprint
+from topos.storage.db.migrations.wiki_lifecycle_v1 import apply_wiki_lifecycle_v1_up
 from topos.permissions_v2.canonical import PolicyError, digest
 from topos.permissions_v2.ledger import NodeIdentity, PolicyLedger
 from topos.permissions_v2.node_protocol import NodePolicyProtocol
@@ -28,6 +29,7 @@ def protocol(tmp_path):
         conn.execute("CREATE TABLE wiki_schema_migrations (migration_id TEXT PRIMARY KEY)")
         apply_owner_only_records_v1_up(conn)
         apply_entity_blackhole_v1_up(conn)
+        apply_wiki_lifecycle_v1_up(conn)
         conn.execute("CREATE TABLE engine_config (key TEXT PRIMARY KEY, value TEXT)")
         conn.execute("INSERT INTO engine_config VALUES ('user_id','owner-1')")
         conn.execute("CREATE TABLE conversation_messages(message_id TEXT PRIMARY KEY, source_id TEXT, content TEXT)")

@@ -10,6 +10,7 @@ import pytest
 
 from topos.features.facts.store import FactStore
 from topos.features.lifecycle.record_protection import RecordProtectionStore
+from topos.storage.db.migrations.wiki_lifecycle_v1 import apply_wiki_lifecycle_v1_up
 from topos.permissions_v2.canonical import PolicyError
 from topos.permissions_v2.evidence import EvidenceBinding, EvidenceResolver, EvidenceReviewStore, ReviewedClassification
 from topos.permissions_v2.protection_clock import ensure_protection_clock
@@ -36,6 +37,7 @@ def corpus(tmp_path):
         apply_signal_objects_up(conn)
         apply_owner_only_records_v1_up(conn)
         apply_entity_blackhole_v1_up(conn)
+        apply_wiki_lifecycle_v1_up(conn)
         conn.execute("CREATE TABLE engine_config(key TEXT PRIMARY KEY,value TEXT)")
         conn.execute("INSERT INTO engine_config VALUES('user_id','owner-1')")
         conn.execute("CREATE TABLE entities(entity_id TEXT PRIMARY KEY,is_self INTEGER)")

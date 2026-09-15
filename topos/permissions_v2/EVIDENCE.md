@@ -228,3 +228,13 @@ physical column colliding with this marker is rejected. The marker is omitted
 from owner preview cells and does not change any public wire schema. Changing a
 posture and restoring all of its original inputs before another read is not a
 separate durable revocation event; owner Off-limits has its own monotonic clock.
+
+## Intelligence-exclusion boundary
+
+Record and semantic fact tombstones veto every recursive contribution before
+release, including the interval before lifecycle purge finishes. Any entity
+exclusion withholds this family until complete entity coverage is certified;
+missing observations after purge are not evidence of absence. Unknown exclusion
+state fails closed. The versioned protection clock now tracks exclusion changes,
+including add/remove cycles. Existing beta nodes require the explicit, monotonic
+[clock v2 upgrade](EXCLUSION_CLOCK_UPGRADE.md); signed schemas remain unchanged.
