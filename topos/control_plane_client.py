@@ -577,6 +577,10 @@ class ControlPlaneClient:
 
     async def _handle_message(self, ws, data: Dict[str, Any]) -> None:
         msg_type = str(data.get("type") or "").strip().lower()
+        if msg_type == "permissions_v2_fact_read":
+            from .permissions_v2.fact_release_transport import dispatch_fact_message
+            await dispatch_fact_message(ws, data)
+            return
         if msg_type == "permissions_v2_source_read":
             # This adapter owns the actual send while final evidence/authority
             # gates remain held. Never return its contents into a later outbox.

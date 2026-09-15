@@ -1,8 +1,4 @@
-"""Dedicated bounded WebSocket dispatch; no generic late-response queue.
-
-Only ControlPlaneClient's actual relay socket calls this function. HTTP/MCP
-dispatch cannot inject a socket or a trusted callback through a JSON message.
-"""
+"""Dedicated fact WebSocket dispatch while all release gates remain held."""
 from __future__ import annotations
 
 import asyncio
@@ -14,34 +10,29 @@ from topos.principal import THIRD_PARTY, reset_principal, set_principal
 from topos.relay_stamp import verify_relay_stamp
 
 from .canonical import PolicyError, canonical_bytes
-from .release import SourceMessageRelease
+from .fact_release import FactProjectionRelease
 from .runtime import get_runtime
-from .signing import SignedEnvelope, verify_current_signature
+from .signing import SignedFactEnvelope, verify_current_signature
 
-MESSAGE_TYPE = "permissions_v2_source_read"
+MESSAGE_TYPE = "permissions_v2_fact_read"
+FLAG = "TOPOS_PERMISSIONS_V2_FACT_RELEASE_ENABLED"
 SEND_TIMEOUT_SECONDS = 5
 
 
-async def dispatch_source_message(ws, message) -> None:
-    """Keep all node evidence/authority gates held through the actual WS send.
-
-    The service worker waits for completion of ws.send on the socket's loop.
-    Gate ownership stays on that worker. No outbox, retry, or reconnect sends a
-    disclosure later. On cancellation we drain the worker before returning.
-    """
+async def dispatch_fact_message(ws, message) -> None:
+    """No returned data, generic outbox, retry or deferred sender is permitted."""
     request_id = message.get("id")
     cancelled = threading.Event()
     try:
-        if (os.environ.get("TOPOS_PERMISSIONS_V2_SOURCE_RELEASE_ENABLED", "").lower() != "true"
-            or message.get("type") != MESSAGE_TYPE):
-            raise PolicyError("source_release_disabled")
+        if os.environ.get(FLAG, "").lower() != "true" or message.get("type") != MESSAGE_TYPE:
+            raise PolicyError("fact_release_disabled")
         principal = verify_relay_stamp(message)
         if principal is None or principal.cls != THIRD_PARTY or principal.channel != "cp_relay":
             raise PolicyError("recipient_relay_required")
         body = message.get("payload")
         if not isinstance(body, dict) or set(body) != {"envelope", "intent"}:
             raise PolicyError("release_payload_invalid")
-        signed = SignedEnvelope.parse(body["envelope"])
+        signed = SignedFactEnvelope.parse(body["envelope"])
         if request_id != signed.request_id:
             raise PolicyError("request_binding")
         loop = asyncio.get_running_loop()
@@ -50,28 +41,26 @@ async def dispatch_source_message(ws, message) -> None:
             token = set_principal(principal)
             try:
                 runtime = get_runtime()
-                review_service = runtime.evidence_reviews(require_existing=True)
-                adapter = SourceMessageRelease(protocol=runtime.protocol, resolver=review_service.resolver,
-                    reviews=review_service.reviews, clock=lambda: int(time.time()))
+                adapter = FactProjectionRelease(protocol=runtime.protocol,
+                    projections=runtime.projection_reviews(require_existing=True), clock=lambda: int(time.time()))
 
                 def send(result, output):
                     async def actual_send():
-                        # Mutable checks belong to the exact task invoking the
-                        # socket, after wait_for has scheduled it.
+                        # This check runs inside the task that invokes ws.send,
+                        # with no intervening task scheduling after validation.
                         now = int(time.time())
                         if (cancelled.is_set() or result["expires_at"] <= now
-                            or os.environ.get("TOPOS_PERMISSIONS_V2_SOURCE_RELEASE_ENABLED", "").lower() != "true"
-                            or get_runtime() is not runtime):
+                            or os.environ.get(FLAG, "").lower() != "true" or get_runtime() is not runtime):
                             raise PolicyError("release_cancelled_or_expired")
                         verify_current_signature(signed, trusted_keys=runtime.protocol.ledger.trusted_keys, now=now)
                         frame = {"id": request_id, "type": MESSAGE_TYPE, "status": "ok",
-                                 "payload": {"result": result, "output": output}}
+                            "payload": {"result": result, "output": output}}
                         await ws.send(canonical_bytes(frame).decode("ascii"))
 
                     async def transmit():
                         await asyncio.wait_for(actual_send(), SEND_TIMEOUT_SECONDS)
-                    # wait_for owns cancellation; the worker must not abandon a
-                    # still-running send and release its write/review gates.
+                    # The worker retains the write/review gates until the actual
+                    # send task finishes or acknowledges its own cancellation.
                     asyncio.run_coroutine_threadsafe(transmit(), loop).result()
 
                 if cancelled.is_set():
@@ -93,8 +82,6 @@ async def dispatch_source_message(ws, message) -> None:
     except asyncio.CancelledError:
         raise
     except Exception:
-        # Recipient errors reveal no fact existence, review/protection state,
-        # credential/config paths, source text, or exception diagnostics.
         error = {"id": request_id, "type": MESSAGE_TYPE, "status": "error", "code": 403, "error": "permission_denied"}
         try:
             await asyncio.wait_for(ws.send(canonical_bytes(error).decode("ascii")), SEND_TIMEOUT_SECONDS)

@@ -151,3 +151,10 @@ async def handle_permissions_v2_projection_review_record(message):
 @handles("permissions_v2_projection_review_revoke", owner_only=True)
 async def handle_permissions_v2_projection_review_revoke(message):
     return await _handle_evidence(message, "revoke", projection=True)
+
+
+@handles("permissions_v2_fact_read")
+async def handle_permissions_v2_fact_read(message):
+    # The socket interceptor alone owns the actual send under release gates.
+    # Generic dispatch cannot return a payload for deferred forwarding.
+    return {"id":message.get("id"), "status":"error", "code":403, "error":"permission_denied"}

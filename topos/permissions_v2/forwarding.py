@@ -1,7 +1,7 @@
 """Strict node disclosure proof, separate from policy mutation and grantee proof.
 
 This shared module mounts no route and grants no authority. Output is transported
-separately and must match the exact closed MessageDisclosure schema and hash.
+separately and must match the exact signed capability's closed schema and hash.
 """
 from __future__ import annotations
 
@@ -13,8 +13,10 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 from pydantic import StringConstraints, model_validator
 
 from .canonical import PolicyError, canonical_bytes, digest
-from .contract import Hash, Identifier, MessageDisclosure, Number, StrictModel
-from .signing import AuthorityBinding, MAX_TTL_SECONDS, SignedEnvelope
+from .contract import Hash, Identifier, Number, StrictModel
+from .registry import Disclosure, parse_disclosure
+from .signing import (AnyAuthorityBinding, AnySignedEnvelope, AuthorityBinding,
+    MAX_TTL_SECONDS, parse_authority, parse_envelope)
 
 DOMAIN = b"topos-node-disclosure/v1\n"
 
@@ -25,7 +27,7 @@ class ReleaseBody(StrictModel):
     envelope_hash: Hash
     request_id: Identifier
     request_hash: Hash
-    authority: AuthorityBinding
+    authority: AnyAuthorityBinding
     output_hash: Hash
     checked_at: Number
     expires_at: Number
@@ -52,15 +54,15 @@ def sign_node_result(body: ReleaseBody, key: Ed25519PrivateKey) -> SignedNodeRes
     return SignedNodeResult.parse({**body.model_dump(), "signature": signature})
 
 
-def verify_node_result(raw, *, trusted_keys: Mapping[str, bytes], envelope: SignedEnvelope,
-                       output: MessageDisclosure | dict, now: int) -> SignedNodeResult:
+def verify_node_result(raw, *, trusted_keys: Mapping[str, bytes], envelope: AnySignedEnvelope,
+                       output: Disclosure | dict, now: int) -> SignedNodeResult:
     """Current keys and exact issuance required; signature alone is not a permit."""
     if type(now) is not int or now < 0:
         raise PolicyError("clock_invalid")
-    envelope = SignedEnvelope.parse(envelope.model_dump())
-    output = MessageDisclosure.parse(output.model_dump() if isinstance(output, MessageDisclosure) else output)
+    envelope = parse_envelope(envelope)
+    output = parse_disclosure(output, capability=envelope.capability_version)
     result = SignedNodeResult.parse(raw.model_dump() if isinstance(raw, SignedNodeResult) else raw)
-    authority = AuthorityBinding.parse({field: getattr(envelope, field) for field in AuthorityBinding.model_fields})
+    authority = parse_authority({field: getattr(envelope, field) for field in AuthorityBinding.model_fields})
     if (result.envelope_hash != digest(envelope.model_dump()) or result.request_id != envelope.request_id
         or result.request_hash != envelope.request_hash or result.authority != authority
         or result.output_hash != digest(output.model_dump())):

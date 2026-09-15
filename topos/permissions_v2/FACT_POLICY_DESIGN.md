@@ -1,8 +1,9 @@
 # P2b fact policy foundation, v1
 
-The pure policy parser and evaluator exist. This foundation alone enables no
-recipient route, ledger output, grant migration or natural-language evaluation.
-Serving requires explicit signed P2b dispatch and current owner output review.
+The pure policy parser/evaluator and a separate signed node dispatch exist.
+The fact delivery flag is disabled by default. This implementation performs no
+grant migration or natural-language evaluation. Serving requires explicitly
+paired CP authorization and current owner evidence/output reviews.
 
 `fact_contract.py` is the portable closed schema. `fact_policy.py` evaluates
 fresh resolver-owned evidence/rows and a separately reviewed exact scalar. The
@@ -58,7 +59,7 @@ neutralized by choosing an Inference ceiling.
 
 ## Time semantics
 
-The future signed transport supplies `envelope.issued_at` as `request_as_of`.
+The signed transport supplies `envelope.issued_at` as `request_as_of`.
 The recipient cannot provide or override that anchor. The pure function keeps a
 separate argument for deterministic tests. `now` must be a strict safe integer,
 at or after issuance and no more than 120 seconds later; current policy lifetime
@@ -112,3 +113,48 @@ Schemas are exported under `fixtures/permissions_v2/fact_policy/`. Focused tests
 cover explicit opt-in, empty sets, both output ceilings and Inference withholding,
 timestamp precision/unknowns, current validity, identity axes, request expiry,
 correlated rules, descendant-aware exclusions and revision substitution.
+
+## Signed beta integration (disabled by default)
+
+The dedicated node transport now accepts `permissions_v2_fact_read` frames with
+exact `{envelope, intent}` payloads, where intent is `{query: "fact:<id>"}`. Its
+signed request type is `permissions.v2.fact.read`; `FactEnvelopeBody` and
+`SignedFactEnvelope` require `permissions-beta/p2b-v1`. Concrete P2a parsers retain
+their original closed contracts. An explicit registry dispatches the two known
+profiles and rejects unknown profiles without fallback. The mutation/ACK and
+node-result schemas carry the corresponding closed authority union; canonical
+signing domains and old P2a golden signature bytes remain unchanged.
+
+A grant cannot change capability, including after revocation. P2b requires a new
+explicitly approved grant/assignment. Signed requests must fit both the current
+policy lifetime and the 120-second envelope limit. The signed issuance timestamp
+alone supplies the event-window anchor. `FactProjectionRelease` admits exact
+current authority, loads fresh evidence plus both authenticated owner reviews,
+evaluates one complete clause, checkpoints a one-shot private decision receipt,
+and signs only the exact six-field `FactScalarDisclosure`. There is no raw-source,
+generic-query, Inference, model, or prose fallback.
+
+Actual WebSocket send runs while the process write gate, canonical read snapshot,
+and both private review-store write transactions remain held. The task that
+invokes `ws.send` rechecks expiry, the feature flag, runtime identity and current
+CP signing key immediately before invocation. Cancellation drains that actual
+send before releasing gates. Send-start is the linearization boundary: bytes
+already accepted by the transport cannot be recalled. This guarantee assumes
+canonical writers use the node write gate; it does not authorize external direct
+SQLite writes against a serving node. Errors expose only `permission_denied` and
+consume admitted requests when execution or delivery is uncertain.
+
+`TOPOS_PERMISSIONS_V2_FACT_RELEASE_ENABLED` is a separate default-off flag. The
+generic handler always denies, and the dedicated relay interception returns no
+content to the generic outbox. Code and synthetic tests do not enable a public
+service or certify a full client profile. The registry's default capability
+metadata remains non-executing; deployment/profile advertisement and CP final
+forwarding must be explicitly paired before any recipient can use the feature.
+
+The signed fixture at `fixtures/permissions_v2/fact_policy/signed-golden-v1.json`
+binds a synthetic policy, request, mutation/ACK and six-field node result with
+fixed public verification keys. Regression coverage includes signed activation,
+status/restart/revocation, same-grant capability rejection, independently bounded
+policy expiry, exact result typing, both review revisions, Off-limits/protection
+ABA, source changes, unknown/future event time, denied/empty rule selections,
+request replay, and mutable send-task races on both source and fact transports.

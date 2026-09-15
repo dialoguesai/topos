@@ -1,0 +1,87 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "actor_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Actor Id",
+      "type": "string"
+    },
+    "assignment_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Assignment Id",
+      "type": "string"
+    },
+    "client_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Client Id",
+      "type": "string"
+    },
+    "environment_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Environment Id",
+      "type": "string"
+    },
+    "grant_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Grant Id",
+      "type": "string"
+    },
+    "node_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Node Id",
+      "type": "string"
+    },
+    "owner_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Owner Id",
+      "type": "string"
+    },
+    "request_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Request Id",
+      "type": "string"
+    },
+    "request_type": {
+      "const": "permissions.v2.fact.read",
+      "title": "Request Type",
+      "type": "string"
+    },
+    "resource_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Resource Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "environment_id",
+    "node_id",
+    "resource_id",
+    "owner_id",
+    "actor_id",
+    "client_id",
+    "grant_id",
+    "assignment_id",
+    "request_id",
+    "request_type"
+  ],
+  "title": "FactRequestContext",
+  "type": "object"
+}

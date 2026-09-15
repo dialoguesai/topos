@@ -9,12 +9,14 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 from pydantic import StringConstraints
 from typing_extensions import Annotated
 
-from .canonical import PolicyError, canonical_bytes, digest
+from .canonical import PolicyError, canonical_bytes, digest, parse_json
 from .contract import Binding, Generation, Hash, Identifier, Number, StrictModel
 
 DOMAIN = b"topos-grantee-envelope/v2\n"
 MAX_TTL_SECONDS = 120
 RequestType = Literal["permissions.v2.preview", "permissions.v2.read"]
+FactRequestType = Literal["permissions.v2.fact.read"]
+Signature = Annotated[str, StringConstraints(strict=True, pattern=r"^[A-Za-z0-9_-]{86}$")]
 
 
 class AuthorityBinding(Binding):
@@ -38,7 +40,20 @@ class EnvelopeBody(AuthorityBinding):
 
 
 class SignedEnvelope(EnvelopeBody):
-    signature: Annotated[str, StringConstraints(strict=True, pattern=r"^[A-Za-z0-9_-]{86}$")]
+    signature: Signature
+
+
+class FactAuthorityBinding(AuthorityBinding):
+    capability_version: Literal["permissions-beta/p2b-v1"]
+
+
+class FactEnvelopeBody(EnvelopeBody):
+    capability_version: Literal["permissions-beta/p2b-v1"]
+    request_type: FactRequestType
+
+
+class SignedFactEnvelope(FactEnvelopeBody):
+    signature: Signature
 
 
 class RequestContext(StrictModel):
@@ -56,31 +71,77 @@ class RequestContext(StrictModel):
     request_type: RequestType
 
 
-def request_digest(request_type: RequestType, payload: Any) -> str:
+class FactRequestContext(RequestContext):
+    request_type: FactRequestType
+
+
+AnyAuthorityBinding = AuthorityBinding | FactAuthorityBinding
+AnySignedEnvelope = SignedEnvelope | SignedFactEnvelope
+AnyEnvelopeBody = EnvelopeBody | FactEnvelopeBody
+AnyRequestContext = RequestContext | FactRequestContext
+
+
+def _value(raw):
+    if hasattr(raw, "model_dump"):
+        raw = raw.model_dump()
+    raw = parse_json(raw) if isinstance(raw, (str, bytes)) else raw
+    if type(raw) is not dict:
+        raise PolicyError("unsupported_capability")
+    return raw
+
+
+def parse_authority(raw) -> AnyAuthorityBinding:
+    raw = _value(raw)
+    if raw.get("capability_version") == "permissions-beta/p2a-v1":
+        return AuthorityBinding.parse(raw)
+    if raw.get("capability_version") == "permissions-beta/p2b-v1":
+        return FactAuthorityBinding.parse(raw)
+    raise PolicyError("unsupported_capability")
+
+
+def parse_envelope(raw, *, signed=True):
+    raw = _value(raw)
+    if raw.get("capability_version") == "permissions-beta/p2a-v1":
+        return (SignedEnvelope if signed else EnvelopeBody).parse(raw)
+    if raw.get("capability_version") == "permissions-beta/p2b-v1":
+        return (SignedFactEnvelope if signed else FactEnvelopeBody).parse(raw)
+    raise PolicyError("unsupported_capability")
+
+
+def parse_request_context(raw) -> AnyRequestContext:
+    raw = _value(raw)
+    if raw.get("request_type") == "permissions.v2.fact.read":
+        return FactRequestContext.parse(raw)
+    return RequestContext.parse(raw)
+
+
+def request_digest(request_type: RequestType | FactRequestType, payload: Any) -> str:
     return digest({"request_type": request_type, "payload": payload})
 
 
-def signing_bytes(body: EnvelopeBody) -> bytes:
+def signing_bytes(body: AnyEnvelopeBody) -> bytes:
     # Re-validate even model instances: nested Python containers are mutable.
-    parsed = EnvelopeBody.parse(body.model_dump(exclude={"signature"}))
+    parsed = parse_envelope(body.model_dump(exclude={"signature"}), signed=False)
     return DOMAIN + canonical_bytes(parsed.model_dump())
 
 
-def sign_envelope(body: EnvelopeBody, key: Ed25519PrivateKey) -> SignedEnvelope:
+def sign_envelope(body: AnyEnvelopeBody, key: Ed25519PrivateKey) -> AnySignedEnvelope:
     signature = base64.urlsafe_b64encode(key.sign(signing_bytes(body))).decode("ascii").rstrip("=")
-    return SignedEnvelope.parse({**body.model_dump(), "signature": signature})
+    return parse_envelope({**body.model_dump(), "signature": signature})
 
 
 def verify_envelope(
     raw: bytes | str | dict,
     *,
     trusted_keys: Mapping[str, bytes],
-    expected_authority: AuthorityBinding,
-    request: RequestContext,
+    expected_authority: AnyAuthorityBinding,
+    request: AnyRequestContext,
     payload: Any,
     now: int,
-) -> SignedEnvelope:
-    envelope = SignedEnvelope.parse(raw)
+) -> AnySignedEnvelope:
+    envelope = parse_envelope(raw)
+    expected_authority = parse_authority(expected_authority)
+    request = parse_request_context(request)
     verify_current_signature(envelope, trusted_keys=trusted_keys, now=now)
     for field, value in expected_authority.model_dump().items():
         if getattr(envelope, field) != value:
@@ -93,12 +154,13 @@ def verify_envelope(
     return envelope
 
 
-def verify_current_signature(envelope: SignedEnvelope, *, trusted_keys: Mapping[str, bytes], now: int) -> None:
+def verify_current_signature(envelope: AnySignedEnvelope, *, trusted_keys: Mapping[str, bytes], now: int) -> None:
     """Recheck an admitted envelope's key/time at the final private checkpoint.
 
     Signature validity alone is never authorization; initial admission also
     requires the full verify_envelope context/authority comparison above.
     """
+    envelope = parse_envelope(envelope)
     if type(now) is not int or now < 0:
         raise PolicyError("clock_invalid")
     if envelope.issued_at > now or envelope.expires_at <= now:

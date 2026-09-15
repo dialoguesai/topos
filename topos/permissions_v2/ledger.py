@@ -16,8 +16,11 @@ from topos.principal import OWNER_APP, current_principal
 from topos.storage.db.write_gate import with_db_write
 
 from .canonical import MAX_INTEGER, PolicyError, canonical_bytes, digest, parse_json
-from .contract import CAPABILITY, Decision, Hash, Identifier, MessageDisclosure, Number, Only, PolicyV2, StrictModel
-from .signing import AuthorityBinding, RequestContext, SignedEnvelope, verify_current_signature, verify_envelope
+from .contract import Hash, Identifier, Number, Only, StrictModel
+from .registry import Policy, PolicyDecision, Disclosure, parse_policy, parse_decision, parse_disclosure
+from .fact_contract import FactPolicyV2
+from .signing import (AnyAuthorityBinding, AnyRequestContext, parse_authority,
+    parse_envelope, parse_request_context, verify_current_signature, verify_envelope)
 
 
 class NodeIdentity(StrictModel):
@@ -149,7 +152,7 @@ class PolicyLedger:
         CP synchronization envelope must use a distinct signature domain.
         """
         self._owner()
-        policy = PolicyV2.parse(raw_policy)
+        policy = parse_policy(raw_policy)
         self._integer(now)
         for generation in (grant_generation, assignment_generation):
             self._integer(generation)
@@ -171,6 +174,8 @@ class PolicyLedger:
             if other and other["grant_id"] != policy.binding.grant_id:
                 raise PolicyError("assignment_binding")
             if old:
+                if self._grant_capability(conn, old) != policy.versions.capability:
+                    raise PolicyError("capability_change_requires_new_grant")
                 if old["assignment_id"] != policy.binding.assignment_id:
                     raise PolicyError("assignment_binding")
                 if grant_generation <= old["grant_generation"] or assignment_generation <= old["assignment_generation"]:
@@ -223,17 +228,25 @@ class PolicyLedger:
             conn.execute("UPDATE p2a_node SET protection_revision=? WHERE singleton=1", (revision,))
             return self._mutated(conn, command_id, body, expected_epoch)
 
+    def _grant_capability(self, conn, grant) -> str:
+        saved = conn.execute("SELECT authority_json FROM p2a_grant_authorities WHERE grant_id=?", (grant["grant_id"],)).fetchone()
+        if saved:
+            authority = parse_authority(saved["authority_json"])
+            if authority.policy_version_id == grant["version_id"]:
+                return authority.capability_version
+        return self._policy(conn, grant["version_id"]).versions.capability
+
     @staticmethod
-    def _policy(conn, version_id: str) -> PolicyV2:
+    def _policy(conn, version_id: str) -> Policy:
         row = conn.execute("SELECT * FROM p2a_policies WHERE version_id=?", (version_id,)).fetchone()
         if row is None:
             raise PolicyError("policy_unknown")
-        policy = PolicyV2.parse(row["policy_json"])
+        policy = parse_policy(row["policy_json"])
         if digest(policy.model_dump()) != row["policy_hash"]:
             raise PolicyError("policy_integrity")
         return policy
 
-    def _authority(self, conn, grant_id: str, now: int) -> tuple[AuthorityBinding, PolicyV2]:
+    def _authority(self, conn, grant_id: str, now: int) -> tuple[AnyAuthorityBinding, Policy]:
         self._integer(now)
         grant = conn.execute("SELECT * FROM p2a_grants WHERE grant_id=?", (grant_id,)).fetchone()
         if grant is None or not grant["active"]:
@@ -242,24 +255,27 @@ class PolicyLedger:
         if not policy.validity.starts_at <= now < policy.validity.expires_at:
             raise PolicyError("policy_time")
         node = self._node(conn)
-        authority = AuthorityBinding.parse({**policy.binding.model_dump(), "grant_generation": grant["grant_generation"], "assignment_generation": grant["assignment_generation"], "policy_version_id": policy.policy_version_id, "policy_hash": digest(policy.model_dump()), "capability_version": CAPABILITY, "protection_revision": node["protection_revision"], "node_epoch": node["epoch"]})
+        authority = parse_authority({**policy.binding.model_dump(), "grant_generation": grant["grant_generation"], "assignment_generation": grant["assignment_generation"], "policy_version_id": policy.policy_version_id, "policy_hash": digest(policy.model_dump()), "capability_version": policy.versions.capability, "protection_revision": node["protection_revision"], "node_epoch": node["epoch"]})
         return authority, policy
 
-    def authority_snapshot(self, grant_id: str, *, now: int) -> AuthorityBinding:
+    def authority_snapshot(self, grant_id: str, *, now: int) -> AnyAuthorityBinding:
         """Owner-only local signer coordination. Never a public token endpoint."""
         self._owner()
         with self._transaction() as conn:
             authority, _ = self._authority(conn, grant_id, now)
             return authority
 
-    def admit(self, raw_envelope: bytes | str | dict, *, request: RequestContext, payload: Any, now: int) -> Lease:
+    def admit(self, raw_envelope: bytes | str | dict, *, request: AnyRequestContext, payload: Any, now: int) -> Lease:
         # Reparse trusted typed inputs against accidental mutation too.
-        request = RequestContext.parse(request.model_dump())
+        request = parse_request_context(request)
         if any(getattr(request, key) != value for key, value in self.identity.model_dump().items()):
             raise PolicyError("request_binding")
         with self._transaction() as conn:
-            authority, _ = self._authority(conn, request.grant_id, now)
+            authority, policy = self._authority(conn, request.grant_id, now)
             envelope = verify_envelope(raw_envelope, trusted_keys=self.trusted_keys, expected_authority=authority, request=request, payload=payload, now=now)
+            if (envelope.issued_at < policy.validity.starts_at
+                or envelope.expires_at > policy.validity.expires_at):
+                raise PolicyError("envelope_policy_time")
             encoded = canonical_bytes(envelope.model_dump()).decode("ascii")
             envelope_hash = digest(envelope.model_dump())
             if conn.execute("SELECT 1 FROM p2a_requests WHERE request_id=?", (request.request_id,)).fetchone():
@@ -268,19 +284,24 @@ class PolicyLedger:
             return Lease(request_id=request.request_id, envelope_hash=envelope_hash, node_epoch=envelope.node_epoch)
 
     @staticmethod
-    def _permit_shape(policy: PolicyV2, decision: Decision, output: MessageDisclosure) -> None:
+    def _permit_shape(policy: Policy, decision: PolicyDecision, output: Disclosure) -> None:
         # A single clause's evidence and release tuple must authorize this
         # output shape. This is necessary but not sufficient for disclosure:
         # actual predicate, provenance and Off-limits proof await an adapter.
         if len(decision.matched_allow_clause_ids) != 1 or decision.matched_deny_clause_ids or decision.missing_context_codes or decision.reason_code != "rule_permit":
             raise PolicyError("decision_inconsistent")
         rule = next((rule for rule in policy.rules if rule.rule_id == decision.matched_allow_clause_ids[0]), None)
-        if rule is None or rule.effect != "permit" or rule.release.ceiling != "raw" or "owner-engine-local" not in rule.evidence_use.processors.values:
+        ceilings = {"summary", "raw"} if isinstance(policy, FactPolicyV2) else {"raw"}
+        if rule is None or rule.effect != "permit" or rule.release.ceiling not in ceilings or "owner-engine-local" not in rule.evidence_use.processors.values:
             raise PolicyError("rule_binding")
         sources = rule.evidence_use.sources.values if isinstance(rule.evidence_use.sources, Only) else policy.source_universe.source_ids
-        for record in output.records:
-            if record.source_id not in sources or not any(record.canonical_table in form.tables for form in rule.release.forms):
+        if isinstance(policy, FactPolicyV2):
+            if "signal_objects" not in rule.evidence_use.tables or not (set(rule.evidence_use.tables) & {"conversation_messages", "ai_chat_messages"}):
                 raise PolicyError("rule_binding")
+        else:
+            for record in output.records:
+                if record.source_id not in sources or not any(record.canonical_table in form.tables for form in rule.release.forms):
+                    raise PolicyError("rule_binding")
         if not rule.release.forms or not sources:
             raise PolicyError("rule_binding")
 
@@ -291,7 +312,6 @@ class PolicyLedger:
         immediately before its transport release. No adapter is enabled in
         P2a. This method returns no candidate content or reusable permit.
         """
-        decision = Decision.parse(raw_decision)
         self._validate_revision(candidate_revision)
         lease = Lease.parse(lease.model_dump())
         with self._transaction() as conn:
@@ -300,7 +320,8 @@ class PolicyLedger:
                 raise PolicyError("lease_unknown")
             if row["status"] != "admitted":
                 raise PolicyError("request_replay")
-            envelope = SignedEnvelope.parse(row["envelope_json"])
+            envelope = parse_envelope(row["envelope_json"])
+            decision = parse_decision(raw_decision, capability=envelope.capability_version)
             if envelope.node_epoch != lease.node_epoch or envelope.expires_at <= now or envelope.issued_at > now:
                 raise PolicyError("lease_expired")
             verify_current_signature(envelope, trusted_keys=self.trusted_keys, now=now)
@@ -311,9 +332,11 @@ class PolicyLedger:
                 raise PolicyError("decision_binding")
             output_hash = None
             if decision.verdict == "permit":
-                if decision.required_projection_id != "canonical.message_disclosure.v1" or output is None:
+                if output is None:
                     raise PolicyError("projection_required")
-                parsed_output = MessageDisclosure.parse(output)
+                parsed_output = parse_disclosure(output, capability=envelope.capability_version)
+                if decision.required_projection_id != parsed_output.view_id:
+                    raise PolicyError("projection_required")
                 self._permit_shape(policy, decision, parsed_output)
                 output_hash = digest(parsed_output.model_dump())
             elif output is not None:

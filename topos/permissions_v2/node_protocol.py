@@ -18,7 +18,7 @@ from .canonical import MAX_INTEGER, PolicyError, canonical_bytes, digest, parse_
 from .contract import Binding
 from .ledger import PolicyLedger
 from .protocol import AckBody, AppliedCommandReceipt, NodeGrantState, SignedAck, SignedMutation, SignedStatusRequest, binding_of, command_digest, sign_ack, verify_mutation, verify_status_request
-from .signing import AuthorityBinding
+from .signing import parse_authority
 from .protection_clock import clock_state, current_protection_revision, ensure_protection_clock
 
 
@@ -87,7 +87,7 @@ class NodePolicyProtocol:
                 policy = self.ledger._policy(conn, grant["version_id"])
                 authority_body = {**policy.binding.model_dump(), "policy_version_id": policy.policy_version_id, "policy_hash": digest(policy.model_dump()), "capability_version": policy.versions.capability}
             authority_body.update(grant_generation=grant["grant_generation"], assignment_generation=grant["assignment_generation"], node_epoch=node["epoch"], protection_revision=node["protection_revision"])
-            authority = AuthorityBinding.parse(authority_body)
+            authority = parse_authority(authority_body)
         return NodeGrantState.parse({"identity": self.ledger.identity.model_dump(), "node_epoch": node["epoch"], "protection_revision": node["protection_revision"], "grant_state": "absent" if grant is None else "active" if grant["active"] else "revoked", "authority": authority.model_dump() if authority else None})
 
     @staticmethod
@@ -115,6 +115,8 @@ class NodePolicyProtocol:
         binding = binding_of(target)
         grant = self._bound_grant(conn, binding)
         if grant:
+            if self.ledger._grant_capability(conn, grant) != target.capability_version:
+                raise PolicyError("binding_conflict")
             if target.grant_generation <= grant["grant_generation"] or target.assignment_generation <= grant["assignment_generation"]:
                 raise PolicyError("generation_stale")
         elif command.operation == "activate":

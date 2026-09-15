@@ -14,8 +14,9 @@ from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey,
 from pydantic import StringConstraints, model_validator
 
 from .canonical import PolicyError, canonical_bytes, digest
-from .contract import Binding, Hash, Identifier, Number, PolicyV2, StrictModel
-from .signing import AuthorityBinding, MAX_TTL_SECONDS
+from .contract import Binding, Hash, Identifier, Number, StrictModel
+from .registry import Policy
+from .signing import AnyAuthorityBinding, MAX_TTL_SECONDS
 
 Signature = Annotated[str, StringConstraints(strict=True, pattern=r"^[A-Za-z0-9_-]{86}$")]
 
@@ -40,8 +41,8 @@ class MutationBody(StrictModel):
     command_id: Identifier
     operation: Literal["activate", "revoke"]
     expected_epoch: Number
-    authority: AuthorityBinding
-    policy: PolicyV2 | None
+    authority: AnyAuthorityBinding
+    policy: Policy | None
     owner_authorization: OwnerAuthorization
     issued_at: Number
     expires_at: Number
@@ -53,7 +54,7 @@ class MutationBody(StrictModel):
         if self.owner_authorization.actor_id != self.authority.owner_id:
             raise ValueError("mutation owner")
         if self.operation == "activate":
-            if self.policy is None or self.policy.binding != binding_of(self.authority) or self.policy.policy_version_id != self.authority.policy_version_id or digest(self.policy.model_dump()) != self.authority.policy_hash:
+            if self.policy is None or self.policy.binding != binding_of(self.authority) or self.policy.policy_version_id != self.authority.policy_version_id or digest(self.policy.model_dump()) != self.authority.policy_hash or self.policy.versions.capability != self.authority.capability_version:
                 raise ValueError("mutation policy")
         elif self.policy is not None:
             raise ValueError("revocation policy")
@@ -91,7 +92,7 @@ class AppliedCommandReceipt(StrictModel):
     command_id: Identifier
     command_hash: Hash
     operation: Literal["activate", "revoke"]
-    authority: AuthorityBinding
+    authority: AnyAuthorityBinding
     applied_at: Number
 
 
@@ -100,7 +101,7 @@ class NodeGrantState(StrictModel):
     node_epoch: Number
     protection_revision: Hash
     grant_state: Literal["active", "revoked", "absent"]
-    authority: AuthorityBinding | None
+    authority: AnyAuthorityBinding | None
 
     @model_validator(mode="after")
     def coherent(self):
@@ -160,7 +161,7 @@ class SignedAck(AckBody):
     signature: Signature
 
 
-def binding_of(authority: AuthorityBinding) -> Binding:
+def binding_of(authority: AnyAuthorityBinding) -> Binding:
     return Binding.parse({key: getattr(authority, key) for key in Binding.model_fields})
 
 

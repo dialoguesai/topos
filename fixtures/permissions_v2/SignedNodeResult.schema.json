@@ -3,39 +3,29 @@
     "AuthorityBinding": {
       "additionalProperties": false,
       "properties": {
-        "environment_id": {
-          "maxLength": 200,
-          "minLength": 1,
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
-          "title": "Environment Id",
-          "type": "string"
-        },
-        "node_id": {
-          "maxLength": 200,
-          "minLength": 1,
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
-          "title": "Node Id",
-          "type": "string"
-        },
-        "resource_id": {
-          "maxLength": 200,
-          "minLength": 1,
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
-          "title": "Resource Id",
-          "type": "string"
-        },
-        "owner_id": {
-          "maxLength": 200,
-          "minLength": 1,
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
-          "title": "Owner Id",
-          "type": "string"
-        },
         "actor_id": {
           "maxLength": 200,
           "minLength": 1,
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
           "title": "Actor Id",
+          "type": "string"
+        },
+        "assignment_generation": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Assignment Generation",
+          "type": "integer"
+        },
+        "assignment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Assignment Id",
+          "type": "string"
+        },
+        "capability_version": {
+          "const": "permissions-beta/p2a-v1",
+          "title": "Capability Version",
           "type": "string"
         },
         "client_id": {
@@ -45,18 +35,11 @@
           "title": "Client Id",
           "type": "string"
         },
-        "grant_id": {
+        "environment_id": {
           "maxLength": 200,
           "minLength": 1,
           "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
-          "title": "Grant Id",
-          "type": "string"
-        },
-        "assignment_id": {
-          "maxLength": 200,
-          "minLength": 1,
-          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
-          "title": "Assignment Id",
+          "title": "Environment Id",
           "type": "string"
         },
         "grant_generation": {
@@ -65,11 +48,37 @@
           "title": "Grant Generation",
           "type": "integer"
         },
-        "assignment_generation": {
+        "grant_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Grant Id",
+          "type": "string"
+        },
+        "node_epoch": {
           "maximum": 9007199254740991,
           "minimum": 1,
-          "title": "Assignment Generation",
+          "title": "Node Epoch",
           "type": "integer"
+        },
+        "node_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "owner_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Owner Id",
+          "type": "string"
+        },
+        "policy_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Policy Hash",
+          "type": "string"
         },
         "policy_version_id": {
           "maxLength": 200,
@@ -78,26 +87,17 @@
           "title": "Policy Version Id",
           "type": "string"
         },
-        "policy_hash": {
-          "pattern": "^[0-9a-f]{64}$",
-          "title": "Policy Hash",
-          "type": "string"
-        },
-        "capability_version": {
-          "const": "permissions-beta/p2a-v1",
-          "title": "Capability Version",
-          "type": "string"
-        },
         "protection_revision": {
           "pattern": "^[0-9a-f]{64}$",
           "title": "Protection Revision",
           "type": "string"
         },
-        "node_epoch": {
-          "maximum": 9007199254740991,
-          "minimum": 1,
-          "title": "Node Epoch",
-          "type": "integer"
+        "resource_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Resource Id",
+          "type": "string"
         }
       },
       "required": [
@@ -119,14 +119,157 @@
       ],
       "title": "AuthorityBinding",
       "type": "object"
+    },
+    "FactAuthorityBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "actor_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Actor Id",
+          "type": "string"
+        },
+        "assignment_generation": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Assignment Generation",
+          "type": "integer"
+        },
+        "assignment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Assignment Id",
+          "type": "string"
+        },
+        "capability_version": {
+          "const": "permissions-beta/p2b-v1",
+          "title": "Capability Version",
+          "type": "string"
+        },
+        "client_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Client Id",
+          "type": "string"
+        },
+        "environment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Environment Id",
+          "type": "string"
+        },
+        "grant_generation": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Grant Generation",
+          "type": "integer"
+        },
+        "grant_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Grant Id",
+          "type": "string"
+        },
+        "node_epoch": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Node Epoch",
+          "type": "integer"
+        },
+        "node_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "owner_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Owner Id",
+          "type": "string"
+        },
+        "policy_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Policy Hash",
+          "type": "string"
+        },
+        "policy_version_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Policy Version Id",
+          "type": "string"
+        },
+        "protection_revision": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Protection Revision",
+          "type": "string"
+        },
+        "resource_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Resource Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "environment_id",
+        "node_id",
+        "resource_id",
+        "owner_id",
+        "actor_id",
+        "client_id",
+        "grant_id",
+        "assignment_id",
+        "grant_generation",
+        "assignment_generation",
+        "policy_version_id",
+        "policy_hash",
+        "capability_version",
+        "protection_revision",
+        "node_epoch"
+      ],
+      "title": "FactAuthorityBinding",
+      "type": "object"
     }
   },
   "additionalProperties": false,
   "properties": {
-    "version": {
-      "const": "topos-node-disclosure/v1",
-      "title": "Version",
+    "authority": {
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AuthorityBinding"
+        },
+        {
+          "$ref": "#/$defs/FactAuthorityBinding"
+        }
+      ],
+      "title": "Authority"
+    },
+    "checked_at": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "Checked At",
+      "type": "integer"
+    },
+    "envelope_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Envelope Hash",
       "type": "string"
+    },
+    "expires_at": {
+      "maximum": 9007199254740991,
+      "minimum": 0,
+      "title": "Expires At",
+      "type": "integer"
     },
     "kid": {
       "maxLength": 200,
@@ -135,9 +278,14 @@
       "title": "Kid",
       "type": "string"
     },
-    "envelope_hash": {
+    "output_hash": {
       "pattern": "^[0-9a-f]{64}$",
-      "title": "Envelope Hash",
+      "title": "Output Hash",
+      "type": "string"
+    },
+    "request_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Request Hash",
       "type": "string"
     },
     "request_id": {
@@ -147,34 +295,14 @@
       "title": "Request Id",
       "type": "string"
     },
-    "request_hash": {
-      "pattern": "^[0-9a-f]{64}$",
-      "title": "Request Hash",
-      "type": "string"
-    },
-    "authority": {
-      "$ref": "#/$defs/AuthorityBinding"
-    },
-    "output_hash": {
-      "pattern": "^[0-9a-f]{64}$",
-      "title": "Output Hash",
-      "type": "string"
-    },
-    "checked_at": {
-      "maximum": 9007199254740991,
-      "minimum": 0,
-      "title": "Checked At",
-      "type": "integer"
-    },
-    "expires_at": {
-      "maximum": 9007199254740991,
-      "minimum": 0,
-      "title": "Expires At",
-      "type": "integer"
-    },
     "signature": {
       "pattern": "^[A-Za-z0-9_-]{86}$",
       "title": "Signature",
+      "type": "string"
+    },
+    "version": {
+      "const": "topos-node-disclosure/v1",
+      "title": "Version",
       "type": "string"
     }
   },

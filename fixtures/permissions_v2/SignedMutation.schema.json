@@ -456,6 +456,434 @@
       "title": "EvidenceUse",
       "type": "object"
     },
+    "FactAuthorityBinding": {
+      "additionalProperties": false,
+      "properties": {
+        "actor_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Actor Id",
+          "type": "string"
+        },
+        "assignment_generation": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Assignment Generation",
+          "type": "integer"
+        },
+        "assignment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Assignment Id",
+          "type": "string"
+        },
+        "capability_version": {
+          "const": "permissions-beta/p2b-v1",
+          "title": "Capability Version",
+          "type": "string"
+        },
+        "client_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Client Id",
+          "type": "string"
+        },
+        "environment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Environment Id",
+          "type": "string"
+        },
+        "grant_generation": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Grant Generation",
+          "type": "integer"
+        },
+        "grant_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Grant Id",
+          "type": "string"
+        },
+        "node_epoch": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Node Epoch",
+          "type": "integer"
+        },
+        "node_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "owner_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Owner Id",
+          "type": "string"
+        },
+        "policy_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Policy Hash",
+          "type": "string"
+        },
+        "policy_version_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Policy Version Id",
+          "type": "string"
+        },
+        "protection_revision": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Protection Revision",
+          "type": "string"
+        },
+        "resource_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Resource Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "environment_id",
+        "node_id",
+        "resource_id",
+        "owner_id",
+        "actor_id",
+        "client_id",
+        "grant_id",
+        "assignment_id",
+        "grant_generation",
+        "assignment_generation",
+        "policy_version_id",
+        "policy_hash",
+        "capability_version",
+        "protection_revision",
+        "node_epoch"
+      ],
+      "title": "FactAuthorityBinding",
+      "type": "object"
+    },
+    "FactEvaluator": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "hard_rules",
+          "title": "Kind",
+          "type": "string"
+        },
+        "version": {
+          "const": "hard-rules/p2b-v1",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "version"
+      ],
+      "title": "FactEvaluator",
+      "type": "object"
+    },
+    "FactEvidenceUse": {
+      "additionalProperties": false,
+      "properties": {
+        "event_window": {
+          "$ref": "#/$defs/RollingEventWindow"
+        },
+        "new_records": {
+          "const": "include_if_predicate",
+          "title": "New Records",
+          "type": "string"
+        },
+        "predicate": {
+          "discriminator": {
+            "mapping": {
+              "all_of": "#/$defs/AllOf",
+              "any_of": "#/$defs/AnyOf",
+              "atom": "#/$defs/Atom",
+              "not": "#/$defs/Not"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Atom"
+            },
+            {
+              "$ref": "#/$defs/AllOf"
+            },
+            {
+              "$ref": "#/$defs/AnyOf"
+            },
+            {
+              "$ref": "#/$defs/Not"
+            }
+          ],
+          "title": "Predicate"
+        },
+        "processors": {
+          "$ref": "#/$defs/Only"
+        },
+        "purpose": {
+          "const": "owner-stated-fact-projection",
+          "title": "Purpose",
+          "type": "string"
+        },
+        "sources": {
+          "discriminator": {
+            "mapping": {
+              "all": "#/$defs/All",
+              "only": "#/$defs/Only"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Only"
+            },
+            {
+              "$ref": "#/$defs/All"
+            }
+          ],
+          "title": "Sources"
+        },
+        "tables": {
+          "items": {
+            "enum": [
+              "signal_objects",
+              "conversation_messages",
+              "ai_chat_messages"
+            ],
+            "type": "string"
+          },
+          "maxItems": 3,
+          "title": "Tables",
+          "type": "array"
+        }
+      },
+      "required": [
+        "sources",
+        "predicate",
+        "purpose",
+        "processors",
+        "new_records",
+        "tables",
+        "event_window"
+      ],
+      "title": "FactEvidenceUse",
+      "type": "object"
+    },
+    "FactOutputForm": {
+      "additionalProperties": false,
+      "properties": {
+        "family": {
+          "const": "owner_stated_fact",
+          "title": "Family",
+          "type": "string"
+        },
+        "operation": {
+          "const": "read",
+          "title": "Operation",
+          "type": "string"
+        },
+        "view_id": {
+          "const": "owner_stated_fact.scalar.v1",
+          "title": "View Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "family",
+        "operation",
+        "view_id"
+      ],
+      "title": "FactOutputForm",
+      "type": "object"
+    },
+    "FactPolicyV2": {
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/Binding"
+        },
+        "evaluator": {
+          "$ref": "#/$defs/FactEvaluator"
+        },
+        "hard_constraints": {
+          "$ref": "#/$defs/HardConstraints"
+        },
+        "natural_language": {
+          "title": "Natural Language",
+          "type": "null"
+        },
+        "policy_version_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Policy Version Id",
+          "type": "string"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/FactRule"
+          },
+          "maxItems": 64,
+          "title": "Rules",
+          "type": "array"
+        },
+        "source_universe": {
+          "$ref": "#/$defs/SourceUniverse"
+        },
+        "validity": {
+          "$ref": "#/$defs/Validity"
+        },
+        "version": {
+          "const": "topos-policy/v2",
+          "title": "Version",
+          "type": "string"
+        },
+        "versions": {
+          "$ref": "#/$defs/FactVersions"
+        }
+      },
+      "required": [
+        "version",
+        "policy_version_id",
+        "binding",
+        "versions",
+        "validity",
+        "source_universe",
+        "hard_constraints",
+        "rules",
+        "evaluator",
+        "natural_language"
+      ],
+      "title": "FactPolicyV2",
+      "type": "object"
+    },
+    "FactRelease": {
+      "additionalProperties": false,
+      "properties": {
+        "ceiling": {
+          "enum": [
+            "summary",
+            "inference",
+            "raw"
+          ],
+          "title": "Ceiling",
+          "type": "string"
+        },
+        "forms": {
+          "items": {
+            "$ref": "#/$defs/FactOutputForm"
+          },
+          "maxItems": 1,
+          "title": "Forms",
+          "type": "array"
+        },
+        "predicate": {
+          "discriminator": {
+            "mapping": {
+              "all_of": "#/$defs/AllOf",
+              "any_of": "#/$defs/AnyOf",
+              "atom": "#/$defs/Atom",
+              "not": "#/$defs/Not"
+            },
+            "propertyName": "kind"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/Atom"
+            },
+            {
+              "$ref": "#/$defs/AllOf"
+            },
+            {
+              "$ref": "#/$defs/AnyOf"
+            },
+            {
+              "$ref": "#/$defs/Not"
+            }
+          ],
+          "title": "Predicate"
+        }
+      },
+      "required": [
+        "predicate",
+        "ceiling",
+        "forms"
+      ],
+      "title": "FactRelease",
+      "type": "object"
+    },
+    "FactRule": {
+      "additionalProperties": false,
+      "properties": {
+        "effect": {
+          "enum": [
+            "permit",
+            "deny"
+          ],
+          "title": "Effect",
+          "type": "string"
+        },
+        "evidence_use": {
+          "$ref": "#/$defs/FactEvidenceUse"
+        },
+        "release": {
+          "$ref": "#/$defs/FactRelease"
+        },
+        "rule_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Rule Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "rule_id",
+        "effect",
+        "evidence_use",
+        "release"
+      ],
+      "title": "FactRule",
+      "type": "object"
+    },
+    "FactVersions": {
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "const": "permissions-beta/p2b-v1",
+          "title": "Capability",
+          "type": "string"
+        },
+        "vocabulary": {
+          "const": "owner-review-vocabulary/v1",
+          "title": "Vocabulary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "vocabulary",
+        "capability"
+      ],
+      "title": "FactVersions",
+      "type": "object"
+    },
     "HardConstraints": {
       "additionalProperties": false,
       "properties": {
@@ -741,6 +1169,52 @@
       "title": "Release",
       "type": "object"
     },
+    "RollingEventWindow": {
+      "additionalProperties": false,
+      "properties": {
+        "anchor": {
+          "const": "server_request_as_of",
+          "title": "Anchor",
+          "type": "string"
+        },
+        "event_time_semantics": {
+          "const": "canonical_event_time_v1",
+          "title": "Event Time Semantics",
+          "type": "string"
+        },
+        "future": {
+          "const": "withhold",
+          "title": "Future",
+          "type": "string"
+        },
+        "kind": {
+          "const": "rolling",
+          "title": "Kind",
+          "type": "string"
+        },
+        "max_age_seconds": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Max Age Seconds",
+          "type": "integer"
+        },
+        "missing_or_ambiguous": {
+          "const": "withhold",
+          "title": "Missing Or Ambiguous",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "anchor",
+        "max_age_seconds",
+        "event_time_semantics",
+        "missing_or_ambiguous",
+        "future"
+      ],
+      "title": "RollingEventWindow",
+      "type": "object"
+    },
     "Rule": {
       "additionalProperties": false,
       "properties": {
@@ -867,7 +1341,15 @@
       "type": "string"
     },
     "authority": {
-      "$ref": "#/$defs/AuthorityBinding"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/AuthorityBinding"
+        },
+        {
+          "$ref": "#/$defs/FactAuthorityBinding"
+        }
+      ],
+      "title": "Authority"
     },
     "command_id": {
       "maxLength": 200,
@@ -925,9 +1407,13 @@
           "$ref": "#/$defs/PolicyV2"
         },
         {
+          "$ref": "#/$defs/FactPolicyV2"
+        },
+        {
           "type": "null"
         }
-      ]
+      ],
+      "title": "Policy"
     },
     "signature": {
       "pattern": "^[A-Za-z0-9_-]{86}$",
