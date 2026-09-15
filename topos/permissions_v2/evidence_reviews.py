@@ -103,9 +103,9 @@ class EvidenceReviewMutation(StrictModel):
 def _cells(row):
     result = {}
     for name, value in row.items():
-        # Resolver-added parent hash is already represented by the evidence
+        # Resolver-added parent/source hashes is already represented by the evidence
         # revision; it is not a physical SQLite column.
-        if name == "_p2b_parent_revision":
+        if name in {"_p2b_parent_revision", "_p2b_source_revision"}:
             continue
         if value is None:
             result[name] = NullCell(kind="null")

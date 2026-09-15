@@ -333,3 +333,10 @@ async def test_request_flags_and_incomplete_binding_are_not_accepted(corpus, pai
     request = message(corpus); request["payload"] = payload
     result = await handle_control_plane_request(request,principal=Principal(OWNER_APP,"cp_relay",acting_user="owner-1"))
     assert result["code"] == 400 and "payload" not in result
+
+
+def test_owner_preview_omits_internal_source_posture_revision_cell(corpus, service):
+    with owner():
+        preview = service.preview(EvidenceLookup(fact_id=corpus[2]))
+    assert preview.status == "complete"
+    assert all("_p2b_source_revision" not in record.cells for record in preview.records)

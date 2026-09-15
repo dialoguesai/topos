@@ -590,3 +590,181 @@ def test_intact_review_and_canonical_identity_survive_normal_service_restart(cor
     with owner():
         reopened = EvidenceReviewStore(corpus[1].path, resolver=resolver)
     assert resolver.qualify(corpus[2], reviews=reopened).verdict == "qualified"
+
+
+def canonical_role(corpus, table, role):
+    edit(corpus, f"ALTER TABLE {table} ADD COLUMN actor_role TEXT")
+    edit(corpus, f"UPDATE {table} SET actor_role=?", (role,))
+
+
+def ai_lineage(corpus):
+    edit(corpus, "UPDATE signal_objects SET source_refs_json=?", (json.dumps([
+        {"table":"ai_chat_messages","source_id":"ai-source-1","record_id":"ai-message-1"}]),))
+
+
+def source_settings(corpus, posture, *, dataset="dataset-1", source="source-1"):
+    edit(corpus, "CREATE TABLE IF NOT EXISTS user_ingestion_sources(dataset_id TEXT, source_id TEXT, posture TEXT)")
+    edit(corpus, "INSERT INTO user_ingestion_sources VALUES (?,?,?)", (dataset,source,posture))
+
+
+def runtime_source(corpus, posture, *, source="source-1"):
+    edit(corpus, "CREATE TABLE IF NOT EXISTS source_runtime_installs(source_id TEXT, is_active INTEGER, status TEXT, source_definition_json TEXT)")
+    edit(corpus, "INSERT INTO source_runtime_installs VALUES (?,1,'active',?)", (source,json.dumps({"source_id":source,"posture":posture})))
+
+
+@pytest.mark.parametrize("table", ["signal_objects","conversation_messages","ai_chat_messages"])
+@pytest.mark.parametrize("role", ["addressed","participated","observed","ambient","unknown","inferred",""])
+def test_explicit_canonical_role_veto_cannot_be_overridden_by_native_flags_or_review(corpus, table, role):
+    if table == "ai_chat_messages": ai_lineage(corpus)
+    canonical_role(corpus, table, role)
+    payload(corpus, actor_role="authored")
+    attest(corpus)
+    assert decision(corpus).verdict == "withheld"
+
+
+@pytest.mark.parametrize("table", ["signal_objects","conversation_messages","ai_chat_messages"])
+@pytest.mark.parametrize("role", [None,"authored"])
+def test_null_legacy_or_authored_role_still_requires_native_truth_and_review(corpus, table, role):
+    if table == "ai_chat_messages": ai_lineage(corpus)
+    canonical_role(corpus, table, role)
+    assert decision(corpus).reason_code == "owner_review_required"
+    attest(corpus)
+    assert decision(corpus).verdict == "qualified"
+    if table == "signal_objects": payload(corpus, asserted_by="another-person")
+    elif table == "conversation_messages": edit(corpus,"UPDATE conversation_messages SET is_from_self=0")
+    else: edit(corpus,"UPDATE ai_chat_messages SET sender_type='assistant'")
+    attest(corpus,review_id="review-2")
+    assert decision(corpus).verdict == "withheld"
+
+
+@pytest.mark.parametrize("kind", ["override","runtime"])
+def test_ambient_posture_caps_native_authored_even_after_owner_review(corpus, kind):
+    (source_settings if kind == "override" else runtime_source)(corpus,"ambient")
+    attest(corpus)
+    assert decision(corpus).verdict == "withheld"
+
+
+@pytest.mark.parametrize("kind", ["override","runtime"])
+def test_source_posture_changes_invalidate_existing_owner_review(corpus, kind):
+    (source_settings if kind == "override" else runtime_source)(corpus,"mixed")
+    attest(corpus)
+    assert decision(corpus).verdict == "qualified"
+    if kind == "override": edit(corpus,"UPDATE user_ingestion_sources SET posture='ambient'")
+    else: edit(corpus,"UPDATE source_runtime_installs SET source_definition_json=?",(json.dumps({"posture":"ambient"}),))
+    assert decision(corpus).reason_code == "review_stale"
+    attest(corpus,review_id="review-2")
+    assert decision(corpus).verdict == "withheld"
+
+
+@pytest.mark.parametrize("posture", ["ambient","unknown","", " AMBIENT "])
+def test_datasetless_ai_cannot_borrow_another_datasets_permissive_override(corpus, posture):
+    ai_lineage(corpus)
+    source_settings(corpus,"personal",dataset="first-dataset",source="ai-source-1")
+    source_settings(corpus,posture,dataset="second-dataset",source="ai-source-1")
+    if posture == "ambient": attest(corpus)
+    assert decision(corpus).verdict == "withheld"
+
+
+def test_datasetless_ai_posture_change_invalidates_review(corpus):
+    ai_lineage(corpus)
+    source_settings(corpus,"mixed",source="ai-source-1")
+    attest(corpus)
+    assert decision(corpus).verdict == "qualified"
+    edit(corpus,"UPDATE user_ingestion_sources SET posture='ambient'")
+    assert decision(corpus).reason_code == "review_stale"
+
+
+@pytest.mark.parametrize("case", ["invalid_override", "duplicate_override", "invalid_runtime", "runtime_object", "runtime_list",
+    "duplicate_runtime", "wrong_source", "broken_json", "duplicate_json", "missing_posture_column", "unknown_active", "unknown_status", "view_instead_of_table"])
+def test_unknown_or_ambiguous_posture_never_falls_back_to_authored(corpus, case):
+    if case == "invalid_override": source_settings(corpus,"unknown")
+    elif case == "duplicate_override": source_settings(corpus,"personal"); source_settings(corpus,"mixed")
+    elif case in {"invalid_runtime","runtime_object","runtime_list"}:
+        runtime_source(corpus,{"invalid_runtime":"unknown","runtime_object":{},"runtime_list":[]}[case])
+    elif case == "duplicate_runtime": runtime_source(corpus,"personal"); runtime_source(corpus,"ambient")
+    elif case in {"wrong_source","broken_json","duplicate_json","unknown_active","unknown_status"}:
+        runtime_source(corpus,"mixed")
+        if case == "unknown_active": edit(corpus,"UPDATE source_runtime_installs SET is_active=2")
+        elif case == "unknown_status": edit(corpus,"UPDATE source_runtime_installs SET status='unknown'")
+        else:
+            raw = {"wrong_source":'{"source_id":"another-source","posture":"personal"}',"broken_json":"{", "duplicate_json":'{"posture":"ambient","posture":"personal"}'}[case]
+            edit(corpus,"UPDATE source_runtime_installs SET source_definition_json=?",(raw,))
+    elif case == "missing_posture_column": edit(corpus,"CREATE TABLE user_ingestion_sources(dataset_id TEXT,source_id TEXT)")
+    else: edit(corpus,"CREATE VIEW user_ingestion_sources AS SELECT 'dataset-1' AS dataset_id,'source-1' AS source_id,'personal' AS posture")
+    assert decision(corpus).verdict == "withheld"
+
+
+@pytest.mark.parametrize("posture", [None,"mixed","personal"])
+def test_valid_legacy_and_owner_overrides_preserve_native_authored_availability(corpus, posture):
+    source_settings(corpus,posture)
+    runtime_source(corpus,None)
+    attest(corpus)
+    assert decision(corpus).verdict == "qualified"
+
+
+def test_conversation_uses_exact_dataset_and_source_override(corpus):
+    source_settings(corpus,"ambient",dataset="another-dataset")
+    source_settings(corpus,"ambient",source="another-source")
+    attest(corpus)
+    assert decision(corpus).verdict == "qualified"
+
+
+def test_bundled_ambient_cap_survives_missing_or_mixed_runtime_default(corpus, monkeypatch):
+    from types import SimpleNamespace
+    from topos.sources import registry
+    monkeypatch.setitem(registry.BUNDLED_REGISTRY,"source-1",SimpleNamespace(posture="ambient"))
+    runtime_source(corpus,"mixed")
+    attest(corpus)
+    assert decision(corpus).verdict == "withheld"
+    source_settings(corpus,"personal")  # Exact owner override remains authoritative.
+    attest(corpus,review_id="review-2")
+    assert decision(corpus).verdict == "qualified"
+
+
+def test_bundled_posture_change_invalidates_review(corpus, monkeypatch):
+    from types import SimpleNamespace
+    from topos.sources import registry
+    attest(corpus)
+    monkeypatch.setitem(registry.BUNDLED_REGISTRY,"source-1",SimpleNamespace(posture="ambient"))
+    assert decision(corpus).reason_code == "review_stale"
+
+
+def test_posture_resolution_never_opens_global_database_or_trusts_process_runtime_registry(corpus, monkeypatch):
+    from types import SimpleNamespace
+    from topos.sources import registry
+    import topos.core.state as state
+    def forbidden(*args, **kwargs): pytest.fail("global database/posture fallback was used")
+    monkeypatch.setattr(state,"get_db_connection",forbidden)
+    monkeypatch.setattr(registry,"effective_posture",forbidden)
+    monkeypatch.setattr(registry,"_registry_posture_default",forbidden)
+    monkeypatch.setitem(registry.REGISTRY,"source-1",SimpleNamespace(posture="personal"))
+    runtime_source(corpus,"ambient")
+    attest(corpus)
+    assert decision(corpus).verdict == "withheld"
+
+
+@pytest.mark.parametrize("table", ["signal_objects","conversation_messages","ai_chat_messages"])
+def test_reserved_source_revision_marker_cannot_be_spoofed_by_canonical_column(corpus, table):
+    if table == "ai_chat_messages": ai_lineage(corpus)
+    edit(corpus,f"ALTER TABLE {table} ADD COLUMN _p2b_source_revision TEXT")
+    assert decision(corpus).reason_code == "evidence_malformed"
+
+
+@pytest.mark.parametrize("field,value", [("user_id","other-owner"),("topos_id","other-resource"),("dataset_id","other-dataset"),("device_id","unknown-device")])
+def test_scoped_runtime_posture_cannot_lend_authority_across_bindings(corpus, field, value):
+    runtime_source(corpus,"personal")
+    edit(corpus,"ALTER TABLE source_runtime_installs ADD COLUMN scope_key TEXT")
+    scope = {"user_id":"owner-1","topos_id":"resource-1","dataset_id":"dataset-1","device_id":"*"}
+    scope[field] = value
+    edit(corpus,"UPDATE source_runtime_installs SET scope_key=?",(json.dumps(scope),))
+    assert decision(corpus).reason_code == "source_posture_unknown"
+
+
+def test_exact_scoped_runtime_posture_and_revision_are_bound(corpus):
+    runtime_source(corpus,"mixed")
+    edit(corpus,"ALTER TABLE source_runtime_installs ADD COLUMN scope_key TEXT")
+    edit(corpus,"UPDATE source_runtime_installs SET scope_key=?",(json.dumps({"user_id":"owner-1","topos_id":"resource-1","dataset_id":"dataset-1","device_id":"*"}),))
+    attest(corpus)
+    assert decision(corpus).verdict == "qualified"
+    edit(corpus,"UPDATE source_runtime_installs SET status='ready'")
+    assert decision(corpus).reason_code == "review_stale"

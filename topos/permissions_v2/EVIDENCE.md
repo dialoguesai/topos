@@ -193,3 +193,38 @@ and immediate transport delivery before returning, and must not mutate evidence
 or reviews. The transaction guarantee assumes the configured single writer and
 shared write gate; an external writer bypassing that gate in SQLite WAL mode is
 outside this guarantee. No serialized qualification is accepted as authorization.
+
+## Native authorship and source posture vetoes
+
+A materialized canonical `actor_role` on any fact or terminal source row is a
+restriction: only the exact value `authored` or SQL NULL/absent is eligible.
+Addressed, participated, observed, ambient, inferred, unknown, empty, or malformed
+roles cannot be overridden by review labels, a pack name, or native self flags.
+SQL NULL is legacy absence, not authorship proof: all existing owner identity,
+native sender, stated fact, recursive lineage and explicit review checks remain.
+
+The resolver applies the native `record_role` ambient posture cap using only its
+own canonical SQLite read snapshot and immutable bundled source defaults. It does
+not call legacy posture helpers that can open the process default database or
+suppress a failed settings read. Conversation overrides match the exact dataset
+and source. Datasetless AI cannot borrow another dataset's permissive override;
+any ambient override for its source vetoes, and permissive overrides cannot lift
+an ambient source default without a certified dataset binding.
+
+Absent legacy posture configuration inherits `mixed`, which merely leaves native
+per-row attribution in place. Explicit malformed values, malformed schemas,
+ambiguous active installs/overrides, and incompatible concrete runtime source
+scope bindings withhold. A missing runtime posture inherits its bundled default;
+a runtime's bare `mixed` default retains a bundled non-mixed declaration, matching
+the native registry read semantics. An exact conversation owner override still
+takes precedence. Unknown sources with no explicit posture remain legacy mixed
+and require all native authorship and owner-review proof.
+
+Every terminal source revision includes a reserved `_p2b_source_revision` hash of
+its effective posture and configuration inputs, including the applicable owner
+overrides, active runtime definition/revision and bundled default. A posture/input
+change invalidates the old review, even if it does not alter message text. A
+physical column colliding with this marker is rejected. The marker is omitted
+from owner preview cells and does not change any public wire schema. Changing a
+posture and restoring all of its original inputs before another read is not a
+separate durable revocation event; owner Off-limits has its own monotonic clock.

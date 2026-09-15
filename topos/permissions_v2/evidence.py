@@ -18,6 +18,7 @@ from typing import Literal
 from pydantic import model_validator
 
 from topos.principal import OWNER_APP, current_principal
+from topos.features.provenance.roles import record_role
 from topos.storage.db.write_gate import with_db_write
 
 from .canonical import MAX_INTEGER, PolicyError, canonical_bytes, digest
@@ -167,6 +168,107 @@ def _row_revision(row: dict) -> str:
     return digest(values)
 
 
+
+def _source_posture(conn, identity: EvidenceIdentity) -> tuple[str, str]:
+    """Snapshot-local restrictive mirror of native posture precedence.
+
+    Do not call effective_posture/make_posture_resolver: their legacy fallback
+    can open the ambient process database or suppress a failed override read.
+    Missing legacy configuration inherits mixed, but never proves authorship.
+    Malformed/ambiguous explicit configuration cannot silently inherit.
+    """
+    from topos.sources.registry import BUNDLED_REGISTRY
+
+    valid = {"personal", "mixed", "ambient"}
+    source = identity.source_id
+    bundled = BUNDLED_REGISTRY.get(source)
+    bundled_posture = getattr(bundled, "posture", None) if bundled is not None else None
+    if bundled_posture is not None and (type(bundled_posture) is not str or bundled_posture not in valid):
+        raise PolicyError("source_posture_unknown")
+
+    def schema(table, required):
+        found = conn.execute("SELECT type FROM sqlite_master WHERE name=?", (table,)).fetchmany(2)
+        if not found:
+            return False
+        if len(found) != 1 or found[0][0] != "table":
+            raise PolicyError("source_posture_unknown")
+        columns = {item[1] for item in conn.execute(f"PRAGMA table_info({table})")}
+        if not required <= columns:
+            raise PolicyError("source_posture_unknown")
+        return True
+
+    override_present = schema("user_ingestion_sources", {"dataset_id", "source_id", "posture"})
+    overrides = []
+    if override_present:
+        sql, args = "SELECT dataset_id,posture FROM user_ingestion_sources WHERE source_id=?", [source]
+        if identity.dataset_kind == "row_dataset":
+            sql += " AND dataset_id=?"
+            args.append(identity.dataset_id)
+        selected = conn.execute(sql, args).fetchmany(MAX_NODES + 1)
+        if len(selected) > MAX_NODES:
+            raise PolicyError("source_posture_unknown")
+        datasets = set()
+        for dataset, posture in selected:
+            if (not isinstance(dataset, str) or not dataset or dataset != dataset.strip()
+                or dataset in datasets or (posture is not None and (type(posture) is not str or posture not in valid))):
+                raise PolicyError("source_posture_unknown")
+            datasets.add(dataset)
+            overrides.append({"dataset_id": dataset, "posture": posture})
+        overrides.sort(key=lambda item: item["dataset_id"])
+
+    runtime_present = schema("source_runtime_installs", {"source_id", "is_active", "status", "source_definition_json"})
+    runtime_posture, runtime_revision = None, None
+    if runtime_present:
+        installed = conn.execute("SELECT * FROM source_runtime_installs WHERE source_id=? AND is_active IS NOT 0",
+                                 (source,)).fetchmany(2)
+        if len(installed) > 1:
+            raise PolicyError("source_posture_unknown")
+        if installed:
+            installation = dict(installed[0])
+            if type(installation["is_active"]) is not int or installation["is_active"] != 1 or installation["status"] not in {"installed", "active", "ready"}:
+                raise PolicyError("source_posture_unknown")
+            # A scoped source definition cannot lend a permissive posture to a
+            # different owner, resource or dataset. Legacy schemas without a
+            # scope column remain node-local; explicit malformed scopes reject.
+            if "scope_key" in installation:
+                scope = _json(installation["scope_key"], dict)
+                if not scope or not set(scope) <= {"user_id", "device_id", "topos_id", "app_id", "dataset_id"}:
+                    raise PolicyError("source_posture_unknown")
+                scope_binding = {"user_id": identity.binding.owner_id, "topos_id": identity.binding.resource_id,
+                                 "app_id": identity.binding.resource_id, "dataset_id": identity.dataset_id}
+                for field, actual in scope.items():
+                    if type(actual) is not str or not actual or actual != actual.strip():
+                        raise PolicyError("source_posture_unknown")
+                    if actual != "*" and (field == "device_id" or actual != scope_binding[field]):
+                        raise PolicyError("source_posture_unknown")
+            definition = _json(installation["source_definition_json"], dict)
+            runtime_posture = definition.get("posture")
+            if (("source_id" in definition and definition["source_id"] != source)
+                or (runtime_posture is not None and (type(runtime_posture) is not str or runtime_posture not in valid))):
+                raise PolicyError("source_posture_unknown")
+            runtime_revision = _row_revision(installation)
+
+    # Native registry semantics retain a non-mixed bundled declaration when a
+    # runtime definition only carries the mixed default. Explicit personal or
+    # ambient runtime declarations remain effective, subject to owner override.
+    default = runtime_posture or bundled_posture or "mixed"
+    if default == "mixed" and bundled_posture not in (None, "mixed"):
+        default = bundled_posture
+    explicit = [item["posture"] for item in overrides if item["posture"] is not None]
+    if identity.dataset_kind == "row_dataset":
+        effective = explicit[0] if explicit else default
+    else:
+        # Datasetless AI cannot borrow a dataset to erase an ambient cap. Any
+        # ambient override for its source vetoes; permissive overrides cannot
+        # relax an ambient source default without a certified dataset binding.
+        effective = "ambient" if "ambient" in explicit else default
+    revision = digest({"version": "evidence-source-posture/v1", "source_id": source,
+        "dataset_kind": identity.dataset_kind, "dataset_id": identity.dataset_id,
+        "override_schema_present": override_present, "overrides": overrides,
+        "runtime_schema_present": runtime_present, "runtime_revision": runtime_revision,
+        "runtime_posture": runtime_posture, "bundled_posture": bundled_posture, "effective": effective})
+    return effective, revision
+
 def _deleted(row: dict) -> bool:
     return any(row.get(field) not in (None, 0, False, "") for field in
                ("valid_to", "deleted_at", "is_deleted", "deleted"))
@@ -266,6 +368,8 @@ class EvidenceResolver:
         if len(rows) != 1:
             raise PolicyError("evidence_ambiguous")
         row = dict(rows[0])
+        if any(marker in row for marker in ("_p2b_parent_revision", "_p2b_source_revision")):
+            raise PolicyError("evidence_malformed")
         if _deleted(row):
             raise PolicyError("evidence_deleted")
         if table == "signal_objects" and row.get("object_type") != "fact":
@@ -280,6 +384,8 @@ class EvidenceResolver:
             if _deleted(dict(parents[0])) or "_p2b_parent_revision" in row:
                 raise PolicyError("evidence_malformed")
             row["_p2b_parent_revision"] = _row_revision(dict(parents[0]))
+        if table in LEAF_TABLES:
+            row["_p2b_source_revision"] = _source_posture(conn, identity)[1]
         return row
 
     def _snapshot(self, conn, floor: str, fact_id: str, *, enforce_floor: bool = False):
@@ -383,6 +489,8 @@ class EvidenceResolver:
                 raise PolicyError("independent_copy_lineage")
             identity = reference.identity
             row = rows[key]
+            if row.get("actor_role") not in (None, "authored"):
+                raise PolicyError("not_owner_authored")
             if conn.execute("SELECT 1 FROM owner_only_records WHERE canonical_table=? AND record_id=? LIMIT 1",
                             (identity.table, identity.record_id)).fetchone():
                 raise PolicyError("owner_only")
@@ -433,6 +541,9 @@ class EvidenceResolver:
                     if type(row.get("is_from_self")) is not int or row["is_from_self"] != 1:
                         raise PolicyError("not_owner_authored")
                 elif row.get("sender_type") != "user":
+                    raise PolicyError("not_owner_authored")
+                posture, _revision = _source_posture(conn, identity)
+                if record_role(row, table=identity.table, posture=posture) != "authored":
                     raise PolicyError("not_owner_authored")
                 if self._known_copies(conn, identity, row):
                     raise PolicyError("independent_copy_lineage")
