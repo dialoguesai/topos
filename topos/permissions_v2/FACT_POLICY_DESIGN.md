@@ -83,6 +83,36 @@ This represents source-event windows rather than merely grant expiry. It does
 not implement the complete 180/365/30/14-day profiles: finance, project facts,
 availability and summaries need additional closed forms and evidence adapters.
 
+### Stated-day validity (P2b v2)
+
+`permissions-beta/p2b-v2` is a separate capability with its own policy class
+(`StatedDayFactPolicy`), evaluator version (`hard-rules/p2b-v2`) and decision
+class. Its rules, reviews, lineage, contributor event window, precedence and
+exact scalar output are the v1 rules; only the meaning of `valid_from` differs,
+and a policy must select every part of that meaning explicitly in
+`versions.fact_validity`: `stated_day_v1`, day precision, an unrecorded timezone
+basis, currency from 12:00 UTC on the following day, explicit UTC instants kept
+exact, and unknown or not-yet-elapsed values withheld.
+
+A `valid_from` of the exact form `YYYY-MM-DD` is a stated calendar day whose
+timezone basis the producers did not record. It counts as current only once it
+has ended at every Earth offset, 36 hours after its own 00:00 UTC. A stated day
+that has not elapsed is `fact_not_current`, like a future instant. Month, year,
+naive, offset, calendar-invalid or padded text stays unknown and withholds as
+`fact_validity`, exactly as under v1. Explicit UTC instants keep their v1
+meaning, so for such rows a v2 decision equals the frozen v1 oracle except for
+its evaluator version and policy hash. The payload's real-world period fields
+are not evaluated by either contract.
+
+The v1 class is byte-identical after this addition: existing signed v1 policies
+keep their hashes, `FactPolicyV2` never parses a v2 document and vice versa, the
+registry dispatches on the capability literal, and changing the capability of an
+existing grant still requires a new grant. `valid_from` is on the review surface,
+so re-stamping a fact's validity stales its evidence review, and a snapshot taken
+before the change is rejected as `fact_policy_revision`. The copied-corpus
+waterfall that motivated this contract is recorded in the control-plane lab
+documentation; a temporal contract alone produced no copied positive there.
+
 ## Correlation and exclusions
 
 One permit clause must cover every artifact/leaf table, every terminal source,
@@ -153,7 +183,10 @@ forwarding must be explicitly paired before any recipient can use the feature.
 
 The signed fixture at `fixtures/permissions_v2/fact_policy/signed-golden-v1.json`
 binds a synthetic policy, request, mutation/ACK and six-field node result with
-fixed public verification keys. Regression coverage includes signed activation,
+fixed public verification keys. `signed-golden-v2.json` does the same for a
+stated-day policy over a fact whose validity is a calendar day; it is rebuilt by
+`python -m tests.permissions_v2.test_fact_stated_day --write-golden` under the
+test environment and verified by both the engine and control-plane suites. Regression coverage includes signed activation,
 status/restart/revocation, same-grant capability rejection, independently bounded
 policy expiry, exact result typing, both review revisions, Off-limits/protection
 ABA, source changes, unknown/future event time, denied/empty rule selections,

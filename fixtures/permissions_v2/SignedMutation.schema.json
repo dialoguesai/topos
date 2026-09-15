@@ -480,7 +480,10 @@
           "type": "string"
         },
         "capability_version": {
-          "const": "permissions-beta/p2b-v1",
+          "enum": [
+            "permissions-beta/p2b-v1",
+            "permissions-beta/p2b-v2"
+          ],
           "title": "Capability Version",
           "type": "string"
         },
@@ -1284,6 +1287,166 @@
       "title": "SourceUniverse",
       "type": "object"
     },
+    "StatedDayFactEvaluator": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "hard_rules",
+          "title": "Kind",
+          "type": "string"
+        },
+        "version": {
+          "const": "hard-rules/p2b-v2",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "version"
+      ],
+      "title": "StatedDayFactEvaluator",
+      "type": "object"
+    },
+    "StatedDayFactPolicy": {
+      "additionalProperties": false,
+      "description": "P2b rules, reviews and scalar view unchanged; only fact validity differs.\n\nThe v1 class stays byte-identical, so existing signed v1 policies keep their\nhashes and exact-instant behaviour. A v1 document never parses as v2 and a\nv2 document never parses as v1; the registry dispatches on the capability.",
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/Binding"
+        },
+        "evaluator": {
+          "$ref": "#/$defs/StatedDayFactEvaluator"
+        },
+        "hard_constraints": {
+          "$ref": "#/$defs/HardConstraints"
+        },
+        "natural_language": {
+          "title": "Natural Language",
+          "type": "null"
+        },
+        "policy_version_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Policy Version Id",
+          "type": "string"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/FactRule"
+          },
+          "maxItems": 64,
+          "title": "Rules",
+          "type": "array"
+        },
+        "source_universe": {
+          "$ref": "#/$defs/SourceUniverse"
+        },
+        "validity": {
+          "$ref": "#/$defs/Validity"
+        },
+        "version": {
+          "const": "topos-policy/v2",
+          "title": "Version",
+          "type": "string"
+        },
+        "versions": {
+          "$ref": "#/$defs/StatedDayFactVersions"
+        }
+      },
+      "required": [
+        "version",
+        "policy_version_id",
+        "binding",
+        "versions",
+        "validity",
+        "source_universe",
+        "hard_constraints",
+        "rules",
+        "evaluator",
+        "natural_language"
+      ],
+      "title": "StatedDayFactPolicy",
+      "type": "object"
+    },
+    "StatedDayFactValidity": {
+      "additionalProperties": false,
+      "description": "Every temporal meaning a stated-day policy relies on, selected explicitly.\n\nA `valid_from` of the exact lexical form YYYY-MM-DD is a stated calendar day\nwhose timezone basis the producers did not record. Such a day counts as\ncurrent only once it has ended at every Earth offset, i.e. from 12:00:00 UTC\non the following day. Explicit UTC instants keep their exact P2b v1 meaning.\nYear, month, naive, offset or otherwise malformed values stay unknown and\nwithhold; a stated day that has not fully elapsed withholds as not current.\nThe payload's real-world period fields are not evaluated by this contract.",
+      "properties": {
+        "current_from": {
+          "const": "next_day_12_00_utc",
+          "title": "Current From",
+          "type": "string"
+        },
+        "instants": {
+          "const": "explicit_utc_exact",
+          "title": "Instants",
+          "type": "string"
+        },
+        "not_elapsed": {
+          "const": "withhold",
+          "title": "Not Elapsed",
+          "type": "string"
+        },
+        "precision": {
+          "const": "day",
+          "title": "Precision",
+          "type": "string"
+        },
+        "semantics": {
+          "const": "stated_day_v1",
+          "title": "Semantics",
+          "type": "string"
+        },
+        "timezone_basis": {
+          "const": "unrecorded_any_earth_offset",
+          "title": "Timezone Basis",
+          "type": "string"
+        },
+        "unknown": {
+          "const": "withhold",
+          "title": "Unknown",
+          "type": "string"
+        }
+      },
+      "required": [
+        "semantics",
+        "precision",
+        "timezone_basis",
+        "current_from",
+        "instants",
+        "unknown",
+        "not_elapsed"
+      ],
+      "title": "StatedDayFactValidity",
+      "type": "object"
+    },
+    "StatedDayFactVersions": {
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "const": "permissions-beta/p2b-v2",
+          "title": "Capability",
+          "type": "string"
+        },
+        "fact_validity": {
+          "$ref": "#/$defs/StatedDayFactValidity"
+        },
+        "vocabulary": {
+          "const": "owner-review-vocabulary/v1",
+          "title": "Vocabulary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "vocabulary",
+        "capability",
+        "fact_validity"
+      ],
+      "title": "StatedDayFactVersions",
+      "type": "object"
+    },
     "Validity": {
       "additionalProperties": false,
       "properties": {
@@ -1408,6 +1571,9 @@
         },
         {
           "$ref": "#/$defs/FactPolicyV2"
+        },
+        {
+          "$ref": "#/$defs/StatedDayFactPolicy"
         },
         {
           "type": "null"

@@ -22,7 +22,7 @@ from pydantic import Field, model_validator
 from ..canonical import MAX_INTEGER, PolicyError, canonical_bytes, digest
 from ..contract import Binding, Hash, Identifier, Number, StrictModel
 from ..evidence import QualifiedEvidence, _json, _key
-from ..fact_contract import VIEW, FactPolicyV2
+from ..fact_contract import VIEW, FactPolicy, FactPolicyV2
 from ..fact_eligibility import DenyStructure, FactEligibility, PermitStructure, prepare_fact_eligibility
 from ..fact_policy import fact_projection_decision
 from ..fact_projection import ReviewedFactProjection
@@ -93,7 +93,7 @@ class FactExperimentCapsule(StrictModel):
     """
     version: Literal["topos-offline-qualified-fact-experiment/v1"]
     experiment_id: Identifier
-    policy: FactPolicyV2
+    policy: FactPolicy
     prose: Prose
     processor: ProcessorPin
     owner_approved_revision: Hash
@@ -185,7 +185,7 @@ class _Capture:
     evidence: QualifiedEvidence
     projection: ReviewedFactProjection
     rows: dict
-    policy: FactPolicyV2
+    policy: FactPolicy
     structure: FactEligibility
     surfaces: tuple
     output_surface: _Surface

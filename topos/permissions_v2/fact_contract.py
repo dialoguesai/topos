@@ -15,6 +15,12 @@ from .contract import (Binding, EvidenceUse, Generation, HardConstraints, Hash,
 
 CAPABILITY = "permissions-beta/p2b-v1"
 EVALUATOR = "hard-rules/p2b-v1"
+CAPABILITY_STATED_DAY = "permissions-beta/p2b-v2"
+EVALUATOR_STATED_DAY = "hard-rules/p2b-v2"
+FACT_VALIDITY_EXACT_INSTANT = "exact_instant_v1"
+FACT_VALIDITY_STATED_DAY = "stated_day_v1"
+FACT_CAPABILITIES = (CAPABILITY, CAPABILITY_STATED_DAY)
+FactCapability = Literal["permissions-beta/p2b-v1", "permissions-beta/p2b-v2"]
 VOCABULARY = "owner-review-vocabulary/v1"
 PURPOSE = "owner-stated-fact-projection"
 VIEW = "owner_stated_fact.scalar.v1"
@@ -135,5 +141,61 @@ class FactDecision(StrictModel):
     reason_code: Literal["rule_permit", "rule_deny", "unknown_context", "unsupported_view", "stale_authority", "fact_not_current"]
     required_projection_id: Literal["owner_stated_fact.scalar.v1"] | None
     missing_context_codes: list[Literal["classification", "lineage", "time", "fact_validity"]]
+
+
+class StatedDayFactValidity(StrictModel):
+    """Every temporal meaning a stated-day policy relies on, selected explicitly.
+
+    A `valid_from` of the exact lexical form YYYY-MM-DD is a stated calendar day
+    whose timezone basis the producers did not record. Such a day counts as
+    current only once it has ended at every Earth offset, i.e. from 12:00:00 UTC
+    on the following day. Explicit UTC instants keep their exact P2b v1 meaning.
+    Year, month, naive, offset or otherwise malformed values stay unknown and
+    withhold; a stated day that has not fully elapsed withholds as not current.
+    The payload's real-world period fields are not evaluated by this contract.
+    """
+    semantics: Literal["stated_day_v1"]
+    precision: Literal["day"]
+    timezone_basis: Literal["unrecorded_any_earth_offset"]
+    current_from: Literal["next_day_12_00_utc"]
+    instants: Literal["explicit_utc_exact"]
+    unknown: Literal["withhold"]
+    not_elapsed: Literal["withhold"]
+
+
+class StatedDayFactVersions(StrictModel):
+    vocabulary: Literal["owner-review-vocabulary/v1"]
+    capability: Literal["permissions-beta/p2b-v2"]
+    fact_validity: StatedDayFactValidity
+
+
+class StatedDayFactEvaluator(StrictModel):
+    kind: Literal["hard_rules"]
+    version: Literal["hard-rules/p2b-v2"]
+
+
+class StatedDayFactPolicy(FactPolicyV2):
+    """P2b rules, reviews and scalar view unchanged; only fact validity differs.
+
+    The v1 class stays byte-identical, so existing signed v1 policies keep their
+    hashes and exact-instant behaviour. A v1 document never parses as v2 and a
+    v2 document never parses as v1; the registry dispatches on the capability.
+    """
+    versions: StatedDayFactVersions
+    evaluator: StatedDayFactEvaluator
+
+
+class StatedDayFactDecision(FactDecision):
+    evaluator_version: Literal["hard-rules/p2b-v2"]
+
+
+FactPolicy = FactPolicyV2 | StatedDayFactPolicy
+AnyFactDecision = FactDecision | StatedDayFactDecision
+
+
+def fact_validity_semantics(policy) -> str:
+    """The validity contract a parsed policy selected; v1 policies are exact instants."""
+    versions = policy.versions
+    return versions.fact_validity.semantics if isinstance(versions, StatedDayFactVersions) else FACT_VALIDITY_EXACT_INSTANT
 
 

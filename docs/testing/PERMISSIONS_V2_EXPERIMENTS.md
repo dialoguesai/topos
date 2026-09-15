@@ -123,7 +123,9 @@ selector. Its inputs are the real `ProjectionReviewService` (resolver, owner
 evidence-review store, owner output-review store), a verified `Binding`, a
 clock and an operator-injected local transport.
 
-The capsule pairs the signed-grammar P2b policy with its prose twin: inclusion
+The capsule pairs the signed-grammar P2b policy (either the exact-instant v1
+class or the separate stated-day `permissions-beta/p2b-v2` class; the rules
+arm evaluates whichever the owner approved) with its prose twin: inclusion
 identifiers are exactly the policy's permit rule identifiers and exclusions its
 deny rule identifiers, so both arms answer over one clause universe. The
 processor pin names the exact local model, model revision, prompt revision and

@@ -18,10 +18,15 @@ from .contract import Binding, Number, Only, StrictModel
 from .evidence import (MAX_DEPTH, MAX_NODES, EvidenceIdentity, Qualification,
     QualifiedEvidence, _json, _key, _row_revision)
 from .fact_projection import ReviewedFactProjection, _SENSITIVITY, _current, prepare_fact_projection
-from .fact_contract import PROJECTION_VERSION, FactPolicyV2
+from .fact_contract import (FACT_VALIDITY_STATED_DAY, PROJECTION_VERSION, FactPolicyV2,
+    StatedDayFactPolicy, fact_validity_semantics)
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _UTC = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|\+00:00)")
+_DAY = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}")
+# A calendar day with an unrecorded timezone basis ends last at UTC-12, so it has
+# elapsed everywhere 36 hours after its own 00:00 UTC: 12:00:00 UTC the next day.
+STATED_DAY_ELAPSED_MICROSECONDS = 36 * 3600 * 1_000_000
 
 
 class _EvaluationTime(StrictModel):
@@ -43,6 +48,33 @@ def canonical_utc_microseconds(value) -> int | None:
     except ValueError:
         return None
     return (delta.days * 86400 + delta.seconds) * 1_000_000 + delta.microseconds
+
+
+def stated_day_elapsed_microseconds(value) -> int | None:
+    """Instant from which a stated YYYY-MM-DD day has ended at every Earth offset.
+
+    Only that exact lexical form is a stated day. Month, year, naive, offset,
+    calendar-invalid or padded text stays unknown; nothing is rounded to a day.
+    """
+    if type(value) is not str or _DAY.fullmatch(value) is None:
+        return None
+    try:
+        day = datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+    return (day - _EPOCH).days * 86_400_000_000 + STATED_DAY_ELAPSED_MICROSECONDS
+
+
+def fact_current_from_microseconds(value, *, semantics) -> int | None:
+    """Instant from which `valid_from` counts as current under the selected contract.
+
+    Exact UTC instants are accepted by every contract. A stated day is accepted
+    only by `stated_day_v1`, and then conservatively. None means unknown.
+    """
+    start = canonical_utc_microseconds(value)
+    if start is None and semantics == FACT_VALIDITY_STATED_DAY:
+        start = stated_day_elapsed_microseconds(value)
+    return start
 
 
 def _reference(raw, binding):
@@ -157,8 +189,14 @@ def prepare_fact_eligibility(*, policy: FactPolicyV2, evidence: QualifiedEvidenc
     carries only its own descendants selected by that exact rule's sources.
     A future model adapter must independently establish processing authority
     and stop on mandatory unknowns before passing any candidate contents on.
+    Fact validity follows the contract the policy itself selected: exact UTC
+    instants for v1, and additionally conservatively elapsed stated days for a
+    v2 policy. The contributor event window is unchanged by that selection.
     """
-    policy = FactPolicyV2.parse(policy.model_dump())
+    if type(policy) not in (FactPolicyV2, StatedDayFactPolicy):
+        raise PolicyError("fact_policy_binding")
+    policy = type(policy).parse(policy.model_dump())
+    semantics = fact_validity_semantics(policy)
     binding = Binding.parse(binding.model_dump())
     clock = _EvaluationTime.parse({"request_as_of": request_as_of, "now": now})
     if policy.binding != binding:
@@ -184,7 +222,7 @@ def prepare_fact_eligibility(*, policy: FactPolicyV2, evidence: QualifiedEvidenc
         row = rows[_key(ref.identity)]
         if row.get("valid_to") is not None:
             return prepared("fact_not_current")
-        start = canonical_utc_microseconds(row.get("valid_from"))
+        start = fact_current_from_microseconds(row.get("valid_from"), semantics=semantics)
         fact_times_unknown |= start is None or "valid_to" not in row
         if start is not None and start > anchor:
             return prepared("fact_not_current")

@@ -11,6 +11,7 @@ from typing_extensions import Annotated
 
 from .canonical import PolicyError, canonical_bytes, digest, parse_json
 from .contract import Binding, Generation, Hash, Identifier, Number, StrictModel
+from .fact_contract import FACT_CAPABILITIES, FactCapability
 
 DOMAIN = b"topos-grantee-envelope/v2\n"
 MAX_TTL_SECONDS = 120
@@ -44,11 +45,11 @@ class SignedEnvelope(EnvelopeBody):
 
 
 class FactAuthorityBinding(AuthorityBinding):
-    capability_version: Literal["permissions-beta/p2b-v1"]
+    capability_version: FactCapability
 
 
 class FactEnvelopeBody(EnvelopeBody):
-    capability_version: Literal["permissions-beta/p2b-v1"]
+    capability_version: FactCapability
     request_type: FactRequestType
 
 
@@ -94,7 +95,7 @@ def parse_authority(raw) -> AnyAuthorityBinding:
     raw = _value(raw)
     if raw.get("capability_version") == "permissions-beta/p2a-v1":
         return AuthorityBinding.parse(raw)
-    if raw.get("capability_version") == "permissions-beta/p2b-v1":
+    if raw.get("capability_version") in FACT_CAPABILITIES:
         return FactAuthorityBinding.parse(raw)
     raise PolicyError("unsupported_capability")
 
@@ -103,7 +104,7 @@ def parse_envelope(raw, *, signed=True):
     raw = _value(raw)
     if raw.get("capability_version") == "permissions-beta/p2a-v1":
         return (SignedEnvelope if signed else EnvelopeBody).parse(raw)
-    if raw.get("capability_version") == "permissions-beta/p2b-v1":
+    if raw.get("capability_version") in FACT_CAPABILITIES:
         return (SignedFactEnvelope if signed else FactEnvelopeBody).parse(raw)
     raise PolicyError("unsupported_capability")
 

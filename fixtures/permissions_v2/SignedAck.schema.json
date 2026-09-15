@@ -195,7 +195,10 @@
           "type": "string"
         },
         "capability_version": {
-          "const": "permissions-beta/p2b-v1",
+          "enum": [
+            "permissions-beta/p2b-v1",
+            "permissions-beta/p2b-v2"
+          ],
           "title": "Capability Version",
           "type": "string"
         },
