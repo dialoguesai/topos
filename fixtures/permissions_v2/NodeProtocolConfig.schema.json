@@ -55,6 +55,18 @@
       "title": "Cp Issuer Id",
       "type": "string"
     },
+    "evidence_review_store_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Evidence Review Store Path"
+    },
     "frontend_client_id": {
       "maxLength": 200,
       "minLength": 1,

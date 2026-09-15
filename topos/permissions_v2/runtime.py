@@ -28,14 +28,36 @@ class NodeProtocolConfig(StrictModel):
     node_signing_key_path: str
     canonical_database_path: str
     ledger_path: str
+    evidence_review_store_path: str | None = None
 
 
 class Runtime:
-    def __init__(self, protocol: NodePolicyProtocol, lock_file, config_path: Path):
+    def __init__(self, protocol: NodePolicyProtocol, lock_file, config_path: Path, *, evidence_review_store_path: Path | None = None):
         self.protocol = protocol
         self.lock_file = lock_file
         self.config_path = config_path
         self.pid = os.getpid()
+        self.evidence_review_store_path = evidence_review_store_path
+        self._evidence_review_runtime = None
+
+    def evidence_reviews(self, *, require_existing=True):
+        """Trusted runtime accessor; request payloads never select enrollment."""
+        if self.pid != os.getpid():
+            raise PolicyError("configuration_restart_required")
+        if os.environ.get("TOPOS_PERMISSIONS_V2_ENABLED", "").lower() != "true":
+            raise PolicyError("permissions_v2_disabled")
+        if os.environ.get("TOPOS_PERMISSIONS_V2_EVIDENCE_REVIEWS_ENABLED", "").lower() != "true":
+            raise PolicyError("evidence_reviews_disabled")
+        if self.evidence_review_store_path is None:
+            raise PolicyError("evidence_reviews_not_configured")
+        from .evidence import EvidenceBinding
+        from .evidence_review_runtime import ReviewEnrollmentRuntime
+        from topos.storage.db.write_gate import with_db_write
+        with with_db_write():
+            if self._evidence_review_runtime is None:
+                self._evidence_review_runtime = ReviewEnrollmentRuntime(canonical_database=self.protocol.canonical_database,
+                    binding=EvidenceBinding.parse(self.protocol.ledger.identity.model_dump()), path=self.evidence_review_store_path)
+            return self._evidence_review_runtime.get(require_existing=require_existing)
 
     def close(self):
         self.lock_file.close()
@@ -75,6 +97,15 @@ def load_runtime(config_path: Path, *, active_database: Path) -> Runtime:
         raise PolicyError("private_directory_required")
     if ledger_path.resolve().parent != durable or key_path.resolve(strict=True).parent != durable:
         raise PolicyError("durable_path_binding")
+    review_path = Path(config.evidence_review_store_path) if config.evidence_review_store_path is not None else None
+    if review_path is not None:
+        from .evidence import _checked_file
+        marker_path = review_path.with_name(review_path.name + ".enrollment.json")
+        if (not review_path.is_absolute() or review_path.parent != durable
+            or {review_path, marker_path} & {canonical, ledger_path, key_path, config_path, durable / "protocol.lock"}):
+            raise PolicyError("review_database_binding")
+        _checked_file(review_path, code="review_database_binding", may_create=True)
+        _checked_file(marker_path, code="review_database_binding", may_create=True)
     try:
         seed = bytes.fromhex(_private_file(key_path).decode("ascii").strip())
         key = Ed25519PrivateKey.from_private_bytes(seed)
@@ -104,7 +135,7 @@ def load_runtime(config_path: Path, *, active_database: Path) -> Runtime:
         keys = {kid: bytes.fromhex(value) for kid, value in config.trusted_cp_keys.items()}
         ledger = PolicyLedger(ledger_path, identity=config.identity, protection_revision=revision, trusted_keys=keys)
         protocol = NodePolicyProtocol(ledger, canonical_database=canonical, cp_issuer_id=config.cp_issuer_id, frontend_client_id=config.frontend_client_id, trusted_cp_keys=keys, node_signing_kid=config.node_signing_kid, node_signing_key=key)
-        return Runtime(protocol, lock_file, config_path)
+        return Runtime(protocol, lock_file, config_path, evidence_review_store_path=review_path)
     except BaseException:
         lock_file.close()
         raise

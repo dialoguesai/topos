@@ -27,6 +27,7 @@ from .protection_clock import clock_state, current_protection_revision
 MAX_NODES = 128
 MAX_DEPTH = 16
 LEAF_TABLES = ("conversation_messages", "ai_chat_messages")
+_ANY_REVIEW = object()
 
 
 class EvidenceBinding(StrictModel):
@@ -439,22 +440,38 @@ class EvidenceResolver:
     def qualify(self, fact_id: str, *, reviews: "EvidenceReviewStore") -> Qualification:
         """Resolve now and load an authoritative stored review, never caller flags."""
         try:
-            if reviews.binding != self.binding or reviews.canonical_file_revision != self._file_revision():
-                raise PolicyError("review_database_binding")
-            with self._read() as (conn, floor):
-                # Persist even observations that subsequently withhold, so a
-                # protection/restore cycle cannot revive a previously stale review.
-                reviews._observe_clock(conn)
-                snapshot, rows = self._snapshot(conn, floor, fact_id, enforce_floor=True)
-                review = reviews._load_current(fact_id)
-                if review.owner_id != self.binding.owner_id or review.snapshot != snapshot:
-                    raise PolicyError("review_stale")
-                self._eligible(conn, snapshot, rows, review)
-                return Qualification(verdict="qualified", reason_code="owner_reviewed_current_evidence",
-                    evidence=QualifiedEvidence(family="owner_stated_fact/v1", snapshot=snapshot, review_id=review.review_id,
-                        review_revision=digest(review.model_dump()), classifications=review.classifications, execution_enabled=False))
+            return self.with_qualified(fact_id, reviews=reviews, callback=lambda evidence, _rows:
+                Qualification(verdict="qualified", reason_code="owner_reviewed_current_evidence", evidence=evidence))
         except PolicyError as exc:
             return Qualification(verdict="withheld", reason_code=exc.code, evidence=None)
+
+    def _qualified_bundle(self, conn, floor, fact_id, reviews, review_db):
+        snapshot, rows = self._snapshot(conn, floor, fact_id, enforce_floor=True)
+        review = reviews._current_in(review_db, fact_id)
+        if review is None:
+            raise PolicyError("owner_review_required")
+        if review.owner_id != self.binding.owner_id or review.snapshot != snapshot:
+            raise PolicyError("review_stale")
+        self._eligible(conn, snapshot, rows, review)
+        return QualifiedEvidence(family="owner_stated_fact/v1", snapshot=snapshot, review_id=review.review_id,
+            review_revision=digest(review.model_dump()), classifications=review.classifications, execution_enabled=False), rows
+
+    def with_qualified(self, fact_id: str, *, reviews: "EvidenceReviewStore", callback):
+        """Run trusted server code with current private evidence under both gates.
+
+        This callback is never deserialized from a request. The service assumes
+        the configured single writer and shared node write gate; bypassing them
+        with an external WAL writer is outside that transaction guarantee.
+        The callback must not mutate canonical data or reviews. It must perform
+        its own final policy/authority checks before releasing any output.
+        """
+        if reviews.binding != self.binding or reviews.canonical_file_revision != self._file_revision():
+            raise PolicyError("review_database_binding")
+        with self._read() as (conn, floor):
+            reviews._observe_clock(conn)
+            with reviews._db() as review_db:
+                evidence, rows = self._qualified_bundle(conn, floor, fact_id, reviews, review_db)
+                return callback(evidence, rows)
 
 
 class EvidenceReviewStore:
@@ -464,10 +481,11 @@ class EvidenceReviewStore:
     object. File identity and persisted resource identity are checked every open.
     It is not an integrity boundary against a privileged host administrator.
     """
-    def __init__(self, path: Path, *, resolver: EvidenceResolver):
-        _owner(resolver.binding)
+    def __init__(self, path: Path, *, resolver: EvidenceResolver, _existing_only=False):
+        if not _existing_only:
+            _owner(resolver.binding)
         path = Path(path)
-        _checked_file(path, code="review_database_binding", may_create=True)
+        _checked_file(path, code="review_database_binding", may_create=not _existing_only)
         if path == resolver.path:
             raise PolicyError("review_database_binding")
         self.path, self.binding = path, resolver.binding
@@ -475,6 +493,8 @@ class EvidenceReviewStore:
         self.canonical_file_revision = resolver._file_revision()
         try:
             try:
+                if _existing_only:
+                    raise FileExistsError()
                 fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, 0o600)
                 newly_created = True
             except FileExistsError:
@@ -562,7 +582,8 @@ class EvidenceReviewStore:
         self._highest_generation = generation
 
     def record_review(self, *, resolver: EvidenceResolver, review_id: str, expected_snapshot: EvidenceSnapshot,
-                      classifications: list[ReviewedClassification], reviewed_at: int) -> OwnerEvidenceReview:
+                      classifications: list[ReviewedClassification], reviewed_at: int,
+                      expected_current_review_revision=_ANY_REVIEW, _server_timestamp_retry=False) -> OwnerEvidenceReview:
         _owner(self.binding)
         if resolver.binding != self.binding or resolver._file_revision() != self.canonical_file_revision:
             raise PolicyError("review_database_binding")
@@ -580,23 +601,49 @@ class EvidenceReviewStore:
                 old = db.execute("SELECT review_json,active FROM fact_reviews WHERE review_id=?", (review.review_id,)).fetchone()
                 raw = canonical_bytes(review.model_dump()).decode("ascii")
                 if old:
-                    if old[0] != raw or old[1] != 1:
+                    stored = OwnerEvidenceReview.parse(old[0])
+                    same = (stored.model_dump(exclude={"reviewed_at"}) == review.model_dump(exclude={"reviewed_at"})
+                            if _server_timestamp_retry else old[0] == raw)
+                    if not same or old[1] != 1:
                         raise PolicyError("review_id_conflict")
-                    return review
+                    return stored
+                if expected_current_review_revision is not _ANY_REVIEW:
+                    current_review = self._current_in(db, current.fact_id)
+                    actual = digest(current_review.model_dump()) if current_review else None
+                    if actual != expected_current_review_revision:
+                        raise PolicyError("review_conflict")
                 db.execute("UPDATE fact_reviews SET active=0 WHERE fact_id=?", (current.fact_id,))
                 db.execute("INSERT INTO fact_reviews VALUES(?,?,?,1)", (review.review_id, current.fact_id, raw))
             return review
 
-    def revoke_review(self, review_id: str) -> None:
+    def revoke_review(self, review_id: str, *, fact_id=None, expected_review_revision=_ANY_REVIEW) -> OwnerEvidenceReview | None:
         _owner(self.binding)
         with self._db() as db:
+            if expected_review_revision is not _ANY_REVIEW:
+                row = db.execute("SELECT review_json,active FROM fact_reviews WHERE review_id=? AND fact_id=?", (review_id, fact_id)).fetchone()
+                if row is None:
+                    raise PolicyError("review_unknown")
+                review = OwnerEvidenceReview.parse(row[0])
+                if digest(review.model_dump()) != expected_review_revision:
+                    raise PolicyError("review_conflict")
+                current_review = self._current_in(db, fact_id)
+                if current_review is not None and current_review.review_id != review_id:
+                    raise PolicyError("review_conflict")
             changed = db.execute("UPDATE fact_reviews SET active=0 WHERE review_id=?", (review_id,))
             if changed.rowcount != 1:
                 raise PolicyError("review_unknown")
+            return review if expected_review_revision is not _ANY_REVIEW else None
+
+    @staticmethod
+    def _current_in(db, fact_id):
+        rows = db.execute("SELECT review_json FROM fact_reviews WHERE fact_id=? AND active=1", (fact_id,)).fetchmany(2)
+        if len(rows) > 1:
+            raise PolicyError("review_ambiguous")
+        return OwnerEvidenceReview.parse(rows[0][0]) if rows else None
 
     def _load_current(self, fact_id: str) -> OwnerEvidenceReview:
         with self._db() as db:
-            rows = db.execute("SELECT review_json FROM fact_reviews WHERE fact_id=? AND active=1", (fact_id,)).fetchmany(2)
-            if len(rows) != 1:
+            review = self._current_in(db, fact_id)
+            if review is None:
                 raise PolicyError("owner_review_required")
-            return OwnerEvidenceReview.parse(rows[0][0])
+            return review

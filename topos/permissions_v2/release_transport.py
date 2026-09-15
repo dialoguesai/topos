@@ -1,0 +1,90 @@
+"""Dedicated bounded WebSocket dispatch; no generic late-response queue.
+
+Only ControlPlaneClient's actual relay socket calls this function. HTTP/MCP
+dispatch cannot inject a socket or a trusted callback through a JSON message.
+"""
+from __future__ import annotations
+
+import asyncio
+import os
+import threading
+import time
+
+from topos.principal import THIRD_PARTY, reset_principal, set_principal
+from topos.relay_stamp import verify_relay_stamp
+
+from .canonical import PolicyError, canonical_bytes
+from .release import SourceMessageRelease
+from .runtime import get_runtime
+
+MESSAGE_TYPE = "permissions_v2_source_read"
+SEND_TIMEOUT_SECONDS = 5
+
+
+async def dispatch_source_message(ws, message) -> None:
+    """Keep all node evidence/authority gates held through the actual WS send.
+
+    The service worker waits for completion of ws.send on the socket's loop.
+    Gate ownership stays on that worker. No outbox, retry, or reconnect sends a
+    disclosure later. On cancellation we drain the worker before returning.
+    """
+    request_id = message.get("id")
+    cancelled = threading.Event()
+    try:
+        if os.environ.get("TOPOS_PERMISSIONS_V2_SOURCE_RELEASE_ENABLED", "").lower() != "true":
+            raise PolicyError("source_release_disabled")
+        principal = verify_relay_stamp(message)
+        if principal is None or principal.cls != THIRD_PARTY or principal.channel != "cp_relay":
+            raise PolicyError("recipient_relay_required")
+        body = message.get("payload")
+        if not isinstance(body, dict) or set(body) != {"envelope", "intent"}:
+            raise PolicyError("release_payload_invalid")
+        loop = asyncio.get_running_loop()
+
+        def work():
+            token = set_principal(principal)
+            try:
+                runtime = get_runtime()
+                review_service = runtime.evidence_reviews(require_existing=True)
+                adapter = SourceMessageRelease(protocol=runtime.protocol, resolver=review_service.resolver,
+                    reviews=review_service.reviews, clock=lambda: int(time.time()))
+
+                def send(result, output):
+                    # This coroutine is the transport operation, not a queued
+                    # future response. Expiry is sampled again after scheduling.
+                    async def transmit():
+                        if cancelled.is_set() or result["expires_at"] <= int(time.time()):
+                            raise PolicyError("release_cancelled_or_expired")
+                        frame = {"id": request_id, "type": MESSAGE_TYPE, "status": "ok",
+                                 "payload": {"result": result, "output": output}}
+                        await asyncio.wait_for(ws.send(canonical_bytes(frame).decode("ascii")), SEND_TIMEOUT_SECONDS)
+                    # wait_for owns cancellation; the worker must not abandon a
+                    # still-running send and release its write/review gates.
+                    asyncio.run_coroutine_threadsafe(transmit(), loop).result()
+
+                if cancelled.is_set():
+                    raise PolicyError("release_cancelled_or_expired")
+                adapter.dispatch(envelope=body["envelope"], payload=body["intent"], request_id=request_id, send=send)
+            finally:
+                reset_principal(token)
+
+        worker = asyncio.create_task(asyncio.to_thread(work))
+        try:
+            await asyncio.shield(worker)
+        except asyncio.CancelledError:
+            cancelled.set()
+            try:
+                await asyncio.shield(worker)
+            except Exception:
+                pass
+            raise
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        # Recipient errors reveal no fact existence, review/protection state,
+        # credential/config paths, source text, or exception diagnostics.
+        error = {"id": request_id, "type": MESSAGE_TYPE, "status": "error", "code": 403, "error": "permission_denied"}
+        try:
+            await asyncio.wait_for(ws.send(canonical_bytes(error).decode("ascii")), SEND_TIMEOUT_SECONDS)
+        except Exception:
+            pass

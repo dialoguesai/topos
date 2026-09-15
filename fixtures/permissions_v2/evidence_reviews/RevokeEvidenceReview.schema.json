@@ -1,0 +1,31 @@
+{
+  "additionalProperties": false,
+  "properties": {
+    "expected_review_revision": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Expected Review Revision",
+      "type": "string"
+    },
+    "fact_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Fact Id",
+      "type": "string"
+    },
+    "review_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Review Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "fact_id",
+    "review_id",
+    "expected_review_revision"
+  ],
+  "title": "RevokeEvidenceReview",
+  "type": "object"
+}

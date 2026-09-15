@@ -1,9 +1,13 @@
 # First-family evidence qualification (P2b)
 
-`evidence.py` implements an unmounted, node-local qualification step for the
+`evidence.py` implements a node-local qualification step for the
 `owner_stated_fact/v1` family. It does not register an executable data form, issue
 a grant, run a natural-language evaluator, or return fact/source contents. Every
 qualified result explicitly carries `execution_enabled: false`.
+
+The separate `evidence_reviews.py` owner service now supplies disabled-by-default
+preview/read/review/revoke handlers. `QualifiedEvidence` itself remains processing
+metadata; another adapter must independently authorize any executable output.
 
 ## What can qualify
 
@@ -126,3 +130,66 @@ input use and output release, registered output form, vocabulary mappings, and
 fresh final authority/evidence checks. Node final checks plus CP final forwarding
 checks must enforce cancellation/revocation; this module makes no immediate
 cross-service revocation claim and mounts no query route.
+
+## Owner review service and wire contract
+
+The four owner-only relay types are `permissions_v2_evidence_preview`,
+`permissions_v2_evidence_review_read`, `permissions_v2_evidence_review_record`, and
+`permissions_v2_evidence_review_revoke`. Every payload has exactly
+`{binding: EvidenceBinding, request: <request model>}`. The CP must inject the
+configured binding, never forward a recipient-selected one. Engine handlers check
+the exact owner principal and full node/resource binding before opening the store
+or returning content. Both UDS and signed CP relay require an explicit matching
+`acting_user`; client headers confer no authority.
+
+Authoritative request/response JSON schemas live in
+`fixtures/permissions_v2/evidence_reviews/`. A successful handler's `payload` is
+the corresponding response model directly. Preview includes exact SQLite cells:
+null has its own tag; integers use decimal strings, floats use `float.hex()`,
+blobs use lowercase hex, and text is preserved verbatim. This representation
+does not relax the policy contract's prohibition on JSON floats. Preview is capped
+at 512 KiB and does not truncate an oversized row into reviewable evidence.
+
+Owners can inspect existing owner-only content without changing its disclosure.
+Incomplete lineage returns only the root record and a bounded reason, with
+`snapshot=null`; the UI must not offer a review of a nonexistent complete snapshot.
+Every new classification remains an explicit owner decision. Neither legacy
+confirmation nor viewing the preview is review consent.
+
+Recording requires the exact inspected snapshot and the expected current review
+hash (or explicit null when no current review exists). Timestamps come from the
+server. Retrying the identical active review ID/content returns the original
+review, including its timestamp; changing its contents or replaying a revoked ID
+conflicts. Revoke binds fact ID, review ID and review hash, so an old UI cannot
+revoke a replacement review. Responses include authoritative current review state
+and qualification, including explicit absence after revocation. Deleted facts can
+still have their reviews revoked. Conflict errors use 409, unknown records/reviews
+404, invalid payloads 400, wrong owner/target 403, and unavailable/disabled storage
+503. Oversized previews use 413. Error responses contain no candidate contents.
+
+## Runtime enrollment and existing-only recipient access
+
+Owner review integration requires `TOPOS_PERMISSIONS_V2_ENABLED=true`, the paired
+node configuration, `TOPOS_PERMISSIONS_V2_EVIDENCE_REVIEWS_ENABLED=true`, and an
+explicit `evidence_review_store_path` in the private canonical database's
+`permissions-v2` directory. The path cannot alias the node key, config, ledger or
+lock. The default is disabled and unconfigured.
+
+The first authorized owner preview/read enrolls the private store. A separate
+private durable marker is written as pending before store creation, then activated
+with the canonical/resource/store identity only after enrollment succeeds. Crash
+interruption, missing marker, missing store, identity loss, file replacement or
+protection-clock rollback requires explicit recovery and is never silently fixed.
+The marker and store together do not provide protection against a privileged host
+deleting or rolling back all trusted durable state at once.
+
+Trusted server adapters use `Runtime.evidence_reviews(require_existing=True)`.
+This never enrolls and exposes only an already pinned service; it does not grant
+recipient access to owner preview/read methods. `EvidenceResolver.with_qualified`
+calls a trusted in-process callback with current qualification and private rows
+while holding the canonical read transaction, the node write gate and a private
+review write transaction. The callback must finish its own final policy checks
+and immediate transport delivery before returning, and must not mutate evidence
+or reviews. The transaction guarantee assumes the configured single writer and
+shared write gate; an external writer bypassing that gate in SQLite WAL mode is
+outside this guarantee. No serialized qualification is accepted as authorization.
