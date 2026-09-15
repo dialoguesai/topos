@@ -2,7 +2,10 @@
 
 Status: next implementation plan, not an enabled capability. This document is
 based on the signed P2b implementation at `65b09a1` and exclusion hardening at
-`18ef2af`. It creates no coverage record, source mapping, grant, classifier input
+`18ef2af`. The structural/membership split (`fact_eligibility.py`) and the
+offline owner-shadow bridge (`experiments/fact_bridge.py`, see
+`docs/testing/PERMISSIONS_V2_EXPERIMENTS.md`) are now implemented; coverage,
+copy enrollment, a genuine copied positive and any active B capability are not. It creates no coverage record, source mapping, grant, classifier input
 or release exception. The current owner-only, record/entity Off-limits and
 intelligence-exclusion floors remain intact. The first target is one existing
 scoped, current, explicitly owner-authored `prefers` fact and its exact reviewed

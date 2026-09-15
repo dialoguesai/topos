@@ -39,8 +39,9 @@ Tests compare complete canonical decision bytes and error types/codes across
 independent source/table/window selections, a three-level graph, temporal
 unknowns, exclusion masking, clause permutations and invalid/stale bundles.
 
-A future offline A/B bridge still needs its own closed service-captured input,
-owner-approved processor/policy capsule, bounded surfaces and current-state
-requalification. It must reject mandatory unknowns before model processing;
-this refactor deliberately does not turn the pure contexts into that gate.
+The offline A/B bridge (`experiments/fact_bridge.py`) now consumes these
+contexts: it captures its input from the real review services under their
+gates, requires an owner-approved processor/policy capsule, bounds the inspected
+surfaces, rejects mandatory unknowns before any model call and requalifies the
+capture afterwards. The pure contexts remain consistency results, not that gate.
 See [COPIED_POSITIVE_PLAN.md](COPIED_POSITIVE_PLAN.md#direct-prose-shares-this-boundary-not-raw-export-authority).

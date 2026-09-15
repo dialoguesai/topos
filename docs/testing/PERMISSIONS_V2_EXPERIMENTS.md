@@ -113,6 +113,53 @@ Provider/model failures expose bounded codes and suppress candidate-bearing
 exception chains. Detailed observations remain node-side; this package adds no
 logging or persistence of prompts, candidate bodies or denied samples.
 
+## Owner-shadow fact bridge over the real P2b services
+
+`experiments/fact_bridge.py` is the closed offline bridge the copied-positive
+plan asked for, grammar `topos-offline-qualified-fact-experiment/v1`. It is
+still unmounted: no serving module imports the experiments package (a test
+asserts this), it has no ledger issuance, no send path and no recipient arm
+selector. Its inputs are the real `ProjectionReviewService` (resolver, owner
+evidence-review store, owner output-review store), a verified `Binding`, a
+clock and an operator-injected local transport.
+
+The capsule pairs the signed-grammar P2b policy with its prose twin: inclusion
+identifiers are exactly the policy's permit rule identifiers and exclusions its
+deny rule identifiers, so both arms answer over one clause universe. The
+processor pin names the exact local model, model revision, prompt revision and
+byte/token budgets the owner approved. The capsule digest detects edits; it
+does not authenticate the owner.
+
+One closure is captured under the live gates through `with_reviewed`, where
+`prepare_fact_eligibility` supplies the mandatory structural floor and the
+inspected surfaces are read: each fact artifact as its subject/predicate/value
+and each terminal message as its content, at most 16 units of 16,000
+characters; over budget withholds instead of truncating. Arm A is the exact
+serving evaluator over that capture. Arm B stops before any model call on a
+terminal reason, unknown fact validity, an inclusion with unknown or
+out-of-window leaf time, or no structurally eligible inclusion; it then runs
+evidence_use over the whole closure and output_release over the exact scalar,
+offering only eligible inclusions and only exclusions whose own event window is
+not already false. Reviewed labels, owner-only flags, record identifiers,
+revisions and authority never enter the prompt. A matched exclusion dominates;
+invented clause identifiers, missing projection identifiers and malformed or
+oversized answers withhold with bounded reason codes and no rule fallback.
+
+After a model call the closure, both review revisions, protection state,
+policy time and structure are captured again; an unchanged capture is a
+retained observation (`requalified`), any change or withholding discards it
+(`not_retained`) and evicts its cache entries. Results carry decision metadata
+only and always say `execution_enabled: false` and `serving_adapter: null`.
+`tests/permissions_v2/test_fact_bridge.py` covers both arms, prompt hygiene,
+every structural stop, exclusion precedence, output-stage clause narrowing,
+window masks, five mid-call changes, cache isolation, withheld evidence, capsule
+closure and the import boundary with fake transports (36 cases). An exclusion
+with unknown event time cannot coexist with an eligible inclusion, because an
+inclusion needs every leaf known and in window; that branch is defensive only.
+The host-side measurement (`scripts/permissions_beta/run_fact_bridge.py` in
+the control-plane repository) runs both arms on scratch corpora against the
+pinned local model; its report is orchestration evidence, not accuracy.
+
 ## Run and verify
 
 With the scratch/offline environment and live DB tripwire from
