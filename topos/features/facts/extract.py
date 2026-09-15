@@ -29,18 +29,25 @@ _OWNER_ASSERT_KWARGS: Dict[str, Any] = (
 
 
 def _owner_entity_id(conn: sqlite3.Connection) -> str:
-    row = conn.execute(
+    selection = (
         "SELECT entity_id FROM entities WHERE is_self=1"
         " ORDER BY (SELECT COUNT(*) FROM signal_objects o WHERE o.object_type='fact'"
         "   AND o.object_key LIKE 'fact:' || entities.entity_id || ':%') DESC,"
         " entity_id ASC LIMIT 1"
-    ).fetchone()
+    )
+    row = conn.execute(selection).fetchone()
     if row:
         return str(row[0])
     from ..entities.resolver import EntityResolver
 
     resolver = EntityResolver(conn)
     with with_db_write():
+        # Another ingest may have created the initial self entity after our
+        # empty read. Recheck under the same gate as creation and commit; keep
+        # the existing fact-bearing selector and all historical self rows.
+        row = conn.execute(selection).fetchone()
+        if row:
+            return str(row[0])
         entity_id = resolver._create_entity("Owner", "person", is_self=True)
         commit_connection(conn)
     return entity_id
