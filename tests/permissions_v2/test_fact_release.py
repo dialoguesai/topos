@@ -163,6 +163,29 @@ def test_output_type_substitution_fails_node_proof(fact_setup):
         with pytest.raises(PolicyError):verify_node_result(result,trusted_keys=keys,envelope=envelope,output=bad,now=AS_OF)
 
 
+@pytest.mark.parametrize("floor",["diverged","unpublished"])
+def test_release_requires_the_resolver_floor_it_read_to_equal_signed_protection(fact_setup,monkeypatch,floor):
+    # The canonical read lock keeps protection writes out of the callback, so a
+    # floor that differs from unchanged signed authority can only come from the
+    # resolver's published floor itself; stub what the callback reads.
+    envelope,payload=issue(fact_setup)
+    resolver=fact_setup[0].projections.resolver
+    published=[]
+    class DivergedFloor(type(resolver)):
+        @property
+        def current_floor(self):
+            real=self.__dict__.get("current_floor")
+            published.append(real)
+            return None if real is None or floor=="unpublished" else "f"*64
+        @current_floor.setter
+        def current_floor(self,value):
+            self.__dict__["current_floor"]=value
+    monkeypatch.setattr(resolver,"__class__",DivergedFloor)
+    with pytest.raises(PolicyError,match="authority_stale"):
+        dispatch(fact_setup,envelope,payload,send=lambda *_:pytest.fail("output sent under a mismatched floor"))
+    assert published==[envelope.protection_revision] and resolver.__dict__["current_floor"] is None
+
+
 def test_callback_holds_canonical_and_both_review_writes(fact_setup):
     envelope,payload=issue(fact_setup)
     def send(result,output):

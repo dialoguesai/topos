@@ -148,10 +148,11 @@ correlated rules, descendant-aware exclusions and revision substitution.
 
 The dedicated node transport now accepts `permissions_v2_fact_read` frames with
 exact `{envelope, intent}` payloads, where intent is `{query: "fact:<id>"}`. Its
-signed request type is `permissions.v2.fact.read`; `FactEnvelopeBody` and
-`SignedFactEnvelope` require `permissions-beta/p2b-v1`. Concrete P2a parsers retain
-their original closed contracts. An explicit registry dispatches the two known
-profiles and rejects unknown profiles without fallback. The mutation/ACK and
+signed request type is `permissions.v2.fact.read`; `FactAuthorityBinding`,
+`FactEnvelopeBody` and `SignedFactEnvelope` accept exactly `permissions-beta/p2b-v1`
+or `permissions-beta/p2b-v2` (`FactCapability`). Concrete P2a parsers retain
+their original closed contracts. An explicit registry dispatches the known P2a and
+P2b capability literals and rejects unknown ones without fallback. The mutation/ACK and
 node-result schemas carry the corresponding closed authority union; canonical
 signing domains and old P2a golden signature bytes remain unchanged.
 

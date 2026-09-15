@@ -177,18 +177,30 @@ def test_temporal_restamp_stales_reviews_and_cannot_reuse_the_old_snapshot(timed
         decide(timed, stated_day_policy(timed), supplied=supplied)
 
 
-def test_correction_closes_the_old_row_and_the_replacement_needs_its_own_review(timed):
+def test_owner_correction_closes_the_stated_day_row_and_the_replacement_needs_its_own_review(timed):
+    from topos.features.facts.verdicts import edit_fact
     set_valid_from(timed, ELAPSED)
-    assert decide(timed, stated_day_policy(timed)).verdict == "permit"
+    raw = stated_day_policy(timed)
+    supplied = bundle(timed)
+    assert decide(timed, raw, supplied=supplied).verdict == "permit"
+    # 'prefers' is multi-valued, so FactStore alone never supersedes it; the owner
+    # edit verdict is the path that closes the old value.
     with sqlite3.connect(timed[0].path) as conn:
-        replacement = FactStore(conn).assert_fact(subject_entity_id="self", predicate="prefers", object_value="science books",
-            disclosure="scoped", asserted_by="owner", valid_from=PENDING,
-            source_refs=[{"table": "conversation_messages", "dataset_id": "dataset-1", "source_id": "source-1", "record_id": "message-1"}])
+        corrected = edit_fact(conn, timed[2], object_value="science books", note="synthetic correction")
         rows = {row[0]: row for row in conn.execute("SELECT object_id, valid_from, valid_to FROM signal_objects WHERE object_type='fact'")}
-    assert rows[timed[2]][1] == ELAPSED and rows[replacement["object_id"]][1] == PENDING
-    if rows[timed[2]][2] is not None:
-        assert timed[0].qualify(timed[2], reviews=timed[1]).verdict == "withheld"
-    assert timed[0].qualify(replacement["object_id"], reviews=timed[1]).verdict == "withheld"
+    replacement = corrected["object_id"]
+    assert corrected["superseded_object_id"] == timed[2] and replacement != timed[2] and set(rows) == {timed[2], replacement}
+    assert rows[timed[2]][1] == ELAPSED and rows[timed[2]][2] is not None
+    assert rows[replacement][2] is None
+    assert timed[0].qualify(timed[2], reviews=timed[1]).reason_code == "evidence_deleted"
+    root = next(ref for ref in supplied["evidence"].snapshot.artifacts if ref.identity.record_id == timed[2])
+    supplied["rows"][_key(root.identity)]["valid_to"] = rows[timed[2]][2]
+    with pytest.raises(PolicyError, match="fact_policy_revision"):
+        decide(timed, raw, supplied=supplied)
+    assert timed[0].qualify(replacement, reviews=timed[1]).reason_code == "owner_review_required"
+    attest((timed[0], timed[1], replacement), review_id="review-replacement")
+    assert timed[0].qualify(replacement, reviews=timed[1]).verdict == "qualified"
+    assert timed[0].qualify(timed[2], reviews=timed[1]).reason_code == "evidence_deleted"
 
 
 @pytest.mark.parametrize("change", ["missing_block", "semantics", "precision", "timezone_basis", "current_from", "instants",

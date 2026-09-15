@@ -117,9 +117,10 @@ logging or persistence of prompts, candidate bodies or denied samples.
 
 `experiments/fact_bridge.py` is the closed offline bridge the copied-positive
 plan asked for, grammar `topos-offline-qualified-fact-experiment/v1`. It is
-still unmounted: no serving module imports the experiments package (a test
-asserts this), it has no ledger issuance, no send path and no recipient arm
-selector. Its inputs are the real `ProjectionReviewService` (resolver, owner
+still unmounted: no module under `topos/` outside the experiments package
+imports it (a test parses every such module's absolute, relative and
+`import_module` string imports), it has no ledger issuance, no send path and no
+recipient arm selector. Its inputs are the real `ProjectionReviewService` (resolver, owner
 evidence-review store, owner output-review store), a verified `Binding`, a
 clock and an operator-injected local transport.
 
@@ -127,7 +128,7 @@ The capsule pairs the signed-grammar P2b policy (either the exact-instant v1
 class or the separate stated-day `permissions-beta/p2b-v2` class; the rules
 arm evaluates whichever the owner approved) with its prose twin: inclusion
 identifiers are exactly the policy's permit rule identifiers and exclusions its
-deny rule identifiers, so both arms answer over one clause universe. The
+deny rule identifiers, so both arms start from one clause universe. The
 processor pin names the exact local model, model revision, prompt revision and
 byte/token budgets the owner approved. The capsule digest detects edits; it
 does not authenticate the owner.
@@ -142,25 +143,50 @@ terminal reason, unknown fact validity, an inclusion with unknown or
 out-of-window leaf time, or no structurally eligible inclusion; it then runs
 evidence_use over the whole closure and output_release over the exact scalar,
 offering only eligible inclusions and only exclusions whose own event window is
-not already false. Reviewed labels, owner-only flags, record identifiers,
-revisions and authority never enter the prompt. A matched exclusion dominates;
-invented clause identifiers, missing projection identifiers and malformed or
-oversized answers withhold with bounded reason codes and no rule fallback.
+not already false. Each offered exclusion carries its rule's declared sources
+and tables and the unit IDs it may match: at evidence_use the units the
+structure scoped to that rule, at output_release only the output. The owner's
+original prose restates every clause, so it is sent only when every inclusion
+is eligible and every exclusion offered; otherwise `original` is null and the
+model sees only the offered clause texts and their examples. Reviewed labels,
+owner-only flags, record identifiers, revisions and authority never enter the
+prompt. A matched exclusion dominates. `semantic_deny` always names the
+exclusions it matched; a deny naming no clause is recorded separately as
+`no_semantic_match`, and a deny naming only an inclusion withholds as
+`clause_binding`. Invented clause identifiers, missing projection identifiers
+and malformed or oversized answers withhold with bounded reason codes and no
+rule fallback.
 
-After a model call the closure, both review revisions, protection state,
-policy time and structure are captured again; an unchanged capture is a
-retained observation (`requalified`), any change or withholding discards it
-(`not_retained`) and evicts its cache entries. Results carry decision metadata
-only and always say `execution_enabled: false` and `serving_adapter: null`.
+A model call is counted whenever the transport was awaited, including a call
+that times out, errors or answers with the wrong model identity. After every
+such call, and before the next stage is sent, the closure, both review
+revisions, protection state, policy time and structure are captured again. Any
+change or withholding stops the run with `requalification_failed`
+(`not_retained`), evicts the capture's cache entries and makes no further model
+call; nothing is cached before it requalifies. A run whose last call
+requalified is `requalified`; a run with no call (structural stop or cache hit)
+stays `captured_under_gates`. Results carry decision metadata only and always
+say `execution_enabled: false` and `serving_adapter: null`.
 `tests/permissions_v2/test_fact_bridge.py` covers both arms, prompt hygiene,
-every structural stop, exclusion precedence, output-stage clause narrowing,
-window masks, five mid-call changes, cache isolation, withheld evidence, capsule
-closure and the import boundary with fake transports (36 cases). An exclusion
-with unknown event time cannot coexist with an eligible inclusion, because an
-inclusion needs every leaf known and in window; that branch is defensive only.
+every structural stop, exclusion precedence and scope, masked and narrowed
+clauses keeping the original prose out, output-stage clause narrowing, window
+masks, five mid-call changes during either model call (a change during the
+first stops before the second call; one during the second evicts the cached
+first-stage decision), post-call identity mismatch, cache isolation, withheld
+evidence, capsule closure and the import boundary with fake transports (47
+cases). An exclusion with unknown
+event time cannot coexist with an eligible inclusion, because an inclusion
+needs every leaf known and in window; that branch is defensive only.
+
 The host-side measurement (`scripts/permissions_beta/run_fact_bridge.py` in
-the control-plane repository) runs both arms on scratch corpora against the
-pinned local model; its report is orchestration evidence, not accuracy.
+the control-plane repository) runs both arms on eight synthetic scratch
+corpora, five of them designed to deny, against the pinned local model. Each
+arm captures under the gates itself; the runner refuses a record whose arms
+report different bundle revisions. It refuses any uncommitted change under
+the engine's `topos/` and `shared/` packages, the two engine trees the measured
+path loads (storage migrations import `shared` through source definitions);
+a runner test fails if it loads an engine module outside them. Its report is
+orchestration evidence, not accuracy.
 
 ## Run and verify
 
@@ -187,7 +213,8 @@ accuracy, real lineage certification, data disclosure safety or a winning arm**.
 A separate actual local-model pilot exercised eight public synthetic examples;
 its audit record is `NL_SYNTHETIC_EXPERIMENT.md`. That pilot establishes neither
 held-out classifier quality nor copied-corpus eligibility. Owner adjudication,
-relevance/utility/false-permit metrics, the real qualified-input bridge and all
-eight actual client/arm cells remain outstanding. See the versioned
+relevance/utility/false-permit metrics, copied-corpus inputs to the offline
+fact bridge above (it runs only on scratch corpora), any mounted shadow adapter
+and all eight actual client/arm cells remain outstanding. See the versioned
 [copied-positive and prose-bridge plan](../../topos/permissions_v2/COPIED_POSITIVE_PLAN.md)
 for the next bounded slice; current signed P2b serving uses hard rules only.

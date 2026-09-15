@@ -212,14 +212,36 @@ def test_complete_error_and_stale_authority_precedence(timed, bad):
     assert outcome_value[0] == ("decision" if bad == "validity" else "error")
 
 
+def guard_predicate_evaluation(patch):
+    """Fail on any predicate evaluation: every bound evaluate_predicate and any inline Atom read."""
+    import sys
+    from topos.permissions_v2 import contract
+    original = contract.evaluate_predicate
+    sites = [module for name, module in list(sys.modules.items())
+             if name.startswith("topos.") and getattr(module, "evaluate_predicate", None) is original]
+    for module in sites:
+        patch.setattr(module, "evaluate_predicate", lambda *_: pytest.fail("membership evaluated during preparation"))
+    def atom_read(self, name):
+        if name in contract.Atom.model_fields and name != "kind":
+            pytest.fail("membership evaluated during preparation")
+        return object.__getattribute__(self, name)
+    patch.setattr(contract.Atom, "__getattribute__", atom_read)
+    return {module.__name__ for module in sites}
+
+
 def test_structural_preparation_never_evaluates_membership_and_captures_frozen_masks(timed, monkeypatch):
-    import topos.permissions_v2.fact_policy as current
+    from topos.permissions_v2 import contract
     supplied = bundle(timed); raw = policy(timed)
     raw["rules"] = [rule("excluded-by-membership", domain="health"), rule("deny", "deny")]
     parsed = FactPolicyV2.parse(raw)
-    monkeypatch.setattr(current, "evaluate_predicate", lambda *_: pytest.fail("membership evaluated during preparation"))
-    checked_policy, _, _, structure = prepare_fact_eligibility(policy=parsed, **supplied,
-        binding=Binding.parse(raw["binding"]), request_as_of=AS_OF, now=AS_OF)
+    with monkeypatch.context() as patch:
+        sites = guard_predicate_evaluation(patch)
+        assert {"topos.permissions_v2.contract", "topos.permissions_v2.fact_policy"} <= sites
+        sentinel = parsed.rules[0].release.predicate
+        with pytest.raises(pytest.fail.Exception): contract.evaluate_predicate(sentinel, {"domain": ["health"]})
+        with pytest.raises(pytest.fail.Exception): sentinel.values
+        checked_policy, _, _, structure = prepare_fact_eligibility(policy=parsed, **supplied,
+            binding=Binding.parse(raw["binding"]), request_as_of=AS_OF, now=AS_OF)
     assert [item.rule_index for item in structure.clauses] == [0, 1]
     assert isinstance(structure.clauses[0], PermitStructure) and isinstance(structure.clauses[1], DenyStructure)
     assert structure.clauses[0].leaf_times == (True,)

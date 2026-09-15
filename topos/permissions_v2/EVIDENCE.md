@@ -87,12 +87,19 @@ Off-limits and record-tombstone state of every closure record, every fact
 tombstone key its facts could match, and the latest clock-v3 event that
 touched any of them. Protecting, excluding or lifting anything else on the
 node leaves every unaffected review current, while any event touching the
-closure, including a protect-then-lift with no intervening read, changes it
-permanently. Entity Off-limits and entity exclusions remain node-wide inputs
-until entity coverage exists. Signed authority still binds the node-wide
+closure, including a protect-then-lift with no intervening read, changes it.
+That memory lives in the clock v3 event log, which has no delete or update guard
+yet, so deleting its rows can make such a review current again (open issue
+F07). Entity Off-limits and entity exclusions remain node-wide inputs until
+entity coverage exists. Signed authority still binds the node-wide
 revision of the read that serves it, checked by the release adapters.
 
 ## Owner review storage and trust
+
+Open issues F01, F02 and F07 cited in this document come from the 15 September
+audit. They are reproduced on synthetic databases and listed, with their
+mitigations, under "Known open issues" in the control plane's
+`docs/testing/PERMISSIONS_BETA_RELEASE_CHECKPOINT_2026-09-14.md`.
 
 `EvidenceReviewStore` is a separately configured private SQLite service dependency;
 `qualify` never accepts a request-supplied review or a `reviewed=true` flag. Creating
@@ -104,18 +111,32 @@ The store requires an absolute path, a private file owned by the process user,
 and no symlink anywhere in its parent path. It persists a random store identity,
 the durable canonical identity and the resource identity inside the file and
 checks them on every open; the enrolled runtime additionally pins that store
-identity and an authority digest of every review row in its external marker, so
-a different store at the enrolled path or an older store restored in place is
-refused. Device and inode numbers are compared only within one process: a bind
-mount renumbers them across a container VM restart (observed 2026-09-15), which
-is not a change of database. Replacing either database with a different one or
-tampering with the stored identity withholds.
-The store persists its observed protection-clock ID and highest generation; a
-seen rollback is rejected during use and across a normal service restart. A new
-clock is not silently accepted. Review IDs are immutable and cannot be replayed
-after revocation; one current review per fact is loaded authoritatively.
-First enrollment requires an exclusively created new file. Missing schemas or
-identity/clock metadata in an existing file are never silently recreated.
+identity and an authority digest of every review row in its external marker. A
+different store at the enrolled path is refused, and so is an older store file
+restored alone whose review rows differ from the enrolled digest (for example a
+copy from before a revocation). An older file with the same review rows is not
+refused: the marker does not carry the store's protection-generation floor, so
+restoring the canonical database and the store together from before a
+restriction, with the marker left in place, is not detected (open issue F02).
+The marker lives beside the store, so restoring both together (for example the
+whole `permissions-v2` directory from an earlier backup) is not detected either.
+Device and inode numbers are compared only within one process: a bind mount
+renumbers them across a container VM restart (observed 2026-09-15), which is not
+a change of database. Replacing either database with a different one or
+tampering with the stored identity withholds. The canonical identity does not
+separate byte copies at the same path: where the canonical path is fixed, as in
+containers (`/root/.topos/database.db`), a copy of the node state run under the
+same resource binding is the same database to these checks. Distinct nodes are
+distinguished by their binding, not by path. The store persists its observed
+protection-clock ID and highest generation; a seen rollback is rejected during
+use and across a normal service restart. The generation advances only when a
+review is recorded, an owner read or preview or recipient qualification runs, or
+a projection transaction observes the clock, so a canonical restore to before an
+unobserved protect is not seen (open issue F01). A new clock is not silently
+accepted. Review IDs are immutable and cannot be replayed after revocation; one
+current review per fact is loaded authoritatively. First enrollment requires an
+exclusively created new file. Missing schemas or identity/clock metadata in an
+existing file are never silently recreated.
 
 This protects the service against copied/replaced databases, configuration mixups
 and stale state. It is not tamper-proof storage against a host administrator who
@@ -204,9 +225,15 @@ The first authorized owner preview/read enrolls the private store. A separate
 private durable marker is written as pending before store creation, then activated
 with the canonical/resource/store identity only after enrollment succeeds. Crash
 interruption, missing marker, missing store, identity loss, file replacement or
-protection-clock rollback requires explicit recovery and is never silently fixed.
-The marker and store together do not provide protection against a privileged host
-deleting or rolling back all trusted durable state at once.
+observed protection-clock rollback requires explicit recovery and is never
+silently fixed; rollbacks the store never observed, and event-log deletion, are
+open issues (F01, F02, F07). A marker left pending by a crash after a review
+mutation is recovered only with the engine stopped, through the lab's
+`recover_durable_identity.py --phase activate-pending`: it activates the marker
+when the store's authority digest equals the pending digest and otherwise
+archives both, so the next owner preview enrolls a fresh store. The marker and store together do not provide
+protection against a privileged host deleting or rolling back all trusted
+durable state at once.
 
 Trusted server adapters use `Runtime.evidence_reviews(require_existing=True)`.
 This never enrolls and exposes only an already pinned service; it does not grant
@@ -261,5 +288,13 @@ release, including the interval before lifecycle purge finishes. Any entity
 exclusion withholds this family until complete entity coverage is certified;
 missing observations after purge are not evidence of absence. Unknown exclusion
 state fails closed. The versioned protection clock now tracks exclusion changes,
-including add/remove cycles. Existing beta nodes require the explicit, monotonic
-[clock v2 upgrade](EXCLUSION_CLOCK_UPGRADE.md); signed schemas remain unchanged.
+including add/remove cycles. Serving requires clock contract v3. Existing beta
+nodes run the explicit, monotonic [clock v2 upgrade](EXCLUSION_CLOCK_UPGRADE.md)
+from a v1 clock and then the
+[clock v3 upgrade](EXCLUSION_CLOCK_UPGRADE.md#clock-v3-closure-scoped-review-binding);
+a node that ran only the v2 upgrade withholds with `protection_clock_unavailable`.
+Neither clock upgrade changes a signed schema. The separate `permissions-beta/p2b-v2`
+capability did: engine `122028c` regenerated eight signed protocol and fact
+schema exports that embed the fact authority union, and added two schema exports
+(`StatedDayFactPolicy`, `StatedDayFactDecision`) and the signed golden vector
+`signed-golden-v2.json`.

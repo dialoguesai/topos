@@ -3,6 +3,7 @@
 These establish orchestration, hygiene and requalification behaviour. They do
 not measure classifier accuracy, and no serving path can reach this package.
 """
+import ast
 import asyncio
 from copy import deepcopy
 import json
@@ -47,6 +48,10 @@ class Fake:
         body = self.answers[min(len(self.calls) - 1, len(self.answers) - 1)]
         return ModelResponse(arm=request.arm, model_id=request.model_id, model_revision=request.model_revision,
             prompt_revision=request.prompt_revision, body=body if isinstance(body, str) else json.dumps(body))
+
+
+def approved(call):
+    return json.loads(call.system.split("\nAPPROVED_POLICY_JSON\n", 1)[1])
 
 
 def prose(exclusions=()):
@@ -169,6 +174,8 @@ async def test_structural_floor_stops_both_arms_before_any_model_call(timed, pro
 @pytest.mark.asyncio
 @pytest.mark.parametrize("answer,verdict,reason", [
     (judgment(matched_deny_clause_ids=["deny-health"]), "deny", "semantic_deny"),
+    (judgment(verdict="deny", matched_allow_clause_ids=[]), "deny", "no_semantic_match"),
+    (judgment(verdict="deny"), "indeterminate", "clause_binding"),
     (judgment(matched_allow_clause_ids=["invented"]), "indeterminate", "clause_binding"),
     (judgment(required_projection_id=None), "indeterminate", "projection_required"),
     (judgment(matched_allow_clause_ids=[]), "indeterminate", "clause_binding"),
@@ -199,6 +206,10 @@ async def test_output_stage_may_only_use_inclusions_that_permitted_the_evidence(
     assert '"eligible_inclusion_ids":["allow-reading","allow-second"]' in model.calls[0].system
     assert '"eligible_inclusion_ids":["allow-reading"]' in model.calls[1].system
     assert result.stages[1].reason_code == "clause_binding" and result.verdict == "indeterminate"
+    # The original restates the narrowed-away inclusion, so only clause texts remain.
+    assert approved(model.calls[0])["owner_approved_prose"]["original"] is not None
+    output_prose = approved(model.calls[1])["owner_approved_prose"]
+    assert output_prose["original"] is None and "stated again" not in model.calls[1].system
 
 
 @pytest.mark.asyncio
@@ -219,20 +230,43 @@ async def test_exclusion_window_masks_gate_what_the_model_may_match(timed, proje
     # An exclusion outside its own window is never offered, so the model
     # cannot match it; inside the window a match dominates the permit.
     assert ("deny-health" in model.calls[0].system) is offered
+    # Neither the exclusion's own text nor the original prose restating it may reach the model when masked.
+    assert ("rivate health information" in model.calls[0].system) is offered
+    prose_json = approved(model.calls[0])["owner_approved_prose"]
+    assert (prose_json["original"] is not None) is offered
     assert (result.verdict, result.stages[-1].reason_code) == (verdict, reason)
     if offered:
         assert result.stages[-1].matched_deny_clause_ids == ["deny-health"]
+        [exclusion] = prose_json["exclusions"]
+        assert (exclusion["sources"], len(exclusion["tables"])) == (["ai-source-1"], 3)
+        tables = {unit["unit_id"]: unit["table"] for unit in json.loads(model.calls[0].candidate_data)["untrusted_candidate_data"]}
+        assert sorted(tables[unit] for unit in exclusion["unit_ids"]) == ["ai_chat_messages", "signal_objects"]
 
 
 @pytest.mark.asyncio
+async def test_output_stage_exclusion_is_scoped_to_the_exact_output(timed, projection_service):
+    raw = policy(timed)
+    raw["rules"].append(rule("deny-health", "deny", "health"))
+    record_output(timed, projection_service)
+    model = Fake()
+    await bridge(timed, projection_service, raw=raw, transport=model).run(timed[2], request_as_of=AS_OF, arm="semantic_v1")
+    [evidence_exclusion] = approved(model.calls[0])["owner_approved_prose"]["exclusions"]
+    [output_exclusion] = approved(model.calls[1])["owner_approved_prose"]["exclusions"]
+    assert evidence_exclusion["unit_ids"] == ["u1", "u2"] and output_exclusion["unit_ids"] == ["output"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["evidence_use", "output_release"])
 @pytest.mark.parametrize("change", ["protect", "revoke_evidence", "edit_row", "revoke_output", "expire_clock"])
-async def test_change_during_the_model_call_is_never_retained_or_cached(timed, projection_service, change):
+async def test_change_during_the_model_call_is_never_retained_or_cached(timed, projection_service, change, stage):
     recorded = record_output(timed, projection_service)
     clock = [AS_OF]
+    cached_before_call = []
 
     def mutate(request):
-        if request.stage != "evidence_use":
+        if request.stage != stage:
             return
+        cached_before_call.append(len(cache._entries))
         if change == "protect":
             with sqlite3.connect(timed[0].path) as conn:
                 RecordProtectionStore(conn).protect(canonical_table="conversation_messages", record_id="message-1")
@@ -247,12 +281,43 @@ async def test_change_during_the_model_call_is_never_retained_or_cached(timed, p
                     expected_review_revision=recorded.review_revision), now=AS_OF)
         else:
             clock[0] = AS_OF + 121
-    cache = ShadowDecisionCache()
-    result = await bridge(timed, projection_service, transport=Fake(callback=mutate), clock=lambda: clock[0], cache=cache).run(
+    cache, model = ShadowDecisionCache(), Fake(callback=mutate)
+    result = await bridge(timed, projection_service, transport=model, clock=lambda: clock[0], cache=cache).run(
         timed[2], request_as_of=AS_OF, arm="semantic_v1")
     assert result.observation_state == "not_retained" and result.verdict == "indeterminate"
     assert result.stages[-1].reason_code == "requalification_failed"
-    assert cache._entries == {}
+    # A change during stage 1 is caught before output_release sends the
+    # reviewed scalar; one during stage 2 is caught before the permit is kept.
+    expected = ["evidence_use"] if stage == "evidence_use" else ["evidence_use", "output_release"]
+    assert [call.stage for call in model.calls] == expected and result.model_calls == len(expected)
+    assert [item.stage for item in result.stages] == expected + [stage]
+    # Stage 1's permit was cached before the stage-2 call and is evicted with it.
+    assert cached_before_call == [len(expected) - 1] and cache._entries == {}
+
+
+class WrongRevision(Fake):
+    async def complete(self, request):
+        response = await super().complete(request)
+        return ModelResponse(**{**response.model_dump(), "model_revision": "8" * 64})
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revoked", [False, True])
+async def test_post_call_identity_mismatch_counts_the_call_and_requalifies(timed, projection_service, revoked):
+    record_output(timed, projection_service)
+
+    def mutate(request):
+        if revoked:
+            with owner():
+                timed[1].revoke_review("review-1")
+    model, cache = WrongRevision(callback=mutate), ShadowDecisionCache()
+    result = await bridge(timed, projection_service, transport=model, cache=cache).run(timed[2], request_as_of=AS_OF, arm="semantic_v1")
+    assert len(model.calls) == 1 and result.model_calls == 1 and result.verdict == "indeterminate"
+    assert result.stages[0].reason_code == "model_identity" and cache._entries == {}
+    if revoked:
+        assert (result.observation_state, result.stages[-1].reason_code) == ("not_retained", "requalification_failed")
+    else:
+        assert result.observation_state == "requalified" and len(result.stages) == 1
 
 
 @pytest.mark.asyncio
@@ -327,7 +392,44 @@ async def test_binding_and_prompt_pins_are_enforced_before_any_call(timed, proje
     assert absent.stages[-1].reason_code == "unconfigured_model" and absent.verdict == "indeterminate"
 
 
+EXPERIMENTS = "topos.permissions_v2.experiments"
+
+
+def _imported_modules(path, package):
+    tree = ast.parse(path.read_text(), filename=str(path))
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            yield from (alias.name for alias in node.names)
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            if node.level:
+                parts = package.split(".")[:len(package.split(".")) - node.level + 1]
+                base = ".".join(parts + ([base] if base else []))
+            yield base
+            yield from (base + "." + alias.name for alias in node.names)
+        elif isinstance(node, ast.Constant) and isinstance(node.value, str) and node.value.startswith(EXPERIMENTS):
+            yield node.value  # importlib.import_module("topos.permissions_v2.experiments...")
+
+
 def test_no_serving_module_imports_the_experiment_package():
-    root = Path(__file__).resolve().parents[2] / "topos" / "permissions_v2"
-    serving = [path for path in root.glob("*.py")]
-    assert serving and all("experiments" not in path.read_text() for path in serving)
+    root = Path(__file__).resolve().parents[2]
+    experiments = root / "topos" / "permissions_v2" / "experiments"
+    offenders, scanned = [], 0
+    for path in sorted((root / "topos").rglob("*.py")):
+        if experiments in path.parents or "tests" in path.relative_to(root).parts:
+            continue
+        module = ".".join(path.relative_to(root).with_suffix("").parts)
+        package = module.rsplit(".", 1)[0] if path.name != "__init__.py" else module.removesuffix(".__init__")
+        scanned += 1
+        if any(name == EXPERIMENTS or name.startswith(EXPERIMENTS + ".") for name in _imported_modules(path, package)):
+            offenders.append(module)
+    assert scanned > 100 and offenders == []
+
+
+def test_import_boundary_scan_resolves_relative_imports(tmp_path):
+    for source, package in (("from .experiments import fact_bridge", "topos.permissions_v2"),
+                            ("from ..permissions_v2 import experiments", "topos.api"),
+                            ("import topos.permissions_v2.experiments.fact_bridge", "topos.api")):
+        path = tmp_path / "probe.py"
+        path.write_text(source)
+        assert any(name.startswith(EXPERIMENTS) for name in _imported_modules(path, package)), source

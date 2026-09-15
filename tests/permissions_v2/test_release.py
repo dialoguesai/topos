@@ -246,3 +246,29 @@ def test_review_revoke_waits_until_actual_dispatch_returns(release_setup):
         dispatch(release_setup, envelope, payload, send=send)
         future.result(timeout=3)
     assert revoked.is_set()
+
+
+@pytest.mark.parametrize("floor", ["diverged", "unpublished"])
+def test_release_requires_the_resolver_floor_it_read_to_equal_signed_protection(release_setup, monkeypatch, floor):
+    # A real protection write cannot land mid-read: the read holds the canonical lock
+    # and _sync_protection re-reads protection first, so stub the published floor.
+    envelope, payload = issue(release_setup)
+    resolver = release_setup[0].resolver
+    published = []
+
+    class DivergedFloor(type(resolver)):
+        @property
+        def current_floor(self):
+            real = self.__dict__.get("current_floor")
+            published.append(real)
+            return None if real is None or floor == "unpublished" else "f" * 64
+
+        @current_floor.setter
+        def current_floor(self, value):
+            self.__dict__["current_floor"] = value
+
+    monkeypatch.setattr(resolver, "__class__", DivergedFloor)
+    with pytest.raises(PolicyError, match="authority_stale"):
+        dispatch(release_setup, envelope, payload, send=lambda *_: pytest.fail("output sent under a mismatched floor"))
+    assert published and set(published) == {envelope.protection_revision}
+    assert resolver.__dict__["current_floor"] is None

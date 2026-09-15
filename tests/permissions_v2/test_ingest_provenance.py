@@ -242,7 +242,7 @@ def test_batch_failure_rolls_back_rows_links_and_job_completion(ingest_fixture):
         assert service.status(conn, job_id=ctx.job_id)["status"] == "running"
 
 
-@pytest.mark.parametrize("loss", ["table", "trigger", "marker", "foreign_database", "older_database"])
+@pytest.mark.parametrize("loss", ["table", "trigger", "marker", "foreign_database", "pre_enrollment_bytes"])
 def test_missing_durable_authority_never_autoheals_after_restart(ingest_fixture, loss):
     service, conn, _ = ingest_fixture
     path = service.resolver.path
@@ -266,13 +266,50 @@ def test_missing_durable_authority_never_autoheals_after_restart(ingest_fixture,
         conn.close()
         conn = sqlite3.connect(path)
     else:
-        # The pre-enrollment bytes restored in place, same file identity.
+        # Bytes from before enrollment: the ledger tables themselves are gone.
         conn.close()
         path.write_bytes(pristine)
         conn = sqlite3.connect(path)
     restarted = IngestProvenanceService(canonical_database=path, binding=service.binding, snapshot_root=service.root)
-    with owner(), pytest.raises(PolicyError):
+    with owner(), pytest.raises(PolicyError) as refused:
         restarted.consume_command(conn, command_id="command-new", command_hash="a" * 64, allow_install=True)
+    assert refused.value.code == {"table": "ingest_ledger_invalid", "trigger": "ingest_ledger_invalid", "marker": "ingest_enrollment_required",
+        "foreign_database": "ingest_ledger_binding", "pre_enrollment_bytes": "ingest_ledger_invalid"}[loss]
+
+
+@pytest.mark.parametrize("restore", ["in_place", "new_inode"])
+@pytest.mark.parametrize("mutation", ["consumed_command", "revocation"])
+def test_older_enrolled_canonical_copy_is_a_detected_ledger_rollback(ingest_fixture, mutation, restore):
+    service, conn, _ = ingest_fixture
+    path = service.resolver.path
+    enrollment = enroll(service, conn)
+    older, inode = path.read_bytes(), path.stat().st_ino
+    with owner():
+        if mutation == "consumed_command":
+            service.consume_command(conn, command_id="command-1", command_hash="a" * 64)
+        else:
+            assert service.revoke(conn, enrollment_id=enrollment["enrollment_id"])["state"] == "revoked"
+    conn.close()
+    if restore == "in_place":
+        path.write_bytes(older)
+        assert path.stat().st_ino == inode
+    else:
+        copy = path.with_suffix(".older")
+        copy.write_bytes(older)
+        os.replace(copy, path)
+        assert path.stat().st_ino != inode
+    conn = sqlite3.connect(path)
+    try:
+        assert conn.execute("SELECT count(*) FROM ingest_provenance_commands WHERE command_id='command-1'").fetchone()[0] == 0
+        assert conn.execute("SELECT state FROM ingest_provenance_enrollments").fetchone()[0] == "active"
+        restarted = IngestProvenanceService(canonical_database=path, binding=service.binding, snapshot_root=service.root)
+        with owner(), pytest.raises(PolicyError, match="^ingest_ledger_rollback$"):
+            if mutation == "consumed_command":
+                restarted.consume_command(conn, command_id="command-1", command_hash="a" * 64)
+            else:
+                restarted.enqueue(conn, enrollment_id=enrollment["enrollment_id"])
+    finally:
+        conn.close()
 
 
 def test_identical_database_copy_at_the_same_path_keeps_authority(ingest_fixture):

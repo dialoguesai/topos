@@ -380,8 +380,10 @@ class EvidenceResolver:
         Persisted enrollment markers, review stores, the ingest ledger and every
         review snapshot embed this value, so it must survive a restart or a
         remount of the same database. A different database has a different
-        clock identity, a copy elsewhere has a different path, and an older
-        copy restored in place is caught by the generation and authority floors.
+        clock identity. A byte copy carries the same clock identity, so copies
+        at the same path under the same binding are not told apart (container
+        paths are fixed). An older copy restored in place is caught only once a
+        review store or the ledger has observed the newer clock generation.
         """
         self._incarnation()
         return digest({"binding": self.binding.model_dump(), "clock_id": self._clock_id, "canonical_path": str(self.path)})
