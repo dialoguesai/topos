@@ -1,0 +1,602 @@
+"""Node-local fact evidence qualification; neither a grant nor a release API.
+
+Only existing scoped facts with explicitly reviewed, current recursive evidence
+can qualify. Reviews are owner-authored in a separate private store. Pack names,
+legacy confirmation flags and recipient-supplied labels confer no authority.
+"""
+from __future__ import annotations
+
+from contextlib import contextmanager
+import json
+import math
+import os
+from pathlib import Path
+import sqlite3
+import stat
+from typing import Literal
+
+from pydantic import model_validator
+
+from topos.principal import OWNER_APP, current_principal
+from topos.storage.db.write_gate import with_db_write
+
+from .canonical import MAX_INTEGER, PolicyError, canonical_bytes, digest
+from .contract import Hash, Identifier, Number, StrictModel
+from .protection_clock import clock_state, current_protection_revision
+
+MAX_NODES = 128
+MAX_DEPTH = 16
+LEAF_TABLES = ("conversation_messages", "ai_chat_messages")
+
+
+class EvidenceBinding(StrictModel):
+    """Pinned by the node runtime to this resource; never a recipient parameter."""
+    environment_id: Identifier
+    node_id: Identifier
+    resource_id: Identifier
+    owner_id: Identifier
+
+
+class EvidenceIdentity(StrictModel):
+    binding: EvidenceBinding
+    table: Literal["signal_objects", "conversation_messages", "ai_chat_messages"]
+    record_id: Identifier
+    source_id: Identifier | None
+    dataset_kind: Literal["row_dataset", "node_resource"]
+    dataset_id: Identifier | None
+
+    @model_validator(mode="after")
+    def exact_scope(self):
+        if self.table == "conversation_messages":
+            if self.source_id is None or self.dataset_kind != "row_dataset" or self.dataset_id is None:
+                raise ValueError("conversation identity requires dataset and source")
+        elif self.dataset_kind != "node_resource" or self.dataset_id is not None:
+            raise ValueError("datasetless table uses explicit node/resource scope")
+        if self.table == "ai_chat_messages" and self.source_id is None:
+            raise ValueError("message source missing")
+        if self.table == "signal_objects" and self.source_id is not None:
+            raise ValueError("derived fact has recursive sources, not a fabricated source")
+        return self
+
+
+class EvidenceRevision(StrictModel):
+    identity: EvidenceIdentity
+    revision: Hash
+
+
+class EvidenceSnapshot(StrictModel):
+    binding: EvidenceBinding
+    canonical_file_revision: Hash
+    fact_id: Identifier
+    candidate_revision: Hash
+    lineage_revision: Hash
+    protection_revision: Hash
+    artifacts: list[EvidenceRevision]
+    leaves: list[EvidenceRevision]
+
+
+class ReviewedClassification(StrictModel):
+    """Explicit human attestation of one exact fact or leaf, not model output."""
+    evidence: EvidenceRevision
+    domains: list[Identifier]
+    sensitivity: Literal["none", "personal", "special", "unknown"]
+    subject_entity_ids: list[Identifier]
+    authorship: Literal["owner_authored", "other", "unknown"]
+    speech: Literal["direct_self_statement", "third_party_quote", "mixed", "unknown"]
+    independent_copies: Literal["none_known", "present", "unknown"]
+
+
+class OwnerEvidenceReview(StrictModel):
+    version: Literal["topos-owner-evidence-review/v1"]
+    review_id: Identifier
+    owner_id: Identifier
+    reviewed_at: Number
+    snapshot: EvidenceSnapshot
+    classifications: list[ReviewedClassification]
+
+
+class QualifiedEvidence(StrictModel):
+    """Private processing input. Does not permit any policy or output form."""
+    family: Literal["owner_stated_fact/v1"]
+    snapshot: EvidenceSnapshot
+    review_id: Identifier
+    review_revision: Hash
+    classifications: list[ReviewedClassification]
+    execution_enabled: Literal[False]
+
+
+class Qualification(StrictModel):
+    verdict: Literal["qualified", "withheld"]
+    reason_code: str
+    evidence: QualifiedEvidence | None
+
+
+def _owner(binding: EvidenceBinding) -> None:
+    principal = current_principal()
+    if (principal is None or principal.cls != OWNER_APP or principal.channel not in {"uds", "cp_relay"}
+        or principal.acting_user != binding.owner_id):
+        raise PolicyError("owner_authority_required")
+
+
+def _key(identity: EvidenceIdentity) -> str:
+    return canonical_bytes(identity.model_dump()).decode("ascii")
+
+
+def _json(raw, expected):
+    def pairs(items):
+        result = {}
+        for key, value in items:
+            if key in result:
+                raise ValueError()
+            result[key] = value
+        return result
+    def constant(_):
+        raise ValueError()
+    try:
+        if not isinstance(raw, str) or len(raw.encode()) > 1_048_576:
+            raise ValueError()
+        value = json.loads(raw, object_pairs_hook=pairs, parse_constant=constant)
+        if not isinstance(value, expected):
+            raise ValueError()
+        return value
+    except (ValueError, TypeError, RecursionError):
+        raise PolicyError("evidence_malformed") from None
+
+
+def _row_revision(row: dict) -> str:
+    """Pin every SQLite column, including legacy JSON text and float confidence.
+
+    The policy JSON grammar intentionally rejects floats. SQLite floats are
+    instead encoded as tagged exact hex strings solely for revision hashing.
+    """
+    values = {}
+    for name, value in row.items():
+        if value is None:
+            values[name] = ["null"]
+        elif type(value) is int:
+            values[name] = ["integer", str(value)]
+        elif type(value) is float and math.isfinite(value):
+            values[name] = ["float", value.hex()]
+        elif isinstance(value, str):
+            values[name] = ["text", value]
+        elif isinstance(value, bytes):
+            values[name] = ["blob", value.hex()]
+        else:
+            raise PolicyError("evidence_malformed")
+    return digest(values)
+
+
+def _deleted(row: dict) -> bool:
+    return any(row.get(field) not in (None, 0, False, "") for field in
+               ("valid_to", "deleted_at", "is_deleted", "deleted"))
+
+
+def _checked_file(path: Path, *, code: str, may_create: bool = False):
+    """Reject symlinks throughout the explicit path, including after startup."""
+    try:
+        if not path.is_absolute() or ".." in path.parts:
+            raise PolicyError(code)
+        for parent in path.parents:
+            if not stat.S_ISDIR(parent.lstat().st_mode):
+                raise PolicyError(code)
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            if may_create:
+                return None
+            raise
+        if not stat.S_ISREG(info.st_mode):
+            raise PolicyError(code)
+        return info
+    except OSError:
+        raise PolicyError(code) from None
+
+
+class EvidenceResolver:
+    """Read a fresh SQLite snapshot of one explicitly bound canonical database.
+
+    Datasetless AI messages use node/resource identity; they do not acquire a
+    conversation dataset label. Conversation references must name dataset_id.
+    Unsupported leaf families and incomplete references are withheld.
+    """
+    def __init__(self, canonical_database: Path, *, binding: EvidenceBinding):
+        path = Path(canonical_database)
+        info = _checked_file(path, code="evidence_database_binding")
+        self.path = path
+        self._file_identity = (info.st_dev, info.st_ino)
+        self.binding = EvidenceBinding.parse(binding.model_dump())
+
+    def _file_revision(self) -> str:
+        info = _checked_file(self.path, code="evidence_database_binding")
+        if (info.st_dev, info.st_ino) != self._file_identity:
+            raise PolicyError("evidence_database_binding")
+        return digest({"binding": self.binding.model_dump(), "device": str(info.st_dev), "inode": str(info.st_ino)})
+
+    @contextmanager
+    def _read(self):
+        with with_db_write():
+            self._file_revision()
+            try:
+                conn = sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True)
+            except sqlite3.Error:
+                raise PolicyError("evidence_storage_unavailable") from None
+            conn.row_factory = sqlite3.Row
+            try:
+                self._file_revision()
+                conn.execute("BEGIN")
+                # Requires the real canonical owner and intact monotonic clock.
+                floor = current_protection_revision(conn, owner_id=self.binding.owner_id)
+                yield conn, floor
+                self._file_revision()
+            except sqlite3.Error:
+                raise PolicyError("evidence_storage_unavailable") from None
+            finally:
+                conn.close()
+
+    def _identity(self, table: str, record_id: str, source_id=None, dataset_id=None):
+        return EvidenceIdentity.parse(dict(binding=self.binding.model_dump(), table=table, record_id=record_id,
+            source_id=source_id, dataset_kind="row_dataset" if table == "conversation_messages" else "node_resource", dataset_id=dataset_id))
+
+    def _reference(self, raw) -> EvidenceIdentity:
+        if not isinstance(raw, dict) or not set(raw) <= {"table", "record_id", "source_id", "dataset_id", "node_id", "resource_id"}:
+            raise PolicyError("lineage_identity_incomplete")
+        if any(field in raw and raw[field] != getattr(self.binding, field) for field in ("node_id", "resource_id")):
+            raise PolicyError("lineage_binding")
+        try:
+            return self._identity(raw.get("table"), raw.get("record_id"), raw.get("source_id"), raw.get("dataset_id"))
+        except PolicyError:
+            raise PolicyError("lineage_identity_incomplete") from None
+
+    @staticmethod
+    def _load(conn, identity: EvidenceIdentity) -> dict:
+        # Table names are a closed enum and columns are selected only here.
+        table = identity.table
+        if table == "signal_objects":
+            rows = conn.execute("SELECT * FROM signal_objects WHERE object_id=?", (identity.record_id,)).fetchmany(2)
+        else:
+            sql = f"SELECT * FROM {table} WHERE message_id=? AND source_id=?"
+            args = [identity.record_id, identity.source_id]
+            if table == "conversation_messages":
+                sql += " AND dataset_id=?"
+                args.append(identity.dataset_id)
+            rows = conn.execute(sql, args).fetchmany(2)
+        if not rows:
+            raise PolicyError("evidence_missing")
+        if len(rows) != 1:
+            raise PolicyError("evidence_ambiguous")
+        row = dict(rows[0])
+        if _deleted(row):
+            raise PolicyError("evidence_deleted")
+        if table == "signal_objects" and row.get("object_type") != "fact":
+            raise PolicyError("unsupported_derived_evidence")
+        if table == "conversation_messages" and row.get("owner_user_id") != identity.binding.owner_id:
+            raise PolicyError("evidence_owner_binding")
+        if table == "ai_chat_messages":
+            parents = conn.execute("SELECT * FROM ai_chat_conversations WHERE conversation_id=? AND source_id=?",
+                (row.get("conversation_id"), identity.source_id)).fetchmany(2)
+            if len(parents) != 1 or dict(parents[0]).get("owner_user_id") != identity.binding.owner_id:
+                raise PolicyError("evidence_owner_binding")
+            if _deleted(dict(parents[0])) or "_p2b_parent_revision" in row:
+                raise PolicyError("evidence_malformed")
+            row["_p2b_parent_revision"] = _row_revision(dict(parents[0]))
+        return row
+
+    def _snapshot(self, conn, floor: str, fact_id: str, *, enforce_floor: bool = False):
+        root = self._identity("signal_objects", fact_id)
+        artifacts, leaves, rows, edges = {}, {}, {}, {}
+        visiting = set()
+        if enforce_floor and conn.execute("SELECT 1 FROM entity_blackholes LIMIT 1").fetchone():
+            raise PolicyError("entity_protection_lineage_unavailable")
+
+        def visit(identity, depth):
+            key = _key(identity)
+            if depth > MAX_DEPTH:
+                raise PolicyError("lineage_limit")
+            if key in visiting:
+                raise PolicyError("lineage_cycle")
+            if key in rows:
+                return
+            if len(rows) >= MAX_NODES:
+                raise PolicyError("lineage_limit")
+            visiting.add(key)
+            if enforce_floor and conn.execute("SELECT 1 FROM owner_only_records WHERE canonical_table=? AND record_id=? LIMIT 1",
+                (identity.table, identity.record_id)).fetchone():
+                raise PolicyError("owner_only")
+            row = self._load(conn, identity)
+            rows[key] = row
+            version = EvidenceRevision(identity=identity, revision=_row_revision(row))
+            if identity.table == "signal_objects":
+                if enforce_floor and _json(row.get("payload_json"), dict).get("disclosure") != "scoped":
+                    raise PolicyError("owner_only")
+                artifacts[key] = version
+                refs = _json(row.get("source_refs_json"), list)
+                if not refs:
+                    raise PolicyError("lineage_missing")
+                references = [self._reference(ref) for ref in refs]
+                if len({_key(ref) for ref in references}) != len(references):
+                    raise PolicyError("lineage_ambiguous")
+                edges[key] = sorted(_key(ref) for ref in references)
+                for reference in references:
+                    visit(reference, depth + 1)
+            else:
+                leaves[key] = version
+            visiting.remove(key)
+
+        visit(root, 0)
+        snapshot = EvidenceSnapshot(binding=self.binding, canonical_file_revision=self._file_revision(), fact_id=fact_id,
+            candidate_revision=artifacts[_key(root)].revision,
+            lineage_revision=digest({"artifacts": [artifacts[k].model_dump() for k in sorted(artifacts)],
+                "leaves": [leaves[k].model_dump() for k in sorted(leaves)], "edges": edges}),
+            protection_revision=floor, artifacts=[artifacts[k] for k in sorted(artifacts)], leaves=[leaves[k] for k in sorted(leaves)])
+        return snapshot, rows
+
+    def inspect_for_review(self, fact_id: str) -> EvidenceSnapshot:
+        _owner(self.binding)
+        with self._read() as (conn, floor):
+            return self._snapshot(conn, floor, fact_id)[0]
+
+    @staticmethod
+    def _owner_subjects(conn) -> set[str]:
+        try:
+            rows = conn.execute("SELECT entity_id FROM entities WHERE is_self=1").fetchmany(2)
+        except sqlite3.OperationalError:
+            raise PolicyError("owner_subject_unknown") from None
+        if len(rows) != 1 or not isinstance(rows[0][0], str) or not rows[0][0]:
+            raise PolicyError("owner_subject_ambiguous")
+        return {"self", rows[0][0]}
+
+    @staticmethod
+    def _known_copies(conn, identity: EvidenceIdentity, row: dict) -> bool:
+        content = row.get("content")
+        if not isinstance(content, str) or not content.strip():
+            raise PolicyError("evidence_content_unknown")
+        count = 0
+        for table in LEAF_TABLES:
+            # The first family requires both canonical table schemas so that
+            # exact independent copies cannot hide in an unchecked sibling table.
+            found = conn.execute(f"SELECT count(*) FROM {table} WHERE content=?", (content,)).fetchone()[0]
+            count += found
+        return count > 1
+
+    def _eligible(self, conn, snapshot: EvidenceSnapshot, rows: dict, review: OwnerEvidenceReview):
+        owners = self._owner_subjects(conn)
+        expected = {_key(ref.identity): ref for ref in snapshot.artifacts + snapshot.leaves}
+        classifications = {_key(item.evidence.identity): item for item in review.classifications}
+        if len(classifications) != len(review.classifications) or set(classifications) != set(expected):
+            raise PolicyError("classification_incomplete")
+        # Entity mention lineage is not certified by this first adapter. A
+        # protected entity anywhere conservatively withholds this fact family.
+        if conn.execute("SELECT 1 FROM entity_blackholes LIMIT 1").fetchone():
+            raise PolicyError("entity_protection_lineage_unavailable")
+        for key, reference in expected.items():
+            item = classifications[key]
+            if item.evidence != reference:
+                raise PolicyError("review_stale")
+            if (not item.domains or len(item.domains) != len(set(item.domains)) or item.sensitivity == "unknown"
+                or not item.subject_entity_ids or not set(item.subject_entity_ids) <= owners
+                or len(item.subject_entity_ids) != len(set(item.subject_entity_ids))):
+                raise PolicyError("classification_unknown_or_mixed")
+            if item.authorship != "owner_authored" or item.speech != "direct_self_statement":
+                raise PolicyError("not_owner_self_statement")
+            if item.independent_copies != "none_known":
+                raise PolicyError("independent_copy_lineage")
+            identity = reference.identity
+            row = rows[key]
+            if conn.execute("SELECT 1 FROM owner_only_records WHERE canonical_table=? AND record_id=? LIMIT 1",
+                            (identity.table, identity.record_id)).fetchone():
+                raise PolicyError("owner_only")
+            if identity.table == "signal_objects":
+                payload = _json(row.get("payload_json"), dict)
+                if payload.get("disclosure") != "scoped":
+                    raise PolicyError("owner_only")
+                if (not isinstance(payload.get("subject_entity_id"), str) or payload["subject_entity_id"] not in owners
+                    or payload.get("asserted_by") != "owner"
+                    or ("actor_role" in payload and payload["actor_role"] != "authored")
+                    or payload.get("object_entity_id") not in (None, "", *owners)):
+                    raise PolicyError("not_owner_self_statement")
+                # Neither representation may mask an inferred/unknown one.
+                # Native FactStore deliberately has no altitude; only that
+                # writer's absence can be completed by this exact owner review
+                # and the independently checked native authored source rows.
+                altitudes = [value for value in (row.get("altitude"), payload.get("altitude")) if value is not None]
+                if (any(value != "stated" for value in altitudes)
+                    or (not altitudes and row.get("extractor_version") != "fact_store_v1")
+                    or ("altitude" in payload and payload["altitude"] is None)):
+                    raise PolicyError("unsupported_fact_altitude")
+                if not isinstance(payload.get("predicate"), str) or not isinstance(payload.get("object_value"), str):
+                    raise PolicyError("evidence_malformed")
+                # Distinct active fact objects with the same normalized claim
+                # are independent copies, not interchangeable lineage proofs.
+                def normalized_claim(value):
+                    subject = value.get("subject_entity_id")
+                    if any(not isinstance(value.get(field), str) for field in ("subject_entity_id", "predicate", "object_value")):
+                        raise PolicyError("evidence_malformed")
+                    subject = "@owner" if subject in owners else subject
+                    return tuple(" ".join(str(item or "").lower().split()) for item in
+                                 (subject, value.get("predicate"), value.get("object_value")))
+                claim = normalized_claim(payload)
+                for other in conn.execute("SELECT object_id,payload_json FROM signal_objects WHERE object_type='fact' AND valid_to IS NULL AND object_id<>?", (identity.record_id,)):
+                    other_payload = _json(other[1], dict)
+                    other_claim = normalized_claim(other_payload)
+                    if claim == other_claim:
+                        raise PolicyError("independent_copy_lineage")
+            else:
+                # Metadata review cannot turn an addressed/assistant row into
+                # the owner's authored source. Native canonical role is required.
+                if row.get("metadata_json") not in (None, ""):
+                    metadata = _json(row["metadata_json"], dict)
+                    if any(metadata.get(field) not in (None, False, 0, "", [], {}) for field in
+                           ("is_forwarded", "forwarded_from", "quoted_message", "quoted_text", "quote", "quoted_message_id", "quoted_sender", "is_quoted")):
+                        raise PolicyError("not_owner_self_statement")
+                if identity.table == "conversation_messages":
+                    if type(row.get("is_from_self")) is not int or row["is_from_self"] != 1:
+                        raise PolicyError("not_owner_authored")
+                elif row.get("sender_type") != "user":
+                    raise PolicyError("not_owner_authored")
+                if self._known_copies(conn, identity, row):
+                    raise PolicyError("independent_copy_lineage")
+
+    def qualify(self, fact_id: str, *, reviews: "EvidenceReviewStore") -> Qualification:
+        """Resolve now and load an authoritative stored review, never caller flags."""
+        try:
+            if reviews.binding != self.binding or reviews.canonical_file_revision != self._file_revision():
+                raise PolicyError("review_database_binding")
+            with self._read() as (conn, floor):
+                # Persist even observations that subsequently withhold, so a
+                # protection/restore cycle cannot revive a previously stale review.
+                reviews._observe_clock(conn)
+                snapshot, rows = self._snapshot(conn, floor, fact_id, enforce_floor=True)
+                review = reviews._load_current(fact_id)
+                if review.owner_id != self.binding.owner_id or review.snapshot != snapshot:
+                    raise PolicyError("review_stale")
+                self._eligible(conn, snapshot, rows, review)
+                return Qualification(verdict="qualified", reason_code="owner_reviewed_current_evidence",
+                    evidence=QualifiedEvidence(family="owner_stated_fact/v1", snapshot=snapshot, review_id=review.review_id,
+                        review_revision=digest(review.model_dump()), classifications=review.classifications, execution_enabled=False))
+        except PolicyError as exc:
+            return Qualification(verdict="withheld", reason_code=exc.code, evidence=None)
+
+
+class EvidenceReviewStore:
+    """Private node-local owner review metadata with an observed clock high-water.
+
+    This explicit SQLite file is a trusted service dependency, never a request
+    object. File identity and persisted resource identity are checked every open.
+    It is not an integrity boundary against a privileged host administrator.
+    """
+    def __init__(self, path: Path, *, resolver: EvidenceResolver):
+        _owner(resolver.binding)
+        path = Path(path)
+        _checked_file(path, code="review_database_binding", may_create=True)
+        if path == resolver.path:
+            raise PolicyError("review_database_binding")
+        self.path, self.binding = path, resolver.binding
+        self._resolver = resolver
+        self.canonical_file_revision = resolver._file_revision()
+        try:
+            try:
+                fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_RDWR | os.O_NOFOLLOW, 0o600)
+                newly_created = True
+            except FileExistsError:
+                fd = os.open(path, os.O_RDWR | os.O_NOFOLLOW)
+                newly_created = False
+            try:
+                info = os.fstat(fd)
+                self._file_identity = (info.st_dev, info.st_ino)
+            finally:
+                os.close(fd)
+        except OSError:
+            raise PolicyError("review_database_binding") from None
+        if self._file_identity == resolver._file_identity:
+            raise PolicyError("review_database_binding")
+        self._binding_json = canonical_bytes(self.binding.model_dump()).decode("ascii")
+        with resolver._read() as (conn, _floor):
+            self._clock_id, self._highest_generation = clock_state(conn)
+            with self._db(initializing=True) as db:
+                if newly_created:
+                    db.execute("CREATE TABLE review_identity(singleton INTEGER PRIMARY KEY CHECK(singleton=1),binding_json TEXT NOT NULL,file_revision TEXT NOT NULL,clock_id TEXT NOT NULL,highest_generation INTEGER NOT NULL)")
+                    db.execute("CREATE TABLE fact_reviews(review_id TEXT PRIMARY KEY,fact_id TEXT NOT NULL,review_json TEXT NOT NULL,active INTEGER NOT NULL CHECK(active IN (0,1)))")
+                    db.execute("INSERT INTO review_identity VALUES(1,?,?,?,?)", (self._binding_json,
+                        self.canonical_file_revision, self._clock_id, self._highest_generation))
+                else:
+                    # Loss of a durable identity/clock is not first enrollment.
+                    # Do not rebuild either schema or singleton in existing files.
+                    old = db.execute("SELECT binding_json,file_revision,clock_id,highest_generation FROM review_identity WHERE singleton=1").fetchone()
+                    self._check_identity(old, reopening=True)
+                    db.execute("SELECT review_id,fact_id,review_json,active FROM fact_reviews LIMIT 1")
+                    db.execute("UPDATE review_identity SET highest_generation=? WHERE singleton=1", (self._highest_generation,))
+
+    def _check_file(self):
+        info = _checked_file(self.path, code="review_database_binding")
+        if (info.st_dev, info.st_ino) != self._file_identity:
+            raise PolicyError("review_database_binding")
+        if info.st_mode & 0o077 or info.st_uid != os.getuid():
+            raise PolicyError("review_store_permissions")
+        if self._resolver._file_revision() != self.canonical_file_revision:
+            raise PolicyError("review_database_binding")
+
+    def _check_identity(self, row, *, reopening=False):
+        if row is None or tuple(row[:3]) != (self._binding_json, self.canonical_file_revision, self._clock_id):
+            raise PolicyError("review_database_binding")
+        generation = row[3]
+        if type(generation) is not int or not 0 <= generation <= MAX_INTEGER:
+            raise PolicyError("review_protection_clock")
+        # A new process must not reopen against an older canonical clock. A
+        # running process must not observe its private high-water moving back.
+        if (reopening and generation > self._highest_generation) or (not reopening and generation < self._highest_generation):
+            raise PolicyError("review_protection_clock")
+        if not reopening:
+            self._highest_generation = generation
+
+    @contextmanager
+    def _db(self, *, initializing=False):
+        with with_db_write():
+            self._check_file()
+            try:
+                db = sqlite3.connect(self.path.as_uri() + "?mode=rw", uri=True, isolation_level=None)
+            except sqlite3.Error:
+                raise PolicyError("review_storage_unavailable") from None
+            try:
+                self._check_file()
+                db.execute("BEGIN IMMEDIATE")
+                if not initializing:
+                    self._check_identity(db.execute("SELECT binding_json,file_revision,clock_id,highest_generation FROM review_identity WHERE singleton=1").fetchone())
+                yield db
+                self._check_file()
+                db.commit()
+            except sqlite3.Error:
+                db.rollback()
+                raise PolicyError("review_storage_unavailable") from None
+            except BaseException:
+                db.rollback()
+                raise
+            finally:
+                db.close()
+
+    def _observe_clock(self, canonical_conn):
+        clock_id, generation = clock_state(canonical_conn)
+        with self._db() as db:
+            if clock_id != self._clock_id or generation < self._highest_generation:
+                raise PolicyError("review_protection_clock")
+            db.execute("UPDATE review_identity SET highest_generation=? WHERE singleton=1", (generation,))
+        self._highest_generation = generation
+
+    def record_review(self, *, resolver: EvidenceResolver, review_id: str, expected_snapshot: EvidenceSnapshot,
+                      classifications: list[ReviewedClassification], reviewed_at: int) -> OwnerEvidenceReview:
+        _owner(self.binding)
+        if resolver.binding != self.binding or resolver._file_revision() != self.canonical_file_revision:
+            raise PolicyError("review_database_binding")
+        # The owner must have inspected these exact revisions. A concurrent
+        # canonical mutation after this snapshot makes the review stale on use.
+        with resolver._read() as (conn, floor):
+            self._observe_clock(conn)
+            current = resolver._snapshot(conn, floor, expected_snapshot.fact_id)[0]
+            if current != expected_snapshot:
+                raise PolicyError("review_stale")
+            review = OwnerEvidenceReview.parse(dict(version="topos-owner-evidence-review/v1", review_id=review_id,
+                owner_id=self.binding.owner_id, reviewed_at=reviewed_at, snapshot=current.model_dump(),
+                classifications=[item.model_dump() for item in classifications]))
+            with self._db() as db:
+                old = db.execute("SELECT review_json,active FROM fact_reviews WHERE review_id=?", (review.review_id,)).fetchone()
+                raw = canonical_bytes(review.model_dump()).decode("ascii")
+                if old:
+                    if old[0] != raw or old[1] != 1:
+                        raise PolicyError("review_id_conflict")
+                    return review
+                db.execute("UPDATE fact_reviews SET active=0 WHERE fact_id=?", (current.fact_id,))
+                db.execute("INSERT INTO fact_reviews VALUES(?,?,?,1)", (review.review_id, current.fact_id, raw))
+            return review
+
+    def revoke_review(self, review_id: str) -> None:
+        _owner(self.binding)
+        with self._db() as db:
+            changed = db.execute("UPDATE fact_reviews SET active=0 WHERE review_id=?", (review_id,))
+            if changed.rowcount != 1:
+                raise PolicyError("review_unknown")
+
+    def _load_current(self, fact_id: str) -> OwnerEvidenceReview:
+        with self._db() as db:
+            rows = db.execute("SELECT review_json FROM fact_reviews WHERE fact_id=? AND active=1", (fact_id,)).fetchmany(2)
+            if len(rows) != 1:
+                raise PolicyError("owner_review_required")
+            return OwnerEvidenceReview.parse(rows[0][0])
