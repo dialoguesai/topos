@@ -165,7 +165,8 @@ class ProjectionReviewService:
             or resolver._file_revision() != evidence_reviews.canonical_file_revision
             or resolver._file_revision() != outputs.canonical_file_revision
             or evidence_reviews.path == outputs.path
-            or evidence_reviews._file_identity == outputs._file_identity):
+            or evidence_reviews._file_identity == outputs._file_identity
+            or evidence_reviews.store_id == outputs.store_id):
             raise PolicyError("projection_service_binding")
         self.resolver, self.evidence_reviews, self.outputs = resolver, evidence_reviews, outputs
 

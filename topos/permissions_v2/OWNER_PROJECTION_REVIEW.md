@@ -20,10 +20,12 @@ Approving output never overrides any of them.
 
 The private `projection_review_store_path` must be an absolute, distinct file
 inside the configured node's private `permissions-v2` directory. Enrollment uses
-its own versioned pending/active marker with exact resource, canonical-file and
-store-inode binding. The store also has a distinct contract singleton. A missing
-store, lost marker, swapped evidence-store file, pending enrollment, changed
-inode, damaged identity or protection-clock rollback cannot silently reset it.
+its own versioned pending/active marker with exact resource, durable canonical
+identity, store identity and review authority-digest binding. The store also has
+a distinct contract singleton. A missing store, lost marker, swapped evidence-store
+file, pending enrollment, replaced store, older store restored in place, damaged
+identity or protection-clock rollback cannot silently reset it. A remount that
+renumbers device/inode values does not close it.
 Existing evidence enrollment is required even for owner output preview; an
 output request never enrolls evidence implicitly. Recipients cannot enroll either
 store or call the owner preview/read/mutation operations.

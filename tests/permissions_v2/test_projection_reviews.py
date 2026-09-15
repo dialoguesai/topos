@@ -187,8 +187,10 @@ def test_output_enrollment_is_explicit_separate_and_survives_restart(corpus, pro
     reopened = load_runtime(path, active_database=corpus[0].path)
     try:
         again = reopened.projection_reviews()
-        assert again.outputs._file_identity == first.outputs._file_identity
-        assert again.evidence_reviews._file_identity != first.outputs._file_identity
+        assert again.outputs.store_id == first.outputs.store_id
+        assert again.evidence_reviews.store_id != first.outputs.store_id
+        marker = json.loads(Path(config["projection_review_store_path"] + ".enrollment.json").read_text())
+        assert marker["version"] == "topos-owner-projection-enrollment/v2" and marker["store_id"] == first.outputs.store_id
     finally: reopened.close()
 
 
@@ -203,7 +205,7 @@ def test_output_enrollment_loss_is_not_recreated(corpus, projection_runtime, dam
     if damage == "store": store.unlink()
     elif damage == "marker": marker.unlink()
     else:
-        raw = json.loads(marker.read_text()); raw["version"] = "topos-owner-evidence-enrollment/v1"; marker.write_text(json.dumps(raw))
+        raw = json.loads(marker.read_text()); raw["version"] = "topos-owner-evidence-enrollment/v2"; marker.write_text(json.dumps(raw))
     runtime.close()
     reopened = load_runtime(path, active_database=corpus[0].path)
     try:
@@ -276,3 +278,27 @@ def test_projection_runtime_config_rejects_colliding_or_unbound_paths(corpus, pr
     path.write_text(json.dumps(config))
     with pytest.raises(PolicyError,match="review_database_binding"):
         load_runtime(path,active_database=corpus[0].path)
+
+
+def test_output_enrollment_survives_device_and_inode_renumbering(corpus, projection_runtime, monkeypatch):
+    from tests.permissions_v2.test_evidence import simulate_remount
+    from tests.permissions_v2.test_evidence_reviews import create_request
+    runtime, config, path = projection_runtime
+    with owner():
+        runtime.evidence_reviews(require_existing=False).record(create_request(corpus), now=1200)
+        outputs = runtime.projection_reviews(require_existing=False)
+        preview = outputs.preview(lookup(corpus), now=1200)
+        request = RecordProjectionReview(review_id="output-review-1", expected_candidate=preview.candidate,
+            expected_candidate_hash=preview.candidate_hash, expected_current_review_revision=None,
+            classification={"domains":["reading"], "sensitivity":"personal", "subject":"self", "assertion":"explicit_atomic_preference"})
+        recorded = outputs.record(request, now=1200)
+    runtime.close()
+    simulate_remount(monkeypatch, path.parents[1])
+    reopened = load_runtime(path, active_database=corpus[0].path)
+    try:
+        with owner():
+            state = reopened.projection_reviews().read(lookup(corpus), now=1201)
+        assert state.current_review_revision == recorded.review_revision
+        assert state.qualification.verdict == "reviewed"
+    finally:
+        reopened.close()

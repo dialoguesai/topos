@@ -6,12 +6,12 @@ from .projection_reviews import ProjectionReviewService, ProjectionReviewStore
 
 
 class ProjectionEnrollment(ReviewEnrollment):
-    version: Literal["topos-owner-projection-enrollment/v1"]
+    version: Literal["topos-owner-projection-enrollment/v2"]
 
 
 class ProjectionEnrollmentRuntime(ReviewEnrollmentRuntime):
     enrollment_type = ProjectionEnrollment
-    enrollment_version = "topos-owner-projection-enrollment/v1"
+    enrollment_version = "topos-owner-projection-enrollment/v2"
     store_type = ProjectionReviewStore
     not_enrolled = "projection_reviews_not_enrolled"
 

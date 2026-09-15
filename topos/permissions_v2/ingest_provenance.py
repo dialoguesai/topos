@@ -163,7 +163,9 @@ class IngestProvenanceService:
                 os.close(fd)
             if len(data) != before.st_size or data[:16] != b"SQLite format 3\x00" or data[18:20] != b"\x01\x01":
                 raise PolicyError("ingest_snapshot_not_closed")
-            descriptor = {"snapshot_id": snapshot_id, "snapshot_sha256": hashlib.sha256(data).hexdigest(), "snapshot_bytes": len(data), "device": str(before.st_dev), "inode": str(before.st_ino), "root_device": str(identity[0]), "root_inode": str(identity[1]), "reader_contract": READER_CONTRACT, "ownership_basis": OWNERSHIP_BASIS}
+            # Durable snapshot identity is the exact bytes. Device/inode were
+            # compared above only within this read; a remount renumbers them.
+            descriptor = {"snapshot_id": snapshot_id, "snapshot_sha256": hashlib.sha256(data).hexdigest(), "snapshot_bytes": len(data), "reader_contract": READER_CONTRACT, "ownership_basis": OWNERSHIP_BASIS}
             return descriptor, data
         except OSError:
             raise PolicyError("ingest_snapshot_unavailable") from None

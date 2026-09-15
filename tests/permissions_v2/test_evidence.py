@@ -3,6 +3,8 @@ from contextlib import contextmanager
 from copy import deepcopy
 import json
 import os
+import pathlib
+from pathlib import Path
 import shutil
 import sqlite3
 
@@ -85,6 +87,56 @@ def attest(corpus, *, review_id="review-1", transform=None):
 
 def decision(corpus):
     return corpus[0].qualify(corpus[2], reviews=corpus[1])
+
+
+class _Renumbered:
+    """A stat result whose device/inode differ, as after a bind-mount remount."""
+    def __init__(self, inner):
+        self._inner = inner
+
+    @property
+    def st_dev(self):
+        return self._inner.st_dev + 4096
+
+    @property
+    def st_ino(self):
+        return self._inner.st_ino + 1_000_000
+
+    def __getattr__(self, name):
+        return getattr(self._inner, name)
+
+
+def simulate_remount(monkeypatch, root):
+    """Every file under root reports new device/inode numbers to this process.
+
+    This is what the Docker Desktop VM restart did to the lab's bind mount on
+    2026-09-15: same bytes, same paths, renumbered file identities.
+    """
+    root = Path(root)
+    real = {name: getattr(os, name) for name in ("stat", "lstat", "fstat")}
+
+    def under(target):
+        if isinstance(target, int):
+            return True
+        try:
+            path = Path(os.fsdecode(target))
+        except (TypeError, ValueError):
+            return False
+        return path.is_absolute() and (path == root or root in path.parents)
+
+    def wrapped(name):
+        def call(target, *args, **kwargs):
+            info = real[name](target, *args, **kwargs)
+            return _Renumbered(info) if under(target) else info
+        return call
+
+    for name in real:
+        monkeypatch.setattr(os, name, wrapped(name))
+    accessor = getattr(pathlib, "_NormalAccessor", None)
+    for name in ("stat", "lstat"):
+        # Python 3.10 pathlib bound os.stat at import time; lstat goes through it.
+        if accessor is not None and name in vars(accessor):
+            monkeypatch.setattr(accessor, name, staticmethod(wrapped(name)))
 
 
 def test_positive_existing_scoped_fact_requires_explicit_revision_bound_owner_review(corpus):
@@ -474,7 +526,7 @@ def test_review_file_replacement_with_full_snapshot_review_fails_closed(corpus, 
     assert result.evidence is None
 
 
-@pytest.mark.parametrize("assignment", ["binding_json='{}'", "file_revision='forged'", "clock_id='forged'", "singleton=2"])
+@pytest.mark.parametrize("assignment", ["binding_json='{}'", "file_revision='forged'", "clock_id='forged'", "store_id='forged'", "store_id='"+"a"*64+"'", "singleton=2"])
 def test_persisted_review_identity_is_revalidated_every_open(corpus, assignment):
     attest(corpus)
     with sqlite3.connect(corpus[1].path) as conn:
@@ -546,7 +598,11 @@ def test_private_review_clock_high_water_cannot_regress_in_a_running_process(cor
 def test_clock_identity_replacement_is_rejected(corpus):
     attest(corpus)
     edit(corpus, "UPDATE permissions_v2_protection_state SET clock_id=?", ("f" * 64,))
-    assert decision(corpus).reason_code == "review_protection_clock"
+    # The clock identity is the database's durable identity, so the resolver
+    # itself refuses before the store's own clock comparison can run.
+    assert decision(corpus).reason_code == "evidence_database_binding"
+    with pytest.raises(PolicyError, match="review_database_binding"):
+        EvidenceReviewStore(corpus[1].path, resolver=EvidenceResolver(corpus[0].path, binding=corpus[0].binding), _existing_only=True)
 
 
 def test_owner_subject_alias_does_not_hide_an_independent_fact_copy(corpus):
@@ -770,3 +826,52 @@ def test_exact_scoped_runtime_posture_and_revision_are_bound(corpus):
     assert decision(corpus).verdict == "qualified"
     edit(corpus,"UPDATE source_runtime_installs SET status='ready'")
     assert decision(corpus).reason_code == "review_stale"
+
+
+def test_durable_identity_survives_device_and_inode_renumbering(corpus, monkeypatch):
+    attest(corpus)
+    before = corpus[0]._file_revision()
+    simulate_remount(monkeypatch, corpus[0].path.parent)
+    resolver = EvidenceResolver(corpus[0].path, binding=corpus[0].binding)
+    assert resolver._file_identity != corpus[0]._file_identity
+    assert resolver._file_revision() == before
+    reviews = EvidenceReviewStore(corpus[1].path, resolver=resolver, _existing_only=True)
+    assert reviews.store_id == corpus[1].store_id
+    result = resolver.qualify(corpus[2], reviews=reviews)
+    assert result.verdict == "qualified" and result.evidence.review_id == "review-1"
+    # The pre-remount objects keep their in-process incarnation pin and fail closed.
+    assert decision(corpus).reason_code == "evidence_database_binding"
+
+
+def test_identical_copy_replaced_at_the_same_path_is_the_same_database(corpus, tmp_path):
+    attest(corpus)
+    for original in (corpus[0].path, corpus[1].path):
+        replacement = tmp_path / (original.name + ".replacement")
+        shutil.copyfile(original, replacement)
+        replacement.chmod(0o600)
+        os.replace(replacement, original)
+    resolver = EvidenceResolver(corpus[0].path, binding=corpus[0].binding)
+    reviews = EvidenceReviewStore(corpus[1].path, resolver=resolver, _existing_only=True)
+    assert resolver.qualify(corpus[2], reviews=reviews).verdict == "qualified"
+    assert decision(corpus).reason_code == "evidence_database_binding"
+
+
+def test_older_canonical_copy_restored_in_place_is_rejected_on_reopen(corpus):
+    attest(corpus)
+    older = corpus[0].path.read_bytes()
+    with sqlite3.connect(corpus[0].path) as conn:
+        RecordProtectionStore(conn).protect(canonical_table="conversation_messages", record_id="message-1")
+    assert decision(corpus).reason_code != "owner_reviewed_current_evidence"
+    corpus[0].path.write_bytes(older)
+    resolver = EvidenceResolver(corpus[0].path, binding=corpus[0].binding)
+    with pytest.raises(PolicyError, match="review_protection_clock"):
+        EvidenceReviewStore(corpus[1].path, resolver=resolver, _existing_only=True)
+
+
+def test_resolver_requires_an_installed_clock_at_construction(tmp_path):
+    canonical = tmp_path / "bare.db"
+    with sqlite3.connect(canonical) as conn:
+        conn.execute("CREATE TABLE engine_config(key TEXT PRIMARY KEY,value TEXT)")
+    binding = EvidenceBinding(environment_id="permissions-beta-test", node_id="node-1", resource_id="resource-1", owner_id="owner-1")
+    with pytest.raises(PolicyError, match="protection_clock_unavailable"):
+        EvidenceResolver(canonical, binding=binding)

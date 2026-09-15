@@ -35,8 +35,10 @@ historical owner fields. Both node and CP feature flags default off.
 ## Storage and recovery
 
 The canonical tables and exact source-clock trigger schema are paired with a
-private external marker containing node/file identity, a source-generation floor
-and a digest of all provenance authority rows. The marker detects replacement
+private external marker containing the node identity, the durable canonical
+identity (resource binding, protection clock identity and exact path; never
+device/inode numbers, which a bind mount renumbers across a VM restart), a
+source-generation floor and a digest of all provenance authority rows. The marker detects replacement
 and in-place rollback of canonical state, including consumed commands and revoked
 enrollments, across process restarts.
 
@@ -49,7 +51,7 @@ authority floor is outside this rollback guarantee and must not be used to reviv
 old grants, commands or enrollments.
 
 Exact enrollment retries recover the original active or revoked metadata without
-resurrection. Different source bytes/file identity cannot reuse that dataset.
+resurrection. Different source bytes cannot reuse that dataset.
 Enqueue is idempotent per enrollment. Failed or expired jobs can be explicitly
 run with a new random claim; a stale worker cannot write or fail the newer claim.
 Completed jobs cannot repeat. Status is a signed, read-only recovery operation.
@@ -63,8 +65,9 @@ lane has no automatic reauthorization or provenance migration.
 ## Current supported subset
 
 - Snapshot: regular file, one link, mode `0400`, no symlink ancestors or journal
-  sidecars, SQLite DELETE journal header, at most 16 MiB. File incarnation and
-  digest are checked again before and after the canonical batch.
+  sidecars, SQLite DELETE journal header, at most 16 MiB. Its durable identity is
+  the exact bytes; device/inode are compared only within one read. The digest is
+  checked again before and after the canonical batch.
 - Native reader: at most 1,000 ordinary plain-text messages, 64 KiB per message,
   1 MiB total text, one unambiguous chat join, literal integer `is_from_me` 0/1,
   exact sender identity for correspondents.

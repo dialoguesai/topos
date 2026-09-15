@@ -11,6 +11,8 @@ import json
 import math
 import os
 from pathlib import Path
+import re
+import secrets
 import sqlite3
 import stat
 from typing import Literal
@@ -29,6 +31,8 @@ MAX_NODES = 128
 MAX_DEPTH = 16
 LEAF_TABLES = ("conversation_messages", "ai_chat_messages")
 _ANY_REVIEW = object()
+_IDENTITY_SELECT = "SELECT binding_json,file_revision,clock_id,highest_generation,store_id FROM review_identity WHERE singleton=1"
+_STORE_ID = re.compile(r"[0-9a-f]{64}")
 
 
 class EvidenceBinding(StrictModel):
@@ -306,31 +310,69 @@ class EvidenceResolver:
         path = Path(canonical_database)
         info = _checked_file(path, code="evidence_database_binding")
         self.path = path
+        # In-process incarnation pin only. A bind mount renumbers device and
+        # inode values across a VM restart, so they are never persisted and
+        # never hashed into a durable identity.
         self._file_identity = (info.st_dev, info.st_ino)
         self.binding = EvidenceBinding.parse(binding.model_dump())
+        self._clock_id = self._durable_clock_id()
 
-    def _file_revision(self) -> str:
+    def _durable_clock_id(self) -> str:
+        """The installed protection clock identity is this database's durable identity.
+
+        The clock is installed exactly once, preserved by the explicit clock
+        upgrade, and already persisted by every review store. A missing clock
+        fails closed here instead of at the first read.
+        """
+        with with_db_write():
+            self._incarnation()
+            try:
+                conn = sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True)
+            except sqlite3.Error:
+                raise PolicyError("evidence_storage_unavailable") from None
+            try:
+                conn.execute("BEGIN")
+                return clock_state(conn)[0]
+            except sqlite3.Error:
+                raise PolicyError("evidence_storage_unavailable") from None
+            finally:
+                conn.close()
+
+    def _incarnation(self) -> None:
         info = _checked_file(self.path, code="evidence_database_binding")
         if (info.st_dev, info.st_ino) != self._file_identity:
             raise PolicyError("evidence_database_binding")
-        return digest({"binding": self.binding.model_dump(), "device": str(info.st_dev), "inode": str(info.st_ino)})
+
+    def _file_revision(self) -> str:
+        """Durable canonical identity digest: binding, clock identity and exact path.
+
+        Persisted enrollment markers, review stores, the ingest ledger and every
+        review snapshot embed this value, so it must survive a restart or a
+        remount of the same database. A different database has a different
+        clock identity, a copy elsewhere has a different path, and an older
+        copy restored in place is caught by the generation and authority floors.
+        """
+        self._incarnation()
+        return digest({"binding": self.binding.model_dump(), "clock_id": self._clock_id, "canonical_path": str(self.path)})
 
     @contextmanager
     def _read(self):
         with with_db_write():
-            self._file_revision()
+            self._incarnation()
             try:
                 conn = sqlite3.connect(self.path.as_uri() + "?mode=ro", uri=True)
             except sqlite3.Error:
                 raise PolicyError("evidence_storage_unavailable") from None
             conn.row_factory = sqlite3.Row
             try:
-                self._file_revision()
+                self._incarnation()
                 conn.execute("BEGIN")
                 # Requires the real canonical owner and intact monotonic clock.
                 floor = current_protection_revision(conn, owner_id=self.binding.owner_id)
+                if clock_state(conn)[0] != self._clock_id:
+                    raise PolicyError("evidence_database_binding")
                 yield conn, floor
-                self._file_revision()
+                self._incarnation()
             except sqlite3.Error:
                 raise PolicyError("evidence_storage_unavailable") from None
             finally:
@@ -644,8 +686,12 @@ class EvidenceReviewStore:
     """Private node-local owner review metadata with an observed clock high-water.
 
     This explicit SQLite file is a trusted service dependency, never a request
-    object. File identity and persisted resource identity are checked every open.
-    It is not an integrity boundary against a privileged host administrator.
+    object. Its durable identity is a random `store_id` persisted inside the
+    file and, once enrolled, in the private external marker; device/inode are
+    only an in-process incarnation pin. An enrolled store also carries an
+    external authority digest so an in-place restore of an older file is
+    detected as rollback. It is not an integrity boundary against a privileged
+    host administrator who rewrites every trusted file together.
     """
     def __init__(self, path: Path, *, resolver: EvidenceResolver, _existing_only=False):
         if not _existing_only:
@@ -676,18 +722,23 @@ class EvidenceReviewStore:
         if self._file_identity == resolver._file_identity:
             raise PolicyError("review_database_binding")
         self._binding_json = canonical_bytes(self.binding.model_dump()).decode("ascii")
+        self.store_id = None
+        # Attached by the enrollment runtime after it verified the marker; a
+        # standalone store has no external rollback floor.
+        self._floor = None
         with resolver._read() as (conn, _floor):
             self._clock_id, self._highest_generation = clock_state(conn)
             with self._db(initializing=True) as db:
                 if newly_created:
-                    db.execute("CREATE TABLE review_identity(singleton INTEGER PRIMARY KEY CHECK(singleton=1),binding_json TEXT NOT NULL,file_revision TEXT NOT NULL,clock_id TEXT NOT NULL,highest_generation INTEGER NOT NULL)")
+                    self.store_id = secrets.token_hex(32)
+                    db.execute("CREATE TABLE review_identity(singleton INTEGER PRIMARY KEY CHECK(singleton=1),binding_json TEXT NOT NULL,file_revision TEXT NOT NULL,clock_id TEXT NOT NULL,highest_generation INTEGER NOT NULL,store_id TEXT NOT NULL)")
                     db.execute("CREATE TABLE fact_reviews(review_id TEXT PRIMARY KEY,fact_id TEXT NOT NULL,review_json TEXT NOT NULL,active INTEGER NOT NULL CHECK(active IN (0,1)))")
-                    db.execute("INSERT INTO review_identity VALUES(1,?,?,?,?)", (self._binding_json,
-                        self.canonical_file_revision, self._clock_id, self._highest_generation))
+                    db.execute("INSERT INTO review_identity VALUES(1,?,?,?,?,?)", (self._binding_json,
+                        self.canonical_file_revision, self._clock_id, self._highest_generation, self.store_id))
                 else:
                     # Loss of a durable identity/clock is not first enrollment.
                     # Do not rebuild either schema or singleton in existing files.
-                    old = db.execute("SELECT binding_json,file_revision,clock_id,highest_generation FROM review_identity WHERE singleton=1").fetchone()
+                    old = db.execute(_IDENTITY_SELECT).fetchone()
                     self._check_identity(old, reopening=True)
                     db.execute("SELECT review_id,fact_id,review_json,active FROM fact_reviews LIMIT 1")
                     db.execute("UPDATE review_identity SET highest_generation=? WHERE singleton=1", (self._highest_generation,))
@@ -704,6 +755,10 @@ class EvidenceReviewStore:
     def _check_identity(self, row, *, reopening=False):
         if row is None or tuple(row[:3]) != (self._binding_json, self.canonical_file_revision, self._clock_id):
             raise PolicyError("review_database_binding")
+        store_id = row[4]
+        if (type(store_id) is not str or _STORE_ID.fullmatch(store_id) is None
+            or (self.store_id is not None and store_id != self.store_id)):
+            raise PolicyError("review_database_binding")
         generation = row[3]
         if type(generation) is not int or not 0 <= generation <= MAX_INTEGER:
             raise PolicyError("review_protection_clock")
@@ -711,8 +766,20 @@ class EvidenceReviewStore:
         # running process must not observe its private high-water moving back.
         if (reopening and generation > self._highest_generation) or (not reopening and generation < self._highest_generation):
             raise PolicyError("review_protection_clock")
+        if reopening and self.store_id is None:
+            self.store_id = store_id
         if not reopening:
             self._highest_generation = generation
+
+    @staticmethod
+    def _authority_digest(db) -> str:
+        """Digest of every review row; the observed clock high-water is excluded."""
+        rows = db.execute("SELECT review_id,fact_id,review_json,active FROM fact_reviews ORDER BY review_id").fetchall()
+        return digest([list(row) for row in rows])
+
+    def current_authority_digest(self) -> str:
+        with self._db() as db:
+            return self._authority_digest(db)
 
     @contextmanager
     def _db(self, *, initializing=False):
@@ -725,11 +792,24 @@ class EvidenceReviewStore:
             try:
                 self._check_file()
                 db.execute("BEGIN IMMEDIATE")
+                floor = None if initializing else self._floor
                 if not initializing:
-                    self._check_identity(db.execute("SELECT binding_json,file_revision,clock_id,highest_generation FROM review_identity WHERE singleton=1").fetchone())
+                    self._check_identity(db.execute(_IDENTITY_SELECT).fetchone())
+                    if floor is not None and self._authority_digest(db) != floor.expected_authority_digest():
+                        raise PolicyError("review_store_rollback")
                 yield db
                 self._check_file()
+                published = None
+                if floor is not None:
+                    after = self._authority_digest(db)
+                    if after != floor.expected_authority_digest():
+                        # Durable before the commit. A crash in either order
+                        # leaves the enrollment pending, never a silent reset.
+                        floor.publish_pending(after)
+                        published = after
                 db.commit()
+                if published is not None:
+                    floor.publish_active(published)
             except sqlite3.Error:
                 db.rollback()
                 raise PolicyError("review_storage_unavailable") from None

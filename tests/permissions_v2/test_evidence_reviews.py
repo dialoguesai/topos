@@ -201,7 +201,7 @@ def test_existing_only_runtime_cannot_enroll_but_owner_preview_can(corpus, paire
     runtime.close()
     reopened = load_runtime(path, active_database=corpus[0].path)
     try:
-        assert reopened.evidence_reviews(require_existing=True).reviews._file_identity == service.reviews._file_identity
+        assert reopened.evidence_reviews(require_existing=True).reviews.store_id == service.reviews.store_id
     finally:
         reopened.close()
 
@@ -340,3 +340,98 @@ def test_owner_preview_omits_internal_source_posture_revision_cell(corpus, servi
         preview = service.preview(EvidenceLookup(fact_id=corpus[2]))
     assert preview.status == "complete"
     assert all("_p2b_source_revision" not in record.cells for record in preview.records)
+
+
+def _recorded(corpus, runtime):
+    with owner():
+        service = runtime.evidence_reviews(require_existing=False)
+        mutation = service.record(create_request(corpus), now=1200)
+    assert mutation.state.qualification.verdict == "qualified"
+    return service, mutation
+
+
+def test_enrollment_survives_device_and_inode_renumbering(corpus, paired_runtime, monkeypatch):
+    from tests.permissions_v2.test_evidence import simulate_remount
+    runtime, config, path = paired_runtime
+    service, mutation = _recorded(corpus, runtime)
+    marker = json.loads(Path(config["evidence_review_store_path"] + ".enrollment.json").read_text())
+    assert marker["version"] == "topos-owner-evidence-enrollment/v2" and marker["state"] == "active"
+    assert marker["store_id"] == service.reviews.store_id and not {"store_device", "store_inode"} & set(marker)
+    runtime.close()
+    simulate_remount(monkeypatch, path.parents[1])
+    reopened = load_runtime(path, active_database=corpus[0].path)
+    try:
+        again = reopened.evidence_reviews(require_existing=True)
+        assert again.reviews.store_id == service.reviews.store_id
+        with owner():
+            state = again.read(EvidenceLookup(fact_id=corpus[2]))
+        assert state.current_review_revision == mutation.review_revision
+        assert state.qualification.verdict == "qualified"
+    finally:
+        reopened.close()
+
+
+def test_a_different_store_at_the_enrolled_path_is_rejected_after_restart(corpus, paired_runtime, tmp_path):
+    runtime, config, path = paired_runtime
+    _recorded(corpus, runtime)
+    runtime.close()
+    store = Path(config["evidence_review_store_path"])
+    store.rename(tmp_path / "enrolled-store-moved-aside.db")
+    with owner():
+        from topos.permissions_v2.evidence import EvidenceReviewStore
+        EvidenceReviewStore(store, resolver=corpus[0])
+    reopened = load_runtime(path, active_database=corpus[0].path)
+    try:
+        with owner(), pytest.raises(PolicyError, match="review_database_binding"):
+            reopened.evidence_reviews(require_existing=True)
+    finally:
+        reopened.close()
+
+
+def test_in_place_restore_of_an_older_store_is_rejected_as_rollback(corpus, paired_runtime):
+    runtime, config, path = paired_runtime
+    service, mutation = _recorded(corpus, runtime)
+    store = Path(config["evidence_review_store_path"])
+    marker = store.with_name(store.name + ".enrollment.json")
+    older, older_marker = store.read_bytes(), json.loads(marker.read_text())
+    with owner():
+        service.revoke(RevokeEvidenceReview(fact_id=corpus[2], review_id=mutation.review_id,
+            expected_review_revision=mutation.review_revision))
+    current_marker = json.loads(marker.read_text())
+    assert current_marker["revision"] == older_marker["revision"] + 1
+    assert current_marker["authority_digest"] != older_marker["authority_digest"]
+    store.write_bytes(older)
+    with owner(), pytest.raises(PolicyError, match="review_store_rollback"):
+        service.read(EvidenceLookup(fact_id=corpus[2]))
+    runtime.close()
+    reopened = load_runtime(path, active_database=corpus[0].path)
+    try:
+        with owner(), pytest.raises(PolicyError, match="review_store_rollback"):
+            reopened.evidence_reviews(require_existing=True).read(EvidenceLookup(fact_id=corpus[2]))
+    finally:
+        reopened.close()
+
+
+def test_interrupted_marker_activation_leaves_enrollment_closed(corpus, paired_runtime, monkeypatch):
+    runtime, config, path = paired_runtime
+    with owner():
+        service = runtime.evidence_reviews(require_existing=False)
+    request = create_request(corpus)
+    original = ReviewEnrollmentRuntime.publish_active
+    def interrupted(self, digest):
+        raise PolicyError("review_enrollment_unavailable")
+    monkeypatch.setattr(ReviewEnrollmentRuntime, "publish_active", interrupted)
+    with owner(), pytest.raises(PolicyError, match="review_enrollment_unavailable"):
+        service.record(request, now=1200)
+    marker = json.loads(Path(config["evidence_review_store_path"] + ".enrollment.json").read_text())
+    assert marker["state"] == "pending"
+    monkeypatch.setattr(ReviewEnrollmentRuntime, "publish_active", original)
+    with owner(), pytest.raises(PolicyError, match="review_enrollment_unavailable"):
+        runtime.evidence_reviews(require_existing=True)
+    runtime.close()
+    reopened = load_runtime(path, active_database=corpus[0].path)
+    try:
+        with owner(), pytest.raises(PolicyError, match="review_enrollment_unavailable"):
+            reopened.evidence_reviews(require_existing=False)
+    finally:
+        reopened.close()

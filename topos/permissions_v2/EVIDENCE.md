@@ -68,8 +68,9 @@ are withheld.
 
 Every row revision hashes all SQLite columns, including exact legacy JSON text,
 timestamps and tagged finite SQLite float values. The snapshot additionally binds
-the complete graph, canonical file device/inode identity, and the actual canonical
-protection clock/floor. Any changed candidate, source, parent or recursive edge
+the complete graph, the durable canonical identity (resource binding, protection
+clock identity and exact database path), and the actual canonical protection
+clock/floor. Any changed candidate, source, parent or recursive edge
 invalidates the review. A protection change invalidates it even if protection is
 later lifted and the visible floor returns to its earlier shape.
 
@@ -82,9 +83,15 @@ or revoking a review requires a verified `OWNER_APP` principal over `uds` or sig
 the same actor under a third-party class, and TCP headers are insufficient.
 
 The store requires an absolute path, a private file owned by the process user,
-and no symlink anywhere in its parent path. It pins the review file's device/inode,
-canonical file identity and persisted resource identity, checking them on every
-open. Replacing either database or tampering with the stored identity withholds.
+and no symlink anywhere in its parent path. It persists a random store identity,
+the durable canonical identity and the resource identity inside the file and
+checks them on every open; the enrolled runtime additionally pins that store
+identity and an authority digest of every review row in its external marker, so
+a different store at the enrolled path or an older store restored in place is
+refused. Device and inode numbers are compared only within one process: a bind
+mount renumbers them across a container VM restart (observed 2026-09-15), which
+is not a change of database. Replacing either database with a different one or
+tampering with the stored identity withholds.
 The store persists its observed protection-clock ID and highest generation; a
 seen rollback is rejected during use and across a normal service restart. A new
 clock is not silently accepted. Review IDs are immutable and cannot be replayed

@@ -242,9 +242,11 @@ def test_batch_failure_rolls_back_rows_links_and_job_completion(ingest_fixture):
         assert service.status(conn, job_id=ctx.job_id)["status"] == "running"
 
 
-@pytest.mark.parametrize("loss", ["table", "trigger", "marker", "database"])
+@pytest.mark.parametrize("loss", ["table", "trigger", "marker", "foreign_database", "older_database"])
 def test_missing_durable_authority_never_autoheals_after_restart(ingest_fixture, loss):
     service, conn, _ = ingest_fixture
+    path = service.resolver.path
+    pristine = path.read_bytes()
     ctx = claimed(ingest_fixture)
     if loss == "table":
         conn.execute("DROP TABLE ingest_provenance_records")
@@ -254,13 +256,58 @@ def test_missing_durable_authority_never_autoheals_after_restart(ingest_fixture,
         conn.commit()
     elif loss == "marker":
         service.marker.unlink()
+    elif loss == "foreign_database":
+        # A different database at the same path: its clock identity differs.
+        replacement = path.with_suffix(".replacement")
+        shutil.copyfile(path, replacement)
+        with sqlite3.connect(replacement) as other:
+            other.execute("UPDATE permissions_v2_protection_state SET clock_id=?", ("e" * 64,))
+        replacement.replace(path)
+        conn.close()
+        conn = sqlite3.connect(path)
     else:
-        replacement = service.resolver.path.with_suffix(".replacement")
-        shutil.copyfile(service.resolver.path, replacement)
-        replacement.replace(service.resolver.path)
-    restarted = IngestProvenanceService(canonical_database=service.resolver.path, binding=service.binding, snapshot_root=service.root)
+        # The pre-enrollment bytes restored in place, same file identity.
+        conn.close()
+        path.write_bytes(pristine)
+        conn = sqlite3.connect(path)
+    restarted = IngestProvenanceService(canonical_database=path, binding=service.binding, snapshot_root=service.root)
     with owner(), pytest.raises(PolicyError):
         restarted.consume_command(conn, command_id="command-new", command_hash="a" * 64, allow_install=True)
+
+
+def test_identical_database_copy_at_the_same_path_keeps_authority(ingest_fixture):
+    service, conn, _ = ingest_fixture
+    ctx = claimed(ingest_fixture)
+    path = service.resolver.path
+    replacement = path.with_suffix(".replacement")
+    shutil.copyfile(path, replacement)
+    replacement.replace(path)
+    conn.close()
+    conn = sqlite3.connect(path)
+    restarted = IngestProvenanceService(canonical_database=path, binding=service.binding, snapshot_root=service.root)
+    with owner():
+        assert restarted.status(conn, job_id=ctx.job_id)["status"] == "running"
+        with pytest.raises(PolicyError, match="ingest_command_replayed"):
+            restarted.consume_command(conn, command_id="command-new", command_hash="a" * 64)
+            restarted.consume_command(conn, command_id="command-new", command_hash="a" * 64)
+
+
+def test_enrollment_and_claims_survive_device_and_inode_renumbering(ingest_fixture, monkeypatch):
+    from tests.permissions_v2.test_evidence import simulate_remount
+    service, conn, snapshot = ingest_fixture
+    enrollment = enroll(service, conn)
+    with owner():
+        job = service.enqueue(conn, enrollment_id=enrollment["enrollment_id"])
+        described = service.describe_snapshot(conn, snapshot_id="canary")
+    assert not {"device", "inode", "root_device", "root_inode"} & set(described)
+    simulate_remount(monkeypatch, service.resolver.path.parent)
+    restarted = IngestProvenanceService(canonical_database=service.resolver.path, binding=service.binding, snapshot_root=service.root)
+    with owner():
+        assert restarted.status(conn, job_id=job["job_id"])["status"] == "queued"
+        assert restarted.enroll(conn, snapshot_id="canary", dataset_id="native-dataset",
+            snapshot_sha256=described["snapshot_sha256"], owner_attestation=OWNER_ATTESTATION) == enrollment
+    context = restarted.claim(conn, job["job_id"])
+    assert restarted.snapshot_bytes(conn, context) == snapshot.read_bytes()
 
 
 def test_signed_command_burn_survives_restart_and_dispatch_failure(ingest_fixture):
