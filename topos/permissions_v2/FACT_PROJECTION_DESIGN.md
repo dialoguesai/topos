@@ -123,6 +123,11 @@ an explicit source-slice identity, parent revision, exact offsets and reviewed
 independence/classification before it can safely relax whole-record withholding.
 An Off-limits parent still protects every slice.
 
+The separate [owner-attested entity coverage design](ENTITY_COVERAGE_DESIGN.md)
+describes a possible future replacement for global entity withholding. It is
+not implemented or a machine completeness certificate; existing self-only
+reviews cannot be migrated into it.
+
 ## Shared A/B path without raw recipient disclosure
 
 Both evaluators can consume the same fresh qualified evidence and exact proposed
