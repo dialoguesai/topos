@@ -1,9 +1,10 @@
 # Owner-stated fact projection design, v1
 
-Status: pure projection prototype. A separate explicit P2b policy foundation is
-described in [the fact policy design](FACT_POLICY_DESIGN.md); it alone enables no
-advertised capability, signed authority, or recipient route for this projection.
-This is not completion of the reading profile or an executable permission.
+Status: the pure projection prototype is now used by a separate signed P2b
+implementation described in [the fact policy design](FACT_POLICY_DESIGN.md).
+Its delivery flag is disabled by default and requires paired CP authorization,
+current owner evidence/output reviews and explicit new grants. Pure projection
+objects remain non-authorizing. This is not completion of the reading profile.
 
 ## First exact output
 
@@ -54,21 +55,21 @@ rejects stale, revoked or future-dated reviews. It always returns
 
 The models establish consistency, not authenticity. A caller can construct
 self-consistent models; neither hashes nor a Python type makes them a permit.
-A future adapter must obtain qualification itself under the resolver gates, load
-the current review from an authenticated owner store, then perform signed policy
+The serving adapter obtains qualification itself under the resolver gates, loads
+the current review from an authenticated owner store, then performs signed policy
 and actual-release checks. Do not expose these functions as accepting recipient
 qualification or review objects.
 
-## Minimal serving contract that still must be agreed
+## Minimal serving contract
 
-The pure P2b foundation now defines an explicit new capability version requiring
-owner consent; its serving integration remains a separate gate. Existing P2a
+The P2b foundation defines an explicit new capability version requiring
+owner consent; its signed implementation retains separate release gates. Existing P2a
 policies/envelopes are closed to this form and must remain so. Keep the existing
 raw source reader unchanged. Do not map a fact form onto its output `tables`:
 that field currently doubles as evidence-table coverage in the raw adapter.
 
-The next evidence-use schema needs independent `sources` and exact canonical
-`tables`, plus an explicit event-time constraint. Proposed bounded first form:
+The P2b evidence-use schema defines independent `sources` and exact canonical
+`tables`, plus the following mandatory bounded event-time constraint:
 
 ```text
 event_window = {
@@ -86,7 +87,7 @@ The server supplies and signs the request anchor. Every contributing leaf must
 satisfy the interval using an approved table-specific, timezone-aware canonical
 UTC event timestamp. Grant expiry stays a separate current-time check. Never use
 fact creation/`valid_from` as a replacement for a missing source event timestamp.
-Fact validity also needs a current, non-future assertion check. The planned
+Fact validity also requires a current, non-future assertion check. The planned
 180/365/30/14-day profile windows are not represented by current P2a grant validity.
 
 Output permission remains an exact family/operation/view tuple. A single whole
@@ -104,9 +105,10 @@ must never select an arbitrary output parser, raw fallback or grant.
 
 ## What this enables, and what remains separate
 
-The next useful profile slice is an explicitly stated ordinary reading interest.
-It does not yet satisfy the full reading profile: date windows, output permission,
-actual client delivery and policy evaluation remain outstanding. Finance needs
+The useful narrow slice is an explicitly stated ordinary reading interest.
+Its P2b date-window, output-permission and policy machinery now exists, but
+qualification of actual copied inputs and the complete real-client campaign
+remain separate gates. It does not yet satisfy the full reading profile. Finance needs
 separate typed amount/currency/date or planning claims; work needs project-bound
 facts and later endpoint-safe relationships. Availability is a distinct closed
 inference family over certified calendar/free-busy lineage, not a preference fact.
@@ -185,3 +187,7 @@ remain non-bootable until this reader and its identity binding are implemented.
 - Differential canaries varying excluded content without changing allowed input;
   no influence on output, count, order or citations. Held-out human adjudication
   for B, including prompt injection, mixed context and policy paraphrases.
+
+The [next copied-positive and direct-prose plan](COPIED_POSITIVE_PLAN.md) specifies
+the missing enrollment, coverage and experiment bridge. No design text above
+authorizes a copied-runtime boot or a positive override of unresolved provenance.

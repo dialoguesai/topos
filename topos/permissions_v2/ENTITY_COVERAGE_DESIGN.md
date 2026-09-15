@@ -99,8 +99,10 @@ Legacy mention matches are useful conservative veto signals. They are never a
 permission proof: collisions across source/table/dataset require disambiguation
 with full identity or withholding, not selection of a convenient match.
 
-The current protection clock watches `owner_only_records` and `entity_blackholes`.
-It does not watch entity aliases, resolution merges or `entity_mentions` edits.
+The current version-2 protection clock watches `owner_only_records`,
+`entity_blackholes` and `intelligence_exclusions`. Record and semantic fact
+tombstones remain direct vetoes; entity exclusions currently withhold this family.
+The clock does not watch entity aliases, resolution merges or `entity_mentions` edits.
 A future implementation needs a separate monotonic identity/attribution clock or
 an explicitly versioned clock extension. Its identity and high-water mark must
 survive restart; missing triggers, reset, rollback and replacement fail closed.
@@ -127,20 +129,24 @@ silent migration is acceptable. Unregistered families keep the existing floor.
 
 Coverage addresses an owner-wide restriction; it does not create data access.
 The source-message release still requires raw permission and does not satisfy the
-planned reading facts/summaries profile. The proposed exact `prefers` scalar is
-unmounted and has no signed output authority. Finance, work and availability need
-their own closed forms and evidence contracts.
+planned reading facts/summaries profile. The exact `prefers` scalar now has a
+separate, default-off signed P2b implementation with authenticated evidence/output
+reviews. This narrow form does not complete the reading profile. Finance, work
+and availability need their own closed forms and evidence contracts.
 
-The planned 180/365/30/14-day client profile windows also remain separate work.
-Current P2a validity timestamps bound grant lifetime, not the event times of
-contributing evidence. The next schema needs exact evidence tables separately
-from output forms and an explicit source-event-time window. Missing or ambiguous
-leaf timestamps, future evidence and unresolved fact validity withhold. Do not
-substitute fact creation time or grant expiry for source event time.
+The planned complete 180/365/30/14-day client profiles remain separate work.
+P2a validity timestamps bound grant lifetime rather than contributor event time.
+P2b now requires exact evidence tables separately from output forms and a rolling
+source-event window anchored to signed issuance. Missing/ambiguous leaf times,
+future evidence and unresolved fact validity withhold. This does not supply
+missing corpus timestamps or register the other profiles’ output families.
 
 See [the scalar projection design](FACT_PROJECTION_DESIGN.md) for the proposed
 event-window semantics, output review and separate evidence/output rule changes.
-None of these gaps is closed by approving entity coverage.
+None of these gaps is closed by approving entity coverage. The versioned
+[next copied-positive and prose-bridge plan](COPIED_POSITIVE_PLAN.md) orders
+identity/posture enrollment, coverage proof and the offline experiment without
+changing any current floor.
 
 ## Required acceptance tests before any enablement
 

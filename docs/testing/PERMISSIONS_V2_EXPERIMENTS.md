@@ -54,9 +54,9 @@ node-owned review store, require `Qualification.verdict == qualified`, and
 preserve its binding, candidate/lineage/protection revisions and review revision.
 Each contributing leaf retains its source/table/dataset identity and reviewed
 classification. `QualifiedEvidence` supplies no candidate text and authorizes no
-output form. Loading fact values, defining a typed fact release projection,
-checking all native/disclosure constraints, and final release validation remain
-separate work. The harness's `experiment.synthetic_fact.v1` is not that adapter
+output form. A separate signed P2b scalar release now performs typed projection, native/
+disclosure checks and final release validation. The experiment package is not
+wired into it; its copied-evidence/coverage bridge remains separate work. The harness's `experiment.synthetic_fact.v1` is not that adapter
 and is not added to the capability registry.
 
 The provider is called again around each evaluation and every cache hit. A
@@ -135,6 +135,10 @@ timeouts/errors, injection-shaped data separation, cache isolation and changes
 during evaluation. They establish orchestration behavior, **not classifier
 accuracy, real lineage certification, data disclosure safety or a winning arm**.
 
-An actual model run, held-out owner adjudication, relevance/utility/false-permit
-metrics, corpus qualification, mounted preview, certified output adapter and
-all eight client/arm cells remain outstanding.
+A separate actual local-model pilot exercised eight public synthetic examples;
+its audit record is `NL_SYNTHETIC_EXPERIMENT.md`. That pilot establishes neither
+held-out classifier quality nor copied-corpus eligibility. Owner adjudication,
+relevance/utility/false-permit metrics, the real qualified-input bridge and all
+eight actual client/arm cells remain outstanding. See the versioned
+[copied-positive and prose-bridge plan](../../topos/permissions_v2/COPIED_POSITIVE_PLAN.md)
+for the next bounded slice; current signed P2b serving uses hard rules only.
