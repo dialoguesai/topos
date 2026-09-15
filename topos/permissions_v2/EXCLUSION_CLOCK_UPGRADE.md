@@ -77,8 +77,9 @@ generation, strip the version column or reverse-migrate to make older code run.
 
 ## Clock v3: closure-scoped review binding
 
-Clock v3 keeps the single monotonic generation and adds an append-only event
-log, `permissions_v2_protection_events(sequence, generation, source,
+Clock v3 keeps the single monotonic generation and adds an event log that the
+engine only ever appends to (no trigger yet refuses a direct delete or update of
+its rows; see the open issues in the release checkpoint), `permissions_v2_protection_events(sequence, generation, source,
 artifact_key)`, written by the same nine triggers in the same canonical
 transaction. Each insert, update or delete on `owner_only_records`,
 `entity_blackholes` or `intelligence_exclusions` records the generation it
