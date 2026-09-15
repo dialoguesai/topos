@@ -1,7 +1,8 @@
 # Owner-stated fact projection design, v1
 
-Status: pure, unmounted prototype. No policy grammar, advertised capability,
-signed authority, owner-review API, or recipient route accepts this projection.
+Status: pure projection prototype. A separate explicit P2b policy foundation is
+described in [the fact policy design](FACT_POLICY_DESIGN.md); it alone enables no
+advertised capability, signed authority, or recipient route for this projection.
 This is not completion of the reading profile or an executable permission.
 
 ## First exact output
@@ -60,7 +61,8 @@ qualification or review objects.
 
 ## Minimal serving contract that still must be agreed
 
-Introduce an explicit new capability version with owner consent. Existing P2a
+The pure P2b foundation now defines an explicit new capability version requiring
+owner consent; its serving integration remains a separate gate. Existing P2a
 policies/envelopes are closed to this form and must remain so. Keep the existing
 raw source reader unchanged. Do not map a fact form onto its output `tables`:
 that field currently doubles as evidence-table coverage in the raw adapter.

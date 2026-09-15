@@ -8,40 +8,16 @@ No signed Policy v2 grammar, capability, ledger or transport imports this module
 from __future__ import annotations
 
 from typing import Annotated, Literal
-import unicodedata
 
-from pydantic import Field, StringConstraints, field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from .canonical import MAX_INTEGER, PolicyError, digest
 from .contract import Hash, Identifier, Number, StrictModel
 from .evidence import EvidenceSnapshot, Qualification, _json, _key, _row_revision
 
-VIEW = "owner_stated_fact.scalar.v1"
-PROJECTION_VERSION = "exact-owner-preference/v1"
-Scalar = Annotated[str, StringConstraints(strict=True, min_length=1, max_length=256)]
+from .fact_contract import VIEW, PROJECTION_VERSION, FactScalarDisclosure
+
 _SENSITIVITY = {"none": 0, "personal": 1, "special": 2}
-
-
-class FactScalarDisclosure(StrictModel):
-    family: Literal["owner_stated_fact"]
-    operation: Literal["read"]
-    view_id: Literal["owner_stated_fact.scalar.v1"]
-    subject: Literal["self"]
-    predicate: Literal["prefers"]
-    value: Scalar
-
-    @field_validator("value")
-    @classmethod
-    def atomic_label_syntax(cls, value):
-        # This deliberately narrow lexical grammar is NOT a semantic classifier.
-        # Human review must attest that the exact label is one stated preference.
-        # Do not silently normalize bytes that were reviewed or source-bound.
-        if (value != unicodedata.normalize("NFC", value) or value != " ".join(value.split())
-            or value.startswith(("'", "’")) or value.endswith(("'", "’"))
-            or not any(unicodedata.category(char)[0] in "LN" for char in value)
-            or any(unicodedata.category(char)[0] not in "LMN" and char not in " -'’&" for char in value)):
-            raise ValueError("unsupported preference label syntax")
-        return value
 
 
 class OutputClassification(StrictModel):
