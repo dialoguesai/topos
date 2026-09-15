@@ -1,0 +1,363 @@
+{
+  "$defs": {
+    "EvidenceBinding": {
+      "additionalProperties": false,
+      "description": "Pinned by the node runtime to this resource; never a recipient parameter.",
+      "properties": {
+        "environment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Environment Id",
+          "type": "string"
+        },
+        "node_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "owner_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Owner Id",
+          "type": "string"
+        },
+        "resource_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Resource Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "environment_id",
+        "node_id",
+        "resource_id",
+        "owner_id"
+      ],
+      "title": "EvidenceBinding",
+      "type": "object"
+    },
+    "EvidenceIdentity": {
+      "additionalProperties": false,
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/EvidenceBinding"
+        },
+        "dataset_id": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Dataset Id"
+        },
+        "dataset_kind": {
+          "enum": [
+            "row_dataset",
+            "node_resource"
+          ],
+          "title": "Dataset Kind",
+          "type": "string"
+        },
+        "record_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Record Id",
+          "type": "string"
+        },
+        "source_id": {
+          "anyOf": [
+            {
+              "maxLength": 200,
+              "minLength": 1,
+              "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ],
+          "title": "Source Id"
+        },
+        "table": {
+          "enum": [
+            "signal_objects",
+            "conversation_messages",
+            "ai_chat_messages"
+          ],
+          "title": "Table",
+          "type": "string"
+        }
+      },
+      "required": [
+        "binding",
+        "table",
+        "record_id",
+        "source_id",
+        "dataset_kind",
+        "dataset_id"
+      ],
+      "title": "EvidenceIdentity",
+      "type": "object"
+    },
+    "EvidenceRevision": {
+      "additionalProperties": false,
+      "properties": {
+        "identity": {
+          "$ref": "#/$defs/EvidenceIdentity"
+        },
+        "revision": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Revision",
+          "type": "string"
+        }
+      },
+      "required": [
+        "identity",
+        "revision"
+      ],
+      "title": "EvidenceRevision",
+      "type": "object"
+    },
+    "EvidenceSnapshot": {
+      "additionalProperties": false,
+      "properties": {
+        "artifacts": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRevision"
+          },
+          "title": "Artifacts",
+          "type": "array"
+        },
+        "binding": {
+          "$ref": "#/$defs/EvidenceBinding"
+        },
+        "candidate_revision": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Candidate Revision",
+          "type": "string"
+        },
+        "canonical_file_revision": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Canonical File Revision",
+          "type": "string"
+        },
+        "fact_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Fact Id",
+          "type": "string"
+        },
+        "leaves": {
+          "items": {
+            "$ref": "#/$defs/EvidenceRevision"
+          },
+          "title": "Leaves",
+          "type": "array"
+        },
+        "lineage_revision": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Lineage Revision",
+          "type": "string"
+        },
+        "protection_revision": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Protection Revision",
+          "type": "string"
+        }
+      },
+      "required": [
+        "binding",
+        "canonical_file_revision",
+        "fact_id",
+        "candidate_revision",
+        "lineage_revision",
+        "protection_revision",
+        "artifacts",
+        "leaves"
+      ],
+      "title": "EvidenceSnapshot",
+      "type": "object"
+    },
+    "FactProjectionCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_review_revision": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Evidence Review Revision",
+          "type": "string"
+        },
+        "output": {
+          "$ref": "#/$defs/FactScalarDisclosure"
+        },
+        "projection_version": {
+          "const": "exact-owner-preference/v1",
+          "title": "Projection Version",
+          "type": "string"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/EvidenceSnapshot"
+        },
+        "version": {
+          "const": "topos-fact-projection-candidate/v1",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "projection_version",
+        "snapshot",
+        "evidence_review_revision",
+        "output"
+      ],
+      "title": "FactProjectionCandidate",
+      "type": "object"
+    },
+    "FactScalarDisclosure": {
+      "additionalProperties": false,
+      "properties": {
+        "family": {
+          "const": "owner_stated_fact",
+          "title": "Family",
+          "type": "string"
+        },
+        "operation": {
+          "const": "read",
+          "title": "Operation",
+          "type": "string"
+        },
+        "predicate": {
+          "const": "prefers",
+          "title": "Predicate",
+          "type": "string"
+        },
+        "subject": {
+          "const": "self",
+          "title": "Subject",
+          "type": "string"
+        },
+        "value": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Value",
+          "type": "string"
+        },
+        "view_id": {
+          "const": "owner_stated_fact.scalar.v1",
+          "title": "View Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "family",
+        "operation",
+        "view_id",
+        "subject",
+        "predicate",
+        "value"
+      ],
+      "title": "FactScalarDisclosure",
+      "type": "object"
+    },
+    "OutputClassification": {
+      "additionalProperties": false,
+      "properties": {
+        "assertion": {
+          "const": "explicit_atomic_preference",
+          "title": "Assertion",
+          "type": "string"
+        },
+        "domains": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+            "type": "string"
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "title": "Domains",
+          "type": "array"
+        },
+        "sensitivity": {
+          "enum": [
+            "none",
+            "personal",
+            "special"
+          ],
+          "title": "Sensitivity",
+          "type": "string"
+        },
+        "subject": {
+          "const": "self",
+          "title": "Subject",
+          "type": "string"
+        }
+      },
+      "required": [
+        "domains",
+        "sensitivity",
+        "subject",
+        "assertion"
+      ],
+      "title": "OutputClassification",
+      "type": "object"
+    }
+  },
+  "additionalProperties": false,
+  "properties": {
+    "classification": {
+      "$ref": "#/$defs/OutputClassification"
+    },
+    "expected_candidate": {
+      "$ref": "#/$defs/FactProjectionCandidate"
+    },
+    "expected_candidate_hash": {
+      "pattern": "^[0-9a-f]{64}$",
+      "title": "Expected Candidate Hash",
+      "type": "string"
+    },
+    "expected_current_review_revision": {
+      "anyOf": [
+        {
+          "pattern": "^[0-9a-f]{64}$",
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "title": "Expected Current Review Revision"
+    },
+    "review_id": {
+      "maxLength": 200,
+      "minLength": 1,
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+      "title": "Review Id",
+      "type": "string"
+    }
+  },
+  "required": [
+    "review_id",
+    "expected_candidate",
+    "expected_candidate_hash",
+    "expected_current_review_revision",
+    "classification"
+  ],
+  "title": "RecordProjectionReview",
+  "type": "object"
+}

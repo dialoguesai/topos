@@ -92,6 +92,18 @@
       "title": "Node Signing Kid",
       "type": "string"
     },
+    "projection_review_store_path": {
+      "anyOf": [
+        {
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
+      ],
+      "default": null,
+      "title": "Projection Review Store Path"
+    },
     "trusted_cp_keys": {
       "patternProperties": {
         "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$": {

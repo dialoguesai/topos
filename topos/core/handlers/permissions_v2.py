@@ -49,10 +49,11 @@ async def handle_permissions_v2_status(message):
     return await _handle(message, "status")
 
 
-async def _handle_evidence(message, operation):
+async def _handle_evidence(message, operation, *, projection=False):
     from ...permissions_v2.canonical import PolicyError
     from ...permissions_v2.evidence import EvidenceBinding
     from ...permissions_v2.evidence_reviews import EvidenceLookup, RecordEvidenceReview, RevokeEvidenceReview
+    from ...permissions_v2.projection_reviews import RecordProjectionReview, RevokeProjectionReview
     from ...permissions_v2.runtime import get_runtime
     from ...principal import OWNER_APP, current_principal
     from ...storage.db.write_gate import with_db_write
@@ -70,7 +71,8 @@ async def _handle_evidence(message, operation):
         with with_db_write():
             binding = EvidenceBinding.parse(payload["binding"])
             request_type = {"preview":EvidenceLookup, "read":EvidenceLookup,
-                "record":RecordEvidenceReview, "revoke":RevokeEvidenceReview}[operation]
+                "record":RecordProjectionReview if projection else RecordEvidenceReview,
+                "revoke":RevokeProjectionReview if projection else RevokeEvidenceReview}[operation]
             request = request_type.parse(payload["request"])
             runtime = get_runtime()
             actual = EvidenceBinding.parse(runtime.protocol.ledger.identity.model_dump())
@@ -78,8 +80,13 @@ async def _handle_evidence(message, operation):
                 raise PolicyError("owner_authority_required")
             if binding != actual:
                 raise PolicyError("evidence_target_binding")
-            if operation == "record" and request.expected_snapshot.binding != actual:
-                raise PolicyError("evidence_target_binding")
+            if operation == "record":
+                snapshot = request.expected_candidate.snapshot if projection else request.expected_snapshot
+                if snapshot.binding != actual:
+                    raise PolicyError("evidence_target_binding")
+            if projection:
+                service = runtime.projection_reviews(require_existing=operation in {"record", "revoke"})
+                return getattr(service, operation)(request, now=int(time.time()))
             service = runtime.evidence_reviews(require_existing=operation in {"record", "revoke"})
             if operation == "record":
                 return service.record(request, now=int(time.time()))
@@ -91,9 +98,9 @@ async def _handle_evidence(message, operation):
     except PolicyError as exc:
         if exc.code in {"owner_authority_required", "evidence_target_binding"}:
             code = 403
-        elif exc.code in {"review_stale", "review_conflict", "review_id_conflict"}:
+        elif exc.code in {"review_stale", "review_conflict", "review_id_conflict", "output_review_stale", "output_review_conflict", "output_review_id_conflict"}:
             code = 409
-        elif exc.code in {"evidence_missing", "review_unknown"}:
+        elif exc.code in {"evidence_missing", "review_unknown", "output_review_unknown"}:
             code = 404
         elif exc.code == "preview_too_large":
             code = 413
@@ -124,3 +131,23 @@ async def handle_permissions_v2_evidence_review_record(message):
 @handles("permissions_v2_evidence_review_revoke", owner_only=True)
 async def handle_permissions_v2_evidence_review_revoke(message):
     return await _handle_evidence(message, "revoke")
+
+
+@handles("permissions_v2_projection_preview", owner_only=True)
+async def handle_permissions_v2_projection_preview(message):
+    return await _handle_evidence(message, "preview", projection=True)
+
+
+@handles("permissions_v2_projection_review_read", owner_only=True)
+async def handle_permissions_v2_projection_review_read(message):
+    return await _handle_evidence(message, "read", projection=True)
+
+
+@handles("permissions_v2_projection_review_record", owner_only=True)
+async def handle_permissions_v2_projection_review_record(message):
+    return await _handle_evidence(message, "record", projection=True)
+
+
+@handles("permissions_v2_projection_review_revoke", owner_only=True)
+async def handle_permissions_v2_projection_review_revoke(message):
+    return await _handle_evidence(message, "revoke", projection=True)

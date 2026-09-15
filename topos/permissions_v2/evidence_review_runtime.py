@@ -46,12 +46,21 @@ def _sync_directory(path):
 
 
 class ReviewEnrollmentRuntime:
+    enrollment_type = ReviewEnrollment
+    enrollment_version = "topos-owner-evidence-enrollment/v1"
+    store_type = EvidenceReviewStore
+    not_enrolled = "evidence_reviews_not_enrolled"
+
     def __init__(self, *, canonical_database: Path, binding: EvidenceBinding, path: Path):
         self.resolver = EvidenceResolver(canonical_database, binding=binding)
         self.path = path
         self.marker = path.with_name(path.name + ".enrollment.json")
         self._service = None
         self._enrollment = None
+        self._store = None
+
+    def _make_service(self, store):
+        return EvidenceReviewService(self.resolver, store)
 
     def _read_marker(self):
         info = _checked_file(self.marker, code="review_enrollment_unavailable")
@@ -60,7 +69,7 @@ class ReviewEnrollmentRuntime:
         try:
             if info.st_size > 8192:
                 raise PolicyError("review_enrollment_unavailable")
-            result = ReviewEnrollment.parse(self.marker.read_bytes())
+            result = self.enrollment_type.parse(self.marker.read_bytes())
         except OSError:
             raise PolicyError("review_enrollment_unavailable") from None
         if (result.binding != self.resolver.binding or result.canonical_file_revision != self.resolver._file_revision()
@@ -79,18 +88,18 @@ class ReviewEnrollmentRuntime:
                 if self._enrollment is not None or self.path.exists() or self.marker.is_symlink():
                     raise PolicyError("review_enrollment_unavailable")
                 if require_existing:
-                    raise PolicyError("evidence_reviews_not_enrolled")
+                    raise PolicyError(self.not_enrolled)
                 _owner(self.resolver.binding)
                 _checked_file(self.path, code="review_database_binding", may_create=True)
                 _checked_file(self.marker, code="review_enrollment_unavailable", may_create=True)
-                pending = ReviewEnrollment(version="topos-owner-evidence-enrollment/v1", state="pending",
+                pending = self.enrollment_type(version=self.enrollment_version, state="pending",
                     binding=self.resolver.binding, canonical_file_revision=self.resolver._file_revision(),
                     review_store_path=str(self.path), store_device=None, store_inode=None)
                 # Persist intent first. A crash at any later point must require
                 # deliberate recovery, never silently create a replacement store.
                 _write_new(self.marker, pending)
                 _sync_directory(self.marker.parent)
-                reviews = EvidenceReviewStore(self.path, resolver=self.resolver)
+                reviews = self.store_type(self.path, resolver=self.resolver)
                 active = pending.model_copy(update={"state":"active", "store_device":str(reviews._file_identity[0]),
                     "store_inode":str(reviews._file_identity[1])})
                 temporary = self.marker.with_name(self.marker.name + "." + secrets.token_hex(8))
@@ -100,11 +109,13 @@ class ReviewEnrollmentRuntime:
                 except OSError:
                     raise PolicyError("review_enrollment_unavailable") from None
                 _sync_directory(self.marker.parent)
-                self._service = EvidenceReviewService(self.resolver, reviews)
+                self._store = reviews
+                self._service = self._make_service(reviews)
             enrollment = self._read_marker()
             if self._service is None:
-                reviews = EvidenceReviewStore(self.path, resolver=self.resolver, _existing_only=True)
-                self._service = EvidenceReviewService(self.resolver, reviews)
+                reviews = self.store_type(self.path, resolver=self.resolver, _existing_only=True)
+                self._store = reviews
+                self._service = self._make_service(reviews)
             self._enrollment = enrollment
-            self._service.reviews._check_file()
+            self._store._check_file()
             return self._service
