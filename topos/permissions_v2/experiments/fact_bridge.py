@@ -10,6 +10,12 @@ call, and before the next stage, every revision and authority is captured again
 and compared; any change stops the run and nothing is retained. Results carry
 decision metadata only. Nothing here can release data, and no serving module
 imports this package.
+
+The subject rule, output family, view and reviewed projection all come from the
+capsule policy's capability through the same maps the release adapter reads, so
+arm A is the serving decision for every fact capability rather than for the
+first family only. Arm B never sees an entity id, and its evidence stage never
+sees the scalar it would release.
 """
 from __future__ import annotations
 
@@ -23,7 +29,7 @@ from pydantic import Field, model_validator
 from ..canonical import MAX_INTEGER, PolicyError, canonical_bytes, digest
 from ..contract import Binding, Hash, Identifier, Number, Only, StrictModel
 from ..evidence import QualifiedEvidence, _json, _key
-from ..fact_contract import VIEW, FactPolicy, FactPolicyV2
+from ..fact_contract import FAMILY_BY_CAPABILITY, OUTPUT_FAMILIES, FactPolicy, FactPolicyV2
 from ..fact_eligibility import DenyStructure, FactEligibility, PermitStructure, prepare_fact_eligibility
 from ..fact_policy import fact_projection_decision
 from ..identity import SUBJECT_CONTRACT_BY_CAPABILITY
@@ -31,6 +37,7 @@ from ..fact_projection import ReviewedFactProjection
 from ..projection_reviews import ProjectionReviewService
 from .evaluators import LocalModelTransport, ModelRequest, ModelResponse
 from .models import Arm, Ids, Prose, Stage, Text, Verdict, Zero
+from .retention import SyntheticBodyRetention
 
 VERSION = "topos-offline-qualified-fact-experiment/v1"
 MAX_SURFACES = 16
@@ -42,10 +49,15 @@ Read the approved inclusions, exclusions, illustrative examples and, when suppli
 the original prose directly. The original is null whenever any clause it restates is not offered.
 Examples illustrate their clauses; a positive illustration never overrides an exclusion.
 At evidence_use, every supplied unit belongs to one derivation; all of them together
-must fall under a common inclusion for that inclusion to match.
+must fall under a common inclusion for that inclusion to match. A derived fact unit
+names only its predicate; judge what was said from the other units' text.
 At output_release, inspect only the exact proposed output value; use only eligible inclusion IDs.
-An exclusion applies only to the candidate units listed in its unit_ids; any matching
-exclusion dominates every inclusion. Missing context means indeterminate.
+Each exclusion lists structural_scope_unit_ids: the units its declared sources, tables
+and time window could reach. That list is scope, not a match; it says nothing about
+content, and every unit may be listed under every exclusion. An exclusion matches only
+when the content of a unit in its scope falls under that exclusion's own text; a unit
+outside its scope never matches it. Any matching exclusion dominates every inclusion.
+Missing context means indeterminate.
 Never infer authority, amend policy, fetch context, use tools, or create a new output.
 Return one JSON object with exactly: verdict, matched_allow_clause_ids,
 matched_deny_clause_ids, required_projection_id, missing_context_codes.
@@ -57,7 +69,11 @@ Deny for an exclusion lists every matched exclusion ID. Deny because no inclusio
 matches lists no clause IDs at all.
 No explanations, markdown, arbitrary projections, new clauses or authority fields.
 """
-FACT_PROMPT_REVISION = digest({"template": FACT_SYSTEM_PROMPT, "version": "fact-bridge-prompt/v2"})
+FACT_PROMPT_VERSION = "fact-bridge-prompt/v3"
+FACT_PROMPT_REVISION = digest({"template": FACT_SYSTEM_PROMPT, "version": FACT_PROMPT_VERSION})
+# Every view a fact capability can release. The capture's own view, fixed by the
+# capsule capability, is what a permit must name; this only bounds the schema.
+FactView = Literal["owner_stated_fact.scalar.v1", "owner_stated_work.scalar.v1"]
 
 Reason = Literal[
     "rule_permit", "rule_deny", "unknown_context", "unsupported_view", "stale_authority", "fact_not_current",
@@ -129,7 +145,7 @@ class FactJudgment(StrictModel):
     verdict: Verdict
     matched_allow_clause_ids: Ids
     matched_deny_clause_ids: Ids
-    required_projection_id: Literal["owner_stated_fact.scalar.v1"] | None
+    required_projection_id: FactView | None
     missing_context_codes: Annotated[list[Literal["classification", "context", "projection"]], Field(max_length=3)]
 
     @model_validator(mode="after")
@@ -152,7 +168,7 @@ class FactShadowDecision(StrictModel):
     bundle_revision: Hash | None
     matched_allow_clause_ids: Ids
     matched_deny_clause_ids: Ids
-    required_projection_id: Literal["owner_stated_fact.scalar.v1"] | None
+    required_projection_id: FactView | None
     missing_context_codes: list[Missing]
 
 
@@ -181,14 +197,14 @@ class _Surface:
 
     def prompt_unit(self):
         # Identifiers and content only: no reviewed labels, owner-only flags,
-        # record identifiers, revisions or authority reach the model.
+        # record or entity identifiers, revisions or authority reach the model.
         return {"unit_id": self.unit_id, "table": self.table, "source_id": self.source_id,
                 "dataset_id": self.dataset_id, "text": self.text}
 
 
 @dataclass(frozen=True)
 class _Capture:
-    """Private. Rows and surfaces never leave the bridge or enter a result."""
+    """Private. Rows, surfaces and permitted subjects never leave the bridge or enter a result."""
     evidence: QualifiedEvidence
     projection: ReviewedFactProjection
     rows: dict
@@ -198,6 +214,9 @@ class _Capture:
     output_surface: _Surface
     captured_at: int
     revision: str
+    permits: frozenset
+    family: str
+    view: str
 
 
 class _Withheld(Exception):
@@ -268,7 +287,10 @@ class FactShadowBridge:
     """
     def __init__(self, capsule: FactExperimentCapsule, *, projections: ProjectionReviewService, binding: Binding,
                  clock: Callable[[], int], transport: LocalModelTransport | None = None,
-                 cache: ShadowDecisionCache | None = None):
+                 cache: ShadowDecisionCache | None = None, retention: SyntheticBodyRetention | None = None):
+        if retention is not None and not isinstance(retention, SyntheticBodyRetention):
+            raise PolicyError("retention_invalid")
+        self.retention = retention
         self.capsule = FactExperimentCapsule.parse(capsule.model_dump())
         self.binding = Binding.parse(binding.model_dump())
         if self.capsule.policy.binding != self.binding:
@@ -289,29 +311,34 @@ class FactShadowBridge:
 
     def _capture(self, fact_id, request_as_of, now) -> _Capture:
         capsule = self.capsule
+        # Same rule as the release adapter: the capsule's own capability fixes
+        # the owner-identity contract and the output family, never the bridge
+        # and never the candidate in hand.
+        capability = capsule.policy.versions.capability
+        contract, family = SUBJECT_CONTRACT_BY_CAPABILITY.get(capability), FAMILY_BY_CAPABILITY.get(capability)
+        if contract is None or family is None:
+            raise _Withheld("unsupported_capability")
 
         def callback(evidence, reviewed, rows, permits):
             policy, evidence, projection, structure = prepare_fact_eligibility(policy=capsule.policy, evidence=evidence,
                 projection=reviewed, rows=rows, binding=self.binding, request_as_of=request_as_of, now=now,
                 permitted_subjects=permits)
-            surfaces, output = self._surfaces(evidence, projection, rows)
+            surfaces, output = self._surfaces(evidence, projection, rows, family)
             revision = digest({"version": VERSION, "capsule": capsule.owner_approved_revision, "request_as_of": request_as_of,
                 "evidence": evidence.model_dump(), "output_review_revision": projection.output_review_revision,
                 "projection": digest(projection.candidate.model_dump()), "structure": _structure_dump(structure)})
-            return _Capture(evidence, projection, rows, policy, structure, surfaces, output, now, revision)
+            # The permit set is kept by value for arm A only, exactly as the release
+            # callback passes it on; it is never part of a revision, prompt or result.
+            return _Capture(evidence, projection, rows, policy, structure, surfaces, output, now, revision,
+                            frozenset(permits), family, OUTPUT_FAMILIES[family][0])
 
         try:
-            # Same rule as the release adapter: the capsule's own capability
-            # fixes the owner-identity contract, never the bridge.
-            contract = SUBJECT_CONTRACT_BY_CAPABILITY.get(capsule.policy.versions.capability)
-            if contract is None:
-                raise _Withheld("unsupported_capability")
-            return self.projections.with_reviewed(fact_id, now=now, callback=callback, contract=contract)
+            return self.projections.with_reviewed(fact_id, now=now, callback=callback, contract=contract, family=family)
         except PolicyError as exc:
             raise _Withheld(exc.code) from None
 
     @staticmethod
-    def _surfaces(evidence, projection, rows):
+    def _surfaces(evidence, projection, rows, family):
         refs = evidence.snapshot.artifacts + evidence.snapshot.leaves
         if len(refs) > MAX_SURFACES:
             raise _Withheld("surface_budget")
@@ -319,16 +346,19 @@ class FactShadowBridge:
         for index, ref in enumerate(refs, start=1):
             row = rows[_key(ref.identity)]
             if ref.identity.table == "signal_objects":
+                # A derived fact shows its predicate only. Its subject is an entity
+                # id under the attested contract, and its value is the scalar the
+                # output stage inspects; evidence use is judged from what was said.
                 payload = _json(row.get("payload_json"), dict)
-                text = canonical_bytes({"subject": payload.get("subject_entity_id"), "predicate": payload.get("predicate"),
-                                        "value": payload.get("object_value")}).decode("ascii")
+                text = canonical_bytes({"predicate": payload.get("predicate")}).decode("ascii")
             else:
                 text = row.get("content")
             if type(text) is not str or not text or len(text) > MAX_SURFACE_CHARS:
                 raise _Withheld("surface_budget")
             surfaces.append(_Surface(_key(ref.identity), "u%d" % index, ref.identity.table, ref.identity.source_id, ref.identity.dataset_id, text))
+        # The disclosure subject is the schema literal "self", never an entity id.
         scalar = projection.candidate.output
-        output = _Surface(None, "output", "owner_stated_fact", None, None,
+        output = _Surface(None, "output", family, None, None,
             canonical_bytes({"subject": scalar.subject, "predicate": scalar.predicate, "value": scalar.value}).decode("ascii"))
         return tuple(surfaces), output
 
@@ -349,7 +379,15 @@ class FactShadowBridge:
 
     def _rules(self, capture, request_as_of):
         decision = fact_projection_decision(policy=capture.policy, evidence=capture.evidence, projection=capture.projection,
-            rows=capture.rows, binding=self.binding, request_as_of=request_as_of, now=capture.captured_at)
+            rows=capture.rows, binding=self.binding, request_as_of=request_as_of, now=capture.captured_at,
+            permitted_subjects=capture.permits)
+        if decision.verdict == "permit":
+            # The release adapter parses the reviewed scalar as the granted family's
+            # disclosure before it would send; a candidate that does not fit withholds.
+            try:
+                OUTPUT_FAMILIES[capture.family][2].parse(capture.projection.candidate.output.model_dump())
+            except PolicyError as exc:
+                return self._withheld_decision("output_release", "rules_v2", exc.code, capture)
         return self._decision(stage="output_release", arm="rules_v2", verdict=decision.verdict, reason=decision.reason_code,
             capture=capture, allows=decision.matched_allow_clause_ids, denies=decision.matched_deny_clause_ids,
             projection_id=decision.required_projection_id, missing=decision.missing_context_codes)
@@ -382,7 +420,7 @@ class FactShadowBridge:
         return eligible, exclusions
 
     def _exclusion_prompt(self, capture, stage, exclusions):
-        """Offered exclusion texts with their declared scope and the exact units each may match."""
+        """Offered exclusion texts with their declared scope and the units that scope can reach."""
         rules, offered = capture.policy.rules, []
         units = {surface.key: surface.unit_id for surface in capture.surfaces}
         scoped = {rules[clause.rule_index].rule_id: clause for clause in capture.structure.clauses
@@ -393,11 +431,14 @@ class FactShadowBridge:
             evidence = scoped[clause.clause_id]
             rule = next(rule for rule in rules if rule.rule_id == clause.clause_id)
             sources = rule.evidence_use.sources
+            # Structural scope only: every unit these sources, tables and window can
+            # reach. It is named as scope so it cannot read as a finding that the
+            # unit's content falls under the exclusion.
             offered.append({**clause.model_dump(),
                 "sources": list(sources.values if isinstance(sources, Only) else capture.policy.source_universe.source_ids),
                 "tables": list(rule.evidence_use.tables),
-                "unit_ids": ([units[key] for key, time in evidence.evidence_times if time is not False]
-                             if stage == "evidence_use" else [capture.output_surface.unit_id])})
+                "structural_scope_unit_ids": ([units[key] for key, time in evidence.evidence_times if time is not False]
+                                              if stage == "evidence_use" else [capture.output_surface.unit_id])})
         return offered
 
     async def _semantic(self, capture, stage, eligible, exclusions):
@@ -416,7 +457,7 @@ class FactShadowBridge:
             "exclusions": self._exclusion_prompt(capture, stage, exclusions),
             "examples": [example.model_dump() for example in prose.examples
                          if example.clause_id in eligible or example.clause_id in exclusions]},
-            "stage": stage, "eligible_inclusion_ids": list(eligible), "form": VIEW}
+            "stage": stage, "eligible_inclusion_ids": list(eligible), "form": capture.view}
         units = [surface.prompt_unit() for surface in (capture.surfaces if stage == "evidence_use" else (capture.output_surface,))]
         request = ModelRequest(arm="semantic_v1", model_id=pin.model_id, model_revision=pin.model_revision,
             prompt_revision=pin.prompt_revision, stage=stage,
@@ -427,24 +468,34 @@ class FactShadowBridge:
             return self._withheld_semantic(stage, capture, "prompt_budget"), False
         # From here the gates are released and the transport may have sent the
         # request, so every outcome below counts as a call and is requalified.
+        decision, judgment, body = None, None, None
         try:
             result = await asyncio.wait_for(self.transport.complete(request), timeout=pin.timeout_ms / 1000)
             if not isinstance(result, ModelResponse):
-                return self._withheld_semantic(stage, capture, "malformed_decision"), True
-            result = ModelResponse.parse(result.model_dump())
-            if (result.arm, result.model_id, result.model_revision, result.prompt_revision) != ("semantic_v1", pin.model_id, pin.model_revision, pin.prompt_revision):
-                return self._withheld_semantic(stage, capture, "model_identity"), True
-            if len(result.body.encode("utf8")) > pin.max_response_bytes:
-                return self._withheld_semantic(stage, capture, "response_budget"), True
-            judgment = FactJudgment.parse(result.body)
+                decision = self._withheld_semantic(stage, capture, "malformed_decision")
+            else:
+                result = ModelResponse.parse(result.model_dump())
+                body = result.body
+                if (result.arm, result.model_id, result.model_revision, result.prompt_revision) != ("semantic_v1", pin.model_id, pin.model_revision, pin.prompt_revision):
+                    decision = self._withheld_semantic(stage, capture, "model_identity")
+                elif len(result.body.encode("utf8")) > pin.max_response_bytes:
+                    decision = self._withheld_semantic(stage, capture, "response_budget")
+                else:
+                    judgment = FactJudgment.parse(result.body)
         except asyncio.TimeoutError:
-            return self._withheld_semantic(stage, capture, "model_timeout"), True
+            decision = self._withheld_semantic(stage, capture, "model_timeout")
         except (PolicyError, UnicodeError, ValueError):
-            return self._withheld_semantic(stage, capture, "malformed_decision"), True
+            decision = self._withheld_semantic(stage, capture, "malformed_decision")
         except Exception:
             # Never retain or echo provider exceptions that may carry candidate data.
-            return self._withheld_semantic(stage, capture, "model_error"), True
-        return self._judge(capture, stage, eligible, exclusions, judgment), True
+            decision = self._withheld_semantic(stage, capture, "model_error")
+        if judgment is not None:
+            decision = self._judge(capture, stage, eligible, exclusions, judgment)
+        if self.retention is not None:
+            # Outside the handlers above: a retention failure stops the run rather
+            # than being recorded as a model error.
+            self.retention.keep(stage=stage, request=request, response_body=body, reason_code=decision.reason_code)
+        return decision, True
 
     def _judge(self, capture, stage, eligible, exclusions, judgment):
         if (not set(judgment.matched_allow_clause_ids) <= set(eligible)
@@ -462,12 +513,12 @@ class FactShadowBridge:
             return self._decision(stage=stage, arm="semantic_v1", verdict="indeterminate", reason="unknown_context",
                 capture=capture, allows=judgment.matched_allow_clause_ids, missing=judgment.missing_context_codes)
         if judgment.verdict == "permit":
-            if judgment.required_projection_id != VIEW:
+            if judgment.required_projection_id != capture.view:
                 return self._withheld_semantic(stage, capture, "projection_required")
             if not judgment.matched_allow_clause_ids:
                 return self._withheld_semantic(stage, capture, "clause_binding")
             return self._decision(stage=stage, arm="semantic_v1", verdict="permit", reason="semantic_permit", capture=capture,
-                allows=judgment.matched_allow_clause_ids, projection_id=VIEW)
+                allows=judgment.matched_allow_clause_ids, projection_id=capture.view)
         if judgment.verdict == "indeterminate":
             return self._decision(stage=stage, arm="semantic_v1", verdict="indeterminate", reason="unknown_context",
                 capture=capture, allows=judgment.matched_allow_clause_ids, missing=["classification"])

@@ -144,13 +144,23 @@ out-of-window leaf time, or no structurally eligible inclusion; it then runs
 evidence_use over the whole closure and output_release over the exact scalar,
 offering only eligible inclusions and only exclusions whose own event window is
 not already false. Each offered exclusion carries its rule's declared sources
-and tables and the unit IDs it may match: at evidence_use the units the
-structure scoped to that rule, at output_release only the output. The owner's
+and tables and `structural_scope_unit_ids`: at evidence_use the units that
+rule's sources, tables and window can reach, at output_release only the output.
+The prompt (`fact-bridge-prompt/v3`) says that list is scope, not a match. Under
+v2 the field was `unit_ids`, and every unit sharing those sources was listed
+under every exclusion; the one synthetic positive was then denied citing the
+health exclusion, a likely misreading of that list as a finding. The owner's
 original prose restates every clause, so it is sent only when every inclusion
 is eligible and every exclusion offered; otherwise `original` is null and the
 model sees only the offered clause texts and their examples. Reviewed labels,
-owner-only flags, record identifiers, revisions and authority never enter the
-prompt. A matched exclusion dominates. `semantic_deny` always names the
+owner-only flags, record and entity identifiers, revisions and authority never
+enter the prompt. At evidence_use a derived fact unit shows only its predicate:
+its subject is an entity id under the attested contract, and its value is the
+scalar the output stage judges. The subject rule, output family, view and
+reviewed projection all come from the capsule's capability through the maps the
+release adapter reads, so arm A is the serving decision for p2b-v1 to v4
+(`tests/permissions_v2/test_fact_bridge_parity.py` compares it with the decision
+`FactProjectionRelease` checkpoints, 11 cases). A matched exclusion dominates. `semantic_deny` always names the
 exclusions it matched; a deny naming no clause is recorded separately as
 `no_semantic_match`, and a deny naming only an inclusion withholds as
 `clause_binding`. Invented clause identifiers, missing projection identifiers
@@ -173,14 +183,27 @@ clauses keeping the original prose out, output-stage clause narrowing, window
 masks, five mid-call changes during either model call (a change during the
 first stops before the second call; one during the second evicts the cached
 first-stage decision), post-call identity mismatch, cache isolation, withheld
-evidence, capsule closure and the import boundary with fake transports (47
+evidence, capsule closure and the import boundary with fake transports (49
 cases). An exclusion with unknown
 event time cannot coexist with an eligible inclusion, because an inclusion
 needs every leaf known and in window; that branch is defensive only.
 
+For synthetic runs only, `experiments/retention.py` keeps each model request
+and raw response privately (a caller-chosen 0700 directory, 0600 files, no
+symlinks), so a wrong verdict can be diagnosed; reports never carry bodies.
+`experiments/scoring.py` scores both arms against an external case file whose
+exact bytes are hashed into the report: permits, prohibited permits, recall with
+a 95% Wilson interval, unresolved verdicts, p50/p95 latency, paraphrase
+stability, and the B-minus-A recall gap with Newcombe's paired interval. Gold
+labels are joined only after both arms ran, and evaluators never receive a gold
+field (`test_experiment_scoring.py`, 24 cases; `test_experiment_retention.py`,
+15).
+
 The host-side measurement (`scripts/permissions_beta/run_fact_bridge.py` in
-the control-plane repository) runs both arms on eight synthetic scratch
-corpora, five of them designed to deny, against the pinned local model. Each
+the control-plane repository) runs both arms over the cases in a `--cases` file
+(`--emit-design-cases` writes the 11 synthetic design cases: the original eight,
+five of them designed to deny, plus three restatements) against the pinned local
+model. Each
 arm captures under the gates itself; the runner refuses a record whose arms
 report different bundle revisions. It refuses any uncommitted change under
 the engine's `topos/` and `shared/` packages, the two engine trees the measured

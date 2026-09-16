@@ -19,8 +19,8 @@ from topos.features.lifecycle.record_protection import RecordProtectionStore
 from topos.permissions_v2.canonical import PolicyError, digest
 from topos.permissions_v2.contract import Binding
 from topos.permissions_v2.experiments.evaluators import ModelResponse
-from topos.permissions_v2.experiments.fact_bridge import (FACT_PROMPT_REVISION, VERSION, FactExperimentCapsule,
-    FactShadowBridge, ShadowDecisionCache)
+from topos.permissions_v2.experiments.fact_bridge import (FACT_PROMPT_REVISION, FACT_SYSTEM_PROMPT, VERSION,
+    FactExperimentCapsule, FactShadowBridge, ShadowDecisionCache)
 from topos.permissions_v2.fact_contract import VIEW
 from topos.permissions_v2.projection_reviews import RecordProjectionReview, RevokeProjectionReview
 
@@ -121,7 +121,9 @@ async def test_semantic_arm_runs_two_stages_with_prose_only_prompts_and_requalif
     evidence_call, output_call = model.calls
     evidence_units = json.loads(evidence_call.candidate_data)["untrusted_candidate_data"]
     assert [unit["table"] for unit in evidence_units] == ["signal_objects", "conversation_messages"]
-    assert json.loads(evidence_units[0]["text"]) == {"subject": "self", "predicate": "prefers", "value": "history books"}
+    # The derived fact names its predicate only: no subject id, and not the value
+    # the output stage is about to inspect.
+    assert json.loads(evidence_units[0]["text"]) == {"predicate": "prefers"}
     assert evidence_units[1]["text"] == MESSAGE and set(evidence_units[1]) == {"unit_id", "table", "source_id", "dataset_id", "text"}
     output_units = json.loads(output_call.candidate_data)["untrusted_candidate_data"]
     assert [unit["unit_id"] for unit in output_units] == ["output"] and MESSAGE not in output_call.candidate_data
@@ -240,7 +242,7 @@ async def test_exclusion_window_masks_gate_what_the_model_may_match(timed, proje
         [exclusion] = prose_json["exclusions"]
         assert (exclusion["sources"], len(exclusion["tables"])) == (["ai-source-1"], 3)
         tables = {unit["unit_id"]: unit["table"] for unit in json.loads(model.calls[0].candidate_data)["untrusted_candidate_data"]}
-        assert sorted(tables[unit] for unit in exclusion["unit_ids"]) == ["ai_chat_messages", "signal_objects"]
+        assert sorted(tables[unit] for unit in exclusion["structural_scope_unit_ids"]) == ["ai_chat_messages", "signal_objects"]
 
 
 @pytest.mark.asyncio
@@ -252,7 +254,35 @@ async def test_output_stage_exclusion_is_scoped_to_the_exact_output(timed, proje
     await bridge(timed, projection_service, raw=raw, transport=model).run(timed[2], request_as_of=AS_OF, arm="semantic_v1")
     [evidence_exclusion] = approved(model.calls[0])["owner_approved_prose"]["exclusions"]
     [output_exclusion] = approved(model.calls[1])["owner_approved_prose"]["exclusions"]
-    assert evidence_exclusion["unit_ids"] == ["u1", "u2"] and output_exclusion["unit_ids"] == ["output"]
+    assert evidence_exclusion["structural_scope_unit_ids"] == ["u1", "u2"]
+    assert output_exclusion["structural_scope_unit_ids"] == ["output"]
+
+
+@pytest.mark.asyncio
+async def test_exclusion_reach_is_presented_as_scope_never_as_a_match(timed, projection_service):
+    """Nothing in this positive is about health, yet the deny clause's sources,
+    tables and window reach every unit. Listed as `unit_ids` under a prompt saying
+    the exclusion "applies" to them, that reach read as a finding against the one
+    synthetic positive. It must be named, and described, as scope.
+    """
+    raw = policy(timed)
+    raw["rules"].append(rule("deny-health", "deny", "health"))
+    record_output(timed, projection_service)
+    model = Fake()
+    result = await bridge(timed, projection_service, raw=raw, transport=model).run(timed[2], request_as_of=AS_OF, arm="semantic_v1")
+    assert result.verdict == "permit" and len(model.calls) == 2
+    for call in model.calls:
+        [exclusion] = approved(call)["owner_approved_prose"]["exclusions"]
+        assert set(exclusion) == {"clause_id", "text", "sources", "tables", "structural_scope_unit_ids"}
+        assert exclusion["structural_scope_unit_ids"]
+        assert "unit_ids" not in call.system.replace("structural_scope_unit_ids", "")
+        assert "That list is scope, not a match" in call.system and "applies only to the candidate units" not in call.system
+
+
+def test_prompt_revision_is_pinned_to_its_template_and_version():
+    """Any edit to the template must come with a deliberate version bump and a new pin."""
+    assert FACT_PROMPT_REVISION == digest({"template": FACT_SYSTEM_PROMPT, "version": "fact-bridge-prompt/v3"})
+    assert FACT_PROMPT_REVISION == "f57ae6f3ee18ea6445f5fbe53e6a0dca7b1dffbc7b225a9cd232c38cd99767d2"
 
 
 @pytest.mark.asyncio
