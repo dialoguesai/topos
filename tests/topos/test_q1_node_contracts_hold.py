@@ -34,7 +34,33 @@ from fastapi import HTTPException
 
 from topos.core.handlers import device
 from topos.core.handlers.registry import HANDLERS
-from topos.engine import ollama_pull, registration
+import sys
+
+from topos.engine import registration
+import topos.engine.ollama_pull  # noqa: F401  (registers the module this file resolves live)
+
+class _LiveModule:
+    """Resolve ``topos.engine.ollama_pull`` at attribute-access time.
+
+    These files bind the module once at collection. Other test modules in this
+    directory purge and re-import the ``topos`` package (see
+    ``engine_runtime_isolation`` in conftest), which replaces the module object
+    while leaving this alias pointing at the old one. The handler imports inside
+    its function body and so gets the new object, so a collection-time alias
+    resets one progress registry and patches a fake adapter onto a module
+    nothing calls. Whether that bites depends purely on test order, which is why
+    these guards passed in one ordering and failed in another.
+    """
+
+    def __getattr__(self, name):
+        return getattr(sys.modules["topos.engine.ollama_pull"], name)
+
+    def __setattr__(self, name, value):
+        setattr(sys.modules["topos.engine.ollama_pull"], name, value)
+
+
+ollama_pull = _LiveModule()
+
 
 
 # --------------------------------------------------------------------------
