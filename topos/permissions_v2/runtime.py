@@ -45,6 +45,7 @@ class Runtime:
         self._projection_review_runtime = None
         self._ingestion_service = None
         self._ingestion_snapshot_root = None
+        self._identity_service = None
 
     def ingestion(self):
         """Owner-attested snapshots use only the paired canonical DB and root."""
@@ -116,6 +117,43 @@ class Runtime:
                     canonical_database=self.protocol.canonical_database, binding=evidence.resolver.binding,
                     path=self.projection_review_store_path, evidence_service=evidence)
             return self._projection_review_runtime.get(require_existing=require_existing)
+
+    def identity_attestations(self):
+        """Owner identity consent. Its own flag, and it enrolls nothing.
+
+        The floor file sits beside the canonical database, in the same private
+        directory as the other permission state, and is installed on first use
+        by the owner's own process rather than by any request.
+        """
+        if self.pid != os.getpid():
+            raise PolicyError("configuration_restart_required")
+        if os.environ.get("TOPOS_PERMISSIONS_V2_ENABLED", "").lower() != "true":
+            raise PolicyError("permissions_v2_disabled")
+        if os.environ.get("TOPOS_PERMISSIONS_V2_IDENTITY_ATTESTATIONS_ENABLED", "").lower() != "true":
+            raise PolicyError("identity_attestations_disabled")
+        from .canonical_floor import CanonicalFloorStore
+        from .evidence import EvidenceBinding, EvidenceResolver
+        from .identity_attestation import IdentityAttestationService
+        from topos.storage.db.write_gate import with_db_write
+        with with_db_write():
+            if self._identity_service is None:
+                identity = self.protocol.ledger.identity
+                directory = self.protocol.canonical_database.parent / "permissions-v2"
+                if not directory.is_dir():
+                    raise PolicyError("identity_attestations_not_configured")
+                resolver = EvidenceResolver(self.protocol.canonical_database,
+                                            binding=EvidenceBinding.parse(identity.model_dump()))
+                floor = CanonicalFloorStore(directory / "canonical-floor.json", owner_id=identity.owner_id,
+                                            node_id=identity.node_id, resource_id=identity.resource_id)
+                if not floor.path.exists():
+                    import sqlite3 as _sqlite3
+                    conn = _sqlite3.connect(self.protocol.canonical_database.as_uri() + "?mode=ro", uri=True)
+                    try:
+                        floor.install(conn)
+                    finally:
+                        conn.close()
+                self._identity_service = IdentityAttestationService(resolver=resolver, floor=floor)
+            return self._identity_service
 
     def close(self):
         self.lock_file.close()

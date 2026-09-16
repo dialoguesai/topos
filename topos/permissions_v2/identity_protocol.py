@@ -46,6 +46,10 @@ class AttestIdentity(StrictModel):
     expected_is_self: Literal[1]
     expected_contact_id: Identifier | None
     expected_composition_revision: Hash
+    # A quarantined entry is still the live one. Confirming again retires it and
+    # makes a new statement, and the owner's command says which one it retires,
+    # so the ledger records a replacement rather than an unexplained pair.
+    replaces_entry_id: Identifier | None
 
 
 class RevokeIdentity(StrictModel):
@@ -84,7 +88,7 @@ class IdentityState(StrictModel):
     contract: Literal["owner_attested_v1"]
     statement_version: Literal["owner-identity-attestation/v1"]
     literal_self_shadowed: bool
-    generation: Generation
+    generation: Number
     subjects: Annotated[list[IdentitySubject], Field(max_length=512)]
     permitted_count: Number
     restricted_count: Number

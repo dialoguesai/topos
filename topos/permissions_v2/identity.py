@@ -84,7 +84,15 @@ def legacy_owner_subjects(conn) -> set[str]:
 
 
 def self_entity_ids(conn) -> set[str]:
-    """Every current `is_self` row. Restriction input only; never a permit."""
+    """Every current `is_self` row. Restriction input only; never a permit.
+
+    A node without the entity spine has no self rows, and the clock records that
+    it is not watching that table, so the absence is part of the protection
+    revision rather than something this quietly assumes. A table that exists and
+    cannot be read is a different thing entirely and still fails closed.
+    """
+    if not _has_table(conn, "entities"):
+        return set()
     return {row[0] for row in _rows(conn, "SELECT entity_id FROM entities WHERE is_self=1") if _identifier(row[0])}
 
 
@@ -95,6 +103,8 @@ def literal_self_shadowed(conn) -> bool:
     that id, the two meanings are no longer distinguishable, so the attested
     contract withholds the literal rather than guessing which one a fact meant.
     """
+    if not _has_table(conn, "entities"):
+        return False
     return bool(_rows(conn, "SELECT 1 FROM entities WHERE entity_id=? LIMIT 1", (SELF,)))
 
 
@@ -152,6 +162,8 @@ def composition_revision(conn, entity_id: str) -> str:
 
 
 def _entity_pins(conn, entity_id: str):
+    if not _has_table(conn, "entities"):
+        return None
     rows = _rows(conn, "SELECT entity_type, is_self, contact_id FROM entities WHERE entity_id=?", (entity_id,))
     if len(rows) != 1:
         return None

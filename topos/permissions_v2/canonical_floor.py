@@ -250,3 +250,26 @@ class CanonicalFloorStore:
         self._write(observed)
         self._current, self._resume = observed, (observed.event_sequence, observed.event_chain)
         return observed
+
+
+    def abort_pending(self, conn) -> CanonicalFloor:
+        """Reopen a floor left pending by a consent write that did not happen.
+
+        Only when the ledger is demonstrably where the pending floor left it. If
+        a consent row did land, the two cannot be told apart from here and the
+        floor stays closed for a deliberate recovery rather than guessing.
+        """
+        pending = self._load()
+        if pending.state != "pending":
+            raise PolicyError("canonical_floor_unavailable")
+        self._prefix_holds(conn, pending)
+        observed = observe(conn, owner_id=self.owner_id, node_id=self.node_id, resource_id=self.resource_id,
+                           revision=pending.revision + 1)
+        if (observed.clock_id != pending.clock_id or observed.ledger_digest != pending.ledger_digest
+            or observed.ledger_sequence != pending.ledger_sequence
+            or observed.generation < pending.generation or observed.event_sequence < pending.event_sequence
+            or observed.registry_count < pending.registry_count):
+            raise PolicyError("identity_ledger_unpinned")
+        self._write(observed)
+        self._current, self._resume = observed, (observed.event_sequence, observed.event_chain)
+        return observed
