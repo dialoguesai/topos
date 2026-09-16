@@ -57,6 +57,10 @@ from ..provenance.roles import (
     ROLE_AUTHORED,
     record_role,
 )
+from ..temporal.points import parse_point
+from ..temporal.records import fact_temporal
+from .evidence_time import recorded_evidence
+from .reactions import quotes_another_message
 from .store import KNOWN_PREDICATES, FactStore, normalize_predicate
 
 logger = logging.getLogger("topos.features.facts.llm_extract")
@@ -600,7 +604,13 @@ def _infer_table(row: Dict[str, Any]) -> str:
         return "profile_records"
     if row.get("entry_at") is not None or row.get("mood_tag") is not None:
         return "journal_entries"
-    if str(row.get("sender_type") or "") in ("user", "assistant", "human", "system"):
+    sender_type = str(row.get("sender_type") or "")
+    # The rule extractor's condition, exactly. 'human' is the owner's value in AI
+    # chat, but messenger writes it for everyone; inferring AI chat whenever it
+    # appears read a correspondent's unstamped message as the owner's own turn.
+    if sender_type in ("user", "assistant") or (
+        sender_type in ("human", "system") and "is_from_self" not in row and "sender_id" not in row
+    ):
         return "ai_chat_messages"
     if row.get("is_from_self") is not None or row.get("sender_id") is not None:
         return "conversation_messages"
@@ -864,6 +874,13 @@ def _write_triples_for_row(
                 period_end=triple.get("period_end"),
                 disclosure="owner_only" if asserted_by == "owner" else "scoped",
                 asserted_by=asserted_by,
+                # A model's reading of a period is not a statement the node
+                # verified, so it is recorded as unverified at its own precision.
+                temporal=fact_temporal(
+                    applies_start=parse_point(triple.get("period_start"), provenance="unverified_producer"),
+                    applies_end=parse_point(triple.get("period_end"), provenance="unverified_producer"),
+                    evidence=recorded_evidence(store._conn, table, row),
+                ),
             )
         except Exception as exc:  # noqa: BLE001
             logger.warning(
@@ -1014,6 +1031,8 @@ def extract_owner_facts_llm(
         content = str(row.get("content") or "")
         if not content.strip() or not is_derivable_content(content):
             continue
+        if quotes_another_message(row):
+            continue  # a reaction's text is the message it reacts to
 
         table = _infer_table(row)
         role = record_role(row, table=table, posture=posture_for(row))

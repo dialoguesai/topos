@@ -15,6 +15,10 @@ from typing import Any, Dict, List, Optional
 
 from ...storage.db.write_gate import commit_connection, with_db_write
 from ..provenance.roles import owner_authored
+from ..temporal.points import parse_point
+from ..temporal.records import fact_temporal
+from .evidence_time import recorded_evidence
+from .reactions import quotes_another_message
 from .store import FactStore
 
 # Contract 4 (PLAN_PROVENANCE_SPLIT P4.4): assert_fact grows asserted_by in the
@@ -372,6 +376,8 @@ def extract_message_facts(
 ) -> List[Dict[str, Any]]:
     if not _is_owner_authored(row, table):
         return []
+    if quotes_another_message(row):
+        return []  # a reaction's text is the message it reacts to, not the reactor's statement
     content = str(row.get("content") or "")
     from ..signal.embed_context import is_derivable_content
 
@@ -452,6 +458,65 @@ _EXTRACTORS = {
 }
 
 
+def extract_rules_facts(
+    conn: sqlite3.Connection,
+    rows: List[Dict[str, Any]],
+    *,
+    store: FactStore,
+    subject_entity_id: str,
+    source_ref,
+    temporal_for,
+    accept_value=None,
+    stats: Optional[Dict[str, int]] = None,
+) -> int:
+    """The rules floor alone, for a caller that has already proved its rows.
+
+    Unlike :func:`extract_facts_from_batch` it never imports or runs the LLM
+    pass, never infers a row's table (each row names ``_table``), and never
+    chooses or creates a self entity: the caller supplies the subject, the
+    reference and the temporal record for each row. ``accept_value`` may refuse
+    a value before anything is written; refusals count under
+    ``value_refused`` in ``stats``.
+    """
+    from ..lifecycle.exclusions import excluded_record_ids
+
+    stats = stats if stats is not None else {}
+    excluded_records = excluded_record_ids(conn)
+    written = 0
+    for row in rows:
+        table = str(row.get("_table") or "")
+        record_id = row.get("record_id") or row.get("message_id") or row.get("id")
+        extractor = _EXTRACTORS.get(table)
+        if extractor is None or str(record_id or "") in excluded_records:
+            stats["rows_skipped"] = stats.get("rows_skipped", 0) + 1
+            continue
+        for spec in extractor(row, conn):
+            if accept_value is not None and not accept_value(spec):
+                stats["value_refused"] = stats.get("value_refused", 0) + 1
+                continue
+            # assert_fact returns the incumbent for a queued conflict or a kept
+            # history row; only a write or refresh of this value counts as written.
+            before = sum(store.outcomes.values())
+            asserted = store.assert_fact(
+                subject_entity_id=subject_entity_id,
+                predicate=spec["predicate"],
+                object_value=spec["object_value"],
+                dimension=spec.get("dimension", "profile"),
+                confidence=float(spec.get("confidence") or 0.7),
+                source_refs=[source_ref(row)],
+                valid_from=spec.get("valid_from"),
+                disclosure=spec.get("disclosure", "scoped"),
+                period_start=spec.get("period_start"),
+                period_end=spec.get("period_end"),
+                asserted_by="owner",
+                temporal=temporal_for(row, spec),
+            )
+            if asserted is not None and sum(store.outcomes.values()) == before:
+                written += 1
+    stats["facts_written"] = stats.get("facts_written", 0) + written
+    return written
+
+
 def extract_facts_from_batch(
     conn: sqlite3.Connection,
     rows: List[Dict[str, Any]],
@@ -499,7 +564,16 @@ def extract_facts_from_batch(
         if extractor is None:
             continue
         record_id = row.get("record_id") or row.get("message_id") or row.get("id")
-        for spec in extractor(row, conn):
+        evidence = None
+        specs = extractor(row, conn)
+        # One resume row states one period. Only some of its facts carry it in
+        # the payload (role_is does not), but every one of them applies over it.
+        row_period = next(((spec.get("period_start"), spec.get("period_end")) for spec in specs
+                           if spec.get("period_start") or spec.get("period_end")), (None, None)) \
+            if table == "profile_records" else (None, None)
+        for spec in specs:
+            if evidence is None:
+                evidence = recorded_evidence(conn, table, row)
             # All rule extractors are owner-gated (message extractors via the
             # authored role; journal/profile by construction) — assert as owner.
             asserted = store.assert_fact(
@@ -513,6 +587,13 @@ def extract_facts_from_batch(
                 disclosure=spec.get("disclosure", "scoped"),
                 period_start=spec.get("period_start"),
                 period_end=spec.get("period_end"),
+                # A resume's years were read from the text by a fixed pattern;
+                # the legacy valid_from invents January 1st UTC, this keeps a year.
+                temporal=fact_temporal(
+                    applies_start=parse_point(spec.get("period_start") or row_period[0], provenance="stated_in_content"),
+                    applies_end=parse_point(spec.get("period_end") or row_period[1], provenance="stated_in_content"),
+                    evidence=evidence,
+                ),
                 **_OWNER_ASSERT_KWARGS,
             )
             if asserted is not None:  # None = owner-excluded, never re-asserted

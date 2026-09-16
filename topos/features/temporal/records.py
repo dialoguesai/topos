@@ -28,13 +28,15 @@ def _dumps(value) -> str:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
 
 
-def producer_clock(now: Optional[datetime] = None) -> TimePoint:
-    """The asserting producer's own clock as an explicit-UTC instant."""
+def producer_clock(now: Optional[datetime] = None, *, provenance: str = "producer_clock") -> TimePoint:
+    """The asserting clock as an explicit-UTC instant: a producer's, or an owner's edit."""
+    if provenance not in ("producer_clock", "owner_edit"):
+        raise ValueError("an asserting clock is a producer clock or an owner edit")
     now = now or datetime.now(timezone.utc)
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("producer clock must be timezone-aware")
     text = now.astimezone(timezone.utc).isoformat(timespec="microseconds").replace("+00:00", "Z")
-    return parse_point(text, provenance="producer_clock")
+    return parse_point(text, provenance=provenance)
 
 
 @dataclass(frozen=True)

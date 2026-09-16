@@ -3,9 +3,12 @@
 ``imessage-owner-snapshot/v1`` accepts ordinary, unambiguous plain-text native
 messages. It fixes Apple's modern nanosecond epoch and requires exact
 microsecond representation; older units and sub-microsecond values withhold.
-It does not infer an Apple account, classify content, run enrichment, or make
-the resulting records permission-qualified. Durable authority is supplied only
-by IngestProvenanceService, independently of the snapshot's fields.
+It does not infer an Apple account, classify content, run enrichment or the
+LLM fact pass, or make the resulting records permission-qualified. The one
+derivation it runs is the rules fact floor over the rows the job itself linked
+(IngestProvenanceService.derive_owner_facts), in the same transaction. Durable
+authority is supplied only by IngestProvenanceService, independently of the
+snapshot's fields.
 """
 
 from __future__ import annotations
@@ -240,6 +243,9 @@ async def run_snapshot_job(service: Any, conn_factory: Callable[[], Any], job_id
                     if type(value) is not int or not 0 <= value <= len(records):
                         _reject("snapshot_result_invalid")
                     result[field] = value
+                # Before completion and in the same batch: a crash or failure
+                # here leaves no row, link or fact behind, and no finished job.
+                service.derive_owner_facts(conn, context)
                 service.finish(conn, context, result)
             return result
         except Exception as error:

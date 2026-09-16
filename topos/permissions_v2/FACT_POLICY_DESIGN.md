@@ -225,10 +225,19 @@ This section first said an AI-chat-sourced fact could close today. That was wron
   it is recorded as a separate decision rather than fixed here.
 
 So no producer path could close at all, and every live release proof to that
-point seeded its fact by hand. Step 4 (`INGEST_LIVE_SYNC_DESIGN.md`) emits
-`dataset_id` for conversation-message references, and carries it through the
-loaders, rather than widening `_reference`, which would accept a reference whose
-dataset is unknown.
+point seeded its fact by hand.
+
+Step 4 does not close that gap by widening the shared producers. An earlier
+draft of this section said step 4 would emit `dataset_id` from
+`extract._source_ref` and carry it through the loaders. That was wrong, and a
+design review confirmed why: those loaders also serve the legacy sync, the
+shared-key Signal upload, reprocess and backfill, so a forged or legacy row
+would gain a complete reference and could reach release. `_source_ref` and every
+loader stay unchanged, and a regression test pins that their references still
+withhold as `lineage_identity_incomplete`. Complete references are written only
+by the owner snapshot lane (`ingest_snapshot_facts.py`, `INGEST_SNAPSHOT_DESIGN.md`),
+for rows its own job linked, inside that job's transaction. `_reference` is not
+widened either, since it would accept a reference whose dataset is unknown.
 
 ### What the signed document records, and what it enforces
 

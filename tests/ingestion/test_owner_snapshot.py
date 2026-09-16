@@ -200,8 +200,16 @@ class FakeService:
         if self.failure == "revoke" and self.calls.count("check") == 2:
             raise RuntimeError("PRIVATE_CANARY")
 
+    def derive_owner_facts(self, conn, ctx):
+        self.calls.append("derive")
+        assert conn.in_transaction
+        if self.failure == "derive":
+            raise RuntimeError("PRIVATE_CANARY")
+        return {}
+
     def finish(self, conn, ctx, result):
         self.calls.append("finish")
+        assert self.calls[-2] == "derive"
         assert conn.in_transaction
         if self.failure == "finish":
             raise RuntimeError("PRIVATE_CANARY")
@@ -255,7 +263,7 @@ async def test_runner_uses_worker_connection_atomic_completion_and_metadata_only
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("failure", ["claim", "revoke", "finish", "parse"])
+@pytest.mark.parametrize("failure", ["claim", "revoke", "derive", "finish", "parse"])
 async def test_rejections_and_completion_failure_leave_no_canonical_writes(runner_boundary, failure):
     path, factory, _ = runner_boundary
     service = FakeService(b"invalid" if failure == "parse" else native_snapshot(), failure=failure)

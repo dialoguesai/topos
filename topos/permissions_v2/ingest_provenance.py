@@ -537,6 +537,18 @@ class IngestProvenanceService:
                 self._batches.pop(context.claim_token, None)
                 self._finished.discard(context.claim_token)
 
+    def derive_owner_facts(self, conn, context):
+        """Rules-only owner facts from this job's linked rows, inside its batch. Counts only.
+
+        A failure raises into the batch, which rolls back rows, links and facts
+        together; the job then fails through the token-checked receipt.
+        """
+        self._require_batch(conn, context)
+        self.assert_current(conn, context, source_id=context.source_id, dataset_id=context.dataset_id)
+        from .ingest_snapshot_facts import extract_snapshot_facts
+
+        return extract_snapshot_facts(conn, self, context)
+
     def finish(self, conn, context, result):
         self._require_batch(conn, context)
         self.assert_current(conn, context, source_id=context.source_id, dataset_id=context.dataset_id)

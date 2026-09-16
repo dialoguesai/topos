@@ -48,6 +48,26 @@ The machine-readable twin of each release is
   now raises `JobIdConflictError` and writes and holds nothing. A job re-enqueued with the same
   kind and key is unaffected.
 
+### Added
+- **Time records that keep only what a producer knows.** `[S1]` `[O]` Migration 75 adds
+  `signal_objects.temporal_json` (`topos-fact-temporal/v1`: when the node asserted a fact, when
+  it applies, and its evidence time) and `conversation_messages.event_time_json`
+  (`topos-event-time/v1`). Both are nullable, with no default and no backfill, so no existing
+  evidence review goes stale; both are written once, on insert. Every time keeps its precision
+  (a stated day stays a day, a resume year stays a year), its timezone basis and the clock that
+  produced it. The legacy message writer marks a time it or staging filled with the ingestion
+  clock, and no shared path ever records `native_source_clock`. Neither record reaches a
+  grantee, whatever the grant's filters. `valid_from`, `valid_to`, `period_*` and `event_at`
+  are unchanged. Must land at a release cut, like specs 63 and 69.
+- **The owner-attested snapshot lane derives the owner's facts.** `[O]` Inside the snapshot
+  job's own transaction, the rules extractor (never the LLM pass) reads the rows that job linked
+  and asserts facts with complete `{table, record_id, source_id, dataset_id}` references, about
+  the one `is_self` entity the owner has attested, refusing values that are not one atomic label.
+  An extraction error rolls back rows, links and facts together. The shared extractors and
+  loaders are deliberately unchanged, so legacy and uploaded rows still cannot reach release.
+  The signed job result keeps its shape: a run that derives nothing (no attested self, a refused
+  label, a stronger existing fact) still reports success.
+
 ### Fixed
 - **Reprocess stores the owner's retained messages as the owner's.** `[O]`
   `canonical_pipeline.build_staging_record` copied neither `is_from_self` nor
@@ -75,6 +95,23 @@ The machine-readable twin of each release is
   withhold a fact under an existing grant. Correcting or revising a fact keeps the corrected
   fact's attribution. Not changed: `sender_id == 'self'` still counts as the owner beside an
   explicit `is_from_self` of 0, because legacy and re-staged owner rows are stored that way.
+- **A re-ingest no longer rewrites another dataset's message body, or a proved one.** `[O]`
+  iMessage ids (`imessage:<ROWID>`) carry no dataset, so a second database with the same ROWID
+  rewrote the first database's row body while that row kept its owner and authorship, and a
+  legacy sync could rewrite a row the snapshot lane had proved. The body heal now skips across
+  a dataset or source and over any linked row; the re-ingest is still recorded.
+- **An older statement no longer brings back an owner fact a newer one replaced, when both are
+  proved.** `[O]` Only a fact store given a provenance trust (the snapshot lane) refuses, and
+  only when every challenger reference and one incumbent reference are owner messages whose
+  native clocks the lane vouches for, named by source and dataset, and no later than the moment
+  the owner attested their snapshot. The older value is kept as closed history (repeated older
+  statements fold into one row), not as a conflict. Every other path supersedes exactly as before.
+- **Fact extraction no longer reads someone else's words as the owner's.** `[O]` An iMessage
+  reaction quotes the message it reacts to ('Loved "I work at X"'), so the owner reacting to a
+  correspondent minted an owner fact; both extractors now skip reaction rows. The LLM pass read
+  any unstamped `sender_type='human'` row as the owner's AI chat, including a correspondent's
+  messenger row; it now uses the rules extractor's table inference. Correcting a fact keeps its
+  attribution and carries its applicability and evidence times forward as an owner edit.
 
 ## [1.3.57] — 2026-09-14
 

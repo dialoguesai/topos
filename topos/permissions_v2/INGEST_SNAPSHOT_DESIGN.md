@@ -20,8 +20,10 @@ historical owner fields. Both node and CP feature flags default off.
    imported fields. Old local-sync jobs cannot acquire it.
 5. The worker reads only pinned snapshot bytes. One bounded canonical transaction
    preflights every identity, inserts new parents/messages/origin links and marks
-   the job done. A late error rolls the whole batch back. There is no enrichment,
-   raw staging, legacy checkpoint or implicit global database connection.
+   the job done. Before it marks the job done, the same transaction runs the
+   rules fact floor over the rows this job linked (below). A late error rolls
+   the whole batch back, facts included. There is no other enrichment, no LLM
+   pass, raw staging, legacy checkpoint or implicit global database connection.
 6. Native self and correspondent messages share the verified dataset owner but
    retain distinct authorship. An owner evidence review cannot promote a native
    correspondent to owner-authored evidence.
@@ -85,6 +87,71 @@ ownership. Live iMessage account enrollment, Signal keys/accounts, generic uploa
 larger resumable corpora and additional output families remain separate work.
 Classification, owner-only/black-hole protections, disclosure ceilings, lineage,
 owner reviews and recipient grants remain independent required release checks.
+
+## Owner facts from the lane (step 4)
+
+This lane is the only producer that writes fact references complete enough for
+the p2b evidence chain: `{table, record_id, source_id, dataset_id}`. The shared
+extractors, their `_source_ref` and every loader stay unchanged. They also serve
+legacy sync, the shared-key Signal upload, reprocess and backfill, so widening
+them would give a forged or legacy row a complete reference.
+
+`IngestProvenanceService.derive_owner_facts` runs inside the job's batch, after
+the rows and links are written and before `finish`
+(`ingest_snapshot_facts.py`):
+
+- **Rows.** Only rows linked to this enrollment, revision and job, in this
+  dataset and source, re-checked against their stored identity, in event-time
+  order. A changed identity raises and rolls the batch back.
+- **Rules only.** `extract.extract_rules_facts`, which never imports the LLM
+  pass, never infers a table, and never chooses or creates a self entity. The
+  owner-authored gate is unchanged, so a native correspondent's message
+  produces nothing.
+- **Subject.** The one entity that is both `is_self` and actively attested by
+  the owner (`identity.attested_subjects`). With none or more than one,
+  nothing is extracted. The shared extractor's own choice (the self row with
+  the most facts, or a new `Owner` row) is exactly what the attested contract
+  refuses. The owner therefore attests identity before running the job.
+- **Labels.** A value that fails `fact_contract.atomic_label_syntax` is not
+  written, so no unreleasable scoped owner fact is minted.
+- **Time.** Each fact's `topos-fact-temporal/v1` evidence is the linked row's
+  `event_at` as `native_source_clock`. The store receives a `LinkedRowTrust`,
+  so its supersession guard can order evidence from rows this job, or an
+  earlier still-valid enrollment, proved (`features/temporal/TEMPORAL_FIELDS.md`,
+  reader 1). The trust also gives the ceiling the guard checks each time
+  against: the moment the owner attested that snapshot's bytes, which no
+  message in it can postdate. An older statement enrolled after a newer one is
+  kept as history instead of bringing the old value back; a revoked enrollment
+  stops vouching, so its rows no longer hold anything back. The trusted writer's column tuple and `_record_identity` are
+  unchanged, and the lane writes no `event_time_json`.
+- **Result.** The signed job result keeps its exact shape: `finish` and the
+  signed acknowledgement pin those fields, and the control plane mirrors them.
+  Facts are found through the owner's fact reads, not the result.
+
+Limits the owner can hit, all fail-closed and none visible in the signed result:
+
+- **Order matters.** Extraction reads the attestation when the job runs. A job
+  run before the owner attested produces no fact, and a completed job cannot run
+  again, so recovering needs a new snapshot and dataset.
+- **A run that derives nothing still succeeds.** No attested self, an identity
+  read error, a refused label and a queued conflict all return the same result
+  as a derived fact. The counts exist (`derive_owner_facts` returns them) but
+  the signed result cannot carry them without a protocol version.
+- **A stronger incumbent wins.** A message statement is asserted at 0.6; a
+  resume fact is 0.9. Belief revision's confidence margin queues the lane's
+  value as a `fact_conflicts` row and keeps the incumbent, so the lane's fact is
+  never active and never releasable until the owner resolves the conflict.
+- **Discovery.** The control plane's `/facts/capabilities` profile still lists
+  only p2b-v1 to v3 (changing it breaks the frontend's key-count check), so a
+  client cannot discover p2b-v4 there even though activation accepts it.
+
+Known availability limit: if the legacy extractor later runs over the lane's
+own rows (a reprocess or backfill), it asserts the same owner fact with a
+dataset-less reference. The store's refresh merges that reference into the lane
+fact, which then withholds as `lineage_identity_incomplete`. It fails closed
+and never qualifies with an unproven leaf. A separate fact key for lane facts
+would avoid this, but it would also split the owner's single-valued belief in
+two, so it is left as a decision for when the lane runs continuously.
 
 ## Regression evidence
 
