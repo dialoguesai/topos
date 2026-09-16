@@ -624,6 +624,77 @@ class EvidenceResolver:
                     subjects.add(value)
         return subjects
 
+    @staticmethod
+    def _names_a_leaf(raw, leaves: dict) -> bool:
+        """Whether one fact's stored references name any leaf by (table, record_id).
+
+        Source and dataset identity are ignored: legacy producers omit them.
+        Ids and tables are compared stripped, and `id` counts beside
+        `record_id`, as the node's own provenance reader does. Only a table
+        naming a different evidence table rules a matching id out; a generic or
+        malformed label does not. References that cannot be read (also with
+        their JSON escapes decoded), or that carry no usable `record_id`, count
+        when their text contains a leaf id, so a malformed or older writer
+        fails closed.
+        """
+        text = raw if isinstance(raw, str) else raw.decode("utf-8", "replace") if isinstance(raw, bytes) else str(raw)
+        try:
+            refs = _json(text, list)
+        except PolicyError:
+            spelled = re.sub(r"\\u00([0-9A-Fa-f]{2})", lambda match: chr(int(match.group(1), 16)), text).replace("\\/", "/")
+            return any(record_id in text or record_id in spelled for record_id in leaves)
+        for ref in refs:
+            value = ref.get("record_id") if isinstance(ref, dict) else None
+            if type(value) not in (str, int) or not str(value).strip():
+                if any(record_id in json.dumps(ref) for record_id in leaves):
+                    return True
+                continue
+            table = ref.get("table")
+            table = table.strip() if type(table) is str else None
+            for candidate in (value, ref.get("id")):
+                tables = leaves.get(str(candidate).strip()) if type(candidate) in (str, int) else None
+                if tables and (table is None or table in tables or table not in ("signal_objects", *LEAF_TABLES)):
+                    return True
+        return False
+
+    def _source_sibling_floor(self, conn, snapshot: EvidenceSnapshot) -> None:
+        """Raw release only: a leaf may not also back a fact the owner kept to themselves.
+
+        Releasing a message discloses every claim drawn from it, not only the
+        locator's. "I work at X and I live in Y" backs a scoped fact and an
+        owner-only one, and the owner-only claim is outside the reviewed
+        closure. Every fact row naming a leaf, current, closed or deleted, must
+        be exactly scoped. A scalar release never calls this.
+
+        One scan: SQLite keeps only rows whose reference text contains a leaf id,
+        or a JSON escape through which an identifier's characters could be
+        spelled (``\\u00XX``, ``\\/``). Only those rows are parsed. An
+        Identifier has no GLOB metacharacter, so ``*id*`` is an exact substring
+        test (and faster than instr); anything else falls back to instr.
+        """
+        leaves = {}
+        for version in snapshot.leaves:
+            leaves.setdefault(version.identity.record_id, set()).add(version.identity.table)
+        if not leaves:
+            return
+        clauses, args = [], []
+        for record_id in sorted(leaves):
+            literal = not any(char in record_id for char in "*?[]")
+            clauses.append("source_refs_json GLOB ?" if literal else "instr(source_refs_json,?)>0")
+            args.append("*" + record_id + "*" if literal else record_id)
+        rows = conn.execute("SELECT payload_json,source_refs_json FROM signal_objects WHERE object_type='fact' AND ("
+                            + " OR ".join(clauses) + r" OR source_refs_json GLOB '*\u00*' OR source_refs_json GLOB '*\/*')",
+                            args)
+        for payload, refs in rows:
+            if not self._names_a_leaf(refs, leaves):
+                continue
+            try:
+                disclosure = _json(payload, dict).get("disclosure")
+            except PolicyError:
+                disclosure = None
+            if disclosure != "scoped":
+                raise PolicyError("owner_only")
+
     def inspect_for_review(self, fact_id: str) -> EvidenceSnapshot:
         _owner(self.binding)
         with self._read() as (conn, floor):
@@ -781,8 +852,11 @@ class EvidenceResolver:
             return labels == {"self"}
         return labels <= permits
 
-    def _qualified_bundle(self, conn, floor, fact_id, reviews, review_db, *, contract=LEGACY_CONTRACT):
+    def _qualified_bundle(self, conn, floor, fact_id, reviews, review_db, *, contract=LEGACY_CONTRACT,
+                          discloses_sources=False):
         snapshot, rows = self._snapshot(conn, floor, fact_id, enforce_floor=True)
+        if discloses_sources:
+            self._source_sibling_floor(conn, snapshot)
         review = reviews._current_in(review_db, fact_id)
         if review is None:
             raise PolicyError("owner_review_required")
@@ -794,7 +868,7 @@ class EvidenceResolver:
             subject_contract=contract, execution_enabled=False), rows
 
     def with_qualified(self, fact_id: str, *, reviews: "EvidenceReviewStore", callback,
-                       contract: str = LEGACY_CONTRACT):
+                       contract: str = LEGACY_CONTRACT, discloses_sources: bool = False):
         """Run trusted server code with current private evidence under both gates.
 
         This callback is never deserialized from a request. The service assumes
@@ -802,6 +876,8 @@ class EvidenceResolver:
         with an external WAL writer is outside that transaction guarantee.
         The callback must not mutate canonical data or reviews. It must perform
         its own final policy/authority checks before releasing any output.
+        A caller that will release leaf content sets `discloses_sources`, which
+        adds the sibling-fact floor inside this same read.
         """
         if contract not in SUBJECT_CONTRACTS:
             raise PolicyError("subject_contract_unknown")
@@ -810,7 +886,8 @@ class EvidenceResolver:
         with self._read() as (conn, floor):
             reviews._observe_clock(conn)
             with reviews._db() as review_db:
-                evidence, rows = self._qualified_bundle(conn, floor, fact_id, reviews, review_db, contract=contract)
+                evidence, rows = self._qualified_bundle(conn, floor, fact_id, reviews, review_db, contract=contract,
+                                                        discloses_sources=discloses_sources)
                 return callback(evidence, rows)
 
 

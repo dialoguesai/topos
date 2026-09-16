@@ -37,6 +37,24 @@ entity-protection uncertainty, stale review, ambiguous identity, unknown
 classification, and incomplete lineage all withhold before serialization.
 Ordinary recipient input cannot provide classifications or a qualification.
 
+A returned message discloses every claim drawn from it, not only the locator's.
+"I work at X and I live in Y" gives the rules extractor a scoped `works_at` fact
+and an `owner_only` `lives_in` fact over one message, and the second is outside
+the reviewed closure. So this adapter alone also withholds, as `owner_only`, when
+any fact row (current, closed or deleted) references a terminal message by table
+and record id with a payload disclosure other than exactly `scoped`. Source and
+dataset identity are ignored in that match; ids and tables compare stripped, `id`
+counts beside `record_id`, and only a table naming a different evidence table
+rules a matching id out. References that cannot be read count when their text,
+raw or with JSON escapes decoded, contains the record id. It runs at every read
+inside the same canonical transaction, so a sibling written after the owner's
+review withholds the next read. One scan of `signal_objects` keeps only rows whose
+reference text contains a leaf id or a JSON escape and parses just those: about
+30 ms for a one-message closure over 50,000 synthetic facts. Scalar P2b releases
+do not run it, since a reviewed label discloses no message text. The owner's
+evidence-review state does not show this reason yet: its qualification is shared
+with P2b, where the same evidence still qualifies.
+
 One complete permit clause must cover **every** terminal source and table, allow
 the local processor, have a `raw` ceiling and explicitly select
 `canonical.message_disclosure.v1`. Its evidence predicate must match every

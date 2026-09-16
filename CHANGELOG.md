@@ -47,6 +47,16 @@ The machine-readable twin of each release is
   no start window, and the caller's withheld credential was held against it. Such a collision
   now raises `JobIdConflictError` and writes and holds nothing. A job re-enqueued with the same
   kind and key is unaffected.
+- **A raw message release no longer discloses a fact the owner kept to themselves.** `[O]`
+  Permissions beta `p2a-v1` returns the whole text of every message behind one scoped,
+  owner-reviewed fact, but the floor only checked facts on that fact's own lineage. One message
+  can back a scoped fact and an owner-only one: the rules extractor turns "I work at X and I live
+  in Y" into a scoped `works_at` and an owner-only `lives_in` over the same row, so releasing the
+  message released the city. Raw release now withholds (one refusal to the recipient) when any
+  fact row, current, closed or deleted, cites a released message and is not exactly `scoped`;
+  unreadable references that contain the message id count. It is checked at every read, so a
+  sibling written after the owner's review stops the next read. Scalar fact releases do not run
+  it, and the owner's review state does not show this reason yet.
 
 ### Added
 - **Time records that keep only what a producer knows.** `[S1]` `[O]` Migration 75 adds

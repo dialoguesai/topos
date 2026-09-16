@@ -183,6 +183,8 @@ class SourceMessageRelease:
                 send(result.model_dump(), output.model_dump())
 
             # The P2a message family predates identity binding and stays on the
-            # frozen legacy rule; a v3 grant cannot reach this adapter.
+            # frozen legacy rule; a v3 grant cannot reach this adapter. It
+            # releases whole messages, so every other fact citing one of them
+            # must be scoped too, checked inside the same read.
             self.resolver.with_qualified(fact_id, reviews=self.reviews, callback=release,
-                                         contract=LEGACY_CONTRACT)
+                                         contract=LEGACY_CONTRACT, discloses_sources=True)
