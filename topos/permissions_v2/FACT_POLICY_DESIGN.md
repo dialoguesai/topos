@@ -143,8 +143,13 @@ Exactly one writer in the engine emits a fact that is `scoped`, `asserted_by =
 first-person message patterns in `features/facts/extract.py`. Two of them match
 `works_at`:
 
-    I (currently |now )?work (at|for) X
-    I('m| am) (now )?working (at|for) X
+    \bI (?:now )?work (?:at|for) ([A-Z][\w .&'\-]{1,40})
+    \bI(?:'m| am) (?:now )?working (?:at|for) ([A-Z][\w .&'\-]{1,40})
+
+Quoted exactly, because the difference matters for anyone reasoning about
+coverage: only `lives_in` carries a `currently` alternative. "I currently work
+at X" matches neither of these and produces no fact at all. The object must also
+begin with a capital letter, so "i work at acme" is not a candidate either.
 
 They run only over a row that `provenance.roles.record_role` says the owner
 authored, on `conversation_messages` or `ai_chat_messages`, and

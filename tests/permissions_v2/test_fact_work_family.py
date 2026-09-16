@@ -29,6 +29,8 @@ from tests.permissions_v2.test_evidence import corpus, owner, edit, attest, payl
 from tests.permissions_v2.test_fact_policy import AS_OF, policy, timed, utc
 from tests.permissions_v2.test_fact_release import dispatch, fact_setup, issue, projection_service
 from tests.permissions_v2.test_owner_identity_binding import OWNER, add_entity, db, do_attest
+from tests.permissions_v2.test_evidence_reviews import paired_runtime
+from tests.permissions_v2.test_projection_reviews import projection_runtime
 from topos.permissions_v2.canonical import PolicyError, digest
 from topos.permissions_v2.evidence_reviews import EvidenceLookup
 from topos.permissions_v2.fact_contract import (CAPABILITY_ATTESTED, CAPABILITY_WORK, EVALUATOR_WORK,
@@ -382,6 +384,83 @@ def test_eligibility_names_the_family_mismatch_rather_than_a_schema_error(work_f
     assert captured["code"] == "fact_policy_projection_stale"
 
 
+# --- the owner channel that actually ships ----------------------------------
+
+@pytest.mark.asyncio
+async def test_the_owner_can_record_a_work_review_through_the_real_handler(work_fact, projection_runtime):
+    """The app path, not the service. This is the test whose absence made a
+    capability that cannot work look finished.
+
+    Every other v4 test in this file calls `projection_service.record(...,
+    family=WORK_FAMILY)` directly. No shipped client can do that. The only owner
+    projection channel is `permissions_v2_projection_*`, and until this test
+    existed that handler had no way to name a family: it called the service at
+    the default, so a work candidate came back `schema_invalid` and no work
+    review could ever be written. A signed v4 grant then found no review and was
+    denied `output_review_required` -- on every node, forever, with the whole
+    suite green.
+    """
+    from topos.core.handlers import handle_control_plane_request
+    from topos.permissions_v2.identity import ATTESTED_CONTRACT
+    from topos.principal import OWNER_APP, Principal
+
+    principal = Principal(OWNER_APP, "cp_relay", acting_user="owner-1")
+    runtime = projection_runtime[0]
+    with db(work_fact) as conn:
+        do_attest(conn, OWNER)
+    with owner():
+        evidence = runtime.evidence_reviews(require_existing=False)
+        attest((work_fact[0], evidence.reviews, work_fact[2]), review_id="review-work-handler")
+
+    def message(operation, request, **extra):
+        return {"id": "work-" + operation, "type": "permissions_v2_projection_" + operation,
+                "payload": {"binding": work_fact[0].binding.model_dump(), "request": request,
+                            "subject_contract": ATTESTED_CONTRACT, **extra}}
+
+    # Without the family, the same fact is refused: the handler's default is the
+    # first family and this fact does not belong to it.
+    default = await handle_control_plane_request(message("preview", {"fact_id": work_fact[2]}), principal=principal)
+    assert default["status"] == "ok"
+    assert default["payload"]["candidate"] is None
+    assert default["payload"]["candidate_reason_code"] == "schema_invalid"
+
+    preview = await handle_control_plane_request(
+        message("preview", {"fact_id": work_fact[2]}, output_family=WORK_FAMILY), principal=principal)
+    assert preview["status"] == "ok"
+    candidate = preview["payload"]["candidate"]
+    assert candidate is not None, preview["payload"]["candidate_reason_code"]
+    assert candidate["output"]["family"] == WORK_FAMILY and candidate["output"]["predicate"] == "works_at"
+    assert OWNER not in json.dumps(preview["payload"])
+
+    recorded = await handle_control_plane_request(message("review_record", {
+        "review_id": "work-handler-review", "expected_candidate": candidate,
+        "expected_candidate_hash": preview["payload"]["candidate_hash"],
+        "expected_current_review_revision": preview["payload"]["current_review_revision"],
+        "classification": {"domains": ["reading"], "sensitivity": "personal", "subject": "self",
+                           "assertion": "explicit_atomic_work_engagement"}},
+        output_family=WORK_FAMILY), principal=principal)
+    assert recorded["status"] == "ok"
+    assert recorded["payload"]["state"]["qualification"]["verdict"] == "reviewed"
+    assert OWNER not in json.dumps(recorded)
+
+
+@pytest.mark.asyncio
+async def test_the_handler_refuses_a_family_it_does_not_know(work_fact, projection_runtime):
+    from topos.core.handlers import handle_control_plane_request
+    from topos.principal import OWNER_APP, Principal
+    principal = Principal(OWNER_APP, "cp_relay", acting_user="owner-1")
+    payload = {"binding": work_fact[0].binding.model_dump(), "request": {"fact_id": work_fact[2]},
+               "output_family": "owner_stated_anything"}
+    unknown = await handle_control_plane_request(
+        {"id": "work-unknown", "type": "permissions_v2_projection_preview", "payload": payload}, principal=principal)
+    assert unknown["code"] == 400 and unknown["error"] == "output_family_unknown"
+    # And a family key on the evidence surface is refused as a malformed payload:
+    # evidence review is family-independent and must not grow a family dimension.
+    evidence = await handle_control_plane_request(
+        {"id": "work-evidence", "type": "permissions_v2_evidence_preview", "payload": payload}, principal=principal)
+    assert evidence["code"] == 400 and evidence["error"] == "evidence_payload_invalid"
+
+
 # --- signed release ---------------------------------------------------------
 
 @pytest.fixture
@@ -451,6 +530,28 @@ def test_revoking_the_attestation_stops_the_next_work_release(work_release, work
     with pytest.raises(PolicyError):
         dispatch(work_release, envelope, payload, request_id="fact-read-2",
                  send=lambda *_: pytest.fail("released after the owner withdrew the attestation"))
+
+
+def test_the_design_document_quotes_the_producer_patterns_verbatim():
+    """The doc's account of the producer is the justification for the family.
+
+    It first paraphrased the patterns and got one wrong -- it carried `lives_in`'s
+    `currently` alternative onto `works_at`, so it claimed "I currently work at X"
+    produces a fact when that matches nothing. A paraphrase of a regex is a claim
+    that can drift silently, so the document now quotes the source and this pins
+    the quotes to it.
+    """
+    from pathlib import Path
+    import re
+    from topos.features.facts import extract
+    design = (Path(__file__).resolve().parents[2] / "topos" / "permissions_v2" / "FACT_POLICY_DESIGN.md").read_text()
+    patterns = [pattern.pattern for predicate, pattern, *_ in extract._MSG_FACT_PATTERNS if predicate == "works_at"]
+    assert len(patterns) == 2, "the works_at producer changed shape"
+    for pattern in patterns:
+        assert pattern in design, f"the design document no longer quotes {pattern!r}"
+    # And the thing the paraphrase got wrong: no works_at pattern admits "currently".
+    for pattern in patterns:
+        assert re.search(pattern, "I currently work at Ferrograph") is None
 
 
 # --- frozen exports ---------------------------------------------------------

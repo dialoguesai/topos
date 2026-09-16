@@ -53,6 +53,7 @@ async def _handle_evidence(message, operation, *, projection=False):
     from ...permissions_v2.canonical import PolicyError
     from ...permissions_v2.evidence import EvidenceBinding
     from ...permissions_v2.evidence_reviews import EvidenceLookup, RecordEvidenceReview, RevokeEvidenceReview
+    from ...permissions_v2.fact_contract import FAMILY, OUTPUT_FAMILIES
     from ...permissions_v2.identity import LEGACY_CONTRACT, SUBJECT_CONTRACTS
     from ...permissions_v2.projection_reviews import RecordProjectionReview, RevokeProjectionReview
     from ...permissions_v2.runtime import get_runtime
@@ -65,11 +66,20 @@ async def _handle_evidence(message, operation, *, projection=False):
         or not principal.acting_user):
         return {"id":req_id, "status":"error", "code":403, "error":"owner_authority_required"}
     payload = message.get("payload")
-    # `subject_contract` is accepted only on the output-review surface, and only
-    # there because the projection candidate's accepted subject depends on which
-    # owner-identity rule the owner is reviewing under. Omitting it keeps the
-    # pre-binding rule, so an older client is unchanged.
-    allowed = [{"binding", "request"}] + ([{"binding", "request", "subject_contract"}] if projection else [])
+    # `subject_contract` and `output_family` are accepted only on the output-review
+    # surface, and only there because the projection candidate depends on both:
+    # which owner-identity rule the owner is reviewing under, and which output
+    # family they are reviewing FOR. Omitting either keeps the pre-binding rule
+    # and the first family, so an older client is unchanged.
+    #
+    # The family has to be selectable here, not just inside the release path. A
+    # release loads a review the owner already recorded; if this surface can only
+    # ever record the first family's review, a grant for any other family finds
+    # no review and is denied, and the capability is inert on every node.
+    allowed = [{"binding", "request"}] + ([
+        {"binding", "request", "subject_contract"},
+        {"binding", "request", "output_family"},
+        {"binding", "request", "subject_contract", "output_family"}] if projection else [])
     if not isinstance(payload, dict) or set(payload) not in allowed:
         return {"id":req_id, "status":"error", "code":400, "error":"evidence_payload_invalid"}
 
@@ -94,8 +104,12 @@ async def _handle_evidence(message, operation, *, projection=False):
                 contract = payload.get("subject_contract", LEGACY_CONTRACT)
                 if contract not in SUBJECT_CONTRACTS:
                     raise PolicyError("subject_contract_unknown")
+                family = payload.get("output_family", FAMILY)
+                if family not in OUTPUT_FAMILIES:
+                    raise PolicyError("output_family_unknown")
                 service = runtime.projection_reviews(require_existing=operation in {"record", "revoke"})
-                return getattr(service, operation)(request, now=int(time.time()), contract=contract)
+                return getattr(service, operation)(request, now=int(time.time()), contract=contract,
+                                                   family=family)
             service = runtime.evidence_reviews(require_existing=operation in {"record", "revoke"})
             if operation == "record":
                 return service.record(request, now=int(time.time()))
@@ -113,7 +127,12 @@ async def _handle_evidence(message, operation, *, projection=False):
             code = 404
         elif exc.code == "preview_too_large":
             code = 413
-        elif exc.code == "schema_invalid" or exc.code.startswith("json_"):
+        elif (exc.code in {"subject_contract_unknown", "output_family_unknown"}
+              or exc.code == "schema_invalid" or exc.code.startswith("json_")):
+            # A caller naming a contract or a family this node does not support
+            # has sent a bad request, not found an unavailable service. These
+            # used to fall through to 503, which tells the client to retry
+            # something that can never succeed.
             code = 400
         else:
             code = 503
