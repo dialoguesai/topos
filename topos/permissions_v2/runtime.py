@@ -134,6 +134,9 @@ class Runtime:
         """
         from .canonical_floor import CanonicalFloorStore
         import sqlite3 as _sqlite3
+        if self._canonical_floor is None and self.protocol.canonical_floor is not None:
+            # Attached at startup because this node already has one (load_runtime).
+            self._canonical_floor = self.protocol.canonical_floor
         if self._canonical_floor is None:
             identity = self.protocol.ledger.identity
             directory = self.protocol.canonical_database.parent / "permissions-v2"
@@ -192,6 +195,28 @@ def _private_file(path: Path) -> bytes:
     if not path.is_file() or path.stat().st_mode & 0o077:
         raise PolicyError("private_config_required")
     return path.read_bytes()
+
+
+def _existing_floor(durable: Path, ledger: PolicyLedger):
+    """The floor store for a node that already has one, attached before the protocol starts.
+
+    The protocol refuses to start when its ledger has recorded a floor and none
+    is attached, so that a node that lost its floor never signs anything. The
+    runtime used to attach the floor lazily, on the first identity or review
+    call, so every process after the one that recorded it refused at startup:
+    one restart took down every signed route. A recorded floor whose file is gone
+    still gets a store here, and that store's check refuses, as intended. A node
+    with neither keeps starting without one and installs it on first use.
+    """
+    from .canonical_floor import CanonicalFloorStore
+
+    path = durable / "canonical-floor.json"
+    with ledger._transaction() as conn:
+        recorded = conn.execute("SELECT 1 FROM p2a_canonical_floor WHERE singleton=1").fetchone() is not None
+    if not recorded and not path.exists() and not path.is_symlink():
+        return None
+    identity = ledger.identity
+    return CanonicalFloorStore(path, owner_id=identity.owner_id, node_id=identity.node_id, resource_id=identity.resource_id)
 
 
 def load_runtime(config_path: Path, *, active_database: Path) -> Runtime:
@@ -260,7 +285,7 @@ def load_runtime(config_path: Path, *, active_database: Path) -> Runtime:
                 revision = current_protection_revision(conn, owner_id=config.identity.owner_id)
         keys = {kid: bytes.fromhex(value) for kid, value in config.trusted_cp_keys.items()}
         ledger = PolicyLedger(ledger_path, identity=config.identity, protection_revision=revision, trusted_keys=keys)
-        protocol = NodePolicyProtocol(ledger, canonical_database=canonical, cp_issuer_id=config.cp_issuer_id, frontend_client_id=config.frontend_client_id, trusted_cp_keys=keys, node_signing_kid=config.node_signing_kid, node_signing_key=key)
+        protocol = NodePolicyProtocol(ledger, canonical_database=canonical, cp_issuer_id=config.cp_issuer_id, frontend_client_id=config.frontend_client_id, trusted_cp_keys=keys, node_signing_kid=config.node_signing_kid, node_signing_key=key, canonical_floor=_existing_floor(durable, ledger))
         return Runtime(protocol, lock_file, config_path, evidence_review_store_path=review_path,
                        projection_review_store_path=projection_path)
     except BaseException:

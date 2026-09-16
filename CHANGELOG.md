@@ -69,6 +69,14 @@ The machine-readable twin of each release is
   label, a stronger existing fact) still reports success.
 
 ### Fixed
+- **A permissions node comes back after a restart once it has used its canonical floor.** `[O]`
+  The node protocol refuses to start when its ledger has recorded a canonical floor and none is
+  attached, so that a node which lost its floor never signs anything. The runtime attached the
+  floor lazily, on the first identity or review call, so the first process recorded it and every
+  later process refused at startup with `canonical_floor_unavailable`: after one restart, every
+  signed permissions route (identity, evidence and output reviews, ingestion, grants) answered
+  503 through the control plane. The runtime now attaches an existing floor before the protocol
+  starts. A recorded floor whose file is gone still refuses, as intended.
 - **Reprocess stores the owner's retained messages as the owner's.** `[O]`
   `canonical_pipeline.build_staging_record` copied neither `is_from_self` nor
   `owner_user_id`, so a raw→canonical reprocess that inserted a row with no canonical row
