@@ -178,6 +178,70 @@ async def test_sync_relay_owner_stamp_still_enqueues(keys, cp_key, sync_spy, db)
     assert len(sync_spy) == 1
 
 
+# ---- 2. start_ingestion cannot rewrite another job ---------------------------
+
+
+@pytest.mark.asyncio
+async def test_start_ingestion_cannot_rewrite_a_queued_local_sync_job(keys, db, monkeypatch):
+    from topos.pipeline.job_store import enqueue_job, get_job
+    from topos.storage.db.migrations.pipeline_jobs_v1 import apply_pipeline_jobs_v1_up
+
+    apply_pipeline_jobs_v1_up(db)
+    monkeypatch.setattr("topos.pipeline.job_runner.start_pipeline_worker", lambda factory: None)
+    job_id = str(uuid.uuid4())
+    window = {"mode": "3m"}
+    enqueue_job(db, kind="local_sync", job_id=job_id, source_id="imessage",
+                payload={"source_id": "imessage", "dataset_id": "ds-owner", "sync_options": window},
+                idempotency_key=f"local_sync:{job_id}")
+    response = await relay({"id": "cp", "type": "start_ingestion", "payload": {
+        "job_id": job_id, "dataset_id": "ds-attacker", "file_path": "/nonexistent/synthetic.jsonl"}})
+    job = get_job(db, job_id)
+    # Data first, so a regression shows WHAT was rewritten, not just a status.
+    assert (job["kind"], job["payload"].get("dataset_id"), job["payload"].get("sync_options")) == (
+        "local_sync", "ds-owner", window)
+    assert response["status"] == "error"
+
+
+def test_enqueue_refuses_a_job_id_that_names_another_kind(db):
+    from topos.pipeline.job_store import JobIdConflictError, enqueue_job, get_job
+
+    from topos.pipeline import job_secrets
+
+    owner_payload = {"dataset_id": "ds-owner", "sync_options": {"signal_hex_key": "synthetic-owner-secret"}}
+    enqueue_job(db, kind="local_sync", job_id="shared-id", payload=owner_payload,
+                idempotency_key="local_sync:shared-id")
+    held = job_secrets.peek("shared-id")
+    stored = get_job(db, "shared-id")["payload"]
+    with pytest.raises(JobIdConflictError):
+        enqueue_job(db, kind="file_ingestion", job_id="shared-id",
+                    payload={"dataset_id": "ds-other", "progress_api_key": "synthetic-caller-secret"},
+                    idempotency_key="file_ingestion:shared-id")
+    assert get_job(db, "shared-id")["payload"] == stored
+    # The refused caller's secret is not held against the job it collided with.
+    assert job_secrets.peek("shared-id") == held == {"sync_options.signal_hex_key": "synthetic-owner-secret"}
+    assert not db.in_transaction
+    # The same kind under a different key is a different job too.
+    with pytest.raises(JobIdConflictError):
+        enqueue_job(db, kind="local_sync", job_id="shared-id", payload={"dataset_id": "ds-other"},
+                    idempotency_key="local_sync:forged")
+    assert get_job(db, "shared-id")["payload"] == stored
+    job_secrets.release("shared-id")
+
+
+def test_enqueue_still_resolves_its_own_idempotency_key(db):
+    from topos.pipeline.job_store import enqueue_job, get_job
+
+    first = enqueue_job(db, kind="file_ingestion", job_id="cp-job", payload={"attempt": 1},
+                        idempotency_key="file_ingestion:cp-job")
+    db.execute("UPDATE pipeline_jobs SET status='failed' WHERE job_id='cp-job'")
+    db.commit()
+    again = enqueue_job(db, kind="file_ingestion", job_id="cp-job", payload={"attempt": 2},
+                        idempotency_key="file_ingestion:cp-job")
+    assert first == again == "cp-job"
+    job = get_job(db, "cp-job")
+    assert job["status"] == "queued" and job["payload"] == {"attempt": 2}
+
+
 # ---- 3. pooled scope backfill ---------------------------------------------------
 
 

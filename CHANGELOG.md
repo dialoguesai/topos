@@ -40,6 +40,13 @@ The machine-readable twin of each release is
   dataset the source's canonical rows already carry, and refuses a different one or a source
   whose rows span datasets. Only `conversation_messages` carries a dataset, so activity,
   journal and location sources are unchanged.
+- **A caller-chosen job id can no longer rewrite another job.** `[O]` `start_ingestion` takes
+  its `job_id` from the message, and `enqueue_job` answered a collision its idempotency lookup
+  did not resolve by overwriting that row's payload: a queued iMessage sync given the same id
+  kept its kind but took the caller's dataset and lost its `sync_options`, so it would read with
+  no start window, and the caller's withheld credential was held against it. Such a collision
+  now raises `JobIdConflictError` and writes and holds nothing. A job re-enqueued with the same
+  kind and key is unaffected.
 
 ## [1.3.57] — 2026-09-14
 

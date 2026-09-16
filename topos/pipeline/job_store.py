@@ -15,6 +15,15 @@ JOB_STATUSES = frozenset({"queued", "running", "done", "failed"})
 DEFAULT_LEASE_SECONDS = 300
 
 
+class JobIdConflictError(ValueError):
+    """A caller-chosen job_id already names a different job.
+
+    ``start_ingestion`` takes its job_id from the message, so without this a
+    colliding id rewrote whatever row held it — a queued local sync would run
+    with the caller's dataset and no ``sync_options`` window (full history).
+    """
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -87,7 +96,11 @@ def enqueue_job(
                     job_secrets.hold(existing_id, secrets)
                     return existing_id
 
-        conn.execute(
+        # A job_id collision reaching here was NOT resolved by the idempotency
+        # lookup above, so the row holding that id is some other job. The
+        # payload update survives only for the one case it was written for —
+        # the same kind re-enqueued under the same (possibly absent) key.
+        written = conn.execute(
             """
             INSERT INTO pipeline_jobs (
                 job_id, kind, status, payload_json, source_id, write_id,
@@ -96,6 +109,8 @@ def enqueue_job(
             ON CONFLICT(job_id) DO UPDATE SET
                 payload_json=excluded.payload_json,
                 updated_at=datetime('now')
+            WHERE pipeline_jobs.kind = excluded.kind
+              AND pipeline_jobs.idempotency_key IS excluded.idempotency_key
             """,
             (
                 jid,
@@ -106,8 +121,13 @@ def enqueue_job(
                 sync_batch_id,
                 key,
             ),
-        )
+        ).rowcount
+        # Commit even when nothing was written: the statement opened the
+        # transaction, and raising with it open would hold SQLite's lock.
         commit_connection(conn)
+        if written == 0:
+            # Before the hold: the other job's held secrets stay its own.
+            raise JobIdConflictError(f"job_id {jid!r} already names a different job")
         job_secrets.hold(jid, secrets)
     return jid
 
