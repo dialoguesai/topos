@@ -21,6 +21,13 @@ from topos.ingestion.sources.imessage_reader import (
 from topos.storage.canonical.conversations_tables import CONVERSATION_MESSAGES_TABLE
 
 MAC_DATE = 700_000_000
+# Seconds between 1970-01-01 and 2001-01-01, the epoch chat.db counts from.
+MAC_EPOCH_UNIX = 978_307_200
+
+
+def mac_ns(unix_ts: float) -> int:
+    """A ``message.date`` as current macOS writes it: nanoseconds since 2001-01-01."""
+    return int(round((unix_ts - MAC_EPOCH_UNIX) * 1_000_000_000))
 
 
 def _make_chat_db(path: Path, *, include_spam_columns: bool = True) -> sqlite3.Connection:
@@ -66,11 +73,14 @@ def _add_message(
     rowid: int,
     chat_id: int,
     handle_id: int,
-    text: str,
+    text: str | None,
     is_filtered: int = 0,
     is_spam: int = 0,
     chat_identifier: str | None = None,
+    is_from_me: int = 0,
+    date: int | None = MAC_DATE,
 ) -> None:
+    """Insert one message. ``date=None`` stores NULL; pass ``mac_ns(...)`` for a modern date."""
     cols = {str(r[1]) for r in conn.execute("PRAGMA table_info(chat)").fetchall()}
     filtered_sql = "is_filtered, " if "is_filtered" in cols else ""
     filtered_val = f"{int(is_filtered)}, " if "is_filtered" in cols else ""
@@ -92,9 +102,9 @@ def _add_message(
             ROWID, text, subject, attributedBody, associated_message_guid,
             associated_message_type, cache_has_attachments, item_type,
             {spam_sql} date, handle_id, is_from_me
-        ) VALUES (?, ?, NULL, NULL, NULL, 0, 0, 0, {spam_val} ?, ?, 0)
+        ) VALUES (?, ?, NULL, NULL, NULL, 0, 0, 0, {spam_val} ?, ?, ?)
         """,
-        (rowid, text, MAC_DATE, handle_id),
+        (rowid, text, date, handle_id, int(is_from_me)),
     )
     conn.execute(
         "INSERT INTO chat_message_join (chat_id, message_id) VALUES (?, ?)",

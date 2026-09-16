@@ -131,35 +131,43 @@ def ensure_conversation_messages_table(conn) -> None:
         commit_connection(conn)
 
 
+def _add_missing_columns(conn, table: str, columns) -> None:
+    """ALTER TABLE ``table`` for each of ``columns`` it lacks. Idempotent; never rolls back.
+
+    A present column is found by PRAGMA and never reaches ALTER TABLE. These
+    helpers used to run the ALTER, catch "duplicate column", and call
+    ``conn.rollback()``. ``upsert_message_batch`` reaches them inside
+    ``batched_writes``, whose commit is deferred, so that rollback threw away
+    every parent, contact and participant row the batch had written so far,
+    while the batch still counted them. A failed ALTER undoes only itself, so
+    there is nothing here to roll back.
+    """
+    present = {row[1] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+    for col, typ in columns:
+        if col in present:
+            continue
+        # ALTER TABLE takes SQLite's write lock at execute time — gate it with the commit.
+        try:
+            with with_db_write():
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {col} {typ}")
+                commit_connection(conn)
+        except Exception as e:
+            # Another connection may have added it since the probe.
+            if "duplicate column" not in str(e).lower():
+                logger.debug("%s column %s: %s", table, col, e)
+
+
+_INGEST_PROVENANCE_COLUMNS = (
+    ("source_record_id", "TEXT"),
+    ("ingested_at", "TEXT"),
+    ("sync_batch_id", "TEXT"),
+)
+
+
 def _ensure_contact_ingest_columns(conn) -> None:
     """Add ingest provenance columns used by canonical pipeline. Idempotent."""
-    # ALTER TABLE takes SQLite's write lock at execute time — gate it with the commit.
-    for col, typ in (
-        ("source_record_id", "TEXT"),
-        ("ingested_at", "TEXT"),
-        ("sync_batch_id", "TEXT"),
-    ):
-        try:
-            with with_db_write():
-                conn.execute(f"ALTER TABLE {CONTACTS_TABLE} ADD COLUMN {col} {typ}")
-                commit_connection(conn)
-        except Exception as e:
-            if "duplicate column" not in str(e).lower():
-                logger.debug("Contact ingest column %s: %s", col, e)
-            conn.rollback()
-    for col, typ in (
-        ("source_record_id", "TEXT"),
-        ("ingested_at", "TEXT"),
-        ("sync_batch_id", "TEXT"),
-    ):
-        try:
-            with with_db_write():
-                conn.execute(f"ALTER TABLE {CONTACT_IDENTIFIERS_TABLE} ADD COLUMN {col} {typ}")
-                commit_connection(conn)
-        except Exception as e:
-            if "duplicate column" not in str(e).lower():
-                logger.debug("Contact identifier ingest column %s: %s", col, e)
-            conn.rollback()
+    _add_missing_columns(conn, CONTACTS_TABLE, _INGEST_PROVENANCE_COLUMNS)
+    _add_missing_columns(conn, CONTACT_IDENTIFIERS_TABLE, _INGEST_PROVENANCE_COLUMNS)
 
 
 def ensure_contacts_table(conn) -> None:
@@ -247,72 +255,48 @@ def ensure_conversation_participants_table(conn) -> None:
 
 def _ensure_signal_identity_columns(conn) -> None:
     """Add is_from_self and owner_user_id for Signal identity. Stage 9: is_from_self (was from_self). Idempotent."""
-    for col, typ in (("is_from_self", "INTEGER DEFAULT 0"), ("owner_user_id", "TEXT")):
-        try:
-            with with_db_write():
-                conn.execute(f"ALTER TABLE {CONVERSATION_MESSAGES_TABLE} ADD COLUMN {col} {typ}")
-                commit_connection(conn)
-        except Exception as e:
-            if "duplicate column" not in str(e).lower():
-                logger.debug("Signal identity column %s: %s", col, e)
-            conn.rollback()
+    _add_missing_columns(
+        conn,
+        CONVERSATION_MESSAGES_TABLE,
+        (("is_from_self", "INTEGER DEFAULT 0"), ("owner_user_id", "TEXT")),
+    )
 
 
 def _ensure_reply_and_event_columns(conn) -> None:
     """Add unified reply/system columns for messenger sources. Idempotent."""
-    for col, typ in (
-        ("reply_to_message_id", "TEXT"),
-        ("message_type", "TEXT"),
-        ("event_type", "TEXT"),
-    ):
-        try:
-            with with_db_write():
-                conn.execute(f"ALTER TABLE {CONVERSATION_MESSAGES_TABLE} ADD COLUMN {col} {typ}")
-                commit_connection(conn)
-        except Exception as e:
-            if "duplicate column" not in str(e).lower():
-                logger.debug("Messenger context column %s: %s", col, e)
-            conn.rollback()
+    _add_missing_columns(
+        conn,
+        CONVERSATION_MESSAGES_TABLE,
+        (("reply_to_message_id", "TEXT"), ("message_type", "TEXT"), ("event_type", "TEXT")),
+    )
 
 
 def _ensure_contact_provenance_columns(conn) -> None:
     """Add contact import/profile columns. Idempotent."""
-    for col, typ in (
-        ("known_usernames_json", "TEXT"),
-        ("last_import_source", "TEXT"),
-        ("last_import_run_id", "TEXT"),
-        ("last_imported_at", "TEXT"),
-    ):
-        try:
-            with with_db_write():
-                conn.execute(f"ALTER TABLE {CONTACTS_TABLE} ADD COLUMN {col} {typ}")
-                commit_connection(conn)
-        except Exception as e:
-            if "duplicate column" not in str(e).lower():
-                logger.debug("Contact provenance column %s: %s", col, e)
-            conn.rollback()
+    _add_missing_columns(
+        conn,
+        CONTACTS_TABLE,
+        (
+            ("known_usernames_json", "TEXT"),
+            ("last_import_source", "TEXT"),
+            ("last_import_run_id", "TEXT"),
+            ("last_imported_at", "TEXT"),
+        ),
+    )
 
 
 def _ensure_contact_sharing_policy_column(conn) -> None:
     """Stage 11: JSON policy for name_visibility / row_visibility per contact."""
-    try:
-        with with_db_write():
-            conn.execute(f"ALTER TABLE {CONTACTS_TABLE} ADD COLUMN sharing_policy_json TEXT")
-            commit_connection(conn)
-    except Exception as e:
-        if "duplicate column" not in str(e).lower():
-            logger.debug("Contact sharing_policy_json column: %s", e)
-        conn.rollback()
+    _add_missing_columns(conn, CONTACTS_TABLE, (("sharing_policy_json", "TEXT"),))
 
 
 def _ensure_event_time_column(conn) -> None:
     """Add ``event_time_json`` (``topos-event-time/v1``) if missing. Idempotent.
 
-    Checked with PRAGMA first rather than by catching a duplicate-column error:
-    the sibling helpers above call ``conn.rollback()`` on that error, which
-    inside ``batched_writes`` discards every pending parent, contact and
-    participant insert in the batch. This one never raises on a present column,
-    so it never rolls anything back.
+    Checked with PRAGMA first rather than by catching a duplicate-column error,
+    for the reason ``_add_missing_columns`` gives: a rollback on that error inside
+    ``batched_writes`` discards every pending parent, contact and participant
+    insert in the batch. This one never raises on a present column.
     """
     from ..db.migrations.temporal_fields_v1 import has_column
 
@@ -356,17 +340,31 @@ class ConversationsTablesManager:
         dataset_id: str,
         source_id: Optional[str] = None,
     ) -> None:
-        """Insert or replace one row in conversations."""
+        """Ensure one row in conversations, keeping the columns this writer does not own."""
         if not self.conn:
             return
         self.ensure_tables()
+        self._upsert_conversation_row(conversation_id, dataset_id, source_id)
+
+    def _upsert_conversation_row(
+        self,
+        conversation_id: str,
+        dataset_id: str,
+        source_id: Optional[str],
+    ) -> None:
+        # Not INSERT OR REPLACE: REPLACE deletes the row and re-inserts these five
+        # columns, so every re-sync nulled the owner's context_tag and its source,
+        # the migration-added provenance columns, and reset created_at.
         # commit_connection no-ops inside upsert_message_batch's batched_writes;
         # the batch commits once at exit.
         with with_db_write():
             self.conn.execute(f"""
-                INSERT OR REPLACE INTO {CONVERSATIONS_TABLE}
+                INSERT INTO {CONVERSATIONS_TABLE}
                 (conversation_id, dataset_id, source_id, created_at, updated_at)
                 VALUES (?, ?, ?, datetime('now'), datetime('now'))
+                ON CONFLICT(conversation_id, dataset_id) DO UPDATE SET
+                    source_id = COALESCE(NULLIF(excluded.source_id, ''), {CONVERSATIONS_TABLE}.source_id),
+                    updated_at = excluded.updated_at
             """, (conversation_id, dataset_id, source_id or ""))
             commit_connection(self.conn)
 
@@ -543,7 +541,9 @@ class ConversationsTablesManager:
                 )
                 key = (conversation_id, dataset_id)
                 if key not in seen_conversation_ids:
-                    self.upsert_conversation(conversation_id, dataset_id, source_id)
+                    # Tables were ensured above; re-running that DDL per
+                    # conversation inside the batch bought nothing.
+                    self._upsert_conversation_row(conversation_id, dataset_id, source_id)
                     seen_conversation_ids.add(key)
                     conversations_created += 1
                 contact_id = _upsert_contact(rec)

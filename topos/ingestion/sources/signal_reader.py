@@ -265,6 +265,41 @@ def _extract_reply_from_signal_json(payload: Dict[str, Any]) -> tuple[Optional[s
     return reply_to, metadata
 
 
+def signal_cursor_for_row(row: Dict[str, Any]) -> str:
+    """The sync cursor just past ``row``: ``signal:<id>:<sent_at seconds>:<sent_at ms>``.
+
+    Signal is paged on ``(sent_at, id)``. The message id breaks ties, since several
+    rows can share one millisecond; the exact millisecond value is carried as its
+    own field because seconds rounded to six places do not round-trip to it. The
+    third field stays seconds so an older engine can still parse the cursor.
+    """
+    sent_at_ms = row.get("sent_at_ms")
+    if sent_at_ms is None:
+        sent_at_ms = float(row.get("sent_at") or 0) * 1000.0
+    return f"signal:{row.get('ROWID')}:{float(sent_at_ms) / 1000.0:.6f}:{float(sent_at_ms)!r}"
+
+
+def _parse_signal_cursor(last_record_id: Optional[str]) -> tuple[float, Optional[str]]:
+    """(sent_at in ms, tie-breaking message id) from a cursor; id is None when absent.
+
+    A cursor from before the id was recorded (``signal:0:<seconds>``) cannot say
+    which rows at its millisecond were read, so it is backed off one millisecond
+    and those rows are read again; re-reading is an idempotent upsert.
+    """
+    if not last_record_id or not str(last_record_id).startswith("signal:"):
+        return 0.0, None
+    parts = str(last_record_id)[len("signal:"):].rsplit(":", 2)
+    if len(parts) == 3:
+        try:
+            return float(parts[2]), parts[0]
+        except ValueError:
+            pass
+    try:
+        return max(0.0, float(parts[-1]) * 1000.0 - 1.0), None
+    except ValueError:
+        return 0.0, None
+
+
 def read_signal_rows(
     last_record_id: Optional[str] = None,
     config_path: Optional[Path] = None,
@@ -383,16 +418,8 @@ def read_signal_rows(
         json_cols = [c for c in ("json", "messageJson", "payload_json") if c in available_columns]
         json_select = ", " + ", ".join(json_cols) if json_cols else ""
 
-        last_ts: float = 0.0
-        if last_record_id:
-            parts = last_record_id.split(":")
-            if len(parts) >= 3 and parts[0] == "signal":
-                try:
-                    last_ts = float(parts[2])
-                except ValueError:
-                    pass
         # Query-side normalization converts sent_at to milliseconds.
-        last_ts_ms = float(last_ts) * 1000.0
+        last_ts_ms, last_id = _parse_signal_cursor(last_record_id)
 
         start_ms: Optional[int] = None
         if start_unix is not None:
@@ -411,18 +438,26 @@ def read_signal_rows(
             END
         """
 
+        # Keyset on (sent_at, id). `sent_at > cursor` alone skipped every row that
+        # shared the last row's millisecond when a batch ended between them.
         query = f"""
-            SELECT id, body, sent_at, type, {conversation_col} AS conversation_id{sender_select}{reply_select}{system_select}{json_select}
+            SELECT id, body, sent_at, ({normalized_sent_at_expr}) AS sent_at_ms, type, {conversation_col} AS conversation_id{sender_select}{reply_select}{system_select}{json_select}
             FROM messages
-            WHERE ({normalized_sent_at_expr}) > ?
+            WHERE (
+                    ({normalized_sent_at_expr}) > ?
+                    OR (? IS NOT NULL AND ({normalized_sent_at_expr}) = ? AND CAST(id AS TEXT) > ?)
+                  )
               AND (
                     ? IS NULL
                     OR ({normalized_sent_at_expr}) >= ?
                   )
-            ORDER BY sent_at
+            ORDER BY ({normalized_sent_at_expr}), CAST(id AS TEXT)
             LIMIT ?
         """
-        cursor = conn.execute(query, (last_ts_ms, start_ms, start_ms, batch_size))
+        cursor = conn.execute(
+            query,
+            (last_ts_ms, last_id, last_ts_ms, last_id, start_ms, start_ms, batch_size),
+        )
         rows = cursor.fetchall()
         out = []
         for r in rows:
@@ -482,6 +517,7 @@ def read_signal_rows(
                 "reply_to_message_id": reply_to_message_id,
                 "ROWID": msg_id,
                 "sent_at": sent_at,
+                "sent_at_ms": r.get("sent_at_ms"),
             }
             if metadata:
                 row_out["_metadata"] = metadata

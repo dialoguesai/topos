@@ -114,6 +114,34 @@ The machine-readable twin of each release is
   any unstamped `sender_type='human'` row as the owner's AI chat, including a correspondent's
   messenger row; it now uses the rules extractor's table inference. Correcting a fact keeps its
   attribution and carries its applicability and evidence times forward as an owner edit.
+- **The legacy iMessage and Signal sync no longer lose rows behind their checkpoint.** `[O]`
+  Six defects, each reproduced on a synthetic database first:
+  (1) the `_ensure_*_columns` helpers re-ran `ALTER TABLE` inside the batch, caught
+  "duplicate column", and rolled back. On an already-migrated database that threw away
+  every conversation, contact and participant row in a batch except the last, while
+  `conversations_created` still counted them. They now probe `PRAGMA table_info` first
+  and never roll back. (2) An iMessage row that failed validation (a NULL `date`) or had
+  no body the reader could build was dropped uncounted, and the cursor moved past it.
+  Each is now counted in `records_held`/`held_reasons`, kept by ROWID in the checkpoint,
+  and retried at the start of every later sync until it is written or leaves chat.db.
+  (3) A bounded sync (`mode="3m"`, the default at both doors) saved a cursor that a later
+  `mode="all"` resumed from, so older history was never read. Checkpoints now record the
+  cursor of the last unbounded sync and the spam policy it ran under, and only that
+  cursor is resumed. **Upgrade behaviour differs by source**, because a checkpoint written
+  before this fix cannot say which kind of sync wrote it. iMessage defaults to `3m` at both
+  doors, so its next `all` sync rescans from the start. Existing rows are re-upserted
+  idempotently, but canonical enrichment runs again over every row read. Signal defaults
+  to `all`, so its legacy cursor is resumed and marked `unbounded_inherited_legacy`. A
+  Signal checkpoint that did come from a bounded sync keeps its gap; `mode="custom"` with
+  an early `start_date` always rescans from the start. (4) The parent-conversation upsert was `INSERT OR REPLACE`
+  from five columns, so each re-sync nulled `context_tag`, `context_tag_source` and the
+  migration-added provenance columns and reset `created_at`. It is now `ON CONFLICT DO
+  UPDATE`. (5) Signal paged on `sent_at > cursor`, which skipped rows sharing the
+  boundary millisecond. It now pages on `(sent_at, id)`, and the cursor carries the id
+  and the exact millisecond. (6) The iMessage reader copied only `chat.db`, so messages
+  still in `chat.db-wal` were invisible. It now snapshots through SQLite's backup API
+  from a read-only connection and falls back to the byte copy only if that fails. No
+  schema change.
 
 ## [1.3.57] — 2026-09-14
 
