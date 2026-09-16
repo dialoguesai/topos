@@ -2,9 +2,10 @@
 
 The P2a family releases a scoped fact's complete set of terminal messages,
 whole and unredacted. One closure is captured through the resolver exactly as
-the release adapter reads it: the frozen legacy subject contract and
-`discloses_sources`, so a message that also backs a fact the owner kept to
-themselves withholds both arms before any model call. Arm A is
+the release adapter reads it: the subject contract the capsule policy's
+capability selects (the frozen legacy rule for p2a-v1, the owner's attestations
+for p2a-v2) and `discloses_sources`, so a message that also backs a fact the
+owner kept to themselves withholds both arms before any model call. Arm A is
 `source_message_decision` over that capture, which is the serving decision.
 Arm B judges the owner's approved prose directly, in two stages: evidence_use
 over the text of every closure unit, then output_release over the exact records
@@ -26,7 +27,8 @@ from pydantic import Field, model_validator
 from ..canonical import MAX_INTEGER, PolicyError, canonical_bytes, digest
 from ..contract import VIEW, Binding, Hash, Identifier, MessageDisclosure, Number, Only, PolicyV2, StrictModel
 from ..evidence import EvidenceResolver, EvidenceReviewStore, QualifiedEvidence, _json, _key
-from ..identity import LEGACY_CONTRACT
+from ..identity import SUBJECT_CONTRACT_BY_CAPABILITY
+from ..registry import AttestedSubjectSourcePolicy
 from ..release import MAX_DISCLOSURE_BYTES, VOCABULARY, SourceMessageIntent, _rule_sources, _tables, source_message_decision
 from .evaluators import LocalModelTransport, ModelRequest, ModelResponse
 from .fact_bridge import MAX_SURFACE_CHARS, MAX_SURFACES, ProcessorPin, ShadowDecisionCache, _Stop, _Withheld
@@ -84,11 +86,13 @@ class SourceExperimentCapsule(StrictModel):
 
     The digest detects edits; it does not authenticate the owner. Inclusion and
     exclusion identifiers are exactly the policy's permit and deny rule
-    identifiers, so both arms start from one clause universe.
+    identifiers, so both arms start from one clause universe. The policy is a
+    p2a-v1 or p2a-v2 document, each parsing only as itself, and its capability
+    decides whose messages the capture may read.
     """
     version: Literal["topos-offline-source-message-experiment/v1"]
     experiment_id: Identifier
-    policy: PolicyV2
+    policy: PolicyV2 | AttestedSubjectSourcePolicy
     prose: Prose
     processor: ProcessorPin
     owner_approved_revision: Hash
@@ -297,10 +301,11 @@ class SourceShadowBridge:
                             now, candidate_revision, revision)
 
         try:
-            # Exactly the release adapter's read: the frozen legacy subject rule and
-            # the owner-only sibling-fact floor a raw message release requires.
+            # Exactly the release adapter's read: the subject rule the policy's
+            # capability selects, never one inferred from the rows, and the
+            # owner-only sibling-fact floor a raw message release requires.
             return self.resolver.with_qualified(fact_id, reviews=self.reviews, callback=callback,
-                                                contract=LEGACY_CONTRACT, discloses_sources=True)
+                contract=SUBJECT_CONTRACT_BY_CAPABILITY[policy.versions.capability], discloses_sources=True)
         except PolicyError as exc:
             raise _Withheld(exc.code) from None
 

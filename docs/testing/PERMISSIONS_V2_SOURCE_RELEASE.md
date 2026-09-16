@@ -72,6 +72,35 @@ by the existing schema. The fact locator, classifications and private receipts
 are not added to the recipient output. Failure responses reveal no distinction
 between missing, protected, unreviewed or disallowed facts.
 
+## Whose messages: p2a-v1 and p2a-v2
+
+Two capabilities release this view, and they differ only in the owner-identity
+rule the release reads. `permissions-beta/p2a-v1` keeps the frozen legacy rule:
+the locator fact's subject must be `self` or the node's one `is_self` entity, a
+second self row refuses as `owner_subject_ambiguous`, and attestations are never
+read. `permissions-beta/p2a-v2` is the same grammar, rules and view plus the
+`subject_binding` block p2b-v3 carries (`owner_attested_v1`, every outcome
+`withhold`), evaluated as `hard-rules/p2a-v2`. It reads what the owner attested,
+exactly as the fact labels do: on a node with several self rows it releases a
+fact about an attested entity, an unattested self entity refuses as
+`owner_subject_unattested`, and a review label other than `self` refuses as
+`classification_unknown_or_mixed`.
+
+The rule comes from the signed capability (`SUBJECT_CONTRACT_BY_CAPABILITY`),
+never from the request or the row, and a decision refuses evidence qualified
+under the other rule. The sibling floor applies to both. A grant cannot switch
+between them in place; the owner issues a new grant. Withdrawing an attestation
+changes what the owner's evidence review bound, so the next read under either
+capability is `review_stale` until the owner reviews again; after that p2a-v2
+keeps refusing and p2a-v1, which never read the attestation, releases.
+
+Every p2a-v1 export and golden is byte-identical to what shipped, pinned by hash
+in `tests/permissions_v2/test_source_release_attested.py`. The p2a-v2 exports are
+in `fixtures/permissions_v2/source_attested/`, written by
+`tests/permissions_v2/source_attested_schemas.py`, which also rewrites the five
+protocol exports whose unions name every capability. `capability_document()`
+keeps `version: permissions-beta/p2a-v1` and lists both in `capabilities`.
+
 ## Final checks and delivery
 
 The node synchronizes its actual canonical protection clock before admitting a

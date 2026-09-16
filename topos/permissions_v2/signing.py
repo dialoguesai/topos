@@ -57,6 +57,19 @@ class SignedFactEnvelope(FactEnvelopeBody):
     signature: Signature
 
 
+class AttestedSourceAuthorityBinding(AuthorityBinding):
+    """p2a-v2 authority: a subclass, so the pinned p2a-v1 export does not move."""
+    capability_version: Literal["permissions-beta/p2a-v2"]
+
+
+class AttestedSourceEnvelopeBody(EnvelopeBody):
+    capability_version: Literal["permissions-beta/p2a-v2"]
+
+
+class SignedAttestedSourceEnvelope(AttestedSourceEnvelopeBody):
+    signature: Signature
+
+
 class RequestContext(StrictModel):
     """Actual authenticated caller/transport context, never copied from a token."""
 
@@ -76,9 +89,9 @@ class FactRequestContext(RequestContext):
     request_type: FactRequestType
 
 
-AnyAuthorityBinding = AuthorityBinding | FactAuthorityBinding
-AnySignedEnvelope = SignedEnvelope | SignedFactEnvelope
-AnyEnvelopeBody = EnvelopeBody | FactEnvelopeBody
+AnyAuthorityBinding = AuthorityBinding | FactAuthorityBinding | AttestedSourceAuthorityBinding
+AnySignedEnvelope = SignedEnvelope | SignedFactEnvelope | SignedAttestedSourceEnvelope
+AnyEnvelopeBody = EnvelopeBody | FactEnvelopeBody | AttestedSourceEnvelopeBody
 AnyRequestContext = RequestContext | FactRequestContext
 
 
@@ -95,6 +108,8 @@ def parse_authority(raw) -> AnyAuthorityBinding:
     raw = _value(raw)
     if raw.get("capability_version") == "permissions-beta/p2a-v1":
         return AuthorityBinding.parse(raw)
+    if raw.get("capability_version") == "permissions-beta/p2a-v2":
+        return AttestedSourceAuthorityBinding.parse(raw)
     if raw.get("capability_version") in FACT_CAPABILITIES:
         return FactAuthorityBinding.parse(raw)
     raise PolicyError("unsupported_capability")
@@ -104,6 +119,8 @@ def parse_envelope(raw, *, signed=True):
     raw = _value(raw)
     if raw.get("capability_version") == "permissions-beta/p2a-v1":
         return (SignedEnvelope if signed else EnvelopeBody).parse(raw)
+    if raw.get("capability_version") == "permissions-beta/p2a-v2":
+        return (SignedAttestedSourceEnvelope if signed else AttestedSourceEnvelopeBody).parse(raw)
     if raw.get("capability_version") in FACT_CAPABILITIES:
         return (SignedFactEnvelope if signed else FactEnvelopeBody).parse(raw)
     raise PolicyError("unsupported_capability")

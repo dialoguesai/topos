@@ -3,6 +3,8 @@
 The locator is a scoped, owner-reviewed fact, but the output is its complete set
 of terminal canonical messages. This does not add a fact, summary or NL form.
 The callback is the trusted transport send itself, never a permit consumer.
+Two capabilities release this view: p2a-v1 on the frozen legacy subject rule and
+p2a-v2 on the owner-attested one. The rule is always the signed capability's.
 """
 from __future__ import annotations
 
@@ -14,16 +16,35 @@ from pydantic import StringConstraints
 from topos.principal import THIRD_PARTY, current_principal
 from topos.storage.db.write_gate import with_db_write
 
-from .canonical import PolicyError, canonical_bytes, digest
-from .contract import Decision, MessageDisclosure, Only, PolicyV2, StrictModel, VIEW, evaluate_predicate
+from .canonical import PolicyError, canonical_bytes, digest, parse_json
+from .contract import (CAPABILITY, CAPABILITY_ATTESTED, EVALUATOR_ATTESTED, Decision, MessageDisclosure, Only,
+    PolicyV2, StrictModel, VIEW, evaluate_predicate)
 from .evidence import EvidenceResolver, EvidenceReviewStore, QualifiedEvidence, _key
 from .forwarding import ReleaseBody, sign_node_result
-from .identity import LEGACY_CONTRACT
+from .identity import SUBJECT_CONTRACT_BY_CAPABILITY
 from .node_protocol import NodePolicyProtocol
-from .signing import AuthorityBinding, RequestContext, SignedEnvelope, verify_current_signature
+from .registry import AttestedSubjectSourceDecision
+from .signing import (AuthorityBinding, RequestContext, SignedAttestedSourceEnvelope, SignedEnvelope, parse_authority,
+    verify_current_signature)
 
 VOCABULARY = "owner-review-vocabulary/v1"
 MAX_DISCLOSURE_BYTES = 256_000
+# capability -> (decision class, evaluator version). Closed: a policy of any other
+# capability, fact capabilities included, has no raw message decision at all.
+SOURCE_DECISIONS = {CAPABILITY: (Decision, "hard-rules/p2a-v1"),
+                    CAPABILITY_ATTESTED: (AttestedSubjectSourceDecision, EVALUATOR_ATTESTED)}
+
+
+def parse_source_envelope(raw) -> SignedEnvelope | SignedAttestedSourceEnvelope:
+    """A raw message read's signed envelope, p2a-v1 or p2a-v2, never a fact envelope.
+
+    Only an envelope that names p2a-v2 takes the new class. Everything else parses
+    exactly as it did before that capability existed, with the same refusals.
+    """
+    value = parse_json(raw) if isinstance(raw, (str, bytes)) else raw
+    if isinstance(value, dict) and value.get("capability_version") == CAPABILITY_ATTESTED:
+        return SignedAttestedSourceEnvelope.parse(value)
+    return SignedEnvelope.parse(raw)
 
 
 class SourceMessageIntent(StrictModel):
@@ -62,9 +83,17 @@ def source_message_decision(policy: PolicyV2, evidence: QualifiedEvidence) -> De
     A denial on any selected terminal source withholds the whole unredacted
     result. For derived artifacts, exclusions apply conservatively to the entire
     contributing closure when a deny source overlaps; no partial recomputation.
+    Evidence qualified under a subject rule other than the one the policy's
+    capability selects is refused, never evaluated.
     """
     if policy.versions.vocabulary != VOCABULARY:
         raise PolicyError("unsupported_vocabulary")
+    capability = policy.versions.capability
+    if capability not in SOURCE_DECISIONS:
+        raise PolicyError("unsupported_capability")
+    if evidence.subject_contract != SUBJECT_CONTRACT_BY_CAPABILITY[capability]:
+        raise PolicyError("subject_contract_mismatch")
+    decision_class, evaluator_version = SOURCE_DECISIONS[capability]
     snapshot = evidence.snapshot
     labels = {_key(item.evidence.identity): _attributes(item) for item in evidence.classifications}
     closure = snapshot.artifacts + snapshot.leaves
@@ -101,9 +130,9 @@ def source_message_decision(policy: PolicyV2, evidence: QualifiedEvidence) -> De
             elif None in values:
                 unknown_deny = True
     verdict = "deny" if denies else "indeterminate" if unknown_deny else "permit" if allows else "indeterminate" if unknown_allow else "deny"
-    return Decision(stage="output_release", verdict=verdict, policy_hash=digest(policy.model_dump()),
+    return decision_class(stage="output_release", verdict=verdict, policy_hash=digest(policy.model_dump()),
         candidate_revision=digest({"snapshot": snapshot.model_dump(), "review_revision": evidence.review_revision}),
-        evaluator_version="hard-rules/p2a-v1", matched_allow_clause_ids=allows[:1] if verdict == "permit" else [],
+        evaluator_version=evaluator_version, matched_allow_clause_ids=allows[:1] if verdict == "permit" else [],
         matched_deny_clause_ids=denies, reason_code="rule_permit" if verdict == "permit" else "rule_deny" if verdict == "deny" else "unknown_context",
         required_projection_id=VIEW if verdict == "permit" else None,
         missing_context_codes=["classification"] if verdict == "indeterminate" else [])
@@ -133,9 +162,14 @@ class SourceMessageRelease:
             raise PolicyError("recipient_relay_required")
         intent = SourceMessageIntent.parse(payload)
         fact_id = intent.fact_id()
-        signed = SignedEnvelope.parse(envelope)
+        signed = parse_source_envelope(envelope)
         if signed.request_type != "permissions.v2.read":
             raise PolicyError("unsupported_query")
+        # The owner-identity rule comes from the signed capability, before any
+        # evidence is resolved; never from the request body or the candidate row.
+        contract = SUBJECT_CONTRACT_BY_CAPABILITY.get(signed.capability_version)
+        if contract is None:
+            raise PolicyError("unsupported_capability")
         ledger = self.protocol.ledger
         request = RequestContext.parse({**ledger.identity.model_dump(), "actor_id": principal.acting_user,
             "client_id": principal.client_id, "grant_id": signed.grant_id, "assignment_id": signed.assignment_id,
@@ -152,7 +186,7 @@ class SourceMessageRelease:
                     authority, policy = ledger._authority(db, signed.grant_id, self.clock())
                     # The snapshot binds its closure's protection history; signed
                     # authority binds the node-wide revision of this very read.
-                    if (authority != AuthorityBinding.parse({field: getattr(signed, field) for field in AuthorityBinding.model_fields})
+                    if (authority != parse_authority({field: getattr(signed, field) for field in AuthorityBinding.model_fields})
                         or self.resolver.current_floor is None or self.resolver.current_floor != authority.protection_revision):
                         raise PolicyError("authority_stale")
                 decision = source_message_decision(policy, qualified)
@@ -182,9 +216,9 @@ class SourceMessageRelease:
                     self.protocol.node_signing_key)
                 send(result.model_dump(), output.model_dump())
 
-            # The P2a message family predates identity binding and stays on the
-            # frozen legacy rule; a v3 grant cannot reach this adapter. It
-            # releases whole messages, so every other fact citing one of them
-            # must be scoped too, checked inside the same read.
+            # p2a-v1 keeps the frozen legacy rule; p2a-v2 reads the owner's
+            # attestations, as the fact labels do. A fact grant cannot reach this
+            # adapter. Both release whole messages, so every other fact citing
+            # one of them must be scoped too, checked inside the same read.
             self.resolver.with_qualified(fact_id, reviews=self.reviews, callback=release,
-                                         contract=LEGACY_CONTRACT, discloses_sources=True)
+                                         contract=contract, discloses_sources=True)

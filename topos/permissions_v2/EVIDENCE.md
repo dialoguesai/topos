@@ -320,9 +320,11 @@ preparation refuses a policy whose capability maps to a different one.
 | capability | subject contract | permits |
 |---|---|---|
 | `permissions-beta/p2a-v1` | `legacy_single_self_v1` | the literal subject and the sole `is_self` row, or a refusal |
+| `permissions-beta/p2a-v2` | `owner_attested_v1` | the literal subject unless shadowed, plus each active attestation |
 | `permissions-beta/p2b-v1` | `legacy_single_self_v1` | the same |
 | `permissions-beta/p2b-v2` | `legacy_single_self_v1` | the same |
 | `permissions-beta/p2b-v3` | `owner_attested_v1` | the literal subject unless shadowed, plus each active attestation |
+| `permissions-beta/p2b-v4` | `owner_attested_v1` | the same |
 
 Two sets are always in play. The permit set above decides what may be released.
 The restriction set decides what a tombstone, exclusion or copy check matches,

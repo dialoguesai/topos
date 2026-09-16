@@ -18,6 +18,12 @@ Generation = Annotated[int, Field(strict=True, ge=1, le=MAX_INTEGER)]
 Table = Literal["conversation_messages", "ai_chat_messages"]
 VIEW = "canonical.message_disclosure.v1"
 CAPABILITY = "permissions-beta/p2a-v1"
+# The same raw message release under the owner-attested subject rule the fact
+# labels use. Its policy and decision classes live in registry.py: they reuse the
+# fact contract's subject block, and fact_contract imports this module.
+CAPABILITY_ATTESTED = "permissions-beta/p2a-v2"
+EVALUATOR_ATTESTED = "hard-rules/p2a-v2"
+SOURCE_CAPABILITIES = (CAPABILITY, CAPABILITY_ATTESTED)
 
 
 class StrictModel(BaseModel):
@@ -252,6 +258,9 @@ class MessageDisclosure(StrictModel):
 def capability_document() -> dict[str, Any]:
     return {
         "version": CAPABILITY,
+        # Every capability that releases this view. `version` stays the p2a-v1
+        # grammar so an existing reader of it is unchanged.
+        "capabilities": list(SOURCE_CAPABILITIES),
         "registered_forms": [{"family": "canonical_record", "operation": "read", "view_id": VIEW}],
         "executable_forms": [],
         "natural_language": False,

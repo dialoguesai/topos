@@ -220,7 +220,9 @@ def test_the_capability_registry_knows_exactly_four_fact_capabilities():
     # attestations. v4 rides the attested rule rather than re-deriving one: a new
     # output family is not a reason to revisit whose facts these are.
     assert set(FACT_CAPABILITIES) <= set(SUBJECT_CONTRACT_BY_CAPABILITY)
-    attested = [key for key, value in SUBJECT_CONTRACT_BY_CAPABILITY.items() if value == ATTESTED_CONTRACT]
+    # p2a-v2 reads attestations too; this test is about the fact capabilities.
+    attested = [key for key, value in SUBJECT_CONTRACT_BY_CAPABILITY.items()
+                if value == ATTESTED_CONTRACT and key in FACT_CAPABILITIES]
     assert attested == [CAPABILITY_ATTESTED, CAPABILITY_WORK]
 
 

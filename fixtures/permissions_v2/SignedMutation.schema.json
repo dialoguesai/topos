@@ -234,6 +234,175 @@
       "title": "AttestedFactVersions",
       "type": "object"
     },
+    "AttestedSourceAuthorityBinding": {
+      "additionalProperties": false,
+      "description": "p2a-v2 authority: a subclass, so the pinned p2a-v1 export does not move.",
+      "properties": {
+        "actor_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Actor Id",
+          "type": "string"
+        },
+        "assignment_generation": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Assignment Generation",
+          "type": "integer"
+        },
+        "assignment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Assignment Id",
+          "type": "string"
+        },
+        "capability_version": {
+          "const": "permissions-beta/p2a-v2",
+          "title": "Capability Version",
+          "type": "string"
+        },
+        "client_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Client Id",
+          "type": "string"
+        },
+        "environment_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Environment Id",
+          "type": "string"
+        },
+        "grant_generation": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Grant Generation",
+          "type": "integer"
+        },
+        "grant_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Grant Id",
+          "type": "string"
+        },
+        "node_epoch": {
+          "maximum": 9007199254740991,
+          "minimum": 1,
+          "title": "Node Epoch",
+          "type": "integer"
+        },
+        "node_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Node Id",
+          "type": "string"
+        },
+        "owner_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Owner Id",
+          "type": "string"
+        },
+        "policy_hash": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Policy Hash",
+          "type": "string"
+        },
+        "policy_version_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Policy Version Id",
+          "type": "string"
+        },
+        "protection_revision": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Protection Revision",
+          "type": "string"
+        },
+        "resource_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Resource Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "environment_id",
+        "node_id",
+        "resource_id",
+        "owner_id",
+        "actor_id",
+        "client_id",
+        "grant_id",
+        "assignment_id",
+        "grant_generation",
+        "assignment_generation",
+        "policy_version_id",
+        "policy_hash",
+        "capability_version",
+        "protection_revision",
+        "node_epoch"
+      ],
+      "title": "AttestedSourceAuthorityBinding",
+      "type": "object"
+    },
+    "AttestedSourceEvaluator": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "hard_rules",
+          "title": "Kind",
+          "type": "string"
+        },
+        "version": {
+          "const": "hard-rules/p2a-v2",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "version"
+      ],
+      "title": "AttestedSourceEvaluator",
+      "type": "object"
+    },
+    "AttestedSourceVersions": {
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "const": "permissions-beta/p2a-v2",
+          "title": "Capability",
+          "type": "string"
+        },
+        "subject_binding": {
+          "$ref": "#/$defs/OwnerAttestedSubjectBinding"
+        },
+        "vocabulary": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Vocabulary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "vocabulary",
+        "capability",
+        "subject_binding"
+      ],
+      "title": "AttestedSourceVersions",
+      "type": "object"
+    },
     "AttestedSubjectFactPolicy": {
       "additionalProperties": false,
       "description": "Owner-attested subjects. Deliberately not a subclass of the v2 policy.\n\nRules, reviews and the scalar view are unchanged. Subclassing the stated-day\npolicy would make every v3 document an instance of v2 as well, and the\ndispatch that decides temporal meaning is an isinstance test. A v3 policy\nthat chose exact instants would then be evaluated as a stated-day one.",
@@ -294,6 +463,67 @@
         "natural_language"
       ],
       "title": "AttestedSubjectFactPolicy",
+      "type": "object"
+    },
+    "AttestedSubjectSourcePolicy": {
+      "additionalProperties": false,
+      "description": "p2a-v1's raw message grammar, rules and view, on the owner-attested subject rule.\n\np2a-v1 reads the frozen legacy rule (exactly one `is_self` row, never an\nattestation) while the fact labels read attestations, so withdrawing one\nstopped label grants but not raw grants. This capability carries the fact\ncontract's own subject block by composition, the same class p2b-v3 carries,\nso both families name one rule. The v1 class is untouched and a v1 document\nnever parses here, nor this one there; the registry dispatches on the\ncapability literal and the release adapter picks the rule from it.\n\nIt is defined here because it composes that block, and fact_contract imports\ncontract. Subclassing the v1 class keeps rule correlation and the pinned\nsource universe; no dispatch in this package is an isinstance test on it.",
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/Binding"
+        },
+        "evaluator": {
+          "$ref": "#/$defs/AttestedSourceEvaluator"
+        },
+        "hard_constraints": {
+          "$ref": "#/$defs/HardConstraints"
+        },
+        "natural_language": {
+          "title": "Natural Language",
+          "type": "null"
+        },
+        "policy_version_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Policy Version Id",
+          "type": "string"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/Rule"
+          },
+          "title": "Rules",
+          "type": "array"
+        },
+        "source_universe": {
+          "$ref": "#/$defs/SourceUniverse"
+        },
+        "validity": {
+          "$ref": "#/$defs/Validity"
+        },
+        "version": {
+          "const": "topos-policy/v2",
+          "title": "Version",
+          "type": "string"
+        },
+        "versions": {
+          "$ref": "#/$defs/AttestedSourceVersions"
+        }
+      },
+      "required": [
+        "version",
+        "policy_version_id",
+        "binding",
+        "versions",
+        "validity",
+        "source_universe",
+        "hard_constraints",
+        "rules",
+        "evaluator",
+        "natural_language"
+      ],
+      "title": "AttestedSubjectSourcePolicy",
       "type": "object"
     },
     "AuthorityBinding": {
@@ -2024,6 +2254,9 @@
         },
         {
           "$ref": "#/$defs/FactAuthorityBinding"
+        },
+        {
+          "$ref": "#/$defs/AttestedSourceAuthorityBinding"
         }
       ],
       "title": "Authority"
@@ -2094,6 +2327,9 @@
         },
         {
           "$ref": "#/$defs/WorkFactPolicy"
+        },
+        {
+          "$ref": "#/$defs/AttestedSubjectSourcePolicy"
         },
         {
           "type": "null"

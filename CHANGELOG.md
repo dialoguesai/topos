@@ -77,6 +77,11 @@ The machine-readable twin of each release is
   provenance, revocation and origin marker as iMessage lane rows. Owner facts are not derived from
   them yet. Group chats and shared links are recognised by known marker names; check a real
   export's shape before enrolling one.
+- **`permissions-beta/p2a-v2`: raw message release on the owner-attested subject rule.** `[O]` The
+  same grammar and message view as `p2a-v1`, plus the subject binding `p2b-v3` carries, evaluated
+  as `hard-rules/p2a-v2`. The release adapter takes the subject rule from the signed capability, so
+  withdrawing an attestation stops a v2 read as it stops a label grant, and a node with several
+  attested self entities can release. `p2a-v1` is frozen byte for byte.
 - **Time records that keep only what a producer knows.** `[S1]` `[O]` Migration 75 adds
   `signal_objects.temporal_json` (`topos-fact-temporal/v1`: when the node asserted a fact, when
   it applies, and its evidence time) and `conversation_messages.event_time_json`

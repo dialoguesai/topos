@@ -14,9 +14,9 @@ from topos.principal import THIRD_PARTY, reset_principal, set_principal
 from topos.relay_stamp import verify_relay_stamp
 
 from .canonical import PolicyError, canonical_bytes
-from .release import SourceMessageRelease
+from .release import SourceMessageRelease, parse_source_envelope
 from .runtime import get_runtime
-from .signing import SignedEnvelope, verify_current_signature
+from .signing import verify_current_signature
 
 MESSAGE_TYPE = "permissions_v2_source_read"
 SEND_TIMEOUT_SECONDS = 5
@@ -41,7 +41,7 @@ async def dispatch_source_message(ws, message) -> None:
         body = message.get("payload")
         if not isinstance(body, dict) or set(body) != {"envelope", "intent"}:
             raise PolicyError("release_payload_invalid")
-        signed = SignedEnvelope.parse(body["envelope"])
+        signed = parse_source_envelope(body["envelope"])
         if request_id != signed.request_id:
             raise PolicyError("request_binding")
         loop = asyncio.get_running_loop()

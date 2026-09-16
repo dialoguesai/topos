@@ -52,9 +52,11 @@ The contract comes from the signed capability, never from a caller:
 | capability | subject contract |
 |---|---|
 | `permissions-beta/p2a-v1` | `legacy_single_self_v1` |
+| `permissions-beta/p2a-v2` | `owner_attested_v1` |
 | `permissions-beta/p2b-v1` | `legacy_single_self_v1` |
 | `permissions-beta/p2b-v2` | `legacy_single_self_v1` |
 | `permissions-beta/p2b-v3` | `owner_attested_v1` |
+| `permissions-beta/p2b-v4` | `owner_attested_v1` |
 
 `QualifiedEvidence.subject_contract` records which rule qualified the evidence,
 and the policy preparation refuses a policy whose capability maps to a different
