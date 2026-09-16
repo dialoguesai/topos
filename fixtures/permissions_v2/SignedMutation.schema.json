@@ -169,6 +169,133 @@
       "title": "Atom",
       "type": "object"
     },
+    "AttestedFactEvaluator": {
+      "additionalProperties": false,
+      "properties": {
+        "kind": {
+          "const": "hard_rules",
+          "title": "Kind",
+          "type": "string"
+        },
+        "version": {
+          "const": "hard-rules/p2b-v3",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "kind",
+        "version"
+      ],
+      "title": "AttestedFactEvaluator",
+      "type": "object"
+    },
+    "AttestedFactVersions": {
+      "additionalProperties": false,
+      "properties": {
+        "capability": {
+          "const": "permissions-beta/p2b-v3",
+          "title": "Capability",
+          "type": "string"
+        },
+        "fact_validity": {
+          "discriminator": {
+            "mapping": {
+              "exact_instant_v1": "#/$defs/ExactInstantFactValidity",
+              "stated_day_v1": "#/$defs/StatedDayFactValidity"
+            },
+            "propertyName": "semantics"
+          },
+          "oneOf": [
+            {
+              "$ref": "#/$defs/StatedDayFactValidity"
+            },
+            {
+              "$ref": "#/$defs/ExactInstantFactValidity"
+            }
+          ],
+          "title": "Fact Validity"
+        },
+        "subject_binding": {
+          "$ref": "#/$defs/OwnerAttestedSubjectBinding"
+        },
+        "vocabulary": {
+          "const": "owner-review-vocabulary/v1",
+          "title": "Vocabulary",
+          "type": "string"
+        }
+      },
+      "required": [
+        "vocabulary",
+        "capability",
+        "fact_validity",
+        "subject_binding"
+      ],
+      "title": "AttestedFactVersions",
+      "type": "object"
+    },
+    "AttestedSubjectFactPolicy": {
+      "additionalProperties": false,
+      "description": "Owner-attested subjects. Deliberately not a subclass of the v2 policy.\n\nRules, reviews and the scalar view are unchanged. Subclassing the stated-day\npolicy would make every v3 document an instance of v2 as well, and the\ndispatch that decides temporal meaning is an isinstance test. A v3 policy\nthat chose exact instants would then be evaluated as a stated-day one.",
+      "properties": {
+        "binding": {
+          "$ref": "#/$defs/Binding"
+        },
+        "evaluator": {
+          "$ref": "#/$defs/AttestedFactEvaluator"
+        },
+        "hard_constraints": {
+          "$ref": "#/$defs/HardConstraints"
+        },
+        "natural_language": {
+          "title": "Natural Language",
+          "type": "null"
+        },
+        "policy_version_id": {
+          "maxLength": 200,
+          "minLength": 1,
+          "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+          "title": "Policy Version Id",
+          "type": "string"
+        },
+        "rules": {
+          "items": {
+            "$ref": "#/$defs/FactRule"
+          },
+          "maxItems": 64,
+          "title": "Rules",
+          "type": "array"
+        },
+        "source_universe": {
+          "$ref": "#/$defs/SourceUniverse"
+        },
+        "validity": {
+          "$ref": "#/$defs/Validity"
+        },
+        "version": {
+          "const": "topos-policy/v2",
+          "title": "Version",
+          "type": "string"
+        },
+        "versions": {
+          "$ref": "#/$defs/AttestedFactVersions"
+        }
+      },
+      "required": [
+        "version",
+        "policy_version_id",
+        "binding",
+        "versions",
+        "validity",
+        "source_universe",
+        "hard_constraints",
+        "rules",
+        "evaluator",
+        "natural_language"
+      ],
+      "title": "AttestedSubjectFactPolicy",
+      "type": "object"
+    },
     "AuthorityBinding": {
       "additionalProperties": false,
       "properties": {
@@ -456,6 +583,40 @@
       "title": "EvidenceUse",
       "type": "object"
     },
+    "ExactInstantFactValidity": {
+      "additionalProperties": false,
+      "description": "The v1 temporal meaning, written out so a v3 policy states it explicitly.\n\nv1 and v2 carry their validity in the capability itself. v3 does not: it\nselects the subject rule, and the temporal rule is chosen alongside it, so\nreading a v3 document tells you both without knowing which capability\nimplied which.",
+      "properties": {
+        "instants": {
+          "const": "explicit_utc_exact",
+          "title": "Instants",
+          "type": "string"
+        },
+        "precision": {
+          "const": "instant",
+          "title": "Precision",
+          "type": "string"
+        },
+        "semantics": {
+          "const": "exact_instant_v1",
+          "title": "Semantics",
+          "type": "string"
+        },
+        "unknown": {
+          "const": "withhold",
+          "title": "Unknown",
+          "type": "string"
+        }
+      },
+      "required": [
+        "semantics",
+        "precision",
+        "instants",
+        "unknown"
+      ],
+      "title": "ExactInstantFactValidity",
+      "type": "object"
+    },
     "FactAuthorityBinding": {
       "additionalProperties": false,
       "properties": {
@@ -482,7 +643,8 @@
         "capability_version": {
           "enum": [
             "permissions-beta/p2b-v1",
-            "permissions-beta/p2b-v2"
+            "permissions-beta/p2b-v2",
+            "permissions-beta/p2b-v3"
           ],
           "title": "Capability Version",
           "type": "string"
@@ -1033,6 +1195,58 @@
       "title": "OutputForm",
       "type": "object"
     },
+    "OwnerAttestedSubjectBinding": {
+      "additionalProperties": false,
+      "description": "Whom a release under this policy may be about, and what withholds.\n\nNothing here grants anything. It records which owner-identity rule the\nsigned capability selected, so the resolver cannot be asked for one rule and\nthe policy evaluated under another. Every outcome that is not a live,\ncurrent attestation is `withhold`; there is no permissive setting to pick.",
+      "properties": {
+        "contract": {
+          "const": "owner_attested_v1",
+          "title": "Contract",
+          "type": "string"
+        },
+        "literal_self_when_shadowed": {
+          "const": "withhold",
+          "title": "Literal Self When Shadowed",
+          "type": "string"
+        },
+        "moved_since_attestation": {
+          "const": "withhold",
+          "title": "Moved Since Attestation",
+          "type": "string"
+        },
+        "rekeyed_facts": {
+          "const": "withhold",
+          "title": "Rekeyed Facts",
+          "type": "string"
+        },
+        "statement_version": {
+          "const": "owner-identity-attestation/v1",
+          "title": "Statement Version",
+          "type": "string"
+        },
+        "subjects": {
+          "const": "owner_attested_entities",
+          "title": "Subjects",
+          "type": "string"
+        },
+        "unattested": {
+          "const": "withhold",
+          "title": "Unattested",
+          "type": "string"
+        }
+      },
+      "required": [
+        "contract",
+        "statement_version",
+        "subjects",
+        "unattested",
+        "moved_since_attestation",
+        "rekeyed_facts",
+        "literal_self_when_shadowed"
+      ],
+      "title": "OwnerAttestedSubjectBinding",
+      "type": "object"
+    },
     "OwnerAuthorization": {
       "additionalProperties": false,
       "properties": {
@@ -1574,6 +1788,9 @@
         },
         {
           "$ref": "#/$defs/StatedDayFactPolicy"
+        },
+        {
+          "$ref": "#/$defs/AttestedSubjectFactPolicy"
         },
         {
           "type": "null"

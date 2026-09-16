@@ -254,7 +254,7 @@ def test_signed_authority_and_envelope_accept_only_fact_capabilities(timed):
     parsed = parse_authority(authority)
     assert type(parsed) is FactAuthorityBinding and parsed.capability_version == CAPABILITY_STATED_DAY
     with pytest.raises(PolicyError): AuthorityBinding.parse(authority)
-    with pytest.raises(PolicyError): parse_authority(authority | {"capability_version": "permissions-beta/p2b-v3"})
+    with pytest.raises(PolicyError): parse_authority(authority | {"capability_version": "permissions-beta/p2b-v4"})
     body = {**authority, "version": "topos-grantee-envelope/v2", "kid": "cp-key", "request_id": "request-1",
         "request_type": "permissions.v2.fact.read", "request_hash": "b" * 64, "issued_at": AS_OF, "expires_at": AS_OF + 100}
     assert type(parse_envelope(body, signed=False)) is FactEnvelopeBody

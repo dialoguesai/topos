@@ -178,8 +178,16 @@ def test_a_different_sentence_is_a_different_statement(service):
 
 def test_the_sentence_in_the_contract_is_the_sentence_the_constant_names(service):
     """Edit one without the other and old entries mean something they did not."""
-    from topos.permissions_v2.identity_protocol import ATTESTATION_SENTENCE as SENTENCE
-    from topos.permissions_v2.protection_clock import ATTESTATION_STATEMENT
-    assert AttestIdentity.model_fields["statement"].annotation.__args__ == (SENTENCE,)
-    assert AttestIdentity.model_fields["statement_version"].annotation.__args__ == (ATTESTATION_STATEMENT,)
-    assert state(service).statement_version == ATTESTATION_STATEMENT
+    from topos.permissions_v2 import identity, identity_protocol, protection_clock
+    assert AttestIdentity.model_fields["statement"].annotation.__args__ == (
+        identity_protocol.ATTESTATION_SENTENCE,)
+    # Three copies of the statement version: the table CHECK that pins every
+    # ledger row, the wire contract the control plane mirrors, and the identity
+    # module. They are separate because the control plane has no clock, so
+    # nothing but this test stops them drifting apart.
+    assert (identity_protocol.ATTESTATION_STATEMENT == protection_clock.ATTESTATION_STATEMENT
+            == identity.ATTESTATION_STATEMENT)
+    assert AttestIdentity.model_fields["statement_version"].annotation.__args__ == (
+        protection_clock.ATTESTATION_STATEMENT,)
+    assert f"statement_version='{protection_clock.ATTESTATION_STATEMENT}'" in protection_clock.LEDGER_SQL
+    assert state(service).statement_version == protection_clock.ATTESTATION_STATEMENT

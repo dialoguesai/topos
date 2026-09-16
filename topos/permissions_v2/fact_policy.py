@@ -10,7 +10,8 @@ from __future__ import annotations
 from .contract import Binding, evaluate_predicate
 from .evidence import QualifiedEvidence, _key
 from .fact_projection import ReviewedFactProjection
-from .fact_contract import (CAPABILITY, EVALUATOR, EVALUATOR_STATED_DAY, VOCABULARY, PURPOSE, PROJECTION_VERSION, VIEW,
+from .fact_contract import (CAPABILITY, EVALUATOR, EVALUATOR_ATTESTED, EVALUATOR_STATED_DAY, VOCABULARY,
+    PURPOSE, PROJECTION_VERSION, VIEW, AttestedSubjectFactDecision, AttestedSubjectFactPolicy,
     FactPolicyV2, FactDecision, FactEvidenceUse, FactOutputForm, RollingEventWindow,
     StatedDayFactDecision, StatedDayFactPolicy)
 from .fact_eligibility import PermitStructure, prepare_fact_eligibility, canonical_utc_microseconds
@@ -43,8 +44,11 @@ def fact_projection_decision(*, policy: FactPolicyV2, evidence: QualifiedEvidenc
         evidence=evidence, projection=projection, rows=rows, binding=binding,
         request_as_of=request_as_of, now=now,
         **({} if permitted_subjects is None else {"permitted_subjects": permitted_subjects}))
-    stated_day = isinstance(policy, StatedDayFactPolicy)
-    model, evaluator = (StatedDayFactDecision, EVALUATOR_STATED_DAY) if stated_day else (FactDecision, EVALUATOR)
+    # Dispatch on the class, not on the temporal choice: a v3 policy may select
+    # either validity contract, and its decisions are its own shape either way.
+    model, evaluator = {FactPolicyV2: (FactDecision, EVALUATOR),
+                        StatedDayFactPolicy: (StatedDayFactDecision, EVALUATOR_STATED_DAY),
+                        AttestedSubjectFactPolicy: (AttestedSubjectFactDecision, EVALUATOR_ATTESTED)}[type(policy)]
     def result(verdict, reason, allows=(), denies=(), missing=()):
         return model(stage="output_release", verdict=verdict, policy_hash=structure.policy_hash,
             candidate_revision=structure.candidate_revision, evaluator_version=evaluator,

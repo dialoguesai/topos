@@ -17,10 +17,12 @@ CAPABILITY = "permissions-beta/p2b-v1"
 EVALUATOR = "hard-rules/p2b-v1"
 CAPABILITY_STATED_DAY = "permissions-beta/p2b-v2"
 EVALUATOR_STATED_DAY = "hard-rules/p2b-v2"
+CAPABILITY_ATTESTED = "permissions-beta/p2b-v3"
+EVALUATOR_ATTESTED = "hard-rules/p2b-v3"
 FACT_VALIDITY_EXACT_INSTANT = "exact_instant_v1"
 FACT_VALIDITY_STATED_DAY = "stated_day_v1"
-FACT_CAPABILITIES = (CAPABILITY, CAPABILITY_STATED_DAY)
-FactCapability = Literal["permissions-beta/p2b-v1", "permissions-beta/p2b-v2"]
+FACT_CAPABILITIES = (CAPABILITY, CAPABILITY_STATED_DAY, CAPABILITY_ATTESTED)
+FactCapability = Literal["permissions-beta/p2b-v1", "permissions-beta/p2b-v2", "permissions-beta/p2b-v3"]
 VOCABULARY = "owner-review-vocabulary/v1"
 PURPOSE = "owner-stated-fact-projection"
 VIEW = "owner_stated_fact.scalar.v1"
@@ -189,13 +191,78 @@ class StatedDayFactDecision(FactDecision):
     evaluator_version: Literal["hard-rules/p2b-v2"]
 
 
-FactPolicy = FactPolicyV2 | StatedDayFactPolicy
-AnyFactDecision = FactDecision | StatedDayFactDecision
+class ExactInstantFactValidity(StrictModel):
+    """The v1 temporal meaning, written out so a v3 policy states it explicitly.
+
+    v1 and v2 carry their validity in the capability itself. v3 does not: it
+    selects the subject rule, and the temporal rule is chosen alongside it, so
+    reading a v3 document tells you both without knowing which capability
+    implied which.
+    """
+    semantics: Literal["exact_instant_v1"]
+    precision: Literal["instant"]
+    instants: Literal["explicit_utc_exact"]
+    unknown: Literal["withhold"]
+
+
+AttestedFactValidity = Annotated[StatedDayFactValidity | ExactInstantFactValidity,
+                                 Field(discriminator="semantics")]
+
+
+class OwnerAttestedSubjectBinding(StrictModel):
+    """Whom a release under this policy may be about, and what withholds.
+
+    Nothing here grants anything. It records which owner-identity rule the
+    signed capability selected, so the resolver cannot be asked for one rule and
+    the policy evaluated under another. Every outcome that is not a live,
+    current attestation is `withhold`; there is no permissive setting to pick.
+    """
+    contract: Literal["owner_attested_v1"]
+    statement_version: Literal["owner-identity-attestation/v1"]
+    subjects: Literal["owner_attested_entities"]
+    unattested: Literal["withhold"]
+    moved_since_attestation: Literal["withhold"]
+    rekeyed_facts: Literal["withhold"]
+    literal_self_when_shadowed: Literal["withhold"]
+
+
+class AttestedFactVersions(StrictModel):
+    vocabulary: Literal["owner-review-vocabulary/v1"]
+    capability: Literal["permissions-beta/p2b-v3"]
+    fact_validity: AttestedFactValidity
+    subject_binding: OwnerAttestedSubjectBinding
+
+
+class AttestedFactEvaluator(StrictModel):
+    kind: Literal["hard_rules"]
+    version: Literal["hard-rules/p2b-v3"]
+
+
+class AttestedSubjectFactPolicy(FactPolicyV2):
+    """Owner-attested subjects. Deliberately not a subclass of the v2 policy.
+
+    Rules, reviews and the scalar view are unchanged. Subclassing the stated-day
+    policy would make every v3 document an instance of v2 as well, and the
+    dispatch that decides temporal meaning is an isinstance test. A v3 policy
+    that chose exact instants would then be evaluated as a stated-day one.
+    """
+    versions: AttestedFactVersions
+    evaluator: AttestedFactEvaluator
+
+
+class AttestedSubjectFactDecision(FactDecision):
+    evaluator_version: Literal["hard-rules/p2b-v3"]
+
+
+FactPolicy = FactPolicyV2 | StatedDayFactPolicy | AttestedSubjectFactPolicy
+AnyFactDecision = FactDecision | StatedDayFactDecision | AttestedSubjectFactDecision
 
 
 def fact_validity_semantics(policy) -> str:
     """The validity contract a parsed policy selected; v1 policies are exact instants."""
     versions = policy.versions
-    return versions.fact_validity.semantics if isinstance(versions, StatedDayFactVersions) else FACT_VALIDITY_EXACT_INSTANT
+    if isinstance(versions, (StatedDayFactVersions, AttestedFactVersions)):
+        return versions.fact_validity.semantics
+    return FACT_VALIDITY_EXACT_INSTANT
 
 

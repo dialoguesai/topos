@@ -19,9 +19,13 @@ from pydantic import Field, model_validator
 
 from .canonical import PolicyError, digest
 from .contract import Generation, Hash, Identifier, Number, StrictModel
-from .protection_clock import ATTESTATION_STATEMENT
 from .protocol import NodeIdentity, OwnerAuthorization, Signature, _sign, _verify
 
+# This module is mirrored verbatim by the control plane, which has no canonical
+# database and therefore no protection clock, so the statement version is stated
+# here rather than imported from the table that pins it. A test asserts the two
+# are the same string; if they ever differ, entries mean something they did not.
+ATTESTATION_STATEMENT = "owner-identity-attestation/v1"
 # The exact sentence the owner confirms. Changing a word is a new statement
 # version, and old entries stay bound to the sentence they were made under.
 ATTESTATION_SENTENCE = ("I attest that this entity is me, that facts recorded about it are about me, and that "

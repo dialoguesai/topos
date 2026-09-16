@@ -26,6 +26,7 @@ from ..evidence import QualifiedEvidence, _json, _key
 from ..fact_contract import VIEW, FactPolicy, FactPolicyV2
 from ..fact_eligibility import DenyStructure, FactEligibility, PermitStructure, prepare_fact_eligibility
 from ..fact_policy import fact_projection_decision
+from ..identity import SUBJECT_CONTRACT_BY_CAPABILITY
 from ..fact_projection import ReviewedFactProjection
 from ..projection_reviews import ProjectionReviewService
 from .evaluators import LocalModelTransport, ModelRequest, ModelResponse
@@ -300,7 +301,12 @@ class FactShadowBridge:
             return _Capture(evidence, projection, rows, policy, structure, surfaces, output, now, revision)
 
         try:
-            return self.projections.with_reviewed(fact_id, now=now, callback=callback)
+            # Same rule as the release adapter: the capsule's own capability
+            # fixes the owner-identity contract, never the bridge.
+            contract = SUBJECT_CONTRACT_BY_CAPABILITY.get(capsule.policy.versions.capability)
+            if contract is None:
+                raise _Withheld("unsupported_capability")
+            return self.projections.with_reviewed(fact_id, now=now, callback=callback, contract=contract)
         except PolicyError as exc:
             raise _Withheld(exc.code) from None
 

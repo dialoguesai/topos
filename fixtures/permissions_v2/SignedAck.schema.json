@@ -197,7 +197,8 @@
         "capability_version": {
           "enum": [
             "permissions-beta/p2b-v1",
-            "permissions-beta/p2b-v2"
+            "permissions-beta/p2b-v2",
+            "permissions-beta/p2b-v3"
           ],
           "title": "Capability Version",
           "type": "string"

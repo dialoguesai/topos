@@ -11,6 +11,7 @@ from .contract import Binding
 from .fact_contract import FactPolicyV2, FactScalarDisclosure
 from .fact_policy import fact_projection_decision
 from .forwarding import ReleaseBody, sign_node_result
+from .identity import SUBJECT_CONTRACT_BY_CAPABILITY
 from .node_protocol import NodePolicyProtocol
 from .projection_reviews import ProjectionReviewService
 from .release import SourceMessageIntent
@@ -84,4 +85,12 @@ class FactProjectionRelease:
                     self.protocol.node_signing_key)
                 send(result.model_dump(), output.model_dump())
 
-            self.projections.with_reviewed(fact_id, now=self.clock(), callback=release)
+            # The owner-identity rule comes from the signed capability, before any
+            # evidence is resolved. If the envelope named a capability the grant
+            # does not carry, the policy loaded inside the callback will not match
+            # the contract the evidence was qualified under, and the decision
+            # refuses rather than releasing under the wrong rule.
+            contract = SUBJECT_CONTRACT_BY_CAPABILITY.get(signed.capability_version)
+            if contract is None:
+                raise PolicyError("unsupported_capability")
+            self.projections.with_reviewed(fact_id, now=self.clock(), callback=release, contract=contract)

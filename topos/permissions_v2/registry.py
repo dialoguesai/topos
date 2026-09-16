@@ -3,11 +3,11 @@ from __future__ import annotations
 
 from .canonical import PolicyError, parse_json
 from .contract import PolicyV2, Decision, MessageDisclosure
-from .fact_contract import (FactPolicyV2, FactDecision, FactScalarDisclosure,
-    StatedDayFactPolicy, StatedDayFactDecision)
+from .fact_contract import (AttestedSubjectFactDecision, AttestedSubjectFactPolicy, FactPolicyV2,
+    FactDecision, FactScalarDisclosure, StatedDayFactPolicy, StatedDayFactDecision)
 
-Policy = PolicyV2 | FactPolicyV2 | StatedDayFactPolicy
-PolicyDecision = Decision | FactDecision | StatedDayFactDecision
+Policy = PolicyV2 | FactPolicyV2 | StatedDayFactPolicy | AttestedSubjectFactPolicy
+PolicyDecision = Decision | FactDecision | StatedDayFactDecision | AttestedSubjectFactDecision
 Disclosure = MessageDisclosure | FactScalarDisclosure
 
 
@@ -28,6 +28,8 @@ def parse_policy(raw) -> Policy:
         return FactPolicyV2.parse(raw)
     if capability == "permissions-beta/p2b-v2":
         return StatedDayFactPolicy.parse(raw)
+    if capability == "permissions-beta/p2b-v3":
+        return AttestedSubjectFactPolicy.parse(raw)
     raise PolicyError("unsupported_capability")
 
 
@@ -38,12 +40,14 @@ def parse_decision(raw, *, capability: str) -> PolicyDecision:
         return FactDecision.parse(value_of(raw))
     if capability == "permissions-beta/p2b-v2":
         return StatedDayFactDecision.parse(value_of(raw))
+    if capability == "permissions-beta/p2b-v3":
+        return AttestedSubjectFactDecision.parse(value_of(raw))
     raise PolicyError("unsupported_capability")
 
 
 def parse_disclosure(raw, *, capability: str) -> Disclosure:
     if capability == "permissions-beta/p2a-v1":
         return MessageDisclosure.parse(value_of(raw))
-    if capability in ("permissions-beta/p2b-v1", "permissions-beta/p2b-v2"):
+    if capability in ("permissions-beta/p2b-v1", "permissions-beta/p2b-v2", "permissions-beta/p2b-v3"):
         return FactScalarDisclosure.parse(value_of(raw))
     raise PolicyError("unsupported_capability")

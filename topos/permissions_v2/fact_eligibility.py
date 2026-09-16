@@ -19,8 +19,8 @@ from .evidence import (MAX_DEPTH, MAX_NODES, EvidenceIdentity, Qualification,
     QualifiedEvidence, _json, _key, _row_revision)
 from .fact_projection import ReviewedFactProjection, _SENSITIVITY, _current, prepare_fact_projection
 from .identity import SELF, SUBJECT_CONTRACT_BY_CAPABILITY
-from .fact_contract import (FACT_VALIDITY_STATED_DAY, PROJECTION_VERSION, FactPolicyV2,
-    StatedDayFactPolicy, fact_validity_semantics)
+from .fact_contract import (FACT_VALIDITY_STATED_DAY, PROJECTION_VERSION, AttestedSubjectFactPolicy,
+    FactPolicyV2, StatedDayFactPolicy, fact_validity_semantics)
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _UTC = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|\+00:00)")
@@ -198,7 +198,7 @@ def prepare_fact_eligibility(*, policy: FactPolicyV2, evidence: QualifiedEvidenc
     instants for v1, and additionally conservatively elapsed stated days for a
     v2 policy. The contributor event window is unchanged by that selection.
     """
-    if type(policy) not in (FactPolicyV2, StatedDayFactPolicy):
+    if type(policy) not in (FactPolicyV2, StatedDayFactPolicy, AttestedSubjectFactPolicy):
         raise PolicyError("fact_policy_binding")
     policy = type(policy).parse(policy.model_dump())
     semantics = fact_validity_semantics(policy)

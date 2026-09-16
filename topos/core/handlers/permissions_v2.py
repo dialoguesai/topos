@@ -53,6 +53,7 @@ async def _handle_evidence(message, operation, *, projection=False):
     from ...permissions_v2.canonical import PolicyError
     from ...permissions_v2.evidence import EvidenceBinding
     from ...permissions_v2.evidence_reviews import EvidenceLookup, RecordEvidenceReview, RevokeEvidenceReview
+    from ...permissions_v2.identity import LEGACY_CONTRACT, SUBJECT_CONTRACTS
     from ...permissions_v2.projection_reviews import RecordProjectionReview, RevokeProjectionReview
     from ...permissions_v2.runtime import get_runtime
     from ...principal import OWNER_APP, current_principal
@@ -64,7 +65,12 @@ async def _handle_evidence(message, operation, *, projection=False):
         or not principal.acting_user):
         return {"id":req_id, "status":"error", "code":403, "error":"owner_authority_required"}
     payload = message.get("payload")
-    if not isinstance(payload, dict) or set(payload) != {"binding", "request"}:
+    # `subject_contract` is accepted only on the output-review surface, and only
+    # there because the projection candidate's accepted subject depends on which
+    # owner-identity rule the owner is reviewing under. Omitting it keeps the
+    # pre-binding rule, so an older client is unchanged.
+    allowed = [{"binding", "request"}] + ([{"binding", "request", "subject_contract"}] if projection else [])
+    if not isinstance(payload, dict) or set(payload) not in allowed:
         return {"id":req_id, "status":"error", "code":400, "error":"evidence_payload_invalid"}
 
     def apply():
@@ -85,8 +91,11 @@ async def _handle_evidence(message, operation, *, projection=False):
                 if snapshot.binding != actual:
                     raise PolicyError("evidence_target_binding")
             if projection:
+                contract = payload.get("subject_contract", LEGACY_CONTRACT)
+                if contract not in SUBJECT_CONTRACTS:
+                    raise PolicyError("subject_contract_unknown")
                 service = runtime.projection_reviews(require_existing=operation in {"record", "revoke"})
-                return getattr(service, operation)(request, now=int(time.time()))
+                return getattr(service, operation)(request, now=int(time.time()), contract=contract)
             service = runtime.evidence_reviews(require_existing=operation in {"record", "revoke"})
             if operation == "record":
                 return service.record(request, now=int(time.time()))
