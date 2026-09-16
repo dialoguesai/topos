@@ -158,13 +158,16 @@ class CanonicalTablesManager:
         sync_batch_id: Optional[str] = None,
         mapping_source_id: Optional[str] = None,
         refused: Optional[Dict[str, str]] = None,
+        writers: Optional[Dict[str, Optional[str]]] = None,
     ) -> int:
         """Write messages via CanonicalStore in a single transaction.
 
         ``refused``: when given, filled with ``message_id -> reason`` for every
-        write the store declined (a non-owner writer over an owner-written row;
-        see ``SQLiteCanonicalStore._upsert_ai_chat_message``). Refused messages
+        write the store declined (a non-owner writer over an owner-held row;
+        see ``SQLiteCanonicalStore._upsert_recording_writer``). Refused messages
         get no source mapping either.
+        ``writers``: when given, filled with ``message_id -> writer class`` each
+        row holds after the write.
         """
         if not messages:
             return 0
@@ -196,6 +199,8 @@ class CanonicalTablesManager:
         declined = {ref.record_id: ref.refused for ref in refs if ref.refused}
         if refused is not None:
             refused.update(declined)
+        if writers is not None:
+            writers.update({ref.record_id: ref.writer_class for ref in refs})
         if mapping_source_id:
             mapping_store.save_mappings_batch(
                 MappingRecord(

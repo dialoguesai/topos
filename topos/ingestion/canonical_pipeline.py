@@ -252,6 +252,24 @@ def activity_payload_to_signal_record(
     }
 
 
+def _declined(result: "CanonicalizeResult", ref: Any, table: str) -> bool:
+    """Record a write the canonical store refused; True when it was refused.
+
+    A refused row is left as it was and its record is not handed to derivation:
+    deriving from the declined values under the row's id would attach them to
+    the owner's row.
+    """
+    reason = getattr(ref, "refused", None)
+    if not reason:
+        return False
+    from ..storage.canonical.canonical_store import REFUSED_OWNER_ROW_REWRITE
+
+    result.refused[str(ref.record_id)] = reason
+    if reason == REFUSED_OWNER_ROW_REWRITE:
+        result.errors.append({"error": "owner_row_rewrite_refused", "table": table, "record_id": ref.record_id})
+    return True
+
+
 def canonicalize_normalized_batch(
     db_conn,
     source_def,
@@ -268,10 +286,11 @@ def canonicalize_normalized_batch(
     :func:`parser_vouches_for_self_flag`. ``None`` carries no ``is_from_self``.
 
     ``writer_class`` is the door that wrote the batch
-    (``features/provenance/writer_class.py``). It is recorded on
-    ``ai_chat_messages`` and ``conversation_messages`` rows, where it caps the
-    role gate; the other canonical groups do not carry the column yet. None = an
-    internal path with no door.
+    (``features/provenance/writer_class.py``). It is stamped on every record
+    handed to derivation, where it caps the role gate, and recorded on the rows
+    of ``conversation_messages`` and of every table in ``WRITER_CLASS_TABLES``.
+    None = an internal path with no door: records written through the canonical
+    store take the class the stored row already has.
     """
     if not db_conn or not source_def or not normalized_records:
         return CanonicalizeResult()
@@ -281,6 +300,11 @@ def canonicalize_normalized_batch(
     result = CanonicalizeResult()
 
     def _finish() -> CanonicalizeResult:
+        # Every record handed to derivation carries the door that wrote its
+        # batch; branches that know a row's stored class stamp it themselves.
+        for rec in result.canonical_records:
+            if isinstance(rec, dict) and "writer_class" not in rec:
+                rec["writer_class"] = writer_class
         if result.canonical_records:
             from ..features.timeline_projection import project_timeline_rows
 
@@ -405,13 +429,18 @@ def canonicalize_normalized_batch(
                 from ..storage.canonical.canonical_store import SQLiteCanonicalStore
 
                 store = SQLiteCanonicalStore(db_conn)
-                stamped = [{**p, "source_id": source_id} for p in extra_payloads]
+                stamped = [
+                    {**p, "source_id": source_id, "writer_class": writer_class} for p in extra_payloads
+                ]
                 refs = store.upsert_batch(extra_table, stamped, sync_batch_id=sync_batch_id)
                 result.messages_created += sum(1 for ref in refs if ref.created)
-                for canonical_payload in stamped:
+                for canonical_payload, ref in zip(stamped, refs):
+                    if _declined(result, ref, extra_table):
+                        continue
                     signal_record = _prepare_signal_record(dict(canonical_payload))
                     signal_record["source_id"] = source_id
                     signal_record["_table"] = extra_table
+                    signal_record["writer_class"] = ref.writer_class
                     result.canonical_records.append(signal_record)
         except Exception as exc:
             logger.error("[PIPELINE:CANONICAL] activity upsert failed: %s", exc, exc_info=True)
@@ -532,7 +561,11 @@ def canonicalize_normalized_batch(
                 )
                 for target_table, canonical_payload in mapped_records:
                     canonical_payload["source_id"] = source_id
+                    # Overwritten, never merged: a mapper can carry payload keys.
+                    canonical_payload["writer_class"] = writer_class
                     ref = store.upsert(target_table, canonical_payload, sync_batch_id=sync_batch_id)
+                    if _declined(result, ref, target_table):
+                        continue
                     if ref.created:
                         created += 1
                     signal_record = _prepare_signal_record(dict(canonical_payload))
@@ -541,6 +574,9 @@ def canonicalize_normalized_batch(
                     # default stamp, and a reader handed an unstamped row guesses
                     # its table from its keys (entry_at reads as a journal entry).
                     signal_record["_table"] = target_table
+                    # The row's class after the write: an internal replay (no
+                    # door) re-derives under the class the row was written with.
+                    signal_record["writer_class"] = ref.writer_class
                     if target_table == "calendar_events":
                         result.events_created += 1
                     result.canonical_records.append(signal_record)
@@ -552,11 +588,14 @@ def canonicalize_normalized_batch(
 
                         loc_row = journal_location_event_from_entry(canonical_payload, source_id=source_id)
                         if loc_row:
-                            store.upsert("location_events", loc_row, sync_batch_id=sync_batch_id)
+                            loc_row["writer_class"] = writer_class
+                            loc_ref = store.upsert("location_events", loc_row, sync_batch_id=sync_batch_id)
+                            if _declined(result, loc_ref, "location_events"):
+                                continue
                             result.events_created += 1
-                            result.canonical_records.append(
-                                _prepare_signal_record(journal_location_signal_record(loc_row))
-                            )
+                            loc_signal = _prepare_signal_record(journal_location_signal_record(loc_row))
+                            loc_signal["writer_class"] = loc_ref.writer_class
+                            result.canonical_records.append(loc_signal)
             result.messages_created = created
         except Exception as exc:
             logger.error("[PIPELINE:CANONICAL] demo %s upsert failed: %s", group, exc, exc_info=True)
@@ -864,8 +903,19 @@ def load_canonical_records_for_signal(
     }
     if group in demo_load_sql:
         sql, mapper = demo_load_sql[group]
+        # writer_class caps the role gate; a reload without it would re-derive a
+        # grantee's journal or profile row as the owner's own.
+        table = _RELOAD_WRITER_CLASS_TABLES.get(group)
+        if table:
+            sql = sql.replace(f" FROM {table} ", f", {_writer_class_column(db_conn, table)} FROM {table} ", 1)
         rows = db_conn.execute(sql, (source_id, limit)).fetchall()
-        return [_prepare_signal_record(mapper(row)) for row in rows]
+        out_records = []
+        for row in rows:
+            record = mapper(row)
+            if table:
+                record["writer_class"] = row[-1]
+            out_records.append(_prepare_signal_record(record))
+        return out_records
 
     if group == "ai_messages":
         # writer_class is the role gate's cap: a reprocess/backfill that dropped
@@ -923,6 +973,16 @@ def load_canonical_records_for_signal(
         )
         for row in rows
     ]
+
+
+#: Reload groups whose canonical table records a writer class.
+_RELOAD_WRITER_CLASS_TABLES = {
+    "schedule": "calendar_events",
+    "journal": "journal_entries",
+    "profile": "profile_records",
+    "financial": "financial_transactions",
+    "places": "location_events",
+}
 
 
 def _writer_class_column(db_conn, table: str) -> str:

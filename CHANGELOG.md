@@ -1437,6 +1437,28 @@ The machine-readable twin of each release is
   `prefers` for the owner. The direct ingest door and file imports now take a copy of the raw
   row before a non-owner writer's write and put it back (or remove the new one) when the store
   refuses that record. Owner doors and internal writes are unchanged and take no copy.
+- **Journal, profile and document writes from a grantee or an app are no longer the owner's
+  either; the pipeline worker no longer runs as whichever request started it.** `[S1]` `[O]`
+  The ai_chat fix above left the same door writing every other canonical family with no
+  writer: a grantee's unstamped `app_ingest` to a runtime journal source (journal rows are
+  authored by construction) minted an owner fact, and so did one to `notion_pages` or
+  `gdrive_files` (a personal-posture document resolves to authored). `journal_entries`,
+  `profile_records`, `documents`, `calendar_events`, `financial_transactions` and
+  `location_events` now record `writer_class`, every record handed to derivation carries it,
+  and reloads read it. The store refuses a non-owner write over a row the owner holds — one an
+  owner door wrote, or a legacy row its own table and sender rules make authored or addressed
+  (chat, journal, profile). Legacy documents and calendar rows stay writable: external sync
+  apps arrive unstamped, and refusing them would freeze every sync. An owner door over a row a
+  non-owner wrote replaces it outright; several conflict updates change only some columns and
+  would keep a seeded title or organisation. An internal replay (reprocess) now derives under
+  the class the row was written with instead of as legacy. The `lives_in` aggregate, which
+  never passes the role gate, counts only owner-written rows, and brief input labels a
+  non-owner journal row. These refusals reach the raw-retention restore above. The column rides the always-run `entity_mentions_authored_v1` step,
+  not `actor_role_v1`: `documents` is created at order 42, after 36, so the earlier step would
+  miss it on a fresh install; `user_version` does not move. Separately, the pipeline worker
+  loops were created inside whichever request first started them and inherited its
+  contextvars — the channel principal that `uma_authority` reads, the owner-socket transport
+  marker, the write gate's deferred-commit flag. They now start in an empty context.
 
 ## [1.3.57] — 2026-09-14
 

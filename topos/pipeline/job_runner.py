@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import logging
 import os
 import socket
@@ -773,13 +774,30 @@ async def _worker_loop(
             idle_delay = min(idle_delay * 1.5, max_idle_seconds)
 
 
+def _create_task_outside_the_request(loop: asyncio.AbstractEventLoop, coro: Awaitable[Any]) -> asyncio.Task:
+    """Create a long-lived task in an EMPTY contextvars context.
+
+    ``create_task`` copies the caller's context, and this worker is started from
+    inside request handlers (``app_ingest``, ``start_ingestion``, …). Every
+    contextvar the engine defines is request-scoped: the channel-verified
+    principal (``topos/principal.py``), the owner-socket transport marker
+    (``topos/uds.py``), the write gate's deferred-commit flag, the query caches.
+    A worker that inherits them runs every later job — for every caller — as
+    whichever request happened to start it: an ``owner_app`` or ``cp_relay``
+    principal that ``uma_authority`` reads, a "uds" transport, commits deferred
+    by a batch that has long finished.
+    """
+    return contextvars.Context().run(loop.create_task, coro)
+
+
 def start_pipeline_worker(conn_factory: Callable[[], Any]) -> None:
     """Start the async pipeline worker loops once per process.
 
     Two loops: the general queue, and a lane dedicated to the long-running
     kinds. They are started and stopped together and guarded by the same lock,
     so every existing caller of this function keeps working unchanged — it just
-    now also gets the long lane.
+    now also gets the long lane. Both start outside the calling request's
+    context (see ``_create_task_outside_the_request``).
     """
     global _worker_task, _long_worker_task
     if not _enabled():
@@ -790,12 +808,13 @@ def start_pipeline_worker(conn_factory: Callable[[], Any]) -> None:
         except RuntimeError:
             return
         if _worker_task is None or _worker_task.done():
-            _worker_task = loop.create_task(_worker_loop(conn_factory))
+            _worker_task = _create_task_outside_the_request(loop, _worker_loop(conn_factory))
         # Checked independently of the general loop: an older process may have
         # started only the general one, and a half-started pair must be able to
         # finish starting rather than being skipped by a single combined guard.
         if _long_worker_task is None or _long_worker_task.done():
-            _long_worker_task = loop.create_task(
+            _long_worker_task = _create_task_outside_the_request(
+                loop,
                 _worker_loop(
                     conn_factory,
                     kinds_fn=_long_running_kinds,

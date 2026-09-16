@@ -140,6 +140,7 @@ class Canonicalizer:
 
         messages_created = 0
         refused: Dict[str, str] = {}
+        writers: Dict[str, Optional[str]] = {}
         try:
             messages_created = self.tables_manager.write_messages_batch(
                 canonical_messages,
@@ -147,6 +148,7 @@ class Canonicalizer:
                 sync_batch_id=sync_batch_id,
                 mapping_source_id=mapping_source_id or source,
                 refused=refused,
+                writers=writers,
             )
         except Exception as exc:
             logger.error("Failed to write messages: %s", exc)
@@ -172,6 +174,10 @@ class Canonicalizer:
             except Exception as exc:
                 logger.warning("Failed to update sequences for conversation %s: %s", conversation_id, exc)
 
+        # An internal replay (no door) derives under the class the row holds.
+        for msg in canonical_messages:
+            if msg.writer_class is None:
+                msg.writer_class = writers.get(msg.message_id)
         canonical_messages_dicts = [msg.to_dict() for msg in canonical_messages]
 
         return {

@@ -52,6 +52,12 @@ _TABLE_SENDER_COLUMNS: Dict[str, Tuple[str, ...]] = {
     # (features/provenance/writer_class.py); read only where the column exists.
     "ai_chat_messages": ("sender_type", "writer_class"),
     "conversation_messages": ("sender_type", "sender_id", "is_from_self", "writer_class"),
+    # No sender, but a door: storage/canonical/canonical_store.py WRITER_CLASS_TABLES.
+    "journal_entries": ("writer_class",),
+    "profile_records": ("writer_class",),
+    "financial_transactions": ("writer_class",),
+    "location_events": ("writer_class",),
+    "calendar_events": ("writer_class",),
 }
 
 
