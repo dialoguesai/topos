@@ -540,6 +540,10 @@ def _run_imessage_sync_impl(
                     "dataset_id": dataset_id,
                     "thread_id": thread_id,
                     "ts": rec.get("ts") or datetime.now(timezone.utc).isoformat(),
+                    # The fill above is ingestion time standing in for a missing
+                    # native time. Say so, so the canonical writer can record it
+                    # as a substitute rather than as an event time.
+                    "_event_time_substituted": not rec.get("ts"),
                     "sender_type": rec.get("sender_type", "human"),
                     "sender_id": rec.get("sender_id"),
                     "from_self": is_self,
@@ -862,6 +866,7 @@ def run_signal_sync(
                 "dataset_id": dataset_id,
                 "thread_id": mapped.get("thread_id") or mapped.get("conversation_id") or p.get("thread_id") or p.get("conversation_id") or dataset_id,
                 "ts": mapped.get("ts") or p.get("ts") or datetime.now(timezone.utc).isoformat(),
+                "_event_time_substituted": not (mapped.get("ts") or p.get("ts")),
                 "sender_type": "self" if from_self else "contact",
                 "sender_id": str(sender_id),
                 "reply_to_message_id": mapped.get("reply_to_message_id") or p.get("reply_to_message_id"),

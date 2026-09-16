@@ -247,6 +247,40 @@ class SQLiteCanonicalStore(CanonicalStore):
 
         ensure_migrations_applied(conn)
 
+    def _has_event_time_column(self) -> bool:
+        cached = getattr(self, "_event_time_column", None)
+        if cached is None:
+            from ..db.migrations.temporal_fields_v1 import has_column
+
+            cached = self._event_time_column = has_column(self._conn, "conversation_messages", "event_time_json")
+        return cached
+
+    def _may_heal(self, existing, record: Dict[str, Any]) -> bool:
+        """Whether a re-ingest may replace a stored message body. Skips; never raises.
+
+        Two cases are refused, and the rest of the upsert still happens:
+
+        - the stored row belongs to another dataset or source. Message IDs such as
+          ``imessage:<ROWID>`` carry no dataset, so a second database with the same
+          ROWID would otherwise rewrite this row's body while it keeps this row's
+          owner and authorship;
+        - the stored row carries a durable owner-attested provenance link. Its
+          proof covers the body, so a legacy heal would silently break the proof
+          (fail-closed, but the owner's reviewed row would stop qualifying).
+        """
+        stored_dataset, stored_source = existing[2], existing[3]
+        if (stored_dataset or "") != (record.get("dataset_id") or "") or (stored_source or "") != (record.get("source_id") or ""):
+            logger.warning("[PIPELINE:CANONICAL] refused a cross-dataset content heal for %s", existing[0])
+            return False
+        for table in ("ingest_provenance_records",):
+            found = self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)
+            ).fetchone()
+            if found and self._conn.execute(f"SELECT 1 FROM {table} WHERE message_id=?", (existing[0],)).fetchone():
+                logger.warning("[PIPELINE:CANONICAL] refused a content heal over an attested row %s", existing[0])
+                return False
+        return True
+
     def upsert(self, table: str, record: Dict[str, Any], *, sync_batch_id: Optional[str] = None) -> CanonicalRef:
         # The _upsert_* INSERT takes SQLite's write lock at execute time, so it
         # must run under the same gate hold as the commit (write_gate lock-order
@@ -390,21 +424,23 @@ class SQLiteCanonicalStore(CanonicalStore):
         if not message_id:
             raise ValueError("conversation_messages upsert requires message_id")
         existing = self._conn.execute(
-            "SELECT message_id, content FROM conversation_messages WHERE message_id=?",
+            "SELECT message_id, content, dataset_id, source_id FROM conversation_messages WHERE message_id=?",
             (message_id,),
         ).fetchone()
         dataset_id = record.get("dataset_id") or ""
-        event_at = record.get("event_at") or record.get("ts") or _utc_now()
-        self._conn.execute(
-            """
-            INSERT OR IGNORE INTO conversation_messages (
-                message_id, conversation_id, dataset_id, event_at, sender_type, sender_id,
-                reply_to_message_id, message_type, event_type, content, source_id,
-                metadata_json, is_from_self, owner_user_id,
-                source_record_id, ingested_at, sync_batch_id
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            """,
-            (
+        supplied_time = record.get("event_at") or record.get("ts")
+        event_at = supplied_time or _utc_now()
+        # This writer can only vouch for its own fill, and for a fill a caller
+        # declared. It never records a native source clock, whatever the record
+        # says: only an attested native reader can, and it does not come here.
+        substituted = not supplied_time or record.get("_event_time_substituted") is True
+        columns = [
+            "message_id", "conversation_id", "dataset_id", "event_at", "sender_type", "sender_id",
+            "reply_to_message_id", "message_type", "event_type", "content", "source_id",
+            "metadata_json", "is_from_self", "owner_user_id",
+            "source_record_id", "ingested_at", "sync_batch_id",
+        ]
+        values = [
                 message_id,
                 record.get("conversation_id") or record.get("thread_id"),
                 dataset_id,
@@ -422,7 +458,17 @@ class SQLiteCanonicalStore(CanonicalStore):
                 record.get("source_record_id") or message_id,
                 record.get("ingested_at") or _utc_now(),
                 sync_batch_id or record.get("sync_batch_id"),
-            ),
+        ]
+        if self._has_event_time_column():
+            from ...features.temporal.records import event_time
+
+            columns.append("event_time_json")
+            values.append(event_time(event_at, provenance="ingestion_clock_substitute" if substituted
+                                     else "unverified_producer").to_json())
+        self._conn.execute(
+            f"INSERT OR IGNORE INTO conversation_messages ({', '.join(columns)}) "
+            f"VALUES ({', '.join('?' for _ in columns)})",
+            values,
         )
         if existing is not None:
             self._conn.execute(
@@ -443,7 +489,7 @@ class SQLiteCanonicalStore(CanonicalStore):
             # holding archive bytes: re-syncing read them correctly and then
             # discarded the result at the write.
             incoming = record.get("content")
-            if incoming and str(incoming) != (existing[1] or ""):
+            if incoming and str(incoming) != (existing[1] or "") and self._may_heal(existing, record):
                 self._conn.execute(
                     """
                     UPDATE conversation_messages

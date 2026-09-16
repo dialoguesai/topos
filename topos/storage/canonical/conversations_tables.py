@@ -305,6 +305,24 @@ def _ensure_contact_sharing_policy_column(conn) -> None:
         conn.rollback()
 
 
+def _ensure_event_time_column(conn) -> None:
+    """Add ``event_time_json`` (``topos-event-time/v1``) if missing. Idempotent.
+
+    Checked with PRAGMA first rather than by catching a duplicate-column error:
+    the sibling helpers above call ``conn.rollback()`` on that error, which
+    inside ``batched_writes`` discards every pending parent, contact and
+    participant insert in the batch. This one never raises on a present column,
+    so it never rolls anything back.
+    """
+    from ..db.migrations.temporal_fields_v1 import has_column
+
+    if has_column(conn, CONVERSATION_MESSAGES_TABLE, "event_time_json"):
+        return
+    with with_db_write():
+        conn.execute(f"ALTER TABLE {CONVERSATION_MESSAGES_TABLE} ADD COLUMN event_time_json TEXT")
+        commit_connection(conn)
+
+
 def ensure_all_tables(conn) -> None:
     """Ensure both conversations and conversation_messages tables exist.
     Stage 9 column renames run at engine startup (app.py) to avoid blocking the event loop during requests.
@@ -318,6 +336,7 @@ def ensure_all_tables(conn) -> None:
     _ensure_signal_identity_columns(conn)
     _ensure_contact_provenance_columns(conn)
     _ensure_contact_sharing_policy_column(conn)
+    _ensure_event_time_column(conn)
 
 
 class ConversationsTablesManager:
@@ -573,6 +592,7 @@ class ConversationsTablesManager:
                     "event_type": rec.get("event_type"),
                     "content": rec.get("content"),
                     "event_at": rec.get("event_at") or rec.get("ts") or "",
+                    "_event_time_substituted": rec.get("_event_time_substituted") is True,
                     "source_id": source_id,
                     "metadata_json": metadata_json,
                     "is_from_self": rec.get("is_from_self") is True or rec.get("from_self") is True,
