@@ -300,12 +300,16 @@ async def upload_signal_export(
             file_bytes = await f.read()
     if not file_bytes:
         return {"status": "error", "error": "file required (multipart/form-data)"}
+    from ..auth import resolve_request_writer_class
+    from ..features.provenance.writer_class import WRITER_OWNER_IMPORT
+
     result = await asyncio.to_thread(
         run_signal_upload,
         dataset_id,
         file_bytes,
         my_phone_number=my_phone_number,
         owner_user_id=owner_user_id,
+        writer_class=await resolve_request_writer_class(request, owner_class=WRITER_OWNER_IMPORT),
     )
     return result
 

@@ -778,10 +778,16 @@ def run_signal_upload(
     my_phone_number: Optional[str] = None,
     owner_user_id: Optional[str] = None,
     db_conn: Optional[Any] = None,
+    writer_class: Optional[str] = None,
 ) -> Dict[str, Any]:
     """
     Parse Signal export file (JSON) and write to conversation_messages.
     Uses stored Signal identity for dataset_id if my_phone_number not provided.
+
+    ``writer_class`` is the door that started the upload
+    (features/provenance/writer_class.py). The export decides ``is_from_self``
+    (an ``outgoing`` message, or the caller's ``my_phone_number``), so a row an
+    upload wrote is the owner's only when an owner door made the upload.
     """
     if not dataset_id:
         return {"status": "error", "error": "dataset_id required", "records_processed": 0}
@@ -834,7 +840,10 @@ def run_signal_upload(
     try:
         from ..storage.canonical import ConversationsTablesManager
         manager = ConversationsTablesManager(db_conn)
-        manager.upsert_message_batch(records, dataset_id, SOURCE_ID_SIGNAL)
+        refused: Dict[str, str] = {}
+        manager.upsert_message_batch(
+            records, dataset_id, SOURCE_ID_SIGNAL, writer_class=writer_class, refused=refused
+        )
         _backfill_signal_reply_links_in_db(db_conn=db_conn, dataset_id=dataset_id)
     except Exception as e:
         logger.exception("Signal upload: upsert_message_batch failed")
@@ -852,8 +861,11 @@ def run_signal_upload(
             "ts": rec.get("ts"),
             "content": rec.get("content"),
             "source_id": SOURCE_ID_SIGNAL,
+            "writer_class": writer_class,
         }
         for rec in records
+        # A declined write changed nothing; its text is not derived under that row.
+        if str(rec.get("message_id") or "") not in refused
     ]
     _run_local_sync_enrichment_if_enabled(
         db_conn=db_conn,
@@ -861,7 +873,10 @@ def run_signal_upload(
         canonical_messages=canonical_messages,
     )
 
-    return {"status": "ok", "records_processed": len(records)}
+    result: Dict[str, Any] = {"status": "ok", "records_processed": len(records) - len(refused)}
+    if refused:
+        result["records_refused"] = len(refused)
+    return result
 
 
 def run_signal_sync(

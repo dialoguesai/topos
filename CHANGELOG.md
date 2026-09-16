@@ -1408,6 +1408,35 @@ The machine-readable twin of each release is
   the ones a grantee wrote are not distinguishable and are not reclassified. The column rides
   the always-run `actor_role_v1` step instead of a new registry entry, so `user_version` does
   not move; there is no reprocess.
+- **A grantee's messenger or transcript write is no longer the owner's own speech either.** `[S1]` `[P]`
+  `conversation_messages` names the owner from the row itself (`is_from_self`, or `sender_id`
+  'self'), and both are whatever the writer sent. Reproduced through the relay dispatch: an
+  unstamped `app_ingest` for `voxterm_transcripts` with `sender_id: "self"` stored a row
+  `record_role` read as authored, and deriving from the stored row (reprocess, deferred-enrichment
+  recovery, the enrichment re-run, which is how the manual-trigger voxterm source is derived)
+  asserted a rules `lives_in` and an LLM `prefers` fact `asserted_by: owner`. An unstamped
+  `signal_upload` did the same through `is_from_self` (an `outgoing` message). The ingest-time
+  records carried `sender_id: None` and derived nothing. These rows now record `writer_class`
+  too — the conversations branch of `canonicalize_normalized_batch`, `start_ingestion` file
+  imports, and `signal_upload` over the relay and local HTTP — and the conversations reload
+  loader, brief input and query-time ownership read it; a thread no longer labels a
+  grantee's 'self' row as the owner. A non-owner write under a message id an owner door or a
+  legacy row holds changes nothing (not the body, batch or ingest time) and is not derived; an
+  owner door over a non-owner row deletes it and writes its own, sender included; a write with
+  no writer class (the node's own messenger sync, a reprocess replay) keeps the insert-and-heal
+  and never changes a stored row's class. The nullable column rides the always-run
+  `actor_role_v1` step like the ai_chat one: no `user_version` move, and it reaches the table
+  the messenger lane creates lazily after migrations. The owner's own VoxTerm pushes over the
+  relay land as `cp_relay` (stored, not the owner's) until the control plane stamps that app.
+- **A refused write no longer waits in raw retention for a reprocess to replay it.** `[S1]` `[P]`
+  Both refusals above left the store's row alone but not the raw row: raw retention replaces
+  by record id before the store decides, and a reprocess from raw replays with no writer
+  class, which the store does not gate. Reproduced through the relay dispatch for
+  `voxterm_transcripts` and `chatgpt_ui_conversation`: the owner's row came back holding the
+  grantee's text, still `owner_app`, and the stored-row derivation asserted `lives_in` and
+  `prefers` for the owner. The direct ingest door and file imports now take a copy of the raw
+  row before a non-owner writer's write and put it back (or remove the new one) when the store
+  refuses that record. Owner doors and internal writes are unchanged and take no copy.
 
 ## [1.3.57] — 2026-09-14
 

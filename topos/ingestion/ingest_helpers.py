@@ -532,7 +532,9 @@ def _ingest_ui_payload_direct_db(
 
     # Write raw record to raw retention table (architecture requirement)
     # This preserves original payload before parsing/canonicalization
+    raw_snapshot = None
     try:
+        from ..features.provenance.writer_class import is_owner_writer
         from ..storage.raw.raw_tables_manager import RawTablesManager
         raw_tables_manager = RawTablesManager(db_conn)
         raw_source_type = (
@@ -540,6 +542,13 @@ def _ingest_ui_payload_direct_db(
             if not _ui_stream_passes_payload_through(source, source_id)
             else str(getattr(source, "source_type", None) or "ui_stream")
         )
+        if not is_owner_writer(writer_class):
+            # Only a non-owner writer can be refused below (_restore_refused_raw).
+            raw_snapshot = raw_tables_manager.snapshot_raw_record(
+                source_id=source_id,
+                source_record_id=record_id,
+                source_type=raw_source_type,
+            )
         raw_tables_manager.write_raw_record(
             source_id=source_id,
             source_record_id=record_id,
@@ -623,5 +632,10 @@ def _ingest_ui_payload_direct_db(
             source_id,
             canonical_result.errors,
         )
+    if canonical_result.refused and raw_snapshot is not None:
+        from .manager import _restore_refused_raw
+
+        # This call carries one record, whatever id its canonical row took.
+        _restore_refused_raw(db_conn, [(raw_snapshot, None)], canonical_result.refused)
 
     return {"status": "ok", "_canonical_result": canonical_result}

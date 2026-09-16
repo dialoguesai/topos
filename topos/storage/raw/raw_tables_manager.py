@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import sqlite3
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from ..db.write_gate import commit_connection, with_db_write
@@ -303,3 +304,58 @@ class RawTablesManager:
                 e,
             )
             raise
+
+    def snapshot_raw_record(
+        self,
+        source_id: str,
+        source_record_id: str,
+        source_type: str = "chat_messages",
+    ) -> "RawRecordSnapshot":
+        """The raw row a write is about to replace, so a declined write can be undone.
+
+        A record reaches raw retention before the canonical store decides on it,
+        and the write replaces by record id. When the store refuses a non-owner
+        writer under a row the owner holds (features/provenance/writer_class.py),
+        its payload must not stay here: a reprocess from raw replays raw rows
+        with no writer class, which the store does not gate, and would put that
+        payload under the owner's row.
+        """
+        table_name = self.get_raw_table_name(source_id, source_type)
+        row: Optional[Dict[str, Any]] = None
+        try:
+            cursor = self.conn.execute(
+                f"SELECT * FROM {table_name} WHERE source_system=? AND source_record_id=?",
+                (source_id, source_record_id),
+            )
+            found = cursor.fetchone()
+            if found is not None:
+                row = dict(zip([col[0] for col in cursor.description], found))
+        except sqlite3.OperationalError:  # the table does not exist yet
+            row = None
+        return RawRecordSnapshot(table_name, source_id, source_record_id, row)
+
+    def restore_raw_record(self, snapshot: "RawRecordSnapshot") -> None:
+        """Put a raw row back as :meth:`snapshot_raw_record` found it (absent included)."""
+        with with_db_write():
+            if snapshot.row is None:
+                self.conn.execute(
+                    f"DELETE FROM {snapshot.table_name} WHERE source_system=? AND source_record_id=?",
+                    (snapshot.source_id, snapshot.source_record_id),
+                )
+            else:
+                columns = list(snapshot.row)
+                self.conn.execute(
+                    f"INSERT OR REPLACE INTO {snapshot.table_name} ({', '.join(columns)})"
+                    f" VALUES ({', '.join('?' for _ in columns)})",
+                    tuple(snapshot.row[col] for col in columns),
+                )
+            commit_connection(self.conn)
+
+
+@dataclass(frozen=True)
+class RawRecordSnapshot:
+    table_name: str
+    source_id: str
+    source_record_id: str
+    #: The row as it was; None when the write created it.
+    row: Optional[Dict[str, Any]]

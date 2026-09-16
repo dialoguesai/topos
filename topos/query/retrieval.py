@@ -578,11 +578,13 @@ def _message_row_owner(
         verdict = _roles_owner_authored(table, row)
         return verdict if verdict is not None else None
     if table == "conversation_messages":
+        # is_from_self / sender_id 'self' are the owner only when an owner door
+        # wrote the row (features/provenance/writer_class.py).
         if row.get("is_from_self") is not None:
-            return row.get("is_from_self") in (1, True, "1")
+            return row.get("is_from_self") in (1, True, "1") and _written_by_owner_door(conn, table, row)
         sender_id = str(row.get("sender_id") or "").strip().lower()
         if sender_id == "self":
-            return True
+            return _written_by_owner_door(conn, table, row)
         record_id = str(row.get("record_id") or row.get("message_id") or "")
         if conn is not None and record_id:
             looked_up = _record_owner_authored(conn, record_id, cache)
@@ -593,6 +595,27 @@ def _message_row_owner(
             return verdict
         return False if sender_id else None
     return None
+
+
+def _written_by_owner_door(conn: Optional[Any], table: str, row: Dict[str, Any]) -> bool:
+    """False when a non-owner door wrote this message row (features/provenance/writer_class.py).
+
+    Reads the row's own ``writer_class`` when it carries one; list specs do not
+    select the column, so otherwise it is looked up by record id. No column, no
+    row, or no connection is the legacy answer: True.
+    """
+    from ..features.provenance.writer_class import is_owner_writer
+
+    if "writer_class" in row:
+        return is_owner_writer(row.get("writer_class"))
+    record_id = str(row.get("record_id") or row.get("message_id") or "")
+    if conn is None or not record_id or table not in _MESSAGE_TABLES:
+        return True
+    try:
+        found = conn.execute(f"SELECT writer_class FROM {table} WHERE message_id = ?", (record_id,)).fetchone()
+    except Exception:  # noqa: BLE001 — a schema that predates the column, or no such table
+        return True
+    return found is None or is_owner_writer(found[0])
 
 
 def _record_owner_authored(
@@ -608,16 +631,24 @@ def _record_owner_authored(
         return cache[record_id]
     verdict: Optional[bool] = None
     try:
+        from ..features.provenance.writer_class import is_owner_writer
+
         row = None
         try:
             row = conn.execute(
-                "SELECT is_from_self, sender_id FROM conversation_messages WHERE message_id = ?",
+                "SELECT is_from_self, sender_id, writer_class FROM conversation_messages WHERE message_id = ?",
                 (record_id,),
             ).fetchone()
-        except Exception:  # noqa: BLE001 — a node with no messenger data has no such table
-            row = None
+        except Exception:  # noqa: BLE001 — a schema that predates the column, or no such table
+            try:
+                row = conn.execute(
+                    "SELECT is_from_self, sender_id, NULL FROM conversation_messages WHERE message_id = ?",
+                    (record_id,),
+                ).fetchone()
+            except Exception:  # noqa: BLE001 — a node with no messenger data has no such table
+                row = None
         if row is not None:
-            verdict = row[0] in (1, True, "1") or str(row[1] or "").lower() == "self"
+            verdict = (row[0] in (1, True, "1") or str(row[1] or "").lower() == "self") and is_owner_writer(row[2])
         else:
             # writer_class: a 'human' row a grantee or an app wrote is not the
             # owner's speech (features/provenance/writer_class.py).
@@ -632,8 +663,6 @@ def _record_owner_authored(
                     (record_id,),
                 ).fetchone()
             if row is not None:
-                from ..features.provenance.writer_class import is_owner_writer
-
                 verdict = str(row[0] or "").lower() in ("human", "user") and is_owner_writer(row[1])
     except Exception:
         verdict = None
@@ -2612,7 +2641,10 @@ def _thread_speaker(
     sender_id = str(row.get("sender_id") or "").strip()
     entity_id, is_self = _sender_entity(conn, sender_id, entity_cache)
     if owner is True or is_self or sender_id.lower() == "self":
-        return {"kind": "owner"}
+        if owner is True or _written_by_owner_door(conn, table, row):
+            return {"kind": "owner"}
+        # A grantee's or an app's row that names the owner as its speaker.
+        return {"kind": "unknown"}
     if not sender_id:
         return {"kind": "unknown"}
     # `label` IS A NAME OR IT IS EMPTY. `_sender_display` ends in

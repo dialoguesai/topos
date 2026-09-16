@@ -168,7 +168,7 @@ class CanonicalizeResult:
     timeline_rows_written: int = 0
     errors: List[Dict[str, Any]] = field(default_factory=list)
     #: message_id -> reason for writes the canonical store declined (a
-    #: non-owner writer over an owner-written ai_chat row).
+    #: non-owner writer over an owner-written ai_chat or conversation row).
     refused: Dict[str, str] = field(default_factory=dict)
 
 
@@ -269,8 +269,9 @@ def canonicalize_normalized_batch(
 
     ``writer_class`` is the door that wrote the batch
     (``features/provenance/writer_class.py``). It is recorded on
-    ``ai_chat_messages`` rows, where it caps the role gate; the other canonical
-    groups do not carry the column yet. None = an internal path with no door.
+    ``ai_chat_messages`` and ``conversation_messages`` rows, where it caps the
+    role gate; the other canonical groups do not carry the column yet. None = an
+    internal path with no door.
     """
     if not db_conn or not source_def or not normalized_records:
         return CanonicalizeResult()
@@ -312,10 +313,16 @@ def canonicalize_normalized_batch(
                 dataset_id,
                 source_id,
                 sync_batch_id=sync_batch_id,
+                writer_class=writer_class,
+                refused=result.refused,
             )
             result.conversations_created = int(conv_result.get("conversations_created", 0))
             result.messages_created = int(conv_result.get("messages_created", 0))
             for staging in staging_records:
+                if str(staging.get("message_id") or "") in result.refused:
+                    # The stored row is unchanged; deriving from the declined
+                    # text under its message id would attach it to that row.
+                    continue
                 metadata_json = None
                 if "_metadata" in staging:
                     metadata_json = json.dumps(staging["_metadata"])
@@ -333,6 +340,7 @@ def canonicalize_normalized_batch(
                         "metadata_json": metadata_json,
                         "seq": 0,
                         "source_id": source_id,
+                        "writer_class": writer_class,
                         # Table stamp: without it these records are
                         # key-for-key identical to ai_chat records (both say
                         # sender_type='human'), so downstream attribution
@@ -711,10 +719,14 @@ def load_canonical_records_for_signal(
         # owner-identity fields (is_from_self/sender_id/actor_role) so the
         # provenance role gates classify reloaded rows correctly instead of
         # failing closed to OBSERVED (record_role contract, P1.3).
+        # writer_class too: a reload that dropped it would re-derive a
+        # grantee's 'self' row as the owner's speech.
+        writer_col = _writer_class_column(db_conn, "conversation_messages")
         rows = db_conn.execute(
-            """
+            f"""
             SELECT message_id, conversation_id, sender_type, sender_id,
-                   is_from_self, actor_role, content, event_at, source_id
+                   is_from_self, actor_role, content, event_at, source_id,
+                   {writer_col}
             FROM conversation_messages
             WHERE source_id=?
             ORDER BY event_at DESC
@@ -734,6 +746,7 @@ def load_canonical_records_for_signal(
                 "ts": row[7],
                 "event_at": row[7],
                 "source_id": row[8] or source_id,
+                "writer_class": row[9],
             }
             for row in rows
         ]
@@ -857,7 +870,7 @@ def load_canonical_records_for_signal(
     if group == "ai_messages":
         # writer_class is the role gate's cap: a reprocess/backfill that dropped
         # it would re-derive a grantee's row as the owner's speech.
-        writer_col = _ai_chat_writer_class_column(db_conn)
+        writer_col = _writer_class_column(db_conn, "ai_chat_messages")
         rows = db_conn.execute(
             f"""
             SELECT message_id, conversation_id, sender_type, content, event_at, source_id,
@@ -884,7 +897,7 @@ def load_canonical_records_for_signal(
             for row in rows
         ]
 
-    writer_col = _ai_chat_writer_class_column(db_conn)
+    writer_col = _writer_class_column(db_conn, "ai_chat_messages")
     rows = db_conn.execute(
         f"""
         SELECT message_id, conversation_id, sender_type, content, event_at, source_id,
@@ -912,10 +925,10 @@ def load_canonical_records_for_signal(
     ]
 
 
-def _ai_chat_writer_class_column(db_conn) -> str:
+def _writer_class_column(db_conn, table: str) -> str:
     """``writer_class``, or a NULL literal on a schema that predates the column."""
     try:
-        columns = {row[1] for row in db_conn.execute("PRAGMA table_info(ai_chat_messages)").fetchall()}
+        columns = {row[1] for row in db_conn.execute(f"PRAGMA table_info({table})").fetchall()}
     except Exception:  # noqa: BLE001
         columns = set()
     return "writer_class" if "writer_class" in columns else "NULL AS writer_class"

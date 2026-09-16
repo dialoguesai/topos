@@ -496,9 +496,14 @@ async def handle_signal_upload(message: Dict[str, Any]) -> Optional[Dict[str, An
         file_bytes = base64.b64decode(file_b64)
     except Exception as e:
         return {"id": req_id, "status": "error", "error": f"Invalid file_base64: {e}"}
+    from ...features.provenance.writer_class import WRITER_OWNER_IMPORT, current_writer_class
     from ...ingestion.local_sync import run_signal_upload
+
+    # From the principal the dispatcher scoped, never the payload: the export
+    # itself says which messages are the owner's.
+    writer_class = current_writer_class(owner_class=WRITER_OWNER_IMPORT)
     try:
-        result = await _asyncio.to_thread(run_signal_upload, dataset_id, file_bytes, my_phone_number=my_phone_number, owner_user_id=owner_user_id)
+        result = await _asyncio.to_thread(run_signal_upload, dataset_id, file_bytes, my_phone_number=my_phone_number, owner_user_id=owner_user_id, writer_class=writer_class)
         return {"id": req_id, "status": result.get("status", "ok"), "payload": result, "error": result.get("error")}
     except Exception as exc:  # noqa: BLE001
         return {"id": req_id, "status": "error", "error": str(exc)}

@@ -511,9 +511,26 @@ class SQLiteCanonicalStore(CanonicalStore):
         return CanonicalRef(record_id=conversation_id, created=existing is None)
 
     def _upsert_conversation_message(self, record: Dict[str, Any], *, sync_batch_id: Optional[str]) -> CanonicalRef:
+        """Upsert one messenger/transcript message, keeping the owner's rows the owner's.
+
+        ``is_from_self`` and ``sender_id == 'self'`` are the owner here, and both
+        are whatever the writer sent. ``writer_class`` records which door wrote
+        the row (``features/provenance/writer_class.py``); the role gate caps a
+        non-owner writer. See :meth:`_conversation_writer_gate` for how a write
+        under a message id another door already holds is decided. A record with
+        no writer class is an internal path (the node's own messenger sync, a
+        reprocess replay): it keeps the insert-or-heal below and never changes a
+        stored row's class.
+        """
+        from ...features.provenance.writer_class import normalize_writer_class
+
         message_id = str(record.get("message_id") or "")
         if not message_id:
             raise ValueError("conversation_messages upsert requires message_id")
+        writer_class = normalize_writer_class(record.get("writer_class"))
+        refusal = self._conversation_writer_gate(message_id, record, writer_class)
+        if refusal is not None:
+            return refusal
         existing = self._conn.execute(
             "SELECT message_id, content, dataset_id, source_id FROM conversation_messages WHERE message_id=?",
             (message_id,),
@@ -563,6 +580,11 @@ class SQLiteCanonicalStore(CanonicalStore):
             f"VALUES ({', '.join('?' for _ in columns)})",
             values,
         )
+        if writer_class is not None and existing is None:
+            self._conn.execute(
+                "UPDATE conversation_messages SET writer_class=? WHERE message_id=?",
+                (writer_class, message_id),
+            )
         if existing is not None:
             self._conn.execute(
                 """
@@ -603,6 +625,57 @@ class SQLiteCanonicalStore(CanonicalStore):
                     "[PIPELINE:CANONICAL] healed conversation_messages.content for %s", message_id
                 )
         return CanonicalRef(record_id=message_id, created=existing is None)
+
+    def _conversation_writer_gate(
+        self,
+        message_id: str,
+        record: Dict[str, Any],
+        writer_class: Optional[str],
+    ) -> Optional[CanonicalRef]:
+        """Decide a door's write under a message id that already has a row.
+
+        - A non-owner writer over a row an owner door wrote, or one that predates
+          writer classes, changes nothing: not the body (the heal), not the batch
+          or ingest time. The ref says why, and callers keep the text away from
+          enrichment. Otherwise a grantee could put its own words under the
+          owner's authored row.
+        - An owner door over a row a non-owner wrote takes the message id: the
+          non-owner row is deleted and the insert writes the owner's fresh,
+          sender included. Keeping the seeded sender would make someone else's
+          line the owner's; keeping the seeded writer would demote the owner's.
+
+        Returns None when the write should proceed. A record with no writer
+        class is never gated.
+        """
+        from ...features.provenance.writer_class import is_owner_writer
+
+        if writer_class is None:
+            return None
+        stored = self._conn.execute(
+            "SELECT writer_class, content FROM conversation_messages WHERE message_id=?",
+            (message_id,),
+        ).fetchone()
+        if stored is None:
+            return None
+        stored_by_owner = is_owner_writer(stored[0])
+        if not is_owner_writer(writer_class) and stored_by_owner:
+            # Same test as the heal: an empty or identical body would change nothing.
+            incoming = record.get("content")
+            rewrite = bool(incoming) and str(incoming) != (stored[1] or "")
+            if rewrite:
+                logger.warning(
+                    "[PIPELINE:CANONICAL] refused a %s rewrite of owner-written conversation_messages row %s",
+                    writer_class,
+                    message_id,
+                )
+            return CanonicalRef(
+                record_id=message_id,
+                created=False,
+                refused=REFUSED_OWNER_ROW_REWRITE if rewrite else REFUSED_OWNER_ROW_DUPLICATE,
+            )
+        if is_owner_writer(writer_class) and not stored_by_owner:
+            self._conn.execute("DELETE FROM conversation_messages WHERE message_id=?", (message_id,))
+        return None
 
     def _upsert_activity_event(self, record: Dict[str, Any], *, sync_batch_id: Optional[str]) -> CanonicalRef:
         event_id = str(record.get("event_id") or record.get("source_record_id") or "")

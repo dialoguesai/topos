@@ -51,7 +51,7 @@ _TABLE_SENDER_COLUMNS: Dict[str, Tuple[str, ...]] = {
     # writer_class caps the role of a row a non-owner door wrote
     # (features/provenance/writer_class.py); read only where the column exists.
     "ai_chat_messages": ("sender_type", "writer_class"),
-    "conversation_messages": ("sender_type", "sender_id", "is_from_self"),
+    "conversation_messages": ("sender_type", "sender_id", "is_from_self", "writer_class"),
 }
 
 
