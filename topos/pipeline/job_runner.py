@@ -13,6 +13,7 @@ from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable, Dict, List, Optional
 
 from ..storage.db.write_gate import is_busy_error
+from . import job_secrets
 # Safe at import time: derivation_recovery has no module-level heavy imports.
 from ..enrichment.derivation_recovery import SIGNAL_DERIVE_RETRY_KIND
 from .job_store import (
@@ -26,6 +27,7 @@ from .job_store import (
     renew_job_lease,
     requeue_job,
     update_job_progress,
+    withhold_persisted_secrets,
 )
 
 logger = logging.getLogger("topos.pipeline.job_runner")
@@ -211,6 +213,15 @@ async def _execute_local_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
     sync_options = payload.get("sync_options")
     progress_updater = payload.get("_progress_updater")
     job_id = str(payload.get("_job_id") or "")
+    # A caller-supplied Signal key lives only in the enqueuing process's memory
+    # (job_secrets). After a restart the row still names it as withheld but no
+    # value came back; the sync may still work from Signal's own key, and if it
+    # does not, the error must say what was lost.
+    signal_key_lost = (
+        source_id == "signal"
+        and "sync_options.signal_hex_key" in (payload.get(job_secrets.WITHHELD_FIELD) or [])
+        and not (isinstance(sync_options, dict) and sync_options.get("signal_hex_key"))
+    )
 
     def _on_batch(progress: Dict[str, Any]) -> None:
         """Report a batch and prove the job is still alive, in that order.
@@ -253,6 +264,15 @@ async def _execute_local_sync(payload: Dict[str, Any]) -> Dict[str, Any]:
             result = run_signal_sync(dataset_id, sync_options=sync_options, progress_cb=_on_batch)
 
         status = str(result.get("status") or "error")
+        if status != "ok" and signal_key_lost:
+            result = {
+                **result,
+                "error": (
+                    f"{result.get('error') or 'Sync failed'} — the Signal key supplied with "
+                    "this sync is not kept once the node restarts; start the sync again "
+                    "with the key."
+                ),
+            }
         # The receipt, on this thread, where taking the write gate is legal.
         # Both branches are best-effort: a sync that moved rows must not be
         # reported as failed because its bookkeeping write lost a lock race.
@@ -471,6 +491,7 @@ async def process_job(conn_factory: Callable[[], Any], job: Dict[str, Any]) -> N
     executor = EXECUTORS.get(kind)
     if executor is None:
         await _run_db(conn_factory, fail_job, job_id, error=f"Unknown job kind: {kind}")
+        job_secrets.release(job_id)
         return
 
     def _progress_updater(progress: Dict[str, Any]) -> None:
@@ -491,7 +512,9 @@ async def process_job(conn_factory: Callable[[], Any], job: Dict[str, Any]) -> N
             # the event-loop thread.
             loop.run_in_executor(None, _write)
 
-    payload = dict(job.get("payload") or {})
+    # Credentials were withheld from the row at enqueue; the executor gets them
+    # back here, and they are released below once the job cannot run again.
+    payload = job_secrets.restore(job_id, dict(job.get("payload") or {}))
     jobs = [job]
     if kind == "inbox_deferred_enrichment":
         jobs, payload = await _run_db(conn_factory, _coalesce_inbox_jobs, job, payload)
@@ -551,6 +574,7 @@ async def process_job(conn_factory: Callable[[], Any], job: Dict[str, Any]) -> N
         # control plane too, or the job reads as "processing" until someone
         # reads a log file.
         await report_terminal_failure(payload, [str(e["job_id"]) for e in jobs], str(exc))
+        _release_secrets(jobs)
         return
 
     if str(result.get("status") or "ok") == "requeue":
@@ -574,6 +598,7 @@ async def process_job(conn_factory: Callable[[], Any], job: Dict[str, Any]) -> N
                 update_job_progress(own, str(entry["job_id"]), {"status": "failed", "result": result})
 
         await _run_db(conn_factory, _mark_failed)
+        _release_secrets(jobs)
         return
 
     def _mark_done(own: Any) -> None:
@@ -600,6 +625,18 @@ async def process_job(conn_factory: Callable[[], Any], job: Dict[str, Any]) -> N
                 )
 
     await _run_db(conn_factory, _mark_done)
+    _release_secrets(jobs)
+
+
+def _release_secrets(jobs: List[Dict[str, Any]]) -> None:
+    """Drop held credentials for jobs that reached done or failed.
+
+    A failed row runs again through a fresh enqueue, which supplies its own, or
+    through ``requeue_failed_jobs``, which only derivation debts use; those
+    carry no secrets, and anything that did would fall back as after a restart.
+    """
+    for entry in jobs:
+        job_secrets.release(str(entry["job_id"]))
 
 
 #: Idle poll interval. Every tick claims against SQLite, so this is also how
@@ -812,6 +849,11 @@ async def stop_pipeline_worker() -> None:
 def recover_pipeline_jobs(conn) -> int:
     if conn is None:
         return 0
+    # Before recovery: a running row about to be requeued keeps its secrets in
+    # memory rather than on disk.
+    scrubbed = withhold_persisted_secrets(conn)
+    if scrubbed:
+        logger.info("withheld credentials from %d stored pipeline job payload(s)", scrubbed)
     return recover_stale_jobs(conn)
 
 

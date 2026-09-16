@@ -9,6 +9,23 @@ The machine-readable twin of each release is
 
 ## [Unreleased]
 
+### Security
+- **Job rows no longer store credentials, and non-owners can no longer read them.** `[O]`
+  `pipeline_jobs.payload_json` held the node's shared engine key on every file import
+  (`progress_api_key`, which defaulted to it) and any Signal database key supplied with a
+  sync (`sync_options.signal_hex_key`). The legacy table-inspection handlers
+  (`get_table_rows`, `get_table_count`, `get_table_schema`, `list_database_tables`) served
+  that table to third-party MCP clients, routines and unstamped relay calls whenever no
+  black hole was active. `enqueue_job` now keeps those two fields out of the row, holds
+  them in memory until the job finishes, and records only their names. At startup the
+  worker strips them from rows written before this fix. The progress key falls back to
+  the node's own key. A supplied Signal key does not survive a restart, and when the sync
+  then fails, its error says to supply the key again. `pipeline_jobs` and `mcp_clients`
+  (every enrolled client's token hash) are now served only to the owner's own surface.
+  They are refused with 403 and left out of the table list for everyone else. Raw
+  inspection as a whole stays open to non-owners, because the MCP gateway's owner-policy
+  raw lane and the CP's browser counts depend on it. No schema change.
+
 ## [1.3.57] — 2026-09-14
 
 ### Fixed

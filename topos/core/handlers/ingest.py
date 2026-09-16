@@ -401,7 +401,11 @@ async def handle_start_ingestion(message: Dict[str, Any]) -> Optional[Dict[str, 
         from ...pipeline.job_runner import start_pipeline_worker
 
         progress_api_url = None
-        progress_api_key = str(payload.get("progress_api_key") or settings.topos_key or "")
+        # Only a key the control plane actually sent. It never reaches the job
+        # row (enqueue_job withholds it into memory), and when none is held the
+        # runner falls back to the node's own key at execution time, so the
+        # shared engine key is not baked into a payload here.
+        progress_api_key = str(payload.get("progress_api_key") or "").strip()
 
         control_plane_url = settings.topos_control_plane_url
         if control_plane_url:
@@ -435,9 +439,10 @@ async def handle_start_ingestion(message: Dict[str, Any]) -> Optional[Dict[str, 
             "source_id": source_id,
             "source_definition": source_definition,
             "progress_api_url": progress_api_url,
-            "progress_api_key": progress_api_key,
             "owner_user_id": owner_user_id,
         }
+        if progress_api_key:
+            job_payload["progress_api_key"] = progress_api_key
         if isinstance(file_base64, str) and file_base64:
             job_payload["file_base64"] = file_base64
         elif file_url:

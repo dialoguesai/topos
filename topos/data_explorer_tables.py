@@ -16,6 +16,42 @@ def is_permission_state_table(table_name: str) -> bool:
     return str(table_name or "").startswith(PERMISSION_STATE_TABLE_PREFIXES)
 
 
+# Operational tables served only to the owner's own surface (owner_app). The
+# legacy inspection handlers answer third-party MCP clients (behind the owner's
+# MCP policy), routines, and unstamped relay calls, and none of those may read
+# these rows:
+#
+# - pipeline_jobs: payload_json carried the node's engine key
+#   (progress_api_key) and caller-supplied Signal SQLCipher keys until
+#   job_secrets withheld them, and rows written before that stay until the
+#   startup scrub runs. It still holds raw import bodies (file_base64,
+#   canonical_records) that no record protection filters.
+# - mcp_clients: the token verifier (token_hash) of every enrolled MCP client.
+#   Its own enroll/list/revoke handlers are already owner-only; the raw table
+#   was the way around them.
+#
+# Unlike the permission-state tables, the owner can still inspect these.
+OWNER_ONLY_TABLES: frozenset[str] = frozenset({"pipeline_jobs", "mcp_clients"})
+
+
+def is_owner_only_table(table_name: str) -> bool:
+    return str(table_name or "").strip() in OWNER_ONLY_TABLES
+
+
+def hidden_from_current_principal(table_name: str) -> bool:
+    """True when ``table_name`` must not be served to whoever is asking.
+
+    Reads the channel-verified principal the dispatcher scoped for this request.
+    Anything short of owner_app is refused, including no principal at all, the
+    same way the dispatcher's owner-only gates treat it.
+    """
+    if not is_owner_only_table(table_name):
+        return False
+    from .principal import OWNER_APP, current_principal
+
+    return getattr(current_principal(), "cls", None) != OWNER_APP
+
+
 # MVP canonical schema tables: fixed DDL from migrations — clear rows, never DROP.
 CANONICAL_SCHEMA_TABLES: frozenset[str] = frozenset(
     {

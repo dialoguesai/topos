@@ -399,7 +399,7 @@ async def handle_list_database_tables(message: Dict[str, Any]) -> Optional[Dict[
     _mcp_requester_id = _payload.get("mcp_requester_id")
     """List all tables in the database, grouped by architecture layer."""
     try:
-        from ...data_explorer_tables import is_permission_state_table
+        from ...data_explorer_tables import hidden_from_current_principal, is_permission_state_table
         from ...llm_integrations_storage import DATA_EXPLORER_HIDDEN_TABLES, maybe_migrate_legacy_llm_config
 
         payload = message.get("payload") or {}
@@ -536,6 +536,8 @@ async def handle_list_database_tables(message: Dict[str, Any]) -> Optional[Dict[
             if not _safe_sql_identifier(table_name):
                 continue
             if table_name in DATA_EXPLORER_HIDDEN_TABLES or is_permission_state_table(table_name):
+                continue
+            if hidden_from_current_principal(table_name):
                 continue
 
             # Get table schema info
@@ -733,12 +735,14 @@ async def handle_get_table_count(message: Dict[str, Any]) -> Optional[Dict[str, 
         return None
     msg_type = str(message.get("type") or "").strip().lower()
     """Get row count for a specific table. Used for entry counts in frontend."""
-    from ...data_explorer_tables import is_permission_state_table
+    from ...data_explorer_tables import hidden_from_current_principal, is_permission_state_table
     try:
         payload = message.get("payload") or {}
         table_name = (payload.get("table_name") or "").strip()
         if is_permission_state_table(table_name):
             return {"id": req_id, "status": "error", "error": "This table holds owner permission state and is not readable here"}
+        if hidden_from_current_principal(table_name):
+            return {"id": req_id, "status": "error", "code": 403, "error": "owner_mode_required"}
         query_plan: List[str] = []
         started_at = time_module.perf_counter()
         pooled_mode = _pooled_read_enforcement_enabled()
@@ -901,7 +905,7 @@ async def handle_get_table_rows(message: Dict[str, Any]) -> Optional[Dict[str, A
     msg_type = str(message.get("type") or "").strip().lower()
     """Return rows from a table for the simple table viewer. Limit to avoid huge payloads."""
     try:
-        from ...data_explorer_tables import is_permission_state_table
+        from ...data_explorer_tables import hidden_from_current_principal, is_permission_state_table
         from ...llm_integrations_storage import DATA_EXPLORER_HIDDEN_TABLES
 
         payload = message.get("payload") or {}
@@ -939,6 +943,8 @@ async def handle_get_table_rows(message: Dict[str, Any]) -> Optional[Dict[str, A
                 "status": "error",
                 "error": "This table is managed in Settings and is not available in Data explorer",
             }
+        if hidden_from_current_principal(table_name):
+            return {"id": req_id, "status": "error", "code": 403, "error": "owner_mode_required"}
         if settings.topos_database_mode == "postgres":
             with connect_postgres() as conn:
                 if _is_sqlite_conn(conn):
@@ -1477,7 +1483,7 @@ async def handle_get_table_schema(message: Dict[str, Any]) -> Optional[Dict[str,
     _mcp_source = _payload.get("mcp_source")
     _mcp_requester_id = _payload.get("mcp_requester_id")
     """Return column info for a table (PRAGMA table_info). Used by MCP get_table_schema tool."""
-    from ...data_explorer_tables import is_permission_state_table
+    from ...data_explorer_tables import hidden_from_current_principal, is_permission_state_table
     try:
         payload = message.get("payload") or {}
         table_name = (payload.get("table_name") or "").strip()
@@ -1487,6 +1493,8 @@ async def handle_get_table_schema(message: Dict[str, Any]) -> Optional[Dict[str,
             return {"id": req_id, "status": "error", "error": "Invalid table_name"}
         if is_permission_state_table(table_name):
             return {"id": req_id, "status": "error", "error": "This table holds owner permission state and is not readable here"}
+        if hidden_from_current_principal(table_name):
+            return {"id": req_id, "status": "error", "code": 403, "error": "owner_mode_required"}
         conn = None
         if settings.topos_database_mode == "postgres":
             with connect_postgres() as pg_conn:
