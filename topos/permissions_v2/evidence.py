@@ -482,26 +482,30 @@ class EvidenceResolver:
             row["_p2b_source_revision"] = _source_posture(conn, identity)[1]
         return row
 
-    def _validate_native_origin(self, conn, identity: EvidenceIdentity, row: dict) -> None:
+    def _validate_native_origin(self, conn, identity: EvidenceIdentity, row: dict) -> bool:
         """New owner-attested rows retain their revocable origin requirement.
 
         The reserved marker is inserted by the trusted canonical writer. It
         cannot authorize a legacy row: the separate durable service must prove
-        the exact current enrollment, completed job and stored row identity.
+        the exact current enrollment, completed job and stored row identity
+        (for an AI-chat row: its content revision and its conversation's owner).
         Existing untagged rows keep their independently required native/review
         checks only when they have no durable origin link. Losing the proof
         schema of an enrolled node cannot establish that absence. This shares
         the service's trusted-storage boundary, not an arbitrary host-tamper
         guarantee if both canonical history and private enrollment are erased.
+
+        Returns True only when a live link was proven, False for an untagged
+        row with no link. A tagged or linked row that fails raises.
         """
-        if identity.table != "conversation_messages":
-            return
+        if identity.table not in LEAF_TABLES:
+            return False
         metadata = _json(row["metadata_json"], dict) if row.get("metadata_json") not in (None, "") else {}
         try:
             marker = self.path.parent / "permissions-v2" / "ingest-snapshots.enrollment.json"
             installed = conn.execute("SELECT 1 FROM sqlite_master WHERE name GLOB 'ingest_provenance_*' LIMIT 1").fetchone()
             if "topos_owner_ingest" not in metadata and not installed and not marker.exists() and not marker.is_symlink():
-                return
+                return False
             from .ingest_provenance import IngestProvenanceService
 
             service = IngestProvenanceService(
@@ -514,10 +518,33 @@ class EvidenceResolver:
             if "topos_owner_ingest" not in metadata:
                 if conn.execute("SELECT 1 FROM ingest_provenance_records WHERE message_id=?", (identity.record_id,)).fetchone():
                     raise PolicyError("native_owner_provenance_unavailable")
-                return
-            service.validate_record_origin(conn, message_id=identity.record_id, origin=metadata["topos_owner_ingest"])
+                return False
+            service.validate_record_origin(conn, message_id=identity.record_id, origin=metadata["topos_owner_ingest"],
+                                           table=identity.table)
+            return True
         except Exception:
             raise PolicyError("native_owner_provenance_unavailable") from None
+
+    def _ai_chat_owner_proven(self, conn, identity: EvidenceIdentity, row: dict) -> bool:
+        """An AI-chat prompt is the owner's own words only through the attested ChatGPT lane.
+
+        ``sender_type`` alone proves nothing: app_ingest defaults a missing role
+        to "human", and a conversation's owner is just a dataset id prefix, so
+        any writer that can reach those doors can mint a "human" row in the
+        owner's conversation. The lane's source id on the row and on its one
+        parent, the binding owner on that parent and a live origin link whose
+        content revision matches the row are all required.
+        """
+        from .ingest_protocol import CHATGPT_SOURCE_ID
+
+        if (row.get("sender_type") not in ("human", "user") or identity.source_id != CHATGPT_SOURCE_ID
+                or row.get("source_id") != CHATGPT_SOURCE_ID):
+            return False
+        parents = conn.execute("SELECT owner_user_id,source_id FROM ai_chat_conversations WHERE conversation_id=?",
+                               (row.get("conversation_id"),)).fetchmany(2)
+        if len(parents) != 1 or tuple(parents[0]) != (self.binding.owner_id, CHATGPT_SOURCE_ID):
+            return False
+        return self._validate_native_origin(conn, identity, row)
 
     def _snapshot(self, conn, floor: str, fact_id: str, *, enforce_floor: bool = False):
         root = self._identity("signal_objects", fact_id)
@@ -814,7 +841,7 @@ class EvidenceResolver:
                 if identity.table == "conversation_messages":
                     if type(row.get("is_from_self")) is not int or row["is_from_self"] != 1:
                         raise PolicyError("not_owner_authored")
-                elif row.get("sender_type") != "user":
+                elif not self._ai_chat_owner_proven(conn, identity, row):
                     raise PolicyError("not_owner_authored")
                 posture, _revision = _source_posture(conn, identity)
                 if record_role(row, table=identity.table, posture=posture) != "authored":

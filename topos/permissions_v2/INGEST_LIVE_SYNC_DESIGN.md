@@ -33,7 +33,7 @@ nothing came from a live node.
 | iMessage rows are written with `owner_user_id` NULL; Signal rows get `owner_user_id = dataset_id` | unchanged: legacy rows stay unproven |
 | Worker tasks inherit the principal and transport contextvars of the request that started the worker | unchanged in the legacy lane; the live lane must not |
 | No producer path reached a release: shared extractors write references without `dataset_id` | closed only for the snapshot lane (step 4). The shared extractors stay unchanged **on purpose** (section 6) |
-| AI chat: evidence requires `sender_type == 'user'`, the ChatGPT parser writes `human` | unchanged: a separate evidence decision |
+| AI chat: evidence required `sender_type == 'user'`, the ChatGPT parser writes `human` | decided separately (16 Sept): owner AI-chat evidence only through the owner-attested ChatGPT snapshot lane |
 
 ## The shape
 
@@ -447,4 +447,5 @@ an evidence leaf, so neither can release under p2b.
 - Historical repair of any existing row.
 - The snapshot store's receipt-driven source clock and its 1 MiB authority ceiling
   (recorded above).
-- The AI-chat `sender_type` evidence decision.
+- The AI-chat evidence rule, decided separately: owner AI-chat evidence comes only
+  from the owner-attested ChatGPT snapshot lane.

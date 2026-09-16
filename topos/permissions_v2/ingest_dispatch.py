@@ -5,7 +5,7 @@ import asyncio
 import time
 
 from .canonical import PolicyError, digest
-from .ingest_protocol import IngestAckBody, command_digest, sign_ingest_ack, verify_ingest_command
+from .ingest_protocol import CHATGPT_SOURCE_ID, IngestAckBody, command_digest, sign_ingest_ack, verify_ingest_command
 
 
 async def execute_signed_ingest(raw, *, principal):
@@ -46,7 +46,11 @@ async def execute_signed_ingest(raw, *, principal):
                             command_hash=command_digest(command), allow_install=request.operation == "enroll")
                     if request.operation == "run":
                         return service, None
+                    # Describe/enroll carry a non-default reader contract in the
+                    # dump; the other operations name their lane by source id.
                     arguments = request.model_dump(exclude={"operation", "source_id"})
+                    if request.operation not in {"describe", "enroll"} and request.source_id != "imessage":
+                        arguments["source_id"] = request.source_id
                     method = "describe_snapshot" if request.operation == "describe" else request.operation
                     return service, getattr(service, method)(conn, **arguments)
                 finally:
@@ -57,8 +61,12 @@ async def execute_signed_ingest(raw, *, principal):
         try:
             service, result = await asyncio.to_thread(apply)
             if command.request.operation == "run":
-                from topos.ingestion.owner_snapshot import run_snapshot_job
-                result = await run_snapshot_job(service, runtime.ingestion_connection, command.request.job_id)
+                # The runner claims only its own lane's job; a mismatch fails the claim.
+                if command.request.source_id == CHATGPT_SOURCE_ID:
+                    from topos.ingestion.chatgpt_owner_snapshot import run_chatgpt_snapshot_job as runner
+                else:
+                    from topos.ingestion.owner_snapshot import run_snapshot_job as runner
+                result = await runner(service, runtime.ingestion_connection, command.request.job_id)
         except PolicyError as exc:
             error = exc.code
         except Exception:

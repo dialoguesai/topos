@@ -222,7 +222,9 @@ This section first said an AI-chat-sourced fact could close today. That was wron
   parser stores the owner as `human` (`provenance.roles` accepts both). Real owner
   AI-chat rows are refused. That is a fail-closed gap in evidence, not in the
   producer, and changing it widens what every existing capability can release, so
-  it is recorded as a separate decision rather than fixed here.
+  it is recorded as a separate decision rather than fixed here. (Decided 16 Sept:
+  the owner's typed AI-chat messages count, but only through the owner-attested
+  ChatGPT lane with a live provenance link; see EVIDENCE.md.)
 
 So no producer path could close at all, and every live release proof to that
 point seeded its fact by hand.

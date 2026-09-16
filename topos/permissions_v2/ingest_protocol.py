@@ -8,51 +8,99 @@ from __future__ import annotations
 
 from typing import Annotated, Literal
 
-from pydantic import Field, model_validator
+from pydantic import Field, model_serializer, model_validator
 
 from .canonical import PolicyError, digest
 from .contract import Generation, Hash, Identifier, Number, StrictModel
 from .protocol import NodeIdentity, OwnerAuthorization, Signature, _sign, _verify
 
 OWNER_ATTESTATION = "I attest that this snapshot contains my iMessage account and that native sent-by-me messages are mine."
+CHATGPT_OWNER_ATTESTATION = ("I attest that this ChatGPT export contains only my own ChatGPT account and that "
+                             "the prompts it records as mine were written by me.")
+IMESSAGE_READER_CONTRACT = "imessage-owner-snapshot/v1"
+CHATGPT_READER_CONTRACT = "chatgpt-owner-snapshot/v1"
+CHATGPT_SOURCE_ID = "chatgpt-owner-snapshot"
+SourceId = Literal["imessage", "chatgpt-owner-snapshot"]
+ReaderContract = Literal["imessage-owner-snapshot/v1", "chatgpt-owner-snapshot/v1"]
+# One reader contract is one lane: its fixed source id and the exact sentence the owner attests.
+LANE_SOURCE = {IMESSAGE_READER_CONTRACT: "imessage", CHATGPT_READER_CONTRACT: CHATGPT_SOURCE_ID}
+LANE_ATTESTATION = {IMESSAGE_READER_CONTRACT: OWNER_ATTESTATION, CHATGPT_READER_CONTRACT: CHATGPT_OWNER_ATTESTATION}
 
 
-class DescribeSnapshot(StrictModel):
+class _SelectsReader(StrictModel):
+    """Describe and enroll name their reader contract; iMessage is the implicit default.
+
+    The default never travels: an older node's closed model refuses the key, and
+    both ends sign ``model_dump()``, so an explicit default would also break the
+    signature. It is therefore refused on input rather than normalized away.
+    """
+
+    @model_validator(mode="before")
+    @classmethod
+    def _implicit_default(cls, raw):
+        if isinstance(raw, dict) and raw.get("reader_contract") == IMESSAGE_READER_CONTRACT:
+            raise ValueError("default reader contract is implicit")
+        return raw
+
+    @model_validator(mode="after")
+    def _one_lane(self):
+        if LANE_SOURCE[self.reader_contract] != self.source_id:
+            raise ValueError("reader contract and source")
+        return self
+
+    @model_serializer(mode="wrap")
+    def _wire(self, handler):
+        data = handler(self)
+        if self.reader_contract == IMESSAGE_READER_CONTRACT:
+            data.pop("reader_contract", None)
+        return data
+
+
+class DescribeSnapshot(_SelectsReader):
     operation: Literal["describe"] = "describe"
-    source_id: Literal["imessage"] = "imessage"
+    source_id: SourceId = "imessage"
     snapshot_id: Identifier
+    reader_contract: ReaderContract = IMESSAGE_READER_CONTRACT
 
 
-class EnrollSnapshot(StrictModel):
+class EnrollSnapshot(_SelectsReader):
     operation: Literal["enroll"] = "enroll"
-    source_id: Literal["imessage"] = "imessage"
+    source_id: SourceId = "imessage"
     snapshot_id: Identifier
     snapshot_sha256: Hash
     dataset_id: Identifier
-    owner_attestation: Literal["I attest that this snapshot contains my iMessage account and that native sent-by-me messages are mine."]
+    owner_attestation: Literal["I attest that this snapshot contains my iMessage account and that native sent-by-me messages are mine.",
+                               "I attest that this ChatGPT export contains only my own ChatGPT account and that the prompts it records as mine were written by me."]
+    reader_contract: ReaderContract = IMESSAGE_READER_CONTRACT
+
+    @model_validator(mode="after")
+    def _lane_attestation(self):
+        if LANE_ATTESTATION[self.reader_contract] != self.owner_attestation:
+            raise ValueError("attestation for another reader")
+        return self
 
 
 class RevokeSnapshot(StrictModel):
     operation: Literal["revoke"] = "revoke"
-    source_id: Literal["imessage"] = "imessage"
+    source_id: SourceId = "imessage"
     enrollment_id: Identifier
 
 
 class EnqueueSnapshot(StrictModel):
     operation: Literal["enqueue"] = "enqueue"
-    source_id: Literal["imessage"] = "imessage"
+    source_id: SourceId = "imessage"
     enrollment_id: Identifier
 
 
 class SnapshotJobStatus(StrictModel):
     operation: Literal["status"] = "status"
-    source_id: Literal["imessage"] = "imessage"
+    source_id: SourceId = "imessage"
     job_id: Identifier
 
 
 class RunSnapshotJob(StrictModel):
     operation: Literal["run"] = "run"
-    source_id: Literal["imessage"] = "imessage"
+    source_id: SourceId = "imessage"
     job_id: Identifier
 
 
@@ -65,14 +113,14 @@ class SnapshotMetadata(StrictModel):
     snapshot_id: Identifier
     snapshot_sha256: Hash
     snapshot_bytes: Number
-    reader_contract: Literal["imessage-owner-snapshot/v1"]
+    reader_contract: ReaderContract
     ownership_basis: Literal["owner_attested_snapshot"]
 
 
 class EnrollmentMetadata(StrictModel):
     enrollment_id: Identifier
     dataset_id: Identifier
-    source_id: Literal["imessage"]
+    source_id: SourceId
     revision: Generation
     state: Literal["active", "revoked"]
     ownership_basis: Literal["owner_attested_snapshot"]
@@ -193,11 +241,13 @@ def verify_ingest_ack(raw, *, trusted_keys, issuer_id, audience_id, request, now
         raise PolicyError("ingest_ack_binding")
     result, query = ack.result, request.request
     if result is not None:
-        if isinstance(query, DescribeSnapshot) and result.snapshot_id != query.snapshot_id:
+        if isinstance(query, DescribeSnapshot) and (result.snapshot_id, result.reader_contract) != (query.snapshot_id, query.reader_contract):
             raise PolicyError("ingest_ack_target")
-        if isinstance(query, EnrollSnapshot) and result.dataset_id != query.dataset_id:
+        if isinstance(query, EnrollSnapshot) and (result.dataset_id, result.source_id) != (query.dataset_id, query.source_id):
             raise PolicyError("ingest_ack_target")
         if isinstance(query, (RevokeSnapshot, EnqueueSnapshot)) and result.enrollment_id != query.enrollment_id:
+            raise PolicyError("ingest_ack_target")
+        if isinstance(query, RevokeSnapshot) and result.source_id != query.source_id:
             raise PolicyError("ingest_ack_target")
         if isinstance(query, RevokeSnapshot) and result.state != "revoked":
             raise PolicyError("ingest_ack_target")

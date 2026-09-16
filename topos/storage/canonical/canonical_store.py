@@ -345,6 +345,15 @@ class SQLiteCanonicalStore(CanonicalStore):
         if not self._defer_commit:
             commit_connection(self._conn)
 
+    def _attested_link(self, message_id: str) -> bool:
+        """Whether an owner-attested ingest lane holds a durable provenance link for this id."""
+        found = self._conn.execute(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='ingest_provenance_records'"
+        ).fetchone()
+        return bool(found) and self._conn.execute(
+            "SELECT 1 FROM ingest_provenance_records WHERE message_id=?", (message_id,)
+        ).fetchone() is not None
+
     def _upsert_ai_chat_message(self, record: Dict[str, Any], *, sync_batch_id: Optional[str]) -> CanonicalRef:
         message_id = str(record.get("message_id") or record.get("record_id") or "")
         if not message_id:
@@ -353,6 +362,19 @@ class SQLiteCanonicalStore(CanonicalStore):
             "SELECT message_id FROM ai_chat_messages WHERE message_id=?",
             (message_id,),
         ).fetchone()
+        if existing is not None and self._attested_link(message_id):
+            # The lane's proof covers this row's body, role, conversation, source
+            # and origin marker. Any writer re-sending the id (app_ingest, the
+            # owner's own extension, a reprocess) may only touch sync bookkeeping;
+            # replacing the body would silently turn a proven prompt into text
+            # nobody attested.
+            logger.warning("[PIPELINE:CANONICAL] refused an ai_chat rewrite over an attested row %s", message_id)
+            self._conn.execute(
+                "UPDATE ai_chat_messages SET sync_batch_id=COALESCE(?, sync_batch_id), ingested_at=COALESCE(?, ingested_at) "
+                "WHERE message_id=?",
+                (sync_batch_id or record.get("sync_batch_id"), record.get("ingested_at"), message_id),
+            )
+            return CanonicalRef(record_id=message_id, created=False)
         self._conn.execute(
             """
             INSERT INTO ai_chat_messages (
@@ -391,9 +413,17 @@ class SQLiteCanonicalStore(CanonicalStore):
         if not conversation_id:
             raise ValueError("ai_chat_conversations upsert requires conversation_id")
         existing = self._conn.execute(
-            "SELECT conversation_id FROM ai_chat_conversations WHERE conversation_id=?",
+            "SELECT conversation_id, owner_user_id FROM ai_chat_conversations WHERE conversation_id=?",
             (conversation_id,),
         ).fetchone()
+        incoming_owner = record.get("owner_user_id")
+        if (existing is not None and existing[1] not in (None, "") and incoming_owner not in (None, "")
+                and str(incoming_owner) != existing[1]):
+            # A conversation's owner is who its messages' authorship is bound to.
+            # A writer naming someone else (for example a dataset id prefix) is
+            # refused outright, bookkeeping included, never merged into it.
+            logger.warning("[PIPELINE:CANONICAL] refused an owner re-bind of ai_chat conversation %s", conversation_id)
+            return CanonicalRef(record_id=conversation_id, created=False)
         self._conn.execute(
             """
             INSERT INTO ai_chat_conversations (

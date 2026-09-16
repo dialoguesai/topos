@@ -9,6 +9,15 @@
           "title": "Operation",
           "type": "string"
         },
+        "reader_contract": {
+          "default": "imessage-owner-snapshot/v1",
+          "enum": [
+            "imessage-owner-snapshot/v1",
+            "chatgpt-owner-snapshot/v1"
+          ],
+          "title": "Reader Contract",
+          "type": "string"
+        },
         "snapshot_id": {
           "maxLength": 200,
           "minLength": 1,
@@ -17,8 +26,11 @@
           "type": "string"
         },
         "source_id": {
-          "const": "imessage",
           "default": "imessage",
+          "enum": [
+            "imessage",
+            "chatgpt-owner-snapshot"
+          ],
           "title": "Source Id",
           "type": "string"
         }
@@ -46,8 +58,11 @@
           "type": "string"
         },
         "source_id": {
-          "const": "imessage",
           "default": "imessage",
+          "enum": [
+            "imessage",
+            "chatgpt-owner-snapshot"
+          ],
           "title": "Source Id",
           "type": "string"
         }
@@ -75,8 +90,20 @@
           "type": "string"
         },
         "owner_attestation": {
-          "const": "I attest that this snapshot contains my iMessage account and that native sent-by-me messages are mine.",
+          "enum": [
+            "I attest that this snapshot contains my iMessage account and that native sent-by-me messages are mine.",
+            "I attest that this ChatGPT export contains only my own ChatGPT account and that the prompts it records as mine were written by me."
+          ],
           "title": "Owner Attestation",
+          "type": "string"
+        },
+        "reader_contract": {
+          "default": "imessage-owner-snapshot/v1",
+          "enum": [
+            "imessage-owner-snapshot/v1",
+            "chatgpt-owner-snapshot/v1"
+          ],
+          "title": "Reader Contract",
           "type": "string"
         },
         "snapshot_id": {
@@ -92,8 +119,11 @@
           "type": "string"
         },
         "source_id": {
-          "const": "imessage",
           "default": "imessage",
+          "enum": [
+            "imessage",
+            "chatgpt-owner-snapshot"
+          ],
           "title": "Source Id",
           "type": "string"
         }
@@ -190,8 +220,11 @@
           "type": "string"
         },
         "source_id": {
-          "const": "imessage",
           "default": "imessage",
+          "enum": [
+            "imessage",
+            "chatgpt-owner-snapshot"
+          ],
           "title": "Source Id",
           "type": "string"
         }
@@ -219,8 +252,11 @@
           "type": "string"
         },
         "source_id": {
-          "const": "imessage",
           "default": "imessage",
+          "enum": [
+            "imessage",
+            "chatgpt-owner-snapshot"
+          ],
           "title": "Source Id",
           "type": "string"
         }
@@ -248,8 +284,11 @@
           "type": "string"
         },
         "source_id": {
-          "const": "imessage",
           "default": "imessage",
+          "enum": [
+            "imessage",
+            "chatgpt-owner-snapshot"
+          ],
           "title": "Source Id",
           "type": "string"
         }

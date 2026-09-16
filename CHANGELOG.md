@@ -57,8 +57,26 @@ The machine-readable twin of each release is
   unreadable references that contain the message id count. It is checked at every read, so a
   sibling written after the owner's review stops the next read. Scalar fact releases do not run
   it, and the owner's review state does not show this reason yet.
+- **An AI-chat message counts as the owner's words only when the owner's own ChatGPT import proves it.** `[O]`
+  Permissions evidence accepted an AI-chat row as owner-authored on `sender_type` alone, but
+  `app_ingest`, `store_message`, `start_ingestion` and source install/test all write `human` rows
+  into the owner's conversations without an owner gate (app_ingest even defaults a missing role to
+  `human`), and a conversation's owner is only a dataset id prefix. Evidence now requires the new
+  owner-attested ChatGPT lane: the lane's source on the row and its conversation, the binding owner,
+  and a live provenance link whose content revision matches the row. Every other AI-chat row is
+  refused, including legacy `user` rows. The canonical store no longer lets any writer replace the
+  body, role or conversation of a linked row, and refuses to move a conversation that has an owner
+  to a different owner.
 
 ### Added
+- **Owner-attested ChatGPT export lane.** `[O]` The owner snapshot doors (describe, enroll, enqueue,
+  run, status, revoke) take a second reader contract, `chatgpt-owner-snapshot/v1`, sent only when it
+  is not the iMessage default. A closed `conversations.json` reader keeps the owner's typed prompts
+  on the active branch and the assistant's replies, drops hidden, system and tool nodes, and
+  withholds a whole conversation on any sign of another participant. Its rows get the same
+  provenance, revocation and origin marker as iMessage lane rows. Owner facts are not derived from
+  them yet. Group chats and shared links are recognised by known marker names; check a real
+  export's shape before enrolling one.
 - **Time records that keep only what a producer knows.** `[S1]` `[O]` Migration 75 adds
   `signal_objects.temporal_json` (`topos-fact-temporal/v1`: when the node asserted a fact, when
   it applies, and its evidence time) and `conversation_messages.event_time_json`

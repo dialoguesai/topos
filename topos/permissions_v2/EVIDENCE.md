@@ -24,8 +24,12 @@ canonical SQLite snapshot:
   ambiguous identities or exceeded bounds (128 records, depth 16).
 - Every terminal source is an owner-authored canonical message. Conversation
   messages require native `is_from_self=1` and matching `owner_user_id`. AI messages
-  require `sender_type=user` plus the exact source/conversation parent belonging
-  to the owner. The parent row's revision is bound into the evidence revision.
+  count only through the owner-attested ChatGPT lane: `sender_type` `human` or
+  `user`, the lane's source id on the row and on its one conversation parent,
+  that parent belonging to the owner, and a live provenance link whose content
+  revision matches the row. No other AI-chat row is owner-authored, because
+  `app_ingest` and other unguarded doors can write `human` rows under the
+  owner's conversation. The parent row's revision is bound into the evidence revision.
 - An explicit owner review covers every fact and terminal source at its current
   complete row revision. Every reviewed classification states owner authorship,
   direct self-statement, only owner subjects, known sensitivity and nonempty

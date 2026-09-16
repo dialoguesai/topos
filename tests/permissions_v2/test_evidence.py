@@ -32,8 +32,33 @@ def owner(*, actor="owner-1", cls=OWNER_APP, channel="uds"):
         reset_principal(token)
 
 
+LEGACY_AI_SOURCE = "ai-source-1"
+REAL_AI_CHAT_OWNER_PROVEN = EvidenceResolver._ai_chat_owner_proven
+
+
+def stand_in_for_ai_lane_proof(monkeypatch):
+    """This corpus's one AI-chat row counts as a lane-proven owner prompt, exactly when the old rule said so.
+
+    AI-chat owner authorship now needs the attested ChatGPT lane's live origin
+    link (tests/permissions_v2/test_chatgpt_owner_snapshot_canary.py proves it
+    through the real doors). The tests on this hand-built corpus are about
+    lineage, review surfaces, posture, policy and release across both leaf
+    tables, and their negative controls must fail for their own reason rather
+    than for a missing lane. Only the synthetic legacy source is stood in for;
+    test_the_legacy_ai_row_is_not_owner_authored_without_the_stand_in pins
+    that the real rule refuses this very row.
+    """
+    def stand_in(self, conn, identity, row):
+        if identity.source_id == LEGACY_AI_SOURCE:
+            return row.get("sender_type") == "user"
+        return REAL_AI_CHAT_OWNER_PROVEN(self, conn, identity, row)
+
+    monkeypatch.setattr(EvidenceResolver, "_ai_chat_owner_proven", stand_in)
+
+
 @pytest.fixture
-def corpus(tmp_path):
+def corpus(tmp_path, monkeypatch):
+    stand_in_for_ai_lane_proof(monkeypatch)
     canonical = tmp_path / "canonical.db"
     binding = EvidenceBinding(environment_id="permissions-beta-test", node_id="node-1", resource_id="resource-1", owner_id="owner-1")
     with sqlite3.connect(canonical) as conn:
@@ -203,6 +228,17 @@ def test_mixed_subject_quotes_unknowns_and_copies_withhold(corpus, label):
 def test_native_source_role_cannot_be_overridden_by_review(corpus):
     edit(corpus, "UPDATE conversation_messages SET is_from_self=0")
     attest(corpus)
+    assert decision(corpus).reason_code == "not_owner_authored"
+
+
+@pytest.mark.parametrize("sender_type", ["user", "human"])
+def test_the_legacy_ai_row_is_not_owner_authored_without_the_stand_in(corpus, monkeypatch, sender_type):
+    """Deliberately stricter than the old rule: a "user" or "human" AI row without lane proof is not owner speech."""
+    ai_lineage(corpus)
+    edit(corpus, "UPDATE ai_chat_messages SET sender_type=?", (sender_type,))
+    attest(corpus)
+    assert decision(corpus).verdict == ("qualified" if sender_type == "user" else "withheld")
+    monkeypatch.setattr(EvidenceResolver, "_ai_chat_owner_proven", REAL_AI_CHAT_OWNER_PROVEN)
     assert decision(corpus).reason_code == "not_owner_authored"
 
 

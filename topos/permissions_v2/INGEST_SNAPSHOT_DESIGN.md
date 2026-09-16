@@ -153,6 +153,116 @@ and never qualifies with an unproven leaf. A separate fact key for lane facts
 would avoid this, but it would also split the owner's single-valued belief in
 two, so it is left as a decision for when the lane runs continuously.
 
+## ChatGPT lane (`chatgpt-owner-snapshot/v1`)
+
+Owner decision, 16 Sept: AI-chat prompts the owner typed count as owner-authored
+evidence. Before this lane nothing could prove that. app_ingest, store_message,
+start_ingestion and source install/test can write an `ai_chat_messages` row with
+`sender_type` "human" under the owner's conversation (a conversation's owner is
+only the dataset id prefix, and app_ingest defaults a missing role to "human");
+the rows carried no writer provenance; and the upsert replaced a stored body while
+keeping its role and conversation. The owner's own ChatGPT extension uses
+app_ingest too, so a door's identity is not proof either.
+
+**Selection and wire.** Describe and enroll name `reader_contract`
+`chatgpt-owner-snapshot/v1` with `source_id` `chatgpt-owner-snapshot`; revoke,
+enqueue, status and run name the lane by `source_id`. The iMessage contract is
+the default and never travels: its commands are byte-identical to before (the
+golden fixture still verifies), and an explicit `reader_contract` naming it is
+refused rather than normalized, because both ends sign `model_dump()`. A command
+for one lane cannot see the other lane's enrollment or job
+(`ingest_enrollment_unknown`, `ingest_job_unknown`), and each runner claims only
+its own lane's jobs. The control plane mirror carries the same models, so a CP
+sends the field only for the ChatGPT lane and an older node's closed model
+refuses that command instead of misreading it.
+
+**Durable state.** Same doors, owner-only signed commands, enrollment, durable
+job, marker file and revocation as iMessage. The provenance tables are shared and
+their schema is unchanged, so an installed iMessage ledger keeps its schema digest.
+The pinned snapshot descriptor already records `reader_contract`; a link's lane
+(source id, attested sentence, `<id>.json` file, canonical table) is read from its
+enrollment's descriptor, never from the row. An AI-chat link's row identity is the
+stored row (role, sender, time, sequence, source, source record, actor role, origin
+marker), a SHA-256 content revision of its body, and its one parent conversation's
+id, `owner_user_id` and source. Moving the row, re-binding the parent or replacing
+the body stops the link from matching. Ingestion time and sync batch are excluded.
+
+**Closed reader** (`topos/ingestion/chatgpt_owner_snapshot.py`). One
+`conversations.json`, at most 16 MiB, 1,000 conversations, 20,000 mapping nodes,
+1,000 emitted rows, 64 KiB per body and 1 MiB of text. Only the active branch
+(`current_node` ancestry) is read. An owner prompt (`sender_type` "human",
+`actor_role` "authored") is a visible, finished `user` node with no author name
+or author metadata, `text` or the text parts of `multimodal_text`, message
+metadata inside a closed allow-list, and no set message or mapping-node field
+beyond the ones an ordinary export carries (a group chat must record each sender
+somewhere, so that place is closed too). Hidden and custom-instruction nodes, canvas,
+automation, scheduled-task, starter-prompt and targeted-reply metadata, and any
+key the reader does not know, drop the prompt; its reply is kept. Assistant text
+is kept as `sender_type` "assistant" (`actor_role` "addressed"); system, tool and
+non-text nodes are dropped. If any user node on any branch names an author,
+carries author metadata or a participant/shared-link marker, or the conversation
+carries one, the whole conversation is withheld: a group chat or a continued
+shared link cannot show which prompts the owner typed. Time is `create_time` read
+as an exact decimal of seconds since the Unix epoch: 2022 or later, microsecond
+representable, not in the future and not out of order along the branch.
+Duplicate keys, non-finite numbers, inconsistent ids, broken parent/child links,
+unknown roles and malformed content reject the whole snapshot. Ids are
+`chatgpt-owner-snapshot:<conversation>:<node>`; an existing row or conversation
+with a lane id refuses the whole batch.
+
+**Evidence.** An `ai_chat_messages` leaf is owner-authored only when its
+`sender_type` is "human" or "user", the row, its identity and its one parent
+carry `chatgpt-owner-snapshot`, the parent's owner is the binding owner, and
+`_validate_native_origin` proves a live link whose identity (content revision
+included) matches the row. Any other AI-chat row is `not_owner_authored`,
+including legacy "user" rows that qualified before: this is deliberately
+stricter. Assistant rows are never owner speech. The quote/metadata veto, posture,
+copies and every other release check are unchanged. A tagged or linked row whose
+proof fails, including after revocation, withholds as
+`native_owner_provenance_unavailable` at inspection, as for iMessage.
+
+**Store guards.** The shared `ai_chat_messages` upsert leaves a row that holds a
+provenance link untouched except its sync batch and ingestion time, so no door can
+rewrite a proven prompt's body, source or marker. The conversation upsert refuses a
+write naming a different `owner_user_id` for an existing conversation. Unlinked
+legacy rows upsert exactly as before.
+
+**No facts.** The lane derives no facts; a p2a locator over a prompt must come
+from elsewhere (the canary seeds one). `ingest_snapshot_facts` would generalize
+at the query, but the supersession guard would not: `features/facts/evidence_time.py`
+orders only `conversation_messages` references that name a dataset and an
+`is_from_self` row, and an AI-chat reference carries neither, so ChatGPT facts
+would lose the evidence-time ceiling the iMessage lane relies on and an older
+prompt enrolled later could bring back an old belief.
+
+Known limits, all fail-closed:
+
+- Re-exporting after new chats needs a fresh dataset, and the overlapping
+  conversations collide with the earlier enrollment's rows, so the whole later
+  snapshot is refused. There is no incremental or merge path.
+- The prompt allow-list is conservative. A real export whose prompts carry
+  metadata this reader does not know drops those prompts.
+- `CanonicalTablesManager.update_message_sequences` (legacy canonicalizer)
+  renumbers every row in a conversation. A legacy write into a lane conversation
+  id can therefore change a lane row's `sequence`, which withholds its proof and
+  stales its review. The ChatGPT UI mapper that app_ingest uses prefixes its
+  conversation ids (`chatgpt:`), so reaching a lane conversation needs a writer that
+  does not; the renumbering itself is not guarded here.
+- Identical prompt text anywhere in either leaf table is an independent copy, so
+  a prompt the owner also sent through the extension does not qualify.
+
+Known limit that is NOT fail-closed: every place a message records its sender
+(author, metadata, message and node fields) is closed, but the conversation-level
+participant and shared-link markers are a deny-list (`_PARTICIPANT_MARKERS`), and
+no marker name was checked against a real export. A group chat or shared-link
+continuation marked only by a conversation-level key this reader does not list,
+whose other members' prompts carry no sender at all, is read as the owner's
+prompts (a synthetic `members` roster does exactly that); so is a creator-written
+GPT starter or suggested prompt that no field marks. Such a row is linked and
+passes the evidence proof, and only the owner's attestation and per-leaf review
+stand between it and a recipient. Check a real export's group chat, shared-link
+continuation and GPT conversation shapes before enrolling one.
+
 ## Regression evidence
 
 Tests cover actual UDS and signed relay identity boundaries, SHA mismatch, strict

@@ -29,7 +29,10 @@
           "type": "integer"
         },
         "source_id": {
-          "const": "imessage",
+          "enum": [
+            "imessage",
+            "chatgpt-owner-snapshot"
+          ],
           "title": "Source Id",
           "type": "string"
         },
@@ -165,7 +168,10 @@
           "type": "string"
         },
         "reader_contract": {
-          "const": "imessage-owner-snapshot/v1",
+          "enum": [
+            "imessage-owner-snapshot/v1",
+            "chatgpt-owner-snapshot/v1"
+          ],
           "title": "Reader Contract",
           "type": "string"
         },
