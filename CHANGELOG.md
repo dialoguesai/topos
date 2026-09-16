@@ -92,8 +92,10 @@ The machine-readable twin of each release is
   longer a declared target. The legacy writer and the role gate count only a typed owner
   flag, so text such as `"0"` no longer reads as the owner. Permission evidence also refuses
   Signal quote keys, `storyReplyContext` and non-zero iMessage reaction metadata, which can
-  withhold a fact under an existing grant. Correcting or revising a fact keeps the corrected
-  fact's attribution. Not changed: `sender_id == 'self'` still counts as the owner beside an
+  withhold a fact under an existing grant. Every row the demo and declared lanes emit names its
+  table, so a declared column called `entry_at` or `record_type` no longer retypes a calendar or
+  document row as an owner-written journal or profile record. Correcting or revising a fact keeps
+  the corrected fact's attribution. Not changed: `sender_id == 'self'` still counts as the owner beside an
   explicit `is_from_self` of 0, because legacy and re-staged owner rows are stored that way.
 - **A re-ingest no longer rewrites another dataset's message body, or a proved one.** `[O]`
   iMessage ids (`imessage:<ROWID>`) carry no dataset, so a second database with the same ROWID

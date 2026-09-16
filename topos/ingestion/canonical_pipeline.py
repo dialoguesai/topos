@@ -518,10 +518,10 @@ def canonicalize_normalized_batch(
                         created += 1
                     signal_record = _prepare_signal_record(dict(canonical_payload))
                     signal_record["source_id"] = source_id
-                    if target_table != table_name:
-                        # Mixed-family batch: downstream attribution cannot rely
-                        # on the group-level default stamp alone.
-                        signal_record["_table"] = target_table
+                    # Every row names its table: most of these groups have no
+                    # default stamp, and a reader handed an unstamped row guesses
+                    # its table from its keys (entry_at reads as a journal entry).
+                    signal_record["_table"] = target_table
                     if target_table == "calendar_events":
                         result.events_created += 1
                     result.canonical_records.append(signal_record)
