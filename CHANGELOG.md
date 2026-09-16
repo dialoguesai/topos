@@ -48,6 +48,34 @@ The machine-readable twin of each release is
   now raises `JobIdConflictError` and writes and holds nothing. A job re-enqueued with the same
   kind and key is unaffected.
 
+### Fixed
+- **Reprocess stores the owner's retained messages as the owner's.** `[O]`
+  `canonical_pipeline.build_staging_record` copied neither `is_from_self` nor
+  `owner_user_id`, so a raw→canonical reprocess that inserted a row with no canonical row
+  yet stored a message its parser marked as the owner's as a correspondent's. The flag is now
+  carried when an engine-shipped parser produced the record for an `owner_upload` or
+  `local_sync` source, and only as `True` or the integer 1. A runtime-installed parser, an
+  app-pushed source, and a caller that names no parser carry none. `owner_user_id` is never
+  carried: a raw payload can hold a caller's value (Signal upload), and reprocess attests no
+  owner, so every row it inserts keeps `owner_user_id` NULL. A row that already exists keeps
+  both fields as stored. File import and app ingest (`manager.py`, `ingest_helpers.py`) are
+  unchanged.
+- **A correspondent or a declaration can no longer be recorded as the owner's own words.** `[O]`
+  A Signal export marked any sender whose number was a substring of the owner's as the owner
+  (a precedence bug on top of substring matching); it now needs an exact normalized number.
+  An iMessage correspondent whose handle is spelled `Self` was stored as `sender_id='self'`
+  and its messages minted owner facts; the reader now namespaces such a handle and the sync
+  stores `is_from_me` instead of re-deriving the owner from the sender id. Declared source
+  field maps could write `is_from_self`, `from_self`, `role`, `actor_role`, `owner_user_id`,
+  `sender_type`, `_table` or `canonical_table` on any table, or a `self` sender id; the mapper
+  now drops them with a receipt, install and PATCH refuse them, and `ai_chat_messages` is no
+  longer a declared target. The legacy writer and the role gate count only a typed owner
+  flag, so text such as `"0"` no longer reads as the owner. Permission evidence also refuses
+  Signal quote keys, `storyReplyContext` and non-zero iMessage reaction metadata, which can
+  withhold a fact under an existing grant. Correcting or revising a fact keeps the corrected
+  fact's attribution. Not changed: `sender_id == 'self'` still counts as the owner beside an
+  explicit `is_from_self` of 0, because legacy and re-staged owner rows are stored that way.
+
 ## [1.3.57] — 2026-09-14
 
 ### Fixed

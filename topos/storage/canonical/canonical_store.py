@@ -453,7 +453,9 @@ class SQLiteCanonicalStore(CanonicalStore):
                 record.get("content"),
                 record.get("source_id"),
                 _json_metadata(record.get("metadata_json")),
-                1 if record.get("is_from_self") or record.get("from_self") else 0,
+                # Only a typed flag is the owner: declared rows carry text, and "0"/"false" are truthy.
+                1 if any(record.get(key) is True or (type(record.get(key)) is int and record.get(key) == 1)
+                         for key in ("is_from_self", "from_self")) else 0,
                 record.get("owner_user_id"),
                 record.get("source_record_id") or message_id,
                 record.get("ingested_at") or _utc_now(),

@@ -534,7 +534,9 @@ def _run_imessage_sync_impl(
             staging_records: List[Dict[str, Any]] = []
             for rec in mapped_records:
                 thread_id = rec.get("thread_id") or rec.get("conversation_id") or dataset_id
-                is_self = str(rec.get("sender_id") or "").strip().lower() == "self"
+                # chat.db's is_from_me, never the sender id: a correspondent
+                # handle can be spelled 'self'.
+                is_self = rec.get("is_from_self") is True
                 staging = {
                     "message_id": rec.get("message_id"),
                     "dataset_id": dataset_id,

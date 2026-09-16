@@ -40,6 +40,8 @@ class ImessageCanonicalMapper(CanonicalMapper):
 
     def map(self, normalized: NormalizedRecord) -> CanonicalRecord:
         payload = _normalized_to_canonical_payload(normalized, "imessage")
+        if type(normalized.payload.get("is_from_self")) is bool:
+            payload["is_from_self"] = normalized.payload["is_from_self"]
         return CanonicalRecord(record_id=payload["message_id"], payload=payload)
 
     def mapping_metadata(self, normalized: NormalizedRecord) -> MappingMetadata:

@@ -60,6 +60,7 @@ string would corrupt the column's contract for every reader.
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import dataclass, field as dataclass_field
 from typing import Any, Dict, List, Optional, Sequence
 from urllib.parse import urlparse
@@ -78,7 +79,24 @@ from ..sources.declared_field_map_spec import (  # noqa: F401 — re-exported fo
 )
 from .mappers.base import CanonicalMapper, CanonicalRecord, MappingMetadata
 
+logger = logging.getLogger("topos.canonicalization.declared_field_map")
+
 DEFAULT_JOIN = "\n\n"
+
+# Who wrote a row is the producer's fact, never the registerer's: the same
+# authorship aliases the trusted conversation writer accepts
+# (storage/canonical/canonical_store.py). A declaration naming one is refused at
+# install and dropped here for installs that predate the refusal.
+AUTHORSHIP_COLUMNS = frozenset({"is_from_self", "from_self", "role", "actor_role", "owner_user_id"})
+# Refused on EVERY declared table, not only messages: a reader handed a row with
+# no table guesses it from these keys (sender_type 'user' reads as the owner's AI
+# chat turn) or takes the row's own _table/canonical_table as given, and no
+# non-message table stores any of them.
+UNDECLARABLE_COLUMNS = AUTHORSHIP_COLUMNS | {"sender_type", "_table", "canonical_table"}
+# ai_chat_messages authorship is its sender_type ('human'/'user' is the owner),
+# and its upsert overwrites content on an existing message id, so it is not a
+# declarable target at all.
+UNDECLARABLE_TABLES = frozenset({"ai_chat_messages"})
 
 
 def _strip_event_suffix(value: str) -> str:
@@ -318,7 +336,7 @@ class DeclaredFieldMapper(CanonicalMapper):
         for mapped in records:
             table = mapped.table or self.default_table
             block = self._blocks.get(table)
-            if not block or block.get("fan_out"):
+            if not block or block.get("fan_out") or table in UNDECLARABLE_TABLES:
                 # A fan-out declaration describes ADDITIONAL rows, never an
                 # overlay — the base row passes through and the declared rows
                 # are still minted below. (Suppressing them because the code
@@ -327,7 +345,9 @@ class DeclaredFieldMapper(CanonicalMapper):
                 out.append(mapped)
                 continue
             overlaid.add(table)
-            declared = apply_field_map(block["fields"], record)
+            declared = self._without_declared_authorship(
+                table, apply_field_map(block["fields"], record), record_id=mapped.record_id
+            )
             out.append(
                 CanonicalRecord(
                     record_id=mapped.record_id,
@@ -339,7 +359,31 @@ class DeclaredFieldMapper(CanonicalMapper):
         for table, block in self._blocks.items():
             if table in overlaid:
                 continue
+            if table in UNDECLARABLE_TABLES:
+                logger.warning(
+                    "[DECLARED_FIELD_MAP] refused declared rows for %s: source_id=%s record_id=%s",
+                    table, self.source_id, normalized.record_id,
+                )
+                continue
             out.extend(self._mint(table, block, record))
+        return out
+
+    def _without_declared_authorship(self, table: str, declared: Dict[str, Any], *, record_id: str) -> Dict[str, Any]:
+        """Declared columns minus anything that would say the owner wrote the row."""
+        out = dict(declared)
+        for column in sorted(UNDECLARABLE_COLUMNS & set(out)):
+            del out[column]
+            logger.warning(
+                "[DECLARED_FIELD_MAP] dropped declared %s.%s: source_id=%s record_id=%s",
+                table, column, self.source_id, record_id,
+            )
+        sender_id = out.get("sender_id")
+        if isinstance(sender_id, str) and sender_id.strip().casefold() == "self":
+            out["sender_id"] = f"declared:{sender_id}"
+            logger.warning(
+                "[DECLARED_FIELD_MAP] rewrote declared %s.sender_id to %r: source_id=%s record_id=%s",
+                table, out["sender_id"], self.source_id, record_id,
+            )
         return out
 
     def _mint(self, table: str, block: Dict[str, Any], record: Any) -> List[CanonicalRecord]:
@@ -355,6 +399,10 @@ class DeclaredFieldMapper(CanonicalMapper):
             record_id = payload.get(id_column or "", "")
             if not record_id:
                 continue  # no deterministic identity → nothing safe to upsert
+            payload = self._without_declared_authorship(table, payload, record_id=record_id)
+            if table == "conversation_messages":
+                # No producer vouches for a minted message: it is someone else's.
+                payload.update(is_from_self=0, actor_role="observed")
             out.append(
                 CanonicalRecord(
                     record_id=record_id,

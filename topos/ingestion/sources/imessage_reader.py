@@ -161,10 +161,16 @@ def row_is_imessage_spam(row: Dict[str, Any]) -> bool:
 
 
 def _normalize_sender_id(value: Any) -> Optional[str]:
-    """Normalize sender identity from handle.id for storage."""
+    """Normalize sender identity from handle.id for storage.
+
+    ``self`` is the owner's sender id, so a correspondent handle spelled that
+    way is namespaced to an id that can never read as the owner.
+    """
     if value is None:
         return None
     text = str(value).strip()
+    if text.casefold() == "self":
+        return f"handle:{text}"
     return text or None
 
 
@@ -535,7 +541,7 @@ def read_imessage_batch(
                     continue
                 mac_date = r.get("date")
                 unix_ts = mac_epoch_to_unix(mac_date) if mac_date is not None else None
-                is_from_me = r.get("is_from_me", 0)
+                is_from_me = _as_int_flag(r.get("is_from_me")) == 1
                 role = "user" if is_from_me else "other"
                 context = _extract_imessage_context(r)
                 if is_from_me:
@@ -549,6 +555,7 @@ def read_imessage_batch(
                     "created_at": unix_ts,
                     "role": role,
                     "sender_id": sender_id,
+                    "is_from_me": is_from_me,
                     "ROWID": rowid,
                 }
                 if context.get("reply_to_message_id"):

@@ -15,6 +15,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
@@ -32,6 +33,20 @@ def _norm_ts(sent_at: Any) -> str:
             sent_at = sent_at / 1000.0
         return datetime.fromtimestamp(sent_at, tz=timezone.utc).isoformat()
     return str(sent_at)
+
+
+def _e164(value: Any) -> str:
+    """'+1 555-555-0100' -> '+15555550100'; '' for anything that is not a phone number.
+
+    Only an exact match of the whole number is the owner. A number that merely
+    contains, or is contained in, the owner's (a short code, a local-format
+    suffix) belongs to someone else.
+    """
+    text = str(value or "").strip()
+    if not text or not re.fullmatch(r"\+?[\d\s().\-]+", text):
+        return ""
+    digits = re.sub(r"\D", "", text)
+    return f"+{digits}" if digits else ""
 
 
 def _stable_message_id(conversation_id: str, sent_at: Any, content: str) -> str:
@@ -77,13 +92,9 @@ def parse_signal_export_json(
         source_phone = str(source_phone).strip() if source_phone else None
 
         from_self = msg_type == "outgoing"
-        if my_phone_number and source_phone:
-            norm_phone = my_phone_number.replace(" ", "").replace("-", "").strip()
-            norm_source = (source_phone or "").replace(" ", "").replace("-", "").strip()
-            if norm_phone and norm_source and norm_phone in norm_source or norm_source in norm_phone:
-                from_self = True
-            elif msg_type == "outgoing":
-                from_self = True
+        owner_number = _e164(my_phone_number)
+        if owner_number and owner_number == _e164(source_phone):
+            from_self = True
         sender_type = "self" if from_self else "contact"
         message_type = "system" if msg_type and msg_type not in {"outgoing", "incoming"} else "message"
         event_type = f"signal_type:{msg_type}" if message_type == "system" else None

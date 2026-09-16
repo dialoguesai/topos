@@ -733,8 +733,12 @@ class EvidenceResolver:
                 # the owner's authored source. Native canonical role is required.
                 if row.get("metadata_json") not in (None, ""):
                     metadata = _json(row["metadata_json"], dict)
+                    # Signal reader/export quote keys, and an iMessage tapback's
+                    # target (associated_message_type 0 is an ordinary message).
                     if any(metadata.get(field) not in (None, False, 0, "", [], {}) for field in
-                           ("is_forwarded", "forwarded_from", "quoted_message", "quoted_text", "quote", "quoted_message_id", "quoted_sender", "is_quoted")):
+                           ("is_forwarded", "forwarded_from", "quoted_message", "quoted_text", "quote", "quoted_message_id", "quoted_sender", "is_quoted",
+                            "quoteText", "quoteBody", "quoteAuthor", "quoteAuthorAci", "quoteAuthorUuid", "quoteId", "quotedMessageId",
+                            "storyReplyContext", "associated_message_guid", "associated_message_type")):
                         raise PolicyError("not_owner_self_statement")
                 if identity.table == "conversation_messages":
                     if type(row.get("is_from_self")) is not int or row["is_from_self"] != 1:
