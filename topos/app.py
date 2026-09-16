@@ -513,11 +513,9 @@ async def startup_event() -> None:
         # the client thread's contextvars do not cross run_coroutine_threadsafe,
         # a wrapper closure does.
         async def _relay_dispatch(message):
-            from .principal import RELAY_PRINCIPAL
-            from .relay_stamp import verify_relay_stamp
+            from .core.handlers import dispatch_relay_message
 
-            principal = verify_relay_stamp(message) or RELAY_PRINCIPAL
-            return await handle_control_plane_request(message, principal=principal)
+            return await dispatch_relay_message(message)
 
         # Dual-mint (install-flow invariant): ensure an owner key exists so the
         # fabric's floors/stamps/tier resolution auto-activate on every node —

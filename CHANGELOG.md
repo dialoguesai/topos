@@ -1383,6 +1383,31 @@ The machine-readable twin of each release is
   through its own ring and the exclamation's dot welded itself to the stem. All geometry is
   now expressed in the macOS shell's own points, so the three trays are one drawing at
   three resolutions. Parity with app 0.2.32.
+### Security
+- **A grantee's or an app's chat write is no longer the owner's own speech.** `[S1]` `[P]`
+  `app_ingest`, `store_message`, `start_ingestion` and `post_source_test_ingestion` had no
+  owner gate, an unstamped relay message resolves to `cp_relay`, and the role gate read any
+  `ai_chat_messages` row with `sender_type` 'human' as authored — the default when a record
+  names no role. A third party holding a UMA write grant could therefore send "I live in
+  Lisbon these days" and the rules floor and the LLM pass both asserted it `asserted_by: owner`
+  on the owner entity (reproduced through the relay dispatch on 1.3.57). Each row now records
+  its `writer_class` — the door that wrote it, taken from the channel-verified principal and
+  never from the payload (`topos/features/provenance/writer_class.py`) — and `record_role`
+  caps any non-owner writer at `observed` on every table. Owner classes: `owner_app` (the
+  socket, or a verified `owner_app` relay stamp), `owner_import`, `local_legacy` (local HTTP
+  with no owner key). A plain owner gate was rejected: the owner's ChatGPT extension writes
+  through the same door; the control plane now stamps it `owner_app` when the requester is the
+  owner and the app is an attested capture app, and stamps the owner-credentialed doors.
+  Without a CP signing key and a pinned node key those writes land as `cp_relay`: stored, not
+  the owner's. A write from a non-owner class under a message id an owner door (or a legacy
+  row) wrote is refused and changes nothing; an owner write over a non-owner row replaces it,
+  sender included. Reprocess, brief input and query-time ownership read the column too, and
+  query-time ownership no longer falls back to `sender_type` alone on a node with no
+  `conversation_messages` table. Local HTTP doors record the bearer's class (TCP bearers are
+  `third_party`). Rows written before this have no writer class and keep today's behaviour;
+  the ones a grantee wrote are not distinguishable and are not reclassified. The column rides
+  the always-run `actor_role_v1` step instead of a new registry entry, so `user_version` does
+  not move; there is no reprocess.
 
 ## [1.3.57] — 2026-09-14
 

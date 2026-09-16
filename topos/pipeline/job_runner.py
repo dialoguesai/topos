@@ -69,6 +69,12 @@ async def _execute_file_ingestion(payload: Dict[str, Any]) -> Dict[str, Any]:
 
     ingest_options = payload.get("ingest_options")
     ingest_options = ingest_options if isinstance(ingest_options, dict) else None
+    # Recorded by the door that queued the job (start_ingestion). Never the
+    # ambient principal: this worker task inherited the context of whichever
+    # request started it. A job queued before writer classes existed has none.
+    from ..features.provenance.writer_class import WRITER_UNRECORDED
+
+    writer_class = str(payload.get("writer_class") or WRITER_UNRECORDED)
 
     file_bytes = payload.get("file_bytes")
     if not file_bytes and payload.get("file_base64"):
@@ -90,6 +96,7 @@ async def _execute_file_ingestion(payload: Dict[str, Any]) -> Dict[str, Any]:
             progress_api_url=progress_api_url,
             progress_api_key=progress_api_key,
             ingest_options=ingest_options,
+            writer_class=writer_class,
         )
     else:
         result = await ingest_file_payload(
@@ -103,6 +110,7 @@ async def _execute_file_ingestion(payload: Dict[str, Any]) -> Dict[str, Any]:
             progress_api_url=progress_api_url,
             progress_api_key=progress_api_key,
             ingest_options=ingest_options,
+            writer_class=writer_class,
         )
 
     if progress_api_url and progress_api_key:

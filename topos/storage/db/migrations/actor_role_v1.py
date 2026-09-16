@@ -16,6 +16,15 @@ Idempotent: column adds are PRAGMA-guarded and re-run cheaply after legacy
 DDL (the canonical table creators use CREATE TABLE IF NOT EXISTS, so this must
 re-run on every boot like the disclosure/period column migrations); the
 backfill scan runs once, guarded by the migration ledger.
+
+2026-09: also adds ``ai_chat_messages.writer_class TEXT NULL`` — the door that
+wrote the row (``topos/features/provenance/writer_class.py``), which caps the
+role above. It rides this always-run step rather than a new registry entry on
+purpose: a new entry moves ``PRAGMA user_version``, and a head that registers
+one fences every older installed engine out of any database it touches (the
+2026-08-19 incident). A nullable column moves nothing. There is no backfill:
+the door that wrote an existing row is not recorded anywhere, and NULL means
+exactly that.
 """
 
 from __future__ import annotations
@@ -103,6 +112,8 @@ def apply_actor_role_v1_up(conn: sqlite3.Connection) -> None:
             f"""CREATE INDEX IF NOT EXISTS idx_{table}_actor_role
                 ON {table}(actor_role) WHERE actor_role IS NOT NULL"""
         )
+    if "ai_chat_messages" in tables and "writer_class" not in _columns(conn, "ai_chat_messages"):
+        conn.execute("ALTER TABLE ai_chat_messages ADD COLUMN writer_class TEXT")
 
     if not _migration_applied(conn, MIGRATION_ID):
         # One-time backfill through record_role (never replicated in SQL).

@@ -653,7 +653,10 @@ class IngestionManager(BaseObject):
         source_id: Optional[str] = None,
         progress_api_url: Optional[str] = None,
         progress_api_key: Optional[str] = None,
+        writer_class: Optional[str] = None,
     ) -> Dict[str, Any]:
+        # writer_class: the door that started this import, recorded on the
+        # canonical rows (features/provenance/writer_class.py). None = no door.
         file_path = self.file_store.get_file_path(job.dataset_id, job.schema_id)
         if not file_path.exists():
             raise FileNotFoundError(f"Raw file not found: {file_path}")
@@ -989,6 +992,7 @@ class IngestionManager(BaseObject):
                         normalized_records,
                         dataset_id=job.dataset_id,
                         sync_batch_id=sync_batch_id,
+                        writer_class=writer_class,
                     )
                     canonical_messages.extend(canon_result.canonical_records)
                     if canon_result.errors:

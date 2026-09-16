@@ -560,6 +560,18 @@ def _message_row_owner(
     if table == "ai_chat_messages":
         sender_type = str(row.get("sender_type") or "").strip().lower()
         if sender_type in ("human", "user"):
+            # 'human' is the owner only when an owner door wrote the row
+            # (features/provenance/writer_class.py). List specs do not select
+            # the column, so look it up by record id when the row lacks it.
+            if "writer_class" in row:
+                from ..features.provenance.writer_class import is_owner_writer
+
+                return is_owner_writer(row.get("writer_class"))
+            record_id = str(row.get("record_id") or row.get("message_id") or "")
+            if conn is not None and record_id:
+                looked_up = _record_owner_authored(conn, record_id, cache)
+                if looked_up is not None:
+                    return looked_up
             return True
         if sender_type:
             return False
@@ -596,19 +608,33 @@ def _record_owner_authored(
         return cache[record_id]
     verdict: Optional[bool] = None
     try:
-        row = conn.execute(
-            "SELECT is_from_self, sender_id FROM conversation_messages WHERE message_id = ?",
-            (record_id,),
-        ).fetchone()
+        row = None
+        try:
+            row = conn.execute(
+                "SELECT is_from_self, sender_id FROM conversation_messages WHERE message_id = ?",
+                (record_id,),
+            ).fetchone()
+        except Exception:  # noqa: BLE001 — a node with no messenger data has no such table
+            row = None
         if row is not None:
             verdict = row[0] in (1, True, "1") or str(row[1] or "").lower() == "self"
         else:
-            row = conn.execute(
-                "SELECT sender_type FROM ai_chat_messages WHERE message_id = ?",
-                (record_id,),
-            ).fetchone()
+            # writer_class: a 'human' row a grantee or an app wrote is not the
+            # owner's speech (features/provenance/writer_class.py).
+            try:
+                row = conn.execute(
+                    "SELECT sender_type, writer_class FROM ai_chat_messages WHERE message_id = ?",
+                    (record_id,),
+                ).fetchone()
+            except Exception:  # noqa: BLE001 — a schema that predates the column
+                row = conn.execute(
+                    "SELECT sender_type, NULL FROM ai_chat_messages WHERE message_id = ?",
+                    (record_id,),
+                ).fetchone()
             if row is not None:
-                verdict = str(row[0] or "").lower() in ("human", "user")
+                from ..features.provenance.writer_class import is_owner_writer
+
+                verdict = str(row[0] or "").lower() in ("human", "user") and is_owner_writer(row[1])
     except Exception:
         verdict = None
     if cache is not None:

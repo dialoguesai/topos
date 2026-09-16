@@ -147,3 +147,19 @@ def resolve_request_principal(
             return None  # legacy mode: single-key world, no principal enforcement
         return Principal(cls=THIRD_PARTY, channel="local_http")
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid authorization token")
+
+
+async def resolve_request_writer_class(request: Request, *, owner_class: Optional[str] = None) -> str:
+    """Writer class for an HTTP write door (features/provenance/writer_class.py).
+
+    For routes that authenticate with require_api_key alone and are also called
+    as plain functions (so a ``Depends`` default would never resolve): the class
+    comes from the same credential resolution as resolve_request_principal —
+    the socket is the owner, the shared key in legacy mode is ``local_legacy``,
+    any bearer over TCP once an owner key exists is a third party.
+    """
+    from .features.provenance.writer_class import WRITER_OWNER_APP, writer_class_for_principal
+
+    credentials = await bearer_scheme(request)
+    principal = resolve_request_principal(request, credentials)
+    return writer_class_for_principal(principal, owner_class=owner_class or WRITER_OWNER_APP)

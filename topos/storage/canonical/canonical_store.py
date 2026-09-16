@@ -36,10 +36,19 @@ def _json_metadata(value: Any) -> Optional[str]:
     return json.dumps(value)
 
 
+#: CanonicalRef.refused values for a write the store declined to apply.
+#: ``rewrite``: a non-owner writer sent different content under a message id an
+#: owner door wrote. ``duplicate``: the same, with identical content — nothing
+#: to change, and nothing that should be re-derived under the lesser writer.
+REFUSED_OWNER_ROW_REWRITE = "owner_row_rewrite"
+REFUSED_OWNER_ROW_DUPLICATE = "owner_row_duplicate"
+
+
 @dataclass(frozen=True)
 class CanonicalRef:
     record_id: str
     created: bool = True
+    refused: Optional[str] = None
 
 
 def _insert_trusted_conversation_batch(
@@ -355,11 +364,29 @@ class SQLiteCanonicalStore(CanonicalStore):
         ).fetchone() is not None
 
     def _upsert_ai_chat_message(self, record: Dict[str, Any], *, sync_batch_id: Optional[str]) -> CanonicalRef:
+        """Upsert one chat message, keeping the owner's rows the owner's.
+
+        A message id carries no writer, and the conflict update used to replace
+        ``content`` while keeping ``sender_type``: any later writer could put its
+        own words under a row the owner wrote. Now, when the incoming writer is
+        not an owner class (``features/provenance/writer_class.py``) and the
+        stored row was written by an owner door — or predates writer classes —
+        nothing is changed and the ref says why. A record with no writer class
+        is an internal path (reprocess, upgrade replay) and keeps today's update.
+
+        The reverse is allowed: an owner door writing a message id a non-owner
+        wrote first replaces the row outright, sender included. Otherwise a
+        pre-seeded 'human' row would turn the owner's imported assistant reply
+        into the owner's own words.
+        """
+        from ...features.provenance.writer_class import is_owner_writer, normalize_writer_class
+
         message_id = str(record.get("message_id") or record.get("record_id") or "")
         if not message_id:
             raise ValueError("ai_chat_messages upsert requires message_id")
+        writer_class = normalize_writer_class(record.get("writer_class"))
         existing = self._conn.execute(
-            "SELECT message_id FROM ai_chat_messages WHERE message_id=?",
+            "SELECT message_id, writer_class, content FROM ai_chat_messages WHERE message_id=?",
             (message_id,),
         ).fetchone()
         if existing is not None and self._attested_link(message_id):
@@ -375,19 +402,37 @@ class SQLiteCanonicalStore(CanonicalStore):
                 (sync_batch_id or record.get("sync_batch_id"), record.get("ingested_at"), message_id),
             )
             return CanonicalRef(record_id=message_id, created=False)
+        replace_sender = False
+        if existing is not None and writer_class is not None:
+            stored_writer = normalize_writer_class(existing[1])
+            if not is_owner_writer(writer_class) and is_owner_writer(stored_writer):
+                same = str(record.get("content") or "") == str(existing[2] or "")
+                if not same:
+                    logger.warning(
+                        "[PIPELINE:CANONICAL] refused a %s rewrite of owner-written ai_chat row %s",
+                        writer_class,
+                        message_id,
+                    )
+                return CanonicalRef(
+                    record_id=message_id,
+                    created=False,
+                    refused=REFUSED_OWNER_ROW_DUPLICATE if same else REFUSED_OWNER_ROW_REWRITE,
+                )
+            replace_sender = is_owner_writer(writer_class) and not is_owner_writer(stored_writer)
         self._conn.execute(
             """
             INSERT INTO ai_chat_messages (
                 message_id, conversation_id, sender_type, sender_id, event_at,
                 content, content_rendered, metadata_json, sequence, source_id,
-                source_record_id, ingested_at, sync_batch_id, content_hash
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                source_record_id, ingested_at, sync_batch_id, content_hash, writer_class
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(message_id) DO UPDATE SET
                 content=excluded.content,
                 metadata_json=excluded.metadata_json,
                 source_id=excluded.source_id,
                 sync_batch_id=excluded.sync_batch_id,
-                ingested_at=excluded.ingested_at
+                ingested_at=excluded.ingested_at,
+                writer_class=COALESCE(excluded.writer_class, ai_chat_messages.writer_class)
             """,
             (
                 message_id,
@@ -404,8 +449,24 @@ class SQLiteCanonicalStore(CanonicalStore):
                 record.get("ingested_at") or _utc_now(),
                 sync_batch_id or record.get("sync_batch_id"),
                 record.get("content_hash"),
+                writer_class,
             ),
         )
+        if replace_sender:
+            self._conn.execute(
+                """
+                UPDATE ai_chat_messages
+                SET conversation_id=?, sender_type=?, sender_id=?, event_at=?
+                WHERE message_id=?
+                """,
+                (
+                    record.get("conversation_id"),
+                    record.get("sender_type"),
+                    record.get("sender_id"),
+                    record.get("event_at") or record.get("ts"),
+                    message_id,
+                ),
+            )
         return CanonicalRef(record_id=message_id, created=existing is None)
 
     def _upsert_ai_chat_conversation(self, record: Dict[str, Any], *, sync_batch_id: Optional[str]) -> CanonicalRef:

@@ -167,6 +167,9 @@ class CanonicalizeResult:
     events_created: int = 0
     timeline_rows_written: int = 0
     errors: List[Dict[str, Any]] = field(default_factory=list)
+    #: message_id -> reason for writes the canonical store declined (a
+    #: non-owner writer over an owner-written ai_chat row).
+    refused: Dict[str, str] = field(default_factory=dict)
 
 
 def parser_vouches_for_self_flag(source_def: Any, parser_cls: Any) -> bool:
@@ -257,11 +260,17 @@ def canonicalize_normalized_batch(
     dataset_id: str,
     sync_batch_id: str,
     parser_cls: Any = None,
+    writer_class: Optional[str] = None,
 ) -> CanonicalizeResult:
     """Map normalized ingest records into canonical tables; return signal-ready dicts.
 
     ``parser_cls`` is the parser that produced ``normalized_records``; see
     :func:`parser_vouches_for_self_flag`. ``None`` carries no ``is_from_self``.
+
+    ``writer_class`` is the door that wrote the batch
+    (``features/provenance/writer_class.py``). It is recorded on
+    ``ai_chat_messages`` rows, where it caps the role gate; the other canonical
+    groups do not carry the column yet. None = an internal path with no door.
     """
     if not db_conn or not source_def or not normalized_records:
         return CanonicalizeResult()
@@ -412,8 +421,10 @@ def canonicalize_normalized_batch(
                 batch_size=1000,
                 sync_batch_id=sync_batch_id,
                 mapping_source_id=source_id,
+                writer_class=writer_class,
             )
             result.messages_created = int(canonical_result.get("messages_created", 0))
+            result.refused.update(canonical_result.get("refused") or {})
             result.conversations_created = int(canonical_result.get("conversations_created", 0))
             mapped = canonical_result.get("canonical_messages")
             if isinstance(mapped, list):
@@ -844,9 +855,13 @@ def load_canonical_records_for_signal(
         return [_prepare_signal_record(mapper(row)) for row in rows]
 
     if group == "ai_messages":
+        # writer_class is the role gate's cap: a reprocess/backfill that dropped
+        # it would re-derive a grantee's row as the owner's speech.
+        writer_col = _ai_chat_writer_class_column(db_conn)
         rows = db_conn.execute(
-            """
-            SELECT message_id, conversation_id, sender_type, content, event_at, source_id
+            f"""
+            SELECT message_id, conversation_id, sender_type, content, event_at, source_id,
+                   {writer_col}
             FROM ai_chat_messages
             WHERE source_id=?
             ORDER BY event_at DESC
@@ -863,14 +878,17 @@ def load_canonical_records_for_signal(
                     "content": row[3],
                     "event_at": row[4],
                     "source_id": row[5] or source_id,
+                    "writer_class": row[6],
                 }
             )
             for row in rows
         ]
 
+    writer_col = _ai_chat_writer_class_column(db_conn)
     rows = db_conn.execute(
-        """
-        SELECT message_id, conversation_id, sender_type, content, event_at, source_id
+        f"""
+        SELECT message_id, conversation_id, sender_type, content, event_at, source_id,
+               {writer_col}
         FROM ai_chat_messages
         WHERE source_id=?
         ORDER BY event_at DESC
@@ -887,10 +905,20 @@ def load_canonical_records_for_signal(
                 "content": row[3],
                 "event_at": row[4],
                 "source_id": row[5] or source_id,
+                "writer_class": row[6],
             }
         )
         for row in rows
     ]
+
+
+def _ai_chat_writer_class_column(db_conn) -> str:
+    """``writer_class``, or a NULL literal on a schema that predates the column."""
+    try:
+        columns = {row[1] for row in db_conn.execute("PRAGMA table_info(ai_chat_messages)").fetchall()}
+    except Exception:  # noqa: BLE001
+        columns = set()
+    return "writer_class" if "writer_class" in columns else "NULL AS writer_class"
 
 
 async def run_post_canonical_pipeline(
