@@ -309,6 +309,7 @@ async def _remap_records(
             normalized_records,
             dataset_id=dataset_id,
             sync_batch_id=sync_batch_id,
+            parser_cls=parser_cls,
         )
         created = max(
             canon_result.events_created,

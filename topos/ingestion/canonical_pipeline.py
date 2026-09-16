@@ -169,11 +169,30 @@ class CanonicalizeResult:
     errors: List[Dict[str, Any]] = field(default_factory=list)
 
 
+def parser_vouches_for_self_flag(source_def: Any, parser_cls: Any) -> bool:
+    """Whether ``parser_cls``'s ``is_from_self`` may reach conversation staging.
+
+    Only an engine-shipped parser, for a source the owner uploads or the node
+    syncs itself. A runtime parser's extract map can emit the key straight from
+    raw JSON, and an app-pushed source's raw payload is the app's say-so. An
+    unknown delivery (stub definitions) carries nothing.
+    """
+    from ..sources.definitions import DELIVERY_LOCAL_SYNC, DELIVERY_OWNER_UPLOAD
+    from .parsers import BUNDLED_PARSER_CLASSES
+
+    return (
+        isinstance(parser_cls, type)
+        and parser_cls in BUNDLED_PARSER_CLASSES
+        and getattr(source_def, "delivery", None) in (DELIVERY_OWNER_UPLOAD, DELIVERY_LOCAL_SYNC)
+    )
+
+
 def build_staging_record(
     normalized_payload: Dict[str, Any],
     *,
     dataset_id: str,
     source_id: str,
+    carry_self_flag: bool = False,
 ) -> Dict[str, Any]:
     staging: Dict[str, Any] = {
         "message_id": normalized_payload.get("message_id") or normalized_payload.get("id"),
@@ -193,6 +212,15 @@ def build_staging_record(
         staging["sender_id"] = normalized_payload.get("sender_id")
     if "_metadata" in normalized_payload:
         staging["_metadata"] = normalized_payload["_metadata"]
+    if carry_self_flag:
+        # Only a typed flag is the owner's: text such as "0" is truthy.
+        # owner_user_id is never copied: a raw payload can hold a caller's claim
+        # (run_signal_upload), and no lane reaching here attests the owner.
+        staging["is_from_self"] = any(
+            normalized_payload.get(key) is True
+            or (type(normalized_payload.get(key)) is int and normalized_payload.get(key) == 1)
+            for key in ("is_from_self", "from_self")
+        )
     return staging
 
 
@@ -228,8 +256,13 @@ def canonicalize_normalized_batch(
     *,
     dataset_id: str,
     sync_batch_id: str,
+    parser_cls: Any = None,
 ) -> CanonicalizeResult:
-    """Map normalized ingest records into canonical tables; return signal-ready dicts."""
+    """Map normalized ingest records into canonical tables; return signal-ready dicts.
+
+    ``parser_cls`` is the parser that produced ``normalized_records``; see
+    :func:`parser_vouches_for_self_flag`. ``None`` carries no ``is_from_self``.
+    """
     if not db_conn or not source_def or not normalized_records:
         return CanonicalizeResult()
 
@@ -255,8 +288,9 @@ def canonicalize_normalized_batch(
         else:
             continue
 
+    carry_self_flag = parser_vouches_for_self_flag(source_def, parser_cls)
     staging_records = [
-        build_staging_record(payload, dataset_id=dataset_id, source_id=source_id)
+        build_staging_record(payload, dataset_id=dataset_id, source_id=source_id, carry_self_flag=carry_self_flag)
         for payload in payloads
     ]
 
