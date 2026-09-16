@@ -14,12 +14,8 @@ pytestmark = pytest.mark.gap
 @pytest.mark.asyncio
 async def test_signal_graph_api(monkeypatch) -> None:
     from topos.app import app
-    from topos.auth import require_api_key
+    from topos.uds import UDSChannelApp
 
-    async def _fake_key():
-        return "test-key"
-
-    app.dependency_overrides[require_api_key] = _fake_key
     monkeypatch.setattr(
         "topos.api.signal.get_signal_service",
         lambda: type(
@@ -28,11 +24,10 @@ async def test_signal_graph_api(monkeypatch) -> None:
             {"list_graph": lambda self, **kw: {"nodes": [{"node_id": "n1"}], "edges": []}},
         )(),
     )
-    try:
-        transport = ASGITransport(app=app)
-        async with AsyncClient(transport=transport, base_url="http://test") as client:
-            resp = await client.get("/v1/signal/graph", headers={"Authorization": "Bearer test-key"})
-    finally:
-        app.dependency_overrides.pop(require_api_key, None)
+    # The signal router answers only the owner, so reach it the way the owner's
+    # app does, over the socket transport, instead of overriding its auth.
+    transport = ASGITransport(app=UDSChannelApp(app))
+    async with AsyncClient(transport=transport, base_url="http://test") as client:
+        resp = await client.get("/v1/signal/graph")
     assert resp.status_code == 200
     assert "nodes" in resp.json()
