@@ -20,6 +20,7 @@ from topos.principal import OWNER_APP, THIRD_PARTY, Principal, reset_principal, 
 from topos.storage.db.migrations.entity_blackhole_v1 import apply_entity_blackhole_v1_up
 from topos.storage.db.migrations.owner_only_records_v1 import apply_owner_only_records_v1_up
 from topos.storage.db.migrations.signal_objects import apply_signal_objects_up
+from topos.storage.db.migrations.wiki_entities_v1 import apply_wiki_entities_v1_up
 
 
 @contextmanager
@@ -42,8 +43,8 @@ def corpus(tmp_path):
         apply_wiki_lifecycle_v1_up(conn)
         conn.execute("CREATE TABLE engine_config(key TEXT PRIMARY KEY,value TEXT)")
         conn.execute("INSERT INTO engine_config VALUES('user_id','owner-1')")
-        conn.execute("CREATE TABLE entities(entity_id TEXT PRIMARY KEY,is_self INTEGER)")
-        conn.execute("INSERT INTO entities VALUES('owner-entity',1)")
+        apply_wiki_entities_v1_up(conn)
+        conn.execute("INSERT INTO entities(entity_id,entity_type,canonical_name,normalized_name,is_self) VALUES('owner-entity','person','Owner','owner',1)")
         conn.execute("CREATE TABLE conversation_messages(message_id TEXT, dataset_id TEXT, source_id TEXT, content TEXT, is_from_self INTEGER, deleted_at TEXT,owner_user_id TEXT)")
         conn.execute("CREATE TABLE ai_chat_messages(message_id TEXT,source_id TEXT,content TEXT,sender_type TEXT,deleted_at TEXT,conversation_id TEXT)")
         conn.execute("CREATE TABLE ai_chat_conversations(conversation_id TEXT,source_id TEXT,owner_user_id TEXT)")
@@ -336,7 +337,7 @@ def test_legacy_verified_flag_and_namespace_are_not_review_authority(corpus):
 
 def test_unknown_or_multiple_owner_entities_withholds(corpus):
     attest(corpus)
-    edit(corpus, "INSERT INTO entities VALUES('second-owner',1)")
+    edit(corpus, "INSERT INTO entities(entity_id,entity_type,canonical_name,normalized_name,is_self) VALUES('second-owner','person','Person','person',1)")
     assert decision(corpus).reason_code == "owner_subject_ambiguous"
 
 

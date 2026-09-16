@@ -30,7 +30,7 @@ def _or(values):
 
 def fact_projection_decision(*, policy: FactPolicyV2, evidence: QualifiedEvidence,
     projection: ReviewedFactProjection, rows: dict, binding: Binding,
-    request_as_of: int, now: int) -> FactDecision:
+    request_as_of: int, now: int, permitted_subjects=None) -> FactDecision:
     """Pure hard-rule membership over one correlated structural context.
 
     The serving adapter supplies fresh resolver/review-owned inputs and signed
@@ -41,7 +41,8 @@ def fact_projection_decision(*, policy: FactPolicyV2, evidence: QualifiedEvidenc
     """
     policy, evidence, projection, structure = prepare_fact_eligibility(policy=policy,
         evidence=evidence, projection=projection, rows=rows, binding=binding,
-        request_as_of=request_as_of, now=now)
+        request_as_of=request_as_of, now=now,
+        **({} if permitted_subjects is None else {"permitted_subjects": permitted_subjects}))
     stated_day = isinstance(policy, StatedDayFactPolicy)
     model, evaluator = (StatedDayFactDecision, EVALUATOR_STATED_DAY) if stated_day else (FactDecision, EVALUATOR)
     def result(verdict, reason, allows=(), denies=(), missing=()):

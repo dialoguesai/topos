@@ -289,9 +289,10 @@ class FactShadowBridge:
     def _capture(self, fact_id, request_as_of, now) -> _Capture:
         capsule = self.capsule
 
-        def callback(evidence, reviewed, rows):
+        def callback(evidence, reviewed, rows, permits):
             policy, evidence, projection, structure = prepare_fact_eligibility(policy=capsule.policy, evidence=evidence,
-                projection=reviewed, rows=rows, binding=self.binding, request_as_of=request_as_of, now=now)
+                projection=reviewed, rows=rows, binding=self.binding, request_as_of=request_as_of, now=now,
+                permitted_subjects=permits)
             surfaces, output = self._surfaces(evidence, projection, rows)
             revision = digest({"version": VERSION, "capsule": capsule.owner_approved_revision, "request_as_of": request_as_of,
                 "evidence": evidence.model_dump(), "output_review_revision": projection.output_review_revision,

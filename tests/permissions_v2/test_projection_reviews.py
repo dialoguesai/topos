@@ -127,7 +127,7 @@ def test_recipient_and_wrong_owner_cannot_inspect_or_mutate(corpus, service, ope
 def test_final_callback_holds_both_review_sqlite_writes_and_returns_minimal_output(corpus, service):
     request = prepare(corpus, service)
     with owner(): service.record(request, now=1200)
-    def deliver(evidence, projection, rows):
+    def deliver(evidence, projection, rows, permits):
         assert projection.candidate.evidence_review_revision == evidence.review_revision
         for path in (service.outputs.path, corpus[1].path):
             with sqlite3.connect(path, timeout=0) as other, pytest.raises(sqlite3.OperationalError, match="locked"):

@@ -18,6 +18,7 @@ from .canonical import PolicyError, canonical_bytes, digest
 from .contract import Decision, MessageDisclosure, Only, PolicyV2, StrictModel, VIEW, evaluate_predicate
 from .evidence import EvidenceResolver, EvidenceReviewStore, QualifiedEvidence, _key
 from .forwarding import ReleaseBody, sign_node_result
+from .identity import LEGACY_CONTRACT
 from .node_protocol import NodePolicyProtocol
 from .signing import AuthorityBinding, RequestContext, SignedEnvelope, verify_current_signature
 
@@ -181,4 +182,7 @@ class SourceMessageRelease:
                     self.protocol.node_signing_key)
                 send(result.model_dump(), output.model_dump())
 
-            self.resolver.with_qualified(fact_id, reviews=self.reviews, callback=release)
+            # The P2a message family predates identity binding and stays on the
+            # frozen legacy rule; a v3 grant cannot reach this adapter.
+            self.resolver.with_qualified(fact_id, reviews=self.reviews, callback=release,
+                                         contract=LEGACY_CONTRACT)

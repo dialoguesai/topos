@@ -48,7 +48,7 @@ def test_runtime_restart_rejects_lost_clock_instead_of_reinstalling(configured):
     runtime = load_runtime(path, active_database=canonical)
     runtime.close()
     with sqlite3.connect(canonical) as conn:
-        for name in TRIGGERS:
+        for (name,) in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'permissions_v2_%'").fetchall():
             conn.execute(f"DROP TRIGGER {name}")
         conn.execute(f"DROP TABLE {TABLE}")
     with pytest.raises(PolicyError, match="protection_clock_unavailable"):

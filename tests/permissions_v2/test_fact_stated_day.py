@@ -46,6 +46,7 @@ from topos.permissions_v2.signing import (AuthorityBinding, FactAuthorityBinding
 from topos.storage.db.migrations.entity_blackhole_v1 import apply_entity_blackhole_v1_up
 from topos.storage.db.migrations.owner_only_records_v1 import apply_owner_only_records_v1_up
 from topos.storage.db.migrations.signal_objects import apply_signal_objects_up
+from topos.storage.db.migrations.wiki_entities_v1 import apply_wiki_entities_v1_up
 from topos.storage.db.migrations.wiki_lifecycle_v1 import apply_wiki_lifecycle_v1_up
 
 STATED_DAY = {"semantics": "stated_day_v1", "precision": "day", "timezone_basis": "unrecorded_any_earth_offset",
@@ -349,8 +350,8 @@ def build_stated_day_golden(directory):
         apply_signal_objects_up(conn); apply_owner_only_records_v1_up(conn); apply_entity_blackhole_v1_up(conn); apply_wiki_lifecycle_v1_up(conn)
         conn.execute("CREATE TABLE engine_config(key TEXT PRIMARY KEY,value TEXT)")
         conn.execute("INSERT INTO engine_config VALUES('user_id','owner-1')")
-        conn.execute("CREATE TABLE entities(entity_id TEXT PRIMARY KEY,is_self INTEGER)")
-        conn.execute("INSERT INTO entities VALUES('owner-entity',1)")
+        apply_wiki_entities_v1_up(conn)
+        conn.execute("INSERT INTO entities(entity_id,entity_type,canonical_name,normalized_name,is_self) VALUES('owner-entity','person','Owner','owner',1)")
         conn.execute("CREATE TABLE conversation_messages(message_id TEXT, dataset_id TEXT, source_id TEXT, content TEXT, is_from_self INTEGER, deleted_at TEXT, owner_user_id TEXT, event_at TEXT)")
         conn.execute("CREATE TABLE ai_chat_messages(message_id TEXT,source_id TEXT,content TEXT,sender_type TEXT,deleted_at TEXT,conversation_id TEXT, event_at TEXT)")
         conn.execute("CREATE TABLE ai_chat_conversations(conversation_id TEXT,source_id TEXT,owner_user_id TEXT)")

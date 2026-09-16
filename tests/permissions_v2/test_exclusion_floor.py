@@ -9,8 +9,9 @@ from tests.permissions_v2.test_evidence import corpus,owner,attest,decision,edit
 from tests.permissions_v2.test_fact_release import fact_setup,timed,projection_service,issue,dispatch
 from tests.permissions_v2.test_release import release_setup,issue as source_issue,dispatch as source_dispatch
 from topos.permissions_v2.canonical import PolicyError,digest
-from topos.permissions_v2.protection_clock import (EVENTS,TABLE,TRIGGERS,V2_TRIGGERS,LEGACY_TRIGGERS,clock_state,
-    current_protection_revision,ensure_protection_clock,upgrade_protection_clock_v2,upgrade_protection_clock_v3)
+from topos.permissions_v2.protection_clock import (EVENTS,LEDGER,REGISTRY,TABLE,TRIGGERS,V2_TRIGGERS,V3_TRIGGERS,
+    LEGACY_TRIGGERS,clock_state,current_protection_revision,ensure_protection_clock,upgrade_protection_clock_v2,
+    upgrade_protection_clock_v3,upgrade_protection_clock_v4)
 from topos.features.lifecycle.exclusions import ExclusionStore
 
 
@@ -104,8 +105,11 @@ def make_legacy(corpus):
     """Rebuild the exact former v1 clock: no version column, six triggers, no event log."""
     with sqlite3.connect(corpus[0].path) as db:
         old=clock_state(db)
-        for name in TRIGGERS:db.execute(f"DROP TRIGGER {name}")
+        for (name,) in db.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'permissions_v2_%'").fetchall():
+            db.execute(f"DROP TRIGGER {name}")
         db.execute(f"DROP TABLE {EVENTS}")
+        # v1 predates the identity ledger and registry entirely.
+        db.execute(f"DROP TABLE {LEDGER}");db.execute(f"DROP TABLE {REGISTRY}")
         db.execute(f"CREATE TABLE {TABLE}_v1 (singleton INTEGER PRIMARY KEY CHECK(singleton=1), clock_id TEXT NOT NULL, generation INTEGER NOT NULL)")
         db.execute(f"INSERT INTO {TABLE}_v1 SELECT singleton,clock_id,generation FROM {TABLE}")
         db.execute(f"DROP TABLE {TABLE}");db.execute(f"ALTER TABLE {TABLE}_v1 RENAME TO {TABLE}")
@@ -115,7 +119,8 @@ def make_legacy(corpus):
 
 def upgrade_to_current(path,old):
     upgrade_protection_clock_v2(path,owner_id="owner-1",expected_clock_id=old[0],expected_generation=old[1])
-    return upgrade_protection_clock_v3(path,owner_id="owner-1",expected_clock_id=old[0],expected_generation=old[1]+1)
+    upgrade_protection_clock_v3(path,owner_id="owner-1",expected_clock_id=old[0],expected_generation=old[1]+1)
+    return upgrade_protection_clock_v4(path,owner_id="owner-1",expected_clock_id=old[0],expected_generation=old[1]+2)
 
 
 def test_upgrade_is_explicit_monotone_and_never_repairs_partial_clock(corpus):
@@ -137,6 +142,10 @@ def test_upgrade_v3_is_explicit_monotone_logs_events_and_never_repairs_partial_c
     result=upgrade_protection_clock_v3(corpus[0].path,owner_id="owner-1",expected_clock_id=old[0],expected_generation=old[1]+1)
     assert result=={"contract_version":3,"clock_id":old[0],"generation":old[1]+2,"already_current":False}
     assert upgrade_protection_clock_v3(corpus[0].path,owner_id="owner-1",expected_clock_id=old[0],expected_generation=old[1]+1)["already_current"]
+    # A v3 clock is not the current contract, so the startup check still refuses it.
+    with pytest.raises(PolicyError):ensure_protection_clock(corpus[0].path,owner_id="owner-1")
+    assert upgrade_protection_clock_v4(corpus[0].path,owner_id="owner-1",expected_clock_id=old[0],
+        expected_generation=old[1]+2)["generation"]==old[1]+3
     ensure_protection_clock(corpus[0].path,owner_id="owner-1")
     with sqlite3.connect(corpus[0].path) as db:
         assert db.execute(f"SELECT count(*) FROM {EVENTS}").fetchone()[0]==0
@@ -144,8 +153,8 @@ def test_upgrade_v3_is_explicit_monotone_logs_events_and_never_repairs_partial_c
         RecordProtectionStore(db).protect(canonical_table="conversation_messages",record_id="message-1")
         RecordProtectionStore(db).unprotect(canonical_table="conversation_messages",record_id="message-1")
         events=db.execute(f"SELECT generation,source,artifact_key FROM {EVENTS} ORDER BY sequence").fetchall()
-        assert events==[(old[1]+3,"owner_only_records","conversation_messages|message-1"),(old[1]+4,"owner_only_records","conversation_messages|message-1")]
-        assert clock_state(db)==(old[0],old[1]+4)
+        assert events==[(old[1]+4,"owner_only_records","conversation_messages|message-1"),(old[1]+5,"owner_only_records","conversation_messages|message-1")]
+        assert clock_state(db)==(old[0],old[1]+5)
         db.execute("DROP TRIGGER permissions_v2_owner_only_records_delete")
     with pytest.raises(PolicyError):upgrade_protection_clock_v3(corpus[0].path,owner_id="owner-1",expected_clock_id=old[0],expected_generation=old[1]+1)
     with pytest.raises(PolicyError):ensure_protection_clock(corpus[0].path,owner_id="owner-1")
@@ -194,7 +203,11 @@ def test_upgrade_invalidates_initialized_v1_ledger_and_reviews_then_fresh_state_
         # v1 reviews bound the node-wide revision; the current closure binding
         # did not exist yet and its event log is absent from a v1 database.
         stack.enter_context(patch.object(evidence,"closure_protection_revision",
-            lambda conn,*,owner_id,records,fact_prefixes:legacy_revision(conn,owner_id=owner_id)))
+            lambda conn,*,owner_id,records,fact_prefixes,identity=None:legacy_revision(conn,owner_id=owner_id)))
+        # A v1 database has no restriction registry and no identity state at all,
+        # so fixture construction uses the sole-self rule that shipped with it.
+        stack.enter_context(patch.object(evidence,"restriction_subjects",evidence.legacy_owner_subjects))
+        stack.enter_context(patch.object(evidence,"closure_identity",lambda conn,*,subjects,fact_ids:None))
         setup=fact_setup.__wrapped__(timed,projection_service,tmp_path)
         envelope,payload=issue(setup)
     upgrade_to_current(timed[0].path,old)

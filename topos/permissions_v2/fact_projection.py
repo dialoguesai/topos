@@ -14,6 +14,7 @@ from pydantic import Field, field_validator, model_validator
 from .canonical import MAX_INTEGER, PolicyError, digest
 from .contract import Hash, Identifier, Number, StrictModel
 from .evidence import EvidenceSnapshot, Qualification, _json, _key, _row_revision
+from .identity import LEGACY_CONTRACT, SELF
 
 from .fact_contract import VIEW, PROJECTION_VERSION, FactScalarDisclosure
 
@@ -96,11 +97,18 @@ def _current(qualification: Qualification):
     return evidence
 
 
-def prepare_fact_projection(*, qualification: Qualification, fact_row: dict) -> FactProjectionCandidate:
+def prepare_fact_projection(*, qualification: Qualification, fact_row: dict,
+                            permitted_subjects=frozenset({SELF})) -> FactProjectionCandidate:
     """Create a PRIVATE review candidate from the exact existing fact scalar.
 
     This validates consistency of supplied values, not authenticity or current
     database state. Future owner preview must call it under resolver ownership.
+
+    `permitted_subjects` is the resolver's permit set for the qualifying
+    contract, derived in the same read transaction and never stored in the
+    candidate. It defaults to the literal subject alone, so a caller that omits
+    it can only reproduce the pre-binding behaviour. Under the legacy contract
+    the literal rule is frozen and this argument is ignored entirely.
     """
     evidence = _current(qualification)
     snapshot = evidence.snapshot
@@ -110,7 +118,11 @@ def prepare_fact_projection(*, qualification: Qualification, fact_row: dict) -> 
         or _row_revision(fact_row, table="signal_objects") != snapshot.candidate_revision):
         raise PolicyError("projection_evidence_binding")
     payload = _json(fact_row.get("payload_json"), dict)
-    if (payload.get("disclosure") != "scoped" or payload.get("subject_entity_id") != "self"
+    subject = payload.get("subject_entity_id")
+    # Frozen for every pre-binding capability; the attested contract widens the
+    # accepted subject but never the emitted one, which stays the literal below.
+    allowed = {SELF} if evidence.subject_contract == LEGACY_CONTRACT else set(permitted_subjects)
+    if (payload.get("disclosure") != "scoped" or type(subject) is not str or subject not in allowed
         or payload.get("asserted_by") != "owner" or fact_row.get("actor_role") not in (None,"authored")
         or payload.get("actor_role", "authored") != "authored"):
         raise PolicyError("projection_source_restricted")
@@ -121,14 +133,16 @@ def prepare_fact_projection(*, qualification: Qualification, fact_row: dict) -> 
 
 
 def bind_output_review(*, qualification: Qualification, fact_row: dict,
-                       review: FactProjectionReview | None, now: int) -> ReviewedFactProjection:
+                       review: FactProjectionReview | None, now: int,
+                       permitted_subjects=frozenset({SELF})) -> ReviewedFactProjection:
     """Return a non-executing candidate for later policy evaluation, never permit.
 
     The caller must load the current review from an authenticated owner store.
     A supplied or replayed JSON review cannot establish that trusted provenance.
     No evidence restriction can be overridden by output classification.
     """
-    current = prepare_fact_projection(qualification=qualification, fact_row=fact_row)
+    current = prepare_fact_projection(qualification=qualification, fact_row=fact_row,
+                                      permitted_subjects=permitted_subjects)
     if review is None or not isinstance(review, FactProjectionReview):
         raise PolicyError("output_review_required")
     review = FactProjectionReview.parse(review.model_dump())

@@ -52,7 +52,7 @@ class FactProjectionRelease:
                 self.protocol._sync_protection(db)
             lease = ledger.admit(signed.model_dump(), request=request, payload=intent.model_dump(), now=self.clock())
 
-            def release(evidence, reviewed, rows):
+            def release(evidence, reviewed, rows, permits):
                 with ledger._transaction() as db:
                     self.protocol._sync_protection(db)
                     authority, policy = ledger._authority(db, signed.grant_id, self.clock())
@@ -64,7 +64,8 @@ class FactProjectionRelease:
                 # Extract only after full verified authority equality above.
                 binding = Binding.parse({field: getattr(authority, field) for field in Binding.model_fields})
                 decision = fact_projection_decision(policy=policy, evidence=evidence, projection=reviewed,
-                    rows=rows, binding=binding, request_as_of=signed.issued_at, now=self.clock())
+                    rows=rows, binding=binding, request_as_of=signed.issued_at, now=self.clock(),
+                    permitted_subjects=permits)
                 if decision.verdict != "permit":
                     ledger.checkpoint_decision(lease, decision.model_dump(), candidate_revision=decision.candidate_revision,
                         output=None, now=self.clock())

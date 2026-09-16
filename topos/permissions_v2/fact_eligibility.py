@@ -18,6 +18,7 @@ from .contract import Binding, Number, Only, StrictModel
 from .evidence import (MAX_DEPTH, MAX_NODES, EvidenceIdentity, Qualification,
     QualifiedEvidence, _json, _key, _row_revision)
 from .fact_projection import ReviewedFactProjection, _SENSITIVITY, _current, prepare_fact_projection
+from .identity import SELF, SUBJECT_CONTRACT_BY_CAPABILITY
 from .fact_contract import (FACT_VALIDITY_STATED_DAY, PROJECTION_VERSION, FactPolicyV2,
     StatedDayFactPolicy, fact_validity_semantics)
 
@@ -94,7 +95,7 @@ def _reference(raw, binding):
         "dataset_id": raw.get("dataset_id")})
 
 
-def _check_bundle(evidence, projection, rows, binding):
+def _check_bundle(evidence, projection, rows, binding, permitted_subjects=frozenset({SELF})):
     evidence = QualifiedEvidence.parse(evidence.model_dump())
     projection = ReviewedFactProjection.parse(projection.model_dump())
     qualification = Qualification(verdict="qualified", reason_code="trusted_adapter_input", evidence=evidence)
@@ -139,7 +140,11 @@ def _check_bundle(evidence, projection, rows, binding):
     visit(_key(roots[0].identity), 0)
     if visited != set(versions):
         raise PolicyError("fact_policy_lineage")
-    candidate = prepare_fact_projection(qualification=qualification, fact_row=rows[_key(roots[0].identity)])
+    # Re-derived here so a reviewed projection cannot be paired with different
+    # rows. `permitted_subjects` must be the set the resolver qualified under,
+    # or this re-derivation legitimately refuses an attested subject.
+    candidate = prepare_fact_projection(qualification=qualification, fact_row=rows[_key(roots[0].identity)],
+                                        permitted_subjects=permitted_subjects)
     if candidate != projection.candidate or candidate.projection_version != PROJECTION_VERSION:
         raise PolicyError("fact_policy_projection_stale")
     if _SENSITIVITY[projection.classification.sensitivity] < max(_SENSITIVITY[item.sensitivity] for item in evidence.classifications):
@@ -180,7 +185,7 @@ def _or(values):
 
 def prepare_fact_eligibility(*, policy: FactPolicyV2, evidence: QualifiedEvidence,
     projection: ReviewedFactProjection, rows: dict, binding: Binding,
-    request_as_of: int, now: int):
+    request_as_of: int, now: int, permitted_subjects=frozenset({SELF})):
     """Return parsed input copies and frozen structure, without membership.
 
     False/unknown temporal masks are retained, not promoted or flattened. In
@@ -201,7 +206,13 @@ def prepare_fact_eligibility(*, policy: FactPolicyV2, evidence: QualifiedEvidenc
     clock = _EvaluationTime.parse({"request_as_of": request_as_of, "now": now})
     if policy.binding != binding:
         raise PolicyError("fact_policy_binding")
-    evidence, projection, versions, descendants = _check_bundle(evidence, projection, rows, binding)
+    # The policy's own capability fixes which owner-identity rule applies. If the
+    # evidence was qualified under a different one, the two were paired after the
+    # fact and neither the permit set nor the review can be trusted for this grant.
+    if SUBJECT_CONTRACT_BY_CAPABILITY.get(policy.versions.capability) != evidence.subject_contract:
+        raise PolicyError("subject_contract_mismatch")
+    evidence, projection, versions, descendants = _check_bundle(evidence, projection, rows, binding,
+                                                                permitted_subjects)
     revision = digest({"snapshot": evidence.snapshot.model_dump(), "review_revision": evidence.review_revision,
         "output_review_revision": projection.output_review_revision, "projection": projection.candidate.output.model_dump(),
         "projection_version": PROJECTION_VERSION, "request_as_of": request_as_of, "event_time_semantics": "canonical_event_time_v1"})

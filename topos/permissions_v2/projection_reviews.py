@@ -15,6 +15,7 @@ from .canonical import PolicyError, canonical_bytes, digest
 from .contract import Hash, Identifier, StrictModel
 from .evidence import EvidenceResolver, EvidenceReviewStore, Qualification, _key, _owner
 from .evidence_reviews import EvidenceLookup
+from .identity import LEGACY_CONTRACT, permit_subjects
 from .fact_projection import (FactProjectionCandidate, FactProjectionReview, OutputClassification,
     bind_output_review, prepare_fact_projection)
 from topos.storage.db.write_gate import with_db_write
@@ -178,22 +179,33 @@ class ProjectionReviewService:
             with self.evidence_reviews._db() as evidence_db, self.outputs._db() as output_db:
                 yield conn, floor, evidence_db, output_db
 
-    def _candidate(self, conn, floor, fact_id, evidence_db):
-        evidence, rows = self.resolver._qualified_bundle(conn, floor, fact_id, self.evidence_reviews, evidence_db)
+    def _candidate(self, conn, floor, fact_id, evidence_db, *, contract=LEGACY_CONTRACT):
+        """One read transaction produces the qualification and its permit set together.
+
+        The permit set is derived here, beside the evidence, so the projection
+        cannot be bound to a subject rule other than the one that qualified it.
+        It is passed by value and never stored in the candidate, which is why no
+        entity id reaches a review, a receipt or a recipient.
+        """
+        evidence, rows = self.resolver._qualified_bundle(conn, floor, fact_id, self.evidence_reviews, evidence_db,
+                                                         contract=contract)
         qualification = Qualification(verdict="qualified", reason_code="owner_reviewed_current_evidence", evidence=evidence)
         root = next(ref for ref in evidence.snapshot.artifacts if ref.identity.record_id == fact_id)
         row = rows[_key(root.identity)]
-        candidate = prepare_fact_projection(qualification=qualification, fact_row=row)
-        return qualification, row, candidate, rows
+        permits = permit_subjects(conn, contract=contract)
+        candidate = prepare_fact_projection(qualification=qualification, fact_row=row, permitted_subjects=permits)
+        return qualification, row, candidate, rows, permits
 
-    def _state(self, conn, floor, fact_id, evidence_db, output_db, *, now):
+    def _state(self, conn, floor, fact_id, evidence_db, output_db, *, now, contract=LEGACY_CONTRACT):
         current = self.outputs._current_in(output_db, fact_id)
         candidate, candidate_reason, minimum = None, None, None
         try:
-            qualification, row, candidate, _rows = self._candidate(conn, floor, fact_id, evidence_db)
+            qualification, row, candidate, _rows, permits = self._candidate(conn, floor, fact_id, evidence_db,
+                                                                             contract=contract)
             order = {"none": 0, "personal": 1, "special": 2}
             minimum = max((item.sensitivity for item in qualification.evidence.classifications), key=order.__getitem__)
-            bind_output_review(qualification=qualification, fact_row=row, review=current, now=now)
+            bind_output_review(qualification=qualification, fact_row=row, review=current, now=now,
+                               permitted_subjects=permits)
             status = ProjectionQualification(verdict="reviewed", reason_code="owner_reviewed_current_projection")
         except PolicyError as exc:
             if candidate is None:
@@ -204,27 +216,29 @@ class ProjectionReviewService:
             qualification=status, authorization_status="not_evaluated", execution_enabled=False)
         return state, candidate, candidate_reason, minimum
 
-    def preview(self, request: EvidenceLookup, *, now: int) -> OwnerProjectionPreview:
+    def preview(self, request: EvidenceLookup, *, now: int, contract: str = LEGACY_CONTRACT) -> OwnerProjectionPreview:
         _owner(self.resolver.binding)
         request = EvidenceLookup.parse(request.model_dump())
         with self._transaction() as (conn, floor, evidence_db, output_db):
-            state, candidate, reason, minimum = self._state(conn, floor, request.fact_id, evidence_db, output_db, now=now)
+            state, candidate, reason, minimum = self._state(conn, floor, request.fact_id, evidence_db, output_db,
+                                                             now=now, contract=contract)
             return OwnerProjectionPreview(**(state.model_dump() | {"version":"topos-owner-projection-preview/v1"}),
                 candidate=candidate, candidate_hash=digest(candidate.model_dump()) if candidate else None,
                 candidate_reason_code=reason, minimum_output_sensitivity=minimum)
 
-    def read(self, request: EvidenceLookup, *, now: int) -> ProjectionReviewState:
+    def read(self, request: EvidenceLookup, *, now: int, contract: str = LEGACY_CONTRACT) -> ProjectionReviewState:
         _owner(self.resolver.binding)
         request = EvidenceLookup.parse(request.model_dump())
         with self._transaction() as (conn, floor, evidence_db, output_db):
-            return self._state(conn, floor, request.fact_id, evidence_db, output_db, now=now)[0]
+            return self._state(conn, floor, request.fact_id, evidence_db, output_db, now=now, contract=contract)[0]
 
-    def record(self, request: RecordProjectionReview, *, now: int) -> ProjectionReviewMutation:
+    def record(self, request: RecordProjectionReview, *, now: int, contract: str = LEGACY_CONTRACT) -> ProjectionReviewMutation:
         _owner(self.resolver.binding)
         request = RecordProjectionReview.parse(request.model_dump())
         fact_id = request.expected_candidate.snapshot.fact_id
         with self._transaction() as (conn, floor, evidence_db, output_db):
-            qualification, row, candidate, _rows = self._candidate(conn, floor, fact_id, evidence_db)
+            qualification, row, candidate, _rows, permits = self._candidate(conn, floor, fact_id, evidence_db,
+                                                                             contract=contract)
             if candidate != request.expected_candidate:
                 raise PolicyError("output_review_stale")
             current = self.outputs._current_in(output_db, fact_id)
@@ -241,15 +255,16 @@ class ProjectionReviewService:
                 review = old
             elif (digest(current.model_dump()) if current else None) != request.expected_current_review_revision:
                 raise PolicyError("output_review_conflict")
-            bind_output_review(qualification=qualification, fact_row=row, review=review, now=now)
+            bind_output_review(qualification=qualification, fact_row=row, review=review, now=now,
+                               permitted_subjects=permits)
             if not existing:
                 output_db.execute("UPDATE fact_reviews SET active=0 WHERE fact_id=?", (fact_id,))
                 output_db.execute("INSERT INTO fact_reviews VALUES(?,?,?,1)", (review.review_id, fact_id, canonical_bytes(review.model_dump()).decode("ascii")))
-            state = self._state(conn, floor, fact_id, evidence_db, output_db, now=now)[0]
+            state = self._state(conn, floor, fact_id, evidence_db, output_db, now=now, contract=contract)[0]
             return ProjectionReviewMutation(version="topos-owner-projection-mutation/v1", action="recorded", review_id=review.review_id,
                 review_revision=digest(review.model_dump()), state=state, authorization_status="not_evaluated", execution_enabled=False)
 
-    def revoke(self, request: RevokeProjectionReview, *, now: int) -> ProjectionReviewMutation:
+    def revoke(self, request: RevokeProjectionReview, *, now: int, contract: str = LEGACY_CONTRACT) -> ProjectionReviewMutation:
         _owner(self.resolver.binding)
         request = RevokeProjectionReview.parse(request.model_dump())
         with self._transaction() as (conn, floor, evidence_db, output_db):
@@ -263,18 +278,20 @@ class ProjectionReviewService:
             if current is not None and current.review_id != review.review_id:
                 raise PolicyError("output_review_conflict")
             output_db.execute("UPDATE fact_reviews SET active=0 WHERE review_id=?", (review.review_id,))
-            state = self._state(conn, floor, request.fact_id, evidence_db, output_db, now=now)[0]
+            state = self._state(conn, floor, request.fact_id, evidence_db, output_db, now=now, contract=contract)[0]
             return ProjectionReviewMutation(version="topos-owner-projection-mutation/v1", action="revoked", review_id=review.review_id,
                 review_revision=digest(review.model_dump()), state=state, authorization_status="not_evaluated", execution_enabled=False)
 
-    def with_reviewed(self, fact_id: str, *, now: int, callback):
+    def with_reviewed(self, fact_id: str, *, now: int, callback, contract: str = LEGACY_CONTRACT):
         """Only a trusted node release adapter may supply this in-process callback.
 
         Holds canonical, evidence-review and output-review gates through callback
         completion. The callback still must perform signed policy/final-send checks.
         """
         with self._transaction() as (conn, floor, evidence_db, output_db):
-            qualification, row, candidate, rows = self._candidate(conn, floor, fact_id, evidence_db)
+            qualification, row, candidate, rows, permits = self._candidate(conn, floor, fact_id, evidence_db,
+                                                                            contract=contract)
             current = self.outputs._current_in(output_db, fact_id)
-            reviewed = bind_output_review(qualification=qualification, fact_row=row, review=current, now=now)
-            return callback(qualification.evidence, reviewed, rows)
+            reviewed = bind_output_review(qualification=qualification, fact_row=row, review=current, now=now,
+                                          permitted_subjects=permits)
+            return callback(qualification.evidence, reviewed, rows, permits)

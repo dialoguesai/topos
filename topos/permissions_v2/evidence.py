@@ -25,6 +25,8 @@ from topos.storage.db.write_gate import with_db_write
 
 from .canonical import MAX_INTEGER, PolicyError, canonical_bytes, digest
 from .contract import Hash, Identifier, Number, StrictModel
+from .identity import (ATTESTED_CONTRACT, LEGACY_CONTRACT, SUBJECT_CONTRACTS, closure_identity,
+    legacy_owner_subjects, permit_subjects, rekeyed_facts, restriction_subjects)  # noqa: F401 (legacy_owner_subjects: patched by tests)
 from .protection_clock import clock_state, closure_protection_revision, current_protection_revision
 
 MAX_NODES = 128
@@ -114,12 +116,19 @@ class OwnerEvidenceReview(StrictModel):
 
 
 class QualifiedEvidence(StrictModel):
-    """Private processing input. Does not permit any policy or output form."""
+    """Private processing input. Does not permit any policy or output form.
+
+    `subject_contract` records which owner-identity rule this evidence was
+    qualified under, so a policy can never be evaluated against evidence
+    qualified under a different one. It is set by the resolver from the signed
+    capability, never by a caller.
+    """
     family: Literal["owner_stated_fact/v1"]
     snapshot: EvidenceSnapshot
     review_id: Identifier
     review_revision: Hash
     classifications: list[ReviewedClassification]
+    subject_contract: Literal["legacy_single_self_v1", "owner_attested_v1"]
     execution_enabled: Literal[False]
 
 
@@ -532,7 +541,7 @@ class EvidenceResolver:
             row = self._load(conn, identity)
             self._validate_native_origin(conn, identity, row)
             if enforce_floor and identity.table == "signal_objects" and fact_excluded(
-                _json(row.get("payload_json"), dict), tombstones["fact"], self._owner_subjects(conn)):
+                _json(row.get("payload_json"), dict), tombstones["fact"], restriction_subjects(conn)):
                 raise PolicyError("intelligence_excluded")
             rows[key] = row
             version = EvidenceRevision(identity=identity, revision=_row_revision(row, table=identity.table))
@@ -560,7 +569,9 @@ class EvidenceResolver:
         # remain node-wide until coverage exists. `floor` stays the node-wide
         # revision for signed authority and is not bound here.
         scoped = closure_protection_revision(conn, owner_id=self.binding.owner_id,
-            records=self._closure_records(artifacts, leaves), fact_prefixes=self._fact_prefixes(conn, rows, artifacts))
+            records=self._closure_records(artifacts, leaves), fact_prefixes=self._fact_prefixes(conn, rows, artifacts),
+            identity=closure_identity(conn, subjects=self._closure_subjects(rows, artifacts),
+                fact_ids={version.identity.record_id for version in artifacts.values()}))
         snapshot = EvidenceSnapshot(binding=self.binding, canonical_file_revision=self._file_revision(), fact_id=fact_id,
             candidate_revision=artifacts[_key(root)].revision,
             lineage_revision=digest({"artifacts": [artifacts[k].model_dump() for k in sorted(artifacts)],
@@ -573,11 +584,16 @@ class EvidenceResolver:
         return {(version.identity.table, version.identity.record_id) for version in list(artifacts.values()) + list(leaves.values())}
 
     def _fact_prefixes(self, conn, rows, artifacts):
+        """Tombstone prefixes this closure could match, over every owner spelling.
+
+        This is a restriction, so it uses the widest set the node knows and never
+        falls back: the old fallback to `{"self"}` silently dropped every
+        entity-keyed owner tombstone on exactly the multi-self nodes that needed
+        it most.
+        """
         from topos.features.facts.store import normalize_predicate
-        try:
-            owners = self._owner_subjects(conn)
-        except PolicyError:
-            owners = {"self"}
+
+        owners = restriction_subjects(conn)
         prefixes = set()
         for key in artifacts:
             payload = _json(rows[key].get("payload_json"), dict)
@@ -589,20 +605,21 @@ class EvidenceResolver:
                 prefixes.add((candidate + ":" + normalize_predicate(predicate)).lower())
         return prefixes
 
+    def _closure_subjects(self, rows, artifacts):
+        """Entity ids this closure's facts name as subject or object."""
+        subjects = set()
+        for key in artifacts:
+            payload = _json(rows[key].get("payload_json"), dict)
+            for field in ("subject_entity_id", "object_entity_id"):
+                value = payload.get(field)
+                if type(value) is str and value:
+                    subjects.add(value)
+        return subjects
+
     def inspect_for_review(self, fact_id: str) -> EvidenceSnapshot:
         _owner(self.binding)
         with self._read() as (conn, floor):
             return self._snapshot(conn, floor, fact_id)[0]
-
-    @staticmethod
-    def _owner_subjects(conn) -> set[str]:
-        try:
-            rows = conn.execute("SELECT entity_id FROM entities WHERE is_self=1").fetchmany(2)
-        except sqlite3.OperationalError:
-            raise PolicyError("owner_subject_unknown") from None
-        if len(rows) != 1 or not isinstance(rows[0][0], str) or not rows[0][0]:
-            raise PolicyError("owner_subject_ambiguous")
-        return {"self", rows[0][0]}
 
     @staticmethod
     def _known_copies(conn, identity: EvidenceIdentity, row: dict) -> bool:
@@ -617,8 +634,10 @@ class EvidenceResolver:
             count += found
         return count > 1
 
-    def _eligible(self, conn, snapshot: EvidenceSnapshot, rows: dict, review: OwnerEvidenceReview):
-        owners = self._owner_subjects(conn)
+    def _eligible(self, conn, snapshot: EvidenceSnapshot, rows: dict, review: OwnerEvidenceReview, *, contract: str):
+        """Two sets, never one: permits come from `contract`, vetoes from every owner spelling."""
+        permits = permit_subjects(conn, contract=contract)
+        restrictions = restriction_subjects(conn)
         from .exclusion_floor import exclusions, fact_excluded
         tombstones = exclusions(conn)
         expected = {_key(ref.identity): ref for ref in snapshot.artifacts + snapshot.leaves}
@@ -636,7 +655,7 @@ class EvidenceResolver:
             if item.evidence != reference:
                 raise PolicyError("review_stale")
             if (not item.domains or len(item.domains) != len(set(item.domains)) or item.sensitivity == "unknown"
-                or not item.subject_entity_ids or not set(item.subject_entity_ids) <= owners
+                or not item.subject_entity_ids or not self._labelled_subjects(item, contract, permits)
                 or len(item.subject_entity_ids) != len(set(item.subject_entity_ids))):
                 raise PolicyError("classification_unknown_or_mixed")
             if item.authorship != "owner_authored" or item.speech != "direct_self_statement":
@@ -654,15 +673,27 @@ class EvidenceResolver:
                 raise PolicyError("owner_only")
             if identity.table == "signal_objects":
                 payload = _json(row.get("payload_json"), dict)
-                if fact_excluded(payload, tombstones["fact"], owners):
+                if fact_excluded(payload, tombstones["fact"], restrictions):
                     raise PolicyError("intelligence_excluded")
                 if payload.get("disclosure") != "scoped":
                     raise PolicyError("owner_only")
-                if (not isinstance(payload.get("subject_entity_id"), str) or payload["subject_entity_id"] not in owners
+                subject = payload.get("subject_entity_id")
+                if isinstance(subject, str) and subject not in permits and subject in restrictions:
+                    # A known owner spelling the owner has not attested, or whose
+                    # identity moved since they did. Named separately so the owner
+                    # can see why, while the recipient still sees one refusal.
+                    raise PolicyError("owner_subject_unattested")
+                if (not isinstance(subject, str) or subject not in permits
                     or payload.get("asserted_by") != "owner"
                     or ("actor_role" in payload and payload["actor_role"] != "authored")
-                    or payload.get("object_entity_id") not in (None, "", *owners)):
+                    or payload.get("object_entity_id") not in (None, "", *permits)):
                     raise PolicyError("not_owner_self_statement")
+                if contract == ATTESTED_CONTRACT and rekeyed_facts(conn, [identity.record_id]):
+                    # This fact's subject was rewritten in place, which is what a
+                    # merge does to the absorbed entity's facts. Another person's
+                    # claim can arrive this way carrying the owner's own messages
+                    # as evidence, so it is never releasable under this contract.
+                    raise PolicyError("fact_subject_rewritten")
                 # Neither representation may mask an inferred/unknown one.
                 # Native FactStore deliberately has no altitude; only that
                 # writer's absence can be completed by this exact owner review
@@ -680,7 +711,7 @@ class EvidenceResolver:
                     subject = value.get("subject_entity_id")
                     if any(not isinstance(value.get(field), str) for field in ("subject_entity_id", "predicate", "object_value")):
                         raise PolicyError("evidence_malformed")
-                    subject = "@owner" if subject in owners else subject
+                    subject = "@owner" if subject in restrictions else subject
                     return tuple(" ".join(str(item or "").lower().split()) for item in
                                  (subject, value.get("predicate"), value.get("object_value")))
                 claim = normalized_claim(payload)
@@ -708,26 +739,50 @@ class EvidenceResolver:
                 if self._known_copies(conn, identity, row):
                     raise PolicyError("independent_copy_lineage")
 
-    def qualify(self, fact_id: str, *, reviews: "EvidenceReviewStore") -> Qualification:
-        """Resolve now and load an authoritative stored review, never caller flags."""
+    def qualify(self, fact_id: str, *, reviews: "EvidenceReviewStore",
+                contract: str = LEGACY_CONTRACT) -> Qualification:
+        """Resolve now and load an authoritative stored review, never caller flags.
+
+        `contract` defaults to the frozen legacy rule so that a caller which
+        forgets it can only ever get today's behaviour. Widening to the attested
+        rule is opt-in and comes from a signed capability.
+        """
         try:
-            return self.with_qualified(fact_id, reviews=reviews, callback=lambda evidence, _rows:
+            return self.with_qualified(fact_id, reviews=reviews, contract=contract, callback=lambda evidence, _rows:
                 Qualification(verdict="qualified", reason_code="owner_reviewed_current_evidence", evidence=evidence))
         except PolicyError as exc:
             return Qualification(verdict="withheld", reason_code=exc.code, evidence=None)
 
-    def _qualified_bundle(self, conn, floor, fact_id, reviews, review_db):
+    @staticmethod
+    def _labelled_subjects(item, contract, permits) -> bool:
+        """What the owner said the record is about.
+
+        The label vocabulary does not change with the binding: `self` means
+        "about me", and the attested contract resolves which entities that
+        covers. Entity ids are never a label, so no review carries one and none
+        reaches the control plane, the frontend or a recipient.
+        """
+        labels = set(item.subject_entity_ids)
+        if len(labels) != len(item.subject_entity_ids):
+            return False
+        if contract == ATTESTED_CONTRACT:
+            return labels == {"self"}
+        return labels <= permits
+
+    def _qualified_bundle(self, conn, floor, fact_id, reviews, review_db, *, contract=LEGACY_CONTRACT):
         snapshot, rows = self._snapshot(conn, floor, fact_id, enforce_floor=True)
         review = reviews._current_in(review_db, fact_id)
         if review is None:
             raise PolicyError("owner_review_required")
         if review.owner_id != self.binding.owner_id or review.snapshot != snapshot:
             raise PolicyError("review_stale")
-        self._eligible(conn, snapshot, rows, review)
+        self._eligible(conn, snapshot, rows, review, contract=contract)
         return QualifiedEvidence(family="owner_stated_fact/v1", snapshot=snapshot, review_id=review.review_id,
-            review_revision=digest(review.model_dump()), classifications=review.classifications, execution_enabled=False), rows
+            review_revision=digest(review.model_dump()), classifications=review.classifications,
+            subject_contract=contract, execution_enabled=False), rows
 
-    def with_qualified(self, fact_id: str, *, reviews: "EvidenceReviewStore", callback):
+    def with_qualified(self, fact_id: str, *, reviews: "EvidenceReviewStore", callback,
+                       contract: str = LEGACY_CONTRACT):
         """Run trusted server code with current private evidence under both gates.
 
         This callback is never deserialized from a request. The service assumes
@@ -736,12 +791,14 @@ class EvidenceResolver:
         The callback must not mutate canonical data or reviews. It must perform
         its own final policy/authority checks before releasing any output.
         """
+        if contract not in SUBJECT_CONTRACTS:
+            raise PolicyError("subject_contract_unknown")
         if reviews.binding != self.binding or reviews.canonical_file_revision != self._file_revision():
             raise PolicyError("review_database_binding")
         with self._read() as (conn, floor):
             reviews._observe_clock(conn)
             with reviews._db() as review_db:
-                evidence, rows = self._qualified_bundle(conn, floor, fact_id, reviews, review_db)
+                evidence, rows = self._qualified_bundle(conn, floor, fact_id, reviews, review_db, contract=contract)
                 return callback(evidence, rows)
 
 

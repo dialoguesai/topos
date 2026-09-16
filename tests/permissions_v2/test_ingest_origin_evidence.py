@@ -8,6 +8,7 @@ import pytest_asyncio
 from tests.ingestion.test_owner_snapshot import enrolled_snapshot, verified_owner
 from topos.ingestion.owner_snapshot import run_snapshot_job
 from topos.permissions_v2.evidence import EvidenceResolver, EvidenceReviewStore, ReviewedClassification
+from topos.permissions_v2.protection_clock import resync_identity_coverage
 
 
 @pytest_asyncio.fixture
@@ -17,15 +18,21 @@ async def reviewed_ingest(enrolled_snapshot, tmp_path):
     assert result["status"] == "ok"
     from topos.features.facts.store import FactStore
     from topos.storage.db.migrations.signal_objects import apply_signal_objects_up
+    from topos.storage.db.migrations.wiki_entities_v1 import apply_wiki_entities_v1_up
     with sqlite3.connect(path) as conn:
         apply_signal_objects_up(conn)
-        conn.execute("CREATE TABLE entities(entity_id TEXT PRIMARY KEY,is_self INTEGER)")
-        conn.execute("INSERT INTO entities VALUES ('owner-entity',1)")
+        apply_wiki_entities_v1_up(conn)
+        conn.execute("INSERT INTO entities(entity_id,entity_type,canonical_name,normalized_name,is_self) VALUES('owner-entity','person','Person','person',1)")
         conn.execute("CREATE TABLE ai_chat_messages(message_id TEXT,content TEXT)")
         conn.commit()
+        clock = conn.execute("SELECT clock_id,generation FROM permissions_v2_protection_state WHERE singleton=1").fetchone()
         fact = FactStore(conn).assert_fact(subject_entity_id="self", predicate="prefers", object_value="history books",
             disclosure="scoped", asserted_by="owner",
             source_refs=[{"table": "conversation_messages", "record_id": "imessage:1", "source_id": "imessage", "dataset_id": "dataset-synthetic"}])
+    # The entity spine arrived after the clock was installed, so the clock is
+    # watching less than it claims and every read fails closed until this runs.
+    resync_identity_coverage(path, owner_id=service.binding.owner_id, expected_clock_id=clock[0],
+                             expected_generation=clock[1])
     resolver = EvidenceResolver(path, binding=service.binding)
     with verified_owner():
         reviews = EvidenceReviewStore(tmp_path / "evidence-reviews.db", resolver=resolver)

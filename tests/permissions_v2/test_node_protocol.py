@@ -359,7 +359,7 @@ def test_protection_lift_does_not_reuse_old_epoch_even_when_fingerprint_returns(
 def test_reopening_ledger_cannot_silently_recreate_a_lost_canonical_clock(protocol):
     from topos.permissions_v2.protection_clock import TABLE, TRIGGERS
     with sqlite3.connect(protocol[0].canonical_database) as conn:
-        for trigger in TRIGGERS:
+        for (trigger,) in conn.execute("SELECT name FROM sqlite_master WHERE type='trigger' AND name LIKE 'permissions_v2_%'").fetchall():
             conn.execute(f"DROP TRIGGER {trigger}")
         conn.execute(f"DROP TABLE {TABLE}")
     with pytest.raises(PolicyError, match="protection_clock_unavailable"):
