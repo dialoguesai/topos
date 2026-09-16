@@ -60,6 +60,26 @@ def require_api_key(
     raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid authorization token")
 
 
+def require_owner_unless_legacy(
+    request: Request = None,  # noqa: B008 — populated by FastAPI
+    credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),
+) -> Optional[Principal]:
+    """For HTTP routes that write canonical rows or durable jobs: the owner only.
+
+    Authenticates exactly as require_api_key first, so every 401 is unchanged,
+    then refuses any principal that is not owner_app. Once TOPOS_OWNER_KEY
+    exists that is every TCP bearer (the legacy key AND the owner key, which TCP
+    demotes) — the owner writes through the 0600 socket. While the key is unset
+    the legacy key resolves to None and passes: install-flow invariant, these
+    routes behave byte-for-byte as before until the node has minted its key.
+    """
+    require_api_key(request, credentials)
+    principal = resolve_request_principal(request, credentials)
+    if principal is not None and principal.cls != OWNER_APP:
+        raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="owner_mode_required")
+    return principal
+
+
 def resolve_request_principal(
     request: Request = None,  # noqa: B008 — populated by FastAPI
     credentials: HTTPAuthorizationCredentials = Depends(bearer_scheme),

@@ -474,7 +474,7 @@ async def handle_start_ingestion(message: Dict[str, Any]) -> Optional[Dict[str, 
         print(f"\033[91m[CRITICAL TOPOS HANDLER] Traceback:\n{traceback.format_exc()}\033[0m", file=sys.stderr, flush=True)
         return {"id": req_id, "status": "error", "error": str(exc)}
 
-@handles("ingestion_reprocess")
+@handles("ingestion_reprocess", owner_only=True)
 async def handle_ingestion_reprocess(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     if not req_id:

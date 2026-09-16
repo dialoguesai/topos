@@ -366,7 +366,7 @@ async def handle_auto_resolve_source_contacts(message: Dict[str, Any]) -> Option
         },
     }
 
-@handles("source_sync")
+@handles("source_sync", owner_only=True)
 async def handle_source_sync(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     """Enqueue a local sync and answer with its job handle, immediately.
 
@@ -382,6 +382,10 @@ async def handle_source_sync(message: Dict[str, Any]) -> Optional[Dict[str, Any]
     relays this verbatim and an older app — which discards this body and
     re-reads settings — sees no error. Progress is read with the existing,
     kind-agnostic ``enrichment_progress``.
+
+    Owner-only: a sync writes canonical rows under a caller-named dataset. An
+    unstamped relay message resolves to cp_relay and is refused, so the CP route
+    that forwards this must attach an owner_app stamp, as the signal proxy does.
     """
     req_id = message.get("id")
     if not req_id:
@@ -471,7 +475,9 @@ async def handle_put_signal_settings(message: Dict[str, Any]) -> Optional[Dict[s
     put_signal_identity(conn, dataset_id, my_phone_number=my_phone_number, my_signal_id=my_signal_id)
     return {"id": req_id, "status": "ok", "payload": {"status": "ok", "dataset_id": dataset_id}}
 
-@handles("signal_upload")
+# Declared rather than left to the signal_ prefix gate in handle_control_plane_request:
+# the upload writes conversation rows under a payload-supplied owner_user_id.
+@handles("signal_upload", owner_only=True)
 async def handle_signal_upload(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     if not req_id:

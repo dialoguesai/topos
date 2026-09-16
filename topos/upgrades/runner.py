@@ -586,7 +586,10 @@ def _exec_canonical_reprocess(step: Dict[str, Any], conn: sqlite3.Connection) ->
             out = _run_coro(
                 reprocess_source(
                     source_id=str(source_id),
-                    dataset_id=str(params.get("dataset_id") or "default"),
+                    # Unset binds the dataset the source's rows already use.
+                    # The literal "default" this replaced wrote remapped rows
+                    # under "default" wherever the source's rows actually lived.
+                    dataset_id=str(params["dataset_id"]) if params.get("dataset_id") else None,
                     from_stage=from_stage,  # type: ignore[arg-type]
                     force=bool(params.get("force", False)),
                     run_enrichment=run_enrichment,

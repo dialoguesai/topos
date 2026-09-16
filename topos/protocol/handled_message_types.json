@@ -280,6 +280,7 @@
   "delete_database_table",
   "get_database_explorer_summary",
   "graph_cypher_query",
+  "ingestion_reprocess",
   "mcp_client_decide_elevation",
   "mcp_client_enroll",
   "mcp_client_list",
@@ -298,7 +299,12 @@
   "permissions_v2_projection_review_record",
   "permissions_v2_projection_review_revoke",
   "permissions_v2_status",
+  "pooled_scope_backfill_apply",
+  "pooled_scope_backfill_dry_run",
+  "pooled_scope_backfill_rollback",
   "signal_blackhole_record",
-  "signal_unblackhole_record"
+  "signal_unblackhole_record",
+  "signal_upload",
+  "source_sync"
  ]
 }

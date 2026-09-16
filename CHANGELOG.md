@@ -25,6 +25,21 @@ The machine-readable twin of each release is
   They are refused with 403 and left out of the table list for everyone else. Raw
   inspection as a whole stays open to non-owners, because the MCP gateway's owner-policy
   raw lane and the CP's browser counts depend on it. No schema change.
+- **Ingestion doors that write canonical rows answer only the owner.** `[P]` `[O]`
+  `POST /sources/{id}/sync`, `POST /sources/signal/upload` and `POST /ingestion/reprocess`
+  checked only that a key authenticated, so the legacy shared key over TCP could enqueue a
+  sync, upload Signal rows under a query-string `owner_user_id`, or reprocess a source. They
+  now refuse every non-owner principal (the owner writes through the 0600 socket); while
+  `TOPOS_OWNER_KEY` is unset they behave exactly as before. `source_sync`, `signal_upload`,
+  `ingestion_reprocess` and the three `pooled_scope_backfill_*` types are now `owner_only`
+  (`signal_upload` was refused only because of its `signal_` prefix). A CP route that relays
+  `source_sync` unstamped is refused on a node with this change until it attaches an owner stamp.
+- **Reprocess no longer writes one dataset's raw rows under another.** `[O]` Raw retention has
+  no dataset column, so a reprocess put every remapped row under whatever dataset the caller
+  named, and the `canonical_reprocess` upgrade step named `default`. A reprocess now uses the
+  dataset the source's canonical rows already carry, and refuses a different one or a source
+  whose rows span datasets. Only `conversation_messages` carries a dataset, so activity,
+  journal and location sources are unchanged.
 
 ## [1.3.57] — 2026-09-14
 

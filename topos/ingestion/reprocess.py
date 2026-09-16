@@ -86,6 +86,60 @@ def _count_canonical_rows(conn, source_def) -> int:
     return int(row[0]) if row else 0
 
 
+def bound_dataset_ids(conn, source_def) -> List[str]:
+    """Datasets that already hold this source's canonical rows, sorted.
+
+    Raw retention has no dataset column (raw_tables_manager.py), so these rows
+    are the only record of whose data a raw row became. Only tables carrying
+    ``dataset_id`` can answer; a source whose tables have none returns [].
+    NULL and '' count as a dataset of their own rather than as "unbound".
+    """
+    from ..disclosure.field_registry import canonical_tables_for_group
+
+    group = getattr(source_def, "canonical_group_id", None)
+    tables = list(canonical_tables_for_group(group)) or ["ai_chat_messages"]
+    found: set = set()
+    for table in tables:
+        try:
+            columns = {row[1] for row in conn.execute(f'PRAGMA table_info("{table}")')}
+            if not {"dataset_id", "source_id"} <= columns:
+                continue
+            rows = conn.execute(
+                f'SELECT DISTINCT COALESCE(dataset_id, \'\') FROM "{table}" WHERE source_id=?',
+                (source_def.source_id,),
+            ).fetchall()
+        except sqlite3.Error:
+            continue
+        found.update(str(row[0]) for row in rows)
+    return sorted(found)
+
+
+def bind_reprocess_dataset(conn, source_def, dataset_id: Optional[str]) -> str:
+    """The dataset a raw→canonical remap may write under, or ValueError.
+
+    A remap stamps every row it writes with this id, and a message id carries no
+    dataset — so a foreign id put another dataset's raw rows under the caller's
+    dataset. ``None`` asks for the one dataset the source already uses
+    (``default`` when it has written nothing yet, as before). Refused: an id the
+    source's rows are not under, and a source spanning datasets, whose raw rows
+    cannot be attributed to any one of them. Ids are not echoed: this reaches
+    HTTP errors and upgrade status.
+    """
+    bound = bound_dataset_ids(conn, source_def)
+    if len(bound) > 1:
+        raise ValueError(
+            f"reprocess refused: {source_def.source_id} rows span {len(bound)} datasets and raw "
+            "retention records none, so its raw rows cannot be attributed to one dataset"
+        )
+    if dataset_id is None:
+        return bound[0] if bound else "default"
+    if bound and dataset_id not in bound:
+        raise ValueError(
+            f"reprocess refused: {source_def.source_id} rows are under a different dataset than the one requested"
+        )
+    return dataset_id
+
+
 def _raw_source_types_for(source_def: Any) -> List[str]:
     declared = str(getattr(source_def, "source_type", None) or "").strip()
     ordered: List[str] = []
@@ -278,7 +332,7 @@ async def _remap_records(
 async def reprocess_source(
     *,
     source_id: str,
-    dataset_id: str,
+    dataset_id: Optional[str],
     from_stage: FromStage = "raw",
     sync_batch_id: Optional[str] = None,
     force: bool = False,
@@ -289,6 +343,8 @@ async def reprocess_source(
 
     ``limit`` selects the newest N raw rows (by ``created_at``). Useful for
     recovering missed canonicalization without replaying an entire source.
+    ``dataset_id`` is checked against the rows the source already wrote (see
+    :func:`bind_reprocess_dataset`); ``None`` uses that dataset.
     """
     source_def = _resolve_source_def(source_id)
 
@@ -310,6 +366,10 @@ async def reprocess_source(
         source_def=source_def,
         limit=limit,
     )
+    if raw_records:
+        # Before any audit row or write: both stages below remap raw rows when
+        # there are any, and that remap is what stamps the dataset.
+        dataset_id = bind_reprocess_dataset(conn, source_def, dataset_id)
     logger.info(
         "reprocess load source_id=%s table=%s raw_rows=%s limit=%s from_stage=%s",
         source_def.source_id,

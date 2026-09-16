@@ -8,7 +8,7 @@ from typing import Optional
 
 from fastapi import APIRouter, Body, Depends, Query, Request  # noqa: F401 Body used in put_signal_settings
 
-from ..auth import require_api_key
+from ..auth import require_api_key, require_owner_unless_legacy
 from ..core.state import get_db_connection
 from ..ingestion.ingest_helpers import ingest_file_payload, ingest_ui_payload, resolve_file_format
 from ..ingestion.local_sync import run_signal_upload
@@ -191,7 +191,7 @@ async def put_source_settings_endpoint(
     return {"status": "ok", "dataset_id": dataset_id, "source_id": source_id, **settings}
 
 
-@router.post("/sources/{source_id}/sync", dependencies=[Depends(require_api_key)])
+@router.post("/sources/{source_id}/sync", dependencies=[Depends(require_owner_unless_legacy)])
 async def sync_source(
     source_id: str,
     dataset_id: Optional[str] = Query(default=None, description="Dataset/owner scope for checkpoint and messages"),
@@ -262,7 +262,7 @@ async def get_job_progress(job_id: str):
     return {"status": "ok", **_progress_dict(job)}
 
 
-@router.post("/sources/signal/upload", dependencies=[Depends(require_api_key)])
+@router.post("/sources/signal/upload", dependencies=[Depends(require_owner_unless_legacy)])
 async def upload_signal_export(
     request: Request,
     dataset_id: Optional[str] = Query(default=None),

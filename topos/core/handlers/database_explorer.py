@@ -1123,7 +1123,9 @@ async def handle_get_table_rows(message: Dict[str, Any]) -> Optional[Dict[str, A
         logger.error("Failed to get table rows: %s", exc, exc_info=True)
         return {"id": req_id, "status": "error", "error": str(exc)}
 
-@handles("pooled_scope_backfill_dry_run")
+# The pooled scope backfill family is owner-only: apply writes a payload-supplied
+# owner_user_id into every unscoped row of every table, rollback puts them back.
+@handles("pooled_scope_backfill_dry_run", owner_only=True)
 async def handle_pooled_scope_backfill_dry_run(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     if not req_id:
@@ -1159,7 +1161,7 @@ async def handle_pooled_scope_backfill_dry_run(message: Dict[str, Any]) -> Optio
         logger.error("pooled_scope_backfill_dry_run failed: %s", exc, exc_info=True)
         return {"id": req_id, "status": "error", "error": str(exc)}
 
-@handles("pooled_scope_backfill_apply")
+@handles("pooled_scope_backfill_apply", owner_only=True)
 async def handle_pooled_scope_backfill_apply(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     if not req_id:
@@ -1201,7 +1203,7 @@ async def handle_pooled_scope_backfill_apply(message: Dict[str, Any]) -> Optiona
         logger.error("pooled_scope_backfill_apply failed: %s", exc, exc_info=True)
         return {"id": req_id, "status": "error", "error": str(exc)}
 
-@handles("pooled_scope_backfill_rollback")
+@handles("pooled_scope_backfill_rollback", owner_only=True)
 async def handle_pooled_scope_backfill_rollback(message: Dict[str, Any]) -> Optional[Dict[str, Any]]:
     req_id = message.get("id")
     if not req_id:
