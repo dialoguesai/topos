@@ -48,6 +48,10 @@ _DDL = (
     "CREATE TABLE IF NOT EXISTS p2a_policy_commitments (version_id TEXT PRIMARY KEY, policy_hash TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS p2a_protocol_commands (command_id TEXT PRIMARY KEY, command_hash TEXT NOT NULL, receipt_json TEXT NOT NULL)",
     "CREATE TABLE IF NOT EXISTS p2a_protection_observation (singleton INTEGER PRIMARY KEY CHECK(singleton=1), clock_id TEXT NOT NULL, generation INTEGER NOT NULL)",
+    # The external canonical floor, mirrored so that deleting the floor file is
+    # a rollback rather than a fresh install. Present only on a node that has
+    # ever had one; absent on a node that never enabled identity attestations.
+    "CREATE TABLE IF NOT EXISTS p2a_canonical_floor (singleton INTEGER PRIMARY KEY CHECK(singleton=1), clock_id TEXT NOT NULL, revision INTEGER NOT NULL, floor_digest TEXT NOT NULL)",
 )
 
 

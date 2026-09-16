@@ -179,6 +179,35 @@ plane, the frontend or a recipient. Output subject stays the literal `self`.
 A refusal the owner sees can distinguish `owner_subject_unattested` from
 `not_owner_self_statement`; a recipient sees one refusal either way.
 
+## Where the floor is consulted
+
+Three checks, each owning one thing, and none of them duplicating another:
+
+* **`p2a_protection_observation`** owns the clock. Its generation only moves
+  forward, so a canonical database replaced by an older copy of itself is
+  refused before anything is signed. This predates identity binding.
+* **The floor's own `check`** owns the consent ledger. It pins the ledger
+  exactly and never adopts a row on a read, so a consent row written outside
+  the attestation handler fails every read closed. It runs on **every resolver
+  read**, not only on a consent write, because the clock is monotone inside its
+  own file and cannot see that file being replaced.
+* **`p2a_canonical_floor`** owns presence. A node that has ever had a floor must
+  still have one, at startup and on every protection sync. This is what stops
+  the floor being removed, or the feature switched off, to get past it.
+
+The mirror deliberately does not compare the floor file's own revision counter
+against the recorded one. `check` re-derives the floor body from the canonical
+database and renumbers a stale file rather than trusting it, so a replaced file
+is corrected rather than detected, and it has nothing to say about the database
+it was re-derived from. A fourth check there would never fire, and a guard no
+test can fail is either untested or unnecessary.
+
+A whole-directory restore, which moves the canonical database, the ledger and
+the floor together, is not visible from inside the node at all. It is caught off
+the node: the protection revision changes, the node epoch advances with it, and
+the control plane refuses a node whose epoch is behind the grant's recorded
+authority with `node_epoch_stale`.
+
 ## Residual risks
 
 * Consent is asserted through the control plane; the owner holds no signing key.

@@ -23,8 +23,12 @@ from .protection_clock import clock_state, current_protection_revision, ensure_p
 
 
 class NodePolicyProtocol:
-    def __init__(self, ledger: PolicyLedger, *, canonical_database: Path, cp_issuer_id: str, frontend_client_id: str, trusted_cp_keys: Mapping[str, bytes], node_signing_kid: str, node_signing_key: Ed25519PrivateKey):
+    def __init__(self, ledger: PolicyLedger, *, canonical_database: Path, cp_issuer_id: str, frontend_client_id: str, trusted_cp_keys: Mapping[str, bytes], node_signing_kid: str, node_signing_key: Ed25519PrivateKey, canonical_floor=None):
         self.ledger = ledger
+        # The external floor, when this node has one. It is mirrored into the
+        # ledger below so that removing the file reads as a rollback rather than
+        # as a node that never had one.
+        self.canonical_floor = canonical_floor
         self.canonical_database = Path(canonical_database).resolve(strict=True)
         if self.canonical_database == ledger.path.resolve() or not self.canonical_database.is_file():
             raise PolicyError("canonical_database_invalid")
@@ -41,6 +45,44 @@ class NodePolicyProtocol:
             if previous is not None and (previous["clock_id"] != clock_id or previous["generation"] > generation):
                 raise PolicyError("protection_clock_rollback")
             conn.execute("INSERT OR IGNORE INTO p2a_protection_observation VALUES (1,?,?)", (clock_id, generation))
+            self._observe_floor(conn)
+
+    def _observe_floor(self, ledger_conn) -> None:
+        """A node that has had a canonical floor must still have one.
+
+        That is the whole job of this row, and it is the reason the feature
+        cannot be switched off to get past the floor. It deliberately does not
+        compare the file's own revision counter against the recorded one: the
+        floor's `check` re-derives its body from the canonical database and
+        renumbers a stale file rather than trusting it, so a replaced file is
+        corrected rather than detected, and it has nothing to say about the
+        database it was re-derived from. What a replaced file cannot survive is
+        the exact pin on the attestation ledger, and what a replaced *database*
+        cannot survive is `p2a_protection_observation`, whose generation only
+        moves forward. Those two, plus this presence rule, are the three checks;
+        a fourth on the revision counter would never fire.
+
+        The clock identity is recorded rather than compared, for the same
+        reason: `p2a_protection_observation` is checked first and already owns
+        it, so a comparison here could not fire either.
+        """
+        from .canonical_floor import CanonicalFloor
+
+        recorded = ledger_conn.execute("SELECT * FROM p2a_canonical_floor WHERE singleton=1").fetchone()
+        if self.canonical_floor is None:
+            if recorded is not None:
+                raise PolicyError("canonical_floor_unavailable")
+            return
+        with sqlite3.connect(self.canonical_database.as_uri() + "?mode=ro", uri=True) as canonical:
+            canonical.execute("BEGIN")
+            observed = self.canonical_floor.check(canonical)
+        seen = digest(CanonicalFloor.parse(observed.model_dump()).model_dump(exclude={"revision", "state"}))
+        if recorded is None:
+            ledger_conn.execute("INSERT INTO p2a_canonical_floor VALUES (1,?,?,?)",
+                                (observed.clock_id, observed.revision, seen))
+            return
+        ledger_conn.execute("UPDATE p2a_canonical_floor SET clock_id=?, revision=?, floor_digest=? WHERE singleton=1",
+                            (observed.clock_id, observed.revision, seen))
 
     def _protection_revision(self, ledger_conn) -> str:
         # This process must share the write gate with the actual owner controls.
@@ -53,7 +95,8 @@ class NodePolicyProtocol:
             if previous is None or previous["clock_id"] != clock_id or previous["generation"] > generation:
                 raise PolicyError("protection_clock_rollback")
             ledger_conn.execute("UPDATE p2a_protection_observation SET generation=? WHERE singleton=1", (generation,))
-            return revision
+        self._observe_floor(ledger_conn)
+        return revision
 
     def _sync_protection(self, conn) -> None:
         actual = self._protection_revision(conn)

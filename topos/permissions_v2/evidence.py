@@ -356,6 +356,10 @@ class EvidenceResolver:
         # The node-wide protection revision of the read in progress; adapters
         # compare it to signed authority. Snapshots bind their own closure.
         self.current_floor = None
+        # The external canonical floor, attached by the node runtime. A
+        # resolver constructed on its own has none, exactly as a review store
+        # built outside enrollment has no external rollback floor.
+        self.canonical_floor = None
 
     def _durable_clock_id(self) -> str:
         """The installed protection clock identity is this database's durable identity.
@@ -413,6 +417,10 @@ class EvidenceResolver:
                 floor = current_protection_revision(conn, owner_id=self.binding.owner_id)
                 if clock_state(conn)[0] != self._clock_id:
                     raise PolicyError("evidence_database_binding")
+                # Every read, not only a consent write: the clock is monotone
+                # inside its own file and cannot see that file being replaced.
+                if self.canonical_floor is not None:
+                    self.canonical_floor.check(conn)
                 self.current_floor = floor
                 yield conn, floor
                 self._incarnation()
