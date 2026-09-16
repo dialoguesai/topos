@@ -113,6 +113,117 @@ before the change is rejected as `fact_policy_revision`. The copied-corpus
 waterfall that motivated this contract is recorded in the control-plane lab
 documentation; a temporal contract alone produced no copied positive there.
 
+## A second output family (P2b v4)
+
+`permissions-beta/p2b-v4` releases `owner_stated_work.scalar.v1`: one
+organisation the owner said, in the first person, that they work for. It is a
+second output family, not a second spelling of the first. It rides the v3
+attested subject rule and either validity contract, by composition; the evidence
+rules, event window, correlation, exclusions, review gates and the scalar shape
+are v1 unchanged.
+
+### Why a second family at all
+
+The first family releases `prefers`, and **no producer in the engine can write a
+`prefers` fact this contract accepts.** The contract requires a payload that is
+both `disclosure = "scoped"` and `asserted_by = "owner"`. The only writer that
+emits `prefers` is the LLM extractor, and at `features/facts/llm_extract.py` it
+sets `disclosure = "owner_only" if asserted_by == "owner" else "scoped"` — the
+two conditions are mutually exclusive there. Every LLM-extracted fact is
+therefore either owner-asserted and owner-only, or scoped and asserted by
+somebody else. Neither qualifies, for any predicate.
+
+That is the real reason the first family has measured zero releasable facts, and
+it is a property of the producers rather than of any particular node.
+
+### The producer, and the semantics it actually has
+
+Exactly one writer in the engine emits a fact that is `scoped`, `asserted_by =
+"owner"`, and sourced from a table this contract accepts as a leaf: the
+first-person message patterns in `features/facts/extract.py`. Two of them match
+`works_at`:
+
+    I (currently |now )?work (at|for) X
+    I('m| am) (now )?working (at|for) X
+
+They run only over a row that `provenance.roles.record_role` says the owner
+authored, on `conversation_messages` or `ai_chat_messages`, and
+`extract_facts_from_batch` asserts every rule-extracted fact as the owner with
+`disclosure` defaulting to `scoped`. So the value reaching a v4 disclosure is a
+proper-noun-shaped span the owner typed after "I work at", cleaned by
+`_clean_object` — which splits at the first `.` or `,`, so the label can carry
+letters, digits, spaces, `&`, `'` and `-` and essentially nothing else. That is
+what `explicit_atomic_work_engagement` means, and the owner still has to attest
+it in review; the contract never decides it.
+
+### Why not `works_on`, which measures higher
+
+The corpus waterfall (`scripts/permissions_beta/CORPUS_FACT_WATERFALL.md` in the
+control plane) scores `works_on` at 7 current scoped facts and 3 owner-asserted,
+the only family reaching the assertion stage at all, and scores `works_at` at 0.
+The family was still chosen as `works_at`, because the count measures a copy and
+the producer measures the future:
+
+- The only writer that emits a `scoped`, owner-asserted `works_on` is
+  `extract_journal_facts`, which matches a journal entry's **category** string
+  against the `normalized_name` of a declared `org`/`topic` entity and emits that
+  entity's canonical name. That is a filing label, not a statement — the owner
+  never said it — and its lineage always terminates in `journal_entries`, which
+  is not a supported leaf table. All 3 measured candidates die at
+  `reference_not_supported`, and any future one would too.
+- `works_at`'s producer is a first-person declaration in a supported message
+  table. Zero on that copy; reachable on every node.
+
+So the measurement chose the shape of the question and ruled out six predicates;
+reading the producers chose between the two it left. A family picked on the count
+alone would have shipped a capability that cannot close, named after a statement
+nobody made.
+
+### What still blocks a live `works_at` closure
+
+`extract._source_ref` emits `{table, record_id}` plus `source_id` when present,
+and never `dataset_id`. The lineage grammar in `fact_eligibility._reference`
+requires exactly `{table, record_id, source_id, dataset_id}` for
+`conversation_messages` and exactly `{table, record_id, source_id}` for
+`ai_chat_messages`. A `works_at` fact sourced from a conversation message
+therefore fails lineage today; one sourced from an AI chat message with a
+`source_id` does not. This is a property of the producer, not of the contract,
+and it is recorded rather than worked around: widening `_reference` would accept
+a reference whose dataset is unknown.
+
+### What the signed document records, and what it enforces
+
+`OwnerStatedWorkFamily` writes the family's premise into the policy: its name,
+view id, predicate, assertion, projection version, and `producer`, a literal
+naming the writer whose semantics the family claims. None of it is enforceable —
+nothing in the contract can inspect the engine — in the same sense that
+`OwnerAttestedSubjectBinding` records which identity rule was selected without
+granting anything. Pinning it means a reader of a signed v4 policy can see what
+the owner was told they were releasing, and that every signed v4 policy stops
+parsing the day the family is redefined.
+
+### Freezing
+
+The v1/v2/v3 classes are untouched and their schema exports are byte-identical;
+`test_the_first_familys_exports_did_not_move` asserts that against the checked-in
+fixtures rather than against themselves. The second family is parallel classes
+throughout — `WorkScalarDisclosure`, `WorkFactOutputForm`, `WorkFactRule`,
+`WorkFactPolicy`, `WorkFactDecision`, `WorkOutputClassification`,
+`WorkFactProjectionCandidate`, `WorkFactProjectionReview` — never a widened
+Literal. Widening `FactScalarDisclosure.predicate` would have been the cheap
+edit and the worst one: `prepare_fact_projection` derives the output predicate
+from the payload, so every already-signed v1/v2/v3 grant would silently have
+begun producing work candidates it was never granted.
+
+The one shared piece is the lexical grammar, extracted to
+`fact_contract.atomic_label_syntax` and called by both disclosures. It answers
+"is this one label or is it prose", which does not depend on what the label
+names; `test_both_families_share_one_label_grammar` pins the accept/reject
+battery for both so the extraction is provably behaviour-preserving.
+
+Which family a request releases comes from `FAMILY_BY_CAPABILITY`, keyed by the
+signed capability, and is never inferred from the row being disclosed.
+
 ## Correlation and exclusions
 
 One permit clause must cover every artifact/leaf table, every terminal source,

@@ -211,16 +211,17 @@ def test_attested_schema_exports_are_frozen(model):
     assert json.loads(path.read_text()) == model.model_json_schema()
 
 
-def test_the_capability_registry_knows_exactly_three_fact_capabilities():
-    from topos.permissions_v2.fact_contract import FACT_CAPABILITIES
+def test_the_capability_registry_knows_exactly_four_fact_capabilities():
+    from topos.permissions_v2.fact_contract import CAPABILITY_WORK, FACT_CAPABILITIES
     from topos.permissions_v2.identity import SUBJECT_CONTRACT_BY_CAPABILITY
     assert FACT_CAPABILITIES == ("permissions-beta/p2b-v1", "permissions-beta/p2b-v2",
-                                 "permissions-beta/p2b-v3")
-    # Every fact capability declares a subject contract, and only the newest one
-    # reads attestations at all.
+                                 "permissions-beta/p2b-v3", "permissions-beta/p2b-v4")
+    # Every fact capability declares a subject contract, and the two newest read
+    # attestations. v4 rides the attested rule rather than re-deriving one: a new
+    # output family is not a reason to revisit whose facts these are.
     assert set(FACT_CAPABILITIES) <= set(SUBJECT_CONTRACT_BY_CAPABILITY)
     attested = [key for key, value in SUBJECT_CONTRACT_BY_CAPABILITY.items() if value == ATTESTED_CONTRACT]
-    assert attested == [CAPABILITY_ATTESTED]
+    assert attested == [CAPABILITY_ATTESTED, CAPABILITY_WORK]
 
 
 # --- the frozen projection rule ---------------------------------------------

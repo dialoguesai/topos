@@ -4,11 +4,12 @@ from __future__ import annotations
 from .canonical import PolicyError, parse_json
 from .contract import PolicyV2, Decision, MessageDisclosure
 from .fact_contract import (AttestedSubjectFactDecision, AttestedSubjectFactPolicy, FactPolicyV2,
-    FactDecision, FactScalarDisclosure, StatedDayFactPolicy, StatedDayFactDecision)
+    FactDecision, FactScalarDisclosure, StatedDayFactPolicy, StatedDayFactDecision,
+    WorkFactDecision, WorkFactPolicy, WorkScalarDisclosure)
 
-Policy = PolicyV2 | FactPolicyV2 | StatedDayFactPolicy | AttestedSubjectFactPolicy
-PolicyDecision = Decision | FactDecision | StatedDayFactDecision | AttestedSubjectFactDecision
-Disclosure = MessageDisclosure | FactScalarDisclosure
+Policy = PolicyV2 | FactPolicyV2 | StatedDayFactPolicy | AttestedSubjectFactPolicy | WorkFactPolicy
+PolicyDecision = Decision | FactDecision | StatedDayFactDecision | AttestedSubjectFactDecision | WorkFactDecision
+Disclosure = MessageDisclosure | FactScalarDisclosure | WorkScalarDisclosure
 
 
 def value_of(raw):
@@ -30,6 +31,8 @@ def parse_policy(raw) -> Policy:
         return StatedDayFactPolicy.parse(raw)
     if capability == "permissions-beta/p2b-v3":
         return AttestedSubjectFactPolicy.parse(raw)
+    if capability == "permissions-beta/p2b-v4":
+        return WorkFactPolicy.parse(raw)
     raise PolicyError("unsupported_capability")
 
 
@@ -42,6 +45,8 @@ def parse_decision(raw, *, capability: str) -> PolicyDecision:
         return StatedDayFactDecision.parse(value_of(raw))
     if capability == "permissions-beta/p2b-v3":
         return AttestedSubjectFactDecision.parse(value_of(raw))
+    if capability == "permissions-beta/p2b-v4":
+        return WorkFactDecision.parse(value_of(raw))
     raise PolicyError("unsupported_capability")
 
 
@@ -50,4 +55,7 @@ def parse_disclosure(raw, *, capability: str) -> Disclosure:
         return MessageDisclosure.parse(value_of(raw))
     if capability in ("permissions-beta/p2b-v1", "permissions-beta/p2b-v2", "permissions-beta/p2b-v3"):
         return FactScalarDisclosure.parse(value_of(raw))
+    # v4 is the one P2b capability whose disclosure is NOT the preference scalar.
+    if capability == "permissions-beta/p2b-v4":
+        return WorkScalarDisclosure.parse(value_of(raw))
     raise PolicyError("unsupported_capability")

@@ -8,7 +8,7 @@ from topos.storage.db.write_gate import with_db_write
 
 from .canonical import PolicyError, canonical_bytes, digest
 from .contract import Binding
-from .fact_contract import FactPolicyV2, FactScalarDisclosure
+from .fact_contract import FAMILY_BY_CAPABILITY, OUTPUT_FAMILIES, FactPolicyV2
 from .fact_policy import fact_projection_decision
 from .forwarding import ReleaseBody, sign_node_result
 from .identity import SUBJECT_CONTRACT_BY_CAPABILITY
@@ -48,6 +48,16 @@ class FactProjectionRelease:
         request = FactRequestContext.parse({**ledger.identity.model_dump(), "actor_id": principal.acting_user,
             "client_id": principal.client_id, "grant_id": signed.grant_id, "assignment_id": signed.assignment_id,
             "request_id": request_id, "request_type": "permissions.v2.fact.read"})
+        # The owner-identity rule AND the output family come from the signed
+        # capability, before any evidence is resolved or any row is read. If the
+        # envelope named a capability the grant does not carry, the policy loaded
+        # inside the callback will not match the contract the evidence was
+        # qualified under, and the decision refuses rather than releasing under
+        # the wrong rule. Neither is ever inferred from the candidate.
+        contract = SUBJECT_CONTRACT_BY_CAPABILITY.get(signed.capability_version)
+        family = FAMILY_BY_CAPABILITY.get(signed.capability_version)
+        if contract is None or family is None:
+            raise PolicyError("unsupported_capability")
         with with_db_write():
             with ledger._transaction() as db:
                 self.protocol._sync_protection(db)
@@ -71,7 +81,10 @@ class FactProjectionRelease:
                     ledger.checkpoint_decision(lease, decision.model_dump(), candidate_revision=decision.candidate_revision,
                         output=None, now=self.clock())
                     raise PolicyError("permission_denied")
-                output = FactScalarDisclosure.parse(reviewed.candidate.output.model_dump())
+                # The disclosure class comes from the capability that was signed,
+                # not from the candidate in hand: a candidate that does not fit
+                # the granted family is refused here rather than re-labelled.
+                output = OUTPUT_FAMILIES[family][2].parse(reviewed.candidate.output.model_dump())
                 if len(canonical_bytes(output.model_dump())) > MAX_FACT_DISCLOSURE_BYTES:
                     raise PolicyError("disclosure_budget")
                 ledger.checkpoint_decision(lease, decision.model_dump(), candidate_revision=decision.candidate_revision,
@@ -85,12 +98,5 @@ class FactProjectionRelease:
                     self.protocol.node_signing_key)
                 send(result.model_dump(), output.model_dump())
 
-            # The owner-identity rule comes from the signed capability, before any
-            # evidence is resolved. If the envelope named a capability the grant
-            # does not carry, the policy loaded inside the callback will not match
-            # the contract the evidence was qualified under, and the decision
-            # refuses rather than releasing under the wrong rule.
-            contract = SUBJECT_CONTRACT_BY_CAPABILITY.get(signed.capability_version)
-            if contract is None:
-                raise PolicyError("unsupported_capability")
-            self.projections.with_reviewed(fact_id, now=self.clock(), callback=release, contract=contract)
+            self.projections.with_reviewed(fact_id, now=self.clock(), callback=release, contract=contract,
+                                           family=family)

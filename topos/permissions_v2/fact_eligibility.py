@@ -17,10 +17,12 @@ from .canonical import PolicyError, digest
 from .contract import Binding, Number, Only, StrictModel
 from .evidence import (MAX_DEPTH, MAX_NODES, EvidenceIdentity, Qualification,
     QualifiedEvidence, _json, _key, _row_revision)
-from .fact_projection import ReviewedFactProjection, _SENSITIVITY, _current, prepare_fact_projection
+from .fact_projection import (PROJECTION_BY_FAMILY, ReviewedFactProjection, _SENSITIVITY,
+    _current, prepare_fact_projection)
 from .identity import SELF, SUBJECT_CONTRACT_BY_CAPABILITY
-from .fact_contract import (FACT_VALIDITY_STATED_DAY, PROJECTION_VERSION, AttestedSubjectFactPolicy,
-    FactPolicyV2, StatedDayFactPolicy, fact_validity_semantics)
+from .fact_contract import (FACT_VALIDITY_STATED_DAY, FAMILY, OUTPUT_FAMILIES, PROJECTION_VERSION,
+    AttestedSubjectFactPolicy, FactPolicyV2, StatedDayFactPolicy, WorkFactPolicy,
+    fact_output_family, fact_validity_semantics)
 
 _EPOCH = datetime(1970, 1, 1, tzinfo=timezone.utc)
 _UTC = re.compile(r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|\+00:00)")
@@ -95,9 +97,15 @@ def _reference(raw, binding):
         "dataset_id": raw.get("dataset_id")})
 
 
-def _check_bundle(evidence, projection, rows, binding, permitted_subjects=frozenset({SELF})):
+def _check_bundle(evidence, projection, rows, binding, permitted_subjects=frozenset({SELF}),
+                  family=FAMILY):
     evidence = QualifiedEvidence.parse(evidence.model_dump())
-    projection = ReviewedFactProjection.parse(projection.model_dump())
+    # Exact type, not isinstance: the reviewed projection for one family is never
+    # a usable stand-in for another's, and the policy alone says which is meant.
+    reviewed_model = PROJECTION_BY_FAMILY[family][2]
+    if type(projection) is not reviewed_model:
+        raise PolicyError("fact_policy_projection_stale")
+    projection = reviewed_model.parse(projection.model_dump())
     qualification = Qualification(verdict="qualified", reason_code="trusted_adapter_input", evidence=evidence)
     _current(qualification)
     snapshot = evidence.snapshot
@@ -144,8 +152,8 @@ def _check_bundle(evidence, projection, rows, binding, permitted_subjects=frozen
     # rows. `permitted_subjects` must be the set the resolver qualified under,
     # or this re-derivation legitimately refuses an attested subject.
     candidate = prepare_fact_projection(qualification=qualification, fact_row=rows[_key(roots[0].identity)],
-                                        permitted_subjects=permitted_subjects)
-    if candidate != projection.candidate or candidate.projection_version != PROJECTION_VERSION:
+                                        permitted_subjects=permitted_subjects, family=family)
+    if candidate != projection.candidate or candidate.projection_version != OUTPUT_FAMILIES[family][1]:
         raise PolicyError("fact_policy_projection_stale")
     if _SENSITIVITY[projection.classification.sensitivity] < max(_SENSITIVITY[item.sensitivity] for item in evidence.classifications):
         raise PolicyError("output_sensitivity_attenuation_unsupported")
@@ -198,10 +206,11 @@ def prepare_fact_eligibility(*, policy: FactPolicyV2, evidence: QualifiedEvidenc
     instants for v1, and additionally conservatively elapsed stated days for a
     v2 policy. The contributor event window is unchanged by that selection.
     """
-    if type(policy) not in (FactPolicyV2, StatedDayFactPolicy, AttestedSubjectFactPolicy):
+    if type(policy) not in (FactPolicyV2, StatedDayFactPolicy, AttestedSubjectFactPolicy, WorkFactPolicy):
         raise PolicyError("fact_policy_binding")
     policy = type(policy).parse(policy.model_dump())
     semantics = fact_validity_semantics(policy)
+    family = fact_output_family(policy)
     binding = Binding.parse(binding.model_dump())
     clock = _EvaluationTime.parse({"request_as_of": request_as_of, "now": now})
     if policy.binding != binding:
@@ -212,10 +221,12 @@ def prepare_fact_eligibility(*, policy: FactPolicyV2, evidence: QualifiedEvidenc
     if SUBJECT_CONTRACT_BY_CAPABILITY.get(policy.versions.capability) != evidence.subject_contract:
         raise PolicyError("subject_contract_mismatch")
     evidence, projection, versions, descendants = _check_bundle(evidence, projection, rows, binding,
-                                                                permitted_subjects)
+                                                                permitted_subjects, family)
+    # The family's own projection version goes into the candidate revision, so a
+    # v4 candidate can never collide with a v1 one over the same fact and rows.
     revision = digest({"snapshot": evidence.snapshot.model_dump(), "review_revision": evidence.review_revision,
         "output_review_revision": projection.output_review_revision, "projection": projection.candidate.output.model_dump(),
-        "projection_version": PROJECTION_VERSION, "request_as_of": request_as_of, "event_time_semantics": "canonical_event_time_v1"})
+        "projection_version": OUTPUT_FAMILIES[family][1], "request_as_of": request_as_of, "event_time_semantics": "canonical_event_time_v1"})
     policy_hash = digest(policy.model_dump())
 
     def prepared(terminal=None, unknown=False, unsupported=False, clauses=()):

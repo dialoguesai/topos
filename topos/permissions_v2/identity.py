@@ -37,6 +37,7 @@ SUBJECT_CONTRACT_BY_CAPABILITY = {
     "permissions-beta/p2b-v1": LEGACY_CONTRACT,
     "permissions-beta/p2b-v2": LEGACY_CONTRACT,
     "permissions-beta/p2b-v3": ATTESTED_CONTRACT,
+    "permissions-beta/p2b-v4": ATTESTED_CONTRACT,
 }
 # The exact sentence the owner confirms. Changing it is a new statement version.
 ATTESTATION_STATEMENT = "owner-identity-attestation/v1"

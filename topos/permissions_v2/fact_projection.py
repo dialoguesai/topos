@@ -16,7 +16,8 @@ from .contract import Hash, Identifier, Number, StrictModel
 from .evidence import EvidenceSnapshot, Qualification, _json, _key, _row_revision
 from .identity import LEGACY_CONTRACT, SELF
 
-from .fact_contract import VIEW, PROJECTION_VERSION, FactScalarDisclosure
+from .fact_contract import (FAMILY, OUTPUT_FAMILIES, PROJECTION_VERSION, VIEW, WORK_FAMILY,
+    WORK_PROJECTION_VERSION, FactScalarDisclosure, WorkScalarDisclosure)
 
 _SENSITIVITY = {"none": 0, "personal": 1, "special": 2}
 
@@ -43,7 +44,23 @@ class FactProjectionCandidate(StrictModel):
     output: FactScalarDisclosure
 
 
-class FactProjectionReview(StrictModel):
+class _ReviewBinding(StrictModel):
+    """The exact-binding check, shared so a second family cannot drift from the first.
+
+    Declares no fields, so it changes neither the field order nor the serialized
+    shape nor the JSON schema of any class that inherits it.
+    """
+
+    @model_validator(mode="after")
+    def exact_binding(self):
+        if (self.owner_id != self.candidate.snapshot.binding.owner_id
+            or self.candidate_hash != digest(self.candidate.model_dump())
+            or self.output_hash != digest(self.candidate.output.model_dump())):
+            raise ValueError("projection review binding")
+        return self
+
+
+class FactProjectionReview(_ReviewBinding):
     """Value loaded from a FUTURE authenticated owner store, not caller proof."""
     version: Literal["topos-fact-projection-review/v1"]
     review_id: Identifier
@@ -55,14 +72,6 @@ class FactProjectionReview(StrictModel):
     output_hash: Hash
     classification: OutputClassification
 
-    @model_validator(mode="after")
-    def exact_binding(self):
-        if (self.owner_id != self.candidate.snapshot.binding.owner_id
-            or self.candidate_hash != digest(self.candidate.model_dump())
-            or self.output_hash != digest(self.candidate.output.model_dump())):
-            raise ValueError("projection review binding")
-        return self
-
 
 class ReviewedFactProjection(StrictModel):
     candidate: FactProjectionCandidate
@@ -70,6 +79,65 @@ class ReviewedFactProjection(StrictModel):
     output_review_revision: Hash
     authorization_status: Literal["not_evaluated"]
     execution_enabled: Literal[False]
+
+
+class WorkOutputClassification(StrictModel):
+    """What the owner attests about a work label, in their own review.
+
+    A separate class rather than a widened `assertion` literal. Widening would
+    let a preference review carry a work assertion and the reverse, and the
+    review is the only place a human says what the label means -- so the two
+    must not be interchangeable values of one field.
+    """
+    domains: Annotated[list[Identifier], Field(min_length=1, max_length=16)]
+    sensitivity: Literal["none", "personal", "special"]
+    subject: Literal["self"]
+    assertion: Literal["explicit_atomic_work_engagement"]
+
+    @field_validator("domains")
+    @classmethod
+    def unique(cls, values):
+        if len(set(values)) != len(values):
+            raise ValueError("duplicate domain")
+        return values
+
+
+class WorkFactProjectionCandidate(StrictModel):
+    version: Literal["topos-fact-projection-candidate/v1"]
+    projection_version: Literal["exact-owner-work/v1"]
+    snapshot: EvidenceSnapshot
+    evidence_review_revision: Hash
+    output: WorkScalarDisclosure
+
+
+class WorkFactProjectionReview(_ReviewBinding):
+    """Value loaded from a FUTURE authenticated owner store, not caller proof."""
+    version: Literal["topos-fact-projection-review/v1"]
+    review_id: Identifier
+    owner_id: Identifier
+    reviewed_at: Number
+    status: Literal["approved", "revoked"]
+    candidate: WorkFactProjectionCandidate
+    candidate_hash: Hash
+    output_hash: Hash
+    classification: WorkOutputClassification
+
+
+class WorkReviewedFactProjection(StrictModel):
+    candidate: WorkFactProjectionCandidate
+    classification: WorkOutputClassification
+    output_review_revision: Hash
+    authorization_status: Literal["not_evaluated"]
+    execution_enabled: Literal[False]
+
+
+# family name -> (candidate class, review class, reviewed class). Kept beside
+# OUTPUT_FAMILIES rather than merged into it: the contract module must not
+# import the projection layer, and these classes live here.
+PROJECTION_BY_FAMILY = {
+    FAMILY: (FactProjectionCandidate, FactProjectionReview, ReviewedFactProjection),
+    WORK_FAMILY: (WorkFactProjectionCandidate, WorkFactProjectionReview, WorkReviewedFactProjection),
+}
 
 
 def _current(qualification: Qualification):
@@ -98,7 +166,7 @@ def _current(qualification: Qualification):
 
 
 def prepare_fact_projection(*, qualification: Qualification, fact_row: dict,
-                            permitted_subjects=frozenset({SELF})) -> FactProjectionCandidate:
+                            permitted_subjects=frozenset({SELF}), family=FAMILY):
     """Create a PRIVATE review candidate from the exact existing fact scalar.
 
     This validates consistency of supplied values, not authenticity or current
@@ -109,6 +177,13 @@ def prepare_fact_projection(*, qualification: Qualification, fact_row: dict,
     candidate. It defaults to the literal subject alone, so a caller that omits
     it can only reproduce the pre-binding behaviour. Under the legacy contract
     the literal rule is frozen and this argument is ignored entirely.
+
+    `family` is the output family the POLICY selected, never the caller's
+    preference and never inferred from the row. It defaults to the first family,
+    so every pre-v4 caller is unchanged. The family fixes the view id, the
+    projection version and the disclosure class, and that class pins the
+    predicate -- so a `prefers` row asked for under the work family is refused
+    as schema_invalid rather than silently relabelled, and the reverse likewise.
     """
     evidence = _current(qualification)
     snapshot = evidence.snapshot
@@ -126,26 +201,38 @@ def prepare_fact_projection(*, qualification: Qualification, fact_row: dict,
         or payload.get("asserted_by") != "owner" or fact_row.get("actor_role") not in (None,"authored")
         or payload.get("actor_role", "authored") != "authored"):
         raise PolicyError("projection_source_restricted")
-    output = FactScalarDisclosure.parse({"family":"owner_stated_fact", "operation":"read", "view_id":VIEW,
+    if family not in OUTPUT_FAMILIES:
+        raise PolicyError("unsupported_view")
+    view, projection_version, disclosure = OUTPUT_FAMILIES[family]
+    candidate_model = PROJECTION_BY_FAMILY[family][0]
+    output = disclosure.parse({"family":family, "operation":"read", "view_id":view,
         "subject":"self", "predicate":payload.get("predicate"), "value":payload.get("object_value")})
-    return FactProjectionCandidate(version="topos-fact-projection-candidate/v1", projection_version=PROJECTION_VERSION,
+    return candidate_model(version="topos-fact-projection-candidate/v1", projection_version=projection_version,
         snapshot=snapshot, evidence_review_revision=evidence.review_revision, output=output)
 
 
 def bind_output_review(*, qualification: Qualification, fact_row: dict,
-                       review: FactProjectionReview | None, now: int,
-                       permitted_subjects=frozenset({SELF})) -> ReviewedFactProjection:
+                       review=None, now: int,
+                       permitted_subjects=frozenset({SELF}), family=FAMILY):
     """Return a non-executing candidate for later policy evaluation, never permit.
 
     The caller must load the current review from an authenticated owner store.
     A supplied or replayed JSON review cannot establish that trusted provenance.
     No evidence restriction can be overridden by output classification.
+
+    The review class is selected by `family` and the isinstance test stays exact,
+    so a preference review presented for a work release is refused as missing
+    rather than accepted: the two review types are not substitutable, which is
+    the whole reason the classification is a separate class per family.
     """
     current = prepare_fact_projection(qualification=qualification, fact_row=fact_row,
-                                      permitted_subjects=permitted_subjects)
-    if review is None or not isinstance(review, FactProjectionReview):
+                                      permitted_subjects=permitted_subjects, family=family)
+    if family not in PROJECTION_BY_FAMILY:
+        raise PolicyError("unsupported_view")
+    _candidate_model, review_model, reviewed_model = PROJECTION_BY_FAMILY[family]
+    if review is None or type(review) is not review_model:
         raise PolicyError("output_review_required")
-    review = FactProjectionReview.parse(review.model_dump())
+    review = review_model.parse(review.model_dump())
     if type(now) is not int or not 0 <= now <= MAX_INTEGER or now < review.reviewed_at or review.status != "approved":
         raise PolicyError("output_review_not_current")
     if review.candidate != current:
@@ -156,5 +243,5 @@ def bind_output_review(*, qualification: Qualification, fact_row: dict,
     floor = max(_SENSITIVITY[item.sensitivity] for item in evidence.classifications)
     if _SENSITIVITY[review.classification.sensitivity] < floor:
         raise PolicyError("output_sensitivity_attenuation_unsupported")
-    return ReviewedFactProjection(candidate=current, classification=review.classification,
+    return reviewed_model(candidate=current, classification=review.classification,
         output_review_revision=digest(review.model_dump()), authorization_status="not_evaluated", execution_enabled=False)

@@ -316,15 +316,158 @@
       ],
       "title": "OutputClassification",
       "type": "object"
+    },
+    "WorkFactProjectionCandidate": {
+      "additionalProperties": false,
+      "properties": {
+        "evidence_review_revision": {
+          "pattern": "^[0-9a-f]{64}$",
+          "title": "Evidence Review Revision",
+          "type": "string"
+        },
+        "output": {
+          "$ref": "#/$defs/WorkScalarDisclosure"
+        },
+        "projection_version": {
+          "const": "exact-owner-work/v1",
+          "title": "Projection Version",
+          "type": "string"
+        },
+        "snapshot": {
+          "$ref": "#/$defs/EvidenceSnapshot"
+        },
+        "version": {
+          "const": "topos-fact-projection-candidate/v1",
+          "title": "Version",
+          "type": "string"
+        }
+      },
+      "required": [
+        "version",
+        "projection_version",
+        "snapshot",
+        "evidence_review_revision",
+        "output"
+      ],
+      "title": "WorkFactProjectionCandidate",
+      "type": "object"
+    },
+    "WorkOutputClassification": {
+      "additionalProperties": false,
+      "description": "What the owner attests about a work label, in their own review.\n\nA separate class rather than a widened `assertion` literal. Widening would\nlet a preference review carry a work assertion and the reverse, and the\nreview is the only place a human says what the label means -- so the two\nmust not be interchangeable values of one field.",
+      "properties": {
+        "assertion": {
+          "const": "explicit_atomic_work_engagement",
+          "title": "Assertion",
+          "type": "string"
+        },
+        "domains": {
+          "items": {
+            "maxLength": 200,
+            "minLength": 1,
+            "pattern": "^[A-Za-z0-9][A-Za-z0-9._:@/-]*$",
+            "type": "string"
+          },
+          "maxItems": 16,
+          "minItems": 1,
+          "title": "Domains",
+          "type": "array"
+        },
+        "sensitivity": {
+          "enum": [
+            "none",
+            "personal",
+            "special"
+          ],
+          "title": "Sensitivity",
+          "type": "string"
+        },
+        "subject": {
+          "const": "self",
+          "title": "Subject",
+          "type": "string"
+        }
+      },
+      "required": [
+        "domains",
+        "sensitivity",
+        "subject",
+        "assertion"
+      ],
+      "title": "WorkOutputClassification",
+      "type": "object"
+    },
+    "WorkScalarDisclosure": {
+      "additionalProperties": false,
+      "description": "One organisation the owner said, in the first person, that they work for.\n\nA second output family, not a second spelling of the first. The preference\nfamily answers \"what does the owner like\"; this one answers \"who does the\nowner work for\". They share the evidence rules, the scalar shape and the\nlabel grammar, and nothing else: a preference review can never authorize\nthis view, and this view can never carry `prefers`.",
+      "properties": {
+        "family": {
+          "const": "owner_stated_work",
+          "title": "Family",
+          "type": "string"
+        },
+        "operation": {
+          "const": "read",
+          "title": "Operation",
+          "type": "string"
+        },
+        "predicate": {
+          "const": "works_at",
+          "title": "Predicate",
+          "type": "string"
+        },
+        "subject": {
+          "const": "self",
+          "title": "Subject",
+          "type": "string"
+        },
+        "value": {
+          "maxLength": 256,
+          "minLength": 1,
+          "title": "Value",
+          "type": "string"
+        },
+        "view_id": {
+          "const": "owner_stated_work.scalar.v1",
+          "title": "View Id",
+          "type": "string"
+        }
+      },
+      "required": [
+        "family",
+        "operation",
+        "view_id",
+        "subject",
+        "predicate",
+        "value"
+      ],
+      "title": "WorkScalarDisclosure",
+      "type": "object"
     }
   },
   "additionalProperties": false,
   "properties": {
     "classification": {
-      "$ref": "#/$defs/OutputClassification"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/OutputClassification"
+        },
+        {
+          "$ref": "#/$defs/WorkOutputClassification"
+        }
+      ],
+      "title": "Classification"
     },
     "expected_candidate": {
-      "$ref": "#/$defs/FactProjectionCandidate"
+      "anyOf": [
+        {
+          "$ref": "#/$defs/FactProjectionCandidate"
+        },
+        {
+          "$ref": "#/$defs/WorkFactProjectionCandidate"
+        }
+      ],
+      "title": "Expected Candidate"
     },
     "expected_candidate_hash": {
       "pattern": "^[0-9a-f]{64}$",

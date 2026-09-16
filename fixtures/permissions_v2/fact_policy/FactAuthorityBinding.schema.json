@@ -25,7 +25,8 @@
       "enum": [
         "permissions-beta/p2b-v1",
         "permissions-beta/p2b-v2",
-        "permissions-beta/p2b-v3"
+        "permissions-beta/p2b-v3",
+        "permissions-beta/p2b-v4"
       ],
       "title": "Capability Version",
       "type": "string"

@@ -7,13 +7,15 @@ Its decision is not a release permit without the final authority/transport gates
 """
 from __future__ import annotations
 
+from .canonical import PolicyError
 from .contract import Binding, evaluate_predicate
 from .evidence import QualifiedEvidence, _key
 from .fact_projection import ReviewedFactProjection
-from .fact_contract import (CAPABILITY, EVALUATOR, EVALUATOR_ATTESTED, EVALUATOR_STATED_DAY, VOCABULARY,
-    PURPOSE, PROJECTION_VERSION, VIEW, AttestedSubjectFactDecision, AttestedSubjectFactPolicy,
-    FactPolicyV2, FactDecision, FactEvidenceUse, FactOutputForm, RollingEventWindow,
-    StatedDayFactDecision, StatedDayFactPolicy)
+from .fact_contract import (CAPABILITY, EVALUATOR, EVALUATOR_ATTESTED, EVALUATOR_STATED_DAY,
+    EVALUATOR_WORK, VOCABULARY, PURPOSE, PROJECTION_VERSION, VIEW, WORK_VIEW,
+    AttestedSubjectFactDecision, AttestedSubjectFactPolicy, FactPolicyV2, FactDecision,
+    FactEvidenceUse, FactOutputForm, RollingEventWindow, StatedDayFactDecision,
+    StatedDayFactPolicy, WorkFactDecision, WorkFactPolicy)
 from .fact_eligibility import PermitStructure, prepare_fact_eligibility, canonical_utc_microseconds
 
 def _attributes(classification):
@@ -46,15 +48,25 @@ def fact_projection_decision(*, policy: FactPolicyV2, evidence: QualifiedEvidenc
         **({} if permitted_subjects is None else {"permitted_subjects": permitted_subjects}))
     # Dispatch on the class, not on the temporal choice: a v3 policy may select
     # either validity contract, and its decisions are its own shape either way.
-    model, evaluator = {FactPolicyV2: (FactDecision, EVALUATOR),
-                        StatedDayFactPolicy: (StatedDayFactDecision, EVALUATOR_STATED_DAY),
-                        AttestedSubjectFactPolicy: (AttestedSubjectFactDecision, EVALUATOR_ATTESTED)}[type(policy)]
+    # The view travels with the class too, so a permit can never name a family
+    # the policy did not select -- the decision's own literal would reject it.
+    dispatch = {FactPolicyV2: (FactDecision, EVALUATOR, VIEW),
+                StatedDayFactPolicy: (StatedDayFactDecision, EVALUATOR_STATED_DAY, VIEW),
+                AttestedSubjectFactPolicy: (AttestedSubjectFactDecision, EVALUATOR_ATTESTED, VIEW),
+                WorkFactPolicy: (WorkFactDecision, EVALUATOR_WORK, WORK_VIEW)}
+    if type(policy) not in dispatch:
+        # Unreachable while this table and the one in prepare_fact_eligibility
+        # agree, which is exactly why it is written down: a capability added to
+        # one and not the other would otherwise raise a bare KeyError out of the
+        # release callback instead of refusing the way every other miss does.
+        raise PolicyError("unsupported_capability")
+    model, evaluator, view = dispatch[type(policy)]
     def result(verdict, reason, allows=(), denies=(), missing=()):
         return model(stage="output_release", verdict=verdict, policy_hash=structure.policy_hash,
             candidate_revision=structure.candidate_revision, evaluator_version=evaluator,
             matched_allow_clause_ids=list(allows[:1]) if verdict == "permit" else [],
             matched_deny_clause_ids=list(denies), reason_code=reason,
-            required_projection_id=VIEW if verdict == "permit" else None, missing_context_codes=list(missing))
+            required_projection_id=view if verdict == "permit" else None, missing_context_codes=list(missing))
     if structure.terminal_reason:
         return result("deny", structure.terminal_reason)
     labels = {_key(item.evidence.identity): _attributes(item) for item in evidence.classifications}
