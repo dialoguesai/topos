@@ -326,13 +326,17 @@ class OwnerStatedWorkFamily(StrictModel):
     policy can see which producer semantics the owner was told they were
     releasing, without reading the engine.
 
-    `producer` names the ONLY writer in the engine that emits a `works_at` fact
-    both marked `scoped` and asserted by the owner: the first-person
-    present-tense message patterns in `features.facts.extract`. Those read
-    "I work at X" / "I am working for X" out of a row the owner themselves
-    typed. If that ever stops being the only such writer, this literal is the
-    thing that has to change, and every signed v4 policy stops parsing until it
-    does. That is the point of writing it down rather than assuming it.
+    `producer` names the writer whose semantics the family claims: the
+    first-person present-tense message patterns in `features.facts.extract`,
+    which read "I work at X" / "I am working for X" out of a row the owner
+    themselves typed. It is the only extractor that writes a `works_at` fact both
+    scoped and asserted by the owner from a message. It is not the only way such
+    a row can exist: an owner correction re-asserts a corrected value under the
+    original message references, and other producers write the same predicate
+    from tables that are not evidence leaves. None of them releases without the
+    owner's own review of every leaf. If the family's producer changes, this
+    literal is the thing that has to change, and every signed v4 policy stops
+    parsing until it does. That is the point of writing it down.
     """
     name: Literal["owner_stated_work"]
     view_id: Literal["owner_stated_work.scalar.v1"]

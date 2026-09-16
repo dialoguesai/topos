@@ -8,8 +8,10 @@ exclusive there, so the first family has no reachable producer at all.
 
 `works_at` does. The first-person present-tense message patterns in
 `features.facts.extract` write it `scoped`, assert it as the owner, and source it
-from a message table -- the only writer in the engine that does all three. That
-is what "one thing the owner said about their work" means here, and it is why
+from a message table -- the only extractor that does all three. (An owner
+correction can also re-assert one under the original message references; see
+FACT_POLICY_DESIGN.md.) That is what "one thing the owner said about their work"
+means here, and it is why
 this family exists rather than `works_on`, which scores higher on a corpus count
 and cannot close: its only qualifying producer matches a journal CATEGORY against
 a declared entity, so its lineage always terminates in `journal_entries`, which

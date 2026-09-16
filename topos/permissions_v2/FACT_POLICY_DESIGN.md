@@ -138,10 +138,10 @@ it is a property of the producers rather than of any particular node.
 
 ### The producer, and the semantics it actually has
 
-Exactly one writer in the engine emits a fact that is `scoped`, `asserted_by =
-"owner"`, and sourced from a table this contract accepts as a leaf: the
-first-person message patterns in `features/facts/extract.py`. Two of them match
-`works_at`:
+Exactly one **extractor** in the engine writes a fact that is `scoped`,
+`asserted_by = "owner"`, and sourced from a table this contract accepts as a leaf:
+the first-person message patterns in `features/facts/extract.py`. Two of them
+match `works_at`:
 
     \bI (?:now )?work (?:at|for) ([A-Z][\w .&'\-]{1,40})
     \bI(?:'m| am) (?:now )?working (?:at|for) ([A-Z][\w .&'\-]{1,40})
@@ -157,7 +157,9 @@ authored, on `conversation_messages` or `ai_chat_messages`, and
 `disclosure` defaulting to `scoped`. So the value reaching a v4 disclosure is a
 proper-noun-shaped span the owner typed after "I work at", cleaned by
 `_clean_object` — which splits at the first `.` or `,`, so the label can carry
-letters, digits, spaces, `&`, `'` and `-` and essentially nothing else. That is
+letters, digits, spaces, `&`, `'`, `-` and `_`. The last is admitted by the
+pattern's `\w` and then refused by `atomic_label_syntax`, so an employer written
+with an underscore is produced and can never be projected. That is
 what `explicit_atomic_work_engagement` means, and the owner still has to attest
 it in review; the contract never decides it.
 
@@ -184,17 +186,49 @@ reading the producers chose between the two it left. A family picked on the coun
 alone would have shipped a capability that cannot close, named after a statement
 nobody made.
 
-### What still blocks a live `works_at` closure
+### Other ways a scoped, owner-asserted `works_at` row can exist
 
-`extract._source_ref` emits `{table, record_id}` plus `source_id` when present,
-and never `dataset_id`. The lineage grammar in `fact_eligibility._reference`
-requires exactly `{table, record_id, source_id, dataset_id}` for
-`conversation_messages` and exactly `{table, record_id, source_id}` for
-`ai_chat_messages`. A `works_at` fact sourced from a conversation message
-therefore fails lineage today; one sourced from an AI chat message with a
-`source_id` does not. This is a property of the producer, not of the contract,
-and it is recorded rather than worked around: widening `_reference` would accept
-a reference whose dataset is unknown.
+"The only extractor" is not "the only writer". Corrected 16 September, after
+mapping every `assert_fact` caller:
+
+- **Owner correction.** `verdicts.edit_fact` re-asserts a corrected value under the
+  corrected fact's original `source_refs`, scoped, as the owner. The leaf is still
+  the owner's message; the value is what the owner corrected it to, not what the
+  message says. Until step 4 it also re-attributed an assistant- or
+  contact-asserted fact to the owner whenever the value changed.
+- **Profile extractor and truth seed.** Both write scoped, owner-asserted
+  `works_at`, from `profile_records` and a synthetic `user_seed` reference. Neither
+  is an evidence leaf, so neither can release.
+- **LLM pass.** It writes scoped `works_at` about addressed rows under the owner
+  entity, but asserted by the speaker (`assistant` or `contact:<id>`), never the
+  owner.
+
+What keeps these from releasing on their own is not the family: it is that every
+leaf must be reviewed by the owner as an owner-authored direct self-statement.
+They also compete on the owner's single-valued `works_at` key, so one of them can
+refresh, supersede or queue a conflict against the fact a message produced.
+
+### What blocked every `works_at` closure until step 4
+
+This section first said an AI-chat-sourced fact could close today. That was wrong.
+
+- **Conversation messages.** `extract._source_ref` emitted `{table, record_id}`
+  plus `source_id`, never `dataset_id`, and the lineage grammar in
+  `fact_eligibility._reference` requires exactly `{table, record_id, source_id,
+  dataset_id}` for `conversation_messages`. The produced fact withheld as
+  `lineage_identity_incomplete` before any authorship check.
+- **AI chat.** The reference grammar matches, but evidence qualification requires
+  the AI-chat row's `sender_type` to be `user`, while the canonical ChatGPT
+  parser stores the owner as `human` (`provenance.roles` accepts both). Real owner
+  AI-chat rows are refused. That is a fail-closed gap in evidence, not in the
+  producer, and changing it widens what every existing capability can release, so
+  it is recorded as a separate decision rather than fixed here.
+
+So no producer path could close at all, and every live release proof to that
+point seeded its fact by hand. Step 4 (`INGEST_LIVE_SYNC_DESIGN.md`) emits
+`dataset_id` for conversation-message references, and carries it through the
+loaders, rather than widening `_reference`, which would accept a reference whose
+dataset is unknown.
 
 ### What the signed document records, and what it enforces
 
