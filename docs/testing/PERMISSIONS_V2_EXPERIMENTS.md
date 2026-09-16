@@ -211,6 +211,51 @@ path loads (storage migrations import `shared` through source definitions);
 a runner test fails if it loads an engine module outside them. Its report is
 orchestration evidence, not accuracy.
 
+## Owner-shadow source bridge for P2a raw message release
+
+`experiments/source_bridge.py` (grammar `topos-offline-source-message-experiment/v1`)
+gives arm B a path for `permissions-beta/p2a-v1`, the whole-message release the
+family cells C and G run on. It is unmounted like the fact bridge, reuses its
+processor pin, transport, requalification, cache and retention, and its capsule
+pairs a P2a policy (vocabulary `owner-review-vocabulary/v1` only) with prose
+whose inclusion and exclusion identifiers are the policy's permit and deny rule
+identifiers.
+
+The closure is read exactly as `SourceMessageRelease` reads it:
+`with_qualified(..., contract=LEGACY_CONTRACT, discloses_sources=True)`, so a
+message that also backs an owner-only fact withholds both arms (`owner_only`)
+before any model call. The capture also binds the node-wide protection revision
+the signed authority would bind, and the policy's validity. Arm A is
+`source_message_decision` over the capture, and after a permit the same
+disclosure build and 256,000-byte budget the adapter applies;
+`tests/permissions_v2/test_source_bridge.py` drives the real adapter and
+compares arm A with the decision it checkpoints (permit, rule deny, and
+indeterminate). The stored review vocabulary cannot yield an unknown label
+today, so the indeterminate cases patch the one label map both paths read.
+
+Arm B stops before any call when no permit rule's processor, raw ceiling,
+sources and tables cover every message (`no_structural_match`), or when a unit
+is over the 16-unit or 16,000-character surface budget. evidence_use shows every
+closure unit (the locator fact as its predicate only, each message as its
+content); output_release shows exactly the records the adapter would disclose.
+A unit carries `unit_id`, `table`, `source_id` and `text`, and never a dataset,
+record or entity identifier, a label, an owner-only flag, a revision or
+authority. An exclusion is offered when its sources and tables reach a message.
+Its `structural_scope_unit_ids` are the whole closure at evidence_use, as the
+rules apply a reached exclusion to the whole derivation, and only the reached
+records at output_release. The prompt `source-bridge-prompt/v1` is pinned by
+hash and uses the fact bridge's "scope, not a match" wording.
+Clause binding, projection, malformed, oversized, timeout and identity failures
+withhold with the fact bridge's bounded codes and never fall back to rules.
+Results carry decision metadata only, with `execution_enabled: false` and
+`serving_adapter: null`. The test file (fake transports only) also covers
+prompt hygiene, the legacy subject rule of the capture, inclusion coverage and
+exclusion reach on a two-message closure, eight mid-call changes during either
+call (among them a revoked review, a new owner-only sibling fact, a protection
+change outside the closure, and an edit or relabel the owner reviewed again,
+which still qualifies and is caught only by the revision comparison), cache
+isolation, synthetic-only retention and the import boundary.
+
 ## Run and verify
 
 With the scratch/offline environment and live DB tripwire from

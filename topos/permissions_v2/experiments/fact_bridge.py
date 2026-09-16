@@ -233,6 +233,10 @@ class _Stop(Exception):
 
 class ShadowDecisionCache:
     """Bounded process-local metadata cache keyed by every revision and the clock."""
+    # The one decision grammar an instance holds; a sibling bridge subclasses
+    # this to reuse the cache without ever parsing another bridge's decisions.
+    decision_model = FactShadowDecision
+
     def __init__(self, max_entries: int = 128):
         if type(max_entries) is not int or not 1 <= max_entries <= 4096:
             raise ValueError("cache budget")
@@ -244,7 +248,7 @@ class ShadowDecisionCache:
         if value is None:
             return None
         self._entries.move_to_end(key)
-        return FactShadowDecision.parse(value)
+        return self.decision_model.parse(value)
 
     def put(self, key, decision):
         self._entries[key] = canonical_bytes(decision.model_dump())
@@ -255,7 +259,7 @@ class ShadowDecisionCache:
     def forget_bundle(self, bundle_revision):
         """Drop every decision of a capture whose observation was not retained."""
         for key in [key for key, value in self._entries.items()
-                    if FactShadowDecision.parse(value).bundle_revision == bundle_revision]:
+                    if self.decision_model.parse(value).bundle_revision == bundle_revision]:
             self._entries.pop(key, None)
 
 
