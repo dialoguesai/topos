@@ -30,7 +30,8 @@ canonical SQLite snapshot:
   complete row revision. Every reviewed classification states owner authorship,
   direct self-statement, only owner subjects, known sensitivity and nonempty
   domains. Mixed subjects, quotations, unknowns and known independent copies
-  withhold the entire candidate.
+  withhold the entire candidate. Which entities count as the owner is fixed by
+  the signed capability, not by this resolver: see the subject contract below.
 - Neither a record protection nor an unresolved entity protection can apply.
   Record protection is checked before reading that record. `owner_only` is checked
   before traversing a fact's sources. Since complete entity-mention lineage has
@@ -288,13 +289,54 @@ release, including the interval before lifecycle purge finishes. Any entity
 exclusion withholds this family until complete entity coverage is certified;
 missing observations after purge are not evidence of absence. Unknown exclusion
 state fails closed. The versioned protection clock now tracks exclusion changes,
-including add/remove cycles. Serving requires clock contract v3. Existing beta
+including add/remove cycles. Serving requires clock contract v4. Existing beta
 nodes run the explicit, monotonic [clock v2 upgrade](EXCLUSION_CLOCK_UPGRADE.md)
 from a v1 clock and then the
 [clock v3 upgrade](EXCLUSION_CLOCK_UPGRADE.md#clock-v3-closure-scoped-review-binding);
-a node that ran only the v2 upgrade withholds with `protection_clock_unavailable`.
+a node that stops at v2 or v3 withholds with `protection_clock_unavailable`, as
+does one whose engine identity tables appeared after the clock was installed,
+until [the coverage resync](EXCLUSION_CLOCK_UPGRADE.md#coverage-is-recorded-not-assumed)
+runs.
 Neither clock upgrade changes a signed schema. The separate `permissions-beta/p2b-v2`
 capability did: engine `122028c` regenerated eight signed protocol and fact
 schema exports that embed the fact authority union, and added two schema exports
 (`StatedDayFactPolicy`, `StatedDayFactDecision`) and the signed golden vector
 `signed-golden-v2.json`.
+
+
+## Whose facts these are
+
+Producers write the owner's entity id as a fact subject, and a node legitimately
+holds several `is_self` rows, so the first fact family could only release the
+literal `"self"` subject that no production producer writes. Identity is now
+attested rather than inferred, and which rule applies is fixed by the signed
+capability. `QualifiedEvidence.subject_contract` records it, and the policy
+preparation refuses a policy whose capability maps to a different one.
+
+| capability | subject contract | permits |
+|---|---|---|
+| `permissions-beta/p2a-v1` | `legacy_single_self_v1` | the literal subject and the sole `is_self` row, or a refusal |
+| `permissions-beta/p2b-v1` | `legacy_single_self_v1` | the same |
+| `permissions-beta/p2b-v2` | `legacy_single_self_v1` | the same |
+| `permissions-beta/p2b-v3` | `owner_attested_v1` | the literal subject unless shadowed, plus each active attestation |
+
+Two sets are always in play. The permit set above decides what may be released.
+The restriction set decides what a tombstone, exclusion or copy check matches,
+and holds every spelling of the owner this node has ever seen: current `is_self`
+rows, ids ever attested or revoked, registry ids, and the merge-tombstone
+fixpoint over those. The permit set is always a subset of the restriction set,
+so widening whom the owner may release about can never narrow what an owner
+restriction covers. The former `{"self"}` fallback in the tombstone prefix
+builder is gone: it silently dropped every entity-keyed owner tombstone on
+exactly the multi-self nodes that needed it most.
+
+Under the attested contract a fact whose subject was rewritten in place is never
+eligible. That is the merge overlay signature: another person's fact re-keyed
+onto the owner's entity, carrying the owner's own messages as its evidence. The
+owner can state the claim again, which writes a new fact with its own lineage.
+
+Entity ids stay inside the node. Reviews still carry `["self"]`, the output
+still says `subject: "self"`, and the permit set is derived beside the evidence
+and passed by value rather than stored in a candidate, a review, a receipt or a
+recipient error. The full design is in
+[OWNER_IDENTITY_BINDING.md](OWNER_IDENTITY_BINDING.md).

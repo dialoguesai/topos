@@ -78,8 +78,8 @@ generation, strip the version column or reverse-migrate to make older code run.
 ## Clock v3: closure-scoped review binding
 
 Clock v3 keeps the single monotonic generation and adds an event log that the
-engine only ever appends to (no trigger yet refuses a direct delete or update of
-its rows; see the open issues in the release checkpoint), `permissions_v2_protection_events(sequence, generation, source,
+engine only ever appends to (v3 had no trigger refusing a direct delete or
+update of its rows; v4 adds them), `permissions_v2_protection_events(sequence, generation, source,
 artifact_key)`, written by the same nine triggers in the same canonical
 transaction. Each insert, update or delete on `owner_only_records`,
 `entity_blackholes` or `intelligence_exclusions` records the generation it
@@ -131,3 +131,110 @@ reviews. Review stores need no re-enrollment: their durable identity and clock
 high-water are unchanged and the generation only moved forward. An older v2
 engine rejects the v3 trigger set and cannot serve this state; rollback means
 disabling beta release, never dropping the event log or reversing the clock.
+
+
+## Clock v4: owner identity, and a log that cannot be edited
+
+v4 adds the storage and the detection that owner identity binding needs
+(`OWNER_IDENTITY_BINDING.md`), and closes the v3 gap where the event log was
+append-only by convention rather than by rule.
+
+Three tables are now append-only by trigger: the event log,
+`permissions_v2_identity_attestations` (the owner's consent ledger) and
+`permissions_v2_identity_subjects` (the restriction registry). `BEFORE UPDATE`
+and `BEFORE DELETE` raise on each. An event log that can be emptied cannot prove
+that a protect-then-lift ever happened, and an attestation ledger that can be
+edited is not a consent record at all.
+
+Seventeen identity triggers are added, all conditional so that enrichment
+writers fire nothing:
+
+* `entities` insert, delete, and update of `entity_id`, `entity_type`,
+  `is_self` and `contact_id`, scoped to self rows and tracked ids.
+* `entity_merge_tombstones` insert, update and delete when either side is a
+  tracked owner spelling.
+* `entity_mentions` update of `entity_id`, deduplicated per generation.
+* `signal_objects` update of `object_key` on a fact, logged as
+  `fact_rekeyed|<object_id>`. The merge remap is the only writer of that column.
+* the ledger's own insert, which advances the generation, registers the id and
+  logs `identity|<id>`, plus two ordering guards: one live attestation per
+  entity, and a revocation that must name the current entry.
+
+`current_protection_revision` gains an identity fingerprint and the coverage
+list, so an identity change stales signed authority uniformly for every
+capability. `closure_protection_revision` becomes `closure-protection/v2`, with
+a closure-scoped identity section and the raw fact-prefix list removed because
+it churned. The state table pins `contract_version=4`.
+
+### The event log admits generation zero
+
+v3 stamped every event from a trigger that had just advanced the clock, so a
+generation of zero was impossible and its table carries `CHECK(generation>0)`.
+v4 also logs identity churn that must *not* advance the clock: a merge moves
+many mentions and re-keys many facts, and the merge's own tombstone advances the
+generation once. Such an event can land while the clock is still at its
+installed zero, and refusing it would abort the node's own merge. v4 therefore
+uses `CHECK(generation>=0)` and the upgrade rebuilds the table, preserving every
+row and its sequence, so a hash chain folded over the log before the upgrade
+folds to the same value after it. The table is rebuilt by `CREATE` and copy
+rather than by `ALTER TABLE ... RENAME`, because SQLite stores a renamed table's
+schema with the name quoted and the clock compares that text byte for byte.
+
+### Coverage is recorded, not assumed
+
+`entities`, `entity_mentions` and `signal_objects` belong to the engine's own
+schema. Requiring all three at install would couple the permission floor to the
+entity spine migration, so the clock watches whichever of them the node has and
+records the list in the protection revision.
+
+A table that **appears** later is a coverage change: the expected trigger set no
+longer matches and every read fails closed until `resync_identity_coverage` runs
+on a stopped node. That lane only adds and removes identity triggers; it never
+creates an engine table, never touches the ledger, the registry or the event
+log, never changes the contract version, and refuses a clock whose other
+triggers were altered or lost. A table that **disappears** is also a coverage
+change, and it moves the protection revision, so every authority signed while it
+was watched goes stale.
+
+### Explicit migration of an initialized v3 node
+
+Stop serving and every canonical writer, keep the canonical DB with its private
+stores together for backup, then run the standalone helper with the new engine
+environment:
+
+```python
+from pathlib import Path
+from topos.permissions_v2.protection_clock import upgrade_protection_clock_v4
+result = upgrade_protection_clock_v4(
+    Path(EXPLICIT_STOPPED_BETA_DATABASE),
+    owner_id=VERIFIED_PINNED_OWNER,
+    expected_clock_id=RECORDED_V3_CLOCK_ID,
+    expected_generation=RECORDED_V3_GENERATION,
+)
+```
+
+The helper validates the exact v3 columns, the twenty-six v3 trigger
+definitions, owner binding, expected clock identity and generation, the v3 event
+table text, and the absence of a ledger or registry. It rebuilds the state
+table, rebuilds the event log under the v4 schema carrying every row, creates
+the ledger, the registry and `entity_merge_tombstones` when the node has never
+merged, seeds the registry from the node's current self rows and merge
+tombstones, installs the v4 triggers for the coverage this node has, and
+verifies the clock before committing.
+
+Seeding matters: an owner who excluded `<entity>:prefers` before this upgrade
+keeps that veto afterwards only because the registry starts from what the node
+already holds. Starting empty would silently drop those vetoes until the next
+identity event.
+
+Before and after, every other table's rows and schema are unchanged, with the
+single exception of `entity_merge_tombstones` when the clock had to create it,
+which must arrive empty. Existing owner reviews are stale by design: the closure
+revision changed. Review stores need no re-enrollment. An older v3 engine
+rejects the v4 trigger set and cannot serve this state; rollback means disabling
+beta release, never dropping the ledger or reversing the clock.
+
+The lab runs both operations through
+`scripts/permissions_beta/upgrade_protection_clock.py --contract 4` and
+`--resync-coverage`, on a stopped synthetic engine, with the unchanged-elsewhere
+proof above.
