@@ -116,8 +116,43 @@ The store requires an absolute path, a private file owned by the process user,
 and no symlink anywhere in its parent path. It persists a random store identity,
 the durable canonical identity and the resource identity inside the file and
 checks them on every open; the enrolled runtime additionally pins that store
-identity and an authority digest of every review row in its external marker. A
-different store at the enrolled path is refused, and so is an older store file
+identity and an authority digest of every review row in its external marker. That
+digest is `digest` of every row -- `review_id`, `fact_id`, the stored body and the
+active flag -- ordered by `review_id`, retired rows included, and it is computed by
+streaming those exact bytes into SHA-256 rather than building them as one canonical
+value. The value is unchanged, so every marker an earlier engine wrote still opens
+and no migration exists to run; what changes is that `canonical_bytes`' 1 MiB
+whole-value refusal no longer applies to it, which had stopped one store at 309
+owner reviews of the beta campaign's shape and failed every read, revoke and
+release on it with `json_size`. Cost is now bounded by reading the rows, not by
+the size of one Python object, but it is still linear. Measured on this machine,
+one digest takes about 3 ms at 386 rows, 7 ms at 772, 19 ms at 2,000 and 94 ms at
+10,000, and a store write pays two of them plus two fsynced marker publications. Of
+each of those, the table-count cross-check described below is about 0.2 ms, 0.4 ms,
+1.1 ms and 5.9 ms -- roughly 7% from 2,000 rows up, and it decodes no row. At 386 rows
+it is 0.02 to 0.2 ms depending on the run, which is inside the noise at that size: the
+figure that resolves, and so the one to hold the design to, is the 7%.
+That work is not merely *under* the node write gate: it is done while HOLDING the
+process-wide write lock (`topos/storage/db/write_gate.py`, one `_WRITE_LOCK` for
+every writer in the process), so at 10^4 rows it is node-wide write latency rather
+than review latency -- every other writer waits for it. The stated goal of a small
+per-write cost at 10^4 rows is therefore not met -- this change covers a few
+thousand reviews per store, not ten thousand. The campaign this was built for fits with
+room to spare: 386 reviews of its shape in one store are about 1.07x the old cap -- so the
+old digest could not have held them at all -- and one further owner write there takes
+about 8 ms end to end, one owner read about 11 ms. Those two end-to-end figures were
+measured before the cross-check; each digest they contain now costs about 0.2 ms more
+at that size, and the digest counts per call are pinned by test (two per owner read,
+five per owner record).
+Nothing bounds lifetime growth, so a single digest over 100 ms is logged as a
+warning -- a duration and a row count, never a review, and pinned by test -- as the
+signal that a bounded or incremental scheme is due. The warning is measured around
+the cross-check as well as the encoding, so it stays a statement about what one
+digest costs rather than about one part of it; 100 ms is about 10,600 rows on
+the machine measured above. The write gate's own slow-section warning
+(`_SLOW_HOLD_WARN_S`, 5 s) is the second tripwire, and it is the one that reports
+what the rest of the node paid.
+A different store at the enrolled path is refused, and so is an older store file
 restored alone whose review rows differ from the enrolled digest (for example a
 copy from before a revocation). An older file with the same review rows is not
 refused: the marker does not carry the store's protection-generation floor, so
@@ -125,6 +160,139 @@ restoring the canonical database and the store together from before a
 restriction, with the marker left in place, is not detected (open issue F02).
 The marker lives beside the store, so restoring both together (for example the
 whole `permissions-v2` directory from an earlier backup) is not detected either.
+One case changed with the size cap, and it is the owner's call rather than an
+implementation detail: a store larger than 1 MiB of digest input, paired with a
+marker written outside the engine to match its rows, now opens, where before every
+path on it failed `json_size`. The engine cannot produce such a pair -- a write
+that crossed the cap rolled back before its commit, and the lab's recovery only
+activates a digest the engine computed -- so it is the same trusted-file boundary
+as a marker forged to match tampered rows, which is already accepted, and which was
+already accepted at any size below 1 MiB. What is lost is that the >1 MiB case used
+to fail closed by accident. Store-only tampering is refused at both sizes, which is
+what the detection cases in `tests/permissions_v2/test_review_store_floor.py` run
+twice. The alternative, if this is not acceptable, is to keep a cap on the digest
+INPUT size and refuse above it, at the cost of the capacity this change exists to
+buy.
+The store file must hold exactly the objects the store creates and nothing else:
+`review_identity`, `fact_reviews`, that table's primary-key index, the
+`(fact_id, active)` index below, and `projection_contract` in the output store.
+Anything else is refused as `review_database_binding` at every open, including the
+reopen that writes the observed clock high-water. The digest covers rows rather
+than schema, so a planted trigger firing inside a legitimate owner write would
+otherwise be published into the marker as the owner's own work. The check compares
+the kind lower-cased and never reads the spelling as authority: SQLite decides an
+object's kind from its `sql` text and accepts any case variant in `type`, so a row
+written with `type='TRIGGER'` installs a trigger that fires while a
+`type IN ('trigger','view')` test sees nothing (SQLite 3.47.1). It denies by kind
+rather than listing the two kinds that execute, so a kind this engine does not know
+about fails closed. The `sql` text is deliberately not compared: rewriting it cannot
+smuggle in an executing object, and any reinterpretation of the stored cells moves
+the row digest. An operator who has added anything to the file -- an extra index, or
+an `ANALYZE`'s `sqlite_stat1` -- must drop it; the refusal is closed, not lossy.
+The current-review lookup uses an index on `(fact_id, active)`, which the store
+creates and the pin therefore requires. The row it points at is never trusted: the
+predicate is answered from the index's keys alone, so `_current_row` re-reads the
+row by rowid, out of the table b-tree, and re-asserts `fact_id` and `active` from
+what it finds. A stale or planted b-tree under that name would otherwise decide
+which review is current while the row digest still matched the marker byte for
+byte -- neither the index nor `sqlite_master` is digested. With the re-read, serving
+a revoked review needs a real row in the table b-tree.
+The digest is what refuses such a row, and it does not take its own reach on trust
+either. What it enumerates is not the table: `ORDER BY review_id` is planned as a walk
+of `sqlite_autoindex_fact_reviews_1`, the primary key's own index, so moving the serving
+lookup onto the table left the digest resting on a different index -- and the two
+could disagree in an attacker's favour. A row written into the table b-tree and not
+into that autoindex is invisible to the digest, so the marker still matches byte for
+byte, the object set is still exactly the pinned one, and the table's `sql` is still
+byte-identical, while `_current_row`'s rowid re-read finds that row and serves it as
+the owner's current review. Every digest -- entry and exit, evidence store and output
+store, since all four are one function -- therefore compares the number of rows it
+streamed with `SELECT count(*) FROM fact_reviews NOT INDEXED`, which is the table
+b-tree's own answer with every index forbidden to the planner, and refuses a
+disagreement as `review_database_binding`, in either direction: a stream shorter than
+the table is the hidden row, and a longer one is an index entry the table cannot answer
+for, which the exit digest -- where a changed digest is published rather than refused --
+would otherwise write into the marker as the owner's own. Both reads run in one
+transaction under `BEGIN IMMEDIATE`, so a disagreement is never a race: it is a store to
+quarantine, not one to retry, which is why it is not the transient
+`review_storage_unavailable`.
+At the entry digest the count and the value are together exhaustive about the reach. A
+stream that misses a table row and still counts right has to have streamed something in
+its place -- some other row a second time, or an entry with no row behind it, which comes
+through as a row of NULLs -- and both of those are in the value, which the marker pins.
+At the exit digest only the count refuses, because a changed value there is the owner's
+own write being published; that is the same boundary the rest of the exit digest has,
+where a file rewritten underneath an open transaction is published rather than refused,
+and the enrolled marker is what the next open judges the file against.
+The cells it hashes are read out of the table too, which took a second correction.
+Written as the plain ordered walk -- `SELECT review_id,fact_id,review_json,active FROM
+fact_reviews ORDER BY review_id` -- the plan took `review_id` from the index KEY and only
+the other three columns from the row, so one cell of every row was pinned to the index
+rather than to the table: a table cell edited away from its key digested as the key, and
+the marker still matched byte for byte while `PRAGMA integrity_check` reported the row
+missing from the index. Nothing reads that cell back today -- every `review_id` a caller
+sees comes from the parsed body, and `record_review` and `revoke_review` match on the
+key -- so it disclosed nothing, but that was a property of the current call sites rather
+than a checked one, which is the accident this cross-check exists to remove. The digest
+now walks the index and joins each entry to the row it points at (`LEFT JOIN fact_reviews
+AS t NOT INDEXED ON t.rowid=i.rowid`), so all four cells come from the table b-tree and
+the autoindex decides only the order of the stream and which rowids it reaches -- the
+first pinned by the digest value itself, since the same rows in another order are another
+value, the second by the count. It costs nothing measurable -- 3.1 vs 3.2 ms, 17.7 vs 17.4
+and 87.8 vs 87.3 at 386, 2,000 and 10,000 M1-shaped rows, walk against join, medians of 21
+interleaved repetitions, a difference that changes sign between sizes -- because it is the
+same b-tree seek the walk already deferred, with one more cell read from the page it lands
+on. Enumerating the table instead (`... FROM fact_reviews NOT INDEXED ORDER BY review_id`)
+reads all four cells from the table too and needs no count, but sorts: 114 ms at 10,000
+rows against 81 ms, with every owner review body through a temp b-tree. `LEFT JOIN`
+rather than an inner one, so that the stream stays one row per index entry: an entry
+pointing at a rowid the table does not hold now streams NULLs and is caught by the count,
+where the plain walk ended the read with SQLite's "database disk image is malformed" and
+an inner join would have dropped it silently.
+`fact_reviews_current` is deliberately not counted the same way. A row hidden from it
+is still in the autoindex, so it is still digested and the marker still has to match
+it; and what that index decides -- which row answers `fact_id=? AND active=1` -- is
+exactly what `_current_row` refuses to trust. `fact_reviews` is also the only table in
+either store with an autoindex to hide a row from: `review_identity` and
+`projection_contract` key on `INTEGER PRIMARY KEY`, which is the rowid itself, so
+their reads are table reads already, and the pinned object set names no autoindex for
+them. A future table with a non-rowid primary key needs the same cross-check, and a
+test fails if one appears without it.
+`PRAGMA integrity_check` is the operator-side check on the indexes themselves; no
+request path runs it. Not because it is slow: measured on this store's shape it is
+about a quarter of one digest (0.6 ms, 4.3 ms and 25 ms at 386, 2,000 and 10,000
+rows), because it walks pages in C while the digest encodes rows in Python. It is off
+the request path because its cost is bounded by the whole file rather than by this one
+table, so it grows with anything the store ever holds; because its verdict is a list
+of English sentences rather than a value, so reading "anything but ok" as a refusal
+makes a SQLite message-text change either an outage or a silent pass; and because it
+is still 3-4x the cross-check's own cost inside a section that holds the node-wide
+write gate. It is what names the fault once an operator is looking: the hidden row
+reports as `row N missing from index sqlite_autoindex_fact_reviews_1`.
+Opening a store still writes to it before the floor has judged it: the reopen
+creates the missing index and the clock high-water, in a transaction that predates
+the floor (the high-water always did). A refusal rolls that transaction back, but an
+operator who wants a suspect store's original bytes must copy the file before
+starting the engine.
+The exit digest is recomputed, and the marker republished, only when the
+transaction compiled a statement that could change a review row. A SQLite
+authorizer on the connection decides that, so trigger bodies and statements
+cached before it are included, and an action code it does not recognize counts as
+a change. Under `BEGIN IMMEDIATE` no other SQLite connection can commit a row
+change, so such a transaction wrote no review row through SQLite. Skipping the exit
+digest is then a deliberate refusal to look, not an equality: a release callback,
+which holds this transaction open across its own work, can rewrite the store file
+in place, and re-reading the rows at the end is exactly the step that would publish
+the rewritten state into the marker as the owner's own. The marker cannot move, and
+the next verifying open refuses the restored file as rollback
+(`test_an_in_place_restore_during_a_release_callback_is_never_absorbed`).
+As a second check, a transaction that compiled no row write at all and still sees
+`total_changes` move is refused as `review_database_binding` -- tamper, not the
+transient `review_storage_unavailable` this file uses for a storage fault. That is
+the whole of the claim: `total_changes` is connection-wide, so a transaction that
+legitimately writes any row, on any table, switches the check off. The one path
+with nothing else to write is an owner read, and it now writes the clock high-water
+only when the high-water actually moves, so the check is live there.
 Device and inode numbers are compared only within one process: a bind mount
 renumbers them across a container VM restart (observed 2026-09-15), which is not
 a change of database. Replacing either database with a different one or
@@ -236,7 +404,18 @@ open issues (F01, F02, F07). A marker left pending by a crash after a review
 mutation is recovered only with the engine stopped, through the lab's
 `recover_durable_identity.py --phase activate-pending`: it activates the marker
 when the store's authority digest equals the pending digest and otherwise
-archives both, so the next owner preview enrolls a fresh store. The marker and store together do not provide
+archives both, so the next owner preview enrolls a fresh store. That tool
+recomputes the same whole-history digest without a size cap, so it keeps working
+unchanged on a store grown past 1 MiB; the marker version literals are unchanged
+for the same reason, and nothing in the marker records that a store has outgrown an
+older engine -- the marker model forbids unknown fields, so adding one would make
+the older engine refuse the marker outright, which is worse than what it does now.
+An engine older than this change, including a shadow host left on an earlier commit,
+refuses a grown store with `json_size`, which the handler maps to HTTP 400 and the
+control plane reports as a bad request rather than as a host that is too old. It
+fails closed and keeps the marker, but the diagnosis is not in the error: deploy
+the node and any shadow host from the same commit, and read a sudden `json_size` on
+a store that used to work as a downgraded host. The marker and store together do not provide
 protection against a privileged host deleting or rolling back all trusted
 durable state at once.
 

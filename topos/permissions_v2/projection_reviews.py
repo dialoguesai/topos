@@ -135,6 +135,16 @@ class ProjectionReviewStore(EvidenceReviewStore):
     contract singleton prevents an evidence-review file becoming an output store.
     No inherited evidence mutation entry point is exposed by this subclass.
     """
+    # The inherited objects plus this store's own contract singleton; the pin in `_db`
+    # refuses anything else in the file, so the set has to name it. `singleton INTEGER
+    # PRIMARY KEY` is the rowid itself, so this table has no autoindex to hide a row from
+    # and the set names none: `_contract` below reads it with no WHERE clause, which is a
+    # scan of the table b-tree, and requires the whole table to be exactly one known row.
+    # `fact_reviews` is the only table in either store whose PRIMARY KEY builds a separate
+    # b-tree, and the inherited `_authority_digest` -- the entry and exit digest for this
+    # store too -- is where that b-tree stops being trusted to enumerate the rows.
+    _schema_objects = EvidenceReviewStore._schema_objects | {("table", "projection_contract")}
+
     def __init__(self, path, *, resolver, _existing_only=False):
         path = Path(path)
         with with_db_write():
@@ -160,14 +170,14 @@ class ProjectionReviewStore(EvidenceReviewStore):
 
     @staticmethod
     def _current_in(db, fact_id, *, family=FAMILY):
-        rows = db.execute("SELECT review_json FROM fact_reviews WHERE fact_id=? AND active=1", (fact_id,)).fetchmany(2)
-        if len(rows) > 1:
-            raise PolicyError("output_review_ambiguous")
+        # Through the inherited row read, which re-asserts `fact_id` and `active` from the
+        # table rather than trusting `fact_reviews_current`'s keys.
+        body = EvidenceReviewStore._current_row(db, fact_id, code="output_review_ambiguous")
         # Parsed as the family the CALLER asked for, so a review recorded for one
         # family is not silently served to a grant for the other. A fact carries
         # one predicate and so belongs to one family, which is why this is a
         # binding failure rather than a row that needs its own column.
-        review = PROJECTION_BY_FAMILY[family][1].parse(rows[0][0]) if rows else None
+        review = PROJECTION_BY_FAMILY[family][1].parse(body) if body is not None else None
         if review is not None and (review.status != "approved" or review.candidate.snapshot.fact_id != fact_id):
             raise PolicyError("output_review_binding")
         return review
@@ -282,7 +292,7 @@ class ProjectionReviewService:
             bind_output_review(qualification=qualification, fact_row=row, review=review, now=now,
                                permitted_subjects=permits, family=family)
             if not existing:
-                output_db.execute("UPDATE fact_reviews SET active=0 WHERE fact_id=?", (fact_id,))
+                output_db.execute("UPDATE fact_reviews SET active=0 WHERE fact_id=? AND active=1", (fact_id,))
                 output_db.execute("INSERT INTO fact_reviews VALUES(?,?,?,1)", (review.review_id, fact_id, canonical_bytes(review.model_dump()).decode("ascii")))
             state = self._state(conn, floor, fact_id, evidence_db, output_db, now=now, contract=contract, family=family)[0]
             return ProjectionReviewMutation(version="topos-owner-projection-mutation/v1", action="recorded", review_id=review.review_id,

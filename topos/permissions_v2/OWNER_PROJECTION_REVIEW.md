@@ -21,8 +21,20 @@ Approving output never overrides any of them.
 The private `projection_review_store_path` must be an absolute, distinct file
 inside the configured node's private `permissions-v2` directory. Enrollment uses
 its own versioned pending/active marker with exact resource, durable canonical
-identity, store identity and review authority-digest binding. The store also has
-a distinct contract singleton. A missing store, lost marker, swapped evidence-store
+identity, store identity and review authority-digest binding. That digest is the
+streamed whole-history value described in EVIDENCE.md: the same bytes as before,
+with no 1 MiB whole-value cap, so the output store is no longer stopped at roughly
+388 one-leaf reviews, and its marker version is unchanged. It is also the same
+function, so this store gets the same cross-check: each digest compares the rows it
+enumerated through `fact_reviews`' primary-key index with the table's own
+`NOT INDEXED` count, and refuses a store holding a row that index cannot see -- and
+it hashes every cell out of the table row each index entry points at, never out of
+the entry's own key, so a cell edited away from its key is refused here too. The
+store also has a distinct contract singleton, which is part of the object set its
+file is pinned to: every open refuses any table, index, trigger or view the store
+did not create. That singleton keys on `INTEGER PRIMARY KEY`, so it has no index of
+its own to hide a row behind, and it is read by scanning the whole table and
+requiring exactly one known row. A missing store, lost marker, swapped evidence-store
 file, pending enrollment, replaced store, older store restored in place, damaged
 identity or protection-clock rollback cannot silently reset it. A remount that
 renumbers device/inode values does not close it.

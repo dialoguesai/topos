@@ -111,6 +111,27 @@ The machine-readable twin of each release is
   keeps the bytes -- and every enrolled marker -- the same.
 
 ### Added
+- **The offline permissions bridges can use a hosted model, for synthetic evaluation only.** `[O]`
+  `ProcessorPin.processor` in `topos/permissions_v2/experiments` now accepts `synthetic-eval-hosted`
+  as well as `owner-engine-local`. The `temperature: 0` field of the pin and of `ModelRequest` is
+  replaced by `sampling` (`temperature_zero` or `provider_reasoning_default`) and `reasoning_effort`
+  (`minimal`, `low`, `medium`, `high`, or null), because reasoning models accept no temperature and a
+  request should not claim one it never sent. A local pin keeps temperature zero and its old budgets.
+  A hosted pin must name a dated snapshot, and names an effort exactly when it uses the provider's
+  sampling. Its timeout can be up to 120 s and its output up to 4,096 tokens. Its `model_revision` is
+  expected to be `hosted_model_revision(provider=, model_id=)`, a digest of the snapshot's identity and
+  not of its weights. The pin carries no provider, so it cannot check that; the transport must.
+  `FactShadowBridge` and `SourceShadowBridge` refuse a hosted pin unless constructed with
+  `synthetic_evaluation=True`, and check again before any capture. That check reads only the pin's
+  label, so `ModelRequest` now also carries the pin's `processor` (required; an `owner-engine-local`
+  request must be at temperature zero). A transport that calls a hosted model must refuse any request
+  whose processor is not `synthetic-eval-hosted`, and must check the run's synthetic binding itself.
+  The engine still ships no network transport, and no serving module imports the package. A capsule
+  or relay frame that still carries `temperature`, or a relay frame without `processor`, no longer
+  parses. The processor block is part of every capsule's `owner_approved_revision`, so each existing
+  experiment capsule must be re-digested and approved again. A local request's canonical bytes grow by
+  71 (`processor`, `sampling` and `reasoning_effort` in place of `temperature`), which count toward `max_prompt_bytes`, so re-baseline any arm B run that sat near that budget.
+  Results from a hosted pin do not certify an in-node local evaluator.
 - **Owner-attested ChatGPT export lane.** `[O]` The owner snapshot doors (describe, enroll, enqueue,
   run, status, revoke) take a second reader contract, `chatgpt-owner-snapshot/v1`, sent only when it
   is not the iMessage default. A closed `conversations.json` reader keeps the owner's typed prompts
@@ -144,6 +165,130 @@ The machine-readable twin of each release is
   label, a stronger existing fact) still reports success.
 
 ### Fixed
+- **The owner's review stores no longer stop at about 309 reviews.** `[O]`
+  The enrolled evidence and output review stores pin an authority digest of every review row,
+  retired rows included, in their external marker, and computed it by building one canonical
+  value -- which `canonical_bytes` refuses above 1 MiB. Measured on the beta campaign's shape,
+  the 310th review of a single store failed with `json_size` and rolled back, and past that
+  point every read, revoke, qualification and release on that store failed the same way, as
+  HTTP 400. The campaign plans 386 reviews per store on one node. The digest is now streamed
+  into SHA-256 instead of materialized, so the cap no longer applies: 2,000 reviews in one
+  store are exercised by the suite. **The value is byte-identical**, so there is no migration:
+  the marker versions, the marker fields and every pinned digest are unchanged, the ordinary
+  entry comparison in the store transaction still verifies the old digest before anything is
+  served, a store whose rows no longer match its marker is still refused as
+  `review_store_rollback`, and the lab's `recover_durable_identity.py --phase activate-pending`
+  keeps working because it already computes this uncapped formula. An engine older than this
+  change, including a shadow host on an earlier commit, refuses a grown store with `json_size`
+  rather than resetting it, so deploy them from the same commit. Cost is still linear in the
+  stored rows -- one digest measures about 3 ms at 386 rows, 7 ms at 772, 19 ms at 2,000 and
+  94 ms at 10,000 (the row-count cross-check below included), and a store write pays two of
+  them -- and it is paid while *holding* the
+  process-wide node write lock, so at 10^4 rows it is node-wide write latency, not just review
+  latency. The stated goal of a small per-write cost at ~10^4 rows is therefore *not* met, and
+  this change covers a few thousand reviews per store rather than ten thousand; a single digest
+  over 100 ms (about 10,600 rows on the machine measured) is now logged as a warning, carrying
+  a duration and a row count and never a review, as the signal that a bounded or incremental
+  scheme is due. The write gate's own slow-section warning is the second tripwire.
+  Four other whole-history digests share the 1 MiB pattern and are deliberately left alone,
+  because none is near its cap for this campaign (the ingest provenance ledger shared it too,
+  and is fixed by the entry above): the exclusion floor (no rows written;
+  cap measured elsewhere at 4,500-5,200), `protection_clock`'s entity floor (about 91 B a black
+  hole, cap about 11,500) and closure record list (about 40 B a record, cap about 26,000), and
+  `canonical_floor`'s `ledger_state` (about 390 B a consent row, cap about 2,700 -- the tightest
+  of the family) and `registry_state` (about 71 B, cap about 14,800). The streamed encoder ships
+  as `canonical.digest_stream`. The entity floor, the closure list and both
+  `canonical_floor` digests are list-shaped and can adopt `Rows` as a one-liner, as the ingest
+  ledger already has; the exclusion
+  floor digests dict rows, so it adopts `MappingRows` instead. Handing dict rows to `Rows`
+  would digest the COLUMN NAMES and drop every value, so `Rows` refuses them with `json_type`,
+  and both adoption shapes are pinned byte-identical by test.
+- **A review store now holds exactly the objects it created, and the exit digest no longer
+  re-reads the file.** `[O]` The authority digest covers rows, not schema, so a trigger
+  planted on `fact_reviews` fired inside a legitimate owner write and had its work published
+  into the marker as the owner's own; one planted on `review_identity` fired on the observed
+  clock write. Every object in the store file is now checked against the exact set the store
+  creates -- the two tables, the primary-key index, the `(fact_id, active)` index, and the
+  output store's contract table -- and anything else is refused as `review_database_binding`
+  at every open, including the reopen that writes the clock high-water, so such a trigger
+  never fires at all. The check reads `sqlite_master`'s kind lower-cased and denies every kind
+  but tables and indexes: SQLite decides an object's kind from its `sql` text and accepts any
+  case variant in `type`, so a row written with `type='TRIGGER'` installs a trigger that fires
+  while a `type IN ('trigger','view')` test sees nothing. An operator who added an index by
+  hand, or ran `ANALYZE` on the file, must drop what it left. The store creates an index on
+  `(fact_id, active)` for the current-review lookup, which was a table scan, and does not trust
+  it: that predicate is answered from the index's keys alone, so the row is re-read by rowid
+  out of the table and its `fact_id` and `active` re-asserted, because a stale b-tree under
+  that name would otherwise serve a revoked review while the row digest still matched the
+  marker byte for byte. Separately, the exit digest is recomputed only when the transaction
+  compiled a statement that could change a review row, decided by a SQLite authorizer on the
+  connection, so it covers trigger bodies and statements cached before it and treats an
+  unrecognized action code as a change. That removes a re-read of the store file at the end of
+  every read transaction: a release callback, which holds that transaction open across its own
+  work, could otherwise rewrite the store file underneath it and have the restored rows
+  published into the marker once the store outgrew SQLite's page cache -- which removing the
+  1 MiB cap makes routine. As a second check, a transaction that compiled *no row write at all*
+  and still sees the connection's change counter move is refused as `review_database_binding`;
+  because that counter is connection-wide, any legitimate row write switches the check off, so
+  an owner read now writes the observed clock high-water only when it actually moves -- which
+  also saves a write per read. Retiring a fact's current review no longer rewrites rows that
+  are already retired, in both stores.
+- **The review stores' authority digest now counts the table, not the index it enumerates
+  with.** `[O]` Moving the current-review lookup onto the table b-tree left the digest itself
+  resting on a different index, and the two disagreed in the attacker's favour. `SELECT
+  review_id,fact_id,review_json,active FROM fact_reviews ORDER BY review_id` is planned as a
+  walk of `sqlite_autoindex_fact_reviews_1`, the primary key's own index, so a row written into
+  the table b-tree and *not* into that index was invisible to the digest -- the marker still
+  matched byte for byte, the pinned object set was still exactly right, and the table's `sql`
+  was still byte-identical -- while `_current_row`, which resolves a rowid through
+  `fact_reviews_current` and re-reads the row out of the *table*, found it and served it. A
+  review the owner had revoked was served again that way, through the cached service, through a
+  freshly built one and after a restart, reproduced with the same `PRAGMA writable_schema`
+  detach/re-attach the schema-pin tests already use, aimed at the autoindex. Every digest now
+  compares the number of rows it streamed with `SELECT count(*) FROM fact_reviews NOT INDEXED`
+  -- the table b-tree's own answer, with every index forbidden to the planner -- and refuses a
+  disagreement as `review_database_binding`, the quarantining code, rather than the transient
+  `review_storage_unavailable`: both reads run in one transaction under `BEGIN IMMEDIATE`, so a
+  disagreement is never a race, in either direction: a stream shorter than the table is the
+  hidden row, and a longer one is an index entry the table cannot answer for, which the exit
+  digest -- where a changed digest is published rather than refused -- would otherwise write
+  into the marker as the owner's own. It covers the entry digest and the exit digest, and the
+  output store as well as the evidence store, because all four are one function. The same walk
+  was also taking one of the four digested cells out of the index: `review_id` came from the
+  index KEY and only `fact_id`, `review_json` and `active` from the row, so a table cell edited
+  away from its key digested as the key and the marker still matched. It disclosed nothing --
+  every `review_id` a caller sees comes from the parsed body, and record and revoke match on
+  the key -- but that was an accident of the call sites rather than a checked property, so the
+  statement now walks the index and joins each entry to the row it points at (`LEFT JOIN
+  fact_reviews AS t NOT INDEXED ON t.rowid=i.rowid`). Measured indistinguishable from the plain
+  walk -- 3.1 vs 3.2 ms, 17.7 vs 17.4 and 87.8 vs 87.3 at 386, 2,000 and 10,000 M1-shaped rows,
+  a difference that changes sign between sizes -- because it is the same seek the walk already
+  deferred, with one more cell read from the page it lands on. Enumerating the table instead
+  reads all four cells from it as well and needs no count, but sorts: 114 ms at 10,000 rows
+  against 81 ms, with every owner review body through a temp b-tree. `LEFT JOIN` keeps the stream one row per index entry, so an entry pointing at a rowid the
+  table does not hold streams NULLs and is caught by the count rather than ending the read with
+  "database disk image is malformed". **What the digest trusts is now stated rather than
+  assumed:** the table b-tree, and nothing else -- every cell of every row, and how many rows
+  there are. Not `sqlite_autoindex_fact_reviews_1`, which now decides only the ORDER of the
+  stream and which rowids it reaches, the first pinned by the digest value itself and the
+  second by the count. Not `fact_reviews_current`, which it does not count at all -- a row
+  hidden from *that* index is still in the autoindex, so it is still digested and the marker
+  still has to match it, and what it decides is exactly what `_current_row` already refuses to
+  trust. Not `sqlite_master`, which the object pin covers instead. `fact_reviews` is the only
+  table in either store with an autoindex to hide a row from: `review_identity` and
+  `projection_contract` key on `INTEGER PRIMARY KEY`, so their reads are table reads already,
+  and a test fails if a future table with a non-rowid primary key appears without the same
+  cross-check. The cross-check decodes no row -- one extra b-tree walk, measured at 0.2 ms,
+  1.1 ms and 5.9 ms at 386, 2,000 and 10,000 reviews, about 7% of a digest from 2,000 rows up
+  and inside the noise at 386 (0.02 to 0.2 ms, run to run), which also moves the 100 ms
+  slow-digest warning from about 11,000 rows to about 10,600.
+  `PRAGMA integrity_check`, which reports the hidden row as `row N missing from index
+  sqlite_autoindex_fact_reviews_1`, stays the operator-side check and is still on no request
+  path -- not because it is slow (about a quarter of one digest at these sizes, since it walks
+  pages in C while the digest encodes rows in Python) but because its cost is bounded by the
+  whole file rather than by this one table, because its verdict is a list of English sentences
+  rather than a value, and because it is still 3-4x the cross-check inside a section that holds
+  the node-wide write gate.
 - **A permissions node comes back after a restart once it has used its canonical floor.** `[O]`
   The node protocol refuses to start when its ledger has recorded a canonical floor and none is
   attached, so that a node which lost its floor never signs anything. The runtime attached the

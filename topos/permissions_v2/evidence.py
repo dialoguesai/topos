@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from contextlib import contextmanager
 import json
+import logging
 import math
 import os
 from pathlib import Path
@@ -15,6 +16,7 @@ import re
 import secrets
 import sqlite3
 import stat
+import time
 from typing import Literal
 
 from pydantic import model_validator
@@ -23,7 +25,7 @@ from topos.principal import OWNER_APP, current_principal
 from topos.features.provenance.roles import record_role
 from topos.storage.db.write_gate import with_db_write
 
-from .canonical import MAX_INTEGER, PolicyError, canonical_bytes, digest
+from .canonical import MAX_INTEGER, PolicyError, Rows, canonical_bytes, digest, digest_stream
 from .contract import Hash, Identifier, Number, StrictModel
 from .identity import (ATTESTED_CONTRACT, LEGACY_CONTRACT, SUBJECT_CONTRACTS, closure_identity,
     legacy_owner_subjects, permit_subjects, rekeyed_facts, restriction_subjects)  # noqa: F401 (legacy_owner_subjects: patched by tests)
@@ -47,6 +49,105 @@ REVIEW_SURFACE_EXCLUSIONS = {
 _ANY_REVIEW = object()
 _IDENTITY_SELECT = "SELECT binding_json,file_revision,clock_id,highest_generation,store_id FROM review_identity WHERE singleton=1"
 _STORE_ID = re.compile(r"[0-9a-f]{64}")
+# Never ORDER BY rowid: `fact_reviews` is a rowid table and VACUUM renumbers rowids,
+# which would turn a benign physical reorder into a rollback refusal.
+# `ORDER BY review_id` is answered by walking `sqlite_autoindex_fact_reviews_1`, so the index
+# chooses the order and which rowids this visits. Written as that walk alone -- `SELECT
+# review_id,fact_id,review_json,active FROM fact_reviews ORDER BY review_id` -- the plan took
+# `review_id` from the index KEY (`Column` on the index cursor) and only the other three
+# columns from the row, so the digest pinned three of the four cells of a row and the key of
+# the fourth: a table cell edited away from its key digested as the key, and the marker still
+# matched byte for byte. Nothing reads that cell back today, which made it an accident of the
+# call sites rather than a checked property. Joining the walk to the row it already seeks
+# reads all four cells out of the TABLE b-tree, which is where `_current_row` reads the row it
+# serves. `NOT INDEXED` on `t` says that side is the table and nothing else; a rowid is not an
+# index, so the lookup it needs stays. It is inert against today's planner -- a rowid equality
+# has one access path, so the plan is identical spelled without it -- and what actually checks
+# where the cells come from is the plan pinned in the floor tests. `LEFT JOIN` keeps one
+# streamed row per index entry, so an entry pointing at a rowid the table does not hold streams
+# NULLs and is counted below rather than ending the read with SQLite's "database disk image is
+# malformed", which an inner join would have dropped silently. Measured indistinguishable from
+# the plain walk on M1-shaped rows -- 3.1 vs 3.2 ms, 17.7 vs 17.4 and 87.8 vs 87.3 at 386,
+# 2,000 and 10,000 rows, medians of 21 interleaved reps, a difference that changes sign between
+# sizes -- because it is the same seek the walk already deferred, landing on the same page,
+# with one more cell read from it. `... FROM fact_reviews NOT INDEXED ORDER BY review_id` reads
+# all four cells from the table as well, but sorts: 114 ms at 10,000 rows, with every review
+# body through a temp b-tree.
+_REVIEW_SELECT = ("SELECT t.review_id,t.fact_id,t.review_json,t.active FROM fact_reviews AS i "
+                  "LEFT JOIN fact_reviews AS t NOT INDEXED ON t.rowid=i.rowid ORDER BY i.review_id")
+# What the digest enumerates is still not the table: one streamed row per index entry, so a row
+# present in the table b-tree but absent from `sqlite_autoindex_fact_reviews_1` streams through
+# neither the digest nor the marker -- while `_current_row`, which resolves a rowid and re-reads
+# the TABLE, finds and serves it. `NOT INDEXED` forbids the planner every index on
+# `fact_reviews`, so this count is the table b-tree's own answer, and comparing the two is what
+# makes "every row is digested" a checked claim rather than a property of whichever index the
+# planner happened to pick. It decodes no row: one extra b-tree walk beside the one the digest
+# already pays.
+_REVIEW_COUNT = "SELECT count(*) FROM fact_reviews NOT INDEXED"
+_SCHEMA_READ = "SELECT type,name FROM sqlite_master"
+_CURRENT_INDEX = "CREATE INDEX IF NOT EXISTS fact_reviews_current ON fact_reviews(fact_id,active)"
+# Nothing bounds a store's lifetime rows, so the only backstop against unbounded growth
+# is an operator noticing. This is the tripwire that says when a bounded or incremental
+# digest has to be reconsidered; it carries a duration and a row count, never a review.
+# 0.25 s was about 26,000 rows on the machine the change was measured on, well past the row
+# count at which the per-write cost is already documented as too high. 0.1 s is about 10,600
+# rows there; both are scaled from the one measured point, 94 ms at 10,000 rows with the
+# table-count cross-check included (87 ms without it), so the warning
+# arrives while the numbers still matter -- and it is measured around the cross-check, so it
+# stays a statement about what one digest costs rather than about one part of it.
+# The duration is machine-dependent by design: what matters is the cost paid while
+# holding the node-wide write gate, not the row count that produced it.
+_DIGEST_WARN_SECONDS = 0.1
+_READ_ACTIONS = frozenset({sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION,
+    sqlite3.SQLITE_TRANSACTION, sqlite3.SQLITE_SAVEPOINT, sqlite3.SQLITE_RECURSIVE})
+_ROW_WRITE_ACTIONS = frozenset({sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE})
+_log = logging.getLogger(__name__)
+
+
+class _Counted:
+    """Counts the rows a digest streams, for the table cross-check and the slow-digest warning."""
+    __slots__ = ("rows", "count")
+
+    def __init__(self, rows):
+        self.rows, self.count = rows, 0
+
+    def __iter__(self):
+        for row in self.rows:
+            self.count += 1
+            yield row
+
+
+class _ReviewAccess:
+    """A SQLite authorizer noting any compiled statement that could change a review row.
+
+    Every statement on the connection is compiled through this hook, trigger
+    programs included, and `set_authorizer` expires statements cached before it.
+    Under BEGIN IMMEDIATE no other SQLite connection can commit a row change, so
+    a transaction that never set `touched` wrote no review row through SQLite.
+    Skipping the exit digest there is a refusal to look, not an equality: a
+    non-SQLite writer that rewrites the store file underneath an open transaction
+    does change the rows on disk, and re-reading them at the end is exactly the
+    step that would publish the rewritten state into the marker as the owner's
+    own. The next verifying open refuses that file instead.
+    An unrecognized action code counts as touched: an unknown statement kind
+    costs one extra digest rather than silently skipping one.
+    `wrote` is any row write on any table, `touched` only a review row, so a
+    transaction can write the observed clock high-water without paying a digest.
+    """
+    __slots__ = ("touched", "wrote")
+
+    def __init__(self):
+        self.touched = self.wrote = False
+
+    def __call__(self, action, table, _column, _database, _trigger):
+        if action in _READ_ACTIONS:
+            return sqlite3.SQLITE_OK
+        if action in _ROW_WRITE_ACTIONS:
+            self.wrote = True
+            if (table or "").lower() != "fact_reviews":
+                return sqlite3.SQLITE_OK
+        self.touched = True
+        return sqlite3.SQLITE_OK
 
 
 class EvidenceBinding(StrictModel):
@@ -929,6 +1030,18 @@ class EvidenceReviewStore:
     detected as rollback. It is not an integrity boundary against a privileged
     host administrator who rewrites every trusted file together.
     """
+    # Exactly the objects this store creates, by kind and name. Anything else is refused:
+    # a trigger or a view executes, and an index decides which row a predicate answers with,
+    # while the authority digest covers rows and never schema. Deny by default, because a
+    # kind this list does not know about must fail closed rather than be allowed by omission.
+    # `type` is compared lower-cased: SQLite decides an object's kind from its `sql` text and
+    # accepts any case variant in `type`, so `type='TRIGGER'` installs a trigger that fires
+    # (verified on SQLite 3.47.1), and a `type IN ('trigger','view')` test misses it. `sql`
+    # is deliberately not compared: rewriting it cannot smuggle in an executing object, and
+    # any reinterpretation of the stored cells moves the row digest.
+    _schema_objects = frozenset({("table", "review_identity"), ("table", "fact_reviews"),
+        ("index", "sqlite_autoindex_fact_reviews_1"), ("index", "fact_reviews_current")})
+
     def __init__(self, path: Path, *, resolver: EvidenceResolver, _existing_only=False):
         if not _existing_only:
             _owner(resolver.binding)
@@ -969,6 +1082,7 @@ class EvidenceReviewStore:
                     self.store_id = secrets.token_hex(32)
                     db.execute("CREATE TABLE review_identity(singleton INTEGER PRIMARY KEY CHECK(singleton=1),binding_json TEXT NOT NULL,file_revision TEXT NOT NULL,clock_id TEXT NOT NULL,highest_generation INTEGER NOT NULL,store_id TEXT NOT NULL)")
                     db.execute("CREATE TABLE fact_reviews(review_id TEXT PRIMARY KEY,fact_id TEXT NOT NULL,review_json TEXT NOT NULL,active INTEGER NOT NULL CHECK(active IN (0,1)))")
+                    db.execute(_CURRENT_INDEX)
                     db.execute("INSERT INTO review_identity VALUES(1,?,?,?,?,?)", (self._binding_json,
                         self.canonical_file_revision, self._clock_id, self._highest_generation, self.store_id))
                 else:
@@ -976,8 +1090,27 @@ class EvidenceReviewStore:
                     # Do not rebuild either schema or singleton in existing files.
                     old = db.execute(_IDENTITY_SELECT).fetchone()
                     self._check_identity(old, reopening=True)
+                    # The current-review lookup is otherwise a table scan, which grows with
+                    # lifetime reviews now that nothing caps them. An index is not part of
+                    # the digested state, so adding one to an existing store changes no
+                    # pinned value and leaves the marker untouched. It is created before the
+                    # schema pin below, which requires it: that is what lets a store an older
+                    # engine wrote pass the pin without a migration step of its own. DDL fires
+                    # no trigger, and a refusal below rolls this whole transaction back.
+                    db.execute(_CURRENT_INDEX)
+                    # Before the reopen's own high-water write, so a trigger planted on
+                    # `review_identity` can never fire: this transaction predates the floor,
+                    # and so predates the verifying open that would otherwise catch it.
+                    self._check_schema(db)
                     db.execute("SELECT review_id,fact_id,review_json,active FROM fact_reviews LIMIT 1")
                     db.execute("UPDATE review_identity SET highest_generation=? WHERE singleton=1", (self._highest_generation,))
+
+    def _check_schema(self, db):
+        """Refuse any object in the store file that this store did not create."""
+        found = {(kind.lower() if type(kind) is str else kind, name)
+                 for kind, name in db.execute(_SCHEMA_READ)}
+        if found != self._schema_objects:
+            raise PolicyError("review_database_binding")
 
     def _check_file(self):
         info = _checked_file(self.path, code="review_database_binding")
@@ -1009,9 +1142,72 @@ class EvidenceReviewStore:
 
     @staticmethod
     def _authority_digest(db) -> str:
-        """Digest of every review row; the observed clock high-water is excluded."""
-        rows = db.execute("SELECT review_id,fact_id,review_json,active FROM fact_reviews ORDER BY review_id").fetchall()
-        return digest([list(row) for row in rows])
+        """Digest of every review row; the observed clock high-water is excluded.
+
+        The value is exactly `digest([[review_id, fact_id, review_json, active], ...])`
+        over every row ordered by `review_id`, retired rows included. It is streamed
+        into SHA-256 rather than built as one canonical value, so the store is no
+        longer capped by the 1 MiB canonical encoding limit, which stopped one store
+        at 309 owner reviews of this shape. The bytes, and so every pinned digest,
+        are unchanged.
+
+        Every cell it hashes is read out of the table b-tree, and what the index
+        decides instead is checked rather than trusted. `_REVIEW_SELECT` walks
+        `sqlite_autoindex_fact_reviews_1` and joins each entry to the row it points
+        at, so that index decides two things: the ORDER of the stream, and which
+        rowids it reaches. The order is pinned by the digest itself, since the same
+        rows in another order are another value. The reach is not: hardening
+        `_current_row` against `fact_reviews_current` left the digest resting on a
+        different index, and a row hidden from the primary-key autoindex is
+        invisible here, so the marker still matches, while `_current_row`'s rowid
+        re-read serves that row as the owner's current review. The streamed row
+        count is therefore compared with the table's own count, taken with `NOT
+        INDEXED`. Both reads run in one transaction under `BEGIN IMMEDIATE`, so
+        nothing can commit between them and a disagreement is never a race: it is
+        refused as `review_database_binding`, the same quarantining code the schema
+        pin and the `total_changes` cross-check use, rather than as the transient
+        `review_storage_unavailable`. The comparison is an equality in both
+        directions. A stream shorter than the table is the hidden row. A stream
+        longer than it is an index entry the table cannot answer for, which the
+        entry digest would refuse anyway as a changed value, but which the exit
+        digest -- where a changed value is published rather than refused -- would
+        otherwise write into the marker as the owner's own work. At the entry digest
+        the count and the value are exhaustive together: a stream that misses a
+        table row and still counts right streamed something in its place -- some
+        other row a second time, or an entry with no row behind it, which comes
+        through as NULLs -- and both of those are in the value. This runs at the
+        entry digest and at the exit digest alike, because both are this function.
+
+        It does not check `fact_reviews_current` the same way, and does not need
+        to: a row hidden from that index is still in the autoindex, so it is still
+        digested and the marker still has to match it, and what such an index can
+        do -- decide which row answers `fact_id=? AND active=1` -- `_current_row`
+        already refuses to trust. `PRAGMA integrity_check` would catch both, and
+        every other b-tree fault besides. It is deliberately not on this path, and
+        the reason is NOT that it is slow: measured on this store's shape it is
+        about a quarter of one digest (0.6 ms, 4.3 ms and 25 ms at 386, 2,000 and
+        10,000 rows, against 3.4 ms, 17 ms and 87 ms), because the digest's cost is
+        encoding rows in Python while its is walking pages in C. The reasons are
+        that its cost is bounded by the whole FILE rather than by this one table,
+        so it grows with anything else the store ever holds; that its verdict is a
+        list of English sentences rather than a value, so reading "anything but ok"
+        as a refusal makes a SQLite message-text change either a node outage or a
+        silent pass; and that it is still 3-4x the cross-check's own cost (+18% and
+        +29% of a digest at 386 and 10,000 rows, against +0.5% and +7.6%) inside
+        the section that holds the node-wide write gate. It stays the operator-side
+        check, which is where the row this cross-check refuses is diagnosed.
+        """
+        counted = _Counted(db.execute(_REVIEW_SELECT))
+        started = time.monotonic()
+        result = digest_stream(Rows(counted))
+        stored = db.execute(_REVIEW_COUNT).fetchone()[0]
+        elapsed = time.monotonic() - started
+        if counted.count != stored:
+            raise PolicyError("review_database_binding")
+        if elapsed > _DIGEST_WARN_SECONDS:
+            _log.warning("permissions_v2 review authority digest took %d ms over %d rows",
+                         int(elapsed * 1000), counted.count)
+        return result
 
     def current_authority_digest(self) -> str:
         with self._db() as db:
@@ -1029,20 +1225,35 @@ class EvidenceReviewStore:
                 self._check_file()
                 db.execute("BEGIN IMMEDIATE")
                 floor = None if initializing else self._floor
+                access, changes = None, db.total_changes
                 if not initializing:
                     self._check_identity(db.execute(_IDENTITY_SELECT).fetchone())
-                    if floor is not None and self._authority_digest(db) != floor.expected_authority_digest():
-                        raise PolicyError("review_store_rollback")
+                    if floor is not None:
+                        self._check_schema(db)
+                        if self._authority_digest(db) != floor.expected_authority_digest():
+                            raise PolicyError("review_store_rollback")
+                        access = _ReviewAccess()
+                        db.set_authorizer(access)
                 yield db
                 self._check_file()
                 published = None
                 if floor is not None:
-                    after = self._authority_digest(db)
-                    if after != floor.expected_authority_digest():
-                        # Durable before the commit. A crash in either order
-                        # leaves the enrollment pending, never a silent reset.
-                        floor.publish_pending(after)
-                        published = after
+                    if access.touched:
+                        after = self._authority_digest(db)
+                        if after != floor.expected_authority_digest():
+                            # Durable before the commit. A crash in either order
+                            # leaves the enrollment pending, never a silent reset.
+                            floor.publish_pending(after)
+                            published = after
+                    elif not access.wrote and db.total_changes != changes:
+                        # Nothing compiled here could change any row, so a changed row is a
+                        # write this connection's authorizer never saw. That is a tamper
+                        # signal, not a transient fault, so it gets the floor's own refusal
+                        # rather than `review_storage_unavailable`. It can only be read as a
+                        # statement about transactions that compiled no row write at all:
+                        # `total_changes` is connection-wide, so a legitimate clock write
+                        # would otherwise trip it, which is why `wrote` gates the branch.
+                        raise PolicyError("review_database_binding")
                 db.commit()
                 if published is not None:
                     floor.publish_active(published)
@@ -1060,7 +1271,12 @@ class EvidenceReviewStore:
         with self._db() as db:
             if clock_id != self._clock_id or generation < self._highest_generation:
                 raise PolicyError("review_protection_clock")
-            db.execute("UPDATE review_identity SET highest_generation=? WHERE singleton=1", (generation,))
+            # Only when it actually moves. An unconditional UPDATE made every owner read a
+            # writing transaction, which both amplified writes and switched off the
+            # `total_changes` cross-check below for the one path that has nothing else to
+            # write. The stored value was just read and validated by `_check_identity`.
+            if db.execute("SELECT highest_generation FROM review_identity WHERE singleton=1").fetchone()[0] != generation:
+                db.execute("UPDATE review_identity SET highest_generation=? WHERE singleton=1", (generation,))
         self._highest_generation = generation
 
     def record_review(self, *, resolver: EvidenceResolver, review_id: str, expected_snapshot: EvidenceSnapshot,
@@ -1094,7 +1310,7 @@ class EvidenceReviewStore:
                     actual = digest(current_review.model_dump()) if current_review else None
                     if actual != expected_current_review_revision:
                         raise PolicyError("review_conflict")
-                db.execute("UPDATE fact_reviews SET active=0 WHERE fact_id=?", (current.fact_id,))
+                db.execute("UPDATE fact_reviews SET active=0 WHERE fact_id=? AND active=1", (current.fact_id,))
                 db.execute("INSERT INTO fact_reviews VALUES(?,?,?,1)", (review.review_id, current.fact_id, raw))
             return review
 
@@ -1111,17 +1327,46 @@ class EvidenceReviewStore:
                 current_review = self._current_in(db, fact_id)
                 if current_review is not None and current_review.review_id != review_id:
                     raise PolicyError("review_conflict")
+            # Deliberately not narrowed with `AND active=1`, unlike `record_review`'s retire:
+            # `rowcount == 1` below is this call's idempotency check, so matching only active
+            # rows would turn a repeated revoke into `review_unknown`. Pinned by
+            # tests/permissions_v2/test_evidence_reviews.py::
+            # test_review_server_time_retry_current_revision_cas_and_revoke, which fails on
+            # the narrowed spelling.
             changed = db.execute("UPDATE fact_reviews SET active=0 WHERE review_id=?", (review_id,))
             if changed.rowcount != 1:
                 raise PolicyError("review_unknown")
             return review if expected_review_revision is not _ANY_REVIEW else None
 
     @staticmethod
+    def _current_row(db, fact_id, code="review_ambiguous"):
+        """The one active row for `fact_id`, read out of the table rather than out of the index.
+
+        `WHERE fact_id=? AND active=1` is answered from `fact_reviews_current`'s keys, so a
+        stale or planted b-tree under that name would otherwise decide which review is
+        current while the row digest still matched the marker byte for byte. The rowid
+        lookup goes to the table b-tree, and the flags are re-asserted from what it
+        returns, so serving a revoked review needs a real row in the table b-tree -- which
+        the entry digest refuses, including the row the digest's own enumeration cannot
+        see, because `_authority_digest` compares what it streamed with the table's own
+        `NOT INDEXED` count. Reading the row out of the table is only worth anything while
+        the table is what the digest is taken over. `PRAGMA integrity_check` is the
+        operator-side check for the index itself; nothing in a request path runs it.
+        """
+        found = db.execute("SELECT rowid FROM fact_reviews WHERE fact_id=? AND active=1", (fact_id,)).fetchmany(2)
+        if len(found) > 1:
+            raise PolicyError(code)
+        if not found:
+            return None
+        row = db.execute("SELECT fact_id,review_json,active FROM fact_reviews WHERE rowid=?", (found[0][0],)).fetchone()
+        if row is None or row[0] != fact_id or row[2] != 1:
+            raise PolicyError("review_database_binding")
+        return row[1]
+
+    @staticmethod
     def _current_in(db, fact_id):
-        rows = db.execute("SELECT review_json FROM fact_reviews WHERE fact_id=? AND active=1", (fact_id,)).fetchmany(2)
-        if len(rows) > 1:
-            raise PolicyError("review_ambiguous")
-        return OwnerEvidenceReview.parse(rows[0][0]) if rows else None
+        body = EvidenceReviewStore._current_row(db, fact_id)
+        return OwnerEvidenceReview.parse(body) if body is not None else None
 
     def _load_current(self, fact_id: str) -> OwnerEvidenceReview:
         with self._db() as db:
