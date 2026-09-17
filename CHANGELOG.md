@@ -67,6 +67,48 @@ The machine-readable twin of each release is
   refused, including legacy `user` rows. The canonical store no longer lets any writer replace the
   body, role or conversation of a linked row, and refuses to move a conversation that has an owner
   to a different owner.
+- **The ingest ledger's authority digest now measures the table, not one index.** `[O]`
+  `IngestProvenanceService._authority_digest` enumerated each durable table with
+  `SELECT * FROM <table> ORDER BY 1`, which SQLite plans for all four as a walk of that
+  table's primary-key autoindex, fetching rows through it. A row written into the table
+  b-tree but not into that autoindex was streamed by nobody, so the external enrollment
+  marker still matched byte for byte -- while `ingest_provenance_enrollments.dataset_id`
+  and `ingest_provenance_jobs.enrollment_id` are declared UNIQUE and carry their own
+  autoindexes, which is where `enroll` and `enqueue` look rows up. Both reached such a row:
+  `enqueue` on an iMessage enrollment answered with the ChatGPT lane's job id, enrollment
+  id, `done` status and result -- across the lane boundary the module otherwise keeps --
+  and suppressed that enrollment's own job; `enroll` reported a second dataset as already
+  enrolled and handed back the first dataset's enrollment, having created nothing. The
+  digest now compares the rows it streamed per table with
+  `SELECT count(*) FROM <table> NOT INDEXED`, which is the table b-tree's own answer with
+  every index forbidden to the planner, and refuses a disagreement as
+  `ingest_ledger_binding`. The digest's value is unchanged, so no marker is re-pinned and
+  no enrolled store needs a migration. The four counts together cost 2.2% of a digest at
+  386 record links and 0.3% at 5,000. `PRAGMA integrity_check` names such a row and stays
+  off every request path: its cost is bounded by the whole canonical database, its verdict
+  is English sentences rather than a value, and it attaches the temp database, which this
+  store's connection binding refuses.
+- **The owner's ingest lane no longer stops working at roughly 5,500 messages.** `[O]`
+  `IngestProvenanceService._authority_digest` built one canonical value over every row of
+  the four durable ledger tables, and `canonical_bytes` refuses anything over 1 MiB with
+  `json_size`. Measured on this ledger's shape -- one enrollment, one job, 8 commands, and
+  a link carrying a real `imessage:<id>`, an `ingest-enrollment-<32 hex>` id, an
+  `ingest-job-<32 hex>` id and a 64-hex row identity -- the last digestible ledger held
+  5,568 record links. From the next one on, every `_check` raised `json_size`, which is
+  every enroll, enqueue, claim, status, revoke and `validate_record_origin` door on the
+  owner-attested ingest lane: closed permanently, with no compaction to fall back to --
+  `ingest_provenance_records` gets one row per linked message and nothing removes them.
+  The digest now streams its rows into SHA-256 instead of building one value, so the
+  ledger is bounded by the time to read it rather than by the size of one Python object.
+  The value is deliberately unchanged: for every ledger the built digest could encode, the
+  streamed digest returns the same hex, so no enrolled store's
+  `ingest-snapshots.enrollment.json` is re-pinned and no marker written before this change
+  stops matching. Streaming is also cheaper, because it never materializes a row as a
+  Python list: 3.3 ms -> 0.89 ms at 386 record links, and 42 ms -> 11 ms at 5,000. Unlike
+  the review stores, which open their own connection, this store digests the connection the
+  node hands it, and the node sets `row_factory = sqlite3.Row` on its canonical connection;
+  the rows are normalized with `list(row)` exactly as the built digest did, which is what
+  keeps the bytes -- and every enrolled marker -- the same.
 
 ### Added
 - **Owner-attested ChatGPT export lane.** `[O]` The owner snapshot doors (describe, enroll, enqueue,

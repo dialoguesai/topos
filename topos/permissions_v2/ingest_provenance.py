@@ -26,7 +26,7 @@ import time
 
 from topos.storage.db.write_gate import with_db_write
 
-from .canonical import PolicyError, canonical_bytes, digest
+from .canonical import PolicyError, Rows, canonical_bytes, digest, digest_stream
 from .evidence import EvidenceBinding, EvidenceResolver, _checked_file, _owner
 from .ingest_protocol import (CHATGPT_OWNER_ATTESTATION, CHATGPT_READER_CONTRACT, CHATGPT_SOURCE_ID,  # noqa: F401 (OWNER_ATTESTATION: re-exported)
     IMESSAGE_READER_CONTRACT, LANE_ATTESTATION, LANE_SOURCE, OWNER_ATTESTATION)
@@ -45,6 +45,31 @@ _SCHEMA = {
     "ingest_provenance_records": "CREATE TABLE ingest_provenance_records (message_id TEXT PRIMARY KEY, enrollment_id TEXT NOT NULL, enrollment_revision INTEGER NOT NULL, job_id TEXT NOT NULL, row_identity TEXT NOT NULL)",
     "ingest_provenance_commands": "CREATE TABLE ingest_provenance_commands (command_id TEXT PRIMARY KEY, command_hash TEXT NOT NULL)",
 }
+
+
+class _Counted:
+    """`list(row)` for every row, counted on the way past.
+
+    The digest cannot ask a `Rows` how many rows it fed SHA-256 after the fact --
+    that is the point of streaming -- so the count is taken here, where the rows
+    go by, and compared with the table's own count once the digest is done.
+
+    `list(row)` is not decoration. Unlike the review stores, which open their own
+    connection, this store digests whatever connection the node hands it, and the
+    node sets `row_factory = sqlite3.Row` on its canonical connection. A
+    `sqlite3.Row` is neither a list nor a tuple, so `Rows` refuses it outright,
+    while `list()` of one is its values -- exactly the rows the built digest
+    encoded, which is what keeps every enrolled marker matching.
+    """
+    __slots__ = ("rows", "count")
+
+    def __init__(self, rows):
+        self.rows, self.count = rows, 0
+
+    def __iter__(self):
+        for row in self.rows:
+            self.count += 1
+            yield list(row)
 
 
 def _identifier(value):
@@ -283,16 +308,88 @@ class IngestProvenanceService:
 
     @staticmethod
     def _authority_digest(conn):
-        # The external marker detects an in-place restore of earlier canonical
-        # bytes too. Source generation is a separately increasing floor because
-        # native configuration writers legitimately advance it outside us.
-        tables = {}
-        for table in _SCHEMA:
-            if table == "ingest_provenance_state":
-                continue
-            rows = [list(row) for row in conn.execute(f"SELECT * FROM {table} ORDER BY 1")]
-            tables[table] = rows
-        return digest(tables)
+        """Digest of every ledger row. The enumeration trusts the table b-tree and nothing else.
+
+        The external marker detects an in-place restore of earlier canonical
+        bytes too. Source generation is a separately increasing floor because
+        native configuration writers legitimately advance it outside us.
+
+        The rows are streamed into SHA-256 rather than built as one canonical
+        value, so the ledger is no longer capped by the 1 MiB canonical encoding
+        limit. Built, this ledger's shape reached that limit at 5,568 record
+        links -- one enrollment, one job, 8 commands, and a link carrying a real
+        `imessage:<id>`, the enrollment and job ids and a 64-hex row identity.
+        The next link made `canonical_bytes` raise `json_size` inside every
+        `_check`, which is every enroll, enqueue, claim, status, revoke and
+        `validate_record_origin` on the lane: not a slow store but a closed one,
+        permanently, at roughly 5,500 ingested messages, with no compaction to
+        fall back to -- `ingest_provenance_records` gets one row per linked
+        message and nothing removes them. The value is deliberately unchanged:
+        for every ledger the built digest accepted, the streamed digest returns
+        the same hex, so no enrolled store's `ingest-snapshots.enrollment.json`
+        is re-pinned and no marker written by the built digest stops matching.
+        Streaming is also the cheaper of the two, because it never materializes
+        a row as a Python list: measured on this shape, 3.3 ms -> 0.89 ms at 386
+        record links and 42 ms -> 11 ms at 5,000.
+
+        What `ORDER BY 1` enumerates is not the table. All four of these plan as
+        `SCAN <table> USING INDEX sqlite_autoindex_<table>_1`, so the digest walks
+        each table's primary-key autoindex and fetches rows through it. A row
+        written into the table b-tree but not into that autoindex is therefore
+        streamed by neither the digest nor the marker -- while
+        `ingest_provenance_enrollments.dataset_id` and
+        `ingest_provenance_jobs.enrollment_id` are declared UNIQUE and have their
+        own autoindexes, which is where `enroll` and `enqueue` look rows up. Both
+        reach such a row: measured, `enqueue` on an iMessage enrollment answered
+        with the ChatGPT lane's job id, enrollment id, `done` status and result,
+        and `enroll` reported a second dataset as already enrolled and returned
+        the first dataset's enrollment, having created nothing -- both with the
+        marker's `authority_digest` still matching byte for byte.
+
+        `NOT INDEXED` forbids the planner every index on the table, so that count
+        is the table b-tree's own answer, and comparing the two is what makes
+        "every row is digested" a checked claim rather than a property of
+        whichever index the planner happened to pick here and in every serving
+        read. It decodes no row: one extra b-tree walk per table beside the ones
+        the digest already pays. Measured on this ledger's shape, all four counts
+        together are 0.020 ms at 386 record links and 0.032 ms at 5,000, against
+        a streamed digest of 0.89 ms and 11 ms -- 2.2% falling to 0.3%, because
+        the counts walk pages in C while the digest's cost is encoding rows in
+        Python. The counts are compared after the digest rather than before each
+        table, so one streaming pass answers both questions; nothing is written
+        under the refusal either way. The disagreement is refused as
+        `ingest_ledger_binding` -- the code an
+        unexpected ledger row count already carries, from
+        `ingest_provenance_state`'s own `len(rows) != 1` -- rather than as
+        `ingest_ledger_rollback`, which says the digested rows moved. Here the
+        rows this store can see did not move, and that is the finding.
+
+        `ingest_provenance_state` is excluded from the digest and needs no
+        cross-check of its own: `_check_locked` reads it with an unordered scan of
+        the table b-tree and requires exactly one row, which is the same claim.
+
+        `PRAGMA integrity_check` would name the row, and every other b-tree fault
+        besides, and is deliberately not on this path. Its cost is bounded by the
+        whole FILE, and this file is the node's canonical database, so it walks
+        `conversation_messages` and everything else the node owns rather than
+        these four tables -- on this fixture, where nothing else is populated, it
+        is 0.35 ms and 2.8 ms at those two sizes, a quarter to a third of one
+        streamed digest, so the reason is not that it is slow; its verdict is a
+        list of English sentences rather than a
+        value, so reading "anything but ok" as a refusal makes a SQLite
+        message-text change either a node outage or a silent pass; and it attaches
+        the temp database, which `_connection` refuses on any connection reaching
+        this store. It stays the operator-side check.
+        """
+        counted = {table: _Counted(conn.execute(f"SELECT * FROM {table} ORDER BY 1"))
+                   for table in _SCHEMA if table != "ingest_provenance_state"}
+        result = digest_stream({table: Rows(rows) for table, rows in counted.items()})
+        for table, rows in counted.items():
+            # Both reads are on this connection inside the caller's transaction, so
+            # nothing can commit between them and a disagreement is never a race.
+            if rows.count != conn.execute(f"SELECT count(*) FROM {table} NOT INDEXED").fetchone()[0]:
+                raise PolicyError("ingest_ledger_binding")
+        return result
 
     def _publish_marker(self, marker):
         temporary = self.marker.with_name(self.marker.name + "." + secrets.token_hex(16))
