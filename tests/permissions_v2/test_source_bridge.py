@@ -17,7 +17,7 @@ import stat
 import pytest
 
 from tests.permissions_v2.test_evidence import attest, corpus, edit, owner, payload as change_fact  # noqa: F401 (fixture)
-from tests.permissions_v2.test_fact_bridge import EXPERIMENTS, _imported_modules
+from tests.permissions_v2.test_fact_bridge import EXPERIMENTS, HOSTED, HOSTED_MODEL, OTHER_HOSTED, _imported_modules
 from tests.permissions_v2.test_release import dispatch, issue, release_setup  # noqa: F401 (fixture)
 from tests.permissions_v2.test_source_release_sibling_facts import sibling
 from topos.features.lifecycle.record_protection import RecordProtectionStore
@@ -123,19 +123,20 @@ def capsule(raw, *, prose_body=None, prompt_revision=SOURCE_PROMPT_REVISION, pro
     body = {"version": VERSION, "experiment_id": experiment_id, "policy": raw, "prose": prose_body or prose(raw),
         "processor": {"processor": "owner-engine-local", "model_id": "synthetic-local-model", "model_revision": "7" * 64,
             "prompt_revision": prompt_revision, "timeout_ms": 500, "max_prompt_bytes": 32768, "max_response_bytes": 4096,
-            "max_output_tokens": 256, "temperature": 0, **(processor or {})}}
+            "max_output_tokens": 256, "sampling": "temperature_zero", "reasoning_effort": None, **(processor or {})}}
     body["owner_approved_revision"] = digest(body)
     if edit_after:
         edit_after(body)
     return SourceExperimentCapsule.parse(body)
 
 
-def bridge(setup, *, raw=None, transport=None, clock=None, cache=None, retention=None, binding=None, **capsule_options):
+def bridge(setup, *, raw=None, transport=None, clock=None, cache=None, retention=None, binding=None,
+           synthetic_evaluation=False, **capsule_options):
     raw = raw if raw is not None else setup[1]
     resolver, reviews, _ = setup[5]
     return SourceShadowBridge(capsule(raw, **capsule_options), resolver=resolver, reviews=reviews,
         binding=Binding.parse(binding or raw["binding"]), clock=clock or (lambda: NOW), transport=transport,
-        cache=cache, retention=retention)
+        cache=cache, retention=retention, synthetic_evaluation=synthetic_evaluation)
 
 
 def serve(setup, *changes):
@@ -618,6 +619,90 @@ async def test_a_synthetic_run_retains_each_exchange_privately_and_results_carry
     assert MESSAGE in records[1]["request"]["candidate_data"]
     dumped = result.model_dump_json()
     assert MESSAGE not in dumped and "APPROVED_POLICY_JSON" not in dumped
+
+
+# --- a hosted processor, for synthetic evaluation only ----------------------------------
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flag,code", [
+    ("omitted", "hosted_processor_requires_synthetic_evaluation"),
+    (False, "hosted_processor_requires_synthetic_evaluation"),
+    (None, "synthetic_evaluation_invalid"), (1, "synthetic_evaluation_invalid"), ("true", "synthetic_evaluation_invalid"),
+])
+async def test_a_hosted_pin_is_refused_before_any_capture_unless_the_bridge_is_flagged_synthetic(
+        release_setup, monkeypatch, flag, code):
+    resolver, reviews, fact_id = release_setup[5]
+    raw, model, captures = release_setup[1], Model(), []
+    real = resolver.with_qualified
+
+    def spy(*args, **kwargs):
+        captures.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(resolver, "with_qualified", spy)
+    options = {} if flag == "omitted" else {"synthetic_evaluation": flag}
+    make = lambda processor=None, **extra: SourceShadowBridge(capsule(raw, processor=processor), resolver=resolver,  # noqa: E731
+        reviews=reviews, binding=Binding.parse(raw["binding"]), clock=lambda: NOW, transport=model, **extra)
+    for hosted in (HOSTED, OTHER_HOSTED):  # refused by its label, at either sampling
+        with pytest.raises(PolicyError, match=code):
+            make(hosted, **options)
+    assert captures == [] and model.calls == []
+    if flag not in ("omitted", False):
+        with pytest.raises(PolicyError, match="synthetic_evaluation_invalid"):
+            make(synthetic_evaluation=flag)
+    # A local pin needs no flag; a hosted capsule swapped in later is refused when run, still before any capture.
+    local = make(**({} if flag == "omitted" else {"synthetic_evaluation": False}))
+    assert local.synthetic_evaluation is False
+    local.capsule = capsule(raw, processor=HOSTED)
+    for arm in ("rules_v2", "semantic_v1"):
+        with pytest.raises(PolicyError, match="hosted_processor_requires_synthetic_evaluation"):
+            await local.run(fact_id, arm=arm)
+    assert captures == [] and model.calls == []
+    flagged = await make(HOSTED, synthetic_evaluation=True).run(fact_id, arm="semantic_v1")
+    assert flagged.verdict == "permit" and len(model.calls) == 2 and captures
+
+
+@pytest.mark.asyncio
+async def test_each_request_carries_exactly_the_sampling_the_owner_approved(release_setup, tmp_path):
+    local, hosted = Model(), Model()
+    first = await bridge(release_setup, transport=local).run(release_setup[5][2], arm="semantic_v1")
+    with SyntheticBodyRetention(tmp_path / "bodies", synthetic_run=True) as retention:
+        second = await bridge(release_setup, transport=hosted, processor=HOSTED, synthetic_evaluation=True,
+                              retention=retention).run(release_setup[5][2], arm="semantic_v1")
+        files = list(retention.files)
+    assert (first.verdict, first.model_calls, second.verdict, second.model_calls) == ("permit", 2, "permit", 2)
+    assert [(call.processor, call.sampling, call.reasoning_effort) for call in local.calls] == [
+        ("owner-engine-local", "temperature_zero", None)] * 2
+    assert [(call.processor, call.model_id, call.model_revision, call.sampling, call.reasoning_effort, call.max_output_tokens)
+            for call in hosted.calls] == [
+        ("synthetic-eval-hosted", HOSTED_MODEL, HOSTED["model_revision"], "provider_reasoning_default", "low", 4096)] * 2
+    assert all("temperature" not in call.model_dump() for call in local.calls + hosted.calls)
+    # A retained synthetic exchange records the processor and sampling that were actually requested.
+    records = [json.loads((tmp_path / "bodies" / name).read_text()) for name in files]
+    assert [(row["request"]["processor"], row["request"]["sampling"], row["request"]["reasoning_effort"]) for row in records] == [
+        ("synthetic-eval-hosted", "provider_reasoning_default", "low")] * 2
+    other = Model()
+    third = await bridge(release_setup, transport=other, processor=OTHER_HOSTED, synthetic_evaluation=True).run(
+        release_setup[5][2], arm="semantic_v1")
+    assert (third.verdict, [(call.processor, call.model_id, call.sampling) for call in other.calls]) == (
+        "permit", [("synthetic-eval-hosted", OTHER_HOSTED["model_id"], "temperature_zero")] * 2)
+
+
+@pytest.mark.asyncio
+async def test_a_local_pin_naming_a_hosted_snapshot_still_says_local_in_its_request(release_setup):
+    """The engine's refusal reads the pin's label; the request carries that label to the transport that must refuse it."""
+    same = {**HOSTED, "timeout_ms": 500, "max_output_tokens": 256, "sampling": "temperature_zero", "reasoning_effort": None}
+    relabelled, approved = Model(), Model()
+    first = await bridge(release_setup, transport=relabelled, processor={**same, "processor": "owner-engine-local"}).run(
+        release_setup[5][2], arm="semantic_v1")
+    second = await bridge(release_setup, transport=approved, processor=same, synthetic_evaluation=True).run(
+        release_setup[5][2], arm="semantic_v1")
+    assert (first.verdict, second.verdict) == ("permit", "permit")
+    assert [call.processor for call in relabelled.calls] == ["owner-engine-local"] * 2
+    assert [call.processor for call in approved.calls] == ["synthetic-eval-hosted"] * 2
+    for local_call, hosted_call in zip(relabelled.calls, approved.calls):
+        local_dump, hosted_dump = local_call.model_dump(), hosted_call.model_dump()
+        assert {key for key in local_dump if local_dump[key] != hosted_dump[key]} == {"processor"}
 
 
 # --- closure of the capsule and the boundary ---------------------------------------------

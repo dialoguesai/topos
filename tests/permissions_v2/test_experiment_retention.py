@@ -29,9 +29,9 @@ def retaining(corpus, service, *, retention, transport=None):
 
 
 def request(stage="evidence_use"):
-    return ModelRequest(arm="semantic_v1", model_id="synthetic-local-model", model_revision="7" * 64,
+    return ModelRequest(arm="semantic_v1", processor="owner-engine-local", model_id="synthetic-local-model", model_revision="7" * 64,
         prompt_revision="8" * 64, stage=stage, system="Synthetic approved policy", candidate_data="Synthetic Fabrikam note",
-        max_output_tokens=64, temperature=0)
+        max_output_tokens=64, sampling="temperature_zero", reasoning_effort=None)
 
 
 @pytest.mark.parametrize("flag", [False, None, 1, "true"])

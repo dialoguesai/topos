@@ -18,13 +18,21 @@ from tests.permissions_v2.test_projection_reviews import service as projection_s
 from topos.features.lifecycle.record_protection import RecordProtectionStore
 from topos.permissions_v2.canonical import PolicyError, digest
 from topos.permissions_v2.contract import Binding
-from topos.permissions_v2.experiments.evaluators import ModelResponse
+from topos.permissions_v2.experiments.evaluators import ModelRequest, ModelResponse
 from topos.permissions_v2.experiments.fact_bridge import (FACT_PROMPT_REVISION, FACT_SYSTEM_PROMPT, VERSION,
-    FactExperimentCapsule, FactShadowBridge, ShadowDecisionCache)
+    FactExperimentCapsule, FactShadowBridge, ProcessorPin, ShadowDecisionCache, hosted_model_revision)
 from topos.permissions_v2.fact_contract import VIEW
 from topos.permissions_v2.projection_reviews import RecordProjectionReview, RevokeProjectionReview
 
 MESSAGE = "I enjoy reading history books."
+HOSTED_MODEL = "gpt-5.5-2026-04-23"
+# The processor fields a hosted synthetic-evaluation pin changes; budgets not named keep the local values.
+HOSTED = {"processor": "synthetic-eval-hosted", "model_id": HOSTED_MODEL,
+    "model_revision": hosted_model_revision(provider="openai", model_id=HOSTED_MODEL), "timeout_ms": 120000,
+    "max_output_tokens": 4096, "sampling": "provider_reasoning_default", "reasoning_effort": "low"}
+# Another provider's dated snapshot at temperature zero: the hosted label follows the pin, not the model or sampling.
+OTHER_HOSTED = {**HOSTED, "model_id": "synthetic-hosted-20260423", "sampling": "temperature_zero", "reasoning_effort": None,
+    "model_revision": hosted_model_revision(provider="synthetic-provider", model_id="synthetic-hosted-20260423")}
 
 
 def judgment(**changes):
@@ -62,12 +70,16 @@ def prose(exclusions=()):
                       "text": "I enjoy reading science fiction."}]}
 
 
-def capsule(raw, *, prose_body=None, prompt_revision=FACT_PROMPT_REVISION, edit_after=None):
+def pin(**changes):
+    return {"processor": "owner-engine-local", "model_id": "synthetic-local-model", "model_revision": "7" * 64,
+        "prompt_revision": FACT_PROMPT_REVISION, "timeout_ms": 500, "max_prompt_bytes": 32768, "max_response_bytes": 4096,
+        "max_output_tokens": 256, "sampling": "temperature_zero", "reasoning_effort": None, **changes}
+
+
+def capsule(raw, *, prose_body=None, prompt_revision=FACT_PROMPT_REVISION, processor=None, edit_after=None):
     body = {"version": VERSION, "experiment_id": "bridge-test", "policy": raw,
         "prose": prose_body or prose(clause for clause in (r["rule_id"] for r in raw["rules"] if r["effect"] == "deny")),
-        "processor": {"processor": "owner-engine-local", "model_id": "synthetic-local-model", "model_revision": "7" * 64,
-            "prompt_revision": prompt_revision, "timeout_ms": 500, "max_prompt_bytes": 32768, "max_response_bytes": 4096,
-            "max_output_tokens": 256, "temperature": 0}}
+        "processor": pin(prompt_revision=prompt_revision, **(processor or {}))}
     body["owner_approved_revision"] = digest(body)
     if edit_after:
         edit_after(body)
@@ -85,10 +97,10 @@ def record_output(corpus, service, *, evidence_transform=None, output_domains=("
         return service.record(request, now=1200)
 
 
-def bridge(corpus, service, *, raw=None, transport=None, clock=None, cache=None, **capsule_options):
+def bridge(corpus, service, *, raw=None, transport=None, clock=None, cache=None, synthetic_evaluation=False, **capsule_options):
     raw = raw or policy(corpus)
     return FactShadowBridge(capsule(raw, **capsule_options), projections=service, binding=Binding.parse(raw["binding"]),
-        clock=clock or (lambda: AS_OF), transport=transport, cache=cache)
+        clock=clock or (lambda: AS_OF), transport=transport, cache=cache, synthetic_evaluation=synthetic_evaluation)
 
 
 async def both(corpus, service, **options):
@@ -420,6 +432,202 @@ async def test_binding_and_prompt_pins_are_enforced_before_any_call(timed, proje
     assert result.stages[-1].reason_code == "model_identity" and model.calls == [] and result.model_calls == 0
     absent = await bridge(timed, projection_service).run(timed[2], request_as_of=AS_OF, arm="semantic_v1")
     assert absent.stages[-1].reason_code == "unconfigured_model" and absent.verdict == "indeterminate"
+
+
+# --- processor pins: the local owner engine, or a hosted model for synthetic evaluation only ---------
+
+_DROP = object()
+
+
+def _without(body, changes):
+    return {key: value for key, value in {**body, **changes}.items() if value is not _DROP}
+
+
+@pytest.mark.parametrize("changes", [
+    {"sampling": "provider_reasoning_default", "reasoning_effort": "low"},
+    {"reasoning_effort": "low"},
+    {"sampling": "provider_reasoning_default"},
+    {"reasoning_effort": "none"},
+    {"timeout_ms": 30001}, {"timeout_ms": 0}, {"timeout_ms": True}, {"max_output_tokens": 1025}, {"max_output_tokens": 31},
+    {"max_prompt_bytes": 65537}, {"max_response_bytes": 8193},
+    # The old field claimed temperature zero whether or not it was sent; it is gone, not aliased.
+    {"sampling": _DROP, "reasoning_effort": _DROP, "temperature": 0},
+    {"temperature": 0},
+    {"sampling": _DROP}, {"reasoning_effort": _DROP},
+    {"processor": "owner-engine-remote"},
+])
+def test_a_local_pin_stays_at_temperature_zero_within_todays_bounds(changes):
+    parsed = ProcessorPin.parse(pin())
+    assert (parsed.processor, parsed.sampling, parsed.reasoning_effort) == ("owner-engine-local", "temperature_zero", None)
+    for edge in ({"timeout_ms": 30000}, {"max_output_tokens": 1024}, {"model_id": "qwen3.5:9b-mlx"}):
+        ProcessorPin.parse(pin(**edge))  # a local model needs no dated snapshot
+    with pytest.raises(PolicyError, match="schema_invalid"):
+        ProcessorPin.parse(_without(pin(), changes))
+
+
+@pytest.mark.parametrize("changes", [
+    {}, {"reasoning_effort": "minimal"}, {"reasoning_effort": "medium"}, {"reasoning_effort": "high"},
+    {"sampling": "temperature_zero", "reasoning_effort": None},
+    {"timeout_ms": 1}, {"timeout_ms": 30001}, {"max_output_tokens": 32}, {"max_output_tokens": 1025},
+    {"max_prompt_bytes": 65536, "max_response_bytes": 8192},
+])
+def test_a_hosted_pin_names_its_reasoning_effort_exactly_when_it_uses_provider_sampling(changes):
+    parsed = ProcessorPin.parse(pin(**{**HOSTED, **changes}))
+    assert parsed.processor == "synthetic-eval-hosted"
+    assert (parsed.reasoning_effort is None) == (parsed.sampling == "temperature_zero")
+
+
+@pytest.mark.parametrize("changes", [
+    {"reasoning_effort": None},
+    {"sampling": "temperature_zero"},
+    {"reasoning_effort": "xhigh"},
+    {"sampling": "temperature_one", "reasoning_effort": None},
+    {"reasoning_effort": _DROP},
+    {"timeout_ms": 120001}, {"timeout_ms": 0}, {"max_output_tokens": 4097}, {"max_output_tokens": 31},
+    {"max_prompt_bytes": 65537}, {"max_prompt_bytes": 1023}, {"max_response_bytes": 8193}, {"max_response_bytes": 127},
+    {"max_output_tokens": "4096"}, {"timeout_ms": False},
+    # A hosted model is pinned to a dated snapshot, never a moving alias.
+    {"model_id": "gpt-5.5"}, {"model_id": "gpt-5.5-latest"}, {"model_id": "gpt-5.5-2026-02-30"},
+    {"model_id": "gpt-5.5-2026-04-23-latest"}, {"model_id": "gpt-5.5-20260423-latest"},
+    {"temperature": 0},
+])
+def test_a_hosted_pin_outside_its_bounds_or_pairing_is_refused(changes):
+    with pytest.raises(PolicyError, match="schema_invalid"):
+        ProcessorPin.parse(_without(pin(**HOSTED), changes))
+
+
+def test_hosted_model_revision_is_the_digest_of_the_dated_snapshot_identity_not_of_weights():
+    revision = hosted_model_revision(provider="openai", model_id=HOSTED_MODEL)
+    assert revision == digest({"provider": "openai", "model_id": HOSTED_MODEL})
+    assert revision == "4e29e091d461be426a90ed53dd6f20d7adfcfaa9dd0d235a4c1076a893906c3e"
+    assert hosted_model_revision(provider="openai", model_id="gpt-5.5-2026-05-01") != revision
+    assert hosted_model_revision(provider="azure-openai", model_id=HOSTED_MODEL) != revision
+    assert hosted_model_revision(provider="anthropic", model_id="claude-synthetic-20260423")
+    for provider, model_id in (("openai", "gpt-5.5"), ("openai", "gpt-5.5-latest"), ("openai", "gpt-5.5-2026-13-01"),
+                               ("openai", "gpt-5.5-20260230"), ("openai", HOSTED_MODEL + "-latest"),
+                               ("", HOSTED_MODEL), ("open ai", HOSTED_MODEL),
+                               ("openai", 7), (None, HOSTED_MODEL)):
+        with pytest.raises(PolicyError):
+            hosted_model_revision(provider=provider, model_id=model_id)
+    with pytest.raises(TypeError):
+        hosted_model_revision("openai", HOSTED_MODEL)  # keyword-only, so the two can never be swapped
+
+
+def _request(**changes):
+    return {"arm": "semantic_v1", "processor": "synthetic-eval-hosted", "model_id": HOSTED_MODEL, "model_revision": HOSTED["model_revision"],
+        "prompt_revision": FACT_PROMPT_REVISION, "stage": "evidence_use", "system": "Synthetic approved policy",
+        "candidate_data": "Synthetic Fabrikam note", "max_output_tokens": 256,
+        "sampling": "provider_reasoning_default", "reasoning_effort": "low", **changes}
+
+
+@pytest.mark.parametrize("changes", [
+    {"reasoning_effort": None}, {"sampling": "temperature_zero"}, {"reasoning_effort": "xhigh"},
+    {"sampling": "temperature_one", "reasoning_effort": None}, {"temperature": 0},
+    {"sampling": _DROP, "reasoning_effort": _DROP, "temperature": 0},
+    # The processor the owner approved travels with every request, so a transport can refuse the wrong one.
+    {"processor": _DROP}, {"processor": None}, {"processor": "owner-engine-remote"}, {"processor": "hosted"},
+    {"processor": "owner-engine-local"},  # a local processor never uses the provider's reasoning sampling
+])
+def test_a_model_request_names_exactly_the_processor_and_sampling_a_transport_must_honour(changes):
+    hosted = ModelRequest.parse(_request())
+    assert (hosted.processor, hosted.reasoning_effort) == ("synthetic-eval-hosted", "low")
+    local = ModelRequest.parse(_request(processor="owner-engine-local", sampling="temperature_zero", reasoning_effort=None))
+    assert "temperature" not in local.model_dump() and local.processor == "owner-engine-local"
+    assert ModelRequest.parse(_request(sampling="temperature_zero", reasoning_effort=None)).processor == "synthetic-eval-hosted"
+    with pytest.raises(PolicyError, match="schema_invalid"):
+        ModelRequest.parse(_without(_request(), changes))
+
+
+@pytest.mark.asyncio
+async def test_each_request_carries_exactly_the_sampling_the_owner_approved(timed, projection_service):
+    record_output(timed, projection_service)
+    local, hosted = Fake(), Fake()
+    first = await bridge(timed, projection_service, transport=local).run(timed[2], request_as_of=AS_OF, arm="semantic_v1")
+    second = await bridge(timed, projection_service, transport=hosted, processor=HOSTED, synthetic_evaluation=True).run(
+        timed[2], request_as_of=AS_OF, arm="semantic_v1")
+    assert (first.verdict, first.model_calls, second.verdict, second.model_calls) == ("permit", 2, "permit", 2)
+    assert [(call.processor, call.sampling, call.reasoning_effort) for call in local.calls] == [
+        ("owner-engine-local", "temperature_zero", None)] * 2
+    assert [(call.processor, call.model_id, call.model_revision, call.sampling, call.reasoning_effort, call.max_output_tokens)
+            for call in hosted.calls] == [
+        ("synthetic-eval-hosted", HOSTED_MODEL, HOSTED["model_revision"], "provider_reasoning_default", "low", 4096)] * 2
+    assert all("temperature" not in call.model_dump() for call in local.calls + hosted.calls)
+    other = Fake()
+    third = await bridge(timed, projection_service, transport=other, processor=OTHER_HOSTED, synthetic_evaluation=True).run(
+        timed[2], request_as_of=AS_OF, arm="semantic_v1")
+    assert (third.verdict, [(call.processor, call.model_id, call.sampling) for call in other.calls]) == (
+        "permit", [("synthetic-eval-hosted", OTHER_HOSTED["model_id"], "temperature_zero")] * 2)
+
+
+class HostedOnly(Fake):
+    """What a hosted transport must do: refuse, before calling out, a request the engine did not approve for hosting."""
+    def __init__(self):
+        super().__init__()
+        self.refused = []
+
+    async def complete(self, request):
+        if request.processor != "synthetic-eval-hosted":
+            self.refused.append(request)
+            raise PermissionError("processor_not_hosted")
+        return await super().complete(request)
+
+
+@pytest.mark.asyncio
+async def test_a_local_pin_naming_a_hosted_snapshot_is_told_apart_where_the_request_leaves(timed, projection_service):
+    """A local label on the hosted snapshot needs no flag, but its request still says local, so a hosted transport refuses it."""
+    record_output(timed, projection_service)
+    same = {**HOSTED, "timeout_ms": 500, "max_output_tokens": 256, "sampling": "temperature_zero", "reasoning_effort": None}
+    relabelled, approved = HostedOnly(), HostedOnly()
+    refused = await bridge(timed, projection_service, transport=relabelled, processor={**same, "processor": "owner-engine-local"}).run(
+        timed[2], request_as_of=AS_OF, arm="semantic_v1")
+    flagged = await bridge(timed, projection_service, transport=approved, processor=same, synthetic_evaluation=True).run(
+        timed[2], request_as_of=AS_OF, arm="semantic_v1")
+    assert (refused.verdict, refused.stages[-1].reason_code, relabelled.calls) == ("indeterminate", "model_error", [])
+    assert [call.processor for call in relabelled.refused] == ["owner-engine-local"]
+    assert (flagged.verdict, approved.refused, [call.processor for call in approved.calls]) == (
+        "permit", [], ["synthetic-eval-hosted"] * 2)
+    # Everything else in the two first-stage requests is identical: only the processor tells them apart.
+    local_dump, hosted_dump = relabelled.refused[0].model_dump(), approved.calls[0].model_dump()
+    assert {key for key in local_dump if local_dump[key] != hosted_dump[key]} == {"processor"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flag,code", [
+    ("omitted", "hosted_processor_requires_synthetic_evaluation"),
+    (False, "hosted_processor_requires_synthetic_evaluation"),
+    (None, "synthetic_evaluation_invalid"), (1, "synthetic_evaluation_invalid"), ("true", "synthetic_evaluation_invalid"),
+])
+async def test_a_hosted_pin_is_refused_before_any_capture_unless_the_bridge_is_flagged_synthetic(
+        timed, projection_service, monkeypatch, flag, code):
+    record_output(timed, projection_service)
+    raw, model, captures = policy(timed), Fake(), []
+    real = projection_service.with_reviewed
+
+    def spy(*args, **kwargs):
+        captures.append(args)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(projection_service, "with_reviewed", spy)
+    options = {} if flag == "omitted" else {"synthetic_evaluation": flag}
+    make = lambda processor=None, **extra: FactShadowBridge(capsule(raw, processor=processor), projections=projection_service,  # noqa: E731
+        binding=Binding.parse(raw["binding"]), clock=lambda: AS_OF, transport=model, **extra)
+    for hosted in (HOSTED, OTHER_HOSTED):  # refused by its label, at either sampling
+        with pytest.raises(PolicyError, match=code):
+            make(hosted, **options)
+    assert captures == [] and model.calls == []
+    # A local pin needs no flag; a hosted capsule swapped in later is refused when run, still before any capture.
+    if flag not in ("omitted", False):
+        with pytest.raises(PolicyError, match="synthetic_evaluation_invalid"):
+            make(synthetic_evaluation=flag)
+    local = make(**({} if flag == "omitted" else {"synthetic_evaluation": False}))
+    assert local.synthetic_evaluation is False
+    local.capsule = capsule(raw, processor=HOSTED)
+    for arm in ("rules_v2", "semantic_v1"):
+        with pytest.raises(PolicyError, match="hosted_processor_requires_synthetic_evaluation"):
+            await local.run(timed[2], request_as_of=AS_OF, arm=arm)
+    assert captures == [] and model.calls == []
+    flagged = await make(HOSTED, synthetic_evaluation=True).run(timed[2], request_as_of=AS_OF, arm="semantic_v1")
+    assert flagged.verdict == "permit" and len(model.calls) == 2 and captures
 
 
 EXPERIMENTS = "topos.permissions_v2.experiments"

@@ -22,6 +22,8 @@ from __future__ import annotations
 import asyncio
 from collections import OrderedDict
 from dataclasses import dataclass
+import datetime
+import re
 from typing import Annotated, Callable, Literal
 
 from pydantic import Field, model_validator
@@ -35,8 +37,9 @@ from ..fact_policy import fact_projection_decision
 from ..identity import SUBJECT_CONTRACT_BY_CAPABILITY
 from ..fact_projection import ReviewedFactProjection
 from ..projection_reviews import ProjectionReviewService
-from .evaluators import LocalModelTransport, ModelRequest, ModelResponse
-from .models import Arm, Ids, Prose, Stage, Text, Verdict, Zero
+from .evaluators import (HOSTED_PROCESSOR, LocalModelTransport, ModelRequest, ModelResponse, Processor, ReasoningEffort,
+    Sampling)
+from .models import Arm, Ids, Prose, Stage, Text, Verdict
 from .retention import SyntheticBodyRetention
 
 VERSION = "topos-offline-qualified-fact-experiment/v1"
@@ -85,9 +88,59 @@ Observation = Literal["captured_under_gates", "requalified", "not_retained"]
 _DENY_WITHHELD = frozenset({"owner_only", "not_owner_authored", "independent_copy_lineage", "projection_source_restricted"})
 
 
+# A dated snapshot ends in its release day, as -YYYY-MM-DD or -YYYYMMDD.
+_DATED_SNAPSHOT = re.compile(r"-(\d{4})-(\d{2})-(\d{2})$|-(\d{4})(\d{2})(\d{2})$")
+
+
+def _dated_snapshot(model_id) -> bool:
+    match = _DATED_SNAPSHOT.search(model_id) if type(model_id) is str else None
+    if match is None:
+        return False
+    try:
+        datetime.date(*(int(part) for part in match.groups() if part is not None))
+    except ValueError:
+        return False
+    return True
+
+
+class _HostedModelIdentity(StrictModel):
+    provider: Identifier
+    model_id: Identifier
+
+    @model_validator(mode="after")
+    def dated(self):
+        if not _dated_snapshot(self.model_id):
+            raise ValueError("hosted model must be a dated snapshot")
+        return self
+
+
+def hosted_model_revision(*, provider: str, model_id: str) -> str:
+    """The `model_revision` of a `synthetic-eval-hosted` pin.
+
+    sha256 of the canonical `{"provider", "model_id"}` identity of a dated
+    snapshot. A hosted provider publishes no weights to digest, so this names the
+    snapshot the owner approved. It is not a weight digest and cannot show what
+    the provider actually serves under that name.
+    """
+    return digest(_HostedModelIdentity.parse({"provider": provider, "model_id": model_id}).model_dump())
+
+
 class ProcessorPin(StrictModel):
-    """The exact local classifier the owner approved for these surfaces."""
-    processor: Literal["owner-engine-local"]
+    """The exact classifier the owner approved for these surfaces.
+
+    `owner-engine-local` is the owner's local model, sampled at temperature zero,
+    within the original budgets; `model_revision` is its artifact revision.
+
+    `synthetic-eval-hosted` is a hosted model for synthetic evaluation only, never
+    for copied or real owner data: both bridges refuse it unless constructed with
+    `synthetic_evaluation=True`. Its `model_id` is a dated snapshot and its
+    `model_revision` is `hosted_model_revision(provider=..., model_id=...)`, not a
+    weight digest. It may sample at temperature zero or with the provider's
+    reasoning default, and names `reasoning_effort` exactly when it does the
+    latter. Reasoning tokens count toward `max_output_tokens`, so its output and
+    timeout budgets are wider.
+    """
+    processor: Processor
     model_id: Identifier
     model_revision: Hash
     prompt_revision: Hash
@@ -95,15 +148,36 @@ class ProcessorPin(StrictModel):
     max_prompt_bytes: int
     max_response_bytes: int
     max_output_tokens: int
-    temperature: Zero
+    sampling: Sampling
+    reasoning_effort: ReasoningEffort | None
 
     @model_validator(mode="after")
     def bounds(self):
-        checks = [(self.timeout_ms, 1, 30000), (self.max_prompt_bytes, 1024, 65536),
-                  (self.max_response_bytes, 128, 8192), (self.max_output_tokens, 32, 1024)]
+        hosted = self.processor == HOSTED_PROCESSOR
+        checks = [(self.timeout_ms, 1, 120000 if hosted else 30000), (self.max_prompt_bytes, 1024, 65536),
+                  (self.max_response_bytes, 128, 8192), (self.max_output_tokens, 32, 4096 if hosted else 1024)]
         if any(type(value) is not int or not low <= value <= high for value, low, high in checks):
             raise ValueError("processor budget")
+        if (self.reasoning_effort is None) != (self.sampling == "temperature_zero"):
+            raise ValueError("sampling and reasoning effort")
+        if not hosted and self.sampling != "temperature_zero":
+            raise ValueError("a local processor samples at temperature zero")
+        if hosted and not _dated_snapshot(self.model_id):
+            raise ValueError("hosted model must be a dated snapshot")
         return self
+
+
+def _refuse_unflagged_hosted(capsule, synthetic_evaluation):
+    """A hosted processor receives candidate data, so it may judge synthetic data only.
+
+    The flag is the caller's assertion that every row the bridge can read is
+    synthetic; the bridge cannot verify it, so it must never be derived from
+    anything but the run's own synthetic binding.
+    """
+    if type(synthetic_evaluation) is not bool:
+        raise PolicyError("synthetic_evaluation_invalid")
+    if capsule.processor.processor == HOSTED_PROCESSOR and synthetic_evaluation is not True:
+        raise PolicyError("hosted_processor_requires_synthetic_evaluation")
 
 
 class FactExperimentCapsule(StrictModel):
@@ -291,11 +365,14 @@ class FactShadowBridge:
     """
     def __init__(self, capsule: FactExperimentCapsule, *, projections: ProjectionReviewService, binding: Binding,
                  clock: Callable[[], int], transport: LocalModelTransport | None = None,
-                 cache: ShadowDecisionCache | None = None, retention: SyntheticBodyRetention | None = None):
+                 cache: ShadowDecisionCache | None = None, retention: SyntheticBodyRetention | None = None,
+                 synthetic_evaluation: bool = False):
         if retention is not None and not isinstance(retention, SyntheticBodyRetention):
             raise PolicyError("retention_invalid")
         self.retention = retention
         self.capsule = FactExperimentCapsule.parse(capsule.model_dump())
+        _refuse_unflagged_hosted(self.capsule, synthetic_evaluation)
+        self.synthetic_evaluation = synthetic_evaluation
         self.binding = Binding.parse(binding.model_dump())
         if self.capsule.policy.binding != self.binding:
             raise PolicyError("fact_policy_binding")
@@ -463,11 +540,11 @@ class FactShadowBridge:
                          if example.clause_id in eligible or example.clause_id in exclusions]},
             "stage": stage, "eligible_inclusion_ids": list(eligible), "form": capture.view}
         units = [surface.prompt_unit() for surface in (capture.surfaces if stage == "evidence_use" else (capture.output_surface,))]
-        request = ModelRequest(arm="semantic_v1", model_id=pin.model_id, model_revision=pin.model_revision,
+        request = ModelRequest(arm="semantic_v1", processor=pin.processor, model_id=pin.model_id, model_revision=pin.model_revision,
             prompt_revision=pin.prompt_revision, stage=stage,
             system=FACT_SYSTEM_PROMPT + "\nAPPROVED_POLICY_JSON\n" + canonical_bytes(approved).decode("ascii"),
             candidate_data=canonical_bytes({"untrusted_candidate_data": units}).decode("ascii"),
-            max_output_tokens=pin.max_output_tokens, temperature=0)
+            max_output_tokens=pin.max_output_tokens, sampling=pin.sampling, reasoning_effort=pin.reasoning_effort)
         if len(canonical_bytes(request.model_dump())) > pin.max_prompt_bytes:
             return self._withheld_semantic(stage, capture, "prompt_budget"), False
         # From here the gates are released and the transport may have sent the
@@ -546,6 +623,8 @@ class FactShadowBridge:
     # --- orchestration ----------------------------------------------------------------
 
     async def run(self, fact_id: str, *, request_as_of: int, arm: Arm) -> FactExperimentResult:
+        # Again here, before any capture: the capsule attribute can be replaced after construction.
+        _refuse_unflagged_hosted(self.capsule, self.synthetic_evaluation)
         if arm not in ("rules_v2", "semantic_v1"):
             raise PolicyError("arm_invalid")
         if type(request_as_of) is not int or not 0 <= request_as_of <= MAX_INTEGER:

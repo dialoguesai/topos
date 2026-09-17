@@ -31,7 +31,8 @@ from ..identity import SUBJECT_CONTRACT_BY_CAPABILITY
 from ..registry import AttestedSubjectSourcePolicy
 from ..release import MAX_DISCLOSURE_BYTES, VOCABULARY, SourceMessageIntent, _rule_sources, _tables, source_message_decision
 from .evaluators import LocalModelTransport, ModelRequest, ModelResponse
-from .fact_bridge import MAX_SURFACE_CHARS, MAX_SURFACES, ProcessorPin, ShadowDecisionCache, _Stop, _Withheld
+from .fact_bridge import (MAX_SURFACE_CHARS, MAX_SURFACES, ProcessorPin, ShadowDecisionCache, _Stop, _Withheld,
+    _refuse_unflagged_hosted)
 from .models import Arm, Ids, Prose, Stage, Verdict
 from .retention import SyntheticBodyRetention
 
@@ -225,6 +226,8 @@ def _structure(policy: PolicyV2, snapshot):
     eligible, exclusions = [], {}
     for rule in policy.rules:
         rule_sources, rule_tables = _rule_sources(rule, policy), _tables(rule)
+        # The signed rule's processor, as serving reads it. A hosted evaluation pin
+        # judges prose in its place but never changes which rules are eligible.
         if "owner-engine-local" not in rule.evidence_use.processors.values:
             continue
         if rule.effect == "permit":
@@ -248,13 +251,16 @@ class SourceShadowBridge:
     """
     def __init__(self, capsule: SourceExperimentCapsule, *, resolver: EvidenceResolver, reviews: EvidenceReviewStore,
                  binding: Binding, clock: Callable[[], int], transport: LocalModelTransport | None = None,
-                 cache: SourceShadowDecisionCache | None = None, retention: SyntheticBodyRetention | None = None):
+                 cache: SourceShadowDecisionCache | None = None, retention: SyntheticBodyRetention | None = None,
+                 synthetic_evaluation: bool = False):
         if retention is not None and not isinstance(retention, SyntheticBodyRetention):
             raise PolicyError("retention_invalid")
         if cache is not None and not isinstance(cache, SourceShadowDecisionCache):
             raise PolicyError("cache_invalid")
         self.retention = retention
         self.capsule = SourceExperimentCapsule.parse(capsule.model_dump())
+        _refuse_unflagged_hosted(self.capsule, synthetic_evaluation)
+        self.synthetic_evaluation = synthetic_evaluation
         self.binding = Binding.parse(binding.model_dump())
         if self.capsule.policy.binding != self.binding:
             raise PolicyError("source_policy_binding")
@@ -422,11 +428,11 @@ class SourceShadowBridge:
                          if example.clause_id in eligible or example.clause_id in exclusions]},
             "stage": stage, "eligible_inclusion_ids": list(eligible), "form": VIEW}
         units = [unit.prompt_unit() for unit in (capture.units if stage == "evidence_use" else capture.records)]
-        request = ModelRequest(arm="semantic_v1", model_id=pin.model_id, model_revision=pin.model_revision,
+        request = ModelRequest(arm="semantic_v1", processor=pin.processor, model_id=pin.model_id, model_revision=pin.model_revision,
             prompt_revision=pin.prompt_revision, stage=stage,
             system=SOURCE_SYSTEM_PROMPT + "\nAPPROVED_POLICY_JSON\n" + canonical_bytes(approved).decode("ascii"),
             candidate_data=canonical_bytes({"untrusted_candidate_data": units}).decode("ascii"),
-            max_output_tokens=pin.max_output_tokens, temperature=0)
+            max_output_tokens=pin.max_output_tokens, sampling=pin.sampling, reasoning_effort=pin.reasoning_effort)
         if len(canonical_bytes(request.model_dump())) > pin.max_prompt_bytes:
             return self._withheld_semantic(stage, capture, "prompt_budget"), False
         # From here the gates are released and the transport may have sent the
@@ -500,6 +506,8 @@ class SourceShadowBridge:
     # --- orchestration ----------------------------------------------------------------
 
     async def run(self, fact_id: str, *, arm: Arm) -> SourceExperimentResult:
+        # Again here, before any capture: the capsule attribute can be replaced after construction.
+        _refuse_unflagged_hosted(self.capsule, self.synthetic_evaluation)
         if arm not in ("rules_v2", "semantic_v1"):
             raise PolicyError("arm_invalid")
         fact_id = _locator(fact_id)

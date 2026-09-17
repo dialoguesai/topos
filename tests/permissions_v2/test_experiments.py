@@ -241,6 +241,8 @@ async def test_candidate_injection_stays_data_and_labels_never_enter_semantic_pr
     runner, _, context = harness(snapshot=snapshot, transport=model)
     result = await runner.run(context)
     request = model.calls[0]
+    # This harness only ever runs the local processor at temperature zero, and says so in the request.
+    assert (request.processor, request.sampling, request.reasoning_effort) == ("owner-engine-local", "temperature_zero", None)
     assert injection not in request.system
     assert json.loads(request.candidate_data)["untrusted_candidate_data"][0]["text"] == injection
     assert "HIDDEN_LABEL_CANARY" not in request.model_dump_json()

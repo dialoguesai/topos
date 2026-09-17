@@ -68,22 +68,32 @@ recheck current CP cancellation as well as node state at actual release.
 ## Injected model transport
 
 There is no default model, network client, subprocess, environment discovery or
-tool executor. An operator may explicitly inject an async local transport:
+tool executor, and the engine ships no network transport. An operator may
+explicitly inject an async transport:
 
 ```python
 async def complete(request: ModelRequest) -> ModelResponse:
     ...
 ```
 
-`ModelRequest` pins arm, model ID, model artifact revision, prompt revision,
-stage, output-token budget and temperature zero. Its `system` field carries the
+`ModelRequest` pins arm, processor, model ID, model revision, prompt revision,
+stage, output-token budget and sampling. `processor` is the approved pin's
+`owner-engine-local` or `synthetic-eval-hosted`; a request without one, or with
+any other value, is refused. `sampling` is `temperature_zero` with
+`reasoning_effort: null`, or `provider_reasoning_default` with a
+`reasoning_effort` of `minimal`, `low`, `medium` or `high`; any other pairing
+is refused, an `owner-engine-local` request must use `temperature_zero`, and
+there is no `temperature` field, so a request never claims a temperature it did
+not send. The transport must request exactly that sampling. This flat harness
+always sends `owner-engine-local` at `temperature_zero`. Its `system` field carries the
 fixed instruction template plus approved policy JSON. `candidate_data` contains
 only the separate untrusted inspected units. Reviewed attributes, expected
 verdicts, authority and protection flags never enter the model prompt. Arm B
 interprets prose directly rather than compiling it to predicates.
 
-The trusted transport must establish that processing is local, enforce model
-identity, avoid truncation and tool execution, and honor cancellation. Merely
+For the local processor the trusted transport must establish that processing is
+local. Every transport must enforce model identity, avoid truncation and tool
+execution, and honor cancellation. Merely
 echoing a model digest is not verification. The harness checks response identity
 against its pins and requires one bounded JSON decision with exactly:
 
@@ -129,9 +139,10 @@ class or the separate stated-day `permissions-beta/p2b-v2` class; the rules
 arm evaluates whichever the owner approved) with its prose twin: inclusion
 identifiers are exactly the policy's permit rule identifiers and exclusions its
 deny rule identifiers, so both arms start from one clause universe. The
-processor pin names the exact local model, model revision, prompt revision and
-byte/token budgets the owner approved. The capsule digest detects edits; it
-does not authenticate the owner.
+processor pin names the processor, model, model revision, prompt revision,
+sampling and byte/token budgets the owner approved: either the local owner
+engine or, for synthetic evaluation only, a hosted model (see "Hosted processor"
+below). The capsule digest detects edits; it does not authenticate the owner.
 
 One closure is captured under the live gates through `with_reviewed`, where
 `prepare_fact_eligibility` supplies the mandatory structural floor and the
@@ -183,8 +194,9 @@ clauses keeping the original prose out, output-stage clause narrowing, window
 masks, five mid-call changes during either model call (a change during the
 first stops before the second call; one during the second evicts the cached
 first-stage decision), post-call identity mismatch, cache isolation, withheld
-evidence, capsule closure and the import boundary with fake transports (49
-cases). An exclusion with unknown
+evidence, capsule closure and the import boundary with fake transports, plus the
+processor pins, sampling, the processor each request carries and the
+hosted-processor refusal described below (115 cases). An exclusion with unknown
 event time cannot coexist with an eligible inclusion, because an inclusion
 needs every leaf known and in window; that branch is defensive only.
 
@@ -255,6 +267,60 @@ call (among them a revoked review, a new owner-only sibling fact, a protection
 change outside the closure, and an edit or relabel the owner reviewed again,
 which still qualifies and is caught only by the revision comparison), cache
 isolation, synthetic-only retention and the import boundary.
+
+## Hosted processor: synthetic evaluation only
+
+A bridge's `ProcessorPin.processor` is `owner-engine-local` or
+`synthetic-eval-hosted`. A hosted processor sends candidate data to a hosted
+model. It is for synthetic evaluation only and never for copied or real owner
+data.
+
+| Pin field | `owner-engine-local` | `synthetic-eval-hosted` |
+| --- | --- | --- |
+| `sampling` | `temperature_zero` only | `temperature_zero` or `provider_reasoning_default` |
+| `reasoning_effort` | `null` | named exactly when `sampling` is `provider_reasoning_default` |
+| `model_id` | any identifier | a dated snapshot (`-YYYY-MM-DD` or `-YYYYMMDD`, a real day) |
+| `model_revision` | the local model's artifact revision | expected to be `hosted_model_revision(provider=..., model_id=...)`; any 64-hex value parses, so the transport checks it |
+| `timeout_ms` | 1 to 30,000 | 1 to 120,000 |
+| `max_output_tokens` | 32 to 1,024 | 32 to 4,096 (reasoning tokens count toward it) |
+| `max_prompt_bytes`, `max_response_bytes` | 1,024 to 65,536; 128 to 8,192 | unchanged |
+
+`hosted_model_revision` is the sha256 of the canonical
+`{"provider", "model_id"}` identity of the snapshot. It is not a weight digest.
+It names what the owner approved and cannot show what the provider serves under
+that name. The pin carries no provider, so the operator's transport, not the
+pin, must check that the revision matches the provider and model it calls.
+
+`FactShadowBridge` and `SourceShadowBridge` take a keyword
+`synthetic_evaluation` (default `False`). With a hosted pin, construction raises
+`hosted_processor_requires_synthetic_evaluation` unless it is `True`, and a
+non-boolean raises `synthetic_evaluation_invalid` for either processor. `run`
+checks again before any capture, because the `capsule` attribute can be replaced
+after construction. The bridge cannot verify that its rows are synthetic, so the
+flag is the caller's assertion. A harness must set it only from the run's own
+binding (the dataset is synthetic and no owner data is mounted), never from a
+command-line default.
+
+That refusal reads only the pin's processor label, and a pin labelled
+`owner-engine-local` may name any model, including a hosted snapshot. Every
+request therefore carries the approved pin's `processor`, and two requests that
+differ only in that label are otherwise byte-identical. The transport is where
+candidate data leaves the engine, so a transport that calls a hosted model must
+refuse any request whose `processor` is not `synthetic-eval-hosted`, before any
+network call. It must also check the run binding itself (a synthetic dataset
+and `owner_data_mounted: false`) rather than trust the engine flag, which is
+only the caller's assertion. Both bridge test files check that each request
+carries its pin's processor and that a local label on the hosted snapshot is
+still sent as `owner-engine-local`.
+
+Arm B's structural floor still reads each signed rule's
+processor as serving does (`owner-engine-local`, the only value the policy
+grammar admits), so a hosted pin changes who judges the prose, not which rules
+are eligible.
+
+Arm B results from a hosted pin describe the approved policy language as that
+hosted model judged it. They do not certify an in-node local evaluator, and a
+report must say so.
 
 ## Run and verify
 
