@@ -4,7 +4,8 @@ from __future__ import annotations
 from typing import Literal
 
 from .canonical import PolicyError, parse_json
-from .contract import SOURCE_CAPABILITIES, Identifier, PolicyV2, Decision, MessageDisclosure, StrictModel
+from .contract import (CAPABILITY_OPAQUE, SOURCE_CAPABILITIES, Identifier, PolicyV2, Decision, MessageDisclosure,
+    OutputForm, Release, Rule, StrictModel)
 from .fact_contract import (AttestedSubjectFactDecision, AttestedSubjectFactPolicy, FactPolicyV2,
     FactDecision, FactScalarDisclosure, OwnerAttestedSubjectBinding, StatedDayFactPolicy, StatedDayFactDecision,
     WorkFactDecision, WorkFactPolicy, WorkScalarDisclosure)
@@ -44,10 +45,53 @@ class AttestedSubjectSourceDecision(Decision):
     evaluator_version: Literal["hard-rules/p2a-v2"]
 
 
-Policy = PolicyV2 | FactPolicyV2 | StatedDayFactPolicy | AttestedSubjectFactPolicy | WorkFactPolicy | AttestedSubjectSourcePolicy
+class OpaqueSourceVersions(AttestedSourceVersions):
+    capability: Literal["permissions-beta/p2a-v3"]
+
+
+class OpaqueSourceEvaluator(StrictModel):
+    kind: Literal["hard_rules"]
+    version: Literal["hard-rules/p2a-v3"]
+
+
+class OpaqueOutputForm(OutputForm):
+    view_id: Literal["canonical.message_disclosure.v2"]
+
+
+class OpaqueRelease(Release):
+    forms: list[OpaqueOutputForm]
+
+
+class OpaqueRule(Rule):
+    release: OpaqueRelease
+
+
+class OpaqueSubjectSourcePolicy(PolicyV2):
+    """p2a-v3: p2a-v2's grammar, rules and subject rule, releasing the opaque-id view.
+
+    The only difference on the wire is `record_id`: a keyed hash under a per-grant
+    key (`opaque_ids`), stable within the grant and meaningless across grants, in
+    place of the canonical counter. Every other field, check and limit is p2a-v2's.
+    """
+    versions: OpaqueSourceVersions
+    evaluator: OpaqueSourceEvaluator
+    rules: list[OpaqueRule]
+
+
+class OpaqueSubjectSourceDecision(Decision):
+    evaluator_version: Literal["hard-rules/p2a-v3"]
+    required_projection_id: Literal["canonical.message_disclosure.v2"] | None
+
+
+class OpaqueMessageDisclosure(MessageDisclosure):
+    view_id: Literal["canonical.message_disclosure.v2"]
+
+
+Policy = (PolicyV2 | FactPolicyV2 | StatedDayFactPolicy | AttestedSubjectFactPolicy | WorkFactPolicy | AttestedSubjectSourcePolicy
+          | OpaqueSubjectSourcePolicy)
 PolicyDecision = (Decision | FactDecision | StatedDayFactDecision | AttestedSubjectFactDecision | WorkFactDecision
-                  | AttestedSubjectSourceDecision)
-Disclosure = MessageDisclosure | FactScalarDisclosure | WorkScalarDisclosure
+                  | AttestedSubjectSourceDecision | OpaqueSubjectSourceDecision)
+Disclosure = MessageDisclosure | OpaqueMessageDisclosure | FactScalarDisclosure | WorkScalarDisclosure
 
 
 def value_of(raw):
@@ -65,6 +109,8 @@ def parse_policy(raw) -> Policy:
         return PolicyV2.parse(raw)
     if capability == "permissions-beta/p2a-v2":
         return AttestedSubjectSourcePolicy.parse(raw)
+    if capability == "permissions-beta/p2a-v3":
+        return OpaqueSubjectSourcePolicy.parse(raw)
     if capability == "permissions-beta/p2b-v1":
         return FactPolicyV2.parse(raw)
     if capability == "permissions-beta/p2b-v2":
@@ -81,6 +127,8 @@ def parse_decision(raw, *, capability: str) -> PolicyDecision:
         return Decision.parse(value_of(raw))
     if capability == "permissions-beta/p2a-v2":
         return AttestedSubjectSourceDecision.parse(value_of(raw))
+    if capability == "permissions-beta/p2a-v3":
+        return OpaqueSubjectSourceDecision.parse(value_of(raw))
     if capability == "permissions-beta/p2b-v1":
         return FactDecision.parse(value_of(raw))
     if capability == "permissions-beta/p2b-v2":
@@ -93,8 +141,9 @@ def parse_decision(raw, *, capability: str) -> PolicyDecision:
 
 
 def parse_disclosure(raw, *, capability: str) -> Disclosure:
-    # Both raw message capabilities release the one message view; only the
-    # subject rule behind it differs.
+    # p2a-v3 releases the opaque-id view; p2a-v1 and p2a-v2 the one they were signed for.
+    if capability == CAPABILITY_OPAQUE:
+        return OpaqueMessageDisclosure.parse(value_of(raw))
     if capability in SOURCE_CAPABILITIES:
         return MessageDisclosure.parse(value_of(raw))
     if capability in ("permissions-beta/p2b-v1", "permissions-beta/p2b-v2", "permissions-beta/p2b-v3"):

@@ -3,8 +3,11 @@
 The locator is a scoped, owner-reviewed fact, but the output is its complete set
 of terminal canonical messages. This does not add a fact, summary or NL form.
 The callback is the trusted transport send itself, never a permit consumer.
-Two capabilities release this view: p2a-v1 on the frozen legacy subject rule and
-p2a-v2 on the owner-attested one. The rule is always the signed capability's.
+Three capabilities name this door. p2a-v1 (frozen legacy subject rule) and p2a-v2
+(owner-attested rule) release `canonical.message_disclosure.v1`, whose record ids are
+the canonical counter; the node now refuses both (RETIRED_SOURCE_CAPABILITIES). p2a-v3
+is p2a-v2 with `canonical.message_disclosure.v2`, whose record ids are opaque per grant
+(`opaque_ids`). The rule is always the signed capability's.
 """
 from __future__ import annotations
 
@@ -17,22 +20,39 @@ from topos.principal import THIRD_PARTY, current_principal
 from topos.storage.db.write_gate import with_db_write
 
 from .canonical import PolicyError, canonical_bytes, digest, parse_json
-from .contract import (CAPABILITY, CAPABILITY_ATTESTED, EVALUATOR_ATTESTED, Decision, MessageDisclosure, Only,
-    PolicyV2, StrictModel, VIEW, evaluate_predicate)
+from .contract import (CAPABILITY, CAPABILITY_ATTESTED, CAPABILITY_OPAQUE, EVALUATOR_ATTESTED, EVALUATOR_OPAQUE,
+    Decision, MessageDisclosure, Only, PolicyV2, StrictModel, VIEW, VIEW_OPAQUE, evaluate_predicate)
 from .evidence import EvidenceResolver, EvidenceReviewStore, QualifiedEvidence, _key
 from .forwarding import ReleaseBody, sign_node_result
 from .identity import SUBJECT_CONTRACT_BY_CAPABILITY
 from .node_protocol import NodePolicyProtocol
-from .registry import AttestedSubjectSourceDecision
-from .signing import (AuthorityBinding, RequestContext, SignedAttestedSourceEnvelope, SignedEnvelope, parse_authority,
-    verify_current_signature)
+from .opaque_ids import RecordKeys, opaque_record_id
+from .registry import AttestedSubjectSourceDecision, OpaqueMessageDisclosure, OpaqueSubjectSourceDecision
+from .signing import (AuthorityBinding, RequestContext, SignedAttestedSourceEnvelope, SignedEnvelope,
+    SignedOpaqueSourceEnvelope, parse_authority, verify_current_signature)
 
 VOCABULARY = "owner-review-vocabulary/v1"
 MAX_DISCLOSURE_BYTES = 256_000
 # capability -> (decision class, evaluator version). Closed: a policy of any other
 # capability, fact capabilities included, has no raw message decision at all.
 SOURCE_DECISIONS = {CAPABILITY: (Decision, "hard-rules/p2a-v1"),
-                    CAPABILITY_ATTESTED: (AttestedSubjectSourceDecision, EVALUATOR_ATTESTED)}
+                    CAPABILITY_ATTESTED: (AttestedSubjectSourceDecision, EVALUATOR_ATTESTED),
+                    CAPABILITY_OPAQUE: (OpaqueSubjectSourceDecision, EVALUATOR_OPAQUE)}
+# capability -> (view id, disclosure class). Only p2a-v3's view carries opaque record ids.
+SOURCE_VIEWS = {CAPABILITY: (VIEW, MessageDisclosure), CAPABILITY_ATTESTED: (VIEW, MessageDisclosure),
+                CAPABILITY_OPAQUE: (VIEW_OPAQUE, OpaqueMessageDisclosure)}
+# Their view's record_id is the canonical counter (`imessage:<ROWID>`), which tells a recipient
+# how many messages lie between two it holds. D20 makes that a release-blocking leak, so the node
+# releases nothing under them; they still parse, so stored policies, grants and receipts verify.
+RETIRED_SOURCE_CAPABILITIES = frozenset({CAPABILITY, CAPABILITY_ATTESTED})
+# Where the per-grant id keys live, relative to the canonical database: the one store the
+# search stream's `runtime.record_keys_root()` names, so both doors derive the same id.
+RECORD_KEYS_PATH = ("permissions-v2", "message-search")
+
+
+def record_keys_root(canonical_database) -> "Path":
+    from pathlib import Path
+    return Path(canonical_database).parent.joinpath(*RECORD_KEYS_PATH)
 
 
 def parse_source_envelope(raw) -> SignedEnvelope | SignedAttestedSourceEnvelope:
@@ -44,6 +64,8 @@ def parse_source_envelope(raw) -> SignedEnvelope | SignedAttestedSourceEnvelope:
     value = parse_json(raw) if isinstance(raw, (str, bytes)) else raw
     if isinstance(value, dict) and value.get("capability_version") == CAPABILITY_ATTESTED:
         return SignedAttestedSourceEnvelope.parse(value)
+    if isinstance(value, dict) and value.get("capability_version") == CAPABILITY_OPAQUE:
+        return SignedOpaqueSourceEnvelope.parse(value)
     return SignedEnvelope.parse(raw)
 
 
@@ -134,7 +156,7 @@ def source_message_decision(policy: PolicyV2, evidence: QualifiedEvidence) -> De
         candidate_revision=digest({"snapshot": snapshot.model_dump(), "review_revision": evidence.review_revision}),
         evaluator_version=evaluator_version, matched_allow_clause_ids=allows[:1] if verdict == "permit" else [],
         matched_deny_clause_ids=denies, reason_code="rule_permit" if verdict == "permit" else "rule_deny" if verdict == "deny" else "unknown_context",
-        required_projection_id=VIEW if verdict == "permit" else None,
+        required_projection_id=SOURCE_VIEWS[capability][0] if verdict == "permit" else None,
         missing_context_codes=["classification"] if verdict == "indeterminate" else [])
 
 
@@ -155,6 +177,8 @@ class SourceMessageRelease:
             or reviews.binding != resolver.binding):
             raise PolicyError("release_service_binding")
         self.protocol, self.resolver, self.reviews, self.clock = protocol, resolver, reviews, clock
+        self.record_keys = record_keys_root(protocol.canonical_database)
+        self.retired = RETIRED_SOURCE_CAPABILITIES
 
     def dispatch(self, *, envelope: dict, payload: dict, request_id: str, send: Callable) -> None:
         principal = current_principal()
@@ -171,6 +195,9 @@ class SourceMessageRelease:
         contract = SUBJECT_CONTRACT_BY_CAPABILITY.get(signed.capability_version)
         if contract is None:
             raise PolicyError("unsupported_capability")
+        if signed.capability_version in self.retired:
+            raise PolicyError("capability_retired")
+        view, disclosure = SOURCE_VIEWS[signed.capability_version]
         ledger = self.protocol.ledger
         request = RequestContext.parse({**ledger.identity.model_dump(), "actor_id": principal.acting_user,
             "client_id": principal.client_id, "grant_id": signed.grant_id, "assignment_id": signed.assignment_id,
@@ -195,12 +222,18 @@ class SourceMessageRelease:
                     ledger.checkpoint_decision(lease, decision.model_dump(), candidate_revision=decision.candidate_revision,
                                                output=None, now=self.clock())
                     raise PolicyError("permission_denied")
+                key = (RecordKeys(self.record_keys).get(signed.grant_id, create=True)
+                       if signed.capability_version == CAPABILITY_OPAQUE else None)
                 records = []
                 for ref in qualified.snapshot.leaves:
                     row = rows[_key(ref.identity)]
-                    records.append({"record_id": ref.identity.record_id, "source_id": ref.identity.source_id,
-                                    "canonical_table": ref.identity.table, "content": row.get("content")})
-                output = MessageDisclosure.parse({"family": "canonical_record", "operation": "read", "view_id": VIEW, "records": records})
+                    identity = ref.identity
+                    record_id = identity.record_id if key is None else opaque_record_id(key, grant_id=signed.grant_id,
+                        table=identity.table, source_id=identity.source_id, dataset_id=identity.dataset_id,
+                        record_id=identity.record_id)
+                    records.append({"record_id": record_id, "source_id": identity.source_id,
+                                    "canonical_table": identity.table, "content": row.get("content")})
+                output = disclosure.parse({"family": "canonical_record", "operation": "read", "view_id": view, "records": records})
                 if not records or len(canonical_bytes(output.model_dump())) > MAX_DISCLOSURE_BYTES:
                     raise PolicyError("disclosure_budget")
                 # This durable one-shot checkpoint precedes transport so an

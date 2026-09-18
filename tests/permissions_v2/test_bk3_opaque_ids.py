@@ -1,0 +1,123 @@
+"""F1: the locator view's record ids are opaque per grant (p2a-v3, canonical.message_disclosure.v2).
+
+`imessage:<ROWID>` counts the owner's whole store, so two released ids told the
+recipient how many messages lay between them (design §6.4 channel 11). p2a-v3
+releases `r.` + HMAC-SHA256 under a per-grant key from `opaque_ids`, the module
+the search stream owns, imported unchanged.
+
+  O1  ids are opaque, stable within a grant, unrelated across grants, and equal to
+      the id message search derives for the same grant and record
+  O2  nothing of the canonical id reaches the recipient
+  O3  the node refuses p2a-v1 and p2a-v2 releases (their view is ordinal)
+  O4  deleting the grant's key (what a revoke does) changes every id
+  O5  opaque_ids.py is byte-identical to the search stream's blob
+"""
+from __future__ import annotations
+
+import json
+import re
+import subprocess
+from pathlib import Path
+
+import pytest
+
+from tests.permissions_v2 import production_corpus as pc
+from tests.permissions_v2.production_node import Node, work_policy
+from topos.permissions_v2 import release
+from topos.permissions_v2.opaque_ids import RecordKeys, opaque_record_id
+
+V3 = "permissions-beta/p2a-v3"
+OPAQUE = re.compile(r"r\.[0-9a-f]{64}")
+# git blob of topos/permissions_v2/opaque_ids.py on beta/p2c-search at e140b145.
+SEARCH_STREAM_BLOB = "5c19f7f07f001815d2267f36fd648f8ab8d23388"
+
+
+def v3_policy(grant_id="grant-1"):
+    def build(binding):
+        raw = work_policy(binding, capability=V3, evaluator="hard-rules/p2a-v3", view="canonical.message_disclosure.v2",
+                          grant_id=grant_id)
+        raw["binding"]["assignment_id"] = "assignment-" + grant_id
+        raw["policy_version_id"] = "policy-" + grant_id
+        return raw
+    return build
+
+
+@pytest.fixture
+def node(tmp_path):
+    corpus = pc.build(tmp_path / "corpus", seed=33, positives=3)
+    (corpus.path.parent / "permissions-v2").mkdir(mode=0o700)
+    return Node(corpus, tmp_path, policy=v3_policy())
+
+
+def released_ids(node, fact, request_id, grant_id="grant-1"):
+    released, reason = node.read(fact, request_id=request_id, grant_id=grant_id)
+    assert reason is None, reason
+    return [record["record_id"] for record in released[1]["records"]], released[1]
+
+
+def test_O1_ids_are_opaque_stable_and_per_grant(node):
+    fact = node.corpus.positives[0]
+    first, output = released_ids(node, fact, "read-1")
+    again, _ = released_ids(node, fact, "read-2")
+    assert output["view_id"] == "canonical.message_disclosure.v2"
+    assert first == again and all(OPAQUE.fullmatch(record_id) for record_id in first)
+    node.activate(v3_policy("grant-2")(node.corpus.resolver.binding))
+    other, _ = released_ids(node, fact, "read-3", grant_id="grant-2")
+    assert other != first
+
+
+def test_O1_equal_to_the_search_streams_derivation(node):
+    fact = node.corpus.positives[1]
+    ids, _ = released_ids(node, fact, "read-1")
+    key = RecordKeys(release.record_keys_root(node.corpus.path)).get("grant-1", create=False)
+    assert ids == [opaque_record_id(key, grant_id="grant-1", table="conversation_messages", source_id=pc.SOURCE,
+                                    dataset_id=pc.DATASET, record_id=node.corpus.messages[fact])]
+
+
+def test_O1_the_key_root_is_the_search_streams_root():
+    try:
+        from topos.permissions_v2.search_index import root_for
+    except ImportError:
+        pytest.skip("search stream not merged yet")
+    assert release.record_keys_root("/n/database.db") == root_for(Path("/n/database.db"))
+
+
+def test_O2_no_part_of_the_canonical_id_is_released(node):
+    fact = node.corpus.positives[2]
+    _ids, output = released_ids(node, fact, "read-1")
+    canonical = node.corpus.messages[fact]
+    wire = json.dumps({"records": [{k: v for k, v in r.items() if k != "content"} for r in output["records"]]})
+    assert canonical not in wire and canonical.split(":")[1] not in wire
+
+
+@pytest.mark.ordinal_ids_retired
+@pytest.mark.parametrize("capability", ["permissions-beta/p2a-v1", "permissions-beta/p2a-v2"])
+def test_O3_the_node_refuses_ordinal_capabilities(tmp_path, capability):
+    corpus = pc.build(tmp_path / "corpus", seed=34, positives=1)
+    if capability.endswith("v1"):
+        from tests.permissions_v2.test_contract_and_ledger import sample_policy
+
+        def policy(binding):
+            raw = work_policy(binding)
+            raw["versions"] = {"vocabulary": release.VOCABULARY, "capability": capability}
+            raw["evaluator"] = sample_policy()["evaluator"]
+            return raw
+    else:
+        policy = work_policy
+    node = Node(corpus, tmp_path, policy=policy)
+    released, reason = node.read(corpus.positives[0], request_id="read-1")
+    assert released is None and reason == "capability_retired"
+
+
+def test_O4_deleting_the_key_changes_every_id(node):
+    fact = node.corpus.positives[0]
+    before, _ = released_ids(node, fact, "read-1")
+    RecordKeys(release.record_keys_root(node.corpus.path)).delete("grant-1")
+    after, _ = released_ids(node, fact, "read-2")
+    assert before != after and all(OPAQUE.fullmatch(record_id) for record_id in after)
+
+
+def test_O5_opaque_ids_is_the_search_streams_module_byte_for_byte():
+    path = Path(release.__file__).with_name("opaque_ids.py")
+    blob = subprocess.run(["git", "hash-object", str(path)], capture_output=True, text=True, check=True).stdout.strip()
+    assert blob == SEARCH_STREAM_BLOB

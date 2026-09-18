@@ -23,7 +23,14 @@ CAPABILITY = "permissions-beta/p2a-v1"
 # fact contract's subject block, and fact_contract imports this module.
 CAPABILITY_ATTESTED = "permissions-beta/p2a-v2"
 EVALUATOR_ATTESTED = "hard-rules/p2a-v2"
-SOURCE_CAPABILITIES = (CAPABILITY, CAPABILITY_ATTESTED)
+# p2a-v2's grammar and subject rule with the view whose record ids are opaque:
+# `imessage:<ROWID>` counts the owner's whole store, so two released ids told the
+# recipient how many messages lay between them (design §6.4, channel 11). A view
+# whose ids change meaning is a new view; the classes live in registry.py.
+VIEW_OPAQUE = "canonical.message_disclosure.v2"
+CAPABILITY_OPAQUE = "permissions-beta/p2a-v3"
+EVALUATOR_OPAQUE = "hard-rules/p2a-v3"
+SOURCE_CAPABILITIES = (CAPABILITY, CAPABILITY_ATTESTED, CAPABILITY_OPAQUE)
 
 
 class StrictModel(BaseModel):
@@ -261,7 +268,8 @@ def capability_document() -> dict[str, Any]:
         # Every capability that releases this view. `version` stays the p2a-v1
         # grammar so an existing reader of it is unchanged.
         "capabilities": list(SOURCE_CAPABILITIES),
-        "registered_forms": [{"family": "canonical_record", "operation": "read", "view_id": VIEW}],
+        "registered_forms": [{"family": "canonical_record", "operation": "read", "view_id": VIEW},
+                             {"family": "canonical_record", "operation": "read", "view_id": VIEW_OPAQUE}],
         "executable_forms": [],
         "natural_language": False,
         "lineage_certified": False,

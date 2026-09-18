@@ -355,9 +355,12 @@ def test_the_node_lists_both_capabilities_and_maps_each_to_its_own_rule():
     assert SUBJECT_CONTRACT_BY_CAPABILITY[V2] == ATTESTED_CONTRACT
     document = capability_document()
     assert document["version"] == V1
-    assert document["capabilities"] == [V1, V2]
+    # p2a-v3 (bookkeeping batch 3) joins with the opaque-id view; v1 and v2 keep theirs.
+    assert document["capabilities"] == [V1, V2, "permissions-beta/p2a-v3"]
     assert document["registered_forms"] == [{"family": "canonical_record", "operation": "read",
-                                             "view_id": "canonical.message_disclosure.v1"}]
+                                             "view_id": "canonical.message_disclosure.v1"},
+                                            {"family": "canonical_record", "operation": "read",
+                                             "view_id": "canonical.message_disclosure.v2"}]
     assert document["executable_forms"] == [] and document["natural_language"] is False
 
 

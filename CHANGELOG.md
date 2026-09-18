@@ -10,6 +10,22 @@ The machine-readable twin of each release is
 ## [Unreleased]
 
 ### Security
+- **Released message ids no longer count the owner's messages: p2a-v3, and p2a-v1/v2 retired.** `[O]`
+  The locator view `canonical.message_disclosure.v1` returned each record's canonical id,
+  `imessage:<ROWID>`, a counter over the owner's whole message store, so two released records
+  told a recipient how many messages lay between them (design §6.4, channel 11; boundary
+  catalog F1). New capability **`permissions-beta/p2a-v3`** is p2a-v2 (grammar, owner-attested
+  subject rule, evaluator logic, limits, receipt) releasing view
+  **`canonical.message_disclosure.v2`**, whose `record_id` is
+  `"r." + HMAC-SHA256(k_grant, ...)` from `opaque_ids`, the search stream's module, imported
+  byte for byte. Ids are stable within a grant, unrelated across grants, equal to the ids
+  message search derives, and change when the grant's key is deleted (a revoke). The node now
+  refuses every p2a-v1 and p2a-v2 release (`capability_retired`, the uniform refusal); both
+  still parse, so stored policies, grants and receipts verify. **Every existing locator grant
+  must be re-issued as p2a-v3**, and the campaign harness and boundary battery compile p2a-v2
+  (see BOOKKEEPING_BATCH_3_PLAN.md, "changes the campaign stream must make"). The protocol
+  schema exports whose unions name every capability moved; the p2a-v1 and p2a-v2 exports did
+  not. The frontend mirror needs regenerating after the merge.
 - **Job rows no longer store credentials, and non-owners can no longer read them.** `[O]`
   `pipeline_jobs.payload_json` held the node's shared engine key on every file import
   (`progress_api_key`, which defaulted to it) and any Signal database key supplied with a

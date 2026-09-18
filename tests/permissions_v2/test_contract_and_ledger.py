@@ -140,7 +140,9 @@ def test_unknown_never_becomes_permission_under_boolean_composition(kind, expect
 
 
 def test_capability_is_registry_only():
-    assert capability_document()["registered_forms"] == [{"family": "canonical_record", "operation": "read", "view_id": VIEW}]
+    # p2a-v3 (bookkeeping batch 3) registers the opaque-id view beside the ordinal one.
+    assert capability_document()["registered_forms"] == [{"family": "canonical_record", "operation": "read", "view_id": VIEW},
+        {"family": "canonical_record", "operation": "read", "view_id": "canonical.message_disclosure.v2"}]
     assert capability_document()["executable_forms"] == []
     assert not capability_document()["natural_language"]
     assert not capability_document()["lineage_certified"]
