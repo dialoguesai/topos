@@ -57,7 +57,7 @@ def build_cell(root: Path, *, positives: int, hidden: int, denied_per_kind: int,
     from tests.permissions_v2 import message_search_corpus as mc
     from tests.permissions_v2.message_search_harness import twin
     counts = {"clean_positive_C": positives}
-    extra = {kind: denied_per_kind for kind in mc.WITHHELD_KINDS} if denied_per_kind else None
+    extra = {kind: denied_per_kind for kind in mc.HIDDEN_KINDS} if denied_per_kind else None
     return twin(root, f"p{positives}-h{hidden}-d{denied_per_kind}", seed=seed, counts=counts,
                 hidden_messages=hidden, extra_withheld=extra)
 

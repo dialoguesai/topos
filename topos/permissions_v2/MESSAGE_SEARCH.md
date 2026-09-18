@@ -67,7 +67,7 @@ Every failure leaves the node as the one error frame.
 - `request_hash` and the MCP `arguments_hash` are unsalted SHA-256 of the query. Anyone who can read the node ledger (that is, the owner) or the CP database (the operator) can confirm a guessed query. Plaintext is never stored. Accepted for v1.
 - The daemon sweep holds the write gate for O(sum of members over grants) every 10 s.
 - The rebuild's gate hold is visible to concurrent requests as timing, which reveals that the owner acted.
-- The re-check stage reuses p2a's per-read scans: the sibling GLOB (R2) and the copy count (R1). Its time therefore grows with node size until the bookkeeping stream lands. `scripts/permissions_v2/p2c_timing_twins.py` reports it apart from the gated discovery stages.
+- The re-check stage reuses p2a's per-read qualification. Measured on a local merge with the bookkeeping branch (migration 76 applied; `p2c-evidence/timing-twins-2026-09-18-merged-with-bookkeeping-2.json`), it costs 3.8 to 5.2 ms per re-checked fact (|P| 25) and 4.5 to 5.9 ms (|P| 250). That is flat in hidden messages from 10k to 100k, and grows only with hidden facts: the R3 claim loop is about 90% of it and the R2 sibling scan about 10%, which the bookkeeping stream is flattening. The discovery stages stay flat (every shift under 0.25 ms) with byte-identical answers. The earlier figure of 3 to 21 ms per fact measured a fixture without migration 76, a node that will not exist after the merge.
 - The embedder's warm or cold state is observable.
 - A black hole anywhere empties P under the global D8 floor, so search answers `[]` after the owner re-syncs.
 
@@ -81,5 +81,5 @@ Every failure leaves the node as the one error frame.
   - it is coalesced and rate-limited;
   - it builds on a read snapshot outside the write gate, and is recorded in the receipt trail as a node-system action with its cause class (no item-naming reasons).
 - For the bookkeeping stream (measured here):
-  - the re-check costs about 3 to 21 ms per fact as hidden rows grow to 100k (R1, R2);
+  - the re-check costs about 4 to 5 ms per fact after migration 76, still growing with hidden facts (R3 about 90%, R2 about 10%);
   - the 10 s daemon sweep holds the write gate for O(members across grants).

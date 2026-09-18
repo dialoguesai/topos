@@ -93,6 +93,11 @@ KINDS: dict[str, Kind] = {
 }
 POSITIVE_KINDS = tuple(name for name, kind in KINDS.items() if kind.search_release)
 WITHHELD_KINDS = tuple(name for name, kind in KINDS.items() if not kind.search_release)
+# Outside R(g) for good: never permitted, or permitted but never releasable by search. A
+# future-dated record is permitted and enters R(g) (the rolling window will reach it), so a
+# twin that adds one changes |R(g)|, not only hidden data; timing twins must not add it.
+HIDDEN_KINDS = tuple(name for name, kind in KINDS.items()
+                     if not kind.p2a_release or kind.alter in {"nsfw", "event_missing", "event_old"})
 
 
 @dataclass
