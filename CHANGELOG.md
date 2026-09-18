@@ -165,6 +165,88 @@ The machine-readable twin of each release is
   label, a stronger existing fact) still reports success.
 
 ### Fixed
+- **The exclusion floor no longer closes every signed route at about 5,000 tombstones, and the
+  node-wide protection revision is folded once per owner mutation rather than once per read.** `[O]`
+  `exclusion_floor.exclusion_fingerprint` digested every `intelligence_exclusions` row as one canonical
+  value, which `canonical_bytes` refuses above 1 MiB, and it is folded into `current_protection_revision`,
+  which every permissions read, status and ingest door computes. Measured on the campaign's tombstone
+  shape (a hex entity id, `works_at`, one value, the lifecycle store's note: about 219 bytes a row),
+  the built digest refused as `json_size` at 5,000 rows, and one tombstone carrying a 1.1 MB note
+  refused alone; from that row on every signed v2 route on the node answered with a refusal, revoke
+  and status included, with nothing to fall back to. The fingerprint now streams its rows into SHA-256
+  through `canonical.digest_stream`/`MappingRows`, so the floor is bounded by the time to read it:
+  10,000 tombstones digest in 125 ms, the oversized note in 171 ms. **The value is byte-identical**: for
+  every table the built digest could encode the streamed digest returns the same hex, pinned at 0, 1,
+  2, 40, 386 and 2,000 rows and by a known answer that survives VACUUM, and every refusal but
+  `json_size` is the code it was, so no signed authority, review or ledger row that carries a revision
+  is re-pinned. Streaming costs about a fifth more per row than building did (48 vs 40 ms at 4,000
+  rows), and that cost is now paid once per mutation instead of once per read: the revision is
+  remembered per canonical database file, keyed by the clock identity and generation, SQLite's
+  `schema_version`, the identity coverage and the restriction registry's row count. Every table the
+  revision folds is watched by the clock, so any SQLite write to one of them advances the generation
+  and misses the cache; any DDL misses it through `schema_version`; a registry row written outside a
+  trigger misses it through the count; a second database file at the same generation has its own
+  entry; and `_floor_schema` and `clock_state` still run on every call before the cache is read, so a
+  changed owner binding, a lost trigger or a missing floor table is refused as before. A read at
+  10,000 tombstones went from 127 ms to 0.12 ms. What the cache cannot see is a file rewritten
+  underneath a running process at the same generation with different rows, which no SQLite write can
+  produce -- the same boundary the review stores draw. The cache is process-local and never written
+  to disk, so nothing here changes on-disk state.
+- **A merge no longer scans the protection event log once per fact, and the owner's identity lookups
+  no longer scan it once per read.** `[S1]` `[O]` `permissions_v2_protection_events` carried no index.
+  The fact re-key trigger asked, for every fact a merge moved, whether that fact's event was already
+  logged, so a merge that re-keyed 20,000 facts took 38.5 s against an empty log and 545 ms per fact
+  against a 500,000-row one (about three hours for the same merge), holding the node-wide write gate
+  throughout; `last_identity_event`, `identity_event_count`, `rekeyed_facts` and the closure revision's
+  two event filters each scanned the whole log on every read (about 50 ms each and 97 ms for the
+  closure filter at 500,000 events). Two indexes are now part of the clock's installation:
+  `(artifact_key, generation)`, which answers every per-artifact lookup and both trigger probes as a
+  covering seek, and `(source, artifact_key, generation)`, which answers the closure revision's record
+  terms as exact seeks and bounds its prefix and entity-floor terms to one source's events. Measured at
+  500,000 events: the 20,000-fact merge with 2,000 mentions takes 1.22 s, each identity lookup 0.01 ms,
+  the closure filter 2.9 ms and the entity floor 3.0 ms; against an empty log the 20,000-fact merge
+  takes 0.77 s. The second index carries `artifact_key` rather than being the bare `(source)` the
+  assessment named because, with no statistics, the planner ties two single-column indexes on the
+  closure's `source AND artifact_key` terms and picks the source one alone -- a range over every
+  Off-limits or exclusion event ever logged, filtered by key (5.0 ms against 2.9 ms at 500,000 events,
+  and growing with the log). The indexes are outside the contract `clock_state` verifies, which
+  compares the state row, every trigger's text and the table declarations and never an index: dropping
+  them, or adding a stray one, changes no clock state and no revision, and the same owner and merge
+  writes leave identical logs with or without them (pinned by test). They are created with the event
+  table at install, rebuilt with it by the v4 upgrade and the coverage resync, and added to an existing
+  clock by `ensure_protection_clock` at the next node start, after the clock itself has verified and
+  inside the same transaction, so a clock the node refuses gets no DDL; `IF NOT EXISTS` makes every
+  later start a no-op, and building them over 500,000 events takes 0.7 s once. An engine that predates
+  them serves a clock that carries them unchanged, so this is safe to roll back.
+- **Migration 76: the permissions read path's own indexes.** `[S1]` Four `CREATE INDEX IF NOT EXISTS`,
+  each skipped while its table or column is absent, registered `always_run` because the message
+  tables come from legacy DDL and the merge tombstones are created on demand, both possibly after the
+  step first runs; no row is read or changed, so no owner review goes stale and no pinned digest
+  moves. `entities(is_self) WHERE is_self=1` for the self-row reads every permissions read and every
+  attestation fold make (`legacy_owner_subjects`, `self_entity_ids`), which scanned the whole entity
+  table for a handful of rows. `entity_merge_tombstones(merged_into)` for `composition_revision`, which
+  asked what an attested entity absorbed by the side the table is not keyed on. And on both message
+  tables the exact-copy count behind `independent_copy_lineage`: `_known_copies` counted rows whose
+  `content` equals a released message's, once per cited message, by scanning all message text --
+  0.31-0.38 s per message at 1.2 million rows. SQLite has no built-in hash function, and an expression
+  index on an application-defined one refuses every INSERT from a connection that has not registered
+  it, which is any script or tool that opens the file, so the assessment's "index on a hash of
+  content" is not buildable; the key is two built-in deterministic expressions, `length(content)` and
+  `substr(content,1,64)`, and the count now spells them in front of its full-text equality so the
+  planner answers from the index and reads only the rows whose length and first 64 characters match.
+  Measured at 1.2 million rows: 10 µs per message with the index, against 0.31-0.38 s scanning; the
+  index builds in 2.9 s and holds 101 MB by used pages against 874 MB of tables (a plain index on
+  `content` would hold 170 MB and grow with message length); inserts go from 7.4 to 9.0 µs a row. On a
+  database that has not run the step the same statement scans, as the bare predicate did, about a
+  fifth slower (0.42 s), and answers the same, pinned for twins, near-twins that differ after the 64th
+  character, case variants, copies across tables and text carrying a NUL, which SQLite's `length` stops
+  at and which is why the parameter goes through the same SQLite functions rather than being cut in
+  Python. The `content_hash` column is not used: nothing maintains it on write. Like specs 63, 69 and
+  75, registering this stamps the schema version, so it must land at a release cut and never be run
+  against a node whose installed engine predates it; the first start on it builds the indexes once
+  (a few seconds per million messages) and an engine that predates it then refuses the database as
+  upgraded by a newer node until its `user_version` is walked back, which is lossless here because
+  nothing in the step is anything an older engine reads.
 - **The owner's review stores no longer stop at about 309 reviews.** `[O]`
   The enrolled evidence and output review stores pin an authority digest of every review row,
   retired rows included, in their external marker, and computed it by building one canonical

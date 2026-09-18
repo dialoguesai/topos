@@ -10,9 +10,11 @@ either table.
 """
 from __future__ import annotations
 
+from collections import OrderedDict
 import sqlite3
 import re
 import secrets
+import threading
 from pathlib import Path
 
 from topos.features.lifecycle.record_protection import protection_fingerprint
@@ -41,6 +43,52 @@ EVENTS_SQL_V3 = (f"CREATE TABLE {EVENTS} (sequence INTEGER PRIMARY KEY, generati
 EVENTS_SQL = (f"CREATE TABLE {EVENTS} (sequence INTEGER PRIMARY KEY, generation INTEGER NOT NULL CHECK(generation>=0), "
               "source TEXT NOT NULL, artifact_key TEXT NOT NULL)")
 EVENTS_SQL_BY_VERSION = {3: EVENTS_SQL_V3, 4: EVENTS_SQL}
+# Read-path indexes on the event log. The log is keyed by the artifact a mutation touched and
+# carried no index. `permissions_v2_identity_fact_rekey` asks, for every fact a merge re-keys,
+# whether that fact's rekey event is already logged, and `_IDENTITY_LOG_ONCE` asks the same
+# per moved mention and generation, so one merge scanned the whole log once per row it moved:
+# measured at 36.8 s for 20,000 facts against an EMPTY log, and quadratic from there. The
+# owner's identity lookups (`last_identity_event`, `identity_event_count`, `rekeyed_facts`)
+# and the closure revision's event filters scanned it on every read. `(artifact_key,
+# generation)` answers every one of those as a seek, `max(generation)` and `count(*)`
+# included. The second index leads with `source` and carries `artifact_key` and
+# `generation` behind it: the closure revision's record terms constrain `source` AND
+# `artifact_key`, and against two single-column indexes the planner, with no statistics,
+# ties them and picks the source index alone -- a range over every Off-limits or exclusion
+# event the node ever logged, filtered by key. With the key in the source index those terms
+# are exact covering seeks, and the terms that select by source alone -- the entity floor
+# and the fact-prefix LIKE -- range over that source's events, as a plain `(source)` index
+# would, reading the generation they take the maximum of from the index itself.
+#
+# They are not part of the contract `clock_state` verifies, which compares the state row,
+# every trigger's text and the table declarations, never an index: an index changes no
+# stored value, and this table's readers trust it the way the canonical database's other
+# lookups already trust `owner_only_records`' primary key and `intelligence_exclusions`'
+# unique key. What guards the log's CONTENT is the canonical floor's event chain, folded
+# over the table by `sequence` -- the rowid, not these -- and the append-only triggers.
+# `PRAGMA integrity_check` is the operator-side check for an index that disagrees with its
+# table, as it is for the review stores. They are created with the table, rebuilt with it
+# by the v4 upgrade, and added to an existing clock by `ensure_protection_clock` at the next
+# node start, after the clock itself has been verified; `IF NOT EXISTS` makes that a no-op
+# once they exist, and building them over a grown log is a one-time cost of that start.
+EVENT_INDEXES = {
+    "permissions_v2_protection_events_artifact":
+        f"CREATE INDEX IF NOT EXISTS permissions_v2_protection_events_artifact ON {EVENTS}(artifact_key, generation)",
+    "permissions_v2_protection_events_source":
+        f"CREATE INDEX IF NOT EXISTS permissions_v2_protection_events_source ON {EVENTS}(source, artifact_key, generation)",
+}
+
+
+def _ensure_event_indexes(conn) -> None:
+    """Create the event-log indexes where the event log is; a clock without one gets nothing."""
+    # A v4 clock always has the table by the time `clock_state` has passed, but the upgrade
+    # lanes and the tests reach this with a v1 or v2 clock in hand, which has no log to index.
+    if conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (EVENTS,)).fetchone() is None:
+        return
+    for sql in EVENT_INDEXES.values():
+        conn.execute(sql)
+
+
 # The owner's consent rows. Only the attestation service appends here, and the
 # canonical floor pins their exact digest, so a row written any other way is a
 # tamper, not an attestation. Ids, digests and a statement version only: no
@@ -307,6 +355,7 @@ def ensure_protection_clock(path: Path, *, owner_id: str, allow_install: bool = 
                 conn.execute(f"CREATE TABLE {TABLE} (singleton INTEGER PRIMARY KEY CHECK(singleton=1), clock_id TEXT NOT NULL, generation INTEGER NOT NULL CHECK(generation BETWEEN 0 AND {MAX_INTEGER}), contract_version INTEGER NOT NULL CHECK(contract_version={CONTRACT_VERSION}))")
                 conn.execute(f"INSERT INTO {TABLE} VALUES (1,?,0,{CONTRACT_VERSION})", (secrets.token_hex(32),))
                 conn.execute(EVENTS_SQL)
+                _ensure_event_indexes(conn)
                 conn.execute(LEDGER_SQL)
                 conn.execute(REGISTRY_SQL)
                 conn.execute(TOMBSTONES_SQL)
@@ -314,6 +363,11 @@ def ensure_protection_clock(path: Path, *, owner_id: str, allow_install: bool = 
                 for sql in _triggers(CONTRACT_VERSION, identity_coverage(conn)).values():
                     conn.execute(sql)
             clock_state(conn)
+            # Only once the clock has verified, so this never runs on a clock the node will
+            # refuse to serve, and never counts as the repair the docstring rules out: an
+            # index is outside the contract `clock_state` compares. An engine that predates
+            # the indexes serves a clock that carries them unchanged.
+            _ensure_event_indexes(conn)
 
 
 def _seed_registry(conn) -> None:
@@ -341,20 +395,89 @@ def _seed_registry(conn) -> None:
                      [(entity_id, generation) for entity_id in sorted(seeded)])
 
 
+# --- the node-wide revision, cached by clock generation -------------------------------------
+#
+# `current_protection_revision` folds three whole-table fingerprints: every Off-limits row and
+# black hole, every exclusion tombstone, and the owner's consent ledger with the restriction
+# registry. It runs on every permissions read, every status and every ingest door, and each
+# of those tables grows with the owner's decisions, so the cost of one read grew with the
+# node's whole history -- 10,000 tombstones is tens of milliseconds per read, paid under the
+# node-wide write gate.
+#
+# Every one of those tables is watched by this clock: each insert, update or delete advances
+# the generation in the same transaction, so while the generation stands still no SQLite
+# write has touched them and the fingerprints are the same values. The revision is therefore
+# remembered per canonical database file, one entry each, under a key made of everything
+# that can move the value without a row write the triggers see:
+#   - the clock identity: a different database, or a reinstalled clock;
+#   - the generation: every trigger-watched write;
+#   - SQLite's `schema_version`: any DDL from any connection. A column added to or dropped
+#     from a fingerprinted table changes its rows' encoding and fires no trigger;
+#   - the identity coverage and the contract version, which the digest names outright;
+#   - the registry's row count. The registry has no insert trigger of its own: native
+#     triggers append to it while advancing the clock, but a row written any other way must
+#     still move the revision, exactly as it did uncached.
+# `_floor_schema` and `clock_state` still run on every call, before the cache is read, so a
+# changed owner binding, a lost or altered trigger, a missing table or a rolled-back state
+# row is refused as before; the cache can only ever answer a question the clock has already
+# accepted. What it cannot see is a file rewritten underneath a running process at the same
+# generation with different rows, which no SQLite write can produce, because that write would
+# have advanced the clock. That is the boundary the review stores draw too: the clock is
+# monotone inside its own file and cannot see the file being replaced; the canonical floor's
+# chains and the ledger's observed generation are what catch a replaced file. The cache is
+# process-local, holds a handful of entries, and is never written to disk.
+_REVISIONS: "OrderedDict[str, tuple[tuple, str]]" = OrderedDict()
+_REVISIONS_LIMIT = 8
+_REVISIONS_LOCK = threading.Lock()
+
+
+def _database_file(conn) -> str | None:
+    """The main database's file, or None when it has none (`:memory:`, a temp database)."""
+    for _sequence, name, file in conn.execute("PRAGMA database_list").fetchall():
+        if name == "main":
+            return file or None
+    return None
+
+
 def current_protection_revision(conn, *, owner_id: str) -> str:
     """Node-wide revision for signed authority. Caller holds a read transaction.
 
     Identity is part of it, for every capability, so a recipient cannot tell an
     attestation change from an Off-limits change by which of their grants went
     stale.
+
+    The three fingerprints are recomputed only when the clock generation, the
+    schema, the coverage or the registry has moved since this process last folded
+    them for this database file; see the note above `_REVISIONS`. The value is the
+    same digest either way.
     """
     from .identity import identity_fingerprint
 
     _floor_schema(conn, owner_id)
     clock_id, generation = clock_state(conn)
-    return digest({"clock_id": clock_id, "generation": generation, "protection": protection_fingerprint(conn),
-                   "exclusions": exclusion_fingerprint(conn), "identity": identity_fingerprint(conn),
-                   "identity_coverage": list(identity_coverage(conn)), "contract_version": CONTRACT_VERSION})
+    coverage = list(identity_coverage(conn))
+    try:
+        file = _database_file(conn)
+        schema_version = conn.execute("PRAGMA schema_version").fetchone()[0]
+        registered = conn.execute(f"SELECT count(*) FROM {REGISTRY}").fetchone()[0]
+    except sqlite3.Error:
+        raise PolicyError("protection_clock_unavailable") from None
+    key = (clock_id, generation, schema_version, tuple(coverage), registered, CONTRACT_VERSION)
+    if file is not None:
+        with _REVISIONS_LOCK:
+            remembered = _REVISIONS.get(file)
+        if remembered is not None and remembered[0] == key:
+            return remembered[1]
+    revision = digest({"clock_id": clock_id, "generation": generation, "protection": protection_fingerprint(conn),
+                       "exclusions": exclusion_fingerprint(conn), "identity": identity_fingerprint(conn),
+                       "identity_coverage": coverage, "contract_version": CONTRACT_VERSION})
+    if file is not None:
+        with _REVISIONS_LOCK:
+            _REVISIONS[file] = (key, revision)
+            _REVISIONS.move_to_end(file)
+            while len(_REVISIONS) > _REVISIONS_LIMIT:
+                _REVISIONS.popitem(last=False)
+    return revision
 
 
 def _like(prefix: str) -> str:
@@ -511,6 +634,8 @@ def _rebuild_events(conn) -> None:
     conn.execute(EVENTS_SQL)
     conn.execute(f"INSERT INTO {EVENTS}(sequence,generation,source,artifact_key) "
                  f"SELECT sequence,generation,source,artifact_key FROM {EVENTS}_carry ORDER BY sequence")
+    # After the copy: a b-tree built over the filled table rather than maintained per row.
+    _ensure_event_indexes(conn)
     carried = conn.execute(f"SELECT count(*) FROM {EVENTS}_carry").fetchone()[0]
     conn.execute(f"DROP TABLE {EVENTS}_carry")
     if conn.execute(f"SELECT count(*) FROM {EVENTS}").fetchone()[0] != carried:

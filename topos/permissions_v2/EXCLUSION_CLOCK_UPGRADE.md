@@ -238,3 +238,44 @@ The lab runs both operations through
 `scripts/permissions_beta/upgrade_protection_clock.py --contract 4` and
 `--resync-coverage`, on a stopped synthetic engine, with the unchanged-elsewhere
 proof above.
+
+
+## Bookkeeping: the event-log indexes and the cached revision (17 Sep 2026)
+
+Two changes from the scaling assessment that alter no contract and no value.
+
+**The event log carries two indexes**, `permissions_v2_protection_events_artifact` on
+`(artifact_key, generation)` and `permissions_v2_protection_events_source` on
+`(source, artifact_key, generation)`. They answer the re-key and mention trigger
+probes, the owner's identity lookups and the closure revision's event filters as
+seeks instead of scans of the whole log (a 20,000-fact merge: 38.5 s to 0.77 s
+against an empty log; three hours to 1.2 s against 500,000 events). They are not
+part of the contract `clock_state` verifies, which compares the state row, the
+trigger text and the table declarations and never an index, so dropping them or
+adding a stray one changes no clock state and no revision, and an engine that
+predates them serves a clock that carries them. They are created with the event
+table at install, rebuilt with it by `upgrade_protection_clock_v4` and kept by
+`resync_identity_coverage`, and added to an existing clock by
+`ensure_protection_clock` at the next node start -- after the clock has verified,
+inside the same transaction, so a clock the node refuses gets no DDL. Nothing
+about the stopped-node lanes above changes: they need no extra step, and a lab
+that runs `upgrade_protection_clock.py --contract 4` gets the indexes from the
+rebuild. What guards the log's content is unchanged: the canonical floor's chain
+folds the table by `sequence` and the append-only triggers refuse edits;
+`PRAGMA integrity_check` is the operator-side check for an index that disagrees
+with its table.
+
+**`current_protection_revision` is remembered per canonical database file**, keyed
+by the clock identity and generation, SQLite's `schema_version`, the identity
+coverage and the restriction registry's row count, so the three whole-table
+fingerprints it folds (Off-limits rows and black holes, exclusion tombstones, the
+consent ledger with the registry) are computed once per owner mutation rather than
+once per read. Every table it folds is watched by the clock, so any SQLite write to
+one of them misses the cache through the generation; DDL misses it through
+`schema_version`; a registry row written outside a trigger through the count; a
+second database file at the same generation has its own entry. `_floor_schema`
+and `clock_state` run on every call before the cache is read. The cache is
+process-local and never written to disk. The exclusion fingerprint itself is now
+streamed (`canonical.digest_stream`/`MappingRows`), so the floor no longer refuses
+at about 5,000 tombstones; its value is byte-identical to the built digest.
+

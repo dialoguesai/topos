@@ -23,6 +23,7 @@ from pydantic import model_validator
 
 from topos.principal import OWNER_APP, current_principal
 from topos.features.provenance.roles import record_role
+from topos.storage.db.migrations.permissions_read_path_indexes_v1 import CONTENT_KEY
 from topos.storage.db.write_gate import with_db_write
 
 from .canonical import MAX_INTEGER, PolicyError, Rows, canonical_bytes, digest, digest_stream
@@ -98,6 +99,17 @@ _CURRENT_INDEX = "CREATE INDEX IF NOT EXISTS fact_reviews_current ON fact_review
 # The duration is machine-dependent by design: what matters is the cost paid while
 # holding the node-wide write gate, not the row count that produced it.
 _DIGEST_WARN_SECONDS = 0.1
+# The exact-copy count behind `independent_copy_lineage`. `content=?1` is the predicate; the
+# two expressions in front of it are the key of `idx_<table>_content_key`
+# (`permissions_read_path_indexes_v1`), spelled from the same tuple so the planner answers
+# them from that index and reads only the rows whose length and first 64 characters match,
+# then checks the full text out of each row. On a database that has not run the migration
+# the same statement scans the table, as the bare `content=?` did, and answers the same.
+# The parameter goes through the same SQLite functions rather than being cut in Python:
+# `length` counts characters before the first NUL and `substr` counts characters, and a
+# Python-side `len`/slice would disagree with the index on exactly such a row.
+_COPY_KEY = " AND ".join(f"{expression}={expression.replace('content', '?1', 1)}" for expression in CONTENT_KEY)
+_COPY_COUNT = f"SELECT count(*) FROM {{table}} WHERE {_COPY_KEY} AND content=?1"
 _READ_ACTIONS = frozenset({sqlite3.SQLITE_SELECT, sqlite3.SQLITE_READ, sqlite3.SQLITE_FUNCTION,
     sqlite3.SQLITE_TRANSACTION, sqlite3.SQLITE_SAVEPOINT, sqlite3.SQLITE_RECURSIVE})
 _ROW_WRITE_ACTIONS = frozenset({sqlite3.SQLITE_INSERT, sqlite3.SQLITE_UPDATE, sqlite3.SQLITE_DELETE})
@@ -837,7 +849,7 @@ class EvidenceResolver:
         for table in LEAF_TABLES:
             # The first family requires both canonical table schemas so that
             # exact independent copies cannot hide in an unchecked sibling table.
-            found = conn.execute(f"SELECT count(*) FROM {table} WHERE content=?", (content,)).fetchone()[0]
+            found = conn.execute(_COPY_COUNT.format(table=table), (content,)).fetchone()[0]
             count += found
         return count > 1
 

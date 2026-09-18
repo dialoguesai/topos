@@ -3,10 +3,16 @@ from __future__ import annotations
 
 import sqlite3
 
-from .canonical import PolicyError, digest
+from .canonical import MappingRows, PolicyError, digest_stream
 
 TABLE = "intelligence_exclusions"
 KINDS = {"fact", "entity", "record", "stat_insight"}
+FINGERPRINT_VERSION = "intelligence-exclusion-floor/v1"
+# Every column of every row, read out of the table b-tree. With no WHERE and no ORDER BY this
+# plans as `SCAN intelligence_exclusions`, and no index on the table covers a whole row, so the
+# fingerprint rests on nothing `idx_intelligence_exclusions_key` decides. The rows are ordered
+# in Python by `exclusion_id`, exactly as the built digest ordered them.
+_READ = f"SELECT * FROM {TABLE}"
 
 
 def exclusions(conn) -> dict[str, set[str]]:
@@ -19,7 +25,7 @@ def _read(conn):
         columns = [row[1] for row in conn.execute(f"PRAGMA table_info({TABLE})")]
         if not {"exclusion_id", "artifact_type", "artifact_key"} <= set(columns):
             raise PolicyError("exclusion_schema_unavailable")
-        rows = [dict(zip(columns, row)) for row in conn.execute(f"SELECT * FROM {TABLE}")]
+        rows = [dict(zip(columns, row)) for row in conn.execute(_READ)]
     except sqlite3.Error:
         raise PolicyError("exclusion_schema_unavailable") from None
     found = {kind: set() for kind in KINDS}
@@ -38,8 +44,26 @@ def _read(conn):
 
 
 def exclusion_fingerprint(conn) -> str:
-    # Includes notes/metadata conservatively, but never returns them to callers.
-    return digest({"version": "intelligence-exclusion-floor/v1", "rows": _read(conn)[1]})
+    """Digest of every tombstone row, notes and metadata included; never returned to callers.
+
+    The value is exactly `digest({"version": FINGERPRINT_VERSION, "rows": [row, ...]})`
+    over the rows ordered by `exclusion_id`, each row a mapping of every column. It
+    is streamed into SHA-256 through `MappingRows` rather than built as one canonical
+    value, so the floor is no longer capped by the 1 MiB canonical encoding limit.
+    Built, `canonical_bytes` refused this table as `json_size` at roughly 4,500-5,200
+    tombstones of the campaign's shape, or at a single tombstone whose note passed the
+    cap on its own -- and because this fingerprint is folded into the node-wide
+    protection revision, from that row on every signed v2 route refused, status and
+    revoke included, with nothing to fall back to. The bytes, and so the value, are
+    unchanged: for every table the built digest could encode, this returns the same
+    hex, and for every table it refused this raises the same code, except `json_size`,
+    which it never raises.
+
+    Cost is linear in the tombstones and paid on every uncached protection revision:
+    `protection_clock.current_protection_revision` caches the revision by clock
+    generation, so a read pays this once per owner mutation rather than once per read.
+    """
+    return digest_stream({"version": FINGERPRINT_VERSION, "rows": MappingRows(_read(conn)[1])})
 
 
 def fact_excluded(payload: dict, tombstones: set[str], owner_subjects: set[str]) -> bool:

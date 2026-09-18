@@ -15,6 +15,10 @@ import sqlite3
 from .wiki_mvp_phase0 import MIGRATION_ID as PHASE0_ID, apply_wiki_mvp_phase0_up
 from .owner_only_records_v1 import MIGRATION_ID as OWNER_ONLY_RECORDS_V1_ID, apply_owner_only_records_v1_up
 from .temporal_fields_v1 import MIGRATION_ID as TEMPORAL_FIELDS_V1_ID, apply_temporal_fields_v1_up
+from .permissions_read_path_indexes_v1 import (
+    MIGRATION_ID as PERMISSIONS_READ_PATH_INDEXES_V1_ID,
+    apply_permissions_read_path_indexes_v1_up,
+)
 from .wiki_mvp_phase1 import MIGRATION_ID as PHASE1_ID, apply_wiki_mvp_phase1_up
 from .wiki_mvp_phase4_messages_cutover import (
     MIGRATION_ID as PHASE4_ID,
@@ -411,6 +415,12 @@ MIGRATIONS: List[MigrationSpec] = [
     # 75 must land at a release cut like 63 and 69: it stamps the schema version
     # past any engine that predates it. Two nullable columns, no default, no scan.
     _spec(75, TEMPORAL_FIELDS_V1_ID, apply_temporal_fields_v1_up, always_run=True),
+    # 76 lands at a release cut like 63, 69 and 75: registering it stamps the schema
+    # version past any engine that predates it. Four `CREATE INDEX IF NOT EXISTS`, each
+    # skipped while its table is absent; no row is read or changed. `always_run` because
+    # the message tables come from legacy DDL and the tombstone table is created on
+    # demand, both possibly after this step has run once.
+    _spec(76, PERMISSIONS_READ_PATH_INDEXES_V1_ID, apply_permissions_read_path_indexes_v1_up, always_run=True),
 ]
 
 

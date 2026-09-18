@@ -324,7 +324,12 @@ requires an owner attestation that no other independent copies are known. These
 checks do not certify semantic deduplication, paraphrases, copies in unsupported
 tables, or complete lineage across the wider ingestion graph. The existing
 provenance stubs do not supply that proof. Unknown copies remain a withholding
-condition; this family is not a general declassification mechanism.
+condition; this family is not a general declassification mechanism. The count is
+keyed by two built-in expressions of the text, its character length and its first
+64 characters, which migration 76 indexes on both message tables
+(`permissions_read_path_indexes_v1`); the full-text equality behind them still
+decides, and on a database without the index the same statement scans, as before,
+and answers the same.
 
 The audited baseline of 200 pack facts with `owner_only` disclosure remains
 unqualified, including the ten with fully populated references. The regression
